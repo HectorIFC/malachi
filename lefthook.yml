@@ -1,0 +1,13 @@
+# Lefthook configuration
+# See: https://github.com/evilmartians/lefthook
+
+# Skip installation prompt
+skip_output:
+  - meta
+  - summary
+
+pre-commit:
+  commands:
+    update-baseline:
+      run: bash pre-commit.sh
+      stage_fixed: true

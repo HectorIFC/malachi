@@ -1,0 +1,383 @@
+import Config
+
+# Helper function to parse integers with defaults
+parse_int = fn val, default ->
+  if val do
+    case Integer.parse(val) do
+      {int, _} -> int
+      :error -> default
+    end
+  else
+    default
+  end
+end
+
+# Helper function to parse floats with defaults
+parse_float = fn val, default ->
+  if val do
+    case Float.parse(val) do
+      {float, _} -> float
+      :error -> default
+    end
+  else
+    default
+  end
+end
+
+# Helper function to parse TLS versions from comma-separated string
+parse_tls_versions = fn val, default ->
+  if val do
+    val
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(fn v ->
+      try do
+        String.to_existing_atom(v)
+      rescue
+        _ -> nil
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  else
+    default
+  end
+end
+
+# TLS enforcement: required by default in production
+# Can be overridden with MALACHIMQ_CONFIG_ENV for testing/CI environments
+actual_env =
+  case System.get_env("MALACHIMQ_CONFIG_ENV") do
+    "dev" -> :dev
+    "test" -> :test
+    "prod" -> :prod
+    _ -> config_env()
+  end
+
+require_tls =
+  case {actual_env, System.get_env("MALACHIMQ_REQUIRE_TLS")} do
+    {:prod, "false"} -> false
+    {:prod, _} -> true
+    {_, "true"} -> true
+    _ -> false
+  end
+
+# TLS enabled: always true in production (unless require_tls is false)
+enable_tls =
+  case {actual_env, System.get_env("MALACHIMQ_ENABLE_TLS")} do
+    {:prod, _} -> require_tls
+    {_, "true"} -> true
+    _ -> false
+  end
+
+config :malachimq,
+  config_env: config_env(),
+  tcp_port: String.to_integer(System.get_env("MALACHIMQ_TCP_PORT") || "4040"),
+  dashboard_port: String.to_integer(System.get_env("MALACHIMQ_DASHBOARD_PORT") || "4041"),
+  locale: System.get_env("MALACHIMQ_LOCALE") || "en_US",
+  partition_multiplier: String.to_integer(System.get_env("MALACHIMQ_PARTITION_MULTIPLIER") || "100"),
+  session_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_TIMEOUT_MS") || "3600000"),
+  session_cleanup_interval_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_CLEANUP_MS") || "60000"),
+  auth_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_AUTH_TIMEOUT_MS") || "10000"),
+  tcp_recv_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_RECV_TIMEOUT") || "30000"),
+  tcp_send_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_SEND_TIMEOUT") || "30000"),
+  gc_interval_ms: String.to_integer(System.get_env("MALACHIMQ_GC_INTERVAL_MS") || "10000"),
+  enable_tls: enable_tls,
+  require_tls: require_tls,
+  tls_certfile: System.get_env("MALACHIMQ_TLS_CERTFILE"),
+  tls_keyfile: System.get_env("MALACHIMQ_TLS_KEYFILE"),
+  tls_cacertfile: System.get_env("MALACHIMQ_TLS_CACERTFILE"),
+  tls_versions: parse_tls_versions.(System.get_env("MALACHIMQ_TLS_VERSIONS"), [:"tlsv1.3", :"tlsv1.2"]),
+  tls_verify: System.get_env("MALACHIMQ_TLS_VERIFY") || "verify_none",
+  tls_fail_if_no_peer_cert: System.get_env("MALACHIMQ_TLS_FAIL_IF_NO_PEER_CERT") == "true",
+  default_delivery_mode: System.get_env("MALACHIMQ_DEFAULT_DELIVERY_MODE") || "at_least_once",
+  channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
+  channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),
+  shard_count: String.to_integer(System.get_env("MALACHIMQ_SHARD_COUNT") || "1000"),
+  mnesia_dir: System.get_env("MALACHIMQ_MNESIA_DIR") || "./data/mnesia"
+
+# Only set rate limiting and connection limiting configs in non-test environments
+# Test environment sets these in test.exs with permissive values
+if config_env() != :test do
+  config :malachimq,
+    # Rate limiting configuration
+    auth_rate_limit: parse_int.(System.get_env("MALACHIMQ_AUTH_RATE_LIMIT"), 10),
+    auth_rate_window_ms: parse_int.(System.get_env("MALACHIMQ_AUTH_RATE_WINDOW_MS"), 60_000),
+    publish_rate_limit: parse_int.(System.get_env("MALACHIMQ_PUBLISH_RATE_LIMIT"), 1_000),
+    publish_rate_window_ms: parse_int.(System.get_env("MALACHIMQ_PUBLISH_RATE_WINDOW_MS"), 1_000),
+    subscribe_rate_limit: parse_int.(System.get_env("MALACHIMQ_SUBSCRIBE_RATE_LIMIT"), 100),
+    subscribe_rate_window_ms: parse_int.(System.get_env("MALACHIMQ_SUBSCRIBE_RATE_WINDOW_MS"), 60_000),
+    rate_limit_cleanup_interval_ms: parse_int.(System.get_env("MALACHIMQ_RATE_LIMIT_CLEANUP_INTERVAL"), 300_000),
+    # Connection limits
+    max_connections_per_ip: parse_int.(System.get_env("MALACHIMQ_MAX_CONN_PER_IP"), 100),
+    max_total_connections: parse_int.(System.get_env("MALACHIMQ_MAX_TOTAL_CONN"), 10_000)
+end
+
+config :malachimq,
+  # Security feature flags (test env enabled, prod enabled via env/default)
+  rate_limit_enabled:
+    (case System.get_env("MALACHIMQ_RATE_LIMIT_ENABLED") do
+       "false" -> false
+       "true" -> true
+       nil -> if actual_env == :test, do: true, else: actual_env != :test
+     end),
+  connection_limit_enabled:
+    (case System.get_env("MALACHIMQ_CONNECTION_LIMIT_ENABLED") do
+       "false" -> false
+       "true" -> true
+       nil -> if actual_env == :test, do: true, else: actual_env != :test
+     end),
+  dashboard_auth_enabled:
+    (case System.get_env("MALACHIMQ_DASHBOARD_AUTH_ENABLED") do
+       "false" -> false
+       "true" -> true
+       # Auth enabled by default in ALL environments for security
+       nil -> true
+     end),
+  # Dashboard configuration  
+  dashboard_require_admin_for_html:
+    (case System.get_env("MALACHIMQ_DASHBOARD_REQUIRE_ADMIN") do
+       "false" -> false
+       "true" -> true
+       nil -> true
+     end),
+  dashboard_auth_rate_limit: parse_int.(System.get_env("MALACHIMQ_DASHBOARD_AUTH_RATE_LIMIT"), 10),
+  dashboard_auth_rate_window_ms: parse_int.(System.get_env("MALACHIMQ_DASHBOARD_AUTH_RATE_WINDOW_MS"), 60_000),
+  # CORS configuration
+  dashboard_cors_enabled: System.get_env("MALACHIMQ_DASHBOARD_CORS_ENABLED") == "true",
+  dashboard_cors_origins:
+    (case System.get_env("MALACHIMQ_DASHBOARD_CORS_ORIGINS") do
+       nil -> ["*"]
+       str -> String.split(str, ",") |> Enum.map(&String.trim/1)
+     end),
+  # Security headers
+  dashboard_csp:
+    System.get_env("MALACHIMQ_DASHBOARD_CSP") ||
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+  hsts_enabled:
+    (case System.get_env("MALACHIMQ_HSTS_ENABLED") do
+       "false" -> false
+       "true" -> true
+       nil -> true
+     end),
+  hsts_max_age: parse_int.(System.get_env("MALACHIMQ_HSTS_MAX_AGE"), 31_536_000),
+  hsts_include_subdomains:
+    (case System.get_env("MALACHIMQ_HSTS_INCLUDE_SUBDOMAINS") do
+       "false" -> false
+       _ -> true
+     end),
+  # Audit logging configuration
+  audit_log_output:
+    (case System.get_env("MALACHIMQ_AUDIT_LOG_OUTPUT") do
+       "file" -> :file
+       "stdout" -> :stdout
+       "both" -> :both
+       "ets_only" -> :ets_only
+       nil -> if(config_env() == :test, do: :ets_only, else: :both)
+       _ -> :both
+     end),
+  audit_log_file: System.get_env("MALACHIMQ_AUDIT_LOG_FILE") || "/var/log/malachimq/audit.log",
+  audit_log_max_size_mb: parse_int.(System.get_env("MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB"), 1)
+
+# ============================================================
+# User Authentication Configuration
+# ============================================================
+# BREAKING CHANGE: Production requires explicit password configuration
+# Default passwords removed for security
+
+default_users_env = System.get_env("MALACHIMQ_DEFAULT_USERS")
+disable_default_users = System.get_env("MALACHIMQ_DISABLE_DEFAULT_USERS") == "true"
+
+default_users =
+  if disable_default_users do
+    # No default users - manage via API
+    []
+  else
+    if default_users_env do
+      # Custom user list via env var
+      default_users_env
+      |> String.split(";")
+      |> Enum.map(fn user_str ->
+        [username, password, perms] = String.split(user_str, ":")
+        permissions = perms |> String.split(",") |> Enum.map(&String.to_atom/1)
+        {username, password, permissions}
+      end)
+    else
+      # Standard user list - passwords from individual env vars
+      admin_pass = System.get_env("MALACHIMQ_ADMIN_PASS")
+      producer_pass = System.get_env("MALACHIMQ_PRODUCER_PASS")
+      consumer_pass = System.get_env("MALACHIMQ_CONSUMER_PASS")
+      app_pass = System.get_env("MALACHIMQ_APP_PASS")
+
+      # In production, REQUIRE explicit passwords
+      if actual_env == :prod do
+        unless admin_pass && producer_pass && consumer_pass && app_pass do
+          raise """
+
+          ═══════════════════════════════════════════════════════════════
+          SECURITY ERROR: Production deployment requires explicit passwords
+          ═══════════════════════════════════════════════════════════════
+
+          Default passwords have been removed for security.
+          You MUST configure strong passwords via environment variables:
+
+            export MALACHIMQ_ADMIN_PASS="$(openssl rand -base64 32)"
+            export MALACHIMQ_PRODUCER_PASS="$(openssl rand -base64 32)"
+            export MALACHIMQ_CONSUMER_PASS="$(openssl rand -base64 32)"
+            export MALACHIMQ_APP_PASS="$(openssl rand -base64 32)"
+
+          Alternative: Disable default users and manage via API:
+
+            export MALACHIMQ_DISABLE_DEFAULT_USERS=true
+
+          Generate secure passwords:
+
+            openssl rand -base64 32
+
+          ═══════════════════════════════════════════════════════════════
+          """
+        end
+      end
+
+      # Build user list (use provided passwords or dev defaults)
+      [
+        {"admin", admin_pass || "admin123", [:admin]},
+        {"producer", producer_pass || "producer123", [:produce]},
+        {"consumer", consumer_pass || "consumer123", [:consume]},
+        {"app", app_pass || "app123", [:produce, :consume]}
+      ]
+    end
+  end
+
+config :malachimq,
+  default_users: default_users,
+  disable_default_users: disable_default_users,
+
+  # Account lockout configuration
+  max_auth_attempts: parse_int.(System.get_env("MALACHIMQ_MAX_AUTH_ATTEMPTS"), 5),
+  lockout_duration_ms: parse_int.(System.get_env("MALACHIMQ_LOCKOUT_DURATION_MS"), 300_000),
+  progressive_lockout: System.get_env("MALACHIMQ_PROGRESSIVE_LOCKOUT") != "false",
+
+  # Session security configuration  
+  session_timeout_seconds: parse_int.(System.get_env("MALACHIMQ_SESSION_TIMEOUT_SEC"), 3600),
+  session_ip_binding: System.get_env("MALACHIMQ_SESSION_IP_BINDING") != "false",
+  session_ua_binding: System.get_env("MALACHIMQ_SESSION_UA_BINDING") == "true",
+
+  # Password requirements
+  min_password_length: parse_int.(System.get_env("MALACHIMQ_MIN_PASSWORD_LEN"), 12),
+  require_strong_passwords: System.get_env("MALACHIMQ_REQUIRE_STRONG_PASSWORDS") == "true",
+
+  # Trusted proxy ranges (CIDR notation, comma-separated)
+  trusted_proxy_ranges:
+    (case System.get_env("MALACHIMQ_TRUSTED_PROXY_RANGES") do
+       nil ->
+         []
+
+       ranges_str ->
+         ranges_str
+         |> String.split(",")
+         |> Enum.map(&String.trim/1)
+         |> Enum.reject(&(&1 == ""))
+     end)
+
+# ============================================================
+# Input Validation - Fixed limits (not configurable via environment)
+# ============================================================
+# These limits prevent injection attacks, atom table exhaustion,
+# and resource exhaustion. Values are hardcoded for security.
+
+config :malachimq,
+  # Queue and channel name validation
+  max_queue_name_length: 255,
+  max_channel_name_length: 255,
+  strict_name_validation: true,
+  allow_reserved_names: false,
+
+  # Payload size limit (10MB)
+  max_payload_size: 10_485_760,
+
+  # Header validation
+  max_header_count: 50,
+  max_header_key_length: 128,
+  max_header_value_length: 1024,
+
+  # Validation log rate limiting (per error type)
+  validation_log_rate_limit_per_min: 10
+
+# ============================================================
+# Resource Management & Backpressure Configuration
+# ============================================================
+# Configures message size limits, buffer limits, overflow behaviors,
+# and backpressure thresholds for queues.
+
+config :malachimq,
+  # Message size limits (1MB default)
+  default_max_message_size_bytes: parse_int.(System.get_env("MALACHIMQ_MAX_MESSAGE_SIZE"), 1_048_576),
+
+  # Buffer limits per queue (10,000 messages default)
+  default_max_buffer_size: parse_int.(System.get_env("MALACHIMQ_MAX_BUFFER_SIZE"), 10_000),
+
+  # Overflow behavior: "drop_newest" | "drop_oldest" | "reject" | "block"
+  default_overflow_behavior: System.get_env("MALACHIMQ_OVERFLOW_BEHAVIOR") || "drop_newest",
+
+  # Backpressure threshold (0.8 = 80% buffer utilization)
+  default_backpressure_threshold: parse_float.(System.get_env("MALACHIMQ_BACKPRESSURE_THRESHOLD"), 0.8),
+
+  # Block timeout for :block overflow strategy (5 seconds)
+  default_block_timeout_ms: parse_int.(System.get_env("MALACHIMQ_BLOCK_TIMEOUT_MS"), 5_000),
+
+  # Maximum number of blocked producers per queue (prevents memory leak)
+  default_max_blocked_producers: parse_int.(System.get_env("MALACHIMQ_MAX_BLOCKED_PRODUCERS"), 1_000),
+
+  # Update excess threshold for runtime config changes (50%)
+  # Allows updates when buffer excess is within this threshold
+  update_excess_threshold: parse_float.(System.get_env("MALACHIMQ_UPDATE_EXCESS_THRESHOLD"), 0.5)
+
+# ============================================================
+# Atom & Memory Monitoring Configuration
+# ============================================================
+# Prevents atom table exhaustion and monitors system memory.
+# Atom table in BEAM is never garbage collected (limit: 1,048,576).
+
+config :malachimq,
+  # Atom table monitoring
+  atom_check_interval_ms: parse_int.(System.get_env("MALACHIMQ_ATOM_CHECK_INTERVAL"), 60_000),
+  atom_warning_threshold: parse_float.(System.get_env("MALACHIMQ_ATOM_WARNING_THRESHOLD"), 0.7),
+  atom_critical_threshold: parse_float.(System.get_env("MALACHIMQ_ATOM_CRITICAL_THRESHOLD"), 0.9),
+
+  # Memory monitoring
+  memory_check_interval_ms: parse_int.(System.get_env("MALACHIMQ_MEMORY_CHECK_INTERVAL"), 30_000),
+  gc_threshold_mb: parse_int.(System.get_env("MALACHIMQ_GC_THRESHOLD_MB"), 500),
+  auto_gc_enabled: System.get_env("MALACHIMQ_AUTO_GC") != "false",
+
+  # Resource limits (prevent atom exhaustion via dynamic queue/channel creation)
+  max_dynamic_queues: parse_int.(System.get_env("MALACHIMQ_MAX_DYNAMIC_QUEUES"), 10_000),
+  max_dynamic_channels: parse_int.(System.get_env("MALACHIMQ_MAX_DYNAMIC_CHANNELS"), 1_000)
+
+# ============================================================
+# Production Security Warnings
+# ============================================================
+if actual_env == :prod do
+  dashboard_auth_enabled = Application.get_env(:malachimq, :dashboard_auth_enabled, true)
+
+  if dashboard_auth_enabled do
+    # Check if any users are configured
+    has_users = default_users != []
+
+    unless has_users do
+      IO.warn("""
+
+      ⚠️  SECURITY WARNING: Dashboard authentication is enabled but no users are configured!
+
+      The dashboard will be inaccessible. Configure users via:
+
+      Environment variable:
+        export MALACHIMQ_DEFAULT_USERS="admin:strong_password:admin"
+
+      Or to disable authentication (NOT RECOMMENDED for production):
+        export MALACHIMQ_DASHBOARD_AUTH_ENABLED=false
+
+      For more information, see the Security section in the README.
+      """)
+    end
+  end
+end

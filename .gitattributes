@@ -1,0 +1,9 @@
+# Git attributes for MalachiMQ
+
+# Ensure shell scripts always use LF line endings
+*.sh text eol=lf
+
+# Ensure executables maintain permissions
+pre-commit.sh text eol=lf
+scripts/setup-dev.sh text eol=lf
+benchmark/run_all_baselines.sh text eol=lf

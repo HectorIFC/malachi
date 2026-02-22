@@ -1,0 +1,314 @@
+{
+  "benchmark": "baseline_consolidated",
+  "timestamp": "2026-02-21T19:03:17Z",
+  "version": "0.5.1",
+  "results": {
+    "throughput_20260221": 
+{
+  "burst_traffic": {
+    "burst_duration_sec": 0.01,
+    "burst_size": 1000,
+    "burst_throughput_msgs_per_sec": 142857.14,
+    "latency_avg_us": 3.0,
+    "message_size_bytes": 1024,
+    "messages_processed": 1000,
+    "overall_throughput_msgs_per_sec": 199.68,
+    "total_duration_sec": 5.01
+  },
+  "concurrent_connections": {
+    "concurrent_connections": 100,
+    "duration_sec": 0.4,
+    "latency_avg_us": 322.0,
+    "message_size_bytes": 1024,
+    "messages_per_connection": 1000,
+    "messages_processed": 100000,
+    "messages_sent": 100000,
+    "throughput_mb_per_sec": 243.53,
+    "throughput_msgs_per_sec": 249376.56
+  },
+  "multi_producer_consumer": {
+    "consumer_count": 10,
+    "duration_sec": 60.0,
+    "latency_avg_us": 30.0,
+    "message_size_bytes": 1024,
+    "messages_processed": 12796829,
+    "messages_sent": 12796829,
+    "producer_count": 10,
+    "throughput_mb_per_sec": 208.28,
+    "throughput_msgs_per_sec": 213280.48
+  },
+  "single_producer_consumer": {
+    "100": {
+      "duration_sec": 60.0,
+      "latency_avg_us": 3.0,
+      "message_size_bytes": 100,
+      "messages_processed": 7902269,
+      "messages_sent": 7902269,
+      "throughput_mb_per_sec": 12.56,
+      "throughput_msgs_per_sec": 131704.48
+    },
+    "1024": {
+      "duration_sec": 60.0,
+      "latency_avg_us": 3.0,
+      "message_size_bytes": 1024,
+      "messages_processed": 8161253,
+      "messages_sent": 8161253,
+      "throughput_mb_per_sec": 132.83,
+      "throughput_msgs_per_sec": 136020.88
+    },
+    "10240": {
+      "duration_sec": 60.0,
+      "latency_avg_us": 3.0,
+      "message_size_bytes": 10240,
+      "messages_processed": 8214659,
+      "messages_sent": 8214659,
+      "throughput_mb_per_sec": 1337.02,
+      "throughput_msgs_per_sec": 136910.98
+    },
+    "102400": {
+      "duration_sec": 60.0,
+      "latency_avg_us": 3.0,
+      "message_size_bytes": 102400,
+      "messages_processed": 7929380,
+      "messages_sent": 7929380,
+      "throughput_mb_per_sec": 12905.89,
+      "throughput_msgs_per_sec": 132156.33
+    }
+  }
+}
+,
+    "latency_20260221": 
+{
+  "end_to_end_latency": {
+    "latency_avg_us": 461.48,
+    "latency_max_us": 18588.0,
+    "latency_min_us": 2.0,
+    "latency_p50_us": 75.0,
+    "latency_p95_us": 1585.0,
+    "latency_p99_us": 13070.0,
+    "messages_sampled": 147
+  },
+  "latency_under_heavy_load": {
+    "latency_avg_us": 241.24,
+    "latency_max_us": 3236.0,
+    "latency_min_us": 3.0,
+    "latency_p50_us": 77.0,
+    "latency_p95_us": 1011.0,
+    "latency_p99_us": 3227.0,
+    "load_percentage": 90,
+    "messages_sampled": 150,
+    "target_msgs_per_sec": 117348
+  },
+  "latency_under_light_load": {
+    "latency_avg_us": 428.2,
+    "latency_max_us": 12395.0,
+    "latency_min_us": 3.0,
+    "latency_p50_us": 66.0,
+    "latency_p95_us": 2438.0,
+    "latency_p99_us": 6080.0,
+    "load_percentage": 10,
+    "messages_sampled": 128,
+    "target_msgs_per_sec": 13322
+  },
+  "latency_under_medium_load": {
+    "latency_avg_us": 355.93,
+    "latency_max_us": 7058.0,
+    "latency_min_us": 3.0,
+    "latency_p50_us": 69.0,
+    "latency_p95_us": 1805.0,
+    "latency_p99_us": 5908.0,
+    "load_percentage": 50,
+    "messages_sampled": 134,
+    "target_msgs_per_sec": 66197
+  }
+}
+,
+    "memory_20260221": 
+{
+  "memory_multiple_queues": {
+    "ets_memory_mb": 24.93,
+    "memory_per_queue_mb": 0.124,
+    "processes_memory_mb": 15.83,
+    "queue_count": 1000,
+    "total_memory_mb": 124.1
+  },
+  "memory_per_buffered_message": {
+    "average_memory_per_1000_messages_mb": 0.196,
+    "test_1": {
+      "memory_per_1000_messages_mb": 0.267,
+      "message_count": 1000,
+      "message_size_bytes": 1024,
+      "total_memory_mb": 0.27
+    },
+    "test_2": {
+      "memory_per_1000_messages_mb": 0.287,
+      "message_count": 10000,
+      "message_size_bytes": 1024,
+      "total_memory_mb": 2.87
+    },
+    "test_3": {
+      "memory_per_1000_messages_mb": 0.033,
+      "message_count": 100000,
+      "message_size_bytes": 1024,
+      "total_memory_mb": 3.33
+    }
+  },
+  "memory_per_connection": {
+    "average_memory_per_connection_mb": 0.012,
+    "test_1": {
+      "connection_count": 10,
+      "memory_per_connection_mb": 0.031,
+      "total_memory_mb": 0.31
+    },
+    "test_2": {
+      "connection_count": 100,
+      "memory_per_connection_mb": 0.003,
+      "total_memory_mb": 0.31
+    },
+    "test_3": {
+      "connection_count": 1000,
+      "memory_per_connection_mb": 0.002,
+      "total_memory_mb": 1.91
+    }
+  }
+}
+,
+    "connections_20260221": 
+{
+  "connection_capacity": {
+    "test_1": {
+      "avg_connection_time_ms": 331.8,
+      "failed_connections": 0,
+      "success_rate_percent": 100.0,
+      "successful_connections": 10,
+      "target_connections": 10
+    },
+    "test_2": {
+      "avg_connection_time_ms": 1229.35,
+      "failed_connections": 0,
+      "success_rate_percent": 100.0,
+      "successful_connections": 100,
+      "target_connections": 100
+    },
+    "test_3": {
+      "avg_connection_time_ms": 2684.91,
+      "failed_connections": 784,
+      "success_rate_percent": 21.6,
+      "successful_connections": 216,
+      "target_connections": 1000
+    },
+    "test_4": {
+      "avg_connection_time_ms": 0.0,
+      "failed_connections": 5000,
+      "success_rate_percent": 0.0,
+      "successful_connections": 0,
+      "target_connections": 5000
+    }
+  },
+  "connection_churn": {
+    "cycle_count": 1000,
+    "cycles_per_sec": 30.48,
+    "duration_ms": 32810,
+    "successful_cycles": 1000
+  },
+  "connection_establishment_rate": {
+    "connections_per_sec": 29.33,
+    "duration_sec": 30,
+    "total_connections": 880
+  }
+}
+,
+    "auth_20260221": 
+{
+  "permission_checking": {
+    "admin_has_admin": {
+      "latency_us_per_op": 0.041,
+      "ops_per_sec": 24394237.63
+    },
+    "consumer_has_consume": {
+      "latency_us_per_op": 0.045,
+      "ops_per_sec": 22305194.12
+    },
+    "producer_has_admin_fail": {
+      "latency_us_per_op": 0.045,
+      "ops_per_sec": 22391613.3
+    },
+    "producer_has_produce": {
+      "latency_us_per_op": 0.046,
+      "ops_per_sec": 21775390.54
+    }
+  },
+  "session_creation": {
+    "duration_sec": 0.57,
+    "latency_avg_ms": 28.42,
+    "latency_p50_ms": 27.44,
+    "latency_p95_ms": 29.14,
+    "latency_p99_ms": 40.19,
+    "ops_per_sec": 35.18,
+    "successful_operations": 20,
+    "total_operations": 20
+  },
+  "token_validation": {
+    "duration_sec": 60.0,
+    "latency_us_per_op": 0.54,
+    "ops_per_sec": 1852769.34,
+    "total_operations": 111166168
+  }
+}
+,
+    "edge_cases_20260221": 
+{
+  "cpu_saturation": {
+    "8": {
+      "estimated_cpu_percent": 0.0,
+      "process_count": 185,
+      "run_queue_length": 0,
+      "throughput_msgs_per_sec": 127198.68
+    },
+    "80": {
+      "estimated_cpu_percent": 0.0,
+      "process_count": 257,
+      "run_queue_length": 0,
+      "throughput_msgs_per_sec": 117232.53
+    },
+    "800": {
+      "estimated_cpu_percent": 0.0,
+      "process_count": 977,
+      "run_queue_length": 0,
+      "throughput_msgs_per_sec": 117693.5
+    },
+    "8000": {
+      "estimated_cpu_percent": 0.0,
+      "process_count": 8177,
+      "run_queue_length": 0,
+      "throughput_msgs_per_sec": 116003.88
+    }
+  },
+  "empty_messages": {
+    "duration_sec": 60.0,
+    "latency_avg_us": 3.0,
+    "message_size_bytes": 0,
+    "messages_processed": 8341575,
+    "messages_sent": 8341575,
+    "throughput_msgs_per_sec": 139026.21
+  },
+  "max_connections": {
+    "max_stable_connections": 10000,
+    "total_successful": 10000,
+    "failure_rate": 0.0,
+    "max_attempts_reached": true
+  },
+  "max_message_size": {
+    "duration_sec": 0.0,
+    "latency_avg_us": 6.0,
+    "message_size_bytes": 10485760,
+    "message_size_mb": 10,
+    "messages_processed": 10,
+    "messages_sent": 10,
+    "throughput_mb_per_sec": 917431.19,
+    "throughput_msgs_per_sec": 91743.12
+  }
+}
+
+  }
+}

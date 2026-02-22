@@ -1,0 +1,295 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+env:
+  MIX_ENV: test
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  test:
+    name: Test (Elixir ${{matrix.elixir}} / OTP ${{matrix.otp}})
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: '1.19.4'
+            otp: '28.1'
+            lint: true
+            coverage: true
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🔧 Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+      
+      - name: 📦 Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
+      
+      - name: 🔨 Install dependencies
+        run: mix deps.get
+      
+      - name: 🔍 Check unused dependencies
+        run: mix deps.unlock --check-unused
+        if: matrix.lint
+      
+      - name: ⚙️ Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+        if: matrix.lint
+      
+      - name: ⚙️ Compile (dev)
+        run: mix compile
+        if: ${{ !matrix.lint }}
+      
+      - name: 🎨 Check formatting
+        run: mix format --check-formatted
+        if: matrix.lint
+      
+      - name: 🔎 Run Credo (static analysis)
+        run: mix credo --strict
+        if: matrix.lint
+        continue-on-error: true  # Don't fail build on credo warnings
+      
+      - name: 📊 Run tests with coverage
+        run: mix coveralls.json
+        if: matrix.coverage
+      
+      - name: 📈 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: matrix.coverage
+        with:
+          files: ./cover/excoveralls.json
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  docker:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: 🔨 Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: malachimq:test
+          build-args: |
+            APP_VERSION=test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 🧪 Test Docker image
+        run: |
+          # Cleanup function to ensure container removal
+          cleanup_container() {
+            echo "🛑 Cleaning up container..."
+            docker stop malachimq-test > /dev/null 2>&1 || true
+            docker rm malachimq-test > /dev/null 2>&1 || true
+          }
+          trap cleanup_container EXIT
+
+          # Generate passwords using openssl for better entropy
+          ADMIN_PASS="ci_admin_$(openssl rand -hex 8)"
+          PRODUCER_PASS="ci_producer_$(openssl rand -hex 8)"
+          CONSUMER_PASS="ci_consumer_$(openssl rand -hex 8)"
+          APP_PASS="ci_app_$(openssl rand -hex 8)"
+
+          echo "🚀 Starting container..."
+          docker run -d --name malachimq-test \
+            -e MALACHIMQ_CONFIG_ENV=test \
+            -e MALACHIMQ_TCP_PORT=4040 \
+            -e MALACHIMQ_DASHBOARD_PORT=4041 \
+            -e MALACHIMQ_ADMIN_PASS="$ADMIN_PASS" \
+            -e MALACHIMQ_PRODUCER_PASS="$PRODUCER_PASS" \
+            -e MALACHIMQ_CONSUMER_PASS="$CONSUMER_PASS" \
+            -e MALACHIMQ_APP_PASS="$APP_PASS" \
+            -e MALACHIMQ_REQUIRE_TLS=false \
+            -p 4040:4040 \
+            -p 4041:4041 \
+            malachimq:test
+
+          # Wait for container to start (2 seconds)
+          sleep 2
+
+          # Check if container is running
+          if ! docker ps | grep -q malachimq-test; then
+            echo "❌ Container failed to start!"
+            echo ""
+            echo "📋 Container logs:"
+            docker logs malachimq-test 2>&1 || echo "Could not retrieve logs"
+            echo ""
+            echo "🔍 Container diagnostic info:"
+            docker inspect malachimq-test --format='Exit Code: {{.State.ExitCode}}' 2>&1 || true
+            docker inspect malachimq-test --format='Started: {{.State.StartedAt}} | Ended: {{.State.FinishedAt}}' 2>&1 || true
+            exit 1
+          fi
+          echo "✅ Container is running"
+
+          # Wait for dashboard to be ready (max 15 seconds - app MUST be fast)
+          echo "⏳ Waiting for dashboard to be ready (timeout: 15s)..."
+          MAX_ATTEMPTS=15
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if curl -sf http://localhost:4041/login > /dev/null 2>&1; then
+              echo "✅ Dashboard is ready (${ATTEMPT}s)"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "❌ Dashboard failed to start within 15 seconds!"
+              echo "This indicates a performance issue that needs investigation."
+              echo "📋 Container logs:"
+              docker logs malachimq-test
+              docker stop malachimq-test
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Check if the application process is running
+          echo "🔍 Checking application process..."
+          docker exec malachimq-test cat /proc/1/cmdline | tr '\0' ' '
+
+          # Authenticate and get token
+          echo "🔐 Authenticating with dashboard..."
+          LOGIN_RESPONSE=$(curl -sf -X POST http://localhost:4041/login \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASS\"}" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Authentication request failed!"
+            echo "Response: $LOGIN_RESPONSE"
+            docker logs malachimq-test
+            docker stop malachimq-test
+            exit 1
+          fi
+
+          # Extract token
+          TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['token'])" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to extract token!"
+            echo "Login response: $LOGIN_RESPONSE"
+            docker logs malachimq-test
+            docker stop malachimq-test
+            exit 1
+          fi
+
+          echo "✅ Authentication successful"
+
+          # Check metrics endpoint
+          echo "📊 Fetching metrics..."
+          METRICS_RESPONSE=$(curl -sf http://localhost:4041/metrics \
+            -H "Authorization: Bearer $TOKEN" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to fetch metrics!"
+            echo "Response: $METRICS_RESPONSE"
+            docker logs malachimq-test
+            docker stop malachimq-test
+            exit 1
+          fi
+
+          echo "✅ Dashboard is responding correctly"
+
+          # Stop container
+          echo "🛑 Stopping container..."
+          docker stop malachimq-test
+          echo "✅ All tests passed!"
+
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🔧 Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+      
+      - name: 📦 Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-quality-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-quality-
+      
+      - name: 🔨 Install dependencies
+        run: mix deps.get
+      
+      - name: 📏 Check code complexity
+        run: |
+          mix archive.install hex ex_check --force
+          mix check
+        continue-on-error: true
+      
+      - name: 📝 Generate documentation
+        run: mix docs --warnings-as-errors
+        env:
+          MIX_ENV: dev
+      
+      - name: 🔍 Check for TODO/FIXME comments
+        run: |
+          echo "📝 Checking for TODO/FIXME comments..."
+          grep -r "TODO\|FIXME" lib/ || echo "✅ No TODO/FIXME found"
+        continue-on-error: true
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [test, docker, quality]
+    if: always()
+    
+    steps:
+      - name: 📊 Check results
+        run: |
+          echo "Test Status: ${{ needs.test.result }}"
+          echo "Docker Status: ${{ needs.docker.result }}"
+          echo "Quality Status: ${{ needs.quality.result }}"
+          
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "❌ Tests failed!"
+            exit 1
+          fi
+          
+          if [ "${{ needs.docker.result }}" != "success" ]; then
+            echo "❌ Docker build failed!"
+            exit 1
+          fi
+          
+          echo "✅ All critical checks passed!"
