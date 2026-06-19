@@ -69,11 +69,11 @@ enable_tls =
     _ -> false
   end
 
-config :malachimq,
+config :malachi,
   config_env: config_env(),
   tcp_port: String.to_integer(System.get_env("MALACHIMQ_TCP_PORT") || "4040"),
   dashboard_port: String.to_integer(System.get_env("MALACHIMQ_DASHBOARD_PORT") || "4041"),
-  locale: System.get_env("MALACHIMQ_LOCALE") || "en_US",
+  locale: System.get_env("MALACHI_LOCALE") || "en_US",
   partition_multiplier: String.to_integer(System.get_env("MALACHIMQ_PARTITION_MULTIPLIER") || "100"),
   session_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_TIMEOUT_MS") || "3600000"),
   session_cleanup_interval_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_CLEANUP_MS") || "60000"),
@@ -98,7 +98,7 @@ config :malachimq,
 # Only set rate limiting and connection limiting configs in non-test environments
 # Test environment sets these in test.exs with permissive values
 if config_env() != :test do
-  config :malachimq,
+  config :malachi,
     # Rate limiting configuration
     auth_rate_limit: parse_int.(System.get_env("MALACHIMQ_AUTH_RATE_LIMIT"), 10),
     auth_rate_window_ms: parse_int.(System.get_env("MALACHIMQ_AUTH_RATE_WINDOW_MS"), 60_000),
@@ -112,7 +112,7 @@ if config_env() != :test do
     max_total_connections: parse_int.(System.get_env("MALACHIMQ_MAX_TOTAL_CONN"), 10_000)
 end
 
-config :malachimq,
+config :malachi,
   # Security feature flags (test env enabled, prod enabled via env/default)
   rate_limit_enabled:
     (case System.get_env("MALACHIMQ_RATE_LIMIT_ENABLED") do
@@ -175,7 +175,7 @@ config :malachimq,
        nil -> if(config_env() == :test, do: :ets_only, else: :both)
        _ -> :both
      end),
-  audit_log_file: System.get_env("MALACHIMQ_AUDIT_LOG_FILE") || "/var/log/malachimq/audit.log",
+  audit_log_file: System.get_env("MALACHIMQ_AUDIT_LOG_FILE") || "/var/log/malachi/audit.log",
   audit_log_max_size_mb: parse_int.(System.get_env("MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB"), 1)
 
 # ============================================================
@@ -248,7 +248,7 @@ default_users =
     end
   end
 
-config :malachimq,
+config :malachi,
   default_users: default_users,
   disable_default_users: disable_default_users,
 
@@ -285,7 +285,7 @@ config :malachimq,
 # These limits prevent injection attacks, atom table exhaustion,
 # and resource exhaustion. Values are hardcoded for security.
 
-config :malachimq,
+config :malachi,
   # Queue and channel name validation
   max_queue_name_length: 255,
   max_channel_name_length: 255,
@@ -309,7 +309,7 @@ config :malachimq,
 # Configures message size limits, buffer limits, overflow behaviors,
 # and backpressure thresholds for queues.
 
-config :malachimq,
+config :malachi,
   # Message size limits (1MB default)
   default_max_message_size_bytes: parse_int.(System.get_env("MALACHIMQ_MAX_MESSAGE_SIZE"), 1_048_576),
 
@@ -338,7 +338,7 @@ config :malachimq,
 # Prevents atom table exhaustion and monitors system memory.
 # Atom table in BEAM is never garbage collected (limit: 1,048,576).
 
-config :malachimq,
+config :malachi,
   # Atom table monitoring
   atom_check_interval_ms: parse_int.(System.get_env("MALACHIMQ_ATOM_CHECK_INTERVAL"), 60_000),
   atom_warning_threshold: parse_float.(System.get_env("MALACHIMQ_ATOM_WARNING_THRESHOLD"), 0.7),
@@ -357,7 +357,7 @@ config :malachimq,
 # Production Security Warnings
 # ============================================================
 if actual_env == :prod do
-  dashboard_auth_enabled = Application.get_env(:malachimq, :dashboard_auth_enabled, true)
+  dashboard_auth_enabled = Application.get_env(:malachi, :dashboard_auth_enabled, true)
 
   if dashboard_auth_enabled do
     # Check if any users are configured

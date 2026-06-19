@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * MalachiMQ Channel Publisher
+ * Malachi Channel Publisher
  * 
  * Publishes messages to channels with best-effort delivery.
  * Messages are only delivered to active subscribers (no buffering).
@@ -21,7 +21,7 @@
  */
 
 const net = require('net');
-const { MalachiMQClient } = require('./producer');
+const { MalachiClient } = require('./producer');
 
 const CONFIG = {
   host: process.env.MALACHIMQ_HOST || 'localhost',
@@ -76,13 +76,13 @@ async function publishToChannel(client, channelName, payload, headers = {}) {
 }
 
 async function publishMessages(count) {
-  console.log(colors.cyan(`\n📢 MalachiMQ Channel Publisher`));
+  console.log(colors.cyan(`\n📢 Malachi Channel Publisher`));
   console.log(colors.gray(`   Host: ${CONFIG.host}:${CONFIG.port}`));
   console.log(colors.gray(`   User: ${CONFIG.username}`));
   console.log(colors.gray(`   Channel: ${CONFIG.channelName}`));
   console.log(colors.gray(`   Messages: ${count}\n`));
 
-  const client = new MalachiMQClient({
+  const client = new MalachiClient({
     host: CONFIG.host,
     port: CONFIG.port,
     username: CONFIG.username,
@@ -142,14 +142,14 @@ async function publishMessages(count) {
 }
 
 async function publishContinuous() {
-  console.log(colors.cyan(`\n📢 MalachiMQ Channel Publisher (Continuous)`));
+  console.log(colors.cyan(`\n📢 Malachi Channel Publisher (Continuous)`));
   console.log(colors.gray(`   Host: ${CONFIG.host}:${CONFIG.port}`));
   console.log(colors.gray(`   User: ${CONFIG.username}`));
   console.log(colors.gray(`   Channel: ${CONFIG.channelName}`));
   console.log(colors.gray(`   Auto-Reconnect: yes`));
   console.log(colors.yellow(`   Press Ctrl+C to stop\n`));
 
-  const client = new MalachiMQClient({ 
+  const client = new MalachiClient({ 
     host: CONFIG.host,
     port: CONFIG.port,
     username: CONFIG.username,
@@ -225,7 +225,7 @@ async function main() {
       await publishContinuous();
     } else if (args.includes('--help') || args.includes('-h')) {
       console.log(`
-${colors.cyan('📢 MalachiMQ Channel Publisher')}
+${colors.cyan('📢 Malachi Channel Publisher')}
 
 ${colors.yellow('Usage:')}
   node channel-publisher.js [options] [channel_name] [count]
@@ -262,7 +262,7 @@ ${colors.yellow('Channel Behavior:')}
     }
   } catch (err) {
     console.error(colors.red(`\n❌ Error: ${err.message}`));
-    console.error(colors.gray(`   Check if MalachiMQ is running on ${CONFIG.host}:${CONFIG.port}\n`));
+    console.error(colors.gray(`   Check if Malachi is running on ${CONFIG.host}:${CONFIG.port}\n`));
     process.exit(1);
   }
 }

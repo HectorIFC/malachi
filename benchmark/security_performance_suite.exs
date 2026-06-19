@@ -2,7 +2,7 @@
 
 Mix.install([
   {:jason, "~> 1.4"},
-  {:malachimq, path: Path.expand("..", __DIR__)}
+  {:malachi, path: Path.expand("..", __DIR__)}
 ])
 
 Code.require_file("utils/benchmark_helpers.ex", __DIR__)
@@ -25,10 +25,10 @@ defmodule SecurityPerformanceSuite do
   @iterations 100_000
 
   def run do
-    IO.puts("\nMalachiMQ Security Performance Suite")
+    IO.puts("\nMalachi Security Performance Suite")
     IO.puts("=" <> String.duplicate("=", 79))
 
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -73,12 +73,12 @@ defmodule SecurityPerformanceSuite do
     IO.puts("\n[1/8] Benchmarking authentication (Argon2)...")
 
     # Warmup
-    for _ <- 1..10, do: MalachiMQ.Auth.authenticate("admin", "admin123")
+    for _ <- 1..10, do: Malachi.Auth.authenticate("admin", "admin123")
 
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..100 do
-          MalachiMQ.Auth.authenticate("admin", "admin123")
+          Malachi.Auth.authenticate("admin", "admin123")
         end
       end)
 
@@ -100,15 +100,15 @@ defmodule SecurityPerformanceSuite do
   defp bench_token_validation(results) do
     IO.puts("\n[2/8] Benchmarking token validation (ETS lookup)...")
 
-    {:ok, token} = MalachiMQ.Auth.authenticate("admin", "admin123")
+    {:ok, token} = Malachi.Auth.authenticate("admin", "admin123")
 
     # Warmup
-    for _ <- 1..1000, do: MalachiMQ.Auth.validate_token(token)
+    for _ <- 1..1000, do: Malachi.Auth.validate_token(token)
 
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..@iterations do
-          MalachiMQ.Auth.validate_token(token)
+          Malachi.Auth.validate_token(token)
         end
       end)
 
@@ -129,13 +129,13 @@ defmodule SecurityPerformanceSuite do
 
     # Warmup
     for _ <- 1..1000 do
-      MalachiMQ.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
+      Malachi.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
     end
 
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..@iterations do
-          MalachiMQ.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
+          Malachi.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
         end
       end)
 
@@ -160,34 +160,34 @@ defmodule SecurityPerformanceSuite do
 
     # Warmup
     for _ <- 1..1000 do
-      MalachiMQ.Validator.validate_queue_name(queue_name)
-      MalachiMQ.Validator.validate_payload(payload)
-      MalachiMQ.Validator.validate_headers(headers)
+      Malachi.Validator.validate_queue_name(queue_name)
+      Malachi.Validator.validate_payload(payload)
+      Malachi.Validator.validate_headers(headers)
     end
 
     # Individual
     {name_us, _} =
       BenchmarkHelpers.measure_time(fn ->
-        for _ <- 1..@iterations, do: MalachiMQ.Validator.validate_queue_name(queue_name)
+        for _ <- 1..@iterations, do: Malachi.Validator.validate_queue_name(queue_name)
       end)
 
     {payload_us, _} =
       BenchmarkHelpers.measure_time(fn ->
-        for _ <- 1..@iterations, do: MalachiMQ.Validator.validate_payload(payload)
+        for _ <- 1..@iterations, do: Malachi.Validator.validate_payload(payload)
       end)
 
     {headers_us, _} =
       BenchmarkHelpers.measure_time(fn ->
-        for _ <- 1..@iterations, do: MalachiMQ.Validator.validate_headers(headers)
+        for _ <- 1..@iterations, do: Malachi.Validator.validate_headers(headers)
       end)
 
     # Combined pipeline
     {pipeline_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..@iterations do
-          MalachiMQ.Validator.validate_queue_name(queue_name)
-          MalachiMQ.Validator.validate_payload(payload)
-          MalachiMQ.Validator.validate_headers(headers)
+          Malachi.Validator.validate_queue_name(queue_name)
+          Malachi.Validator.validate_payload(payload)
+          Malachi.Validator.validate_headers(headers)
         end
       end)
 
@@ -215,14 +215,14 @@ defmodule SecurityPerformanceSuite do
 
     # Warmup
     for _ <- 1..1000 do
-      MalachiMQ.RateLimiter.check_limit("bench_id", :publish, config)
+      Malachi.RateLimiter.check_limit("bench_id", :publish, config)
     end
 
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for i <- 1..@iterations do
           id = "bench_#{rem(i, 100)}"
-          MalachiMQ.RateLimiter.check_limit(id, :publish, config)
+          Malachi.RateLimiter.check_limit(id, :publish, config)
         end
       end)
 
@@ -246,12 +246,12 @@ defmodule SecurityPerformanceSuite do
 
     {html_us, _} =
       BenchmarkHelpers.measure_time(fn ->
-        for _ <- 1..@iterations, do: MalachiMQ.Validator.sanitize_for_html(html_input)
+        for _ <- 1..@iterations, do: Malachi.Validator.sanitize_for_html(html_input)
       end)
 
     {log_us, _} =
       BenchmarkHelpers.measure_time(fn ->
-        for _ <- 1..@iterations, do: MalachiMQ.Validator.sanitize_for_log(log_input)
+        for _ <- 1..@iterations, do: Malachi.Validator.sanitize_for_log(log_input)
       end)
 
     IO.puts("   sanitize_for_html avg: #{Float.round(html_us / @iterations, 2)} us/call")
@@ -274,7 +274,7 @@ defmodule SecurityPerformanceSuite do
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..iterations do
-          MalachiMQ.AuditLog.log_event(
+          Malachi.AuditLog.log_event(
             :benchmark,
             %{username: "bench", ip: {0, 0, 0, 0}},
             "benchmark_test",
@@ -289,7 +289,7 @@ defmodule SecurityPerformanceSuite do
     IO.puts("   Audit log_event avg: #{Float.round(avg_us, 2)} us/call")
 
     # Flush to prevent memory buildup
-    MalachiMQ.AuditLog.flush()
+    Malachi.AuditLog.flush()
 
     put_in(results, ["results", "audit_logging"], %{
       "avg_us" => avg_us,
@@ -303,7 +303,7 @@ defmodule SecurityPerformanceSuite do
   defp bench_combined_pipeline(results) do
     IO.puts("\n[8/8] Benchmarking combined security pipeline...")
 
-    {:ok, token} = MalachiMQ.Auth.authenticate("admin", "admin123")
+    {:ok, token} = Malachi.Auth.authenticate("admin", "admin123")
     config = %{limit: 10_000_000, window_ms: 60_000}
     queue_name = "bench_combined_queue"
     payload = "test message payload"
@@ -311,23 +311,23 @@ defmodule SecurityPerformanceSuite do
 
     # Warmup
     for _ <- 1..1000 do
-      MalachiMQ.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
-      MalachiMQ.RateLimiter.check_limit("combined_bench", :publish, config)
-      MalachiMQ.Auth.validate_token(token)
-      MalachiMQ.Validator.validate_queue_name(queue_name)
-      MalachiMQ.Validator.validate_payload(payload)
-      MalachiMQ.Validator.validate_headers(headers)
+      Malachi.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
+      Malachi.RateLimiter.check_limit("combined_bench", :publish, config)
+      Malachi.Auth.validate_token(token)
+      Malachi.Validator.validate_queue_name(queue_name)
+      Malachi.Validator.validate_payload(payload)
+      Malachi.Validator.validate_headers(headers)
     end
 
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         for _ <- 1..@iterations do
-          MalachiMQ.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
-          MalachiMQ.RateLimiter.check_limit("combined_bench", :publish, config)
-          MalachiMQ.Auth.validate_token(token)
-          MalachiMQ.Validator.validate_queue_name(queue_name)
-          MalachiMQ.Validator.validate_payload(payload)
-          MalachiMQ.Validator.validate_headers(headers)
+          Malachi.Auth.LockoutManager.locked?("admin", {127, 0, 0, 1})
+          Malachi.RateLimiter.check_limit("combined_bench", :publish, config)
+          Malachi.Auth.validate_token(token)
+          Malachi.Validator.validate_queue_name(queue_name)
+          Malachi.Validator.validate_payload(payload)
+          Malachi.Validator.validate_headers(headers)
         end
       end)
 

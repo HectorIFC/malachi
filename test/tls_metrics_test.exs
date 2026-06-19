@@ -1,7 +1,7 @@
-defmodule MalachiMQ.TLSMetricsTest do
+defmodule Malachi.TLSMetricsTest do
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Metrics
+  alias Malachi.Metrics
 
   describe "TLS metrics functions" do
     test "increment_tls_handshake_success/0 increments counter" do
@@ -88,7 +88,7 @@ defmodule MalachiMQ.TLSMetricsTest do
 
   # Helper to read raw ETS counter
   defp get_tls_metric(key) do
-    case :ets.lookup(:malachimq_metrics, key) do
+    case :ets.lookup(:malachi_metrics, key) do
       [{^key, value}] -> value
       [] -> 0
     end

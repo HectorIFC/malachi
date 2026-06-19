@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Test.TCPHelper do
+defmodule Malachi.Test.TCPHelper do
   @moduledoc """
   TCP helper utilities for testing.
 
@@ -12,7 +12,7 @@ defmodule MalachiMQ.Test.TCPHelper do
   """
 
   @doc """
-  Connects to the MalachiMQ TCP server with test-appropriate settings.
+  Connects to the Malachi TCP server with test-appropriate settings.
 
   Uses `packet: 0` to avoid line length limitations and handles framing manually.
 
@@ -29,7 +29,7 @@ defmodule MalachiMQ.Test.TCPHelper do
   """
   def connect(opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 1000)
-    port = Keyword.get(opts, :port, Application.get_env(:malachimq, :tcp_port, 4040))
+    port = Keyword.get(opts, :port, Application.get_env(:malachi, :tcp_port, 4040))
 
     :gen_tcp.connect(
       {127, 0, 0, 1},

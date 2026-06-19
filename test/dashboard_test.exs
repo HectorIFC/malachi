@@ -1,13 +1,13 @@
-defmodule MalachiMQ.DashboardTest do
+defmodule Malachi.DashboardTest do
   use ExUnit.Case, async: false
 
   setup do
     # Temporarily disable dashboard auth for these tests
-    original_value = Application.get_env(:malachimq, :dashboard_auth_enabled)
-    Application.put_env(:malachimq, :dashboard_auth_enabled, false)
+    original_value = Application.get_env(:malachi, :dashboard_auth_enabled)
+    Application.put_env(:malachi, :dashboard_auth_enabled, false)
 
     on_exit(fn ->
-      Application.put_env(:malachimq, :dashboard_auth_enabled, original_value)
+      Application.put_env(:malachi, :dashboard_auth_enabled, original_value)
     end)
 
     :ok
@@ -15,7 +15,7 @@ defmodule MalachiMQ.DashboardTest do
 
   describe "dashboard endpoints" do
     test "GET / returns HTML dashboard" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       # Give the dashboard time to start
       :timer.sleep(100)
@@ -39,7 +39,7 @@ defmodule MalachiMQ.DashboardTest do
     end
 
     test "GET /metrics returns JSON" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       :timer.sleep(100)
 
@@ -61,7 +61,7 @@ defmodule MalachiMQ.DashboardTest do
     end
 
     test "GET /stream returns SSE stream" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       :timer.sleep(100)
 
@@ -83,7 +83,7 @@ defmodule MalachiMQ.DashboardTest do
     end
 
     test "GET /unknown returns 404" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       :timer.sleep(100)
 
@@ -104,7 +104,7 @@ defmodule MalachiMQ.DashboardTest do
     end
 
     test "GET /rate_limits returns rate limiting stats" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       :timer.sleep(100)
 
@@ -136,7 +136,7 @@ defmodule MalachiMQ.DashboardTest do
   end
 
   describe "dashboard HTML" do
-    test "dashboard includes MalachiMQ branding" do
+    test "dashboard includes Malachi branding" do
       # This test ensures the dashboard HTML is functional
       :ok
     end

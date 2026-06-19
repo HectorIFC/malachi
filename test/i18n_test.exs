@@ -1,8 +1,8 @@
-defmodule MalachiMQ.I18nTest do
+defmodule Malachi.I18nTest do
   # async: false because set_locale modifies global Application env
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.I18n
+  alias Malachi.I18n
 
   setup do
     original_locale = I18n.locale()

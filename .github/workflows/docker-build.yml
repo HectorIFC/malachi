@@ -13,7 +13,7 @@ on:
 
 env:
   DOCKER_USERNAME: hectorcardoso
-  IMAGE_NAME: malachimq
+  IMAGE_NAME: malachi
 
 jobs:
   build:

@@ -12,18 +12,18 @@
 
 defmodule RateLimitingBenchmark do
   @moduledoc """
-  Performance benchmarks for MalachiMQ rate limiting system.
+  Performance benchmarks for Malachi rate limiting system.
   """
 
   def run do
-    IO.puts("\n" <> IO.ANSI.cyan() <> "=== MalachiMQ Rate Limiting Benchmark ===" <> IO.ANSI.reset())
+    IO.puts("\n" <> IO.ANSI.cyan() <> "=== Malachi Rate Limiting Benchmark ===" <> IO.ANSI.reset())
     IO.puts("Measuring rate limiter performance characteristics\n")
 
     # Ensure app is started
-    {:ok, _} = Application.ensure_all_started(:malachimq)
+    {:ok, _} = Application.ensure_all_started(:malachi)
 
     # Ensure rate limiting is enabled
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
 
     run_latency_benchmark()
     run_throughput_benchmark()
@@ -43,14 +43,14 @@ defmodule RateLimitingBenchmark do
 
     # Warmup
     for _ <- 1..100 do
-      MalachiMQ.RateLimiter.check_limit(identifier, :auth, config)
+      Malachi.RateLimiter.check_limit(identifier, :auth, config)
     end
 
     # Measure
     iterations = 10_000
     latencies = for _ <- 1..iterations do
       {time_us, _result} = :timer.tc(fn ->
-        MalachiMQ.RateLimiter.check_limit(identifier, :auth, config)
+        Malachi.RateLimiter.check_limit(identifier, :auth, config)
       end)
       time_us
     end
@@ -87,28 +87,28 @@ defmodule RateLimitingBenchmark do
     message_count = 50_000
 
     # Benchmark WITHOUT rate limiting
-    Application.put_env(:malachimq, :rate_limit_enabled, false)
+    Application.put_env(:malachi, :rate_limit_enabled, false)
     
     {time_without_us, _result} = :timer.tc(fn ->
       for i <- 1..message_count do
-        MalachiMQ.Queue.enqueue(queue_name, "message_#{i}", %{})
+        Malachi.Queue.enqueue(queue_name, "message_#{i}", %{})
       end
     end)
 
     throughput_without = (message_count / time_without_us) * 1_000_000
 
     # Benchmark WITH rate limiting (high limit to not actually block)
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
     username = "throughput_user"
     config = %{limit: 100_000, window_ms: 1_000}
 
     # Pre-populate to simulate checking
-    MalachiMQ.RateLimiter.check_limit(username, :publish, config)
+    Malachi.RateLimiter.check_limit(username, :publish, config)
 
     {time_with_us, _result} = :timer.tc(fn ->
       for i <- 1..message_count do
-        MalachiMQ.RateLimiter.check_limit(username, :publish, config)
-        MalachiMQ.Queue.enqueue(queue_name, "message_#{i}", %{})
+        Malachi.RateLimiter.check_limit(username, :publish, config)
+        Malachi.Queue.enqueue(queue_name, "message_#{i}", %{})
       end
     end)
 
@@ -134,10 +134,10 @@ defmodule RateLimitingBenchmark do
     IO.puts(IO.ANSI.yellow() <> "3. Memory Benchmark" <> IO.ANSI.reset())
     IO.puts("   Measuring memory per bucket (target: <1KB per bucket)\n")
 
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
 
     # Get initial ETS memory
-    initial_memory = :ets.info(:malachimq_rate_limits, :memory) * :erlang.system_info(:wordsize)
+    initial_memory = :ets.info(:malachi_rate_limits, :memory) * :erlang.system_info(:wordsize)
 
     # Create 1000 buckets
     bucket_count = 1_000
@@ -145,11 +145,11 @@ defmodule RateLimitingBenchmark do
 
     for i <- 1..bucket_count do
       identifier = "user_#{i}"
-      MalachiMQ.RateLimiter.check_limit(identifier, :auth, config)
+      Malachi.RateLimiter.check_limit(identifier, :auth, config)
     end
 
     # Get final memory
-    final_memory = :ets.info(:malachimq_rate_limits, :memory) * :erlang.system_info(:wordsize)
+    final_memory = :ets.info(:malachi_rate_limits, :memory) * :erlang.system_info(:wordsize)
 
     memory_increase = final_memory - initial_memory
     memory_per_bucket = memory_increase / bucket_count
@@ -173,7 +173,7 @@ defmodule RateLimitingBenchmark do
     IO.puts(IO.ANSI.yellow() <> "4. Concurrent Access Benchmark" <> IO.ANSI.reset())
     IO.puts("   Testing concurrent check performance\n")
 
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
     config = %{limit: 1_000_000, window_ms: 60_000}
 
     # Test with increasing concurrency
@@ -188,7 +188,7 @@ defmodule RateLimitingBenchmark do
           Task.async(fn ->
             identifier = "concurrent_user_#{i}"
             for _ <- 1..requests_per_task do
-              MalachiMQ.RateLimiter.check_limit(identifier, :auth, config)
+              Malachi.RateLimiter.check_limit(identifier, :auth, config)
             end
           end)
         end
@@ -214,26 +214,26 @@ defmodule RateLimitingBenchmark do
     IO.puts(IO.ANSI.yellow() <> "5. Cleanup Performance" <> IO.ANSI.reset())
     IO.puts("   Testing periodic cleanup impact\n")
 
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
 
     # Create many expired buckets
     config = %{limit: 10, window_ms: 100}
     
     for i <- 1..5_000 do
       identifier = "cleanup_user_#{i}"
-      MalachiMQ.RateLimiter.check_limit(identifier, :auth, config)
+      Malachi.RateLimiter.check_limit(identifier, :auth, config)
     end
 
     # Wait for buckets to expire
     Process.sleep(150)
 
-    initial_buckets = MalachiMQ.RateLimiter.get_stats().total_buckets
+    initial_buckets = Malachi.RateLimiter.get_stats().total_buckets
 
     # Trigger cleanup manually (would normally happen every 5 minutes)
-    send(Process.whereis(MalachiMQ.RateLimiter), :cleanup)
+    send(Process.whereis(Malachi.RateLimiter), :cleanup)
     Process.sleep(100)
 
-    final_buckets = MalachiMQ.RateLimiter.get_stats().total_buckets
+    final_buckets = Malachi.RateLimiter.get_stats().total_buckets
 
     IO.puts("   Buckets before:  #{initial_buckets}")
     IO.puts("   Buckets after:   #{final_buckets}")

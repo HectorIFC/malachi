@@ -1,4 +1,4 @@
-# Funding/sponsorship configuration for MalachiMQ
+# Funding/sponsorship configuration for Malachi
 # Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
 
 # GitHub Sponsors (replace with your username)
@@ -8,7 +8,7 @@ github: HectorIFC
 # patreon: your-username
 
 # Open Collective (uncomment if the project has a page)
-# open_collective: malachimq
+# open_collective: malachi
 
 # Ko-fi (uncomment and add your username if you use it)
 # ko_fi: your-username
@@ -20,7 +20,7 @@ github: HectorIFC
 # liberapay: your-username
 
 # IssueHunt (uncomment if you use it)
-# issuehunt: HectorIFC/malachimq
+# issuehunt: HectorIFC/malachi
 
 # Polar (uncomment if you use it)
 # polar: HectorIFC

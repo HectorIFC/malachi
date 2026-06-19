@@ -1,6 +1,6 @@
 # Multi-Architecture Docker Build Guide
 
-This guide explains how to build and push multi-architecture Docker images for MalachiMQ.
+This guide explains how to build and push multi-architecture Docker images for Malachi.
 
 ## Prerequisites
 
@@ -27,7 +27,7 @@ make docker-buildx-setup
 Or manually:
 
 ```bash
-docker buildx create --name malachimq-builder --use --bootstrap
+docker buildx create --name malachi-builder --use --bootstrap
 docker buildx inspect --bootstrap
 ```
 
@@ -59,8 +59,8 @@ This will:
 1. Build for `linux/amd64` and `linux/arm64`
 2. Create multi-architecture manifest
 3. Push to Docker Hub with tags:
-   - `hectorcardoso/malachimq:VERSION` (e.g.: 0.2.0)
-   - `hectorcardoso/malachimq:latest`
+   - `hectorcardoso/malachi:VERSION` (e.g.: 0.2.0)
+   - `hectorcardoso/malachi:latest`
 
 ### Custom push
 
@@ -79,21 +79,21 @@ VERSION=1.0.0 make docker-buildx-push
 
 ```bash
 # View available platforms
-docker buildx imagetools inspect hectorcardoso/malachimq:latest
+docker buildx imagetools inspect hectorcardoso/malachi:latest
 ```
 
 Expected output:
 ```
-Name:      docker.io/hectorcardoso/malachimq:latest
+Name:      docker.io/hectorcardoso/malachi:latest
 MediaType: application/vnd.docker.distribution.manifest.list.v2+json
 Digest:    sha256:...
            
 Manifests: 
-  Name:      docker.io/hectorcardoso/malachimq:latest@sha256:...
+  Name:      docker.io/hectorcardoso/malachi:latest@sha256:...
   MediaType: application/vnd.docker.distribution.manifest.v2+json
   Platform:  linux/amd64
              
-  Name:      docker.io/hectorcardoso/malachimq:latest@sha256:...
+  Name:      docker.io/hectorcardoso/malachi:latest@sha256:...
   MediaType: application/vnd.docker.distribution.manifest.v2+json
   Platform:  linux/arm64
 ```
@@ -103,16 +103,16 @@ Manifests:
 ### macOS with Apple Silicon (ARM64)
 
 ```bash
-docker pull hectorcardoso/malachimq:latest
-docker run --rm hectorcardoso/malachimq:latest uname -m
+docker pull hectorcardoso/malachi:latest
+docker run --rm hectorcardoso/malachi:latest uname -m
 # Output: aarch64
 ```
 
 ### Linux x86_64 (AMD64)
 
 ```bash
-docker pull hectorcardoso/malachimq:latest
-docker run --rm hectorcardoso/malachimq:latest uname -m
+docker pull hectorcardoso/malachi:latest
+docker run --rm hectorcardoso/malachi:latest uname -m
 # Output: x86_64
 ```
 
@@ -120,10 +120,10 @@ docker run --rm hectorcardoso/malachimq:latest uname -m
 
 ```bash
 # Force ARM64 even on AMD64
-docker run --platform linux/arm64 hectorcardoso/malachimq:latest
+docker run --platform linux/arm64 hectorcardoso/malachi:latest
 
 # Force AMD64 even on ARM64 (with QEMU emulation)
-docker run --platform linux/amd64 hectorcardoso/malachimq:latest
+docker run --platform linux/amd64 hectorcardoso/malachi:latest
 ```
 
 ## Automation with GitHub Actions
@@ -154,7 +154,7 @@ This means the image doesn't have a build for your architecture. Solution:
 
 ```bash
 docker buildx ls
-docker buildx create --name malachimq-builder --use
+docker buildx create --name malachi-builder --use
 ```
 
 ### Layer cache
@@ -170,7 +170,7 @@ cache-to: type=gha,mode=max
 QEMU emulation (for ARM64 on AMD64 or vice versa) is slow. Use:
 ```bash
 # Build only for your architecture
-docker build -t hectorcardoso/malachimq:latest .
+docker build -t hectorcardoso/malachi:latest .
 ```
 
 ## Useful commands
@@ -180,10 +180,10 @@ docker build -t hectorcardoso/malachimq:latest .
 docker buildx ls
 
 # Remove builder
-docker buildx rm malachimq-builder
+docker buildx rm malachi-builder
 
 # Inspect remote image
-docker buildx imagetools inspect hectorcardoso/malachimq:latest
+docker buildx imagetools inspect hectorcardoso/malachi:latest
 
 # View disk space used by build cache
 docker buildx du

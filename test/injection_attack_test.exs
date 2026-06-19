@@ -1,6 +1,6 @@
-defmodule MalachiMQ.InjectionAttackTest do
+defmodule Malachi.InjectionAttackTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.Validator
+  alias Malachi.Validator
 
   describe "XSS injection attacks" do
     test "rejects script tags in queue names" do

@@ -1,7 +1,7 @@
-defmodule MalachiMQ.TLSValidatorTest do
+defmodule Malachi.TLSValidatorTest do
   use ExUnit.Case, async: true
 
-  alias MalachiMQ.TLSValidator
+  alias Malachi.TLSValidator
 
   # ============================================================
   # Test certificate generation helpers
@@ -37,7 +37,7 @@ defmodule MalachiMQ.TLSValidatorTest do
     ]
 
     %{cert: cert_der, key: private_key} =
-      :public_key.pkix_test_root_cert(~c"MalachiMQ Test", root_opts)
+      :public_key.pkix_test_root_cert(~c"Malachi Test", root_opts)
 
     cert_pem = :public_key.pem_encode([{:Certificate, cert_der, :not_encrypted}])
     key_der = :public_key.der_encode(:RSAPrivateKey, private_key)
@@ -72,28 +72,28 @@ defmodule MalachiMQ.TLSValidatorTest do
 
   defp with_tls_config(config, fun) do
     original = %{
-      enable_tls: Application.get_env(:malachimq, :enable_tls),
-      require_tls: Application.get_env(:malachimq, :require_tls),
-      tls_certfile: Application.get_env(:malachimq, :tls_certfile),
-      tls_keyfile: Application.get_env(:malachimq, :tls_keyfile),
-      tls_cacertfile: Application.get_env(:malachimq, :tls_cacertfile),
-      tls_versions: Application.get_env(:malachimq, :tls_versions),
-      tls_verify: Application.get_env(:malachimq, :tls_verify),
-      tls_fail_if_no_peer_cert: Application.get_env(:malachimq, :tls_fail_if_no_peer_cert)
+      enable_tls: Application.get_env(:malachi, :enable_tls),
+      require_tls: Application.get_env(:malachi, :require_tls),
+      tls_certfile: Application.get_env(:malachi, :tls_certfile),
+      tls_keyfile: Application.get_env(:malachi, :tls_keyfile),
+      tls_cacertfile: Application.get_env(:malachi, :tls_cacertfile),
+      tls_versions: Application.get_env(:malachi, :tls_versions),
+      tls_verify: Application.get_env(:malachi, :tls_verify),
+      tls_fail_if_no_peer_cert: Application.get_env(:malachi, :tls_fail_if_no_peer_cert)
     }
 
     try do
       Enum.each(config, fn {key, value} ->
-        Application.put_env(:malachimq, key, value)
+        Application.put_env(:malachi, key, value)
       end)
 
       fun.()
     after
       Enum.each(original, fn {key, value} ->
         if value == nil do
-          Application.delete_env(:malachimq, key)
+          Application.delete_env(:malachi, key)
         else
-          Application.put_env(:malachimq, key, value)
+          Application.put_env(:malachi, key, value)
         end
       end)
     end

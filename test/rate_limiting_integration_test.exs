@@ -1,54 +1,54 @@
-defmodule MalachiMQ.RateLimitingIntegrationTest do
+defmodule Malachi.RateLimitingIntegrationTest do
   use ExUnit.Case, async: false
 
-  @tcp_port Application.compile_env(:malachimq, :tcp_port, 4040)
+  @tcp_port Application.compile_env(:malachi, :tcp_port, 4040)
 
   setup do
     # Save original config values
     original_config = %{
-      rate_limit_enabled: Application.get_env(:malachimq, :rate_limit_enabled),
-      connection_limit_enabled: Application.get_env(:malachimq, :connection_limit_enabled),
-      dashboard_auth_enabled: Application.get_env(:malachimq, :dashboard_auth_enabled),
-      auth_rate_limit: Application.get_env(:malachimq, :auth_rate_limit),
-      auth_rate_window_ms: Application.get_env(:malachimq, :auth_rate_window_ms),
-      publish_rate_limit: Application.get_env(:malachimq, :publish_rate_limit),
-      publish_rate_window_ms: Application.get_env(:malachimq, :publish_rate_window_ms),
-      subscribe_rate_limit: Application.get_env(:malachimq, :subscribe_rate_limit),
-      subscribe_rate_window_ms: Application.get_env(:malachimq, :subscribe_rate_window_ms),
-      max_connections_per_ip: Application.get_env(:malachimq, :max_connections_per_ip),
-      max_total_connections: Application.get_env(:malachimq, :max_total_connections)
+      rate_limit_enabled: Application.get_env(:malachi, :rate_limit_enabled),
+      connection_limit_enabled: Application.get_env(:malachi, :connection_limit_enabled),
+      dashboard_auth_enabled: Application.get_env(:malachi, :dashboard_auth_enabled),
+      auth_rate_limit: Application.get_env(:malachi, :auth_rate_limit),
+      auth_rate_window_ms: Application.get_env(:malachi, :auth_rate_window_ms),
+      publish_rate_limit: Application.get_env(:malachi, :publish_rate_limit),
+      publish_rate_window_ms: Application.get_env(:malachi, :publish_rate_window_ms),
+      subscribe_rate_limit: Application.get_env(:malachi, :subscribe_rate_limit),
+      subscribe_rate_window_ms: Application.get_env(:malachi, :subscribe_rate_window_ms),
+      max_connections_per_ip: Application.get_env(:malachi, :max_connections_per_ip),
+      max_total_connections: Application.get_env(:malachi, :max_total_connections)
     }
 
     # Enable rate limiting and connection limiting with low limits for testing
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
-    Application.put_env(:malachimq, :connection_limit_enabled, true)
-    Application.put_env(:malachimq, :dashboard_auth_enabled, false)
-    Application.put_env(:malachimq, :auth_rate_limit, 5)
-    Application.put_env(:malachimq, :auth_rate_window_ms, 60_000)
-    Application.put_env(:malachimq, :publish_rate_limit, 10)
-    Application.put_env(:malachimq, :publish_rate_window_ms, 1_000)
-    Application.put_env(:malachimq, :subscribe_rate_limit, 5)
-    Application.put_env(:malachimq, :subscribe_rate_window_ms, 60_000)
-    Application.put_env(:malachimq, :max_connections_per_ip, 20)
-    Application.put_env(:malachimq, :max_total_connections, 10_000)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
+    Application.put_env(:malachi, :connection_limit_enabled, true)
+    Application.put_env(:malachi, :dashboard_auth_enabled, false)
+    Application.put_env(:malachi, :auth_rate_limit, 5)
+    Application.put_env(:malachi, :auth_rate_window_ms, 60_000)
+    Application.put_env(:malachi, :publish_rate_limit, 10)
+    Application.put_env(:malachi, :publish_rate_window_ms, 1_000)
+    Application.put_env(:malachi, :subscribe_rate_limit, 5)
+    Application.put_env(:malachi, :subscribe_rate_window_ms, 60_000)
+    Application.put_env(:malachi, :max_connections_per_ip, 20)
+    Application.put_env(:malachi, :max_total_connections, 10_000)
 
     # Reset any existing rate limit buckets to avoid cross-test contamination
-    MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
-    MalachiMQ.RateLimiter.reset_bucket("producer", :publish)
-    MalachiMQ.RateLimiter.reset_bucket("consumer", :subscribe)
+    Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
+    Malachi.RateLimiter.reset_bucket("producer", :publish)
+    Malachi.RateLimiter.reset_bucket("consumer", :subscribe)
 
     on_exit(fn ->
       # Reset rate limit buckets
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
-      MalachiMQ.RateLimiter.reset_bucket("producer", :publish)
-      MalachiMQ.RateLimiter.reset_bucket("consumer", :subscribe)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
+      Malachi.RateLimiter.reset_bucket("producer", :publish)
+      Malachi.RateLimiter.reset_bucket("consumer", :subscribe)
 
       # Restore original config values
       for {key, value} <- original_config do
         if value == nil do
-          Application.delete_env(:malachimq, key)
+          Application.delete_env(:malachi, key)
         else
-          Application.put_env(:malachimq, key, value)
+          Application.put_env(:malachi, key, value)
         end
       end
     end)
@@ -126,7 +126,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
       Enum.each(sockets, fn s -> :gen_tcp.close(s) end)
 
       # Reset rate limit bucket for the test IP
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
     end
   end
 
@@ -171,7 +171,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
       :gen_tcp.close(socket)
 
       # Reset rate limit bucket
-      MalachiMQ.RateLimiter.reset_bucket("producer", :publish)
+      Malachi.RateLimiter.reset_bucket("producer", :publish)
     end
 
     test "publish rate limit resets after window" do
@@ -223,7 +223,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
       :gen_tcp.close(socket)
 
       # Reset
-      MalachiMQ.RateLimiter.reset_bucket("producer", :publish)
+      Malachi.RateLimiter.reset_bucket("producer", :publish)
     end
   end
 
@@ -265,7 +265,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
       :gen_tcp.close(socket)
 
       # Reset
-      MalachiMQ.RateLimiter.reset_bucket("consumer", :subscribe)
+      Malachi.RateLimiter.reset_bucket("consumer", :subscribe)
     end
   end
 
@@ -273,8 +273,8 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
     test "blocks connections exceeding per-IP limit" do
       # Max connections per IP set to 20 in setup
       # Raise auth rate limit so 20+ successful auths aren't blocked
-      Application.put_env(:malachimq, :auth_rate_limit, 100)
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
+      Application.put_env(:malachi, :auth_rate_limit, 100)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
 
       # Create 20 connections
       sockets =
@@ -351,7 +351,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
 
   describe "metrics tracking" do
     test "tracks rate limit blocks in metrics" do
-      initial_metrics = MalachiMQ.Metrics.get_system_metrics()
+      initial_metrics = Malachi.Metrics.get_system_metrics()
       initial_auth_blocks = get_in(initial_metrics, [:rate_limiting, :auth_blocked]) || 0
 
       # Exhaust auth limit (5 attempts) using separate connections
@@ -373,20 +373,20 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
         end
 
       # Check metrics increased
-      new_metrics = MalachiMQ.Metrics.get_system_metrics()
+      new_metrics = Malachi.Metrics.get_system_metrics()
       new_auth_blocks = get_in(new_metrics, [:rate_limiting, :auth_blocked]) || 0
 
       assert new_auth_blocks > initial_auth_blocks
 
       # Cleanup
       Enum.each(sockets ++ block_sockets, fn s -> :gen_tcp.close(s) end)
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
     end
   end
 
   describe "dashboard /rate_limits endpoint" do
     test "returns top blocked identifiers" do
-      dashboard_port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      dashboard_port = Application.get_env(:malachi, :dashboard_port, 4041)
 
       # Trigger some auth blocks first (5 to exhaust, then extras to block)
       sockets =
@@ -416,7 +416,7 @@ defmodule MalachiMQ.RateLimitingIntegrationTest do
       :gen_tcp.close(dash_socket)
 
       # Reset
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :auth)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
     end
   end
 

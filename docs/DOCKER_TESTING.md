@@ -1,6 +1,6 @@
 # Docker Build Testing Guide
 
-This document describes the comprehensive testing and validation process for MalachiMQ Docker builds.
+This document describes the comprehensive testing and validation process for Malachi Docker builds.
 
 ## Overview
 
@@ -125,7 +125,7 @@ make docker-build
 ### Step 2: Verify Runtime Dependencies
 
 ```bash
-docker run --rm --entrypoint /bin/sh hectorcardoso/malachimq:latest -c "find /app/lib -name 'argon2_nif.so'"
+docker run --rm --entrypoint /bin/sh hectorcardoso/malachi:latest -c "find /app/lib -name 'argon2_nif.so'"
 ```
 
 Expected: Output shows path to `argon2_nif.so`
@@ -133,7 +133,7 @@ Expected: Output shows path to `argon2_nif.so`
 ### Step 3: Test JIT Configuration
 
 ```bash
-docker run --rm hectorcardoso/malachimq:latest bin/malachimq eval ':erlang.system_info(:emu_flavor)'
+docker run --rm hectorcardoso/malachi:latest bin/malachi eval ':erlang.system_info(:emu_flavor)'
 ```
 
 Expected: `jit`
@@ -141,19 +141,19 @@ Expected: `jit`
 ### Step 4: Run Container and Check Logs
 
 ```bash
-docker run -d --name test-malachimq \
+docker run -d --name test-malachi \
   -p 4040:4040 -p 4041:4041 \
   -e MALACHIMQ_ADMIN_PASS="your_admin_password" \
   -e MALACHIMQ_PRODUCER_PASS="your_producer_password" \
   -e MALACHIMQ_CONSUMER_PASS="your_consumer_password" \
   -e MALACHIMQ_APP_PASS="your_app_password" \
-  hectorcardoso/malachimq:latest
-docker logs -f test-malachimq
+  hectorcardoso/malachi:latest
+docker logs -f test-malachi
 ```
 
 Expected logs:
 ```
-[info] 🚀 Iniciando MalachiMQ...
+[info] 🚀 Iniciando Malachi...
 [info] ✓ Gerenciador de partições iniciado com 800 partições
 [info] ✓ Pool de aceitadores TCP iniciado com 8 workers
 [info] ✓ Dashboard HTTP iniciado na porta 4041
@@ -195,11 +195,11 @@ On a typical 8-core system:
 ### Custom Benchmark
 
 ```bash
-docker exec malachimq bin/malachimq eval '
-  MalachiMQ.Benchmark.spawn_consumers("bench", 10000)
-  MalachiMQ.Benchmark.send_messages("bench", 100000)
+docker exec malachi bin/malachi eval '
+  Malachi.Benchmark.spawn_consumers("bench", 10000)
+  Malachi.Benchmark.send_messages("bench", 100000)
   :timer.sleep(5000)
-  metrics = MalachiMQ.Metrics.get_metrics("bench")
+  metrics = Malachi.Metrics.get_metrics("bench")
   IO.inspect(metrics)
 '
 ```
@@ -212,7 +212,7 @@ docker exec malachimq bin/malachimq eval '
 
 **Solution:** Rebuild the image - the argon2 NIF is compiled from source during the build stage:
 ```bash
-docker rmi hectorcardoso/malachimq:latest
+docker rmi hectorcardoso/malachi:latest
 make docker-build
 ```
 
@@ -241,7 +241,7 @@ Common causes:
 
 **Diagnosis:**
 ```bash
-docker exec <container_name> bin/malachimq eval 'MalachiMQ.Benchmark.system_info()'
+docker exec <container_name> bin/malachi eval 'Malachi.Benchmark.system_info()'
 ```
 
 ### Memory Usage Exceeds Threshold
@@ -332,7 +332,7 @@ Recommended workflow for development:
 
 ```bash
 # 1. Make code changes
-vim lib/malachimq/queue.ex
+vim lib/malachi/queue.ex
 
 # 2. Test locally
 mix test
@@ -347,7 +347,7 @@ make docker-validate
 make docker-regression-test
 
 # 6. If all pass, tag and push
-docker push hectorcardoso/malachimq:latest
+docker push hectorcardoso/malachi:latest
 ```
 
 ## Script Locations
@@ -359,5 +359,5 @@ docker push hectorcardoso/malachimq:latest
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/HectorIFC/malachimq/issues
-- Documentation: https://hectorifc.github.io/malachimq
+- GitHub Issues: https://github.com/HectorIFC/malachi/issues
+- Documentation: https://hectorifc.github.io/malachi

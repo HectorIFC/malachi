@@ -22,7 +22,7 @@ This will:
 **Location:** `pre-commit.sh` (root of repository)
 
 **Behavior:**
-- Detects changes in `lib/malachimq/` or `benchmark/`
+- Detects changes in `lib/malachi/` or `benchmark/`
 - If changes detected:
   - Runs full benchmark suite (~10 minutes)
   - Updates `baseline_reference.json`

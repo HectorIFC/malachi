@@ -94,7 +94,7 @@ QueueConfig.create_queue("bench_queue",
 You can create custom benchmarks using the helper module:
 
 ```elixir
-alias MalachiMQ.{Queue, QueueConfig}
+alias Malachi.{Queue, QueueConfig}
 
 # Setup
 queue = "my_bench_queue"
@@ -117,17 +117,17 @@ QueueConfig.delete_queue(queue, force: true)
 
 ### vs RabbitMQ
 - RabbitMQ uses similar strategies (drop-head ≈ drop_oldest)
-- MalachiMQ adds explicit `:block` with FIFO fairness
+- Malachi adds explicit `:block` with FIFO fairness
 - Both support message TTL and queue length limits
 
 ### vs Apache Pulsar
 - Pulsar uses backpressure primarily
-- MalachiMQ combines backpressure signals + overflow strategies
-- MalachiMQ's `:reject` similar to Pulsar's strict validation
+- Malachi combines backpressure signals + overflow strategies
+- Malachi's `:reject` similar to Pulsar's strict validation
 
 ### vs Apache Kafka
 - Kafka relies on producer-side batching and throttling
-- MalachiMQ provides server-side overflow control
+- Malachi provides server-side overflow control
 - Both support partitioning for scalability
 
 ## Performance Tuning
@@ -205,4 +205,4 @@ To add new benchmarks:
 ---
 
 **Last Updated:** 2024 (Resource Management & Backpressure feature)
-**Maintainer:** MalachiMQ Team
+**Maintainer:** Malachi Team

@@ -1,6 +1,6 @@
 import Config
 
-config :malachimq,
+config :malachi,
   tcp_port: 4040,
   dashboard_port: 4041,
   partition_multiplier: 100,

@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Configurable verify mode via `MALACHIMQ_TLS_VERIFY`
   - Configurable `fail_if_no_peer_cert` via `MALACHIMQ_TLS_FAIL_IF_NO_PEER_CERT`
   - HSTS `includeSubDomains` now configurable via `MALACHIMQ_HSTS_INCLUDE_SUBDOMAINS`
-  - New `MalachiMQ.TLSValidator` module with comprehensive startup validation
+  - New `Malachi.TLSValidator` module with comprehensive startup validation
   - TLS metrics: handshake success/failure counters, version distribution
   - TLS section in system metrics (`/metrics` endpoint)
   - 22 new i18n translation keys for TLS messages (pt_BR + en_US)
@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ReDoS protection with regex performance < 100ms for 100k char inputs
 - **Authentication Hardening** (PR #83): Defense-in-depth authentication system
   - Argon2 password hashing replacing SHA-256
-  - Progressive account lockout (`MalachiMQ.Auth.LockoutManager`)
+  - Progressive account lockout (`Malachi.Auth.LockoutManager`)
     - 1st lockout (5 failures): 5 minutes
     - 2nd lockout (10 failures): 15 minutes
     - 3rd lockout (15 failures): 45 minutes
@@ -52,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - 5th+ lockout (25+ failures): 6 hours (max)
   - Session IP binding for session hijack prevention (`MALACHIMQ_SESSION_IP_BINDING`)
   - Trusted proxy support with configurable CIDR ranges (`MALACHIMQ_TRUSTED_PROXY_RANGES`)
-  - Configuration validation at startup (`MalachiMQ.Auth.ConfigValidator`)
-  - Enhanced session management (`MalachiMQ.Auth.SessionManager`)
+  - Configuration validation at startup (`Malachi.Auth.ConfigValidator`)
+  - Enhanced session management (`Malachi.Auth.SessionManager`)
   - Minimum password length enforcement (`MALACHIMQ_MIN_PASSWORD_LEN`, default 12)
   - Timing-safe authentication (non-existent users still trigger hash verification)
 - **Rate Limiting & Connection Controls** (PR #81): Token bucket rate limiting
@@ -62,8 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Per-user subscribe rate limiting (`MALACHIMQ_SUBSCRIBE_RATE_LIMIT`, default 100/60s)
   - Per-IP connection limiting (`MALACHIMQ_MAX_CONN_PER_IP`, default 100)
   - Global connection limiting (`MALACHIMQ_MAX_TOTAL_CONN`, default 10,000)
-  - New `MalachiMQ.RateLimiter` module with sub-microsecond latency
-  - New `MalachiMQ.ConnectionLimiter` module with atomic operations
+  - New `Malachi.RateLimiter` module with sub-microsecond latency
+  - New `Malachi.ConnectionLimiter` module with atomic operations
   - Automatic bucket cleanup every 5 minutes
   - Dashboard endpoint `/rate_limits` for monitoring blocked identifiers
 - **Resource Management & Backpressure** (PR #84): Queue overflow protection
@@ -72,24 +72,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Configurable backpressure threshold (`MALACHIMQ_BACKPRESSURE_THRESHOLD`, default 80%)
   - Block timeout for blocked producers
   - Maximum blocked producers limit (prevents memory leak)
-  - New `MalachiMQ.Backpressure` module
+  - New `Malachi.Backpressure` module
 - **Dashboard Security & Audit Logging** (PR #85): Comprehensive dashboard hardening
-  - Security headers module (`MalachiMQ.Dashboard.SecurityHeaders`)
+  - Security headers module (`Malachi.Dashboard.SecurityHeaders`)
   - Content-Security-Policy (CSP) with configurable policy via `MALACHIMQ_DASHBOARD_CSP`
   - CORS support with origin whitelisting (`MALACHIMQ_DASHBOARD_CORS_ORIGINS`)
   - HSTS enforcement with configurable max-age (`MALACHIMQ_HSTS_MAX_AGE`)
   - X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy headers
   - Dashboard authentication enabled by default in production
   - Dashboard rate limiting for auth endpoints
-  - Comprehensive audit logging (`MalachiMQ.AuditLog`)
+  - Comprehensive audit logging (`Malachi.AuditLog`)
   - Audit log output modes: `file`, `stdout`, `both`, `ets_only`
   - Automatic log rotation with configurable max size (`MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB`)
   - JSON-formatted audit events with full context (hostname, node, actor, metadata)
   - 30-day event retention with automatic cleanup
   - Secondary indexes for querying by type or user
 - **Atom Exhaustion Prevention & Memory Monitoring** (PR #87): BEAM resource safety
-  - `MalachiMQ.AtomMonitor` with configurable warning (70%) and critical (90%) thresholds
-  - `MalachiMQ.MemoryMonitor` with automatic garbage collection triggers
+  - `Malachi.AtomMonitor` with configurable warning (70%) and critical (90%) thresholds
+  - `Malachi.MemoryMonitor` with automatic garbage collection triggers
   - Real-time memory statistics (total, processes, ETS, atoms, binary, code, system)
   - Top memory-consuming processes tracking
   - Dynamic queue/channel creation limits (`MALACHIMQ_MAX_DYNAMIC_QUEUES`, `MALACHIMQ_MAX_DYNAMIC_CHANNELS`)
@@ -255,7 +255,7 @@ Validation errors now return detailed error codes in English (not internationali
 - `invalid_headers_invalid_type`
 
 ### Added
-- Initial implementation of MalachiMQ
+- Initial implementation of Malachi
 - TCP messaging server
 - Authentication system
 - Web dashboard

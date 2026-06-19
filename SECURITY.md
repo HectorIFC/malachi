@@ -128,11 +128,11 @@ export MALACHIMQ_GC_THRESHOLD_MB=500
 
 Security advisories are published at:
 
-- **GitHub Security Advisories:** [https://github.com/HectorIFC/malachimq/security/advisories](https://github.com/HectorIFC/malachimq/security/advisories)
+- **GitHub Security Advisories:** [https://github.com/HectorIFC/malachi/security/advisories](https://github.com/HectorIFC/malachi/security/advisories)
 
 ## Compliance
 
-MalachiMQ implements controls aligned with:
+Malachi implements controls aligned with:
 
 - OWASP Top 10 (2021)
 - CWE Top 25
@@ -140,4 +140,4 @@ MalachiMQ implements controls aligned with:
 ## Contact
 
 - **Security:** hectorwilliancardoso@gmail.com
-- **GitHub:** [https://github.com/HectorIFC/malachimq](https://github.com/HectorIFC/malachimq)
+- **GitHub:** [https://github.com/HectorIFC/malachi](https://github.com/HectorIFC/malachi)

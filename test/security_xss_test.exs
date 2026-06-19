@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Security.XSSTest do
+defmodule Malachi.Security.XSSTest do
   use ExUnit.Case, async: true
 
   @moduledoc """

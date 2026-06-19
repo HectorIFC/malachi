@@ -1,4 +1,4 @@
-defmodule MalachiMQ.IntegrationTest do
+defmodule Malachi.IntegrationTest do
   use ExUnit.Case, async: false
 
   describe "end-to-end message flow" do
@@ -12,11 +12,11 @@ defmodule MalachiMQ.IntegrationTest do
         :ok
       end
 
-      {:ok, _consumer_pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _consumer_pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
       # Produce a message
-      MalachiMQ.Queue.enqueue(queue_name, "integration_test_payload")
+      Malachi.Queue.enqueue(queue_name, "integration_test_payload")
 
       # Verify consumer receives it
       assert_receive {:consumed, "integration_test_payload"}, 2000
@@ -27,11 +27,11 @@ defmodule MalachiMQ.IntegrationTest do
 
       # Enqueue messages without consumer
       for i <- 1..3 do
-        MalachiMQ.Queue.enqueue(queue_name, "buffered_#{i}")
+        Malachi.Queue.enqueue(queue_name, "buffered_#{i}")
       end
 
       # Verify messages are buffered
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.buffered == 3
 
       # Start consumer
@@ -42,7 +42,7 @@ defmodule MalachiMQ.IntegrationTest do
         :ok
       end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
 
       # Receive all buffered messages
       assert_receive {:got, _}, 1000
@@ -62,7 +62,7 @@ defmodule MalachiMQ.IntegrationTest do
 
       _consumer_pids =
         for _ <- 1..3 do
-          {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+          {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
           pid
         end
 
@@ -70,7 +70,7 @@ defmodule MalachiMQ.IntegrationTest do
 
       # Send 6 messages
       for i <- 1..6 do
-        MalachiMQ.Queue.enqueue(queue_name, "msg_#{i}")
+        Malachi.Queue.enqueue(queue_name, "msg_#{i}")
       end
 
       # Collect which consumers processed messages
@@ -92,17 +92,17 @@ defmodule MalachiMQ.IntegrationTest do
       queue_name = "metrics_integration_#{:rand.uniform(100_000)}"
 
       callback = fn _msg -> :ok end
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
       # Send messages
       for _ <- 1..5 do
-        MalachiMQ.Queue.enqueue(queue_name, "test")
+        Malachi.Queue.enqueue(queue_name, "test")
       end
 
       :timer.sleep(200)
 
-      metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+      metrics = Malachi.Metrics.get_metrics(queue_name)
       assert metrics.enqueued >= 5
       assert metrics.processed >= 5
     end
@@ -111,17 +111,17 @@ defmodule MalachiMQ.IntegrationTest do
       queue_name = "auth_integration_#{:rand.uniform(100_000)}"
 
       # Authenticate as producer
-      {:ok, token} = MalachiMQ.Auth.authenticate("producer", "producer123")
-      {:ok, session} = MalachiMQ.Auth.validate_token(token)
+      {:ok, token} = Malachi.Auth.authenticate("producer", "producer123")
+      {:ok, session} = Malachi.Auth.validate_token(token)
 
       assert :produce in session.permissions
 
       # Produce message
-      MalachiMQ.Queue.enqueue(queue_name, "authenticated_message")
+      Malachi.Queue.enqueue(queue_name, "authenticated_message")
 
       # Authenticate as consumer
-      {:ok, consumer_token} = MalachiMQ.Auth.authenticate("consumer", "consumer123")
-      {:ok, consumer_session} = MalachiMQ.Auth.validate_token(consumer_token)
+      {:ok, consumer_token} = Malachi.Auth.authenticate("consumer", "consumer123")
+      {:ok, consumer_session} = Malachi.Auth.validate_token(consumer_token)
 
       assert :consume in consumer_session.permissions
     end
@@ -132,7 +132,7 @@ defmodule MalachiMQ.IntegrationTest do
       partitions =
         for i <- 1..50 do
           queue_name = "dist_test_#{i}"
-          {_name, partition} = MalachiMQ.PartitionManager.get_partition(queue_name)
+          {_name, partition} = Malachi.PartitionManager.get_partition(queue_name)
           partition
         end
 
@@ -152,10 +152,10 @@ defmodule MalachiMQ.IntegrationTest do
         if msg.payload == "error", do: raise("test error"), else: :ok
       end
 
-      {:ok, consumer_pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, consumer_pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "error")
+      Malachi.Queue.enqueue(queue_name, "error")
       assert_receive :called, 1000
 
       :timer.sleep(100)
@@ -166,20 +166,20 @@ defmodule MalachiMQ.IntegrationTest do
       queue_name = "crash_test_#{:rand.uniform(100_000)}"
 
       # Start a consumer that will exit naturally
-      {:ok, _consumer_pid} = MalachiMQ.Consumer.start_link({queue_name, fn _ -> :ok end, []})
+      {:ok, _consumer_pid} = Malachi.Consumer.start_link({queue_name, fn _ -> :ok end, []})
       :timer.sleep(50)
 
       # Verify queue exists
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.exists == true
       assert stats.consumers >= 1
 
       # Queue should still work after consumer processes messages
-      MalachiMQ.Queue.enqueue(queue_name, "test_message")
+      Malachi.Queue.enqueue(queue_name, "test_message")
       :timer.sleep(100)
 
       # Queue still exists and functional
-      stats2 = MalachiMQ.Queue.get_stats(queue_name)
+      stats2 = Malachi.Queue.get_stats(queue_name)
       assert stats2.exists == true
     end
   end

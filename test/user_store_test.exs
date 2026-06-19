@@ -1,12 +1,12 @@
-defmodule MalachiMQ.Auth.UserStoreTest do
+defmodule Malachi.Auth.UserStoreTest do
   @moduledoc """
-  Unit tests for MalachiMQ.Auth.UserStore (Mnesia persistence layer).
+  Unit tests for Malachi.Auth.UserStore (Mnesia persistence layer).
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Auth.UserStore
+  alias Malachi.Auth.UserStore
 
-  @users_table :malachimq_users
+  @users_table :malachi_users
 
   @test_prefixes [
     "test_",

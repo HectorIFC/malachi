@@ -9,10 +9,10 @@
 # Usage:
 #   mix run benchmark/blocked_producer_benchmark.exs
 
-Application.ensure_all_started(:malachimq)
+Application.ensure_all_started(:malachi)
 
 defmodule BlockedProducerBenchmark do
-  alias MalachiMQ.{Queue, QueueConfig}
+  alias Malachi.{Queue, QueueConfig}
 
   def setup_queue(max_buffer, block_timeout, max_blocked) do
     queue_name = "block_bench_#{:erlang.unique_integer([:positive])}"

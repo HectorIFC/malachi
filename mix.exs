@@ -1,12 +1,12 @@
-defmodule MalachiMQ.MixProject do
+defmodule Malachi.MixProject do
   use Mix.Project
 
   @version "0.5.1"
-  @source_url "https://github.com/HectorIFC/malachimq"
+  @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
     [
-      app: :malachimq,
+      app: :malachi,
       version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -41,7 +41,7 @@ defmodule MalachiMQ.MixProject do
   def application do
     [
       extra_applications: [:logger, :runtime_tools, :crypto, :ssl, :mnesia],
-      mod: {MalachiMQ.Application, []}
+      mod: {Malachi.Application, []}
     ]
   end
 
@@ -59,13 +59,14 @@ defmodule MalachiMQ.MixProject do
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.13.0", only: [:dev, :test], runtime: false},
-      {:benchee, "~> 1.5.0", only: :dev, runtime: false}
+      {:benchee, "~> 1.5.0", only: :dev, runtime: false},
+      {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}
     ]
   end
 
   defp releases do
     [
-      malachimq: [
+      malachi: [
         include_executables_for: [:unix],
         applications: [runtime_tools: :permanent],
         steps: [:assemble, :tar]
@@ -79,7 +80,7 @@ defmodule MalachiMQ.MixProject do
 
   defp package do
     [
-      name: "malachimq",
+      name: "malachi",
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url}
     ]

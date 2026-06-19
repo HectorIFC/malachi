@@ -1,4 +1,4 @@
-defmodule MalachiMQ.AttackSimulationTest do
+defmodule Malachi.AttackSimulationTest do
   @moduledoc """
   Simulates real-world attack patterns to validate defenses.
 
@@ -9,10 +9,10 @@ defmodule MalachiMQ.AttackSimulationTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Auth
-  alias MalachiMQ.Auth.{LockoutManager, SessionManager}
-  alias MalachiMQ.ConnectionLimiter
-  alias MalachiMQ.Test.SecurityHelper
+  alias Malachi.Auth
+  alias Malachi.Auth.{LockoutManager, SessionManager}
+  alias Malachi.ConnectionLimiter
+  alias Malachi.Test.SecurityHelper
 
   @moduletag :security
 
@@ -200,10 +200,10 @@ defmodule MalachiMQ.AttackSimulationTest do
 
       # Allow async audit log to process
       Process.sleep(100)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
 
       # Check audit log for hijack event
-      events = MalachiMQ.AuditLog.get_events(50)
+      events = Malachi.AuditLog.get_events(50)
 
       hijack_events =
         Enum.filter(events, fn e ->
@@ -273,7 +273,7 @@ defmodule MalachiMQ.AttackSimulationTest do
       # Attack: create 1000 queues with unique names rapidly
       for i <- 1..1000 do
         name = "atom_bomb_#{:rand.uniform(10_000_000)}_#{i}"
-        MalachiMQ.Queue.enqueue(name, "payload_#{i}")
+        Malachi.Queue.enqueue(name, "payload_#{i}")
       end
 
       after_attack = :erlang.system_info(:atom_count)
@@ -300,7 +300,7 @@ defmodule MalachiMQ.AttackSimulationTest do
 
       for name <- malicious_names do
         # Some may be rejected by validator, that's fine
-        MalachiMQ.Validator.validate_queue_name(name)
+        Malachi.Validator.validate_queue_name(name)
       end
 
       after_attack = :erlang.system_info(:atom_count)
@@ -316,10 +316,10 @@ defmodule MalachiMQ.AttackSimulationTest do
       ip = SecurityHelper.random_ip_string()
 
       # Save original config
-      original_limit = Application.get_env(:malachimq, :max_connections_per_ip, 10_000)
+      original_limit = Application.get_env(:malachi, :max_connections_per_ip, 10_000)
 
       # Set a small limit for testing
-      Application.put_env(:malachimq, :max_connections_per_ip, 10)
+      Application.put_env(:malachi, :max_connections_per_ip, 10)
 
       pids =
         for _ <- 1..10 do
@@ -340,7 +340,7 @@ defmodule MalachiMQ.AttackSimulationTest do
       # Wait for DOWN messages to be processed
       Process.sleep(100)
 
-      Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+      Application.put_env(:malachi, :max_connections_per_ip, original_limit)
     end
 
     test "connection count decrements when processes die" do
@@ -393,7 +393,7 @@ defmodule MalachiMQ.AttackSimulationTest do
       tasks =
         for _ <- 1..50 do
           Task.async(fn ->
-            MalachiMQ.QueueConfig.create_queue(queue_name)
+            Malachi.QueueConfig.create_queue(queue_name)
           end)
         end
 
@@ -410,7 +410,7 @@ defmodule MalachiMQ.AttackSimulationTest do
       assert Enum.any?(results, &match?({:ok, _}, &1))
 
       # Cleanup
-      MalachiMQ.QueueConfig.delete_queue(queue_name, force: true)
+      Malachi.QueueConfig.delete_queue(queue_name, force: true)
     end
   end
 end

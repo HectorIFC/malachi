@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-echo "=== MalachiMQ Docker Regression Tests ==="
+echo "=== Malachi Docker Regression Tests ==="
 echo ""
 
 # Configuration
-IMAGE_NAME="${1:-hectorcardoso/malachimq:latest}"
-CONTAINER_NAME="malachimq-regression-$$"
+IMAGE_NAME="${1:-hectorcardoso/malachi:latest}"
+CONTAINER_NAME="malachi-regression-$$"
 TCP_PORT=14040
 DASHBOARD_PORT=14041
 
@@ -99,14 +99,14 @@ run_test "SSE stream endpoint available" "timeout 2 curl -sf -H 'Authorization: 
 run_test "TCP server listening" "nc -zv localhost ${TCP_PORT}"
 
 # Test 5: Container process running
-run_test "Container process health" "docker exec $CONTAINER_NAME bin/malachimq pid"
+run_test "Container process health" "docker exec $CONTAINER_NAME bin/malachi pid"
 
 # Test 6: Basic queue operations
 echo -n "Testing: Queue publish/consume workflow... "
-WORKFLOW_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
-  result = MalachiMQ.Queue.enqueue("regression_test", "test payload", %{"test" => "true"})
+WORKFLOW_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+  result = Malachi.Queue.enqueue("regression_test", "test payload", %{"test" => "true"})
   :timer.sleep(500)
-  metrics = MalachiMQ.Metrics.get_metrics("regression_test")
+  metrics = Malachi.Metrics.get_metrics("regression_test")
   case {result, metrics.enqueued} do
     {{:ok, _}, count} when count > 0 -> IO.puts("PASS")
     _ -> IO.puts("FAIL")
@@ -122,7 +122,7 @@ else
 fi
 # Test 6.5: Channel publish/broadcast workflow
 echo -n "Testing: Channel publish/broadcast workflow... "
-CHANNEL_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
+CHANNEL_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
   # Spawn multiple subscribers
   parent = self()
   subscribers = Enum.map(1..5, fn i ->
@@ -137,13 +137,13 @@ CHANNEL_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
   
   # Subscribe all
   Enum.each(subscribers, fn sub ->
-    MalachiMQ.Channel.subscribe("regression_channel", sub)
+    Malachi.Channel.subscribe("regression_channel", sub)
   end)
   
   :timer.sleep(200)
   
   # Publish message
-  MalachiMQ.Channel.publish("regression_channel", "broadcast_test", %{})
+  Malachi.Channel.publish("regression_channel", "broadcast_test", %{})
   
   # Wait for responses
   :timer.sleep(500)
@@ -158,7 +158,7 @@ CHANNEL_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
     end
   end)
   
-  stats = MalachiMQ.Channel.get_stats("regression_channel")
+  stats = Malachi.Channel.get_stats("regression_channel")
   
   if received >= 3 and stats.published >= 1 do
     IO.puts("PASS")
@@ -176,12 +176,12 @@ else
 fi
 # Test 7: High-volume throughput
 echo -n "Testing: High-volume message throughput... "
-THROUGHPUT_TEST=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
+THROUGHPUT_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
   results = Enum.map(1..1000, fn i -> 
-    MalachiMQ.Queue.enqueue("throughput_test", "msg_#{i}", %{})
+    Malachi.Queue.enqueue("throughput_test", "msg_#{i}", %{})
   end)
   :timer.sleep(1000)
-  metrics = MalachiMQ.Metrics.get_metrics("throughput_test")
+  metrics = Malachi.Metrics.get_metrics("throughput_test")
   if metrics.enqueued >= 1000, do: IO.puts("PASS"), else: IO.puts("FAIL:#{metrics.enqueued}")
 ' 2>&1 | grep -E "^PASS$|^FAIL:" | tail -1)
 
@@ -196,9 +196,9 @@ fi
 # Test 8: Memory stability under load
 echo -n "Testing: Memory stability under load... "
 INITIAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
-docker exec "$CONTAINER_NAME" bin/malachimq rpc '
+docker exec "$CONTAINER_NAME" bin/malachi rpc '
   Enum.each(1..5000, fn i ->
-    MalachiMQ.Queue.enqueue("mem_test", "msg_#{i}", %{})
+    Malachi.Queue.enqueue("mem_test", "msg_#{i}", %{})
   end)
   :ok
 ' > /dev/null 2>&1
@@ -209,13 +209,13 @@ echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
 
 # Test 9: Concurrent queue operations
 echo -n "Testing: Concurrent multi-queue operations... "
-CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachimq rpc '
+CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachi rpc '
   queues = for i <- 1..10, do: "concurrent_queue_#{i}"
   
   # Send messages to all queues
   Enum.each(queues, fn q ->
     Enum.each(1..100, fn i ->
-      MalachiMQ.Queue.enqueue(q, "msg_#{i}", %{})
+      Malachi.Queue.enqueue(q, "msg_#{i}", %{})
     end)
   end)
   
@@ -223,7 +223,7 @@ CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachimq rpc '
   
   # Verify all queues have messages
   all_ok = Enum.all?(queues, fn q ->
-    metrics = MalachiMQ.Metrics.get_metrics(q)
+    metrics = Malachi.Metrics.get_metrics(q)
     metrics.enqueued >= 100
   end)
   
@@ -240,7 +240,7 @@ fi
 
 # Test 10: JIT compilation active
 echo -n "Testing: JIT compilation enabled... "
-JIT_STATUS=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc ':erlang.system_info(:emu_flavor)' 2>&1 | grep -o 'jit' || echo "nojit")
+JIT_STATUS=$(docker exec "$CONTAINER_NAME" bin/malachi rpc ':erlang.system_info(:emu_flavor)' 2>&1 | grep -o 'jit' || echo "nojit")
 if [ "$JIT_STATUS" = "jit" ]; then
     echo -e "${GREEN}PASS${NC}"
     ((TESTS_PASSED++))

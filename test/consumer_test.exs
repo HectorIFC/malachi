@@ -1,4 +1,4 @@
-defmodule MalachiMQ.ConsumerTest do
+defmodule Malachi.ConsumerTest do
   use ExUnit.Case, async: true
 
   setup do
@@ -9,16 +9,16 @@ defmodule MalachiMQ.ConsumerTest do
   describe "start_link/1" do
     test "starts consumer with callback", %{queue_name: queue_name} do
       callback = fn _msg -> :ok end
-      assert {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      assert {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       assert Process.alive?(pid)
     end
 
     test "consumer subscribes to queue on init", %{queue_name: queue_name} do
       callback = fn _msg -> :ok end
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
 
       :timer.sleep(50)
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.consumers == 1
     end
   end
@@ -32,10 +32,10 @@ defmodule MalachiMQ.ConsumerTest do
         :ok
       end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "test payload")
+      Malachi.Queue.enqueue(queue_name, "test payload")
 
       assert_receive {:processed, "test payload"}, 1000
     end
@@ -48,11 +48,11 @@ defmodule MalachiMQ.ConsumerTest do
         :ok
       end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
       for i <- 1..5 do
-        MalachiMQ.Queue.enqueue(queue_name, "msg_#{i}")
+        Malachi.Queue.enqueue(queue_name, "msg_#{i}")
       end
 
       for _i <- 1..5 do
@@ -63,13 +63,13 @@ defmodule MalachiMQ.ConsumerTest do
     test "acknowledges successful processing", %{queue_name: queue_name} do
       callback = fn _msg -> :ok end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
       :timer.sleep(100)
 
-      stats = MalachiMQ.AckManager.stats()
+      stats = Malachi.AckManager.stats()
       pending = Map.get(stats, queue_name, %{count: 0})
       assert pending.count == 0
     end
@@ -82,10 +82,10 @@ defmodule MalachiMQ.ConsumerTest do
         :error
       end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
 
       assert_receive :called, 1000
       :timer.sleep(100)
@@ -99,10 +99,10 @@ defmodule MalachiMQ.ConsumerTest do
         {:error, "failed"}
       end
 
-      {:ok, _pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, _pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
 
       assert_receive :called, 1000
       :timer.sleep(100)
@@ -113,10 +113,10 @@ defmodule MalachiMQ.ConsumerTest do
         raise "test error"
       end
 
-      {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
       :timer.sleep(200)
 
       assert Process.alive?(pid)
@@ -126,7 +126,7 @@ defmodule MalachiMQ.ConsumerTest do
   describe "hibernation" do
     test "consumer hibernates after initialization", %{queue_name: queue_name} do
       callback = fn _msg -> :ok end
-      {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
 
       :timer.sleep(50)
       {:current_function, {_mod, func, _arity}} = Process.info(pid, :current_function)
@@ -136,24 +136,24 @@ defmodule MalachiMQ.ConsumerTest do
 
   describe "garbage collection" do
     test "consumer performs GC after interval", %{queue_name: queue_name} do
-      original = Application.get_env(:malachimq, :gc_interval_ms)
-      Application.put_env(:malachimq, :gc_interval_ms, 100)
+      original = Application.get_env(:malachi, :gc_interval_ms)
+      Application.put_env(:malachi, :gc_interval_ms, 100)
 
       on_exit(fn ->
         if original do
-          Application.put_env(:malachimq, :gc_interval_ms, original)
+          Application.put_env(:malachi, :gc_interval_ms, original)
         else
-          Application.delete_env(:malachimq, :gc_interval_ms)
+          Application.delete_env(:malachi, :gc_interval_ms)
         end
       end)
 
       callback = fn _msg -> :ok end
-      {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
       :timer.sleep(50)
 
       # Send messages to trigger GC interval
       for _ <- 1..5 do
-        MalachiMQ.Queue.enqueue(queue_name, "test")
+        Malachi.Queue.enqueue(queue_name, "test")
         :timer.sleep(50)
       end
 
@@ -164,7 +164,7 @@ defmodule MalachiMQ.ConsumerTest do
   describe "message queue configuration" do
     test "consumer uses off-heap message queue", %{queue_name: queue_name} do
       callback = fn _msg -> :ok end
-      {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, []})
+      {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, []})
 
       :timer.sleep(50)
       {:message_queue_data, queue_type} = Process.info(pid, :message_queue_data)

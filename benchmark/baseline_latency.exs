@@ -15,7 +15,7 @@ defmodule LatencyBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Latency Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -64,7 +64,7 @@ defmodule LatencyBenchmark do
     IO.puts("  Warming up...")
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear samples
@@ -75,7 +75,7 @@ defmodule LatencyBenchmark do
 
     _message_count =
       BenchmarkHelpers.benchmark_duration(
-        fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+        fn -> Malachi.Queue.enqueue(queue_name, payload) end,
         @duration_sec
       )
       |> elem(0)
@@ -137,7 +137,7 @@ defmodule LatencyBenchmark do
 
     {throughput_count, throughput_actual_sec} =
       BenchmarkHelpers.benchmark_duration(
-        fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+        fn -> Malachi.Queue.enqueue(queue_name, payload) end,
         throughput_test_sec
       )
 
@@ -186,7 +186,7 @@ defmodule LatencyBenchmark do
 
   defp benchmark_with_rate_limit(queue_name, payload, end_time, sleep_us, count \\ 0) do
     if System.monotonic_time(:second) < end_time do
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
 
       if sleep_us > 0 do
         Process.sleep(div(sleep_us, 1000))

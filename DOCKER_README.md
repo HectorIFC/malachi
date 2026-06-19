@@ -1,11 +1,11 @@
-# MalachiMQ
+# Malachi
 
-[![GitHub](https://img.shields.io/github/v/release/HectorIFC/malachimq?label=GitHub)](https://github.com/HectorIFC/malachimq)
-[![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachimq)](https://hub.docker.com/r/hectorcardoso/malachimq)
-[![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachimq/latest)](https://hub.docker.com/r/hectorcardoso/malachimq)
-[![License](https://img.shields.io/github/license/HectorIFC/malachimq)](https://github.com/HectorIFC/malachimq/blob/main/LICENSE)
+[![GitHub](https://img.shields.io/github/v/release/HectorIFC/malachi?label=GitHub)](https://github.com/HectorIFC/malachi)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachi)](https://hub.docker.com/r/hectorcardoso/malachi)
+[![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachi/latest)](https://hub.docker.com/r/hectorcardoso/malachi)
+[![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/HectorIFC/malachi/blob/main/LICENSE)
 
-**MalachiMQ** is a High-performance message system, designed for low-latency, high-throughput messaging with automatic queue partitioning across CPU cores.
+**Malachi** is a High-performance message system, designed for low-latency, high-throughput messaging with automatic queue partitioning across CPU cores.
 
 ## Features
 
@@ -24,18 +24,18 @@
 ### Pull the image
 
 ```bash
-docker pull hectorcardoso/malachimq:latest
+docker pull hectorcardoso/malachi:latest
 ```
 
 ### Run with default settings
 
 ```bash
 docker run \
-  --name malachimq \
+  --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
   -e MALACHIMQ_ADMIN_PASS="your_secure_password" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 **Note**: The image automatically detects your platform (AMD64 or ARM64) and uses the appropriate build.
@@ -75,7 +75,7 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 |----------|---------|-------------|
 | `MALACHIMQ_TCP_PORT` | `4040` | TCP server port for clients |
 | `MALACHIMQ_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
-| `MALACHIMQ_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
+| `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
 | `MALACHIMQ_ENABLE_TLS` | `false` | Enable TLS encryption |
 | `MALACHIMQ_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
 
@@ -83,13 +83,13 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 
 ```bash
 docker run \
-  --name malachimq \
+  --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
   -e MALACHIMQ_ADMIN_PASS="your_secure_password" \
   -e MALACHIMQ_ENABLE_TLS=true \
   -v /path/to/certs:/app/priv/cert:ro \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 Required certificate files in the mounted volume:
@@ -105,14 +105,14 @@ Required certificate files in the mounted volume:
 version: '3.8'
 
 services:
-  malachimq:
-    image: hectorcardoso/malachimq:latest
-    container_name: malachimq
+  malachi:
+    image: hectorcardoso/malachi:latest
+    container_name: malachi
     ports:
       - "4040:4040"  # TCP server
       - "4041:4041"  # Dashboard
     environment:
-      - MALACHIMQ_LOCALE=en_US
+      - MALACHI_LOCALE=en_US
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:4041/metrics"]
@@ -143,8 +143,8 @@ Example `docker-compose.yml` snippet:
 
 ```yaml
 services:
-  malachimq:
-    image: hectorcardoso/malachimq:latest
+  malachi:
+    image: hectorcardoso/malachi:latest
     environment:
       - MALACHIMQ_CHANNEL_SEND_CONCURRENCY=5000
       - MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS=5000
@@ -160,7 +160,7 @@ Notes:
 
 ## TCP Protocol
 
-MalachiMQ uses a JSON-over-TCP protocol. All messages are newline-delimited.
+Malachi uses a JSON-over-TCP protocol. All messages are newline-delimited.
 
 ### Authentication
 
@@ -213,7 +213,7 @@ Returns JSON with queue statistics and system metrics.
 | **Base Image** | `alpine:3.21` |
 | **Runtime** | Erlang/OTP 28, Elixir 1.19 |
 | **Architecture** | `linux/amd64`, `linux/arm64` |
-| **User** | `malachimq` (UID 1000) |
+| **User** | `malachi` (UID 1000) |
 | **Workdir** | `/app` |
 | **JIT Compilation** | Enabled (`+JPperf true`) |
 | **Runtime Dependencies** | `openssl`, `libstdc++`, `ncurses-libs` |
@@ -265,12 +265,12 @@ make docker-test-all
 
 ## Source Code
 
-- **GitHub**: [https://github.com/HectorIFC/malachimq](https://github.com/HectorIFC/malachimq)
-- **Issues**: [https://github.com/HectorIFC/malachimq/issues](https://github.com/HectorIFC/malachimq/issues)
-- **Documentation**: [https://hectorifc.github.io/malachimq](https://hectorifc.github.io/malachimq)
+- **GitHub**: [https://github.com/HectorIFC/malachi](https://github.com/HectorIFC/malachi)
+- **Issues**: [https://github.com/HectorIFC/malachi/issues](https://github.com/HectorIFC/malachi/issues)
+- **Documentation**: [https://hectorifc.github.io/malachi](https://hectorifc.github.io/malachi)
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/HectorIFC/malachimq/blob/main/LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/HectorIFC/malachi/blob/main/LICENSE) for details.

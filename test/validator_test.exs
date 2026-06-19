@@ -1,6 +1,6 @@
-defmodule MalachiMQ.ValidatorTest do
+defmodule Malachi.ValidatorTest do
   use ExUnit.Case, async: true
-  alias MalachiMQ.Validator
+  alias Malachi.Validator
 
   # Validator is already running as part of the application
   # No setup needed - validation methods are stateless

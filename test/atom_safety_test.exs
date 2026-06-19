@@ -1,4 +1,4 @@
-defmodule MalachiMQ.AtomSafetyTest do
+defmodule Malachi.AtomSafetyTest do
   use ExUnit.Case, async: false
 
   @moduledoc """
@@ -17,7 +17,7 @@ defmodule MalachiMQ.AtomSafetyTest do
       queue_names =
         for i <- 1..100 do
           name = "atom_test_queue_#{:rand.uniform(1_000_000)}_#{i}"
-          MalachiMQ.Queue.enqueue(name, "test payload #{i}")
+          Malachi.Queue.enqueue(name, "test payload #{i}")
           name
         end
 
@@ -52,7 +52,7 @@ defmodule MalachiMQ.AtomSafetyTest do
       ]
 
       for name <- special_names do
-        MalachiMQ.Queue.enqueue(name, "test")
+        Malachi.Queue.enqueue(name, "test")
       end
 
       after_creation = :erlang.system_info(:atom_count)
@@ -67,7 +67,7 @@ defmodule MalachiMQ.AtomSafetyTest do
 
       # Max valid queue name length is 255
       long_name = String.duplicate("a", 200)
-      MalachiMQ.Queue.enqueue(long_name, "test")
+      Malachi.Queue.enqueue(long_name, "test")
 
       after_creation = :erlang.system_info(:atom_count)
       atom_increase = after_creation - baseline
@@ -84,10 +84,10 @@ defmodule MalachiMQ.AtomSafetyTest do
       queue_names =
         for i <- 1..50 do
           name = "metrics_atom_test_#{:rand.uniform(1_000_000)}_#{i}"
-          MalachiMQ.Metrics.increment_enqueued(name)
-          MalachiMQ.Metrics.increment_acked(name)
-          MalachiMQ.Metrics.increment_nacked(name)
-          MalachiMQ.Metrics.increment_processed(name)
+          Malachi.Metrics.increment_enqueued(name)
+          Malachi.Metrics.increment_acked(name)
+          Malachi.Metrics.increment_nacked(name)
+          Malachi.Metrics.increment_processed(name)
           name
         end
 
@@ -107,12 +107,12 @@ defmodule MalachiMQ.AtomSafetyTest do
 
       # These should all return pre-compiled atom errors
       for _ <- 1..100 do
-        MalachiMQ.Validator.validate_queue_name("")
-        MalachiMQ.Validator.validate_queue_name(String.duplicate("x", 300))
-        MalachiMQ.Validator.validate_queue_name("invalid name with spaces!")
-        MalachiMQ.Validator.validate_queue_name("_reserved")
-        MalachiMQ.Validator.validate_channel_name("")
-        MalachiMQ.Validator.validate_channel_name(String.duplicate("y", 300))
+        Malachi.Validator.validate_queue_name("")
+        Malachi.Validator.validate_queue_name(String.duplicate("x", 300))
+        Malachi.Validator.validate_queue_name("invalid name with spaces!")
+        Malachi.Validator.validate_queue_name("_reserved")
+        Malachi.Validator.validate_channel_name("")
+        Malachi.Validator.validate_channel_name(String.duplicate("y", 300))
       end
 
       after_validation = :erlang.system_info(:atom_count)
@@ -125,30 +125,30 @@ defmodule MalachiMQ.AtomSafetyTest do
     end
 
     test "returns correct pre-compiled error atoms for queue names" do
-      assert {:error, :invalid_queue_name_empty} = MalachiMQ.Validator.validate_queue_name("")
+      assert {:error, :invalid_queue_name_empty} = Malachi.Validator.validate_queue_name("")
 
       assert {:error, :invalid_queue_name_too_long} =
-               MalachiMQ.Validator.validate_queue_name(String.duplicate("x", 300))
+               Malachi.Validator.validate_queue_name(String.duplicate("x", 300))
 
       assert {:error, :invalid_queue_name_reserved} =
-               MalachiMQ.Validator.validate_queue_name("_reserved_name")
+               Malachi.Validator.validate_queue_name("_reserved_name")
     end
 
     test "returns correct pre-compiled error atoms for channel names" do
-      assert {:error, :invalid_channel_name_empty} = MalachiMQ.Validator.validate_channel_name("")
+      assert {:error, :invalid_channel_name_empty} = Malachi.Validator.validate_channel_name("")
 
       assert {:error, :invalid_channel_name_too_long} =
-               MalachiMQ.Validator.validate_channel_name(String.duplicate("x", 300))
+               Malachi.Validator.validate_channel_name(String.duplicate("x", 300))
 
       assert {:error, :invalid_channel_name_reserved} =
-               MalachiMQ.Validator.validate_channel_name("_reserved_channel")
+               Malachi.Validator.validate_channel_name("_reserved_channel")
     end
   end
 
   describe "ETS tables are anonymous" do
     test "queue ETS tables are not named (not accessible by atom)" do
       queue_name = "anon_ets_test_#{:rand.uniform(1_000_000)}"
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
 
       # Try to find named tables matching the old pattern
       # These should NOT exist as named tables anymore
@@ -156,19 +156,19 @@ defmodule MalachiMQ.AtomSafetyTest do
 
       refute Enum.any?(all_named_tables, fn table ->
                is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachimq_consumers_#{queue_name}")
+                 String.contains?(Atom.to_string(table), "malachi_consumers_#{queue_name}")
              end),
              "Found named consumers table for #{queue_name} — should be anonymous"
 
       refute Enum.any?(all_named_tables, fn table ->
                is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachimq_buffer_#{queue_name}")
+                 String.contains?(Atom.to_string(table), "malachi_buffer_#{queue_name}")
              end),
              "Found named buffer table for #{queue_name} — should be anonymous"
 
       refute Enum.any?(all_named_tables, fn table ->
                is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachimq_producers_#{queue_name}")
+                 String.contains?(Atom.to_string(table), "malachi_producers_#{queue_name}")
              end),
              "Found named producers table for #{queue_name} — should be anonymous"
     end
@@ -176,7 +176,7 @@ defmodule MalachiMQ.AtomSafetyTest do
 
   describe "AtomMonitor" do
     test "reports accurate atom count" do
-      stats = MalachiMQ.AtomMonitor.get_stats()
+      stats = Malachi.AtomMonitor.get_stats()
 
       assert is_integer(stats.atom_count)
       assert stats.atom_count > 0
@@ -188,17 +188,17 @@ defmodule MalachiMQ.AtomSafetyTest do
     end
 
     test "get_atom_count returns positive integer" do
-      count = MalachiMQ.AtomMonitor.get_atom_count()
+      count = Malachi.AtomMonitor.get_atom_count()
       assert is_integer(count)
       assert count > 0
     end
 
     test "get_atom_limit returns BEAM default" do
-      assert MalachiMQ.AtomMonitor.get_atom_limit() == 1_048_576
+      assert Malachi.AtomMonitor.get_atom_limit() == 1_048_576
     end
 
     test "get_atom_usage_percent returns reasonable value" do
-      pct = MalachiMQ.AtomMonitor.get_atom_usage_percent()
+      pct = Malachi.AtomMonitor.get_atom_usage_percent()
       assert is_float(pct)
       assert pct > 0.0
       assert pct < 100.0

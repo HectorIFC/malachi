@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Test.PollingHelper do
+defmodule Malachi.Test.PollingHelper do
   @moduledoc """
   Polling utilities for asynchronous test assertions.
 

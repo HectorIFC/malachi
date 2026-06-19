@@ -1,10 +1,10 @@
-defmodule MalachiMQ.BackpressureTest do
+defmodule Malachi.BackpressureTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.{Backpressure, Queue, QueueConfig}
+  alias Malachi.{Backpressure, Queue, QueueConfig}
 
   setup do
     # Ensure application is started
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
 
     # Create unique queue for each test
     queue_name = "test_bp_#{:erlang.unique_integer([:positive])}"

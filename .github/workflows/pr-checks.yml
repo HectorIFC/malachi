@@ -205,7 +205,7 @@ jobs:
               labels.add('docker');
             }
             
-            if (files.some(f => f.startsWith('lib/malachimq/auth'))) {
+            if (files.some(f => f.startsWith('lib/malachi/auth'))) {
               labels.add('security');
             }
             

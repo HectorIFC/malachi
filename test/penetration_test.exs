@@ -1,4 +1,4 @@
-defmodule MalachiMQ.PenetrationTest do
+defmodule Malachi.PenetrationTest do
   @moduledoc """
   End-to-end penetration test scenarios via the TCP protocol layer.
 
@@ -9,9 +9,9 @@ defmodule MalachiMQ.PenetrationTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Auth
-  alias MalachiMQ.Auth.LockoutManager
-  alias MalachiMQ.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.Auth
+  alias Malachi.Auth.LockoutManager
+  alias Malachi.Test.{TCPHelper, SecurityHelper}
 
   @moduletag :security
   @moduletag :penetration
@@ -304,7 +304,7 @@ defmodule MalachiMQ.PenetrationTest do
     @tag timeout: 30_000
     test "security operations generate audit events", %{user: user, pass: pass} do
       # Flush existing events
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
       # 1. Failed authentication
@@ -318,11 +318,11 @@ defmodule MalachiMQ.PenetrationTest do
 
       # Allow async processing
       Process.sleep(200)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
       # Get recent events
-      events = MalachiMQ.AuditLog.get_events(100)
+      events = Malachi.AuditLog.get_events(100)
 
       # Filter events for our user
       user_events = Enum.filter(events, fn e -> e.username == user end)
@@ -338,16 +338,16 @@ defmodule MalachiMQ.PenetrationTest do
     end
 
     test "audit events contain required fields" do
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
       ip = {20, 20, 20, 20}
       Auth.authenticate("admin", "wrong_pass", ip)
       Process.sleep(200)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
-      events = MalachiMQ.AuditLog.get_events(10)
+      events = Malachi.AuditLog.get_events(10)
 
       # Find a recent auth_failure event
       failure_event =

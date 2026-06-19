@@ -1,4 +1,4 @@
-defmodule MalachiMQ.ProtocolFuzzingTest do
+defmodule Malachi.ProtocolFuzzingTest do
   @moduledoc """
   Fuzzing tests for the TCP protocol layer.
 
@@ -10,7 +10,7 @@ defmodule MalachiMQ.ProtocolFuzzingTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.Test.{TCPHelper, SecurityHelper}
 
   @moduletag :security
 

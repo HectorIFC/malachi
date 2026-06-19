@@ -44,10 +44,10 @@ echo -e "${GREEN}✓ Code formatted${NC}"
 echo ""
 
 # Check if benchmark changes are being committed
-BENCHMARK_CHANGES=$(git diff --cached --name-only | grep -E '^(lib/malachimq/|benchmark/)' || true)
+BENCHMARK_CHANGES=$(git diff --cached --name-only | grep -E '^(lib/malachi/|benchmark/)' || true)
 
 if [ -z "$BENCHMARK_CHANGES" ]; then
-  echo -e "${GREEN}✓ No changes in lib/malachimq/ or benchmark/ - skipping benchmark update${NC}"
+  echo -e "${GREEN}✓ No changes in lib/malachi/ or benchmark/ - skipping benchmark update${NC}"
   echo ""
   exit 0
 fi

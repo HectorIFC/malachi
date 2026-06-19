@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Auth.UserPersistenceIntegrationTest do
+defmodule Malachi.Auth.UserPersistenceIntegrationTest do
   @moduledoc """
   Integration tests for user persistence across Auth and UserStore.
   Tests that users survive GenServer restarts and that the full
@@ -6,10 +6,10 @@ defmodule MalachiMQ.Auth.UserPersistenceIntegrationTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Auth
-  alias MalachiMQ.Auth.UserStore
+  alias Malachi.Auth
+  alias Malachi.Auth.UserStore
 
-  @users_table :malachimq_users
+  @users_table :malachi_users
 
   setup do
     on_exit(fn ->

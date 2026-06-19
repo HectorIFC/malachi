@@ -7,11 +7,11 @@
 #
 # Run: mix run benchmark/atom_safety_benchmark.exs
 
-alias MalachiMQ.Metrics
+alias Malachi.Metrics
 
 IO.puts("""
 ═══════════════════════════════════════════════════════════════
-  MalachiMQ Atom Safety Benchmark
+  Malachi Atom Safety Benchmark
   Comparing anonymous ETS tables vs named (atom-based) tables
 ═══════════════════════════════════════════════════════════════
 """)
@@ -29,7 +29,7 @@ IO.puts("  Baseline atom count: #{baseline_atoms}")
   :timer.tc(fn ->
     for i <- 1..1000 do
       name = "bench_queue_#{i}_#{:rand.uniform(100_000)}"
-      MalachiMQ.Queue.enqueue(name, "bench payload #{i}")
+      Malachi.Queue.enqueue(name, "bench payload #{i}")
     end
   end)
 
@@ -126,7 +126,7 @@ IO.puts("")
 IO.puts("📊 Benchmark 4: Memory Usage")
 IO.puts("────────────────────────────")
 
-memory_stats = MalachiMQ.MemoryMonitor.get_memory_stats()
+memory_stats = Malachi.MemoryMonitor.get_memory_stats()
 
 IO.puts("  Current memory:")
 IO.puts("    Total:     #{memory_stats.total_mb} MB")
@@ -143,7 +143,7 @@ IO.puts("")
 IO.puts("📊 Benchmark 5: Atom Table Status")
 IO.puts("──────────────────────────────────")
 
-atom_stats = MalachiMQ.AtomMonitor.get_stats()
+atom_stats = Malachi.AtomMonitor.get_stats()
 
 IO.puts("  Atom count:    #{atom_stats.atom_count}")
 IO.puts("  Atom limit:    #{atom_stats.atom_limit}")

@@ -13,7 +13,7 @@ defmodule MemoryBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Memory Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -162,7 +162,7 @@ defmodule MemoryBenchmark do
 
     # Enqueue messages
     Enum.each(1..count, fn _ ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end)
 
     Process.sleep(500)
@@ -205,7 +205,7 @@ defmodule MemoryBenchmark do
         {:ok, _pid} = BenchmarkHelpers.start_benchmark_consumer(queue_name, fn _ -> :ok end)
 
         # Send one message to each queue
-        MalachiMQ.Queue.enqueue(queue_name, payload)
+        Malachi.Queue.enqueue(queue_name, payload)
 
         queue_name
       end)

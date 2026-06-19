@@ -1,4 +1,4 @@
-defmodule MalachiMQ.AckManagerTest do
+defmodule Malachi.AckManagerTest do
   use ExUnit.Case, async: false
 
   setup do
@@ -30,9 +30,9 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      assert :ok = MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      assert :ok = Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      status = MalachiMQ.AckManager.get_status(message_id)
+      status = Malachi.AckManager.get_status(message_id)
       assert {:pending, entry} = status
       assert entry.message_id == message_id
       assert entry.queue_name == queue_name
@@ -57,10 +57,10 @@ defmodule MalachiMQ.AckManagerTest do
           queue: queue_name
         }
 
-        MalachiMQ.AckManager.track_message(msg_id, queue_name, pid, msg)
+        Malachi.AckManager.track_message(msg_id, queue_name, pid, msg)
       end
 
-      count = MalachiMQ.AckManager.pending_count(queue_name)
+      count = Malachi.AckManager.pending_count(queue_name)
       assert count == 5
     end
   end
@@ -72,15 +72,15 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      assert :ok = MalachiMQ.AckManager.ack(message_id)
-      assert :acknowledged_or_unknown = MalachiMQ.AckManager.get_status(message_id)
+      assert :ok = Malachi.AckManager.ack(message_id)
+      assert :acknowledged_or_unknown = Malachi.AckManager.get_status(message_id)
     end
 
     test "returns error for non-existent message" do
       fake_id = :erlang.unique_integer([:monotonic, :positive])
-      assert {:error, :not_found} = MalachiMQ.AckManager.ack(fake_id)
+      assert {:error, :not_found} = Malachi.AckManager.ack(fake_id)
     end
 
     test "increments acked metric", %{
@@ -89,9 +89,9 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      MalachiMQ.AckManager.ack(message_id)
+      Malachi.AckManager.ack(message_id)
       :timer.sleep(50)
     end
   end
@@ -103,10 +103,10 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      assert :ok = MalachiMQ.AckManager.nack(message_id, requeue: false)
-      assert :acknowledged_or_unknown = MalachiMQ.AckManager.get_status(message_id)
+      assert :ok = Malachi.AckManager.nack(message_id, requeue: false)
+      assert :acknowledged_or_unknown = Malachi.AckManager.get_status(message_id)
     end
 
     test "nacks and requeues message", %{
@@ -115,18 +115,18 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      assert :ok = MalachiMQ.AckManager.nack(message_id, requeue: true)
+      assert :ok = Malachi.AckManager.nack(message_id, requeue: true)
       :timer.sleep(50)
 
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.buffered >= 1
     end
 
     test "returns error for non-existent message" do
       fake_id = :erlang.unique_integer([:monotonic, :positive])
-      assert {:error, :not_found} = MalachiMQ.AckManager.nack(fake_id)
+      assert {:error, :not_found} = Malachi.AckManager.nack(fake_id)
     end
 
     test "increments nacked metric", %{
@@ -135,9 +135,9 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      MalachiMQ.AckManager.nack(message_id, requeue: false)
+      Malachi.AckManager.nack(message_id, requeue: false)
       :timer.sleep(50)
     end
   end
@@ -149,16 +149,16 @@ defmodule MalachiMQ.AckManagerTest do
       consumer_pid: consumer_pid,
       message: message
     } do
-      MalachiMQ.AckManager.track_message(message_id, queue_name, consumer_pid, message)
+      Malachi.AckManager.track_message(message_id, queue_name, consumer_pid, message)
 
-      assert {:pending, entry} = MalachiMQ.AckManager.get_status(message_id)
+      assert {:pending, entry} = Malachi.AckManager.get_status(message_id)
       assert is_integer(entry.elapsed_ms)
       assert entry.elapsed_ms >= 0
     end
 
     test "returns unknown for non-tracked message" do
       fake_id = :erlang.unique_integer([:monotonic, :positive])
-      assert :acknowledged_or_unknown = MalachiMQ.AckManager.get_status(fake_id)
+      assert :acknowledged_or_unknown = Malachi.AckManager.get_status(fake_id)
     end
   end
 
@@ -182,14 +182,14 @@ defmodule MalachiMQ.AckManagerTest do
           queue: queue_name
         }
 
-        MalachiMQ.AckManager.track_message(msg_id, queue_name, pid, msg)
+        Malachi.AckManager.track_message(msg_id, queue_name, pid, msg)
       end
 
-      assert MalachiMQ.AckManager.pending_count(queue_name) == 3
+      assert Malachi.AckManager.pending_count(queue_name) == 3
     end
 
     test "returns 0 for queue with no pending messages" do
-      assert MalachiMQ.AckManager.pending_count("nonexistent_queue") == 0
+      assert Malachi.AckManager.pending_count("nonexistent_queue") == 0
     end
   end
 
@@ -213,16 +213,16 @@ defmodule MalachiMQ.AckManagerTest do
           queue: queue_name
         }
 
-        MalachiMQ.AckManager.track_message(msg_id, queue_name, pid, msg)
+        Malachi.AckManager.track_message(msg_id, queue_name, pid, msg)
       end
 
-      pending = MalachiMQ.AckManager.list_pending(queue_name)
+      pending = Malachi.AckManager.list_pending(queue_name)
       assert length(pending) == 2
       assert Enum.all?(pending, &is_integer(&1.elapsed_ms))
     end
 
     test "returns empty list for queue with no pending" do
-      assert [] = MalachiMQ.AckManager.list_pending("empty_queue")
+      assert [] = Malachi.AckManager.list_pending("empty_queue")
     end
   end
 
@@ -239,9 +239,9 @@ defmodule MalachiMQ.AckManagerTest do
 
       msg = %{id: msg_id, payload: "test", headers: %{}, timestamp: System.system_time(:microsecond), queue: queue_name}
 
-      MalachiMQ.AckManager.track_message(msg_id, queue_name, pid, msg)
+      Malachi.AckManager.track_message(msg_id, queue_name, pid, msg)
 
-      stats = MalachiMQ.AckManager.stats()
+      stats = Malachi.AckManager.stats()
       assert is_map(stats)
 
       if Map.has_key?(stats, queue_name) do

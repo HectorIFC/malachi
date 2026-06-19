@@ -1,14 +1,14 @@
-defmodule MalachiMQ.ConnectionLimiterTest do
+defmodule Malachi.ConnectionLimiterTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.ConnectionLimiter
+  alias Malachi.ConnectionLimiter
 
   setup do
     # Temporarily enable connection limiting for these tests
-    original_value = Application.get_env(:malachimq, :connection_limit_enabled)
-    Application.put_env(:malachimq, :connection_limit_enabled, true)
+    original_value = Application.get_env(:malachi, :connection_limit_enabled)
+    Application.put_env(:malachi, :connection_limit_enabled, true)
 
     on_exit(fn ->
-      Application.put_env(:malachimq, :connection_limit_enabled, original_value)
+      Application.put_env(:malachi, :connection_limit_enabled, original_value)
     end)
 
     :ok
@@ -17,7 +17,7 @@ defmodule MalachiMQ.ConnectionLimiterTest do
   describe "per-IP connection limits" do
     test "allows connections within per-IP limit" do
       ip = "192.168.1.#{:rand.uniform(255)}"
-      max_per_ip = Application.get_env(:malachimq, :max_connections_per_ip, 100)
+      max_per_ip = Application.get_env(:malachi, :max_connections_per_ip, 100)
 
       # Create processes up to limit
       pids =
@@ -40,11 +40,11 @@ defmodule MalachiMQ.ConnectionLimiterTest do
       ip = "10.0.0.#{:rand.uniform(255)}"
 
       # Set a low limit for testing
-      original_limit = Application.get_env(:malachimq, :max_connections_per_ip)
-      Application.put_env(:malachimq, :max_connections_per_ip, 5)
+      original_limit = Application.get_env(:malachi, :max_connections_per_ip)
+      Application.put_env(:malachi, :max_connections_per_ip, 5)
 
       on_exit(fn ->
-        Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+        Application.put_env(:malachi, :max_connections_per_ip, original_limit)
       end)
 
       # Create processes up to limit
@@ -72,11 +72,11 @@ defmodule MalachiMQ.ConnectionLimiterTest do
       ip2 = "192.168.2.#{:rand.uniform(255)}"
 
       # Set a low limit
-      original_limit = Application.get_env(:malachimq, :max_connections_per_ip)
-      Application.put_env(:malachimq, :max_connections_per_ip, 3)
+      original_limit = Application.get_env(:malachi, :max_connections_per_ip)
+      Application.put_env(:malachi, :max_connections_per_ip, 3)
 
       on_exit(fn ->
-        Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+        Application.put_env(:malachi, :max_connections_per_ip, original_limit)
       end)
 
       # Exhaust ip1's limit
@@ -103,22 +103,22 @@ defmodule MalachiMQ.ConnectionLimiterTest do
 
       # Cleanup
       Enum.each(pids_ip1 ++ pids_ip2 ++ [overflow_pid], &Process.exit(&1, :kill))
-      Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+      Application.put_env(:malachi, :max_connections_per_ip, original_limit)
     end
   end
 
   describe "global connection limits" do
     test "blocks connections exceeding global limit" do
       # Set very low global limit
-      original_global = Application.get_env(:malachimq, :max_total_connections)
-      original_per_ip = Application.get_env(:malachimq, :max_connections_per_ip)
+      original_global = Application.get_env(:malachi, :max_total_connections)
+      original_per_ip = Application.get_env(:malachi, :max_connections_per_ip)
 
-      Application.put_env(:malachimq, :max_total_connections, 10)
-      Application.put_env(:malachimq, :max_connections_per_ip, 100)
+      Application.put_env(:malachi, :max_total_connections, 10)
+      Application.put_env(:malachi, :max_connections_per_ip, 100)
 
       on_exit(fn ->
-        Application.put_env(:malachimq, :max_total_connections, original_global)
-        Application.put_env(:malachimq, :max_connections_per_ip, original_per_ip)
+        Application.put_env(:malachi, :max_total_connections, original_global)
+        Application.put_env(:malachi, :max_connections_per_ip, original_per_ip)
       end)
 
       # Create connections from different IPs
@@ -322,11 +322,11 @@ defmodule MalachiMQ.ConnectionLimiterTest do
   describe "disabled connection limiting" do
     test "bypasses checks when disabled" do
       # Temporarily disable for this test
-      original = Application.get_env(:malachimq, :connection_limit_enabled)
-      Application.put_env(:malachimq, :connection_limit_enabled, false)
+      original = Application.get_env(:malachi, :connection_limit_enabled)
+      Application.put_env(:malachi, :connection_limit_enabled, false)
 
       on_exit(fn ->
-        Application.put_env(:malachimq, :connection_limit_enabled, original)
+        Application.put_env(:malachi, :connection_limit_enabled, original)
       end)
 
       ip = "any.ip.address.123"
@@ -346,11 +346,11 @@ defmodule MalachiMQ.ConnectionLimiterTest do
       ip = "192.168.50.#{:rand.uniform(255)}"
 
       # Set specific limit
-      original_limit = Application.get_env(:malachimq, :max_connections_per_ip)
-      Application.put_env(:malachimq, :max_connections_per_ip, 20)
+      original_limit = Application.get_env(:malachi, :max_connections_per_ip)
+      Application.put_env(:malachi, :max_connections_per_ip, 20)
 
       on_exit(fn ->
-        Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+        Application.put_env(:malachi, :max_connections_per_ip, original_limit)
       end)
 
       # Spawn 50 concurrent registration attempts

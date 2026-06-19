@@ -1,4 +1,4 @@
-defmodule MalachiMQ.SocketHelperTest do
+defmodule Malachi.SocketHelperTest do
   use ExUnit.Case, async: true
 
   # Helper to read until newline in packet: 0 mode
@@ -36,7 +36,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, packet: 0, active: false])
 
-      assert :ok = MalachiMQ.SocketHelper.socket_send(client, "test\n", :gen_tcp)
+      assert :ok = Malachi.SocketHelper.socket_send(client, "test\n", :gen_tcp)
 
       :gen_tcp.close(client)
       :gen_tcp.close(listen_socket)
@@ -45,8 +45,8 @@ defmodule MalachiMQ.SocketHelperTest do
     test "handles SSL socket send" do
       # Test that SSL variant exists and can be called
       # We can't easily test real SSL without certificates, but we can verify the function exists
-      Code.ensure_loaded!(MalachiMQ.SocketHelper)
-      assert function_exported?(MalachiMQ.SocketHelper, :socket_send, 3)
+      Code.ensure_loaded!(Malachi.SocketHelper)
+      assert function_exported?(Malachi.SocketHelper, :socket_send, 3)
     end
   end
 
@@ -99,7 +99,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      result = MalachiMQ.SocketHelper.socket_recv(client, 0, 100, :gen_tcp)
+      result = Malachi.SocketHelper.socket_recv(client, 0, 100, :gen_tcp)
       assert {:error, :timeout} = result
 
       :gen_tcp.close(client)
@@ -107,7 +107,7 @@ defmodule MalachiMQ.SocketHelperTest do
     end
 
     test "SSL recv function exists" do
-      assert function_exported?(MalachiMQ.SocketHelper, :socket_recv, 4)
+      assert function_exported?(Malachi.SocketHelper, :socket_recv, 4)
     end
   end
 
@@ -129,18 +129,18 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      assert :ok = MalachiMQ.SocketHelper.socket_close(client, :gen_tcp)
+      assert :ok = Malachi.SocketHelper.socket_close(client, :gen_tcp)
 
       :gen_tcp.close(listen_socket)
     end
 
     test "handles invalid gen_tcp socket gracefully" do
-      result = MalachiMQ.SocketHelper.socket_close(:invalid_socket, :gen_tcp)
+      result = Malachi.SocketHelper.socket_close(:invalid_socket, :gen_tcp)
       assert result in [:ok, {:error, :invalid_socket}]
     end
 
     test "handles invalid SSL socket gracefully" do
-      result = MalachiMQ.SocketHelper.socket_close(:invalid_ssl_socket, :ssl)
+      result = Malachi.SocketHelper.socket_close(:invalid_ssl_socket, :ssl)
       assert {:error, :invalid_socket} = result
     end
 
@@ -162,7 +162,7 @@ defmodule MalachiMQ.SocketHelperTest do
       :gen_tcp.close(client)
 
       # Try closing again
-      result = MalachiMQ.SocketHelper.socket_close(client, :gen_tcp)
+      result = Malachi.SocketHelper.socket_close(client, :gen_tcp)
       assert result in [:ok, {:error, :invalid_socket}, {:error, :einval}]
 
       :gen_tcp.close(listen_socket)
@@ -187,7 +187,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      assert :ok = MalachiMQ.SocketHelper.socket_setopts(client, [active: false], :gen_tcp)
+      assert :ok = Malachi.SocketHelper.socket_setopts(client, [active: false], :gen_tcp)
 
       :gen_tcp.close(client)
       :gen_tcp.close(listen_socket)
@@ -210,7 +210,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      result = MalachiMQ.SocketHelper.socket_setopts(client, [active: false, nodelay: true], :gen_tcp)
+      result = Malachi.SocketHelper.socket_setopts(client, [active: false, nodelay: true], :gen_tcp)
       assert :ok = result
 
       :gen_tcp.close(client)
@@ -218,8 +218,8 @@ defmodule MalachiMQ.SocketHelperTest do
     end
 
     test "SSL setopts function exists" do
-      Code.ensure_loaded!(MalachiMQ.SocketHelper)
-      assert function_exported?(MalachiMQ.SocketHelper, :socket_setopts, 3)
+      Code.ensure_loaded!(Malachi.SocketHelper)
+      assert function_exported?(Malachi.SocketHelper, :socket_setopts, 3)
     end
   end
 
@@ -241,7 +241,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      assert {:ok, {_ip, _port}} = MalachiMQ.SocketHelper.socket_peername(client, :gen_tcp)
+      assert {:ok, {_ip, _port}} = Malachi.SocketHelper.socket_peername(client, :gen_tcp)
 
       :gen_tcp.close(client)
       :gen_tcp.close(listen_socket)
@@ -264,7 +264,7 @@ defmodule MalachiMQ.SocketHelperTest do
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
 
-      {:ok, {ip, port_num}} = MalachiMQ.SocketHelper.socket_peername(client, :gen_tcp)
+      {:ok, {ip, port_num}} = Malachi.SocketHelper.socket_peername(client, :gen_tcp)
 
       # Verify it's a valid IPv4 tuple
       assert is_tuple(ip)
@@ -277,8 +277,8 @@ defmodule MalachiMQ.SocketHelperTest do
     end
 
     test "SSL peername function exists" do
-      Code.ensure_loaded!(MalachiMQ.SocketHelper)
-      assert function_exported?(MalachiMQ.SocketHelper, :socket_peername, 2)
+      Code.ensure_loaded!(Malachi.SocketHelper)
+      assert function_exported?(Malachi.SocketHelper, :socket_peername, 2)
     end
   end
 
@@ -288,7 +288,7 @@ defmodule MalachiMQ.SocketHelperTest do
       invalid_socket = :not_a_real_socket
 
       # These should return errors or handle gracefully
-      result = MalachiMQ.SocketHelper.socket_close(invalid_socket, :gen_tcp)
+      result = Malachi.SocketHelper.socket_close(invalid_socket, :gen_tcp)
       assert result in [:ok, {:error, :invalid_socket}]
     end
   end

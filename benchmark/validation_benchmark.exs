@@ -2,7 +2,7 @@
 
 Mix.install([
   {:jason, "~> 1.4"},
-  {:malachimq, path: Path.expand("..", __DIR__)}
+  {:malachi, path: Path.expand("..", __DIR__)}
 ])
 
 Code.require_file("utils/benchmark_helpers.ex", __DIR__)
@@ -21,10 +21,10 @@ defmodule ValidationBenchmark do
   @duration_sec 30
 
   def run do
-    IO.puts("\n🔬 MalachiMQ Validation Benchmark")
+    IO.puts("\n🔬 Malachi Validation Benchmark")
     IO.puts("=" <> String.duplicate("=", 79))
     
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
     
     results = %{
@@ -64,14 +64,14 @@ defmodule ValidationBenchmark do
     IO.puts("Testing cold cache (10,000 unique queue names)...")
     
     cold_cache_result = measure_validation_latency(fn i ->
-      MalachiMQ.Validator.validate_queue_name("queue_#{i}")
+      Malachi.Validator.validate_queue_name("queue_#{i}")
     end, 10_000)
     
     # Test 2: Warm cache (same name)
     IO.puts("Testing warm cache (same queue name repeated)...")
     
     warm_cache_result = measure_validation_latency(fn _i ->
-      MalachiMQ.Validator.validate_queue_name("cached_queue")
+      Malachi.Validator.validate_queue_name("cached_queue")
     end, 10_000)
     
     cache_results = %{
@@ -115,7 +115,7 @@ defmodule ValidationBenchmark do
     # Warmup
     IO.puts("Warming up...")
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, "warmup", %{"test" => true})
+      Malachi.Queue.enqueue(queue_name, "warmup", %{"test" => true})
     end, @warmup_sec)
     
     :atomics.put(received, 1, 0)
@@ -126,7 +126,7 @@ defmodule ValidationBenchmark do
     
     {sent_count, _actual_sec} = BenchmarkHelpers.benchmark_duration(fn ->
       # Publish with headers to trigger full validation
-      MalachiMQ.Queue.enqueue(queue_name, "test_payload", %{
+      Malachi.Queue.enqueue(queue_name, "test_payload", %{
         "priority" => 1,
         "type" => "benchmark"
       })
@@ -173,7 +173,7 @@ defmodule ValidationBenchmark do
     
     redos_results = Enum.map(test_cases, fn {name, input} ->
       {time_us, _result} = :timer.tc(fn ->
-        MalachiMQ.Validator.validate_queue_name(input)
+        Malachi.Validator.validate_queue_name(input)
       end)
       
       time_ms = time_us / 1000

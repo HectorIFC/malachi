@@ -1,4 +1,4 @@
-defmodule MalachiMQ.InputFuzzingTest do
+defmodule Malachi.InputFuzzingTest do
   @moduledoc """
   Systematic fuzzing of all Validator functions with randomly generated data.
 
@@ -9,8 +9,8 @@ defmodule MalachiMQ.InputFuzzingTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Validator
-  alias MalachiMQ.Test.SecurityHelper
+  alias Malachi.Validator
+  alias Malachi.Test.SecurityHelper
 
   @moduletag :security
 

@@ -1,17 +1,17 @@
 <p align="center">
-  <img src="docs/logo.jpeg" alt="MalachiMQ Logo" width="200"/>
+  <img src="docs/logo.jpeg" alt="Malachi Logo" width="200"/>
 </p>
 
-# MalachiMQ
+# Malachi
 
 High-performance message system.
 
-[![CI](https://github.com/HectorIFC/malachimq/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachimq/actions/workflows/ci.yml)
-[![Release](https://github.com/HectorIFC/malachimq/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachimq/actions/workflows/release.yml)
-[![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachimq?label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachimq)
-[![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachimq.svg)](https://hub.docker.com/r/hectorcardoso/malachimq)
-[![Security](https://github.com/HectorIFC/malachimq/actions/workflows/security.yml/badge.svg)](https://github.com/HectorIFC/malachimq/actions/workflows/security.yml)
-[![Benchmark](https://github.com/HectorIFC/malachimq/actions/workflows/benchmark.yml/badge.svg)](https://github.com/HectorIFC/malachimq/actions/workflows/benchmark.yml)
+[![CI](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml)
+[![Release](https://github.com/HectorIFC/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/release.yml)
+[![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachi?label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachi)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachi.svg)](https://hub.docker.com/r/hectorcardoso/malachi)
+[![Security](https://github.com/HectorIFC/malachi/actions/workflows/security.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/security.yml)
+[![Benchmark](https://github.com/HectorIFC/malachi/actions/workflows/benchmark.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/benchmark.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-❤-ff69b4)](https://github.com/sponsors/HectorIFC)
 
@@ -36,9 +36,9 @@ Support us with a monthly donation and help us continue our activities. [[Become
 
 ## Demo
 
-Watch MalachiMQ in action:
+Watch Malachi in action:
 
-[![MalachiMQ Demo](https://img.youtube.com/vi/hn26zgRoOUI/0.jpg)](https://www.youtube.com/watch?v=hn26zgRoOUI)
+[![Malachi Demo](https://img.youtube.com/vi/hn26zgRoOUI/0.jpg)](https://www.youtube.com/watch?v=hn26zgRoOUI)
 
 ## 🚀 Quick Start with Docker
 
@@ -47,21 +47,21 @@ Watch MalachiMQ in action:
 ### Pull and Run
 
 ```bash
-docker pull hectorcardoso/malachimq:latest
+docker pull hectorcardoso/malachi:latest
 
 docker run \
-  --name malachimq \
+  --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
   -e MALACHIMQ_ADMIN_PASS=your_secure_password \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 ### Using Docker Compose
 
 ```bash
-git clone https://github.com/HectorIFC/malachimq.git
-cd malachimq
+git clone https://github.com/HectorIFC/malachi.git
+cd malachi
 docker-compose up -d
 ```
 
@@ -85,7 +85,7 @@ See [Multi-Architecture Build Guide](docs/MULTI_ARCH_BUILD.md) for detailed inst
 
 ## 🛡️ Security Features
 
-MalachiMQ v0.5.0 includes comprehensive security hardening:
+Malachi v0.5.0 includes comprehensive security hardening:
 
 - **TLS 1.2/1.3 Enforcement** - Required by default in production with certificate validation at startup
 - **Argon2 Password Hashing** - Industry-standard password hashing replacing SHA-256
@@ -111,7 +111,7 @@ For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Har
 
 ## 🔐 Authentication
 
-MalachiMQ requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.
+Malachi requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.
 
 
 ### Default Users
@@ -131,7 +131,7 @@ MalachiMQ requires authentication for all producers and consumers. Users and per
 |----------|---------|-------------|
 | `MALACHIMQ_TCP_PORT` | 4040 | TCP server port |
 | `MALACHIMQ_DASHBOARD_PORT` | 4041 | Dashboard port |
-| `MALACHIMQ_LOCALE` | en_US | Language (en_US, pt_BR) |
+| `MALACHI_LOCALE` | en_US | Language (en_US, pt_BR) |
 | `MALACHIMQ_ADMIN_PASS` | admin123 | Admin password |
 | `MALACHIMQ_PRODUCER_PASS` | producer123 | Producer password |
 | `MALACHIMQ_CONSUMER_PASS` | consumer123 | Consumer password |
@@ -168,7 +168,7 @@ MalachiMQ requires authentication for all producers and consumers. Users and per
 | `MALACHIMQ_MAX_DYNAMIC_QUEUES` | 10000 | Max dynamic queues |
 | `MALACHIMQ_MAX_DYNAMIC_CHANNELS` | 1000 | Max dynamic channels |
 | `MALACHIMQ_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
-| `MALACHIMQ_AUDIT_LOG_FILE` | /var/log/malachimq/audit.log | Audit log file path |
+| `MALACHIMQ_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
 | `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | 1 | Max audit log file size (MB) |
 
 ### Custom Users
@@ -177,7 +177,7 @@ MalachiMQ requires authentication for all producers and consumers. Users and per
 docker run \
   -e MALACHIMQ_ADMIN_PASS="your_admin_password" \
   -e MALACHIMQ_DEFAULT_USERS="user1:pass1:produce,consume;user2:pass2:admin" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 Format: `username:password:permission1,permission2;...`
@@ -206,7 +206,7 @@ docker run \
   -e MALACHIMQ_ENABLE_TLS=true \
   -e MALACHIMQ_TLS_CERTFILE=/certs/server.crt \
   -e MALACHIMQ_TLS_KEYFILE=/certs/server.key \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 #### 3. Connect with TLS Client (Node.js)
@@ -261,13 +261,13 @@ You **MUST** configure dashboard credentials when deploying to production:
 # Option 1: Use existing admin user credentials
 docker run \
   -e MALACHIMQ_DEFAULT_USERS="admin:your_strong_password:admin" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 
 # Option 2: Separate dashboard credentials (recommended)
 docker run \
   -e MALACHIMQ_DASHBOARD_USER="dashboard_admin" \
   -e MALACHIMQ_DASHBOARD_PASS="dashboard_secure_pass_123" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 ### Accessing the Dashboard
@@ -297,7 +297,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/stream
 
 #### Using Existing Session Tokens
 
-MalachiMQ session tokens (from TCP authentication) can be used for dashboard access if the user has `:admin` permission:
+Malachi session tokens (from TCP authentication) can be used for dashboard access if the user has `:admin` permission:
 
 ```bash
 # Authenticate via TCP to get token
@@ -328,7 +328,7 @@ For development environments only:
 ```bash
 docker run \
   -e MALACHIMQ_DASHBOARD_AUTH_ENABLED=false \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 **⚠️ WARNING**: Never disable authentication in production or internet-facing deployments.
@@ -358,19 +358,19 @@ For web applications accessing metrics:
 docker run \
   -e MALACHIMQ_DASHBOARD_CORS_ENABLED=true \
   -e MALACHIMQ_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 ## 🔍 Audit Logging
 
-MalachiMQ includes comprehensive audit logging for security-relevant events.
+Malachi includes comprehensive audit logging for security-relevant events.
 
 ### Configuration
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `MALACHIMQ_AUDIT_LOG_OUTPUT` | `both` | Output mode: `file`, `stdout`, `both`, `ets_only` |
-| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachimq/audit.log` | Audit log file path |
+| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Audit log file path |
 | `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size in MB (auto-rotation) |
 
 ### Output Modes
@@ -378,7 +378,7 @@ MalachiMQ includes comprehensive audit logging for security-relevant events.
 ```bash
 # File only (traditional deployments)
 -e MALACHIMQ_AUDIT_LOG_OUTPUT=file \
--e MALACHIMQ_AUDIT_LOG_FILE=/var/log/malachimq/audit.log
+-e MALACHIMQ_AUDIT_LOG_FILE=/var/log/malachi/audit.log
 
 # Stdout only (container/cloud environments)
 -e MALACHIMQ_AUDIT_LOG_OUTPUT=stdout
@@ -416,8 +416,8 @@ All events are logged in JSON format with full context:
     "path": "/metrics",
     "method": "GET"
   },
-  "hostname": "malachimq-prod-01",
-  "node": "malachimq@localhost"
+  "hostname": "malachi-prod-01",
+  "node": "malachi@localhost"
 }
 ```
 
@@ -434,16 +434,16 @@ Via Elixir API:
 
 ```elixir
 # Get recent events
-MalachiMQ.AuditLog.get_events(100)
+Malachi.AuditLog.get_events(100)
 
 # Get events by type
-MalachiMQ.AuditLog.get_events_by_type(:dashboard_access, 50)
+Malachi.AuditLog.get_events_by_type(:dashboard_access, 50)
 
 # Get events by user
-MalachiMQ.AuditLog.get_events_by_user("admin", 50)
+Malachi.AuditLog.get_events_by_user("admin", 50)
 
 # Get statistics
-MalachiMQ.AuditLog.get_stats()
+Malachi.AuditLog.get_stats()
 ```
 
 ## 🛡️ Security Hardening
@@ -474,7 +474,7 @@ The default CSP allows `'unsafe-inline'` for compatibility. For maximum security
 ```bash
 docker run \
   -e MALACHIMQ_DASHBOARD_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:" \
-  hectorcardoso/malachimq:latest
+  hectorcardoso/malachi:latest
 ```
 
 **Note**: Removing `'unsafe-inline'` requires refactoring dashboard HTML to use external script/style files or nonces. This is planned for a future release.
@@ -635,7 +635,7 @@ node consumer.js --help
 | `MALACHIMQ_QUEUE` | test | Default queue name |
 | `MALACHIMQ_USER` | producer/consumer | Username |
 | `MALACHIMQ_PASS` | producer123/consumer123 | Password |
-| `MALACHIMQ_LOCALE` | pt_BR | Locale (pt_BR, en_US) |
+| `MALACHI_LOCALE` | pt_BR | Locale (pt_BR, en_US) |
 
 #### Example: Producer + Consumer
 
@@ -651,7 +651,7 @@ node producer.js 10
 
 ### Channel Pub/Sub
 
-MalachiMQ supports Pub/Sub channels with best-effort delivery. Messages are broadcast to all active subscribers without persistence.
+Malachi supports Pub/Sub channels with best-effort delivery. Messages are broadcast to all active subscribers without persistence.
 
 #### Channel Publisher Script
 
@@ -725,7 +725,7 @@ node channel-subscriber.js news sports
 - Elixir 1.19+
 - Erlang/OTP 28+
 
-**Note**: While MalachiMQ is optimized for Elixir 1.19+ and OTP 28+, it may work with earlier versions (1.16+/OTP 26+) but is not officially tested or supported.
+**Note**: While Malachi is optimized for Elixir 1.19+ and OTP 28+, it may work with earlier versions (1.16+/OTP 26+) but is not officially tested or supported.
 
 ### Initial Setup
 
@@ -740,7 +740,7 @@ This will:
 - Configure pre-commit hook to automatically update performance baselines
 - Ensure all developers have consistent git hooks
 
-The pre-commit hook runs benchmarks (~10 minutes) when you modify files in `lib/malachimq/` or `benchmark/`. To skip: `git commit --no-verify`
+The pre-commit hook runs benchmarks (~10 minutes) when you modify files in `lib/malachi/` or `benchmark/`. To skip: `git commit --no-verify`
 
 ### Run Locally
 
@@ -814,28 +814,28 @@ See [CI/CD Documentation](docs/CI_CD.md) for details.
 
 ## 🌍 Internationalization (i18n)
 
-MalachiMQ supports **Brazilian Portuguese (pt_BR)** and **American English (en_US)**.
+Malachi supports **Brazilian Portuguese (pt_BR)** and **American English (en_US)**.
 
 ### Configuration
 
 ```elixir
-config :malachimq, locale: "pt_BR"
+config :malachi, locale: "pt_BR"
 ```
 
 ### Runtime Change
 
 ```elixir
-MalachiMQ.I18n.set_locale("en_US")
-MalachiMQ.I18n.locale()
+Malachi.I18n.set_locale("en_US")
+Malachi.I18n.locale()
 ```
 
 ## 📊 User Management (Elixir)
 
 ```elixir
-MalachiMQ.Auth.list_users()
-MalachiMQ.Auth.add_user("myuser", "mypass", [:produce, :consume])
-MalachiMQ.Auth.remove_user("myuser")
-MalachiMQ.Auth.change_password("myuser", "newpass")
+Malachi.Auth.list_users()
+Malachi.Auth.add_user("myuser", "mypass", [:produce, :consume])
+Malachi.Auth.remove_user("myuser")
+Malachi.Auth.change_password("myuser", "newpass")
 ```
 
 ## 🏗️ Architecture
@@ -911,7 +911,7 @@ Examples:
 
 ## ️📋 Input Validation Rules
 
-MalachiMQ enforces strict validation on all user-supplied inputs to prevent injection attacks, resource exhaustion, and protocol violations.
+Malachi enforces strict validation on all user-supplied inputs to prevent injection attacks, resource exhaustion, and protocol violations.
 
 ### Queue and Channel Names
 

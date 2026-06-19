@@ -17,7 +17,7 @@ defmodule TLSPerformanceBenchmark do
 
   def run do
     IO.puts("=" |> String.duplicate(70))
-    IO.puts("  MalachiMQ TLS Performance Benchmark")
+    IO.puts("  Malachi TLS Performance Benchmark")
     IO.puts("=" |> String.duplicate(70))
     IO.puts("")
 
@@ -237,7 +237,7 @@ defmodule TLSPerformanceBenchmark do
     {parse_time, _} =
       :timer.tc(fn ->
         for _ <- 1..1000 do
-          MalachiMQ.TLSValidator.parse_certificate_validity(cert_pem)
+          Malachi.TLSValidator.parse_certificate_validity(cert_pem)
         end
       end)
 
@@ -245,7 +245,7 @@ defmodule TLSPerformanceBenchmark do
     {key_time, _} =
       :timer.tc(fn ->
         for _ <- 1..1000 do
-          MalachiMQ.TLSValidator.parse_key_size(key_pem)
+          Malachi.TLSValidator.parse_key_size(key_pem)
         end
       end)
 
@@ -253,7 +253,7 @@ defmodule TLSPerformanceBenchmark do
     {match_time, _} =
       :timer.tc(fn ->
         for _ <- 1..100 do
-          MalachiMQ.TLSValidator.do_validate_key_cert_match(cert_pem, key_pem)
+          Malachi.TLSValidator.do_validate_key_cert_match(cert_pem, key_pem)
         end
       end)
 

@@ -1,6 +1,6 @@
-# MalachiMQ Performance Baseline Benchmarks
+# Malachi Performance Baseline Benchmarks
 
-Comprehensive benchmark suite to measure and track MalachiMQ performance over time.
+Comprehensive benchmark suite to measure and track Malachi performance over time.
 
 ## 📋 Overview
 
@@ -161,7 +161,7 @@ All benchmarks generate results in the format:
 Edit `config/benchmark.exs` to adjust:
 
 ```elixir
-config :malachimq,
+config :malachi,
   benchmark_duration_sec: 60,        # Duration of each test
   benchmark_warmup_sec: 10,          # Warm-up before each test
   benchmark_message_sizes: [...],    # Message sizes to test
@@ -235,7 +235,7 @@ max_stable_connections: 5000
 Increase `tcp_recv_timeout` in `config/config.exs`:
 
 ```elixir
-config :malachimq,
+config :malachi,
   tcp_recv_timeout: 60_000  # 60 seconds
 ```
 
@@ -341,4 +341,4 @@ For questions about benchmarks:
 ---
 
 **Last updated**: 2026-02-03
-**MalachiMQ Version**: 0.4.6
+**Malachi Version**: 0.4.6

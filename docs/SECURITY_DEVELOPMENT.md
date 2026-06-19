@@ -1,6 +1,6 @@
 # Security Development Guide
 
-Guide for maintaining security practices during MalachiMQ development.
+Guide for maintaining security practices during Malachi development.
 
 ## Running Security Audits Locally
 
@@ -126,7 +126,7 @@ mix test
 4. Run full test suite: `mix test`
 5. Create a PR with the fix
 
-### If a vulnerability is reported in MalachiMQ:
+### If a vulnerability is reported in Malachi:
 
 1. Assess severity and impact
 2. Create a fix on a private branch

@@ -25,7 +25,7 @@ defmodule SustainedLoadBenchmark do
     Process.sleep(3000)
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     # Initialize result structure
@@ -107,7 +107,7 @@ defmodule SustainedLoadBenchmark do
 
   defp producer_loop(queue_name, payload) do
     # Send messages continuously with small delay
-    MalachiMQ.Queue.enqueue(queue_name, payload)
+    Malachi.Queue.enqueue(queue_name, payload)
     Process.sleep(10)  # ~100 msgs/sec per producer
     producer_loop(queue_name, payload)
   end
@@ -156,13 +156,13 @@ defmodule SustainedLoadBenchmark do
     elapsed_sec = DateTime.diff(now, start_time)
 
     # Get system metrics
-    system_metrics = MalachiMQ.Metrics.get_system_metrics()
+    system_metrics = Malachi.Metrics.get_system_metrics()
     memory_usage = BenchmarkHelpers.get_memory_usage()
 
     # Get queue metrics
     queue_metrics =
       Enum.map(queues, fn queue ->
-        metrics = MalachiMQ.Metrics.get_metrics(queue.name)
+        metrics = Malachi.Metrics.get_metrics(queue.name)
 
         %{
           "queue" => queue.name,

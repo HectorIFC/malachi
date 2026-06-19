@@ -1,4 +1,4 @@
-defmodule MalachiMQ.MemoryMonitorTest do
+defmodule Malachi.MemoryMonitorTest do
   use ExUnit.Case, async: true
 
   @moduledoc """
@@ -8,7 +8,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
 
   describe "get_memory_stats/0" do
     test "returns all required memory fields" do
-      stats = MalachiMQ.MemoryMonitor.get_memory_stats()
+      stats = Malachi.MemoryMonitor.get_memory_stats()
 
       assert is_map(stats)
       assert is_float(stats.total_mb)
@@ -21,7 +21,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
     end
 
     test "memory values are positive" do
-      stats = MalachiMQ.MemoryMonitor.get_memory_stats()
+      stats = Malachi.MemoryMonitor.get_memory_stats()
 
       assert stats.total_mb > 0
       assert stats.processes_mb > 0
@@ -30,7 +30,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
     end
 
     test "total memory is sum of processes and system" do
-      stats = MalachiMQ.MemoryMonitor.get_memory_stats()
+      stats = Malachi.MemoryMonitor.get_memory_stats()
 
       # Total should approximately equal processes + system
       # (with rounding tolerance)
@@ -41,7 +41,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
 
   describe "get_top_memory_processes/1" do
     test "returns list of process info maps" do
-      top = MalachiMQ.MemoryMonitor.get_top_memory_processes(5)
+      top = Malachi.MemoryMonitor.get_top_memory_processes(5)
 
       assert is_list(top)
       assert length(top) <= 5
@@ -56,7 +56,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
     end
 
     test "returns processes sorted by memory descending" do
-      top = MalachiMQ.MemoryMonitor.get_top_memory_processes(10)
+      top = Malachi.MemoryMonitor.get_top_memory_processes(10)
 
       memory_values = Enum.map(top, & &1.memory_mb)
 
@@ -65,7 +65,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
     end
 
     test "default returns 10 processes" do
-      top = MalachiMQ.MemoryMonitor.get_top_memory_processes()
+      top = Malachi.MemoryMonitor.get_top_memory_processes()
 
       assert length(top) <= 10
       assert top != []
@@ -74,7 +74,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
 
   describe "get_gc_stats/0" do
     test "returns GC statistics map" do
-      stats = MalachiMQ.MemoryMonitor.get_gc_stats()
+      stats = Malachi.MemoryMonitor.get_gc_stats()
 
       assert is_map(stats)
       assert Map.has_key?(stats, :total_gc_runs)
@@ -92,19 +92,19 @@ defmodule MalachiMQ.MemoryMonitorTest do
   describe "trigger_gc/0" do
     test "manual GC trigger completes without error" do
       # Should not raise
-      assert :ok = MalachiMQ.MemoryMonitor.trigger_gc()
+      assert :ok = Malachi.MemoryMonitor.trigger_gc()
 
       # Give it a moment to process the cast
       Process.sleep(100)
 
-      stats = MalachiMQ.MemoryMonitor.get_gc_stats()
+      stats = Malachi.MemoryMonitor.get_gc_stats()
       assert stats.total_gc_runs >= 1
     end
   end
 
   describe "memory stats integration with metrics" do
     test "system metrics include memory details" do
-      system_metrics = MalachiMQ.Metrics.get_system_metrics()
+      system_metrics = Malachi.Metrics.get_system_metrics()
 
       assert Map.has_key?(system_metrics, :memory_details)
 
@@ -116,7 +116,7 @@ defmodule MalachiMQ.MemoryMonitorTest do
     end
 
     test "system metrics include atom table stats" do
-      system_metrics = MalachiMQ.Metrics.get_system_metrics()
+      system_metrics = Malachi.Metrics.get_system_metrics()
 
       assert Map.has_key?(system_metrics, :atom_table)
       atom_stats = system_metrics.atom_table

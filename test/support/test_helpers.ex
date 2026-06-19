@@ -1,4 +1,4 @@
-defmodule MalachiMQ.TestHelpers do
+defmodule Malachi.TestHelpers do
   @moduledoc """
   Helper functions for tests to avoid flaky timing issues.
   Replaces Process.sleep with deterministic polling.
@@ -10,7 +10,7 @@ defmodule MalachiMQ.TestHelpers do
   ## Examples
 
       assert eventually(fn -> 
-        stats = MalachiMQ.Queue.get_stats(queue_name)
+        stats = Malachi.Queue.get_stats(queue_name)
         stats.consumers == 1
       end)
       
@@ -51,8 +51,8 @@ defmodule MalachiMQ.TestHelpers do
 
   ## Examples
 
-      wait_for_process(MalachiMQ.Metrics)
-      wait_for_process({:via, Registry, {MalachiMQ.QueueRegistry, {queue_name, 0}}})
+      wait_for_process(Malachi.Metrics)
+      wait_for_process({:via, Registry, {Malachi.QueueRegistry, {queue_name, 0}}})
   """
   def wait_for_process(name, timeout \\ 2_000) do
     eventually(

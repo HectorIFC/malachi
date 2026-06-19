@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# MalachiMQ - Development TLS Certificate Generator
+# Malachi - Development TLS Certificate Generator
 # Generates self-signed certificates for local development
 
 set -e
 
-echo "🔐 Generating development TLS certificates for MalachiMQ..."
+echo "🔐 Generating development TLS certificates for Malachi..."
 echo ""
 
 # Create certificate directory
@@ -14,7 +14,7 @@ mkdir -p "$CERT_DIR"
 
 # Certificate settings
 DAYS=365
-SUBJECT="/C=US/ST=Development/L=Local/O=MalachiMQ/CN=localhost"
+SUBJECT="/C=US/ST=Development/L=Local/O=Malachi/CN=localhost"
 
 echo "📁 Certificate directory: $CERT_DIR"
 echo "⏰ Validity: $DAYS days"

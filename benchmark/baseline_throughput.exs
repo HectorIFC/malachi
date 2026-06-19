@@ -16,7 +16,7 @@ defmodule ThroughputBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Throughput Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -72,11 +72,11 @@ defmodule ThroughputBenchmark do
 
     # Warm-up
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Benchmark
@@ -84,7 +84,7 @@ defmodule ThroughputBenchmark do
 
     {message_count, _actual_sec} =
       BenchmarkHelpers.benchmark_duration(
-        fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+        fn -> Malachi.Queue.enqueue(queue_name, payload) end,
         @duration_sec
       )
 
@@ -94,7 +94,7 @@ defmodule ThroughputBenchmark do
     Process.sleep(1000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
 
     # Calculate throughput
@@ -145,11 +145,11 @@ defmodule ThroughputBenchmark do
     IO.puts("  Warming up...")
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Benchmark - each producer sends messages for duration
@@ -161,7 +161,7 @@ defmodule ThroughputBenchmark do
         Task.async(fn ->
           {count, _actual_sec} =
             BenchmarkHelpers.benchmark_duration(
-              fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+              fn -> Malachi.Queue.enqueue(queue_name, payload) end,
               @duration_sec
             )
 
@@ -178,7 +178,7 @@ defmodule ThroughputBenchmark do
     Process.sleep(2000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
 
     # Calculate throughput
@@ -232,11 +232,11 @@ defmodule ThroughputBenchmark do
     IO.puts("  Warming up...")
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Benchmark - all connections send messages simultaneously
@@ -247,7 +247,7 @@ defmodule ThroughputBenchmark do
       Enum.map(1..connection_count, fn _ ->
         Task.async(fn ->
           Enum.each(1..messages_per_connection, fn _ ->
-            MalachiMQ.Queue.enqueue(queue_name, payload)
+            Malachi.Queue.enqueue(queue_name, payload)
           end)
 
           messages_per_connection
@@ -263,7 +263,7 @@ defmodule ThroughputBenchmark do
     Process.sleep(2000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
 
     # Calculate throughput
@@ -307,11 +307,11 @@ defmodule ThroughputBenchmark do
 
     # Warm-up
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Send burst
@@ -319,7 +319,7 @@ defmodule ThroughputBenchmark do
     start_time = System.monotonic_time(:millisecond)
 
     Enum.each(1..burst_size, fn _ ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end)
 
     burst_duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -329,7 +329,7 @@ defmodule ThroughputBenchmark do
     Process.sleep(5000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
     total_duration_ms = System.monotonic_time(:millisecond) - start_time
 

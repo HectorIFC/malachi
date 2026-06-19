@@ -1,8 +1,8 @@
-defmodule MalachiMQ.TCPQueueManagementTest do
+defmodule Malachi.TCPQueueManagementTest do
   use ExUnit.Case
-  alias MalachiMQ.Test.TCPHelper
+  alias Malachi.Test.TCPHelper
 
-  @tcp_port Application.compile_env(:malachimq, :tcp_port, 4040)
+  @tcp_port Application.compile_env(:malachi, :tcp_port, 4040)
 
   setup do
     queue_name = "tcp_queue_mgmt_#{:rand.uniform(1_000_000)}"
@@ -194,7 +194,7 @@ defmodule MalachiMQ.TCPQueueManagementTest do
       {:ok, parsed} = send_and_recv(socket, delete_msg)
 
       assert parsed["s"] == "ok"
-      refute MalachiMQ.QueueConfig.exists?(queue_name)
+      refute Malachi.QueueConfig.exists?(queue_name)
     end
 
     test "returns error for queue with buffered messages", %{socket: socket, queue_name: queue_name} do
@@ -231,7 +231,7 @@ defmodule MalachiMQ.TCPQueueManagementTest do
       {:ok, parsed} = send_and_recv(socket, delete_msg)
 
       assert parsed["s"] == "ok"
-      refute MalachiMQ.QueueConfig.exists?(queue_name)
+      refute Malachi.QueueConfig.exists?(queue_name)
     end
 
     test "returns error for non-existent queue", %{socket: socket} do

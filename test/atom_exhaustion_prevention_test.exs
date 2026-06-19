@@ -1,4 +1,4 @@
-defmodule MalachiMQ.AtomExhaustionPreventionTest do
+defmodule Malachi.AtomExhaustionPreventionTest do
   use ExUnit.Case, async: false
 
   @moduledoc """
@@ -10,12 +10,12 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
   describe "max_dynamic_queues enforcement" do
     test "rejects queue creation when limit is reached" do
       # Set a very low limit for testing
-      original = Application.get_env(:malachimq, :max_dynamic_queues)
-      Application.put_env(:malachimq, :max_dynamic_queues, 5)
+      original = Application.get_env(:malachi, :max_dynamic_queues)
+      Application.put_env(:malachi, :max_dynamic_queues, 5)
 
       try do
         # Get current queue count from ETS to understand baseline
-        current_count = :ets.info(:malachimq_queue_config, :size)
+        current_count = :ets.info(:malachi_queue_config, :size)
 
         # Create queues up to the limit (accounting for existing queues)
         remaining = max(5 - current_count, 0)
@@ -25,7 +25,7 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
             for i <- 1..remaining do
               name = "limit_test_#{:rand.uniform(1_000_000)}_#{i}"
 
-              case MalachiMQ.QueueConfig.create_queue(name) do
+              case Malachi.QueueConfig.create_queue(name) do
                 {:ok, _} -> name
                 {:error, :max_queues_reached} -> nil
               end
@@ -37,20 +37,20 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
 
         # Now try one more — should be rejected
         extra_name = "limit_test_overflow_#{:rand.uniform(1_000_000)}"
-        result = MalachiMQ.QueueConfig.create_queue(extra_name)
+        result = Malachi.QueueConfig.create_queue(extra_name)
 
         assert result == {:error, :max_queues_reached},
                "Expected :max_queues_reached, got #{inspect(result)}"
 
         # Cleanup created queues
         for name <- created do
-          MalachiMQ.QueueConfig.delete_queue(name)
+          Malachi.QueueConfig.delete_queue(name)
         end
       after
         if original do
-          Application.put_env(:malachimq, :max_dynamic_queues, original)
+          Application.put_env(:malachi, :max_dynamic_queues, original)
         else
-          Application.delete_env(:malachimq, :max_dynamic_queues)
+          Application.delete_env(:malachi, :max_dynamic_queues)
         end
       end
     end
@@ -63,7 +63,7 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
       # Create and interact with many queues
       for i <- 1..50 do
         name = "stability_test_#{:rand.uniform(1_000_000)}_#{i}"
-        MalachiMQ.Queue.enqueue(name, "test payload")
+        Malachi.Queue.enqueue(name, "test payload")
       end
 
       after_creation = :erlang.system_info(:atom_count)
@@ -83,7 +83,7 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
       # Publish to 100 different queues
       for i <- 1..100 do
         name = "msg_atom_test_#{:rand.uniform(1_000_000)}_#{i}"
-        MalachiMQ.Queue.enqueue(name, "payload #{i}", %{"key" => "value"})
+        Malachi.Queue.enqueue(name, "payload #{i}", %{"key" => "value"})
       end
 
       after_publish = :erlang.system_info(:atom_count)
@@ -111,7 +111,7 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
       baseline = :erlang.system_info(:atom_count)
 
       for name <- tricky_names do
-        MalachiMQ.Queue.enqueue(name, "test")
+        Malachi.Queue.enqueue(name, "test")
       end
 
       after_creation = :erlang.system_info(:atom_count)
@@ -128,7 +128,7 @@ defmodule MalachiMQ.AtomExhaustionPreventionTest do
         for i <- 1..20 do
           Task.async(fn ->
             name = "concurrent_atom_test_#{:rand.uniform(1_000_000)}_#{i}"
-            MalachiMQ.Queue.enqueue(name, "concurrent payload")
+            Malachi.Queue.enqueue(name, "concurrent payload")
           end)
         end
 

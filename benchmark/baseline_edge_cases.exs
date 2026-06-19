@@ -16,7 +16,7 @@ defmodule EdgeCasesBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Edge Cases Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -70,11 +70,11 @@ defmodule EdgeCasesBenchmark do
     warm_payload = :crypto.strong_rand_bytes(warm_size)
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, warm_payload)
+      Malachi.Queue.enqueue(queue_name, warm_payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Benchmark - send large messages
@@ -84,7 +84,7 @@ defmodule EdgeCasesBenchmark do
     {duration_us, _} =
       BenchmarkHelpers.measure_time(fn ->
         Enum.each(1..message_count, fn _ ->
-          MalachiMQ.Queue.enqueue(queue_name, payload)
+          Malachi.Queue.enqueue(queue_name, payload)
         end)
       end)
 
@@ -92,7 +92,7 @@ defmodule EdgeCasesBenchmark do
     Process.sleep(2000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
 
     # Calculate throughput
@@ -139,11 +139,11 @@ defmodule EdgeCasesBenchmark do
     IO.puts("  Warming up...")
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Queue.enqueue(queue_name, payload)
+      Malachi.Queue.enqueue(queue_name, payload)
     end, @warmup_sec)
 
     # Clear metrics
-    MalachiMQ.Metrics.reset_metrics(queue_name)
+    Malachi.Metrics.reset_metrics(queue_name)
     :atomics.put(received_count, 1, 0)
 
     # Benchmark - send for configured duration
@@ -152,7 +152,7 @@ defmodule EdgeCasesBenchmark do
 
     {message_count, actual_duration_sec} =
       BenchmarkHelpers.benchmark_duration(
-        fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+        fn -> Malachi.Queue.enqueue(queue_name, payload) end,
         duration_sec
       )
 
@@ -160,7 +160,7 @@ defmodule EdgeCasesBenchmark do
     Process.sleep(1000)
 
     # Get metrics
-    metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+    metrics = Malachi.Metrics.get_metrics(queue_name)
     processed = :atomics.get(received_count, 1)
 
     # Calculate throughput using actual duration
@@ -311,7 +311,7 @@ defmodule EdgeCasesBenchmark do
 
         {message_count, _actual_sec} =
           BenchmarkHelpers.benchmark_duration(
-            fn -> MalachiMQ.Queue.enqueue(queue_name, payload) end,
+            fn -> Malachi.Queue.enqueue(queue_name, payload) end,
             test_durations
           )
 

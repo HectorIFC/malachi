@@ -1,11 +1,11 @@
-defmodule MalachiMQ.Test.SecurityHelper do
+defmodule Malachi.Test.SecurityHelper do
   @moduledoc """
   Shared helpers for security test suite.
   Provides utility functions for random data generation, performance measurement,
   TCP operations, and common attack payloads.
   """
 
-  alias MalachiMQ.Test.TCPHelper
+  alias Malachi.Test.TCPHelper
 
   @doc "Generate a random IPv4 tuple for testing."
   def random_ip do

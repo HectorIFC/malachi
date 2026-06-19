@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# Script to configure and build multi-architecture MalachiMQ images
+# Script to configure and build multi-architecture Malachi images
 set -e
 
 DOCKER_USERNAME="${DOCKER_USERNAME:-hectorcardoso}"
-APP_NAME="malachimq"
+APP_NAME="malachi"
 VERSION=$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER_NAME="${APP_NAME}-builder"
 
-echo "🏗️  MalachiMQ Multi-Architecture Build Script"
+echo "🏗️  Malachi Multi-Architecture Build Script"
 echo "=============================================="
 echo "Version: $VERSION"
 echo "Platforms: $PLATFORMS"

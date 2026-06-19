@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * MalachiMQ Consumer - Node.js Client with Authentication
+ * Malachi Consumer - Node.js Client with Authentication
  * 
- * Consumes messages from MalachiMQ via TCP with username/password authentication.
+ * Consumes messages from Malachi via TCP with username/password authentication.
  * Features automatic reconnection on server restart.
  * 
  * Usage:
@@ -18,7 +18,7 @@
  *   MALACHIMQ_QUEUE    Queue name (default: test)
  *   MALACHIMQ_USER     Username (default: consumer)
  *   MALACHIMQ_PASS     Password (default: consumer123)
- *   MALACHIMQ_LOCALE   Locale: pt_BR | en_US (default: pt_BR)
+ *   MALACHI_LOCALE   Locale: pt_BR | en_US (default: pt_BR)
  */
 
 const net = require('net');
@@ -42,9 +42,9 @@ const colors = {
 };
 
 /**
- * MalachiMQ Consumer Client with authentication and auto-reconnect
+ * Malachi Consumer Client with authentication and auto-reconnect
  */
-class MalachiMQConsumer {
+class MalachiConsumer {
   constructor(options = {}) {
     this.host = options.host || CONFIG.host;
     this.port = options.port || CONFIG.port;
@@ -363,7 +363,7 @@ class MalachiMQConsumer {
  * Creates and starts a consumer
  */
 async function startConsumer(queueName, options = {}) {
-  const consumer = new MalachiMQConsumer({
+  const consumer = new MalachiConsumer({
     queueName,
     ...options,
   });
@@ -384,7 +384,7 @@ async function main() {
   const noReconnect = args.includes('--no-reconnect');
   const queueName = args.find(a => !a.startsWith('-')) || CONFIG.queueName;
 
-  console.log(colors.cyan(`\n📥 MalachiMQ Consumer`));
+  console.log(colors.cyan(`\n📥 Malachi Consumer`));
   console.log(colors.gray(`   Host: ${CONFIG.host}:${CONFIG.port}`));
   console.log(colors.gray(`   User: ${CONFIG.username}`));
   console.log(colors.gray(`   Queue: ${queueName}`));
@@ -394,7 +394,7 @@ async function main() {
   console.log(colors.yellow(`   Press Ctrl+C to stop\n`));
 
   try {
-    const consumer = new MalachiMQConsumer({
+    const consumer = new MalachiConsumer({
       queueName,
       verbose,
       autoAck: !noAck,
@@ -430,7 +430,7 @@ async function main() {
 
   } catch (err) {
     console.error(colors.red(`\n❌ Error: ${err.message}`));
-    console.error(colors.gray(`   Check if MalachiMQ is running on ${CONFIG.host}:${CONFIG.port}\n`));
+    console.error(colors.gray(`   Check if Malachi is running on ${CONFIG.host}:${CONFIG.port}\n`));
     process.exit(1);
   }
 }
@@ -438,7 +438,7 @@ async function main() {
 // Help message
 function showHelp() {
   console.log(`
-${colors.cyan('📥 MalachiMQ Consumer')}
+${colors.cyan('📥 Malachi Consumer')}
 
 ${colors.yellow('Usage:')}
   node consumer.js [options] [queue_name]
@@ -463,7 +463,7 @@ ${colors.yellow('Environment Variables:')}
   MALACHIMQ_QUEUE  Default queue name (default: test)
   MALACHIMQ_USER   Username (default: consumer)
   MALACHIMQ_PASS   Password (default: consumer123)
-  MALACHIMQ_LOCALE Locale: pt_BR | en_US (default: pt_BR)
+  MALACHI_LOCALE Locale: pt_BR | en_US (default: pt_BR)
 
 ${colors.yellow('ACK Behavior:')}
   By default, messages are automatically acknowledged after processing.
@@ -477,7 +477,7 @@ ${colors.yellow('Auto-Reconnect:')}
 `);
 }
 
-module.exports = { MalachiMQConsumer, startConsumer };
+module.exports = { MalachiConsumer, startConsumer };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

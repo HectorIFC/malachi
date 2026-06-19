@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== MalachiMQ Docker Build Validation ==="
+echo "=== Malachi Docker Build Validation ==="
 echo ""
 
 # Colors for output
@@ -12,8 +12,8 @@ NC='\033[0m' # No Color
 
 # Get version from mix.exs
 VERSION=$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
-IMAGE_NAME="hectorcardoso/malachimq:${VERSION}"
-CONTAINER_NAME="malachimq-validation-$$"
+IMAGE_NAME="hectorcardoso/malachi:${VERSION}"
+CONTAINER_NAME="malachi-validation-$$"
 
 echo "Version: $VERSION"
 echo "Image: $IMAGE_NAME"
@@ -40,7 +40,7 @@ echo ""
 # Step 2: Verify ERL_FLAGS with JIT
 echo "Step 2: Verifying ERL_FLAGS configuration..."
 docker run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "
-    bin/malachimq eval ':erlang.system_info(:emu_flavor)' 2>/dev/null || echo 'jit'
+    bin/malachi eval ':erlang.system_info(:emu_flavor)' 2>/dev/null || echo 'jit'
 " | grep -q "jit" || echo -e "${YELLOW}⚠ JIT may not be enabled${NC}"
 echo -e "${GREEN}✓ ERL_FLAGS configuration checked${NC}"
 echo ""
@@ -59,7 +59,7 @@ docker run -d --name "$CONTAINER_NAME" \
     "$IMAGE_NAME" > /dev/null
 
 # Wait for app to be fully started
-echo "Waiting for MalachiMQ to fully initialize..."
+echo "Waiting for Malachi to fully initialize..."
 sleep 8
 
 # Function to cleanup on exit
@@ -106,10 +106,10 @@ echo ""
 
 # Step 5: Basic functionality test
 echo "Step 5: Testing basic queue functionality..."
-FUNC_TEST=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
-  result = MalachiMQ.Queue.enqueue("validation_test", "test_msg", %{})
+FUNC_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+  result = Malachi.Queue.enqueue("validation_test", "test_msg", %{})
   :timer.sleep(100)
-  metrics = MalachiMQ.Metrics.get_metrics("validation_test")
+  metrics = Malachi.Metrics.get_metrics("validation_test")
   case {result, metrics.enqueued} do
     {{:ok, _}, count} when count > 0 -> IO.puts("OK:enqueued=#{count}")
     _ -> IO.puts("FAIL:result=#{inspect(result)}")
@@ -125,7 +125,7 @@ echo ""
 
 # Step 5.5: Channel functionality test
 echo "Step 5.5: Testing basic channel functionality..."
-CHANNEL_TEST=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
+CHANNEL_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
   # Create a simple subscriber process
   parent = self()
   subscriber = spawn(fn ->
@@ -137,11 +137,11 @@ CHANNEL_TEST=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
   end)
   
   # Subscribe to channel
-  :ok = MalachiMQ.Channel.subscribe("validation_channel", subscriber)
+  :ok = Malachi.Channel.subscribe("validation_channel", subscriber)
   :timer.sleep(100)
   
   # Publish a message
-  :ok = MalachiMQ.Channel.publish("validation_channel", "test_channel_msg", %{"test" => "true"})
+  :ok = Malachi.Channel.publish("validation_channel", "test_channel_msg", %{"test" => "true"})
   :timer.sleep(200)
   
   # Check if message was received
@@ -153,7 +153,7 @@ CHANNEL_TEST=$(docker exec "$CONTAINER_NAME" bin/malachimq rpc '
   end
   
   # Get channel stats
-  stats = MalachiMQ.Channel.get_stats("validation_channel")
+  stats = Malachi.Channel.get_stats("validation_channel")
   
   case {result, stats.published >= 1} do
     {:ok, true} -> IO.puts("OK:published=#{stats.published}")

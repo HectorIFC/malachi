@@ -1,10 +1,10 @@
-# MalachiMQ v0.5.0 Release Notes
+# Malachi v0.5.0 Release Notes
 
 **Release Date:** 2026-02-12
 
 ## Summary
 
-MalachiMQ v0.5.0 is a security-focused release that introduces comprehensive hardening across all system layers. This release adds TLS enforcement, rate limiting, input validation, backpressure controls, dashboard security, audit logging, memory monitoring, and an automated security CI/CD pipeline.
+Malachi v0.5.0 is a security-focused release that introduces comprehensive hardening across all system layers. This release adds TLS enforcement, rate limiting, input validation, backpressure controls, dashboard security, audit logging, memory monitoring, and an automated security CI/CD pipeline.
 
 This release represents contributions from PRs #80-91 and includes 29 Elixir modules, 50+ test files, 24+ benchmark files, and 6 CI/CD workflows.
 

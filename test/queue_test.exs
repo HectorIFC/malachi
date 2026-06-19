@@ -1,4 +1,4 @@
-defmodule MalachiMQ.QueueTest do
+defmodule Malachi.QueueTest do
   use ExUnit.Case, async: true
 
   setup do
@@ -8,17 +8,17 @@ defmodule MalachiMQ.QueueTest do
 
   describe "enqueue/3" do
     test "enqueues a message successfully", %{queue_name: queue_name} do
-      assert {:ok, _message} = MalachiMQ.Queue.enqueue(queue_name, "test payload")
+      assert {:ok, _message} = Malachi.Queue.enqueue(queue_name, "test payload")
     end
 
     test "enqueues message with headers", %{queue_name: queue_name} do
       headers = %{"priority" => 1, "type" => "test"}
-      assert {:ok, _message} = MalachiMQ.Queue.enqueue(queue_name, "test payload", headers)
+      assert {:ok, _message} = Malachi.Queue.enqueue(queue_name, "test payload", headers)
     end
 
     test "enqueues multiple messages", %{queue_name: queue_name} do
       for i <- 1..10 do
-        assert {:ok, _message} = MalachiMQ.Queue.enqueue(queue_name, "payload_#{i}")
+        assert {:ok, _message} = Malachi.Queue.enqueue(queue_name, "payload_#{i}")
       end
     end
   end
@@ -32,7 +32,7 @@ defmodule MalachiMQ.QueueTest do
           end
         end)
 
-      assert :ok = MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      assert :ok = Malachi.Queue.subscribe(queue_name, consumer_pid)
     end
 
     test "multiple consumers can subscribe", %{queue_name: queue_name} do
@@ -46,7 +46,7 @@ defmodule MalachiMQ.QueueTest do
         end
 
       Enum.each(consumers, fn pid ->
-        assert :ok = MalachiMQ.Queue.subscribe(queue_name, pid)
+        assert :ok = Malachi.Queue.subscribe(queue_name, pid)
       end)
     end
 
@@ -62,8 +62,8 @@ defmodule MalachiMQ.QueueTest do
           end
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
-      MalachiMQ.Queue.enqueue(queue_name, "test payload")
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.enqueue(queue_name, "test payload")
 
       assert_receive {:received, %{payload: "test payload"}}, 2000
     end
@@ -71,15 +71,15 @@ defmodule MalachiMQ.QueueTest do
 
   describe "get_stats/1" do
     test "returns stats for non-existent queue", %{queue_name: queue_name} do
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.exists == false
       assert stats.consumers == 0
       assert stats.producers == 0
     end
 
     test "returns stats for existing queue", %{queue_name: queue_name} do
-      MalachiMQ.Queue.enqueue(queue_name, "test")
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      Malachi.Queue.enqueue(queue_name, "test")
+      stats = Malachi.Queue.get_stats(queue_name)
 
       assert stats.exists == true
       assert is_integer(stats.partition)
@@ -94,25 +94,25 @@ defmodule MalachiMQ.QueueTest do
           end
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
 
       :timer.sleep(50)
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.consumers == 1
     end
 
     test "tracks buffered messages", %{queue_name: queue_name} do
-      MalachiMQ.Queue.enqueue(queue_name, "msg1")
-      MalachiMQ.Queue.enqueue(queue_name, "msg2")
+      Malachi.Queue.enqueue(queue_name, "msg1")
+      Malachi.Queue.enqueue(queue_name, "msg2")
 
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.buffered == 2
     end
   end
 
   describe "kill_all_consumers/1" do
     test "returns 0 for non-existent queue", %{queue_name: queue_name} do
-      assert {:ok, 0} = MalachiMQ.Queue.kill_all_consumers(queue_name)
+      assert {:ok, 0} = Malachi.Queue.kill_all_consumers(queue_name)
     end
 
     test "kills all consumers", %{queue_name: queue_name} do
@@ -127,20 +127,20 @@ defmodule MalachiMQ.QueueTest do
           end)
         end
 
-      Enum.each(consumers, &MalachiMQ.Queue.subscribe(queue_name, &1))
+      Enum.each(consumers, &Malachi.Queue.subscribe(queue_name, &1))
       :timer.sleep(50)
 
-      assert {:ok, 3} = MalachiMQ.Queue.kill_all_consumers(queue_name)
+      assert {:ok, 3} = Malachi.Queue.kill_all_consumers(queue_name)
 
       :timer.sleep(50)
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.consumers == 0
     end
   end
 
   describe "list_consumers/1" do
     test "returns empty list for non-existent queue", %{queue_name: queue_name} do
-      assert [] = MalachiMQ.Queue.list_consumers(queue_name)
+      assert [] = Malachi.Queue.list_consumers(queue_name)
     end
 
     test "lists all consumers", %{queue_name: queue_name} do
@@ -151,10 +151,10 @@ defmodule MalachiMQ.QueueTest do
           end
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
 
       :timer.sleep(50)
-      consumers = MalachiMQ.Queue.list_consumers(queue_name)
+      consumers = Malachi.Queue.list_consumers(queue_name)
 
       assert length(consumers) == 1
       assert hd(consumers).pid == consumer_pid
@@ -165,7 +165,7 @@ defmodule MalachiMQ.QueueTest do
 
   describe "kill_consumer/2" do
     test "returns error for non-existent queue", %{queue_name: queue_name} do
-      assert {:error, :queue_not_found} = MalachiMQ.Queue.kill_consumer(queue_name, self())
+      assert {:error, :queue_not_found} = Malachi.Queue.kill_consumer(queue_name, self())
     end
 
     test "kills specific consumer", %{queue_name: queue_name} do
@@ -178,37 +178,37 @@ defmodule MalachiMQ.QueueTest do
           end
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
       :timer.sleep(50)
 
-      assert :ok = MalachiMQ.Queue.kill_consumer(queue_name, consumer_pid)
+      assert :ok = Malachi.Queue.kill_consumer(queue_name, consumer_pid)
 
       :timer.sleep(50)
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.consumers == 0
     end
 
     test "returns error for non-existent consumer", %{queue_name: queue_name} do
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
       fake_pid = spawn(fn -> :ok end)
       :timer.sleep(50)
 
-      assert {:error, :not_found} = MalachiMQ.Queue.kill_consumer(queue_name, fake_pid)
+      assert {:error, :not_found} = Malachi.Queue.kill_consumer(queue_name, fake_pid)
     end
   end
 
   describe "message buffering" do
     test "buffers messages when no consumers", %{queue_name: queue_name} do
-      MalachiMQ.Queue.enqueue(queue_name, "buffered1")
-      MalachiMQ.Queue.enqueue(queue_name, "buffered2")
+      Malachi.Queue.enqueue(queue_name, "buffered1")
+      Malachi.Queue.enqueue(queue_name, "buffered2")
 
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.buffered == 2
     end
 
     test "flushes buffer to new consumer", %{queue_name: queue_name} do
-      MalachiMQ.Queue.enqueue(queue_name, "msg1")
-      MalachiMQ.Queue.enqueue(queue_name, "msg2")
+      Malachi.Queue.enqueue(queue_name, "msg1")
+      Malachi.Queue.enqueue(queue_name, "msg2")
 
       test_pid = self()
 
@@ -227,7 +227,7 @@ defmodule MalachiMQ.QueueTest do
           receive_all.(receive_all)
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
 
       assert_receive {:got, payload1}, 1000
       assert_receive {:got, payload2}, 1000
@@ -239,23 +239,23 @@ defmodule MalachiMQ.QueueTest do
   describe "process monitoring" do
     test "removes dead consumer from queue", %{queue_name: queue_name} do
       consumer_pid = spawn(fn -> :ok end)
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
 
       :timer.sleep(100)
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.consumers == 0
     end
 
     test "removes dead producer from tracking", %{queue_name: queue_name} do
       producer_task =
         Task.async(fn ->
-          MalachiMQ.Queue.enqueue(queue_name, "test")
+          Malachi.Queue.enqueue(queue_name, "test")
         end)
 
       Task.await(producer_task)
       :timer.sleep(100)
 
-      stats = MalachiMQ.Queue.get_stats(queue_name)
+      stats = Malachi.Queue.get_stats(queue_name)
       assert stats.producers == 0
     end
   end

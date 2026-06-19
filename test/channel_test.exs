@@ -1,6 +1,6 @@
-defmodule MalachiMQ.ChannelTest do
+defmodule Malachi.ChannelTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.Channel
+  alias Malachi.Channel
 
   setup do
     # Ensure channel processes are cleaned up between tests

@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Test.MassSpawnHelper do
+defmodule Malachi.Test.MassSpawnHelper do
   @moduledoc """
   Helpers to spawn sharded logical subscribers for large-scale channel tests.
 
@@ -57,7 +57,7 @@ defmodule MalachiMQ.Test.MassSpawnHelper do
 
   defp shard_loop(channel, logical_per_process) do
     # subscribe this process to channel
-    MalachiMQ.Channel.subscribe(channel, self())
+    Malachi.Channel.subscribe(channel, self())
 
     receive do
       {:channel_message, _message} ->

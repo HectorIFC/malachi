@@ -14,7 +14,7 @@ defmodule ConnectionBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Connection Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{

@@ -1,6 +1,6 @@
 # Rate Limiting & Connection Controls
 
-Comprehensive rate limiting and connection control system for MalachiMQ.
+Comprehensive rate limiting and connection control system for Malachi.
 
 ## Features
 
@@ -65,7 +65,7 @@ MALACHIMQ_MAX_TOTAL_CONN=10000
 
 ### RateLimiter GenServer
 
-**File**: `lib/malachimq/rate_limiter.ex`
+**File**: `lib/malachi/rate_limiter.ex`
 
 **ETS Schema**:
 - `{{identifier, action}, {count, last_refill_ms, window_start_ms}}` - Token buckets
@@ -91,12 +91,12 @@ end
 
 ### ConnectionLimiter GenServer
 
-**File**: `lib/malachimq/connection_limiter.ex`
+**File**: `lib/malachi/connection_limiter.ex`
 
 **ETS Schema**:
-- `:malachimq_conn_limits_ip` - `{ip, count}`
-- `:malachimq_conn_limits_global` - `{:total, count}`
-- `:malachimq_conn_pids` - `{pid, ip, monitor_ref}`
+- `:malachi_conn_limits_ip` - `{ip, count}`
+- `:malachi_conn_limits_global` - `{:total, count}`
+- `:malachi_conn_pids` - `{pid, ip, monitor_ref}`
 
 **Key Features**:
 - Atomic counter increment with rollback on limit exceeded
@@ -281,11 +281,11 @@ defp format_ip({a, b, c, d, e, f, g, h}), do: "#{hex}:#{hex}:..."
 
 ```elixir
 # Increment blocked counter
-MalachiMQ.Metrics.increment_rate_limit_blocked(:auth)
-MalachiMQ.Metrics.increment_connection_limit_blocked()
+Malachi.Metrics.increment_rate_limit_blocked(:auth)
+Malachi.Metrics.increment_connection_limit_blocked()
 
 # Query in dashboard
-system_metrics = MalachiMQ.Metrics.get_system_metrics()
+system_metrics = Malachi.Metrics.get_system_metrics()
 system_metrics.rate_limiting.auth_blocked  #=> 1523
 ```
 
@@ -295,27 +295,27 @@ system_metrics.rate_limiting.auth_blocked  #=> 1523
 
 ```elixir
 # In IEx
-iex> Application.get_env(:malachimq, :auth_rate_limit)
+iex> Application.get_env(:malachi, :auth_rate_limit)
 10
 
-iex> Application.get_env(:malachimq, :rate_limit_enabled)
+iex> Application.get_env(:malachi, :rate_limit_enabled)
 true
 ```
 
 ### Inspect Buckets
 
 ```elixir
-iex> MalachiMQ.RateLimiter.get_stats()
+iex> Malachi.RateLimiter.get_stats()
 %{total_buckets: 1523, total_blocked_entries: 234}
 
-iex> MalachiMQ.RateLimiter.get_top_blocked(:auth, 5)
+iex> Malachi.RateLimiter.get_top_blocked(:auth, 5)
 [{"192.168.1.100", 523}, {"10.0.0.50", 312}, ...]
 ```
 
 ### Check Connections
 
 ```elixir
-iex> MalachiMQ.ConnectionLimiter.get_stats()
+iex> Malachi.ConnectionLimiter.get_stats()
 %{
   total_connections: 347,
   unique_ips: 52,
@@ -323,7 +323,7 @@ iex> MalachiMQ.ConnectionLimiter.get_stats()
   max_total: 10_000
 }
 
-iex> MalachiMQ.ConnectionLimiter.list_connections()
+iex> Malachi.ConnectionLimiter.list_connections()
 %{"192.168.1.10" => 15, "10.0.0.5" => 23, ...}
 ```
 
@@ -331,11 +331,11 @@ iex> MalachiMQ.ConnectionLimiter.list_connections()
 
 ```elixir
 # Reset rate limit for specific identifier
-iex> MalachiMQ.RateLimiter.reset_bucket("192.168.1.100", :auth)
+iex> Malachi.RateLimiter.reset_bucket("192.168.1.100", :auth)
 :ok
 
 # Unregister connection
-iex> MalachiMQ.ConnectionLimiter.unregister_connection(pid)
+iex> Malachi.ConnectionLimiter.unregister_connection(pid)
 :ok
 ```
 
@@ -405,4 +405,4 @@ When adding new rate-limited operations:
 
 ## License
 
-Part of MalachiMQ - see main project LICENSE.
+Part of Malachi - see main project LICENSE.

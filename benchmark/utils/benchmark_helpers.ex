@@ -108,7 +108,7 @@ defmodule BenchmarkHelpers do
   end
 
   @doc """
-  Gets MalachiMQ version from mix.exs.
+  Gets Malachi version from mix.exs.
   """
   def get_version do
     case File.read("mix.exs") do
@@ -175,7 +175,7 @@ defmodule BenchmarkHelpers do
   so Process.exit(:kill) from kill_all_consumers won't cascade.
   """
   def start_benchmark_consumer(queue_name, callback, opts \\ []) do
-    {:ok, pid} = MalachiMQ.Consumer.start_link({queue_name, callback, opts})
+    {:ok, pid} = Malachi.Consumer.start_link({queue_name, callback, opts})
     Process.unlink(pid)
     {:ok, pid}
   end
@@ -189,7 +189,7 @@ defmodule BenchmarkHelpers do
     old_trap = Process.flag(:trap_exit, true)
 
     try do
-      MalachiMQ.Queue.kill_all_consumers(queue_name)
+      Malachi.Queue.kill_all_consumers(queue_name)
     rescue
       _ -> :ok
     catch
@@ -200,7 +200,7 @@ defmodule BenchmarkHelpers do
     drain_exit_messages()
 
     try do
-      MalachiMQ.Metrics.reset_metrics(queue_name)
+      Malachi.Metrics.reset_metrics(queue_name)
     rescue
       _ -> :ok
     catch

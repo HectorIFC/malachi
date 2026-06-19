@@ -1,7 +1,7 @@
-defmodule MalachiMQ.TLSConfigTest do
+defmodule Malachi.TLSConfigTest do
   use ExUnit.Case, async: true
 
-  alias MalachiMQ.SocketHelper
+  alias Malachi.SocketHelper
 
   describe "TLS Configuration" do
     test "socket helper handles gen_tcp operations" do
@@ -16,11 +16,11 @@ defmodule MalachiMQ.TLSConfigTest do
     end
 
     test "TLS configuration can be read from application config" do
-      enable_tls = Application.get_env(:malachimq, :enable_tls, false)
+      enable_tls = Application.get_env(:malachi, :enable_tls, false)
       assert is_boolean(enable_tls)
 
-      tls_certfile = Application.get_env(:malachimq, :tls_certfile)
-      tls_keyfile = Application.get_env(:malachimq, :tls_keyfile)
+      tls_certfile = Application.get_env(:malachi, :tls_certfile)
+      tls_keyfile = Application.get_env(:malachi, :tls_keyfile)
 
       assert is_nil(tls_certfile) or is_binary(tls_certfile)
       assert is_nil(tls_keyfile) or is_binary(tls_keyfile)
@@ -58,11 +58,11 @@ defmodule MalachiMQ.TLSConfigTest do
 
   describe "Backward Compatibility" do
     test "application can start without TLS certificates" do
-      enable_tls = Application.get_env(:malachimq, :enable_tls, false)
+      enable_tls = Application.get_env(:malachi, :enable_tls, false)
 
       if not enable_tls do
-        certfile = Application.get_env(:malachimq, :tls_certfile)
-        keyfile = Application.get_env(:malachimq, :tls_keyfile)
+        certfile = Application.get_env(:malachi, :tls_certfile)
+        keyfile = Application.get_env(:malachi, :tls_keyfile)
         assert certfile == nil or is_binary(certfile)
         assert keyfile == nil or is_binary(keyfile)
       end

@@ -24,10 +24,10 @@ FROM alpine:3.21 AS runner
 
 ARG APP_VERSION
 
-LABEL org.opencontainers.image.title="MalachiMQ" \
+LABEL org.opencontainers.image.title="Malachi" \
       org.opencontainers.image.description="High-performance message system" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.source="https://github.com/HectorIFC/malachimq" \
+      org.opencontainers.image.source="https://github.com/HectorIFC/malachi" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="HectorIFC"
 
@@ -49,19 +49,19 @@ ENV LC_ALL=C.UTF-8
 
 WORKDIR /app
 
-RUN addgroup -g 1000 malachimq && \
-    adduser -u 1000 -G malachimq -s /bin/sh -D malachimq
+RUN addgroup -g 1000 malachi && \
+    adduser -u 1000 -G malachi -s /bin/sh -D malachi
 
 RUN mkdir -p /app/data/mnesia && \
-    chown -R malachimq:malachimq /app/data
+    chown -R malachi:malachi /app/data
 
-COPY --from=builder --chown=malachimq:malachimq /app/_build/prod/rel/malachimq ./
+COPY --from=builder --chown=malachi:malachi /app/_build/prod/rel/malachi ./
 
-USER malachimq
+USER malachi
 
 ENV MALACHIMQ_TCP_PORT=4040
 ENV MALACHIMQ_DASHBOARD_PORT=4041
-ENV MALACHIMQ_LOCALE=en_US
+ENV MALACHI_LOCALE=en_US
 
 EXPOSE 4040 4041
 
@@ -71,6 +71,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # Security hardening recommendations:
 #   docker run --security-opt=no-new-privileges:true \
 #     --read-only --tmpfs /tmp:rw,noexec,nosuid \
-#     hectorcardoso/malachimq:0.5.0
+#     hectorcardoso/malachi:0.5.0
 
-CMD ["bin/malachimq", "start"]
+CMD ["bin/malachi", "start"]

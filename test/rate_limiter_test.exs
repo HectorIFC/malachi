@@ -1,14 +1,14 @@
-defmodule MalachiMQ.RateLimiterTest do
+defmodule Malachi.RateLimiterTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.RateLimiter
+  alias Malachi.RateLimiter
 
   setup do
     # Temporarily enable rate limiting for these tests
-    original_value = Application.get_env(:malachimq, :rate_limit_enabled)
-    Application.put_env(:malachimq, :rate_limit_enabled, true)
+    original_value = Application.get_env(:malachi, :rate_limit_enabled)
+    Application.put_env(:malachi, :rate_limit_enabled, true)
 
     on_exit(fn ->
-      Application.put_env(:malachimq, :rate_limit_enabled, original_value)
+      Application.put_env(:malachi, :rate_limit_enabled, original_value)
     end)
 
     :ok
@@ -314,7 +314,7 @@ defmodule MalachiMQ.RateLimiterTest do
   describe "disabled rate limiting" do
     test "bypasses checks when disabled" do
       # Temporarily disable for this test
-      Application.put_env(:malachimq, :rate_limit_enabled, false)
+      Application.put_env(:malachi, :rate_limit_enabled, false)
 
       identifier = "any_user"
       # Would normally block everything
@@ -326,7 +326,7 @@ defmodule MalachiMQ.RateLimiterTest do
       assert :ok = RateLimiter.check_limit(identifier, :auth, config)
 
       # Re-enable for other tests
-      Application.put_env(:malachimq, :rate_limit_enabled, true)
+      Application.put_env(:malachi, :rate_limit_enabled, true)
     end
   end
 end

@@ -1,16 +1,16 @@
-defmodule MalachiMQTest do
+defmodule MalachiTest do
   use ExUnit.Case
 
-  describe "MalachiMQ Application" do
+  describe "Malachi Application" do
     test "application starts successfully" do
-      assert Code.ensure_loaded?(MalachiMQ.Application)
+      assert Code.ensure_loaded?(Malachi.Application)
     end
 
     test "main modules are available" do
-      assert Code.ensure_loaded?(MalachiMQ.Queue)
-      assert Code.ensure_loaded?(MalachiMQ.Auth)
-      assert Code.ensure_loaded?(MalachiMQ.AckManager)
-      assert Code.ensure_loaded?(MalachiMQ.PartitionManager)
+      assert Code.ensure_loaded?(Malachi.Queue)
+      assert Code.ensure_loaded?(Malachi.Auth)
+      assert Code.ensure_loaded?(Malachi.AckManager)
+      assert Code.ensure_loaded?(Malachi.PartitionManager)
     end
   end
 end

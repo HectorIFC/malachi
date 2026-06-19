@@ -1,30 +1,30 @@
 /**
- * MalachiMQ Producer - Internationalization (i18n)
+ * Malachi Producer - Internationalization (i18n)
  * 
  * Supports Brazilian Portuguese (pt_BR) and American English (en_US)
  * 
  * Usage:
- *   MALACHIMQ_LOCALE=en_US node producer.js
- *   MALACHIMQ_LOCALE=pt_BR node producer.js
+ *   MALACHI_LOCALE=en_US node producer.js
+ *   MALACHI_LOCALE=pt_BR node producer.js
  */
 
 const translations = {
   // Producer Header
   producer_title: {
-    pt_BR: '🚀 MalachiMQ Producer',
-    en_US: '🚀 MalachiMQ Producer',
+    pt_BR: '🚀 Malachi Producer',
+    en_US: '🚀 Malachi Producer',
   },
   producer_title_fast: {
-    pt_BR: '🚀 MalachiMQ Producer (Modo Rápido)',
-    en_US: '🚀 MalachiMQ Producer (Fast Mode)',
+    pt_BR: '🚀 Malachi Producer (Modo Rápido)',
+    en_US: '🚀 Malachi Producer (Fast Mode)',
   },
   producer_title_continuous: {
-    pt_BR: '🚀 MalachiMQ Producer (Modo Contínuo)',
-    en_US: '🚀 MalachiMQ Producer (Continuous Mode)',
+    pt_BR: '🚀 Malachi Producer (Modo Contínuo)',
+    en_US: '🚀 Malachi Producer (Continuous Mode)',
   },
   microservice_simulator: {
-    pt_BR: 'MalachiMQ Producer - Simulador de Microserviço',
-    en_US: 'MalachiMQ Producer - Microservice Simulator',
+    pt_BR: 'Malachi Producer - Simulador de Microserviço',
+    en_US: 'Malachi Producer - Microservice Simulator',
   },
   
   // Connection
@@ -41,8 +41,8 @@ const translations = {
     en_US: 'Messages',
   },
   connected: {
-    pt_BR: '✓ Conectado ao MalachiMQ',
-    en_US: '✓ Connected to MalachiMQ',
+    pt_BR: '✓ Conectado ao Malachi',
+    en_US: '✓ Connected to Malachi',
   },
   connections_established: {
     pt_BR: '✓ %{count} conexões estabelecidas',
@@ -119,8 +119,8 @@ const translations = {
     en_US: 'Not connected. Call connect() first.',
   },
   check_server_running: {
-    pt_BR: 'Verifique se o MalachiMQ está rodando em %{host}:%{port}',
-    en_US: 'Check if MalachiMQ is running at %{host}:%{port}',
+    pt_BR: 'Verifique se o Malachi está rodando em %{host}:%{port}',
+    en_US: 'Check if Malachi is running at %{host}:%{port}',
   },
   
   // Actions
@@ -202,7 +202,7 @@ const translations = {
 };
 
 // Get current locale from environment
-const currentLocale = process.env.MALACHIMQ_LOCALE || 'pt_BR';
+const currentLocale = process.env.MALACHI_LOCALE || 'pt_BR';
 
 /**
  * Translate a key with optional interpolation

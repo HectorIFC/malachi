@@ -9,10 +9,10 @@
 # Usage:
 #   mix run benchmark/overflow_strategies_benchmark.exs
 
-Application.ensure_all_started(:malachimq)
+Application.ensure_all_started(:malachi)
 
 defmodule OverflowBenchmark do
-  alias MalachiMQ.{Queue, QueueConfig}
+  alias Malachi.{Queue, QueueConfig}
 
   def setup_queue(strategy, max_buffer) do
     queue_name = "bench_#{strategy}_#{:erlang.unique_integer([:positive])}"

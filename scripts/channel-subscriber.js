@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * MalachiMQ Channel Subscriber
+ * Malachi Channel Subscriber
  * 
  * Subscribes to channels and receives messages in real-time.
  * Best-effort delivery - only receives messages while connected.
@@ -316,7 +316,7 @@ async function main() {
     channelNames.push(CONFIG.channelName);
   }
 
-  console.log(colors.cyan(`\n📡 MalachiMQ Channel Subscriber`));
+  console.log(colors.cyan(`\n📡 Malachi Channel Subscriber`));
   console.log(colors.gray(`   Host: ${CONFIG.host}:${CONFIG.port}`));
   console.log(colors.gray(`   User: ${CONFIG.username}`));
   console.log(colors.gray(`   Channels: ${channelNames.join(', ')}`));
@@ -359,14 +359,14 @@ async function main() {
 
   } catch (err) {
     console.error(colors.red(`\n❌ Error: ${err.message}`));
-    console.error(colors.gray(`   Check if MalachiMQ is running on ${CONFIG.host}:${CONFIG.port}\n`));
+    console.error(colors.gray(`   Check if Malachi is running on ${CONFIG.host}:${CONFIG.port}\n`));
     process.exit(1);
   }
 }
 
 function showHelp() {
   console.log(`
-${colors.cyan('📡 MalachiMQ Channel Subscriber')}
+${colors.cyan('📡 Malachi Channel Subscriber')}
 
 ${colors.yellow('Usage:')}
   node channel-subscriber.js [options] [channel_name...]

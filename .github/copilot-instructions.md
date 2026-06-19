@@ -1,8 +1,8 @@
-# MalachiMQ - AI Coding Agent Instructions
+# Malachi - AI Coding Agent Instructions
 
 ## Project Overview
 
-MalachiMQ is a High-performance message system. It provides persistent queues with ETS-backed storage, pub/sub channels with best-effort delivery, TCP/TLS server for client connections, web dashboard with SSE streaming, session-based authentication with Argon2 hashing, rate limiting, connection limiting, audit logging, input validation, backpressure control, and automatic queue partitioning across CPU cores.
+Malachi is a High-performance message system. It provides persistent queues with ETS-backed storage, pub/sub channels with best-effort delivery, TCP/TLS server for client connections, web dashboard with SSE streaming, session-based authentication with Argon2 hashing, rate limiting, connection limiting, audit logging, input validation, backpressure control, and automatic queue partitioning across CPU cores.
 
 **Runtime:** Elixir 1.19+ / OTP 28+ on the BEAM VM.
 
@@ -13,7 +13,7 @@ MalachiMQ is a High-performance message system. It provides persistent queues wi
 The application starts 24 child processes in a `one_for_one` supervisor:
 
 ```
-MalachiMQ.Supervisor (one_for_one)
+Malachi.Supervisor (one_for_one)
 ├── QueueRegistry (partitioned by schedulers)
 ├── ChannelRegistry (unique keys)
 ├── QueueSupervisor (DynamicSupervisor, max 100k)
@@ -37,7 +37,7 @@ MalachiMQ.Supervisor (one_for_one)
 └── Dashboard (HTTP server)
 ```
 
-### Core Components (`lib/malachimq/`)
+### Core Components (`lib/malachi/`)
 
 #### Queue & Messaging
 - **`queue.ex`** - Per-partition queue GenServer using ETS for message storage and dispatch
@@ -223,14 +223,14 @@ mix run benchmark/baselines/baseline_throughput.exs   # Single benchmark
 - `with` expressions for chaining validations
 
 ### Naming Conventions
-- **Modules**: `MalachiMQ.PascalCase` (e.g., `MalachiMQ.TCPProtocol`)
+- **Modules**: `Malachi.PascalCase` (e.g., `Malachi.TCPProtocol`)
 - **Functions/variables**: `snake_case`
 - **Module attributes**: `@snake_case` (e.g., `@max_payload_size`)
 - **Queue process names**: `{queue_name, partition}` tuples via Registry
-- **ETS tables**: `String.to_atom("malachimq_#{name}_#{partition}")` for dynamic tables
+- **ETS tables**: `String.to_atom("malachi_#{name}_#{partition}")` for dynamic tables
 
 ### Internationalization
-- Use `MalachiMQ.I18n.t/2` for **all** log messages
+- Use `Malachi.I18n.t/2` for **all** log messages
 - Translations in `i18n.ex` with both `"pt_BR"` and `"en_US"` entries
 - Template interpolation: `I18n.t(:key, binding: "value")`
 
@@ -334,7 +334,7 @@ Configuration flows: `config/config.exs` → `config/runtime.exs` (env vars) →
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MALACHIMQ_AUDIT_LOG_OUTPUT` | `both` (prod) | Output: `file`, `stdout`, `both`, `ets_only` |
-| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachimq/audit.log` | Log file path |
+| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Log file path |
 | `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size before rotation |
 
 ### Resource Monitoring
@@ -352,7 +352,7 @@ Configuration flows: `config/config.exs` → `config/runtime.exs` (env vars) →
 ### Internationalization
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_LOCALE` | `en_US` | Locale: `en_US` or `pt_BR` |
+| `MALACHI_LOCALE` | `en_US` | Locale: `en_US` or `pt_BR` |
 
 ## Testing
 
@@ -482,9 +482,9 @@ mix run benchmark/scripts/compare_baselines.exs      # Compare results
 ### IEx Benchmarking
 ```elixir
 iex -S mix
-MalachiMQ.Benchmark.spawn_consumers("test_queue", 10_000)
-MalachiMQ.Benchmark.send_messages("test_queue", 100_000)
-MalachiMQ.Benchmark.system_info()
+Malachi.Benchmark.spawn_consumers("test_queue", 10_000)
+Malachi.Benchmark.send_messages("test_queue", 100_000)
+Malachi.Benchmark.system_info()
 ```
 
 ## Adding New Features
@@ -570,11 +570,11 @@ make docker-test-all # Run tests in Docker environment
 
 | Table Name | Type | Purpose |
 |------------|------|---------|
-| `:malachimq_users` | `ordered_set` | User credentials and permissions |
-| `:malachimq_sessions` | `bag` | Active session tokens |
-| `:malachimq_metrics` | `set` | Atomic counters (enqueued, processed, etc.) |
-| `:malachimq_validated_names` | `set` | Validator cache for names |
-| `:malachimq_validation_logs` | `bag` | Validation error throttling |
-| `:malachimq_overflow_logs` | `bag` | Overflow event throttling |
-| `:malachimq_audit_log` | `bag` | In-memory security events |
+| `:malachi_users` | `ordered_set` | User credentials and permissions |
+| `:malachi_sessions` | `bag` | Active session tokens |
+| `:malachi_metrics` | `set` | Atomic counters (enqueued, processed, etc.) |
+| `:malachi_validated_names` | `set` | Validator cache for names |
+| `:malachi_validation_logs` | `bag` | Validation error throttling |
+| `:malachi_overflow_logs` | `bag` | Overflow event throttling |
+| `:malachi_audit_log` | `bag` | In-memory security events |
 | Per-queue anonymous tables | `bag` | Message storage per partition |

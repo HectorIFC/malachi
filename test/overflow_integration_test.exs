@@ -1,9 +1,9 @@
-defmodule MalachiMQ.OverflowIntegrationTest do
+defmodule Malachi.OverflowIntegrationTest do
   use ExUnit.Case, async: false
-  alias MalachiMQ.{Backpressure, Queue, QueueConfig}
+  alias Malachi.{Backpressure, Queue, QueueConfig}
 
   setup do
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     queue_name = "overflow_test_#{:erlang.unique_integer([:positive])}"
 
     on_exit(fn ->

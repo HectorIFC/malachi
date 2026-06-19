@@ -1,4 +1,4 @@
-defmodule MalachiMQ.ChannelIntegrationTest do
+defmodule Malachi.ChannelIntegrationTest do
   use ExUnit.Case, async: false
 
   @port 4040

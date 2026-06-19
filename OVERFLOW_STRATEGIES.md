@@ -1,6 +1,6 @@
 # Overflow Strategies & Backpressure
 
-MalachiMQ provides comprehensive resource management through configurable overflow behaviors and intelligent backpressure signaling. This document explains the available strategies, their use cases, and how to configure them.
+Malachi provides comprehensive resource management through configurable overflow behaviors and intelligent backpressure signaling. This document explains the available strategies, their use cases, and how to configure them.
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ MalachiMQ provides comprehensive resource management through configurable overfl
 
 ## Overview
 
-When queues reach their configured buffer limits, MalachiMQ needs to decide how to handle additional messages. The overflow strategy determines this behavior. Additionally, the system provides backpressure signals to producers before reaching capacity, allowing graceful degradation.
+When queues reach their configured buffer limits, Malachi needs to decide how to handle additional messages. The overflow strategy determines this behavior. Additionally, the system provides backpressure signals to producers before reaching capacity, allowing graceful degradation.
 
 ### Key Features
 
@@ -228,7 +228,7 @@ max_blocked_producers: 1000  # Safety limit
 
 ## Backpressure Signaling
 
-MalachiMQ provides proactive backpressure signals independent of overflow strategy. Producers receive warnings when queues approach capacity, allowing graceful slowdown.
+Malachi provides proactive backpressure signals independent of overflow strategy. Producers receive warnings when queues approach capacity, allowing graceful slowdown.
 
 ### Pressure Levels
 
@@ -521,10 +521,10 @@ publish_message(payload)
 
 ```bash
 # Benchmark overflow behavior
-MalachiMQ.Benchmark.test_overflow("queue", :drop_newest, 100_000)
+Malachi.Benchmark.test_overflow("queue", :drop_newest, 100_000)
 
 # Measure blocked producer latency
-MalachiMQ.Benchmark.test_blocking("queue", 1000, 5000)
+Malachi.Benchmark.test_blocking("queue", 1000, 5000)
 ```
 
 ### 6. Use Force Updates Carefully
@@ -643,7 +643,7 @@ Prevents log spam during sustained overflow while maintaining visibility.
 **Symptom**: Many `rejected` events in metrics  
 **Cause**: Queue using `:reject` strategy, buffer full  
 **Solution**:
-1. Scale consumers: `MalachiMQ.Consumer.start(queue, handler, count: 10)`
+1. Scale consumers: `Malachi.Consumer.start(queue, handler, count: 10)`
 2. Increase buffer: `update_queue_config(queue, max_buffer_size: 20000)`
 3. Switch strategy: `update_queue_config(queue, overflow_behavior: "block")`
 
@@ -679,11 +679,11 @@ Prevents log spam during sustained overflow while maintaining visibility.
 
 ## Related Documentation
 
-- [README.md](README.md) - General MalachiMQ documentation
+- [README.md](README.md) - General Malachi documentation
 - [RATE_LIMITING.md](RATE_LIMITING.md) - Rate limiting strategies
 - [DOCKER_README.md](DOCKER_README.md) - Container deployment
 - Benchmarking: `benchmark/` directory
 
 ## License
 
-MalachiMQ is released under the MIT License. See LICENSE for details.
+Malachi is released under the MIT License. See LICENSE for details.

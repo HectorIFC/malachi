@@ -1,36 +1,36 @@
-defmodule MalachiMQ.DashboardSecurityTest do
+defmodule Malachi.DashboardSecurityTest do
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Test.DashboardHelper
+  alias Malachi.Test.DashboardHelper
 
   # These tests require dashboard authentication and rate limiting enabled in config/test.exs
 
-  @dashboard_port Application.compile_env(:malachimq, :dashboard_port, 4041)
+  @dashboard_port Application.compile_env(:malachi, :dashboard_port, 4041)
 
   setup do
     # Reset rate limiter BEFORE tests (not just on_exit)
-    MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+    Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
 
     # Wait for application to be fully started
     :timer.sleep(200)
 
     # Remove users if they exist from previous tests
-    _ = MalachiMQ.Auth.remove_user("dashboard_admin")
-    _ = MalachiMQ.Auth.remove_user("producer_user")
+    _ = Malachi.Auth.remove_user("dashboard_admin")
+    _ = Malachi.Auth.remove_user("producer_user")
 
     # Create test user with admin permission
-    :ok = MalachiMQ.Auth.add_user("dashboard_admin", "admin_pass_123", [:admin])
-    {:ok, admin_token} = MalachiMQ.Auth.authenticate("dashboard_admin", "admin_pass_123", {127, 0, 0, 1})
+    :ok = Malachi.Auth.add_user("dashboard_admin", "admin_pass_123", [:admin])
+    {:ok, admin_token} = Malachi.Auth.authenticate("dashboard_admin", "admin_pass_123", {127, 0, 0, 1})
 
     # Create test user with only produce permission
-    :ok = MalachiMQ.Auth.add_user("producer_user", "prod_pass_123", [:produce])
-    {:ok, producer_token} = MalachiMQ.Auth.authenticate("producer_user", "prod_pass_123", {127, 0, 0, 1})
+    :ok = Malachi.Auth.add_user("producer_user", "prod_pass_123", [:produce])
+    {:ok, producer_token} = Malachi.Auth.authenticate("producer_user", "prod_pass_123", {127, 0, 0, 1})
 
     on_exit(fn ->
-      _ = MalachiMQ.Auth.remove_user("dashboard_admin")
-      _ = MalachiMQ.Auth.remove_user("producer_user")
+      _ = Malachi.Auth.remove_user("dashboard_admin")
+      _ = Malachi.Auth.remove_user("producer_user")
       # Reset rate limiter for this IP after each test
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     end)
 
     {:ok, admin_token: admin_token, producer_token: producer_token}
@@ -61,7 +61,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=invalid_token_12345\r
+          Cookie: malachi_token=invalid_token_12345\r
           \r
           """
 
@@ -84,7 +84,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -107,7 +107,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -116,7 +116,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
 
           assert String.contains?(response, "200 OK")
           assert String.contains?(response, "text/html")
-          assert String.contains?(response, "MalachiMQ Dashboard")
+          assert String.contains?(response, "Malachi Dashboard")
 
           :gen_tcp.close(socket)
 
@@ -131,7 +131,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET /metrics HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -188,7 +188,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
                    String.contains?(response, "200")
 
           assert String.contains?(response, "token")
-          assert String.contains?(response, "Set-Cookie: malachimq_token=")
+          assert String.contains?(response, "Set-Cookie: malachi_token=")
           assert String.contains?(response, "HttpOnly")
 
           :gen_tcp.close(socket)
@@ -228,7 +228,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
 
           assert String.contains?(response, "200 OK")
           assert String.contains?(response, "text/html")
-          assert String.contains?(response, "MalachiMQ")
+          assert String.contains?(response, "Malachi")
           assert String.contains?(response, "loginForm")
 
           :gen_tcp.close(socket)
@@ -246,7 +246,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -276,7 +276,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET /metrics HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -325,7 +325,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
       :timer.sleep(100)
 
       # Reset rate limiter for this IP to start fresh
-      MalachiMQ.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
 
       # Give it a moment to settle
       :timer.sleep(100)
@@ -376,7 +376,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=#{token}\r
+          Cookie: malachi_token=#{token}\r
           \r
           """
 
@@ -392,7 +392,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
       :timer.sleep(100)
 
       # Check audit log
-      events = MalachiMQ.AuditLog.get_events_by_type(:dashboard_access, 10)
+      events = Malachi.AuditLog.get_events_by_type(:dashboard_access, 10)
       assert events != []
 
       recent_event = List.first(events)
@@ -406,7 +406,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET / HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=invalid_token\r
+          Cookie: malachi_token=invalid_token\r
           \r
           """
 
@@ -422,7 +422,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
       :timer.sleep(100)
 
       # Check audit log
-      events = MalachiMQ.AuditLog.get_events_by_type(:dashboard_auth_failure, 10)
+      events = Malachi.AuditLog.get_events_by_type(:dashboard_auth_failure, 10)
       assert events != []
     end
   end
@@ -434,7 +434,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           request = """
           GET /logout HTTP/1.1\r
           Host: localhost\r
-          Cookie: malachimq_token=some_token\r
+          Cookie: malachi_token=some_token\r
           \r
           """
 
@@ -486,7 +486,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
           {:ok, login_response} = :gen_tcp.recv(socket, 0, 2000)
           :gen_tcp.close(socket)
 
-          assert String.contains?(login_response, "Set-Cookie: malachimq_token=")
+          assert String.contains?(login_response, "Set-Cookie: malachi_token=")
 
           # Extract token from Set-Cookie header
           token = DashboardHelper.extract_set_cookie(login_response)
@@ -498,7 +498,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
               request2 = """
               GET / HTTP/1.1\r
               Host: localhost\r
-              Cookie: malachimq_token=#{token}\r
+              Cookie: malachi_token=#{token}\r
               \r
               """
 
@@ -506,7 +506,7 @@ defmodule MalachiMQ.DashboardSecurityTest do
               {:ok, response2} = :gen_tcp.recv(socket2, 0, 5000)
 
               assert String.contains?(response2, "200 OK")
-              assert String.contains?(response2, "MalachiMQ Dashboard")
+              assert String.contains?(response2, "Malachi Dashboard")
               :gen_tcp.close(socket2)
 
             {:error, _} ->

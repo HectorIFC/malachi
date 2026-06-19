@@ -2,7 +2,7 @@
 
 ## Overview
 
-Complete implementation of resource management and backpressure system for MalachiMQ, providing:
+Complete implementation of resource management and backpressure system for Malachi, providing:
 - **4 overflow strategies** with different performance characteristics
 - **Dynamic backpressure signaling** with 4 pressure levels
 - **Message size validation** to prevent resource exhaustion
@@ -18,41 +18,41 @@ Complete implementation of resource management and backpressure system for Malac
    - 7 new environment variables with type conversion
    - Default: 1MB message size, 10k buffer, drop_newest strategy
    
-2. ✅ **QueueConfig Extension** (lib/malachimq/queue_config.ex)
+2. ✅ **QueueConfig Extension** (lib/malachi/queue_config.ex)
    - 6 new backpressure fields
    - Hybrid update validation (50% excess threshold)
    - Accepts Map OR Keyword list input
    
-3. ✅ **Message Size Validation** (lib/malachimq/validator.ex)
+3. ✅ **Message Size Validation** (lib/malachi/validator.ex)
    - `validate_message_size/2` called BEFORE struct creation
    - Rate-limited logging (10/min)
    
-4. ✅ **Backpressure Module** (lib/malachimq/backpressure.ex)
+4. ✅ **Backpressure Module** (lib/malachi/backpressure.ex)
    - 4 pressure levels: low (<50%), medium (50-79%), high (≥threshold), full (100%)
    - Overloaded `should_apply_backpressure?/1` (accepts queue_name OR pressure_info)
    - Queue existence check to prevent implicit creation
    
-5. ✅ **Overflow Handling** (lib/malachimq/queue.ex)
+5. ✅ **Overflow Handling** (lib/malachi/queue.ex)
    - 4 strategies: drop_newest (O(1)), drop_oldest (O(log N)), reject (O(1)), block (O(1))
    - FIFO unblocking with individual timeouts
    - Rate-limited overflow logging (10 events/min)
    - **Bug fix**: `try_unblock_producers` now returns `{:ok, message}` not `:ok`
    
-6. ✅ **Metrics Expansion** (lib/malachimq/metrics.ex)
+6. ✅ **Metrics Expansion** (lib/malachi/metrics.ex)
    - 5 new functions: set_blocked_producers_count, increment_rejected, increment_dropped
    - 12 new fields in get_metrics/1
    
-7. ✅ **I18n Translations** (lib/malachimq/i18n.ex)
+7. ✅ **I18n Translations** (lib/malachi/i18n.ex)
    - 4 new keys: queue_config_updated, queue_config_force_updated, queue_overflow_event
    - pt_BR and en_US coverage
    
-8. ✅ **TCP Protocol** (lib/malachimq/tcp_protocol.ex)
+8. ✅ **TCP Protocol** (lib/malachi/tcp_protocol.ex)
    - Modified publish: rate limit → validate size → enqueue → backpressure signal
    - 5 new actions: update_queue_config, get_queue_config, list_actions
    - Fixed shorthand publish with same validation flow
    - Backpressure signals in response: `{"backpressure": true, "pressure_status": "high_pressure"}`
    
-9. ✅ **Dashboard UI** (lib/malachimq/dashboard.ex)
+9. ✅ **Dashboard UI** (lib/malachi/dashboard.ex)
    - CSS: pressure badges (4 colors + pulse animation), utilization bar (4 gradients)
    - JavaScript: 10 new metrics displayed (buffer_utilization_pct, blocked_producers_count, etc.)
    

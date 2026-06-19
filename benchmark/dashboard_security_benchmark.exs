@@ -38,7 +38,7 @@ defmodule DashboardSecurityBenchmark do
         {:ok, token}
       
       {:error, _} ->
-        IO.puts("⚠️  MalachiMQ TCP server not running on port 4040")
+        IO.puts("⚠️  Malachi TCP server not running on port 4040")
         IO.puts("Start the server with: mix run --no-halt")
         System.halt(1)
     end
@@ -58,7 +58,7 @@ defmodule DashboardSecurityBenchmark do
         auth_data["token"]
       
       {:error, _} ->
-        IO.puts("⚠️  Could not connect to MalachiMQ")
+        IO.puts("⚠️  Could not connect to Malachi")
         System.halt(1)
     end
 

@@ -1,6 +1,6 @@
 .PHONY: build run test docker-build docker-run docker-push clean release docker-buildx docker-buildx-push docker-buildx-setup docker-validate docker-regression-test
 
-APP_NAME = malachimq
+APP_NAME = malachi
 DOCKER_USERNAME ?= hectorcardoso
 VERSION ?= $(shell grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
 PLATFORMS ?= linux/amd64,linux/arm64

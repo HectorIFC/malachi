@@ -144,7 +144,7 @@ jobs:
           context: .
           push: false
           load: true
-          tags: malachimq:security-test
+          tags: malachi:security-test
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -152,7 +152,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'image'
-          image-ref: 'malachimq:security-test'
+          image-ref: 'malachi:security-test'
           format: 'sarif'
           output: 'trivy-docker-results.sarif'
           severity: 'CRITICAL,HIGH'

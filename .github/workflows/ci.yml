@@ -98,7 +98,7 @@ jobs:
           context: .
           push: false
           load: true
-          tags: malachimq:test
+          tags: malachi:test
           build-args: |
             APP_VERSION=test
           cache-from: type=gha
@@ -109,8 +109,8 @@ jobs:
           # Cleanup function to ensure container removal
           cleanup_container() {
             echo "🛑 Cleaning up container..."
-            docker stop malachimq-test > /dev/null 2>&1 || true
-            docker rm malachimq-test > /dev/null 2>&1 || true
+            docker stop malachi-test > /dev/null 2>&1 || true
+            docker rm malachi-test > /dev/null 2>&1 || true
           }
           trap cleanup_container EXIT
 
@@ -121,7 +121,7 @@ jobs:
           APP_PASS="ci_app_$(openssl rand -hex 8)"
 
           echo "🚀 Starting container..."
-          docker run -d --name malachimq-test \
+          docker run -d --name malachi-test \
             -e MALACHIMQ_CONFIG_ENV=test \
             -e MALACHIMQ_TCP_PORT=4040 \
             -e MALACHIMQ_DASHBOARD_PORT=4041 \
@@ -132,21 +132,21 @@ jobs:
             -e MALACHIMQ_REQUIRE_TLS=false \
             -p 4040:4040 \
             -p 4041:4041 \
-            malachimq:test
+            malachi:test
 
           # Wait for container to start (2 seconds)
           sleep 2
 
           # Check if container is running
-          if ! docker ps | grep -q malachimq-test; then
+          if ! docker ps | grep -q malachi-test; then
             echo "❌ Container failed to start!"
             echo ""
             echo "📋 Container logs:"
-            docker logs malachimq-test 2>&1 || echo "Could not retrieve logs"
+            docker logs malachi-test 2>&1 || echo "Could not retrieve logs"
             echo ""
             echo "🔍 Container diagnostic info:"
-            docker inspect malachimq-test --format='Exit Code: {{.State.ExitCode}}' 2>&1 || true
-            docker inspect malachimq-test --format='Started: {{.State.StartedAt}} | Ended: {{.State.FinishedAt}}' 2>&1 || true
+            docker inspect malachi-test --format='Exit Code: {{.State.ExitCode}}' 2>&1 || true
+            docker inspect malachi-test --format='Started: {{.State.StartedAt}} | Ended: {{.State.FinishedAt}}' 2>&1 || true
             exit 1
           fi
           echo "✅ Container is running"
@@ -165,8 +165,8 @@ jobs:
               echo "❌ Dashboard failed to start within 15 seconds!"
               echo "This indicates a performance issue that needs investigation."
               echo "📋 Container logs:"
-              docker logs malachimq-test
-              docker stop malachimq-test
+              docker logs malachi-test
+              docker stop malachi-test
               exit 1
             fi
             sleep 1
@@ -174,7 +174,7 @@ jobs:
 
           # Check if the application process is running
           echo "🔍 Checking application process..."
-          docker exec malachimq-test cat /proc/1/cmdline | tr '\0' ' '
+          docker exec malachi-test cat /proc/1/cmdline | tr '\0' ' '
 
           # Authenticate and get token
           echo "🔐 Authenticating with dashboard..."
@@ -185,8 +185,8 @@ jobs:
           if [ $? -ne 0 ]; then
             echo "❌ Authentication request failed!"
             echo "Response: $LOGIN_RESPONSE"
-            docker logs malachimq-test
-            docker stop malachimq-test
+            docker logs malachi-test
+            docker stop malachi-test
             exit 1
           fi
 
@@ -196,8 +196,8 @@ jobs:
           if [ $? -ne 0 ]; then
             echo "❌ Failed to extract token!"
             echo "Login response: $LOGIN_RESPONSE"
-            docker logs malachimq-test
-            docker stop malachimq-test
+            docker logs malachi-test
+            docker stop malachi-test
             exit 1
           fi
 
@@ -211,8 +211,8 @@ jobs:
           if [ $? -ne 0 ]; then
             echo "❌ Failed to fetch metrics!"
             echo "Response: $METRICS_RESPONSE"
-            docker logs malachimq-test
-            docker stop malachimq-test
+            docker logs malachi-test
+            docker stop malachi-test
             exit 1
           fi
 
@@ -220,7 +220,7 @@ jobs:
 
           # Stop container
           echo "🛑 Stopping container..."
-          docker stop malachimq-test
+          docker stop malachi-test
           echo "✅ All tests passed!"
 
   quality:

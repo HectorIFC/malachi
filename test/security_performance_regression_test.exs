@@ -1,4 +1,4 @@
-defmodule MalachiMQ.SecurityPerformanceRegressionTest do
+defmodule Malachi.SecurityPerformanceRegressionTest do
   @moduledoc """
   Performance regression tests ensuring security features maintain < 5% overhead.
 
@@ -7,8 +7,8 @@ defmodule MalachiMQ.SecurityPerformanceRegressionTest do
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.{Auth, Validator, RateLimiter, ConnectionLimiter}
-  alias MalachiMQ.Test.SecurityHelper
+  alias Malachi.{Auth, Validator, RateLimiter, ConnectionLimiter}
+  alias Malachi.Test.SecurityHelper
 
   @moduletag :security
   @moduletag :performance
@@ -149,8 +149,8 @@ defmodule MalachiMQ.SecurityPerformanceRegressionTest do
       ip = SecurityHelper.random_ip_string()
 
       # Temporarily allow many connections
-      original_limit = Application.get_env(:malachimq, :max_connections_per_ip, 10_000)
-      Application.put_env(:malachimq, :max_connections_per_ip, 2000)
+      original_limit = Application.get_env(:malachi, :max_connections_per_ip, 10_000)
+      Application.put_env(:malachi, :max_connections_per_ip, 2000)
 
       {time_us, _} =
         :timer.tc(fn ->
@@ -173,7 +173,7 @@ defmodule MalachiMQ.SecurityPerformanceRegressionTest do
       assert time_ms < 2000,
              "Register/unregister 1000 connections took #{Float.round(time_ms, 2)}ms, exceeds 2000ms"
 
-      Application.put_env(:malachimq, :max_connections_per_ip, original_limit)
+      Application.put_env(:malachi, :max_connections_per_ip, original_limit)
     end
 
     test "get_connection_count is fast" do

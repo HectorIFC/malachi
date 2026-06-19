@@ -1,41 +1,41 @@
-defmodule MalachiMQ.ApplicationTest do
+defmodule Malachi.ApplicationTest do
   use ExUnit.Case, async: false
 
   describe "application startup" do
     test "application is started" do
-      assert Process.whereis(MalachiMQ.Supervisor) != nil
+      assert Process.whereis(Malachi.Supervisor) != nil
     end
 
     test "all critical services are running" do
-      assert Process.whereis(MalachiMQ.PartitionManager) != nil
-      assert Process.whereis(MalachiMQ.Metrics) != nil
-      assert Process.whereis(MalachiMQ.Auth) != nil
-      assert Process.whereis(MalachiMQ.AckManager) != nil
-      assert Process.whereis(MalachiMQ.ConnectionRegistry) != nil
+      assert Process.whereis(Malachi.PartitionManager) != nil
+      assert Process.whereis(Malachi.Metrics) != nil
+      assert Process.whereis(Malachi.Auth) != nil
+      assert Process.whereis(Malachi.AckManager) != nil
+      assert Process.whereis(Malachi.ConnectionRegistry) != nil
     end
 
     test "QueueRegistry is available" do
-      assert Registry.whereis_name({MalachiMQ.QueueRegistry, {:test, 0}}) == :undefined
+      assert Registry.whereis_name({Malachi.QueueRegistry, {:test, 0}}) == :undefined
     end
 
     test "QueueSupervisor is running" do
-      assert Process.whereis(MalachiMQ.QueueSupervisor) != nil
+      assert Process.whereis(Malachi.QueueSupervisor) != nil
     end
 
     test "TaskSupervisor is running" do
-      assert Process.whereis(MalachiMQ.TaskSupervisor) != nil
+      assert Process.whereis(Malachi.TaskSupervisor) != nil
     end
   end
 
   describe "configuration" do
     test "TCP port is configured" do
-      port = Application.get_env(:malachimq, :tcp_port, 4040)
+      port = Application.get_env(:malachi, :tcp_port, 4040)
       assert is_integer(port)
       assert port > 0
     end
 
     test "dashboard port is configured" do
-      port = Application.get_env(:malachimq, :dashboard_port, 4041)
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
       assert is_integer(port)
       assert port > 0
     end

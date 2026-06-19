@@ -10,7 +10,7 @@
 
 defmodule TCPProtocolBenchmark do
   @moduledoc """
-  Benchmarks for MalachiMQ.TCPProtocol performance.
+  Benchmarks for Malachi.TCPProtocol performance.
   
   Tests:
   - JSON decoding throughput
@@ -22,7 +22,7 @@ defmodule TCPProtocolBenchmark do
   pure protocol performance without socket errors.
   """
 
-  alias MalachiMQ.TCPProtocol
+  alias Malachi.TCPProtocol
 
   @iterations 10_000
 
@@ -51,7 +51,7 @@ defmodule TCPProtocolBenchmark do
 
   def run do
     IO.puts("\n" <> String.duplicate("=", 80))
-    IO.puts("MalachiMQ TCP Protocol Performance Benchmark")
+    IO.puts("Malachi TCP Protocol Performance Benchmark")
     IO.puts(String.duplicate("=", 80))
     IO.puts("Iterations per test: #{format_number(@iterations)}")
     IO.puts("Note: Using mock socket to avoid network I/O")
@@ -277,9 +277,9 @@ defmodule TCPProtocolBenchmark do
 end
 
 # Start the application if not already started
-unless Process.whereis(MalachiMQ.Auth) do
-  IO.puts("Starting MalachiMQ application...")
-  {:ok, _} = Application.ensure_all_started(:malachimq)
+unless Process.whereis(Malachi.Auth) do
+  IO.puts("Starting Malachi application...")
+  {:ok, _} = Application.ensure_all_started(:malachi)
   Process.sleep(500)
 end
 

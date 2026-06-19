@@ -6,7 +6,7 @@
 set -e
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "MalachiMQ Performance Baseline Suite"
+echo "Malachi Performance Baseline Suite"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -21,7 +21,7 @@ mkdir -p "$PROJECT_ROOT/benchmark/results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 CONSOLIDATED_FILE="$PROJECT_ROOT/benchmark/results/baseline_${TIMESTAMP}.json"
 
-# Get MalachiMQ version
+# Get Malachi version
 VERSION=$(grep '@version "' "$PROJECT_ROOT/mix.exs" | sed 's/.*@version "\(.*\)".*/\1/')
 echo "Version: $VERSION"
 echo "Timestamp: $TIMESTAMP"
@@ -47,42 +47,42 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "1/5 - Throughput Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 cd "$PROJECT_ROOT"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_throughput.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_throughput.exs
 RESULT_FILES+=("$(ls -t benchmark/results/throughput_*.json | head -1)")
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "2/5 - Latency Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_latency.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_latency.exs
 RESULT_FILES+=("$(ls -t benchmark/results/latency_*.json | head -1)")
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "3/5 - Memory Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_memory.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_memory.exs
 RESULT_FILES+=("$(ls -t benchmark/results/memory_*.json | head -1)")
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "4/5 - Connections Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_connections.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_connections.exs
 RESULT_FILES+=("$(ls -t benchmark/results/connections_*.json | head -1)")
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "5/5 - Authentication Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_auth.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_auth.exs
 RESULT_FILES+=("$(ls -t benchmark/results/auth_*.json | head -1)")
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "6/6 - Edge Cases Benchmark"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elixir --sname malachimq_bench -S mix run benchmark/baseline_edge_cases.exs
+elixir --sname malachi_bench -S mix run benchmark/baseline_edge_cases.exs
 RESULT_FILES+=("$(ls -t benchmark/results/edge_cases_*.json | head -1)")
 echo ""
 

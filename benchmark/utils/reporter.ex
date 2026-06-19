@@ -183,6 +183,6 @@ defmodule BenchmarkReporter do
   end
 
   defp get_output_format do
-    Application.get_env(:malachimq, :benchmark_output_format, "json")
+    Application.get_env(:malachi, :benchmark_output_format, "json")
   end
 end

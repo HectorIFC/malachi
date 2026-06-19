@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Demo script for MalachiMQ Channel Pub/Sub
+# Demo script for Malachi Channel Pub/Sub
 # Shows best-effort delivery
 
 set -e
 
-echo "🚀 MalachiMQ Channel Pub/Sub Demo"
+echo "🚀 Malachi Channel Pub/Sub Demo"
 echo "=================================="
 echo ""
 echo "This demo shows:"
@@ -14,14 +14,14 @@ echo "  • Broadcasting to multiple subscribers"
 echo "  • Message drop when no subscribers"
 echo ""
 
-# Check if MalachiMQ is running
+# Check if Malachi is running
 if ! nc -z localhost 4040 2>/dev/null; then
-    echo "❌ MalachiMQ is not running on port 4040"
+    echo "❌ Malachi is not running on port 4040"
     echo "   Start it with: mix run --no-halt"
     exit 1
 fi
 
-echo "✓ MalachiMQ is running"
+echo "✓ Malachi is running"
 echo ""
 
 # Test 1: Publish with no subscribers (messages dropped)

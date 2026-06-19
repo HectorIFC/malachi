@@ -1,9 +1,9 @@
-defmodule MalachiMQ.ValidationIntegrationTest do
+defmodule Malachi.ValidationIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.Test.TCPHelper
+  alias Malachi.Test.TCPHelper
 
-  @tcp_port Application.compile_env(:malachimq, :tcp_port, 4040)
+  @tcp_port Application.compile_env(:malachi, :tcp_port, 4040)
 
   setup do
     # Give time for app to start

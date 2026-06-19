@@ -1,4 +1,4 @@
-defmodule MalachiMQ.AtMostOnceIntegrationTest do
+defmodule Malachi.AtMostOnceIntegrationTest do
   use ExUnit.Case
 
   @moduletag :integration
@@ -11,7 +11,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
   describe "at_most_once delivery mode end-to-end" do
     test "messages are delivered without ack tracking", %{queue_name: queue_name} do
       # Create at_most_once queue
-      {:ok, config} = MalachiMQ.QueueConfig.create_queue(queue_name, delivery_mode: :at_most_once)
+      {:ok, config} = Malachi.QueueConfig.create_queue(queue_name, delivery_mode: :at_most_once)
       assert config.delivery_mode == :at_most_once
 
       # Track received messages
@@ -26,14 +26,14 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
       end
 
       # Start consumer
-      {:ok, _consumer} = MalachiMQ.Consumer.start_link({queue_name, consumer_callback, []})
+      {:ok, _consumer} = Malachi.Consumer.start_link({queue_name, consumer_callback, []})
       :timer.sleep(50)
 
       # Publish messages
       messages = for i <- 1..10, do: "message_#{i}"
 
       Enum.each(messages, fn payload ->
-        MalachiMQ.Queue.enqueue(queue_name, payload)
+        Malachi.Queue.enqueue(queue_name, payload)
       end)
 
       # Verify all messages received
@@ -47,11 +47,11 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
       assert Enum.sort(received_messages) == Enum.sort(messages)
 
       # Verify no messages are pending in AckManager (at_most_once doesn't track)
-      pending = MalachiMQ.AckManager.pending_count(queue_name)
+      pending = Malachi.AckManager.pending_count(queue_name)
       assert pending == 0
 
       # Verify metrics
-      metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+      metrics = Malachi.Metrics.get_metrics(queue_name)
       assert metrics.delivery_mode == :at_most_once
       assert metrics.enqueued == 10
       assert metrics.processed == 10
@@ -62,7 +62,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
 
     test "failed messages are silently dropped in at_most_once mode", %{queue_name: queue_name} do
       # Create at_most_once queue
-      {:ok, _config} = MalachiMQ.QueueConfig.create_queue(queue_name, delivery_mode: :at_most_once)
+      {:ok, _config} = Malachi.QueueConfig.create_queue(queue_name, delivery_mode: :at_most_once)
 
       test_pid = self()
 
@@ -79,14 +79,14 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
       end
 
       # Start consumer
-      {:ok, _consumer} = MalachiMQ.Consumer.start_link({queue_name, consumer_callback, []})
+      {:ok, _consumer} = Malachi.Consumer.start_link({queue_name, consumer_callback, []})
       :timer.sleep(50)
 
       # Publish mix of successful and failing messages
-      MalachiMQ.Queue.enqueue(queue_name, "msg_1_success")
-      MalachiMQ.Queue.enqueue(queue_name, "msg_2_fail")
-      MalachiMQ.Queue.enqueue(queue_name, "msg_3_success")
-      MalachiMQ.Queue.enqueue(queue_name, "msg_4_fail")
+      Malachi.Queue.enqueue(queue_name, "msg_1_success")
+      Malachi.Queue.enqueue(queue_name, "msg_2_fail")
+      Malachi.Queue.enqueue(queue_name, "msg_3_success")
+      Malachi.Queue.enqueue(queue_name, "msg_4_fail")
 
       # All messages should be processed
       assert_receive {:processing, "msg_1_success"}, 1000
@@ -97,7 +97,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
       :timer.sleep(100)
 
       # Verify metrics: 2 errors, 0 retries (at_most_once doesn't retry)
-      metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+      metrics = Malachi.Metrics.get_metrics(queue_name)
       assert metrics.errors == 2
       assert metrics.retried == 0
       assert metrics.dead_lettered == 0
@@ -109,7 +109,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
 
     test "at_least_once mode retries failed messages for comparison", %{queue_name: queue_name} do
       # Create at_least_once queue (default)
-      {:ok, config} = MalachiMQ.QueueConfig.create_queue(queue_name, delivery_mode: :at_least_once)
+      {:ok, config} = Malachi.QueueConfig.create_queue(queue_name, delivery_mode: :at_least_once)
       assert config.delivery_mode == :at_least_once
 
       test_pid = self()
@@ -128,11 +128,11 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
       end
 
       # Start consumer
-      {:ok, _consumer} = MalachiMQ.Consumer.start_link({queue_name, consumer_callback, []})
+      {:ok, _consumer} = Malachi.Consumer.start_link({queue_name, consumer_callback, []})
       :timer.sleep(50)
 
       # Publish one message
-      MalachiMQ.Queue.enqueue(queue_name, "retry_test")
+      Malachi.Queue.enqueue(queue_name, "retry_test")
 
       # Should see first attempt
       assert_receive {:attempt, 1, "retry_test"}, 1000
@@ -145,7 +145,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
 
       # Verify metrics show retry
       :timer.sleep(100)
-      metrics = MalachiMQ.Metrics.get_metrics(queue_name)
+      metrics = Malachi.Metrics.get_metrics(queue_name)
       assert metrics.delivery_mode == :at_least_once
       # Original + requeue
       assert metrics.enqueued >= 1
@@ -156,14 +156,14 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
     test "queue info shows correct delivery mode", %{queue_name: queue_name} do
       # Create at_most_once queue
       {:ok, _} =
-        MalachiMQ.QueueConfig.create_queue(queue_name,
+        Malachi.QueueConfig.create_queue(queue_name,
           delivery_mode: :at_most_once,
           max_retries: 5,
           dlq_enabled: false
         )
 
       # Get config
-      config = MalachiMQ.QueueConfig.get_config(queue_name)
+      config = Malachi.QueueConfig.get_config(queue_name)
 
       assert config.queue_name == queue_name
       assert config.delivery_mode == :at_most_once
@@ -175,10 +175,10 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
 
     test "implicit queue creation uses default delivery mode", %{queue_name: queue_name} do
       # Don't create queue explicitly, just publish
-      MalachiMQ.Queue.enqueue(queue_name, "test")
+      Malachi.Queue.enqueue(queue_name, "test")
 
       # Should create implicit queue
-      config = MalachiMQ.QueueConfig.get_config(queue_name)
+      config = Malachi.QueueConfig.get_config(queue_name)
 
       assert config.queue_name == queue_name
       # Default
@@ -189,7 +189,7 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
 
   describe "queue lifecycle" do
     test "cannot delete queue with active consumers", %{queue_name: queue_name} do
-      {:ok, _} = MalachiMQ.QueueConfig.create_queue(queue_name)
+      {:ok, _} = Malachi.QueueConfig.create_queue(queue_name)
 
       # Create consumer
       consumer_pid =
@@ -199,41 +199,41 @@ defmodule MalachiMQ.AtMostOnceIntegrationTest do
           end
         end)
 
-      MalachiMQ.Queue.subscribe(queue_name, consumer_pid)
+      Malachi.Queue.subscribe(queue_name, consumer_pid)
       :timer.sleep(50)
 
       # Should fail to delete
-      assert {:error, :queue_has_active_consumers} = MalachiMQ.QueueConfig.delete_queue(queue_name)
+      assert {:error, :queue_has_active_consumers} = Malachi.QueueConfig.delete_queue(queue_name)
 
       # Force delete should work
-      assert :ok = MalachiMQ.QueueConfig.delete_queue(queue_name, force: true)
+      assert :ok = Malachi.QueueConfig.delete_queue(queue_name, force: true)
 
       send(consumer_pid, :stop)
     end
 
     test "cannot delete queue with buffered messages", %{queue_name: queue_name} do
-      {:ok, _} = MalachiMQ.QueueConfig.create_queue(queue_name)
+      {:ok, _} = Malachi.QueueConfig.create_queue(queue_name)
 
       # Enqueue messages
-      MalachiMQ.Queue.enqueue(queue_name, "msg1")
-      MalachiMQ.Queue.enqueue(queue_name, "msg2")
+      Malachi.Queue.enqueue(queue_name, "msg1")
+      Malachi.Queue.enqueue(queue_name, "msg2")
       :timer.sleep(50)
 
       # Should fail to delete
-      assert {:error, :queue_has_buffered_messages} = MalachiMQ.QueueConfig.delete_queue(queue_name)
+      assert {:error, :queue_has_buffered_messages} = Malachi.QueueConfig.delete_queue(queue_name)
 
       # Force delete should work
-      assert :ok = MalachiMQ.QueueConfig.delete_queue(queue_name, force: true)
+      assert :ok = Malachi.QueueConfig.delete_queue(queue_name, force: true)
     end
 
     test "can delete empty queue", %{queue_name: queue_name} do
-      {:ok, _} = MalachiMQ.QueueConfig.create_queue(queue_name)
+      {:ok, _} = Malachi.QueueConfig.create_queue(queue_name)
 
       # Should successfully delete
-      assert :ok = MalachiMQ.QueueConfig.delete_queue(queue_name)
+      assert :ok = Malachi.QueueConfig.delete_queue(queue_name)
 
       # Should no longer exist
-      refute MalachiMQ.QueueConfig.exists?(queue_name)
+      refute Malachi.QueueConfig.exists?(queue_name)
     end
   end
 end

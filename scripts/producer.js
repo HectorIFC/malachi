@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * MalachiMQ Producer - Node.js Client with Authentication
+ * Malachi Producer - Node.js Client with Authentication
  * 
- * Sends messages to MalachiMQ via TCP with username/password authentication.
+ * Sends messages to Malachi via TCP with username/password authentication.
  * Features automatic reconnection on server restart (continuous mode).
  * 
  * Usage:
@@ -18,7 +18,7 @@
  *   MALACHIMQ_QUEUE    Queue name (default: test)
  *   MALACHIMQ_USER     Username (default: producer)
  *   MALACHIMQ_PASS     Password (default: producer123)
- *   MALACHIMQ_LOCALE   Locale: pt_BR | en_US (default: pt_BR)
+ *   MALACHI_LOCALE   Locale: pt_BR | en_US (default: pt_BR)
  */
 
 const net = require('net');
@@ -41,9 +41,9 @@ const colors = {
 };
 
 /**
- * MalachiMQ Client with authentication and auto-reconnect support
+ * Malachi Client with authentication and auto-reconnect support
  */
-class MalachiMQClient {
+class MalachiClient {
   constructor(options = {}) {
     this.host = options.host || CONFIG.host;
     this.port = options.port || CONFIG.port;
@@ -329,7 +329,7 @@ class MalachiMQClient {
  * Creates an authenticated connection
  */
 async function createConnection() {
-  const client = new MalachiMQClient();
+  const client = new MalachiClient();
   await client.connect();
   return client;
 }
@@ -456,7 +456,7 @@ async function sendMessagesContinuous() {
   console.log(colors.yellow(`   ${t('press_ctrl_c')}\n`));
 
   // Create client with auto-reconnect enabled
-  const client = new MalachiMQClient({ autoReconnect: true });
+  const client = new MalachiClient({ autoReconnect: true });
   await client.connect();
   console.log(colors.green(`${t('connected')} (authenticated as ${CONFIG.username})\n`));
 
@@ -548,7 +548,7 @@ ${colors.yellow(t('env_variables'))}
   MALACHIMQ_QUEUE  ${t('env_queue')}
   MALACHIMQ_USER   Username for authentication (default: producer)
   MALACHIMQ_PASS   Password for authentication (default: producer123)
-  MALACHIMQ_LOCALE Locale: pt_BR | en_US (default: pt_BR)
+  MALACHI_LOCALE Locale: pt_BR | en_US (default: pt_BR)
 `);
     } else {
       const count = parseInt(args[0]) || 10;
@@ -561,7 +561,7 @@ ${colors.yellow(t('env_variables'))}
   }
 }
 
-module.exports = { MalachiMQClient, createConnection };
+module.exports = { MalachiClient, createConnection };
 
 if (require.main === module) {
   main();

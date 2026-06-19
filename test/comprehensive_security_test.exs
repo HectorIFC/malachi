@@ -1,16 +1,16 @@
-defmodule MalachiMQ.ComprehensiveSecurityTest do
+defmodule Malachi.ComprehensiveSecurityTest do
   @moduledoc """
   Master security acceptance test covering OWASP Top 10 alignment.
 
-  This is the security checklist that verifies MalachiMQ as a whole meets
+  This is the security checklist that verifies Malachi as a whole meets
   security requirements. Unlike individual module tests, this file validates
   the system-wide security posture systematically.
   """
   use ExUnit.Case, async: false
 
-  alias MalachiMQ.{Auth, Validator, RateLimiter, ConnectionLimiter}
-  alias MalachiMQ.Auth.{LockoutManager, SessionManager}
-  alias MalachiMQ.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.{Auth, Validator, RateLimiter, ConnectionLimiter}
+  alias Malachi.Auth.{LockoutManager, SessionManager}
+  alias Malachi.Test.{TCPHelper, SecurityHelper}
 
   @moduletag :security
 
@@ -128,7 +128,7 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
 
     test "passwords are stored with Argon2 (not plaintext)" do
       # Look at the ETS table directly to verify hashed storage
-      users_table = :malachimq_users
+      users_table = :malachi_users
 
       case :ets.lookup(users_table, "admin") do
         [{"admin", stored_hash, _permissions}] ->
@@ -239,23 +239,23 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
     end
 
     test "rate limiting is enabled by default" do
-      enabled = Application.get_env(:malachimq, :rate_limit_enabled, false)
+      enabled = Application.get_env(:malachi, :rate_limit_enabled, false)
       assert enabled, "Rate limiting should be enabled by default"
     end
 
     test "connection limiting is enabled by default" do
-      enabled = Application.get_env(:malachimq, :connection_limit_enabled, false)
+      enabled = Application.get_env(:malachi, :connection_limit_enabled, false)
       assert enabled, "Connection limiting should be enabled by default"
     end
 
     test "dashboard authentication is enabled by default" do
-      enabled = Application.get_env(:malachimq, :dashboard_auth_enabled, false)
+      enabled = Application.get_env(:malachi, :dashboard_auth_enabled, false)
       assert enabled, "Dashboard authentication should be enabled by default"
     end
 
     test "message size limits are configured" do
       # Default max message size should be reasonable (e.g., 10MB)
-      max_size = Application.get_env(:malachimq, :default_max_message_size_bytes, 10_485_760)
+      max_size = Application.get_env(:malachi, :default_max_message_size_bytes, 10_485_760)
       assert max_size > 0
       assert max_size <= 100_000_000, "Max message size too large: #{max_size}"
     end
@@ -266,7 +266,7 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
   # ──────────────────────────────────────────────────────────────────
   describe "OWASP A05 - Security Misconfiguration" do
     test "TLS config excludes weak protocol versions" do
-      tls_versions = Application.get_env(:malachimq, :tls_versions, [])
+      tls_versions = Application.get_env(:malachi, :tls_versions, [])
 
       # Weak versions should NOT be in the list
       weak_versions = [:sslv3, :sslv2, :tlsv1, :"tlsv1.0", :"tlsv1.1"]
@@ -297,26 +297,26 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
 
     test "security modules are loaded and running" do
       # All security-critical GenServers should be running
-      assert Process.whereis(MalachiMQ.Auth) != nil, "Auth GenServer not running"
+      assert Process.whereis(Malachi.Auth) != nil, "Auth GenServer not running"
 
-      assert Process.whereis(MalachiMQ.Auth.LockoutManager) != nil,
+      assert Process.whereis(Malachi.Auth.LockoutManager) != nil,
              "LockoutManager GenServer not running"
 
       # SessionManager is a stateless module over ETS, not a registered GenServer.
       # Verify the sessions ETS table exists (created by Auth GenServer on init).
-      assert :ets.whereis(:malachimq_sessions) != :undefined,
-             "Sessions ETS table (:malachimq_sessions) not found"
+      assert :ets.whereis(:malachi_sessions) != :undefined,
+             "Sessions ETS table (:malachi_sessions) not found"
 
-      assert Process.whereis(MalachiMQ.RateLimiter) != nil,
+      assert Process.whereis(Malachi.RateLimiter) != nil,
              "RateLimiter GenServer not running"
 
-      assert Process.whereis(MalachiMQ.ConnectionLimiter) != nil,
+      assert Process.whereis(Malachi.ConnectionLimiter) != nil,
              "ConnectionLimiter GenServer not running"
 
-      assert Process.whereis(MalachiMQ.AuditLog) != nil,
+      assert Process.whereis(Malachi.AuditLog) != nil,
              "AuditLog GenServer not running"
 
-      assert Process.whereis(MalachiMQ.AtomMonitor) != nil,
+      assert Process.whereis(Malachi.AtomMonitor) != nil,
              "AtomMonitor GenServer not running"
     end
   end
@@ -405,7 +405,7 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
   # ──────────────────────────────────────────────────────────────────
   describe "OWASP A09 - Logging and Monitoring" do
     test "authentication events are logged", %{user: user, pass: pass} do
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
       ip = {30, 30, 30, 30}
@@ -416,10 +416,10 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
       {:ok, _token} = Auth.authenticate(user, pass, ip)
 
       Process.sleep(200)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
-      events = MalachiMQ.AuditLog.get_events(50)
+      events = Malachi.AuditLog.get_events(50)
       user_events = Enum.filter(events, fn e -> e.username == user end)
       event_types = Enum.map(user_events, & &1.event_type)
 
@@ -432,7 +432,7 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
     test "audit log module is running and accessible" do
       # Should be able to log an event
       :ok =
-        MalachiMQ.AuditLog.log_event(
+        Malachi.AuditLog.log_event(
           :security_test,
           %{username: "test", ip: {0, 0, 0, 0}},
           "comprehensive_test",
@@ -441,23 +441,23 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
         )
 
       Process.sleep(100)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
-      events = MalachiMQ.AuditLog.get_events(10)
+      events = Malachi.AuditLog.get_events(10)
       assert is_list(events)
     end
 
     test "audit events have required structure" do
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
       Auth.authenticate("admin", "wrong_pass", {40, 40, 40, 40})
       Process.sleep(200)
-      MalachiMQ.AuditLog.flush()
+      Malachi.AuditLog.flush()
       Process.sleep(100)
 
-      events = MalachiMQ.AuditLog.get_events(10)
+      events = Malachi.AuditLog.get_events(10)
 
       if length(events) > 0 do
         event = hd(events)
@@ -503,10 +503,10 @@ defmodule MalachiMQ.ComprehensiveSecurityTest do
       assert {:error, _} = Validator.validate_queue_name("<script>alert(1)</script>")
 
       # Layer 6: Audit logging
-      assert Process.whereis(MalachiMQ.AuditLog) != nil
+      assert Process.whereis(Malachi.AuditLog) != nil
 
       # Layer 7: Atom monitoring
-      atom_stats = MalachiMQ.AtomMonitor.get_stats()
+      atom_stats = Malachi.AtomMonitor.get_stats()
       assert atom_stats.status in [:normal, :warning, :critical]
     end
 

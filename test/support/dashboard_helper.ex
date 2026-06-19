@@ -1,4 +1,4 @@
-defmodule MalachiMQ.Test.DashboardHelper do
+defmodule Malachi.Test.DashboardHelper do
   @moduledoc """
   HTTP helper utilities for dashboard tests.
 
@@ -7,10 +7,10 @@ defmodule MalachiMQ.Test.DashboardHelper do
   for the MQ wire protocol.
   """
 
-  @dashboard_port Application.compile_env(:malachimq, :dashboard_port, 4041)
+  @dashboard_port Application.compile_env(:malachi, :dashboard_port, 4041)
 
   @doc """
-  Connects to the MalachiMQ dashboard HTTP server.
+  Connects to the Malachi dashboard HTTP server.
 
   ## Options
 
@@ -41,7 +41,7 @@ defmodule MalachiMQ.Test.DashboardHelper do
   ## Examples
 
       {:ok, response} = DashboardHelper.request(socket, :GET, "/")
-      {:ok, response} = DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachimq_token=abc"})
+      {:ok, response} = DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachi_token=abc"})
       {:ok, response} = DashboardHelper.request(socket, :POST, "/login", body: body)
   """
   def request(socket, method, path, opts \\ []) do
@@ -74,7 +74,7 @@ defmodule MalachiMQ.Test.DashboardHelper do
   @doc """
   Sends an authenticated HTTP request using a cookie.
 
-  The token is sent as `Cookie: malachimq_token=<token>`, matching the
+  The token is sent as `Cookie: malachi_token=<token>`, matching the
   HttpOnly cookie set by the dashboard on login.
 
   ## Options
@@ -90,7 +90,7 @@ defmodule MalachiMQ.Test.DashboardHelper do
     extra_headers = Keyword.get(opts, :headers, %{})
 
     merged_headers =
-      Map.put(extra_headers, "Cookie", "malachimq_token=#{token}")
+      Map.put(extra_headers, "Cookie", "malachi_token=#{token}")
 
     request(socket, method, path, Keyword.put(opts, :headers, merged_headers))
   end
@@ -140,8 +140,8 @@ defmodule MalachiMQ.Test.DashboardHelper do
     |> String.split("\r\n")
     |> Enum.find_value(fn line ->
       # Check header name case-insensitively, but preserve token value case
-      if String.downcase(line) |> String.starts_with?("set-cookie: malachimq_token=") do
-        # Extract value after "malachimq_token=" from the ORIGINAL line (preserving case)
+      if String.downcase(line) |> String.starts_with?("set-cookie: malachi_token=") do
+        # Extract value after "malachi_token=" from the ORIGINAL line (preserving case)
         [_header_part, cookie_part] = String.split(line, ": ", parts: 2)
 
         case String.split(cookie_part, "=", parts: 2) do

@@ -3,7 +3,7 @@ import Config
 # Benchmark-specific configuration
 # This file is loaded when running benchmarks
 
-config :malachimq,
+config :malachi,
   # Benchmark parameters
   benchmark_duration_sec: 60,
   benchmark_warmup_sec: 10,

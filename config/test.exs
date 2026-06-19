@@ -4,7 +4,7 @@ import Config
 config :logger, level: :warning
 
 # Test-specific tuning for large-scale channel tests
-config :malachimq,
+config :malachi,
   channel_send_concurrency: 5_000,
   channel_send_task_timeout_ms: 5_000,
   shard_count: 1_000,

@@ -15,7 +15,7 @@ defmodule AuthBenchmark do
     IO.puts("\n#{IO.ANSI.cyan()}Starting Authentication Baseline Benchmark#{IO.ANSI.reset()}\n")
 
     # Start the application
-    Application.ensure_all_started(:malachimq)
+    Application.ensure_all_started(:malachi)
     Process.sleep(1000)
 
     results = %{
@@ -44,7 +44,7 @@ defmodule AuthBenchmark do
     IO.puts("\n#{IO.ANSI.yellow()}Test: Token Validation Performance#{IO.ANSI.reset()}")
 
     # Create a session token first
-    {:ok, token} = MalachiMQ.Auth.authenticate("producer", "producer123")
+    {:ok, token} = Malachi.Auth.authenticate("producer", "producer123")
 
     IO.puts("  Token created: #{String.slice(token, 0, 20)}...")
 
@@ -52,7 +52,7 @@ defmodule AuthBenchmark do
     IO.puts("  Warming up...")
 
     BenchmarkHelpers.warmup(fn ->
-      MalachiMQ.Auth.validate_token(token)
+      Malachi.Auth.validate_token(token)
     end, @warmup_sec)
 
     # Benchmark
@@ -62,7 +62,7 @@ defmodule AuthBenchmark do
       BenchmarkHelpers.measure_time(fn ->
         BenchmarkHelpers.benchmark_duration(
           fn ->
-            MalachiMQ.Auth.validate_token(token)
+            Malachi.Auth.validate_token(token)
           end,
           @duration_sec
         )
@@ -89,14 +89,14 @@ defmodule AuthBenchmark do
     IO.puts("\n#{IO.ANSI.yellow()}Test: Permission Checking Performance#{IO.ANSI.reset()}")
 
     # Create sessions with different permissions
-    {:ok, admin_token} = MalachiMQ.Auth.authenticate("admin", "admin123")
-    {:ok, producer_token} = MalachiMQ.Auth.authenticate("producer", "producer123")
-    {:ok, consumer_token} = MalachiMQ.Auth.authenticate("consumer", "consumer123")
+    {:ok, admin_token} = Malachi.Auth.authenticate("admin", "admin123")
+    {:ok, producer_token} = Malachi.Auth.authenticate("producer", "producer123")
+    {:ok, consumer_token} = Malachi.Auth.authenticate("consumer", "consumer123")
 
     # Get session data
-    {:ok, admin_session} = MalachiMQ.Auth.validate_token(admin_token)
-    {:ok, producer_session} = MalachiMQ.Auth.validate_token(producer_token)
-    {:ok, consumer_session} = MalachiMQ.Auth.validate_token(consumer_token)
+    {:ok, admin_session} = Malachi.Auth.validate_token(admin_token)
+    {:ok, producer_session} = Malachi.Auth.validate_token(producer_token)
+    {:ok, consumer_session} = Malachi.Auth.validate_token(consumer_token)
 
     # Benchmark different permission checks
     tests = [
@@ -112,7 +112,7 @@ defmodule AuthBenchmark do
 
         # Warm-up
         BenchmarkHelpers.warmup(fn ->
-          MalachiMQ.Auth.has_permission?(permissions, permission)
+          Malachi.Auth.has_permission?(permissions, permission)
         end, 5)
 
         # Benchmark
@@ -120,7 +120,7 @@ defmodule AuthBenchmark do
           BenchmarkHelpers.measure_time(fn ->
             BenchmarkHelpers.benchmark_duration(
               fn ->
-                MalachiMQ.Auth.has_permission?(permissions, permission)
+                Malachi.Auth.has_permission?(permissions, permission)
               end,
               30
             )
@@ -150,7 +150,7 @@ defmodule AuthBenchmark do
     IO.puts("  Warming up...")
 
     Enum.each(1..5, fn _ ->
-      MalachiMQ.Auth.authenticate("producer", "producer123")
+      Malachi.Auth.authenticate("producer", "producer123")
     end)
 
     # Benchmark - run for shorter duration since it's slow
@@ -162,7 +162,7 @@ defmodule AuthBenchmark do
         Enum.map(1..iteration_count, fn _ ->
           {time, result} =
             BenchmarkHelpers.measure_time(fn ->
-              MalachiMQ.Auth.authenticate("producer", "producer123")
+              Malachi.Auth.authenticate("producer", "producer123")
             end)
 
           {time, result}

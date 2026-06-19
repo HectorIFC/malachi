@@ -1,9 +1,9 @@
-defmodule MalachiMQ.OneToMillionChannelTest do
+defmodule Malachi.OneToMillionChannelTest do
   use ExUnit.Case, async: true
-  alias MalachiMQ.Channel
-  alias MalachiMQ.Metrics
-  alias MalachiMQ.Test.MassSpawnHelper
-  alias MalachiMQ.Test.PollingHelper
+  alias Malachi.Channel
+  alias Malachi.Metrics
+  alias Malachi.Test.MassSpawnHelper
+  alias Malachi.Test.PollingHelper
 
   @moduletag :integration
   @timeout_ms 300_000
@@ -20,7 +20,7 @@ defmodule MalachiMQ.OneToMillionChannelTest do
     channel = "one_to_million_#{:rand.uniform(999_999)}"
 
     # configuration for sharded test
-    shard_count = Application.get_env(:malachimq, :shard_count, 1_000)
+    shard_count = Application.get_env(:malachi, :shard_count, 1_000)
     logical_per_process = div(1_000_000, shard_count)
 
     # start shards (each shard subscribes and counts deliveries)

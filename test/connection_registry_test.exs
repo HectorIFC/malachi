@@ -1,4 +1,4 @@
-defmodule MalachiMQ.ConnectionRegistryTest do
+defmodule Malachi.ConnectionRegistryTest do
   use ExUnit.Case, async: false
 
   setup do
@@ -39,9 +39,9 @@ defmodule MalachiMQ.ConnectionRegistryTest do
 
       transport = :gen_tcp
 
-      assert :ok = MalachiMQ.ConnectionRegistry.register(pid, socket, transport)
+      assert :ok = Malachi.ConnectionRegistry.register(pid, socket, transport)
 
-      count = MalachiMQ.ConnectionRegistry.count()
+      count = Malachi.ConnectionRegistry.count()
       assert count >= 1
     end
 
@@ -61,13 +61,13 @@ defmodule MalachiMQ.ConnectionRegistryTest do
         :ready -> :ok
       end
 
-      initial_count = MalachiMQ.ConnectionRegistry.count()
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      initial_count = Malachi.ConnectionRegistry.count()
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
       Process.exit(pid, :kill)
       :timer.sleep(100)
 
-      final_count = MalachiMQ.ConnectionRegistry.count()
+      final_count = Malachi.ConnectionRegistry.count()
       assert final_count < initial_count + 1 or not Process.alive?(pid)
     end
   end
@@ -81,9 +81,9 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
-      assert :ok = MalachiMQ.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
+      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
     end
 
     test "updates connection type to consumer", %{socket: socket} do
@@ -94,16 +94,16 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
-      assert :ok = MalachiMQ.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
+      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
     end
 
     test "returns error for unregistered pid" do
       fake_pid = spawn(fn -> :ok end)
       :timer.sleep(50)
 
-      assert {:error, :not_found} = MalachiMQ.ConnectionRegistry.set_connection_type(fake_pid, :producer)
+      assert {:error, :not_found} = Malachi.ConnectionRegistry.set_connection_type(fake_pid, :producer)
     end
 
     test "updates type multiple times", %{socket: socket} do
@@ -114,10 +114,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
-      assert :ok = MalachiMQ.ConnectionRegistry.set_connection_type(pid, :producer, "queue1")
-      assert :ok = MalachiMQ.ConnectionRegistry.set_connection_type(pid, :consumer, "queue2")
+      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "queue1")
+      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "queue2")
     end
   end
 
@@ -130,24 +130,24 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
-      initial_count = MalachiMQ.ConnectionRegistry.count()
-      assert :ok = MalachiMQ.ConnectionRegistry.unregister(pid)
+      initial_count = Malachi.ConnectionRegistry.count()
+      assert :ok = Malachi.ConnectionRegistry.unregister(pid)
 
-      final_count = MalachiMQ.ConnectionRegistry.count()
+      final_count = Malachi.ConnectionRegistry.count()
       assert final_count < initial_count
     end
 
     test "unregistering non-existent connection is harmless" do
       fake_pid = spawn(fn -> :ok end)
-      assert :ok = MalachiMQ.ConnectionRegistry.unregister(fake_pid)
+      assert :ok = Malachi.ConnectionRegistry.unregister(fake_pid)
     end
   end
 
   describe "count/0" do
     test "returns count of active connections" do
-      count = MalachiMQ.ConnectionRegistry.count()
+      count = Malachi.ConnectionRegistry.count()
       assert is_integer(count)
       assert count >= 0
     end
@@ -164,10 +164,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.set_connection_type(pid, :producer, queue_name)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, queue_name)
 
-      producers = MalachiMQ.ConnectionRegistry.list_producers_by_queue(queue_name)
+      producers = Malachi.ConnectionRegistry.list_producers_by_queue(queue_name)
 
       assert is_list(producers)
       assert producers != []
@@ -181,7 +181,7 @@ defmodule MalachiMQ.ConnectionRegistryTest do
     end
 
     test "returns empty list for queue with no producers" do
-      producers = MalachiMQ.ConnectionRegistry.list_producers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
+      producers = Malachi.ConnectionRegistry.list_producers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
       assert producers == []
     end
 
@@ -227,13 +227,13 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(producer_pid, socket1, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.register(consumer_pid, socket2, :gen_tcp)
+      Malachi.ConnectionRegistry.register(producer_pid, socket1, :gen_tcp)
+      Malachi.ConnectionRegistry.register(consumer_pid, socket2, :gen_tcp)
 
-      MalachiMQ.ConnectionRegistry.set_connection_type(producer_pid, :producer, queue_name)
-      MalachiMQ.ConnectionRegistry.set_connection_type(consumer_pid, :consumer, queue_name)
+      Malachi.ConnectionRegistry.set_connection_type(producer_pid, :producer, queue_name)
+      Malachi.ConnectionRegistry.set_connection_type(consumer_pid, :consumer, queue_name)
 
-      producers = MalachiMQ.ConnectionRegistry.list_producers_by_queue(queue_name)
+      producers = Malachi.ConnectionRegistry.list_producers_by_queue(queue_name)
 
       assert producers != []
       assert Enum.all?(producers, fn p -> String.contains?(p.pid, inspect(producer_pid)) end)
@@ -251,10 +251,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.set_connection_type(pid, :consumer, queue_name)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, queue_name)
 
-      consumers = MalachiMQ.ConnectionRegistry.list_consumers_by_queue(queue_name)
+      consumers = Malachi.ConnectionRegistry.list_consumers_by_queue(queue_name)
 
       assert is_list(consumers)
       assert consumers != []
@@ -268,7 +268,7 @@ defmodule MalachiMQ.ConnectionRegistryTest do
     end
 
     test "returns empty list for queue with no consumers" do
-      consumers = MalachiMQ.ConnectionRegistry.list_consumers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
+      consumers = Malachi.ConnectionRegistry.list_consumers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
       assert consumers == []
     end
   end
@@ -282,10 +282,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
 
-      producers = MalachiMQ.ConnectionRegistry.list_producers()
+      producers = Malachi.ConnectionRegistry.list_producers()
       assert is_list(producers)
     end
   end
@@ -299,10 +299,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
 
-      consumers = MalachiMQ.ConnectionRegistry.list_consumers()
+      consumers = Malachi.ConnectionRegistry.list_consumers()
       assert is_list(consumers)
     end
   end
@@ -341,14 +341,14 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid1, socket1, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.register(pid2, socket2, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid1, socket1, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid2, socket2, :gen_tcp)
 
-      result = MalachiMQ.ConnectionRegistry.close_all()
+      result = Malachi.ConnectionRegistry.close_all()
       assert result == :ok
 
       :timer.sleep(100)
-      count = MalachiMQ.ConnectionRegistry.count()
+      count = Malachi.ConnectionRegistry.count()
       assert count == 0
 
       :gen_tcp.close(listen_socket)
@@ -356,11 +356,11 @@ defmodule MalachiMQ.ConnectionRegistryTest do
 
     test "handles empty connection list gracefully" do
       # Clear any existing connections first
-      MalachiMQ.ConnectionRegistry.close_all()
+      Malachi.ConnectionRegistry.close_all()
       :timer.sleep(50)
 
       # Call close_all when there are no connections
-      result = MalachiMQ.ConnectionRegistry.close_all()
+      result = Malachi.ConnectionRegistry.close_all()
       assert result == :ok
     end
 
@@ -391,8 +391,8 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.close_all()
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.close_all()
 
       # The shutdown message should have been sent
       receive do
@@ -414,13 +414,13 @@ defmodule MalachiMQ.ConnectionRegistryTest do
   describe "process monitoring" do
     test "automatically unregisters dead processes", %{socket: socket} do
       pid = spawn(fn -> :ok end)
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
 
       :timer.sleep(100)
 
       # Process should have exited and been unregistered
       # We can verify by checking that count doesn't grow indefinitely
-      initial_count = MalachiMQ.ConnectionRegistry.count()
+      initial_count = Malachi.ConnectionRegistry.count()
       assert is_integer(initial_count)
     end
 
@@ -440,13 +440,13 @@ defmodule MalachiMQ.ConnectionRegistryTest do
         :started -> :ok
       end
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      initial_count = MalachiMQ.ConnectionRegistry.count()
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      initial_count = Malachi.ConnectionRegistry.count()
 
       send(pid, :exit)
       :timer.sleep(100)
 
-      final_count = MalachiMQ.ConnectionRegistry.count()
+      final_count = Malachi.ConnectionRegistry.count()
       # Count should be less or equal (process was cleaned up)
       assert final_count <= initial_count
     end
@@ -479,10 +479,10 @@ defmodule MalachiMQ.ConnectionRegistryTest do
           end
         end)
 
-      MalachiMQ.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      MalachiMQ.ConnectionRegistry.set_connection_type(pid, :producer, "test")
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test")
 
-      producers = MalachiMQ.ConnectionRegistry.list_producers_by_queue("test")
+      producers = Malachi.ConnectionRegistry.list_producers_by_queue("test")
 
       if producers != [] do
         producer = hd(producers)
@@ -499,11 +499,11 @@ defmodule MalachiMQ.ConnectionRegistryTest do
   describe "GenServer callbacks" do
     test "handles unknown messages gracefully" do
       # Send a message directly to the GenServer
-      send(MalachiMQ.ConnectionRegistry, :unknown_message)
+      send(Malachi.ConnectionRegistry, :unknown_message)
       :timer.sleep(50)
 
       # Should still be alive
-      assert Process.whereis(MalachiMQ.ConnectionRegistry) != nil
+      assert Process.whereis(Malachi.ConnectionRegistry) != nil
     end
   end
 end

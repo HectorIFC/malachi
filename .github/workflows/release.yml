@@ -136,19 +136,19 @@ jobs:
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           name: Release v${{ steps.version.outputs.NEW_VERSION }}
           body: |
-            ## 🚀 MalachiMQ v${{ steps.version.outputs.NEW_VERSION }}
+            ## 🚀 Malachi v${{ steps.version.outputs.NEW_VERSION }}
             
             ${{ steps.changelog.outputs.CHANGELOG }}
             
             ### 🐳 Docker
             ```bash
-            docker pull hectorcardoso/malachimq:${{ steps.version.outputs.NEW_VERSION }}
+            docker pull hectorcardoso/malachi:${{ steps.version.outputs.NEW_VERSION }}
             ```
             
             ### 📦 Installation
             ```bash
-            git clone https://github.com/HectorIFC/malachimq.git
-            cd malachimq
+            git clone https://github.com/HectorIFC/malachi.git
+            cd malachi
             git checkout v${{ steps.version.outputs.NEW_VERSION }}
             ```
           draft: false
@@ -195,20 +195,20 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/malachimq:${{ needs.release.outputs.new_version }}
-            ${{ secrets.DOCKER_USERNAME }}/malachimq:${{ steps.version.outputs.MAJOR_MINOR }}
-            ${{ secrets.DOCKER_USERNAME }}/malachimq:${{ steps.version.outputs.MAJOR }}
-            ${{ secrets.DOCKER_USERNAME }}/malachimq:latest
-            ${{ secrets.DOCKER_USERNAME }}/malachimq:alpine
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ needs.release.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ steps.version.outputs.MAJOR_MINOR }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ steps.version.outputs.MAJOR }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:latest
+            ${{ secrets.DOCKER_USERNAME }}/malachi:alpine
           labels: |
-            org.opencontainers.image.title=MalachiMQ
+            org.opencontainers.image.title=Malachi
             org.opencontainers.image.description=High-performance message system
             org.opencontainers.image.version=${{ needs.release.outputs.new_version }}
             org.opencontainers.image.vendor=HectorIFC
-            org.opencontainers.image.source=https://github.com/HectorIFC/malachimq
+            org.opencontainers.image.source=https://github.com/HectorIFC/malachi
             org.opencontainers.image.licenses=MIT
           build-args: |
             APP_VERSION=${{ needs.release.outputs.new_version }}
-          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachimq:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachimq:buildcache,mode=max
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachi:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachi:buildcache,mode=max
           provenance: false
