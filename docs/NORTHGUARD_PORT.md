@@ -126,10 +126,18 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 ## 4. Roadmap faseado
 
 ### Fase 0 — Persistência e modelo de log (Elixir puro)
-- `Malachi.SegmentStore` behaviour + impl Elixir (WAL, file-per-segment, sealing, fsync batching).
-- Tipos `Record`, `Segment`, `Range`, `Topic` + offsets lógicos.
-- Índice esparso (arquivo `.idx` ou ETS) + recuperação no boot (replay do WAL).
-- **Sai do in-memory.** Testes: property-based (`stream_data`) de append/read/seal/crash-recovery.
+- ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
+  (file-per-segment, batching, fsync-antes-do-ack, índice esparso, sealing, crash recovery,
+  `open_read` barato p/ segments selados via `.idx`).
+- ✅ Tipos `Malachi.Log.Record` (framing + CRC32) e `Malachi.Log.Segment` (offsets lógicos).
+- ✅ `Malachi.Log` — log multi-segment: rolling/sealing automático (size/age), leitura
+  contínua atravessando segments, recovery do diretório inteiro (só escaneia o último segment).
+- ✅ Flush por **tamanho** (`:flush_bytes`, default 10MB — gatilho de tamanho do NorthGuard):
+  `append` faz flush+fsync automático ao atingir o limite.
+- ✅ Testes: property-based (`stream_data`) + unit de append/read/seal/crash-recovery/roll/auto-flush.
+- ⏳ Pendente da Fase 0: tipos lógicos `Range`/`Topic`; flush por **tempo** (gatilho ~10ms) e por
+  **contagem** (20k records) via um wrapper GenServer; scan de recovery em chunks (hoje lê o
+  segment inteiro em memória).
 
 ### Fase 1 — Distribuição (Elixir puro)
 - DS-RSM com `ra` (vnodes, coordinators, consistent hashing, split de vnode).

@@ -21,7 +21,7 @@ defmodule Malachi.Log.Segment do
 
   @type t :: %__MODULE__{
           id: id(),
-          dir: Path.t(),
+          directory: Path.t(),
           base_offset: non_neg_integer(),
           state: state(),
           byte_size: non_neg_integer(),
@@ -33,7 +33,7 @@ defmodule Malachi.Log.Segment do
         }
 
   defstruct id: nil,
-            dir: nil,
+            directory: nil,
             base_offset: 0,
             state: :active,
             byte_size: 0,
@@ -53,10 +53,10 @@ defmodule Malachi.Log.Segment do
     * `:created_at` - epoch ms (default: now)
   """
   @spec new(id(), Path.t(), keyword()) :: t()
-  def new(id, dir, opts \\ []) do
+  def new(id, directory, opts \\ []) do
     %__MODULE__{
       id: id,
-      dir: dir,
+      directory: directory,
       base_offset: Keyword.get(opts, :base_offset, 0),
       created_at: Keyword.get(opts, :created_at, System.system_time(:millisecond)),
       max_bytes: Keyword.get(opts, :max_bytes, @default_max_bytes),
@@ -66,19 +66,21 @@ defmodule Malachi.Log.Segment do
 
   @doc "Absolute path of the segment's data file."
   @spec path(t()) :: Path.t()
-  def path(%__MODULE__{dir: dir, id: id}), do: Path.join(dir, "#{id}.log")
+  def path(%__MODULE__{directory: directory, id: id}), do: Path.join(directory, "#{id}.log")
 
   @doc "Absolute path of the segment's persisted sparse index sidecar."
   @spec index_path(t()) :: Path.t()
-  def index_path(%__MODULE__{dir: dir, id: id}), do: Path.join(dir, "#{id}.idx")
+  def index_path(%__MODULE__{directory: directory, id: id}), do: Path.join(directory, "#{id}.idx")
 
   @doc "Absolute path of the segment's seal marker."
   @spec seal_marker_path(t()) :: Path.t()
-  def seal_marker_path(%__MODULE__{dir: dir, id: id}), do: Path.join(dir, "#{id}.sealed")
+  def seal_marker_path(%__MODULE__{directory: directory, id: id}),
+    do: Path.join(directory, "#{id}.sealed")
 
   @doc "The logical offset *after* the last committed record (exclusive end)."
   @spec end_offset(t()) :: non_neg_integer()
-  def end_offset(%__MODULE__{base_offset: base, record_count: count}), do: base + count
+  def end_offset(%__MODULE__{base_offset: base_offset, record_count: record_count}),
+    do: base_offset + record_count
 
   @doc "Whether the segment is sealed (immutable)."
   @spec sealed?(t()) :: boolean()
@@ -91,7 +93,7 @@ defmodule Malachi.Log.Segment do
   @spec should_seal?(t(), non_neg_integer()) :: boolean()
   def should_seal?(%__MODULE__{state: :sealed}, _now_ms), do: false
 
-  def should_seal?(%__MODULE__{} = seg, now_ms) do
-    seg.byte_size >= seg.max_bytes or now_ms - seg.created_at >= seg.max_age_ms
+  def should_seal?(%__MODULE__{} = segment, now_ms) do
+    segment.byte_size >= segment.max_bytes or now_ms - segment.created_at >= segment.max_age_ms
   end
 end

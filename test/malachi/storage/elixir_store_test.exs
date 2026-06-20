@@ -80,6 +80,28 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "size-based auto-flush" do
+    test "commits automatically once the buffer reaches flush_bytes", %{tmp_dir: dir} do
+      # tiny threshold so any append triggers an automatic flush+fsync
+      {:ok, h} = ElixirStore.open(dir, "seg-0", flush_bytes: 1)
+      {:ok, h, _, _} = ElixirStore.append(h, [rec("a"), rec("b")])
+
+      # readable WITHOUT an explicit sync, and the buffer was drained
+      assert {:ok, recs} = ElixirStore.read(h, 0, 10)
+      assert Enum.map(recs, & &1.value) == ["a", "b"]
+      assert h.pending_count == 0
+    end
+
+    test "does not auto-flush below the threshold", %{tmp_dir: dir} do
+      # default flush_bytes (10MB) is never reached by a single small record
+      {:ok, h} = open(dir)
+      {:ok, h, _, _} = ElixirStore.append(h, [rec("a")])
+
+      assert ElixirStore.read(h, 0, 10) == :eof
+      assert h.pending_count == 1
+    end
+  end
+
   describe "sealing" do
     test "seal makes the segment immutable but still readable", %{tmp_dir: dir} do
       {:ok, h} = open(dir)

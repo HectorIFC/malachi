@@ -9,23 +9,23 @@ defmodule Malachi.Log.Record do
   Each record is persisted as a self-describing frame so the log can be scanned and
   recovered after a crash, and so corruption can be detected:
 
-      <<magic::16, payload_len::32, crc32::32, payload::binary-size(payload_len)>>
+      <<magic::16, payload_length::32, crc32::32, payload::binary-size(payload_length)>>
 
   where `payload` is:
 
       <<offset::64, timestamp::64, flags::8,
-        key_len::32, key::binary, value_len::32, value::binary,
-        header_count::32, (k_len::32, k, v_len::32, v)... >>
+        key_length::32, key::binary, value_length::32, value::binary,
+        header_count::32, (key_length::32, key, value_length::32, value)... >>
 
   `flags` bit 0 distinguishes a `nil` key (absent) from an empty-binary key.
-  The leading `magic`/`payload_len`/`crc32` header lets recovery (a) detect a partial
+  The leading `magic`/`payload_length`/`crc32` header lets recovery (a) detect a partial
   trailing write (truncated frame) and stop cleanly, and (b) detect bit-rot via CRC.
   """
 
   import Bitwise
 
   @magic 0x4D51
-  @header_size 10
+  @frame_header_size 10
   @key_present 0x01
 
   @type t :: %__MODULE__{
@@ -58,35 +58,35 @@ defmodule Malachi.Log.Record do
 
   @doc "Encodes a record (with its `offset` already assigned) into a binary frame."
   @spec encode(t()) :: binary()
-  def encode(%__MODULE__{offset: offset} = rec) when is_integer(offset) do
-    {flags, key_bin, key_len} =
-      case rec.key do
+  def encode(%__MODULE__{offset: offset} = record) when is_integer(offset) do
+    {flags, key_bytes, key_length} =
+      case record.key do
         nil -> {0, <<>>, 0}
-        k when is_binary(k) -> {@key_present, k, byte_size(k)}
+        key when is_binary(key) -> {@key_present, key, byte_size(key)}
       end
 
-    headers_bin = encode_headers(rec.headers)
+    headers_binary = encode_headers(record.headers)
 
     payload =
-      <<offset::64, rec.timestamp::64, flags::8, key_len::32, key_bin::binary, byte_size(rec.value)::32,
-        rec.value::binary, length(rec.headers)::32, headers_bin::binary>>
+      <<offset::64, record.timestamp::64, flags::8, key_length::32, key_bytes::binary, byte_size(record.value)::32,
+        record.value::binary, length(record.headers)::32, headers_binary::binary>>
 
     <<@magic::16, byte_size(payload)::32, :erlang.crc32(payload)::32, payload::binary>>
   end
 
   @doc """
-  Decodes a single frame from the front of `bin`.
+  Decodes a single frame from the front of `binary`.
 
-  Returns `{:ok, record, frame_size, rest}` on success, `:incomplete` if `bin` does
+  Returns `{:ok, record, frame_size, rest}` on success, `:incomplete` if `binary` does
   not yet contain a full frame (partial/trailing write), or `{:error, reason}` if the
   framing is corrupt.
   """
   @spec decode_one(binary()) ::
           {:ok, t(), pos_integer(), binary()} | :incomplete | {:error, atom()}
-  def decode_one(<<@magic::16, plen::32, crc::32, payload::binary-size(plen), rest::binary>>) do
-    if :erlang.crc32(payload) == crc do
+  def decode_one(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>) do
+    if :erlang.crc32(payload) == checksum do
       case decode_payload(payload) do
-        {:ok, record} -> {:ok, record, @header_size + plen, rest}
+        {:ok, record} -> {:ok, record, @frame_header_size + payload_length, rest}
         :error -> {:error, :bad_payload}
       end
     else
@@ -94,55 +94,69 @@ defmodule Malachi.Log.Record do
     end
   end
 
-  def decode_one(<<@magic::16, plen::32, _crc::32, partial::binary>>) when byte_size(partial) < plen,
-    do: :incomplete
+  def decode_one(<<@magic::16, payload_length::32, _checksum::32, partial::binary>>)
+      when byte_size(partial) < payload_length,
+      do: :incomplete
 
-  def decode_one(bin) when byte_size(bin) < @header_size, do: :incomplete
-  def decode_one(_), do: {:error, :bad_magic}
+  def decode_one(binary) when byte_size(binary) < @frame_header_size, do: :incomplete
+  def decode_one(_binary), do: {:error, :bad_magic}
 
   @doc """
-  Decodes every complete, valid frame from the front of `bin`.
+  Decodes every complete, valid frame from the front of `binary`.
 
   Returns `{records_with_positions, valid_bytes}` where `records_with_positions` is a
-  list of `{record, byte_offset_in_bin}` and `valid_bytes` is the number of bytes
+  list of `{record, byte_position_in_binary}` and `valid_bytes` is the number of bytes
   consumed by valid frames. Decoding stops at the first incomplete or corrupt frame,
   so `valid_bytes` is exactly the safe truncation point for crash recovery.
   """
   @spec decode_all(binary()) :: {[{t(), non_neg_integer()}], non_neg_integer()}
-  def decode_all(bin), do: decode_all(bin, 0, [])
+  def decode_all(binary), do: decode_all(binary, 0, [])
 
-  defp decode_all(bin, pos, acc) do
-    case decode_one(bin) do
-      {:ok, rec, size, rest} -> decode_all(rest, pos + size, [{rec, pos} | acc])
-      :incomplete -> {Enum.reverse(acc), pos}
-      {:error, _reason} -> {Enum.reverse(acc), pos}
+  defp decode_all(binary, position, decoded) do
+    case decode_one(binary) do
+      {:ok, record, frame_size, rest} ->
+        decode_all(rest, position + frame_size, [{record, position} | decoded])
+
+      :incomplete ->
+        {Enum.reverse(decoded), position}
+
+      {:error, _reason} ->
+        {Enum.reverse(decoded), position}
     end
   end
 
   # --- private encoding helpers ---
 
   defp encode_headers(headers) do
-    for {k, v} <- headers, into: <<>> do
-      <<byte_size(k)::32, k::binary, byte_size(v)::32, v::binary>>
+    for {key, value} <- headers, into: <<>> do
+      <<byte_size(key)::32, key::binary, byte_size(value)::32, value::binary>>
     end
   end
 
   defp decode_payload(payload) do
-    <<offset::64, ts::64, flags::8, key_len::32, key::binary-size(key_len), val_len::32, value::binary-size(val_len),
-      header_count::32, headers_bin::binary>> = payload
+    <<offset::64, timestamp::64, flags::8, key_length::32, key::binary-size(key_length), value_length::32,
+      value::binary-size(value_length), header_count::32, headers_binary::binary>> = payload
 
     key = if (flags &&& @key_present) == @key_present, do: key, else: nil
-    headers = decode_headers(headers_bin, header_count, [])
+    headers = decode_headers(headers_binary, header_count, [])
 
-    {:ok, %__MODULE__{offset: offset, timestamp: ts, key: key, value: value, headers: headers}}
+    {:ok, %__MODULE__{offset: offset, timestamp: timestamp, key: key, value: value, headers: headers}}
   rescue
-    _ -> :error
+    # A malformed payload fails the top-level binary match (MatchError) or the
+    # header-decoding clauses (FunctionClauseError). Any other exception is a real
+    # bug and is left to propagate rather than being silently swallowed.
+    _ in [MatchError, FunctionClauseError] -> :error
   end
 
-  defp decode_headers(_bin, 0, acc), do: Enum.reverse(acc)
+  defp decode_headers(_binary, 0, headers), do: Enum.reverse(headers)
 
-  defp decode_headers(<<kl::32, k::binary-size(kl), vl::32, v::binary-size(vl), rest::binary>>, n, acc)
-       when n > 0 do
-    decode_headers(rest, n - 1, [{k, v} | acc])
+  defp decode_headers(
+         <<key_length::32, key::binary-size(key_length), value_length::32, value::binary-size(value_length),
+           rest::binary>>,
+         remaining_count,
+         headers
+       )
+       when remaining_count > 0 do
+    decode_headers(rest, remaining_count - 1, [{key, value} | headers])
   end
 end

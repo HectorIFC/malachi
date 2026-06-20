@@ -30,8 +30,17 @@ defmodule Malachi.Storage.SegmentStore do
               {:ok, handle()} | {:error, term()}
 
   @doc """
+  Opens an existing *sealed* segment read-only, cheaply (no full scan): the committed
+  `:record_count` and `:base_offset` are supplied by the caller (which knows them from
+  log metadata) and the sparse index is loaded from the persisted sidecar.
+  """
+  @callback open_read(dir :: Path.t(), seg_id :: term(), opts :: keyword()) ::
+              {:ok, handle()} | {:error, term()}
+
+  @doc """
   Buffers `records` (assigning each a logical offset). Returns the updated handle and the
-  first/last offsets assigned. Records are NOT durable until `sync/1`.
+  first/last offsets assigned. Buffered records are durable after `sync/1`, or sooner if
+  an implementation flushes automatically on a size threshold.
   """
   @callback append(handle(), [Record.t()]) ::
               {:ok, handle(), first :: non_neg_integer(), last :: non_neg_integer()}
@@ -52,6 +61,12 @@ defmodule Malachi.Storage.SegmentStore do
 
   @doc "The logical offset the next appended record will receive."
   @callback next_offset(handle()) :: non_neg_integer()
+
+  @doc "Whether the segment is sealed (immutable)."
+  @callback sealed?(handle()) :: boolean()
+
+  @doc "Whether an active segment has hit a seal threshold (size or age) at time `now_ms`."
+  @callback should_seal?(handle(), now_ms :: non_neg_integer()) :: boolean()
 
   @doc "Closes the segment's file handle."
   @callback close(handle()) :: :ok

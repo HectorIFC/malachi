@@ -3,7 +3,9 @@ defmodule Malachi.Storage.ElixirStore do
   Pure-Elixir `Malachi.Storage.SegmentStore` implementation (Phase 0).
 
   File-per-segment, append-only, with batched writes and an fsync-before-ack durability
-  contract. Maintains an in-memory sparse index (`{offset, file_pos}` every
+  contract. `append/2` buffers; the buffer is flushed and fsynced either on an explicit
+  `sync/1` or automatically once it reaches `:flush_bytes` (NorthGuard's size trigger,
+  default 10MB). Maintains an in-memory sparse index (`{offset, file_position}` every
   `:index_interval` bytes) for seeking; the index is persisted to a sidecar on `seal/1`
   and rebuilt by scanning on `recover/3`.
 
@@ -24,38 +26,48 @@ defmodule Malachi.Storage.ElixirStore do
   alias Malachi.Log.{Record, Segment}
 
   @default_index_interval 4096
-  @read_window 262_144
+  @read_window_bytes 262_144
+  # NorthGuard flushes a batch once it reaches ~10MB; matched here as the size trigger.
+  @default_flush_bytes 10_485_760
+
+  @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
+  @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
+
+  @typedoc "One buffered, not-yet-flushed record: its offset, encoded frame, and frame size."
+  @type pending_frame :: {offset :: non_neg_integer(), frame :: iodata(), frame_size :: pos_integer()}
 
   @type t :: %__MODULE__{
           segment: Segment.t(),
           fd: :file.fd(),
-          write_pos: non_neg_integer(),
+          write_position: non_neg_integer(),
           next_offset: non_neg_integer(),
-          pending: [{non_neg_integer(), iodata(), pos_integer()}],
+          pending: [pending_frame()],
           pending_bytes: non_neg_integer(),
           pending_count: non_neg_integer(),
-          index: [{non_neg_integer(), non_neg_integer()}],
+          index: [index_entry()],
           index_interval: pos_integer(),
-          last_index_pos: integer()
+          last_indexed_position: integer(),
+          flush_bytes: pos_integer()
         }
 
   defstruct [
     :segment,
     :fd,
-    write_pos: 0,
+    write_position: 0,
     next_offset: 0,
     pending: [],
     pending_bytes: 0,
     pending_count: 0,
     index: [],
     index_interval: @default_index_interval,
-    last_index_pos: 0
+    last_indexed_position: 0,
+    flush_bytes: @default_flush_bytes
   ]
 
   @impl true
-  def open(dir, seg_id, opts \\ []) do
-    File.mkdir_p!(dir)
-    segment = Segment.new(seg_id, dir, opts)
+  def open(directory, segment_id, opts \\ []) do
+    File.mkdir_p!(directory)
+    segment = Segment.new(segment_id, directory, opts)
     path = Segment.path(segment)
 
     if File.exists?(path) do
@@ -63,38 +75,41 @@ defmodule Malachi.Storage.ElixirStore do
     else
       File.touch!(path)
       {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
 
       {:ok,
        %__MODULE__{
          segment: segment,
          fd: fd,
          next_offset: segment.base_offset,
-         index_interval: Keyword.get(opts, :index_interval, @default_index_interval),
-         last_index_pos: -Keyword.get(opts, :index_interval, @default_index_interval)
+         index_interval: index_interval,
+         # Start "behind" by one interval so the segment's first record is always indexed.
+         last_indexed_position: -index_interval,
+         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes)
        }}
     end
   end
 
   @impl true
-  def recover(dir, seg_id, opts \\ []) do
-    segment = Segment.new(seg_id, dir, opts)
+  def recover(directory, segment_id, opts \\ []) do
+    segment = Segment.new(segment_id, directory, opts)
     path = Segment.path(segment)
 
     if File.exists?(path) do
-      bin = File.read!(path)
-      {pairs, valid_bytes} = Record.decode_all(bin)
-      interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      file_contents = File.read!(path)
+      {records_with_positions, valid_bytes} = Record.decode_all(file_contents)
+      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
 
       {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
 
       # Drop any partial/corrupt trailing bytes from a crash mid-write.
-      if valid_bytes < byte_size(bin) do
+      if valid_bytes < byte_size(file_contents) do
         {:ok, _} = :file.position(fd, valid_bytes)
         :ok = :file.truncate(fd)
       end
 
-      record_count = length(pairs)
-      base = segment.base_offset
+      record_count = length(records_with_positions)
+      base_offset = segment.base_offset
       sealed? = File.exists?(Segment.seal_marker_path(segment))
 
       segment = %Segment{
@@ -105,17 +120,47 @@ defmodule Malachi.Storage.ElixirStore do
           sealed_at: if(sealed?, do: System.system_time(:millisecond), else: nil)
       }
 
-      index = build_index(pairs, interval)
+      index = build_index(records_with_positions, index_interval)
 
       {:ok,
        %__MODULE__{
          segment: segment,
          fd: fd,
-         write_pos: valid_bytes,
-         next_offset: base + record_count,
+         write_position: valid_bytes,
+         next_offset: base_offset + record_count,
          index: index,
-         index_interval: interval,
-         last_index_pos: last_index_pos(index, interval)
+         index_interval: index_interval,
+         last_indexed_position: last_indexed_position(index, index_interval),
+         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes)
+       }}
+    else
+      {:error, :enoent}
+    end
+  end
+
+  @impl true
+  def open_read(directory, segment_id, opts) do
+    segment = Segment.new(segment_id, directory, opts)
+    path = Segment.path(segment)
+
+    if File.exists?(path) do
+      record_count = Keyword.fetch!(opts, :record_count)
+      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      {:ok, fd} = :file.open(path, [:read, :raw, :binary])
+      file_size = File.stat!(path).size
+      index = load_index_file(Segment.index_path(segment))
+
+      segment = %Segment{segment | state: :sealed, byte_size: file_size, record_count: record_count}
+
+      {:ok,
+       %__MODULE__{
+         segment: segment,
+         fd: fd,
+         write_position: file_size,
+         next_offset: segment.base_offset + record_count,
+         index: index,
+         index_interval: index_interval,
+         last_indexed_position: last_indexed_position(index, index_interval)
        }}
     else
       {:error, :enoent}
@@ -125,189 +170,227 @@ defmodule Malachi.Storage.ElixirStore do
   @impl true
   def append(%__MODULE__{segment: %Segment{state: :sealed}}, _records), do: {:error, :sealed}
 
-  def append(%__MODULE__{} = h, records) when is_list(records) and records != [] do
-    first = h.next_offset
+  def append(%__MODULE__{} = store, records) when is_list(records) and records != [] do
+    first_offset = store.next_offset
 
-    {framed, bytes, count, next} =
-      Enum.reduce(records, {[], 0, 0, h.next_offset}, fn %Record{} = rec, {acc, b, c, off} ->
-        frame = Record.encode(%Record{rec | offset: off})
-        size = byte_size(frame)
-        {[{off, frame, size} | acc], b + size, c + 1, off + 1}
+    {framed_records, batch_bytes, batch_count, next_offset} =
+      Enum.reduce(records, {[], 0, 0, store.next_offset}, fn
+        %Record{} = record, {frames, bytes_so_far, count_so_far, offset} ->
+          frame = Record.encode(%Record{record | offset: offset})
+          frame_size = byte_size(frame)
+
+          {[{offset, frame, frame_size} | frames], bytes_so_far + frame_size, count_so_far + 1, offset + 1}
       end)
 
-    h = %{
-      h
-      | pending: framed ++ h.pending,
-        pending_bytes: h.pending_bytes + bytes,
-        pending_count: h.pending_count + count,
-        next_offset: next
+    store = %{
+      store
+      | pending: framed_records ++ store.pending,
+        pending_bytes: store.pending_bytes + batch_bytes,
+        pending_count: store.pending_count + batch_count,
+        next_offset: next_offset
     }
 
-    {:ok, h, first, next - 1}
+    flush_if_full(store, first_offset, next_offset - 1)
   end
 
-  def append(%__MODULE__{} = h, []), do: {:ok, h, h.next_offset, h.next_offset - 1}
+  def append(%__MODULE__{} = store, []), do: {:ok, store, store.next_offset, store.next_offset - 1}
+
+  # NorthGuard's size trigger: once the buffer reaches `:flush_bytes`, flush+fsync it
+  # automatically so the batch is committed without waiting for an explicit `sync/1`.
+  defp flush_if_full(
+         %__MODULE__{pending_bytes: pending_bytes, flush_bytes: flush_bytes} = store,
+         first_offset,
+         last_offset
+       )
+       when pending_bytes >= flush_bytes do
+    {:ok, flushed_store} = sync(store)
+    {:ok, flushed_store, first_offset, last_offset}
+  end
+
+  defp flush_if_full(%__MODULE__{} = store, first_offset, last_offset),
+    do: {:ok, store, first_offset, last_offset}
 
   @impl true
-  def sync(%__MODULE__{pending_count: 0} = h) do
-    :ok = :file.sync(h.fd)
-    {:ok, h}
+  def sync(%__MODULE__{pending_count: 0} = store) do
+    :ok = :file.sync(store.fd)
+    {:ok, store}
   end
 
-  def sync(%__MODULE__{} = h) do
-    frames = Enum.reverse(h.pending)
+  def sync(%__MODULE__{} = store) do
+    frames_in_order = Enum.reverse(store.pending)
 
-    # Build new sparse index entries while computing each frame's file position.
-    {iodata, new_index_entries, end_pos, last_idx_pos} =
-      Enum.reduce(frames, {[], [], h.write_pos, h.last_index_pos}, fn
-        {offset, frame, size}, {io, idx, pos, last_idx} ->
-          {idx, last_idx} =
-            if pos - last_idx >= h.index_interval do
-              {[{offset, pos} | idx], pos}
+    # Write the frames and, in the same pass, compute each frame's file position so we can
+    # add a sparse-index entry roughly every `index_interval` bytes.
+    {frames_iodata, new_index_entries, end_position, last_indexed_position} =
+      Enum.reduce(frames_in_order, {[], [], store.write_position, store.last_indexed_position}, fn
+        {offset, frame, frame_size}, {iodata, index_entries, position, last_indexed_position} ->
+          {index_entries, last_indexed_position} =
+            if position - last_indexed_position >= store.index_interval do
+              {[{offset, position} | index_entries], position}
             else
-              {idx, last_idx}
+              {index_entries, last_indexed_position}
             end
 
-          {[frame | io], idx, pos + size, last_idx}
+          {[frame | iodata], index_entries, position + frame_size, last_indexed_position}
       end)
 
-    :ok = :file.pwrite(h.fd, h.write_pos, Enum.reverse(iodata))
-    :ok = :file.sync(h.fd)
+    :ok = :file.pwrite(store.fd, store.write_position, Enum.reverse(frames_iodata))
+    :ok = :file.sync(store.fd)
 
-    %Segment{} = seg = h.segment
+    %Segment{} = current_segment = store.segment
 
     segment = %Segment{
-      seg
-      | byte_size: end_pos,
-        record_count: seg.record_count + h.pending_count
+      current_segment
+      | byte_size: end_position,
+        record_count: current_segment.record_count + store.pending_count
     }
 
     {:ok,
      %{
-       h
+       store
        | segment: segment,
-         write_pos: end_pos,
+         write_position: end_position,
          pending: [],
          pending_bytes: 0,
          pending_count: 0,
-         index: h.index ++ Enum.reverse(new_index_entries),
-         last_index_pos: last_idx_pos
+         index: store.index ++ Enum.reverse(new_index_entries),
+         last_indexed_position: last_indexed_position
      }}
   end
 
   @impl true
-  def read(%__MODULE__{segment: segment} = h, offset, max_records)
+  def read(%__MODULE__{segment: segment} = store, offset, max_records)
       when is_integer(offset) and is_integer(max_records) and max_records > 0 do
-    committed_end = Segment.end_offset(segment)
+    committed_end_offset = Segment.end_offset(segment)
 
     cond do
       offset < segment.base_offset -> {:error, :out_of_range}
-      offset >= committed_end -> :eof
-      true -> {:ok, do_read(h, offset, max_records)}
+      offset >= committed_end_offset -> :eof
+      true -> {:ok, do_read(store, offset, max_records)}
     end
   end
 
   @impl true
-  def seal(%__MODULE__{segment: %Segment{state: :sealed}} = h), do: {:ok, h}
+  def seal(%__MODULE__{segment: %Segment{state: :sealed}} = store), do: {:ok, store}
 
-  def seal(%__MODULE__{} = h) do
-    {:ok, h} = sync(h)
-    :ok = persist_index(h)
-    File.touch!(Segment.seal_marker_path(h.segment))
+  def seal(%__MODULE__{} = store) do
+    {:ok, store} = sync(store)
+    :ok = persist_index(store)
+    File.touch!(Segment.seal_marker_path(store.segment))
 
-    %Segment{} = seg = h.segment
-    segment = %Segment{seg | state: :sealed, sealed_at: System.system_time(:millisecond)}
-    {:ok, %{h | segment: segment}}
+    %Segment{} = current_segment = store.segment
+    segment = %Segment{current_segment | state: :sealed, sealed_at: System.system_time(:millisecond)}
+    {:ok, %{store | segment: segment}}
   end
 
   @impl true
-  def next_offset(%__MODULE__{next_offset: n}), do: n
+  def next_offset(%__MODULE__{next_offset: next_offset}), do: next_offset
+
+  @impl true
+  def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
+
+  @impl true
+  def should_seal?(%__MODULE__{segment: segment}, now_ms), do: Segment.should_seal?(segment, now_ms)
 
   @impl true
   def close(%__MODULE__{fd: fd}), do: :file.close(fd)
 
   # --- reading ---
 
-  defp do_read(h, target, max) do
-    start_pos = floor_pos(h.index, target)
-    collect(h, target, max, start_pos, <<>>, [])
+  defp do_read(store, target_offset, max_records) do
+    start_position = floor_position(store.index, target_offset)
+    collect(store, target_offset, max_records, start_position, <<>>, [])
   end
 
-  defp collect(h, target, max, pos, carry, acc) do
+  defp collect(store, target_offset, max_records, position, leftover_bytes, collected) do
     cond do
-      length(acc) >= max ->
-        Enum.reverse(acc)
+      length(collected) >= max_records ->
+        Enum.reverse(collected)
 
-      pos >= h.write_pos and carry == <<>> ->
-        Enum.reverse(acc)
+      position >= store.write_position and leftover_bytes == <<>> ->
+        Enum.reverse(collected)
 
       true ->
-        to_read = min(@read_window, h.write_pos - pos)
+        bytes_to_read = min(@read_window_bytes, store.write_position - position)
 
-        case read_chunk(h.fd, pos, to_read) do
+        case read_chunk(store.fd, position, bytes_to_read) do
           :eof ->
-            Enum.reverse(acc)
+            Enum.reverse(collected)
 
-          {:ok, data} ->
-            buffer = carry <> data
-            {pairs, consumed} = Record.decode_all(buffer)
-            acc = take_matching(pairs, target, max, acc)
-            leftover = binary_part(buffer, consumed, byte_size(buffer) - consumed)
-            collect(h, target, max, pos + byte_size(data), leftover, acc)
+          {:ok, chunk} ->
+            buffer = leftover_bytes <> chunk
+            {records_with_positions, consumed_bytes} = Record.decode_all(buffer)
+            collected = take_matching(records_with_positions, target_offset, max_records, collected)
+            remaining_bytes = binary_part(buffer, consumed_bytes, byte_size(buffer) - consumed_bytes)
+            collect(store, target_offset, max_records, position + byte_size(chunk), remaining_bytes, collected)
         end
     end
   end
 
-  # Accumulates (reversed) records with offset >= target, up to `max` total.
-  defp take_matching(pairs, target, max, acc) do
-    Enum.reduce_while(pairs, acc, fn {rec, _pos}, a ->
+  # Accumulates (reversed) records with offset >= target_offset, up to `max_records` total.
+  defp take_matching(records_with_positions, target_offset, max_records, collected) do
+    Enum.reduce_while(records_with_positions, collected, fn {record, _position}, collected ->
       cond do
-        length(a) >= max -> {:halt, a}
-        rec.offset >= target -> {:cont, [rec | a]}
-        true -> {:cont, a}
+        length(collected) >= max_records -> {:halt, collected}
+        record.offset >= target_offset -> {:cont, [record | collected]}
+        true -> {:cont, collected}
       end
     end)
   end
 
-  defp read_chunk(_fd, _pos, 0), do: :eof
+  defp read_chunk(_fd, _position, 0), do: :eof
 
-  defp read_chunk(fd, pos, len) do
-    case :file.pread(fd, pos, len) do
-      {:ok, data} -> {:ok, data}
+  defp read_chunk(fd, position, length) do
+    case :file.pread(fd, position, length) do
+      {:ok, chunk} -> {:ok, chunk}
       :eof -> :eof
     end
   end
 
   # --- sparse index ---
 
-  # Greatest indexed file position whose offset is <= target; 0 if none.
-  defp floor_pos(index, target) do
+  # Greatest indexed file position whose offset is <= target_offset; 0 if none.
+  defp floor_position(index, target_offset) do
     index
-    |> Enum.take_while(fn {offset, _pos} -> offset <= target end)
+    |> Enum.take_while(fn {offset, _position} -> offset <= target_offset end)
     |> List.last()
     |> case do
       nil -> 0
-      {_offset, pos} -> pos
+      {_offset, position} -> position
     end
   end
 
-  defp build_index(pairs, interval), do: build_index(pairs, interval, -interval, [])
+  defp build_index(records_with_positions, index_interval) do
+    build_index(records_with_positions, index_interval, -index_interval, [])
+  end
 
-  defp build_index([], _interval, _last, acc), do: Enum.reverse(acc)
+  defp build_index([], _index_interval, _last_indexed_position, entries), do: Enum.reverse(entries)
 
-  defp build_index([{rec, pos} | rest], interval, last, acc) do
-    if pos - last >= interval do
-      build_index(rest, interval, pos, [{rec.offset, pos} | acc])
+  defp build_index([{record, position} | remaining], index_interval, last_indexed_position, entries) do
+    if position - last_indexed_position >= index_interval do
+      build_index(remaining, index_interval, position, [{record.offset, position} | entries])
     else
-      build_index(rest, interval, last, acc)
+      build_index(remaining, index_interval, last_indexed_position, entries)
     end
   end
 
-  defp last_index_pos([], interval), do: -interval
-  defp last_index_pos(index, _interval), do: index |> List.last() |> elem(1)
+  defp last_indexed_position([], index_interval), do: -index_interval
+  defp last_indexed_position(index, _index_interval), do: index |> List.last() |> elem(1)
 
-  defp persist_index(h) do
-    bin = for {offset, pos} <- h.index, into: <<>>, do: <<offset::64, pos::64>>
-    File.write(Segment.index_path(h.segment), bin)
+  defp persist_index(store) do
+    binary = for {offset, position} <- store.index, into: <<>>, do: <<offset::64, position::64>>
+    File.write(Segment.index_path(store.segment), binary)
   end
+
+  defp load_index_file(path) do
+    case File.read(path) do
+      {:ok, binary} -> parse_index(binary, [])
+      _ -> []
+    end
+  end
+
+  defp parse_index(<<offset::64, position::64, remaining::binary>>, entries),
+    do: parse_index(remaining, [{offset, position} | entries])
+
+  defp parse_index(_remaining, entries), do: Enum.reverse(entries)
 end
