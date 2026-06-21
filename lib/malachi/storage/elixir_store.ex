@@ -6,8 +6,9 @@ defmodule Malachi.Storage.ElixirStore do
   contract. `append/2` buffers; the buffer is flushed and fsynced either on an explicit
   `sync/1` or automatically once it reaches `:flush_bytes` (NorthGuard's size trigger,
   default 10MB). Maintains an in-memory sparse index (`{offset, file_position}` every
-  `:index_interval` bytes) for seeking; the index is persisted to a sidecar on `seal/1`
-  and rebuilt by scanning on `recover/3`.
+  `:index_interval` bytes) for seeking, kept in an `:array` sorted by offset so a lookup
+  is an O(log n) binary search; the index is persisted to a sidecar on `seal/1` and
+  rebuilt by scanning on `recover/3`.
 
   This is deliberately a plain module operating on an immutable handle (no GenServer),
   so it is deterministic and trivial to property-test. Time-based flushing (NorthGuard's
@@ -29,6 +30,7 @@ defmodule Malachi.Storage.ElixirStore do
   @read_window_bytes 262_144
   # NorthGuard flushes a batch once it reaches ~10MB; matched here as the size trigger.
   @default_flush_bytes 10_485_760
+  @empty_index :array.new([])
 
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
@@ -44,7 +46,8 @@ defmodule Malachi.Storage.ElixirStore do
           pending: [pending_frame()],
           pending_bytes: non_neg_integer(),
           pending_count: non_neg_integer(),
-          index: [index_entry()],
+          # sparse index entries kept sorted by offset in an :array for O(log n) floor lookup
+          index: :array.array(),
           index_interval: pos_integer(),
           last_indexed_position: integer(),
           flush_bytes: pos_integer()
@@ -58,7 +61,7 @@ defmodule Malachi.Storage.ElixirStore do
     pending: [],
     pending_bytes: 0,
     pending_count: 0,
-    index: [],
+    index: @empty_index,
     index_interval: @default_index_interval,
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes
@@ -120,7 +123,7 @@ defmodule Malachi.Storage.ElixirStore do
           sealed_at: if(sealed?, do: System.system_time(:millisecond), else: nil)
       }
 
-      index = build_index(records_with_positions, index_interval)
+      index = :array.from_list(sparse_entries(records_with_positions, index_interval))
 
       {:ok,
        %__MODULE__{
@@ -253,7 +256,7 @@ defmodule Malachi.Storage.ElixirStore do
          pending: [],
          pending_bytes: 0,
          pending_count: 0,
-         index: store.index ++ Enum.reverse(new_index_entries),
+         index: append_index_entries(store.index, Enum.reverse(new_index_entries)),
          last_indexed_position: last_indexed_position
      }}
   end
@@ -302,9 +305,11 @@ defmodule Malachi.Storage.ElixirStore do
     collect(store, target_offset, max_records, start_position, <<>>, [])
   end
 
-  defp collect(store, target_offset, max_records, position, leftover_bytes, collected) do
+  # `remaining_records` is a decreasing counter so we never call `length/1` per record
+  # (which would make a large read O(max_records^2)).
+  defp collect(store, target_offset, remaining_records, position, leftover_bytes, collected) do
     cond do
-      length(collected) >= max_records ->
+      remaining_records <= 0 ->
         Enum.reverse(collected)
 
       position >= store.write_position and leftover_bytes == <<>> ->
@@ -320,21 +325,27 @@ defmodule Malachi.Storage.ElixirStore do
           {:ok, chunk} ->
             buffer = leftover_bytes <> chunk
             {records_with_positions, consumed_bytes} = Record.decode_all(buffer)
-            collected = take_matching(records_with_positions, target_offset, max_records, collected)
-            remaining_bytes = binary_part(buffer, consumed_bytes, byte_size(buffer) - consumed_bytes)
-            collect(store, target_offset, max_records, position + byte_size(chunk), remaining_bytes, collected)
+
+            {collected, remaining_records} =
+              take_matching(records_with_positions, target_offset, remaining_records, collected)
+
+            unconsumed_bytes = binary_part(buffer, consumed_bytes, byte_size(buffer) - consumed_bytes)
+
+            collect(store, target_offset, remaining_records, position + byte_size(chunk), unconsumed_bytes, collected)
         end
     end
   end
 
-  # Accumulates (reversed) records with offset >= target_offset, up to `max_records` total.
-  defp take_matching(records_with_positions, target_offset, max_records, collected) do
-    Enum.reduce_while(records_with_positions, collected, fn {record, _position}, collected ->
-      cond do
-        length(collected) >= max_records -> {:halt, collected}
-        record.offset >= target_offset -> {:cont, [record | collected]}
-        true -> {:cont, collected}
-      end
+  # Prepends records with offset >= target_offset to `collected`, decrementing the
+  # remaining budget; stops once it reaches zero.
+  defp take_matching(records_with_positions, target_offset, remaining_records, collected) do
+    Enum.reduce_while(records_with_positions, {collected, remaining_records}, fn
+      {record, _position}, {collected, remaining_records} ->
+        cond do
+          remaining_records <= 0 -> {:halt, {collected, remaining_records}}
+          record.offset >= target_offset -> {:cont, {[record | collected], remaining_records - 1}}
+          true -> {:cont, {collected, remaining_records}}
+        end
     end)
   end
 
@@ -347,45 +358,71 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
-  # --- sparse index ---
+  # --- sparse index (an :array sorted by offset, for O(log n) floor lookups) ---
 
-  # Greatest indexed file position whose offset is <= target_offset; 0 if none.
+  # File position of the greatest indexed offset <= target_offset; 0 if none.
   defp floor_position(index, target_offset) do
-    index
-    |> Enum.take_while(fn {offset, _position} -> offset <= target_offset end)
-    |> List.last()
-    |> case do
-      nil -> 0
-      {_offset, position} -> position
+    case :array.size(index) do
+      0 -> 0
+      size -> binary_floor(index, target_offset, 0, size - 1, 0)
     end
   end
 
-  defp build_index(records_with_positions, index_interval) do
-    build_index(records_with_positions, index_interval, -index_interval, [])
-  end
+  defp binary_floor(_index, _target_offset, low, high, best) when low > high, do: best
 
-  defp build_index([], _index_interval, _last_indexed_position, entries), do: Enum.reverse(entries)
+  defp binary_floor(index, target_offset, low, high, best) do
+    mid = div(low + high, 2)
+    {offset, position} = :array.get(mid, index)
 
-  defp build_index([{record, position} | remaining], index_interval, last_indexed_position, entries) do
-    if position - last_indexed_position >= index_interval do
-      build_index(remaining, index_interval, position, [{record.offset, position} | entries])
+    if offset <= target_offset do
+      binary_floor(index, target_offset, mid + 1, high, position)
     else
-      build_index(remaining, index_interval, last_indexed_position, entries)
+      binary_floor(index, target_offset, low, mid - 1, best)
     end
   end
 
-  defp last_indexed_position([], index_interval), do: -index_interval
-  defp last_indexed_position(index, _index_interval), do: index |> List.last() |> elem(1)
+  # Appends already-ascending entries to the index array (each insert is O(log n)).
+  defp append_index_entries(index, entries) do
+    Enum.reduce(entries, index, fn entry, accumulated ->
+      :array.set(:array.size(accumulated), entry, accumulated)
+    end)
+  end
+
+  # Picks one {offset, file_position} entry roughly every `index_interval` bytes (ascending).
+  defp sparse_entries(records_with_positions, index_interval) do
+    sparse_entries(records_with_positions, index_interval, -index_interval, [])
+  end
+
+  defp sparse_entries([], _index_interval, _last_indexed_position, entries), do: Enum.reverse(entries)
+
+  defp sparse_entries([{record, position} | remaining], index_interval, last_indexed_position, entries) do
+    if position - last_indexed_position >= index_interval do
+      sparse_entries(remaining, index_interval, position, [{record.offset, position} | entries])
+    else
+      sparse_entries(remaining, index_interval, last_indexed_position, entries)
+    end
+  end
+
+  defp last_indexed_position(index, index_interval) do
+    case :array.size(index) do
+      0 -> -index_interval
+      size -> elem(:array.get(size - 1, index), 1)
+    end
+  end
 
   defp persist_index(store) do
-    binary = for {offset, position} <- store.index, into: <<>>, do: <<offset::64, position::64>>
+    binary =
+      for {offset, position} <- :array.to_list(store.index), into: <<>> do
+        <<offset::64, position::64>>
+      end
+
     File.write(Segment.index_path(store.segment), binary)
   end
 
   defp load_index_file(path) do
     case File.read(path) do
-      {:ok, binary} -> parse_index(binary, [])
-      _ -> []
+      {:ok, binary} -> :array.from_list(parse_index(binary, []))
+      _ -> @empty_index
     end
   end
 

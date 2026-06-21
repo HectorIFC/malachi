@@ -101,6 +101,8 @@ defmodule Malachi.Log do
   """
   @spec append(t(), [Malachi.Log.Record.t()]) ::
           {:ok, t(), non_neg_integer(), non_neg_integer()} | {:error, term()}
+  def append(%__MODULE__{} = log, []), do: {:ok, log, log.next_offset, log.next_offset - 1}
+
   def append(%__MODULE__{} = log, records) when is_list(records) and records != [] do
     log = ensure_active(log)
 

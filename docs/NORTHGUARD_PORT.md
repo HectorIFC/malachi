@@ -134,10 +134,15 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
   contínua atravessando segments, recovery do diretório inteiro (só escaneia o último segment).
 - ✅ Flush por **tamanho** (`:flush_bytes`, default 10MB — gatilho de tamanho do NorthGuard):
   `append` faz flush+fsync automático ao atingir o limite.
-- ✅ Testes: property-based (`stream_data`) + unit de append/read/seal/crash-recovery/roll/auto-flush.
-- ⏳ Pendente da Fase 0: tipos lógicos `Range`/`Topic`; flush por **tempo** (gatilho ~10ms) e por
-  **contagem** (20k records) via um wrapper GenServer; scan de recovery em chunks (hoje lê o
-  segment inteiro em memória).
+- ✅ `Malachi.Range` — abstração de log sobre keyspace `[0, 2^bits)`: chaves por hash
+  (`:erlang.phash2`), ranges como blocos buddy-allocator, **split/merge lógicos** (não movem
+  dados), buddy único, linhagem (`parents`) para **happens-before**.
+- ✅ Testes: property-based (`stream_data`) + unit de append/read/seal/crash-recovery/roll/
+  auto-flush + split/merge/buddy/happens-before/roteamento por chave.
+- ⏳ Pendente da Fase 0: tipo lógico `Topic` (cobertura do keyspace + roteamento de records por
+  chave para o range certo + orquestração de split/merge); leitura cross-epoch (histórico de uma
+  chave através de um split: epoch do pai → epoch do filho); flush por **tempo** (~10ms) e por
+  **contagem** (20k records) via wrapper GenServer; scan de recovery em chunks.
 
 ### Fase 1 — Distribuição (Elixir puro)
 - DS-RSM com `ra` (vnodes, coordinators, consistent hashing, split de vnode).

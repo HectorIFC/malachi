@@ -221,7 +221,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
       {:ok, h, _, _} = ElixirStore.append(h, records)
       {:ok, h} = ElixirStore.sync(h)
 
-      assert length(h.index) > 1, "expected multiple sparse index entries"
+      assert :array.size(h.index) > 1, "expected multiple sparse index entries"
 
       for target <- [0, 1, 57, 128, 199] do
         assert {:ok, [r]} = ElixirStore.read(h, target, 1)

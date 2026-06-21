@@ -90,6 +90,11 @@ defmodule Malachi.LogTest do
       {:ok, log} = Log.open(dir)
       assert Log.read(log, 0, 10) == :eof
     end
+
+    test "appending an empty list is a no-op (not a crash)", %{tmp_dir: dir} do
+      {:ok, log} = Log.open(dir)
+      assert {:ok, _log, 0, -1} = Log.append(log, [])
+    end
   end
 
   describe "recovery" do
