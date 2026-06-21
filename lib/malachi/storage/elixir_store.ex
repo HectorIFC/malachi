@@ -40,7 +40,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   @type t :: %__MODULE__{
           segment: Segment.t(),
-          fd: :file.fd(),
+          file_descriptor: :file.fd(),
           write_position: non_neg_integer(),
           next_offset: non_neg_integer(),
           pending: [pending_frame()],
@@ -55,7 +55,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   defstruct [
     :segment,
-    :fd,
+    :file_descriptor,
     write_position: 0,
     next_offset: 0,
     pending: [],
@@ -77,13 +77,13 @@ defmodule Malachi.Storage.ElixirStore do
       {:error, :already_exists}
     else
       File.touch!(path)
-      {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
 
       {:ok,
        %__MODULE__{
          segment: segment,
-         fd: fd,
+         file_descriptor: file_descriptor,
          next_offset: segment.base_offset,
          index_interval: index_interval,
          # Start "behind" by one interval so the segment's first record is always indexed.
@@ -103,12 +103,12 @@ defmodule Malachi.Storage.ElixirStore do
       {records_with_positions, valid_bytes} = Record.decode_all(file_contents)
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
 
-      {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
 
       # Drop any partial/corrupt trailing bytes from a crash mid-write.
       if valid_bytes < byte_size(file_contents) do
-        {:ok, _} = :file.position(fd, valid_bytes)
-        :ok = :file.truncate(fd)
+        {:ok, _} = :file.position(file_descriptor, valid_bytes)
+        :ok = :file.truncate(file_descriptor)
       end
 
       record_count = length(records_with_positions)
@@ -128,7 +128,7 @@ defmodule Malachi.Storage.ElixirStore do
       {:ok,
        %__MODULE__{
          segment: segment,
-         fd: fd,
+         file_descriptor: file_descriptor,
          write_position: valid_bytes,
          next_offset: base_offset + record_count,
          index: index,
@@ -149,7 +149,7 @@ defmodule Malachi.Storage.ElixirStore do
     if File.exists?(path) do
       record_count = Keyword.fetch!(opts, :record_count)
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-      {:ok, fd} = :file.open(path, [:read, :raw, :binary])
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
       file_size = File.stat!(path).size
       index = load_index_file(Segment.index_path(segment))
 
@@ -158,7 +158,7 @@ defmodule Malachi.Storage.ElixirStore do
       {:ok,
        %__MODULE__{
          segment: segment,
-         fd: fd,
+         file_descriptor: file_descriptor,
          write_position: file_size,
          next_offset: segment.base_offset + record_count,
          index: index,
@@ -215,7 +215,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def sync(%__MODULE__{pending_count: 0} = store) do
-    :ok = :file.sync(store.fd)
+    :ok = :file.sync(store.file_descriptor)
     {:ok, store}
   end
 
@@ -237,8 +237,8 @@ defmodule Malachi.Storage.ElixirStore do
           {[frame | iodata], index_entries, position + frame_size, last_indexed_position}
       end)
 
-    :ok = :file.pwrite(store.fd, store.write_position, Enum.reverse(frames_iodata))
-    :ok = :file.sync(store.fd)
+    :ok = :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata))
+    :ok = :file.sync(store.file_descriptor)
 
     %Segment{} = current_segment = store.segment
 
@@ -296,7 +296,7 @@ defmodule Malachi.Storage.ElixirStore do
   def should_seal?(%__MODULE__{segment: segment}, now_ms), do: Segment.should_seal?(segment, now_ms)
 
   @impl true
-  def close(%__MODULE__{fd: fd}), do: :file.close(fd)
+  def close(%__MODULE__{file_descriptor: file_descriptor}), do: :file.close(file_descriptor)
 
   # --- reading ---
 
@@ -318,7 +318,7 @@ defmodule Malachi.Storage.ElixirStore do
       true ->
         bytes_to_read = min(@read_window_bytes, store.write_position - position)
 
-        case read_chunk(store.fd, position, bytes_to_read) do
+        case read_chunk(store.file_descriptor, position, bytes_to_read) do
           :eof ->
             Enum.reverse(collected)
 
@@ -349,10 +349,10 @@ defmodule Malachi.Storage.ElixirStore do
     end)
   end
 
-  defp read_chunk(_fd, _position, 0), do: :eof
+  defp read_chunk(_file_descriptor, _position, 0), do: :eof
 
-  defp read_chunk(fd, position, length) do
-    case :file.pread(fd, position, length) do
+  defp read_chunk(file_descriptor, position, length) do
+    case :file.pread(file_descriptor, position, length) do
       {:ok, chunk} -> {:ok, chunk}
       :eof -> :eof
     end
@@ -368,16 +368,17 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
-  defp binary_floor(_index, _target_offset, low, high, best) when low > high, do: best
+  defp binary_floor(_index, _target_offset, low, high, best_position) when low > high,
+    do: best_position
 
-  defp binary_floor(index, target_offset, low, high, best) do
-    mid = div(low + high, 2)
-    {offset, position} = :array.get(mid, index)
+  defp binary_floor(index, target_offset, low, high, best_position) do
+    middle = div(low + high, 2)
+    {offset, position} = :array.get(middle, index)
 
     if offset <= target_offset do
-      binary_floor(index, target_offset, mid + 1, high, position)
+      binary_floor(index, target_offset, middle + 1, high, position)
     else
-      binary_floor(index, target_offset, low, mid - 1, best)
+      binary_floor(index, target_offset, low, middle - 1, best_position)
     end
   end
 

@@ -22,11 +22,11 @@ defmodule Malachi.Storage.SegmentStore do
   @type handle :: term()
 
   @doc "Creates and opens a new, empty segment. Fails if one already exists."
-  @callback open(dir :: Path.t(), seg_id :: term(), opts :: keyword()) ::
+  @callback open(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
               {:ok, handle()} | {:error, term()}
 
   @doc "Reopens an existing segment, recovering committed state and truncating any partial trailing write."
-  @callback recover(dir :: Path.t(), seg_id :: term(), opts :: keyword()) ::
+  @callback recover(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
               {:ok, handle()} | {:error, term()}
 
   @doc """
@@ -34,7 +34,7 @@ defmodule Malachi.Storage.SegmentStore do
   `:record_count` and `:base_offset` are supplied by the caller (which knows them from
   log metadata) and the sparse index is loaded from the persisted sidecar.
   """
-  @callback open_read(dir :: Path.t(), seg_id :: term(), opts :: keyword()) ::
+  @callback open_read(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
               {:ok, handle()} | {:error, term()}
 
   @doc """
