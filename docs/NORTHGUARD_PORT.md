@@ -156,8 +156,25 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 > topic** (quais ranges existem) — entra no **DS-RSM da Fase 1**, fiel ao NorthGuard, onde essa
 > metadata vive no coordinator/vnode (Raft).
 
-### Fase 1 — Distribuição (Elixir puro)
-- DS-RSM com `ra` (vnodes, coordinators, consistent hashing, split de vnode).
+### Fase 1 — Distribuição
+
+Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
+`ElixirStore`→Rust NIF). A máquina de estado do metadado é desenhada com o contrato
+`apply/2` de um Raft, então o `ra` pluga sem retrabalho.
+
+**Fase 1a — DS-RSM (lógica pura, sem deps):**
+- ✅ `Malachi.Cluster.HashRing` — consistent hashing: vnodes em tokens no anel `[0, 2^bits)`,
+  `route` por ceiling com wraparound, `boundaries` (arco do vnode), add/remove. Movimentação
+  mínima ao adicionar/remover vnode (testado).
+- ⏳ `Malachi.Metadata` — máquina de estado do vnode/coordinator (`apply/2` puro): topics,
+  ranges e segments (replica set, estado active/sealed/reassigning) como metadado durável.
+  **Resolve a persistência de metadados do topic adiada da Fase 0.** Extrair `Malachi.Keyspace`
+  (position/covers?/split-point/buddy?) p/ compartilhar com `Range` e evitar duplicação (DRY).
+- ⏳ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; roteia comandos
+  por hash (topic name / range id) ao vnode dono; split de vnode (parte o estado).
+
+**Fase 1b — Replicação e membership:**
+- Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
 - SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - **Striping**: segment como unidade de replicação; self-balancing ao criar segments.
 - Replicação de segment (active stream + sealed = consume entre brokers) + self-healing.
