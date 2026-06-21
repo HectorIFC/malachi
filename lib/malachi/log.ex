@@ -148,6 +148,11 @@ defmodule Malachi.Log do
     end
   end
 
+  @doc "Whether the log has buffered records not yet flushed."
+  @spec pending?(t()) :: boolean()
+  def pending?(%__MODULE__{active: nil}), do: false
+  def pending?(%__MODULE__{} = log), do: log.store.pending?(log.active)
+
   @doc "Closes the active segment's file handle, if any."
   @spec close(t()) :: :ok
   def close(%__MODULE__{active: nil}), do: :ok

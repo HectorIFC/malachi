@@ -100,6 +100,25 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert ElixirStore.read(store, 0, 10) == :eof
       assert store.pending_count == 1
     end
+
+    test "commits automatically once the buffer reaches flush_count records",
+         %{tmp_dir: directory} do
+      {:ok, store} = ElixirStore.open(directory, "segment-0", flush_count: 2)
+      {:ok, store, _, _} = ElixirStore.append(store, [rec("a"), rec("b")])
+
+      assert {:ok, records} = ElixirStore.read(store, 0, 10)
+      assert Enum.map(records, & &1.value) == ["a", "b"]
+      assert store.pending_count == 0
+    end
+
+    test "pending? reflects whether there is unflushed data", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      refute ElixirStore.pending?(store)
+      {:ok, store, _, _} = ElixirStore.append(store, [rec("a")])
+      assert ElixirStore.pending?(store)
+      {:ok, store} = ElixirStore.sync(store)
+      refute ElixirStore.pending?(store)
+    end
   end
 
   describe "sealing" do

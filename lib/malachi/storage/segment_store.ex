@@ -65,6 +65,9 @@ defmodule Malachi.Storage.SegmentStore do
   @doc "Whether the segment is sealed (immutable)."
   @callback sealed?(handle()) :: boolean()
 
+  @doc "Whether the segment has buffered records not yet flushed (an explicit `sync/1` is due)."
+  @callback pending?(handle()) :: boolean()
+
   @doc "Whether an active segment has hit a seal threshold (size or age) at time `now_ms`."
   @callback should_seal?(handle(), now_ms :: non_neg_integer()) :: boolean()
 

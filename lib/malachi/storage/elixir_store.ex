@@ -3,23 +3,20 @@ defmodule Malachi.Storage.ElixirStore do
   Pure-Elixir `Malachi.Storage.SegmentStore` implementation (Phase 0).
 
   File-per-segment, append-only, with batched writes and an fsync-before-ack durability
-  contract. `append/2` buffers; the buffer is flushed and fsynced either on an explicit
-  `sync/1` or automatically once it reaches `:flush_bytes` (NorthGuard's size trigger,
-  default 10MB). Maintains an in-memory sparse index (`{offset, file_position}` every
-  `:index_interval` bytes) for seeking, kept in an `:array` sorted by offset so a lookup
-  is an O(log n) binary search; the index is persisted to a sidecar on `seal/1` and
-  rebuilt by scanning on `recover/3`.
+  contract. `append/2` buffers; the buffer is flushed and fsynced on an explicit `sync/1`
+  or automatically once it reaches `:flush_bytes` (default 10MB) or `:flush_count` records
+  (default 20k) — NorthGuard's size and count triggers. Maintains an in-memory sparse index
+  (`{offset, file_position}` every `:index_interval` bytes) for seeking, kept in an `:array`
+  sorted by offset so a lookup is an O(log n) binary search; the index is persisted to a
+  sidecar on `seal/1` and rebuilt by scanning on `recover/3`.
 
-  This is deliberately a plain module operating on an immutable handle (no GenServer),
-  so it is deterministic and trivial to property-test. Time-based flushing (NorthGuard's
-  ~10ms trigger) and concurrency belong in a higher layer built on top of this.
+  This is deliberately a plain module operating on an immutable handle (no GenServer), so
+  it is deterministic and trivial to property-test. The time-based flush trigger (~10ms)
+  and concurrency belong in a higher layer (`Malachi.TopicServer`) built on top of this.
 
   Reads via `:file.pread/3` and writes via `:file.pwrite/3` use explicit positions, so
   the single file descriptor serves both append and random read without position races.
-
-  > Recovery currently reads the whole active segment file into memory to scan it. That is
-  > fine for the prototype and bounded by the 1GB seal limit, but a production version
-  > should scan in chunks. Tracked in `docs/NORTHGUARD_PORT.md`.
+  Recovery scans the segment in bounded chunks, so it never loads the whole file at once.
   """
 
   @behaviour Malachi.Storage.SegmentStore
@@ -28,8 +25,9 @@ defmodule Malachi.Storage.ElixirStore do
 
   @default_index_interval 4096
   @read_window_bytes 262_144
-  # NorthGuard flushes a batch once it reaches ~10MB; matched here as the size trigger.
+  # NorthGuard flushes a batch once it reaches ~10MB or ~20k records.
   @default_flush_bytes 10_485_760
+  @default_flush_count 20_000
   @empty_index :array.new([])
 
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
@@ -50,7 +48,8 @@ defmodule Malachi.Storage.ElixirStore do
           index: :array.array(),
           index_interval: pos_integer(),
           last_indexed_position: integer(),
-          flush_bytes: pos_integer()
+          flush_bytes: pos_integer(),
+          flush_count: pos_integer()
         }
 
   defstruct [
@@ -64,7 +63,8 @@ defmodule Malachi.Storage.ElixirStore do
     index: @empty_index,
     index_interval: @default_index_interval,
     last_indexed_position: 0,
-    flush_bytes: @default_flush_bytes
+    flush_bytes: @default_flush_bytes,
+    flush_count: @default_flush_count
   ]
 
   @impl true
@@ -88,7 +88,8 @@ defmodule Malachi.Storage.ElixirStore do
          index_interval: index_interval,
          # Start "behind" by one interval so the segment's first record is always indexed.
          last_indexed_position: -index_interval,
-         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes)
+         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
+         flush_count: Keyword.get(opts, :flush_count, @default_flush_count)
        }}
     end
   end
@@ -99,19 +100,19 @@ defmodule Malachi.Storage.ElixirStore do
     path = Segment.path(segment)
 
     if File.exists?(path) do
-      file_contents = File.read!(path)
-      {records_with_positions, valid_bytes} = Record.decode_all(file_contents)
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-
       {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
 
+      # Scan the file in bounded chunks (never loading it whole), counting records and
+      # building the sparse index. `valid_bytes` is where valid frames end.
+      {record_count, valid_bytes, index_entries} = scan_segment(file_descriptor, index_interval)
+
       # Drop any partial/corrupt trailing bytes from a crash mid-write.
-      if valid_bytes < byte_size(file_contents) do
+      if valid_bytes < File.stat!(path).size do
         {:ok, _} = :file.position(file_descriptor, valid_bytes)
         :ok = :file.truncate(file_descriptor)
       end
 
-      record_count = length(records_with_positions)
       base_offset = segment.base_offset
       sealed? = File.exists?(Segment.seal_marker_path(segment))
 
@@ -123,7 +124,7 @@ defmodule Malachi.Storage.ElixirStore do
           sealed_at: if(sealed?, do: System.system_time(:millisecond), else: nil)
       }
 
-      index = :array.from_list(sparse_entries(records_with_positions, index_interval))
+      index = :array.from_list(index_entries)
 
       {:ok,
        %__MODULE__{
@@ -134,7 +135,8 @@ defmodule Malachi.Storage.ElixirStore do
          index: index,
          index_interval: index_interval,
          last_indexed_position: last_indexed_position(index, index_interval),
-         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes)
+         flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
+         flush_count: Keyword.get(opts, :flush_count, @default_flush_count)
        }}
     else
       {:error, :enoent}
@@ -198,14 +200,19 @@ defmodule Malachi.Storage.ElixirStore do
 
   def append(%__MODULE__{} = store, []), do: {:ok, store, store.next_offset, store.next_offset - 1}
 
-  # NorthGuard's size trigger: once the buffer reaches `:flush_bytes`, flush+fsync it
-  # automatically so the batch is committed without waiting for an explicit `sync/1`.
+  # NorthGuard's size and count triggers: once the buffer reaches `:flush_bytes` or
+  # `:flush_count` records, flush+fsync it automatically without waiting for `sync/1`.
   defp flush_if_full(
-         %__MODULE__{pending_bytes: pending_bytes, flush_bytes: flush_bytes} = store,
+         %__MODULE__{
+           pending_bytes: pending_bytes,
+           pending_count: pending_count,
+           flush_bytes: flush_bytes,
+           flush_count: flush_count
+         } = store,
          first_offset,
          last_offset
        )
-       when pending_bytes >= flush_bytes do
+       when pending_bytes >= flush_bytes or pending_count >= flush_count do
     {:ok, flushed_store} = sync(store)
     {:ok, flushed_store, first_offset, last_offset}
   end
@@ -291,6 +298,9 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
+
+  @impl true
+  def pending?(%__MODULE__{pending_count: pending_count}), do: pending_count > 0
 
   @impl true
   def should_seal?(%__MODULE__{segment: segment}, now_ms), do: Segment.should_seal?(segment, now_ms)
@@ -389,18 +399,54 @@ defmodule Malachi.Storage.ElixirStore do
     end)
   end
 
-  # Picks one {offset, file_position} entry roughly every `index_interval` bytes (ascending).
-  defp sparse_entries(records_with_positions, index_interval) do
-    sparse_entries(records_with_positions, index_interval, -index_interval, [])
+  # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries}
+  # where `entries` is the ascending sparse index and `valid_bytes` is the end of the last
+  # valid frame (the safe truncation point after a crash). Never loads the whole file.
+  defp scan_segment(file_descriptor, index_interval) do
+    do_scan(file_descriptor, index_interval, 0, <<>>, 0, -index_interval, [])
   end
 
-  defp sparse_entries([], _index_interval, _last_indexed_position, entries), do: Enum.reverse(entries)
+  defp do_scan(file_descriptor, index_interval, valid_bytes, carry, record_count, last_indexed_position, entries) do
+    case Record.decode_one(carry) do
+      {:ok, record, frame_size, rest} ->
+        {entries, last_indexed_position} =
+          if valid_bytes - last_indexed_position >= index_interval do
+            {[{record.offset, valid_bytes} | entries], valid_bytes}
+          else
+            {entries, last_indexed_position}
+          end
 
-  defp sparse_entries([{record, position} | remaining], index_interval, last_indexed_position, entries) do
-    if position - last_indexed_position >= index_interval do
-      sparse_entries(remaining, index_interval, position, [{record.offset, position} | entries])
-    else
-      sparse_entries(remaining, index_interval, last_indexed_position, entries)
+        do_scan(
+          file_descriptor,
+          index_interval,
+          valid_bytes + frame_size,
+          rest,
+          record_count + 1,
+          last_indexed_position,
+          entries
+        )
+
+      :incomplete ->
+        read_position = valid_bytes + byte_size(carry)
+
+        case :file.pread(file_descriptor, read_position, @read_window_bytes) do
+          {:ok, chunk} ->
+            do_scan(
+              file_descriptor,
+              index_interval,
+              valid_bytes,
+              carry <> chunk,
+              record_count,
+              last_indexed_position,
+              entries
+            )
+
+          :eof ->
+            {record_count, valid_bytes, Enum.reverse(entries)}
+        end
+
+      {:error, _reason} ->
+        {record_count, valid_bytes, Enum.reverse(entries)}
     end
   end
 

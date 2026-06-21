@@ -137,12 +137,24 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 - ✅ `Malachi.Range` — abstração de log sobre keyspace `[0, 2^bits)`: chaves por hash
   (`:erlang.phash2`), ranges como blocos buddy-allocator, **split/merge lógicos** (não movem
   dados), buddy único, linhagem (`parents`) para **happens-before**.
-- ✅ Testes: property-based (`stream_data`) + unit de append/read/seal/crash-recovery/roll/
-  auto-flush + split/merge/buddy/happens-before/roteamento por chave.
-- ⏳ Pendente da Fase 0: tipo lógico `Topic` (cobertura do keyspace + roteamento de records por
-  chave para o range certo + orquestração de split/merge); leitura cross-epoch (histórico de uma
-  chave através de um split: epoch do pai → epoch do filho); flush por **tempo** (~10ms) e por
-  **contagem** (20k records) via wrapper GenServer; scan de recovery em chunks.
+- ✅ `Malachi.Topic` — coleção nomeada de ranges que **cobrem todo o keyspace**: roteamento de
+  records por chave (`route`/`append`), orquestração de split/merge mantendo a cobertura,
+  sealing, ranges selados retidos para leitura. Metadados do topic são **em memória** por ora
+  (persistência durável vem com o DS-RSM da Fase 1).
+- ✅ Índice esparso em `:array` (busca binária O(log n), insert O(log n)).
+- ✅ **Recovery em chunks** (`scan_segment`) — nunca carrega o segment inteiro na memória.
+- ✅ **Flush por contagem** (`:flush_count`, default 20k) no `ElixirStore` + **flush por tempo**
+  (~10ms) e **acesso concorrente serializado** no `Malachi.TopicServer` (GenServer que envolve o
+  Topic, com timer de flush e flush no shutdown).
+- ✅ **Leitura cross-epoch** (`Topic.read_history/2`) — histórico de uma chave através de um split
+  (epoch do pai → epoch do filho), via linhagem + happens-before.
+- ✅ Testes: property-based (`stream_data`) + unit — append/read/seal/crash-recovery/roll/
+  auto-flush (size+count) + split/merge/buddy/happens-before + cobertura/roteamento/cross-epoch +
+  flush por tempo e concorrência no TopicServer. **66 testes + 2 propriedades.**
+
+> **Fase 0 concluída.** Único item adiado de propósito: **persistência durável dos metadados do
+> topic** (quais ranges existem) — entra no **DS-RSM da Fase 1**, fiel ao NorthGuard, onde essa
+> metadata vive no coordinator/vnode (Raft).
 
 ### Fase 1 — Distribuição (Elixir puro)
 - DS-RSM com `ra` (vnodes, coordinators, consistent hashing, split de vnode).

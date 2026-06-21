@@ -76,7 +76,9 @@ defmodule Malachi.Range do
     end
 
     keyspace_size = 1 <<< keyspace_bits
-    segment_opts = Keyword.drop(opts, [:keyspace_bits])
+    # `:base_offset` is the range's keyspace concept, not its log's offset space — each
+    # range's log always starts at offset 0, so it must not leak into the segment options.
+    segment_opts = Keyword.drop(opts, [:keyspace_bits, :base_offset])
     build_range(directory, 0, keyspace_size, keyspace_size, [], segment_opts)
   end
 
@@ -205,6 +207,33 @@ defmodule Malachi.Range do
   @spec happens_before?(t(), t()) :: boolean()
   def happens_before?(%__MODULE__{} = ancestor, %__MODULE__{} = descendant),
     do: ancestor.id in descendant.parents
+
+  @doc "Whether the range has buffered records not yet flushed."
+  @spec pending?(t()) :: boolean()
+  def pending?(%__MODULE__{} = range), do: Log.pending?(range.log)
+
+  @doc """
+  A metadata-only view of the range — id, keyspace bounds, state and lineage — without the
+  underlying log or its (process-owned) file handle. Safe to pass across processes.
+  """
+  @spec info(t()) :: %{
+          id: id(),
+          key_start: non_neg_integer(),
+          key_end: non_neg_integer(),
+          keyspace_size: pos_integer(),
+          state: :active | :sealed,
+          parents: [id()]
+        }
+  def info(%__MODULE__{} = range) do
+    %{
+      id: range.id,
+      key_start: range.key_start,
+      key_end: range.key_end,
+      keyspace_size: range.keyspace_size,
+      state: range.state,
+      parents: range.parents
+    }
+  end
 
   @doc "Closes the range's active segment file handle, if any."
   @spec close(t()) :: :ok
