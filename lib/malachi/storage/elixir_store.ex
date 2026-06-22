@@ -28,7 +28,6 @@ defmodule Malachi.Storage.ElixirStore do
   # NorthGuard flushes a batch once it reaches ~10MB or ~20k records.
   @default_flush_bytes 10_485_760
   @default_flush_count 20_000
-  @empty_index :array.new([])
 
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
@@ -60,7 +59,7 @@ defmodule Malachi.Storage.ElixirStore do
     pending: [],
     pending_bytes: 0,
     pending_count: 0,
-    index: @empty_index,
+    index: nil,
     index_interval: @default_index_interval,
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes,
@@ -85,6 +84,7 @@ defmodule Malachi.Storage.ElixirStore do
          segment: segment,
          file_descriptor: file_descriptor,
          next_offset: segment.base_offset,
+         index: empty_index(),
          index_interval: index_interval,
          # Start "behind" by one interval so the segment's first record is always indexed.
          last_indexed_position: -index_interval,
@@ -469,9 +469,11 @@ defmodule Malachi.Storage.ElixirStore do
   defp load_index_file(path) do
     case File.read(path) do
       {:ok, binary} -> :array.from_list(parse_index(binary, []))
-      _ -> @empty_index
+      _ -> empty_index()
     end
   end
+
+  defp empty_index, do: :array.new([])
 
   defp parse_index(<<offset::64, position::64, remaining::binary>>, entries),
     do: parse_index(remaining, [{offset, position} | entries])
