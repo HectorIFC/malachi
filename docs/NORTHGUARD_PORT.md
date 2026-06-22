@@ -169,9 +169,15 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
 - ✅ `Malachi.Keyspace` — math de keyspace compartilhada (`size_for_bits!`, `position_of`,
   `within?`, `splittable?`, `split_point`, `buddies?`); `Range` e `HashRing` refatorados para
   usá-la (mata a duplicação de hash + validação `1..32`).
-- ⏳ `Malachi.Metadata` — máquina de estado do vnode/coordinator (`apply/2` puro): topics,
-  ranges e segments (replica set, estado active/sealed/reassigning) como metadado durável.
-  **Resolve a persistência de metadados do topic adiada da Fase 0.**
+- ✅ `Malachi.Metadata` — máquina de estado do vnode/coordinator (`apply/2` **determinístico**,
+  contrato de Raft): topics, ranges (split/merge buddy via `Keyspace`, linhagem) e segments
+  (replica set, estado active/sealed). Ids de range vêm de um contador no estado (sem
+  `unique_integer`/timestamp dentro do `apply` → seguro p/ replicação). **Resolve a persistência
+  de metadados do topic adiada da Fase 0.** Testado inclusive com replay do log (determinismo) e
+  com catch-all defensivo (comando desconhecido retorna erro, não derruba a réplica).
+  - ⏳ Futuro: índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
+    `seal_topic`/`delete_topic`/`ranges_of_topic`/`segments_of_range` varrem todos os ranges/
+    segments (O(n)); aceitável por shard, otimizar quando um vnode acumular muito metadado.
 - ⏳ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; roteia comandos
   por hash (topic name / range id) ao vnode dono; split de vnode (parte o estado).
 

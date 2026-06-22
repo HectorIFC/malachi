@@ -16,18 +16,31 @@ defmodule Malachi.Keyspace do
   @max_bits 32
 
   @doc """
+  Returns `{:ok, 2^bits}` for `bits` in `1..32`, or `{:error, :out_of_range}` otherwise.
+  Use this when `bits` comes from untrusted input (e.g. a replicated command) and must not
+  raise; use `size_for_bits!/2` for trusted callers where bad bits is a programmer error.
+  """
+  @spec size_for_bits(integer()) :: {:ok, pos_integer()} | {:error, :out_of_range}
+  def size_for_bits(bits) when is_integer(bits) and bits >= 1 and bits <= @max_bits,
+    do: {:ok, 1 <<< bits}
+
+  def size_for_bits(_bits), do: {:error, :out_of_range}
+
+  @doc """
   Validates `bits` is in `1..32` and returns the keyspace size `2^bits`. Raises
   `ArgumentError` (mentioning `label`) otherwise.
   """
   @spec size_for_bits!(integer(), String.t()) :: pos_integer()
   def size_for_bits!(bits, label \\ "bits") do
-    if bits < 1 or bits > @max_bits do
-      raise ArgumentError,
-            "#{label} must be in 1..#{@max_bits} (got #{inspect(bits)}); " <>
-              ":erlang.phash2/2 supports a range up to 2^32"
-    end
+    case size_for_bits(bits) do
+      {:ok, size} ->
+        size
 
-    1 <<< bits
+      {:error, :out_of_range} ->
+        raise ArgumentError,
+              "#{label} must be in 1..#{@max_bits} (got #{inspect(bits)}); " <>
+                ":erlang.phash2/2 supports a range up to 2^32"
+    end
   end
 
   @doc "Hashes `key` into `[0, size)`."
