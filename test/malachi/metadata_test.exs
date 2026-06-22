@@ -174,10 +174,10 @@ defmodule Malachi.MetadataTest do
       commands = [
         {:create_topic, "events", 4},
         {:create_topic, "logs", 8},
-        {:split_range, 0},
-        {:split_range, 1},
-        {:merge_ranges, 2, 3},
-        {:register_segment, 4, "s1", [:b1, :b2], 0},
+        {:split_range, {"events", 0}},
+        {:split_range, {"logs", 0}},
+        {:merge_ranges, {"events", 1}, {"events", 2}},
+        {:register_segment, {"events", 3}, "s1", [:b1, :b2], 0},
         {:seal_segment, "s1", 512},
         {:seal_topic, "logs"}
       ]

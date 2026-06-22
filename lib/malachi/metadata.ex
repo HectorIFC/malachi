@@ -29,14 +29,17 @@ defmodule Malachi.Metadata do
   alias Malachi.Keyspace
 
   @type topic_name :: String.t()
-  @type range_id :: non_neg_integer()
+  # Range ids are {topic, seq}: globally unique (topic names are cluster-unique), so a range
+  # can migrate between vnodes (vnode split) without its id colliding with another topic's.
+  @type range_id :: {topic_name(), non_neg_integer()}
   @type segment_id :: term()
   @type broker :: term()
 
   @type topic_meta :: %{
           name: topic_name(),
           keyspace_size: pos_integer(),
-          state: :active | :sealed
+          state: :active | :sealed,
+          next_range_seq: non_neg_integer()
         }
 
   @type range_meta :: %{
@@ -61,8 +64,14 @@ defmodule Malachi.Metadata do
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
           ranges: %{range_id() => range_meta()},
-          segments: %{segment_id() => segment_meta()},
-          next_range_id: non_neg_integer()
+          segments: %{segment_id() => segment_meta()}
+        }
+
+  @typedoc "A topic's complete metadata, extracted for migration between vnodes."
+  @type topic_export :: %{
+          topic: topic_meta(),
+          ranges: %{range_id() => range_meta()},
+          segments: %{segment_id() => segment_meta()}
         }
 
   @type command ::
@@ -75,7 +84,7 @@ defmodule Malachi.Metadata do
           | {:seal_segment, segment_id(), non_neg_integer()}
           | {:set_segment_replicas, segment_id(), [broker()]}
 
-  defstruct topics: %{}, ranges: %{}, segments: %{}, next_range_id: 0
+  defstruct topics: %{}, ranges: %{}, segments: %{}
 
   @doc "An empty metadata state."
   @spec new() :: t()
@@ -85,6 +94,11 @@ defmodule Malachi.Metadata do
   Applies a command, returning `{new_state, reply}`. Deterministic: the same command on the
   same state always yields the same result on every replica. On failure the state is
   returned unchanged with an `{:error, reason}` reply.
+
+  `register_segment` requires the `segment_id` to be **globally unique** across the cluster
+  (the broker-assigned contract). Within a vnode this is checked (`:segment_exists`), but
+  uniqueness across vnodes is the caller's responsibility — it is what keeps a topic's
+  segments safe when it migrates to another vnode (see `insert_topic/2`).
   """
   @spec apply(t(), command()) :: {t(), term()}
   def apply(%__MODULE__{} = state, {:create_topic, name, keyspace_bits}) do
@@ -220,11 +234,61 @@ defmodule Malachi.Metadata do
     state.segments |> Map.values() |> Enum.filter(&(&1.range_id == range_id))
   end
 
+  # --- migration (vnode split) ---
+
+  @doc """
+  Removes a topic and all its ranges/segments from `state`, returning
+  `{state_without_topic, export}` (or `{state, nil}` if the topic is absent). The export
+  can be re-inserted on another vnode with `insert_topic/2` — this is how a vnode split
+  migrates a topic's metadata to a new vnode.
+  """
+  @spec extract_topic(t(), topic_name()) :: {t(), topic_export() | nil}
+  def extract_topic(%__MODULE__{} = state, name) do
+    case Map.fetch(state.topics, name) do
+      :error ->
+        {state, nil}
+
+      {:ok, topic} ->
+        range_ids = for {id, range} <- state.ranges, range.topic == name, into: MapSet.new(), do: id
+        ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
+        segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
+
+        remaining = %{
+          state
+          | topics: Map.delete(state.topics, name),
+            ranges: Map.drop(state.ranges, MapSet.to_list(range_ids)),
+            segments: Map.drop(state.segments, Map.keys(segments))
+        }
+
+        {remaining, %{topic: topic, ranges: ranges, segments: segments}}
+    end
+  end
+
+  @doc """
+  Inserts a topic `export` (from `extract_topic/2`) into `state`. Range ids are globally
+  unique (`{topic, seq}`), so merged ranges never collide with another topic's.
+
+  Segment ids, however, are caller-supplied and independent of range ids: this merges them
+  by id, so a segment id that already exists in `state` is **overwritten**. Migration is
+  therefore safe only if segment ids are globally unique across the cluster (the
+  broker-assigned contract — see `register_segment` in `apply/2`).
+  """
+  @spec insert_topic(t(), topic_export()) :: t()
+  def insert_topic(%__MODULE__{} = state, export) do
+    %{
+      state
+      | topics: Map.put(state.topics, export.topic.name, export.topic),
+        ranges: Map.merge(state.ranges, export.ranges),
+        segments: Map.merge(state.segments, export.segments)
+    }
+  end
+
   # --- internals: topic ---
 
   defp create_topic(state, name, keyspace_size) do
-    topic = %{name: name, keyspace_size: keyspace_size, state: :active}
-    root_id = state.next_range_id
+    root_id = {name, 0}
+    # next_range_seq is the per-topic counter; the root takes seq 0, so the next is 1.
+    topic = %{name: name, keyspace_size: keyspace_size, state: :active, next_range_seq: 1}
 
     root_range = %{
       id: root_id,
@@ -239,8 +303,7 @@ defmodule Malachi.Metadata do
     state = %{
       state
       | topics: Map.put(state.topics, name, topic),
-        ranges: Map.put(state.ranges, root_id, root_range),
-        next_range_id: root_id + 1
+        ranges: Map.put(state.ranges, root_id, root_range)
     }
 
     {state, {:ok, root_id}}
@@ -264,9 +327,8 @@ defmodule Malachi.Metadata do
   # --- internals: range split/merge ---
 
   defp do_split_range(state, range) do
+    {state, [left_id, right_id]} = allocate_range_ids(state, range.topic, 2)
     midpoint = Keyspace.split_point(range.key_start, range.key_end)
-    left_id = state.next_range_id
-    right_id = left_id + 1
     parents = range.parents ++ [range.id]
 
     left = child_range(left_id, range, range.key_start, midpoint, parents)
@@ -278,11 +340,11 @@ defmodule Malachi.Metadata do
       |> Map.put(left_id, left)
       |> Map.put(right_id, right)
 
-    {%{state | ranges: ranges, next_range_id: right_id + 1}, {:ok, left_id, right_id}}
+    {%{state | ranges: ranges}, {:ok, left_id, right_id}}
   end
 
   defp do_merge_ranges(state, range_a, range_b) do
-    child_id = state.next_range_id
+    {state, [child_id]} = allocate_range_ids(state, range_a.topic, 1)
     union_start = min(range_a.key_start, range_b.key_start)
     union_end = max(range_a.key_end, range_b.key_end)
     parents = Enum.uniq(range_a.parents ++ range_b.parents ++ [range_a.id, range_b.id])
@@ -295,7 +357,17 @@ defmodule Malachi.Metadata do
       |> Map.put(range_b.id, %{range_b | state: :sealed})
       |> Map.put(child_id, child)
 
-    {%{state | ranges: ranges, next_range_id: child_id + 1}, {:ok, child_id}}
+    {%{state | ranges: ranges}, {:ok, child_id}}
+  end
+
+  # Allocates `count` fresh range ids `{topic, seq}` from the topic's per-topic counter,
+  # returning the bumped state and the ids in order.
+  defp allocate_range_ids(state, topic_name, count) do
+    topic = Map.fetch!(state.topics, topic_name)
+    first_seq = topic.next_range_seq
+    ids = for seq <- first_seq..(first_seq + count - 1)//1, do: {topic_name, seq}
+    topics = Map.put(state.topics, topic_name, %{topic | next_range_seq: first_seq + count})
+    {%{state | topics: topics}, ids}
   end
 
   defp child_range(id, parent_range, key_start, key_end, parents) do

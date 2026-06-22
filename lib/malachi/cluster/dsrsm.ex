@@ -57,12 +57,38 @@ defmodule Malachi.Cluster.DSRSM do
   @doc """
   Adds a vnode at `token` with a fresh, empty metadata shard. Propagates `HashRing`
   placement errors (`:token_out_of_range`, `:token_taken`, `:already_present`).
+
+  This does **no** migration, so it is only safe before any topic exists (or when the arc
+  it steals holds no topics). Once topics exist, use `split_vnode/3`, which migrates the
+  displaced topics — otherwise their metadata would be orphaned on the old vnode while
+  routing points at the new (empty) one.
   """
   @spec add_vnode(t(), vnode_id(), HashRing.token()) :: {:ok, t()} | {:error, atom()}
   def add_vnode(%__MODULE__{} = dsrsm, vnode_id, token) do
     case HashRing.add_vnode(dsrsm.ring, vnode_id, token) do
       {:ok, ring} ->
         {:ok, %{dsrsm | ring: ring, vnodes: Map.put(dsrsm.vnodes, vnode_id, Metadata.new())}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Adds a new vnode at `token` and **migrates** to it every topic that now routes there —
+  the "dynamically sharded" part of DS-RSM (rebalancing). Adding a vnode only steals an arc
+  from one existing vnode, so only that vnode's affected topics move; their full metadata
+  (topic + ranges + segments) is relocated. Range ids stay valid because they are globally
+  unique (`{topic, seq}`); migration is likewise safe for segments only if segment ids are
+  globally unique (the broker-assigned contract — see `Malachi.Metadata`). Propagates
+  `HashRing` placement errors.
+  """
+  @spec split_vnode(t(), vnode_id(), HashRing.token()) :: {:ok, t()} | {:error, atom()}
+  def split_vnode(%__MODULE__{} = dsrsm, new_vnode_id, token) do
+    case HashRing.add_vnode(dsrsm.ring, new_vnode_id, token) do
+      {:ok, ring} ->
+        dsrsm = %{dsrsm | ring: ring, vnodes: Map.put(dsrsm.vnodes, new_vnode_id, Metadata.new())}
+        {:ok, migrate_displaced_topics(dsrsm, new_vnode_id)}
 
       {:error, _reason} = error ->
         error
@@ -147,6 +173,47 @@ defmodule Malachi.Cluster.DSRSM do
     case HashRing.route(dsrsm.ring, topic_name) do
       {:error, :empty} -> nil
       {:ok, vnode_id} -> fun.(Map.fetch!(dsrsm.vnodes, vnode_id))
+    end
+  end
+
+  # Moves every topic that now routes to `new_vnode_id` out of whatever vnode currently
+  # holds it and into the new one.
+  defp migrate_displaced_topics(dsrsm, new_vnode_id) do
+    Enum.reduce(dsrsm.vnodes, dsrsm, fn {source_id, _metadata}, acc ->
+      if source_id == new_vnode_id do
+        acc
+      else
+        acc
+        |> displaced_topics(source_id, new_vnode_id)
+        |> Enum.reduce(acc, &migrate_topic(&2, &1, source_id, new_vnode_id))
+      end
+    end)
+  end
+
+  defp displaced_topics(dsrsm, source_id, new_vnode_id) do
+    source_metadata = Map.fetch!(dsrsm.vnodes, source_id)
+
+    for name <- Map.keys(source_metadata.topics),
+        HashRing.route(dsrsm.ring, name) == {:ok, new_vnode_id},
+        do: name
+  end
+
+  defp migrate_topic(dsrsm, name, source_id, new_vnode_id) do
+    {source_metadata, export} = Metadata.extract_topic(Map.fetch!(dsrsm.vnodes, source_id), name)
+
+    case export do
+      nil ->
+        dsrsm
+
+      export ->
+        new_metadata = Metadata.insert_topic(Map.fetch!(dsrsm.vnodes, new_vnode_id), export)
+
+        vnodes =
+          dsrsm.vnodes
+          |> Map.put(source_id, source_metadata)
+          |> Map.put(new_vnode_id, new_metadata)
+
+        %{dsrsm | vnodes: vnodes}
     end
   end
 end

@@ -182,9 +182,12 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
   Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode
   (route por nome) — desvio anotado do range-id sharding do NorthGuard.
-  - ⏳ Futuro: sharding de range/segment por range id (cross-vnode + id global) e **split de
-    vnode** (rebalanceamento, migra metadado entre vnodes — precisa de id de range globalmente
-    único p/ migração segura).
+- ✅ **Split de vnode** (o "D" — dinâmico — do DS-RSM): `DSRSM.split_vnode/3` adiciona um vnode
+  e **migra** os topics deslocados (topic + ranges + segments) para ele. Viabilizado por range id
+  `{topic, seq}` (globalmente único → sem colisão na migração); helpers `Metadata.extract_topic/2`
+  e `insert_topic/2`. Testado: migração sem perda + ranges/segments acompanham o topic.
+  - ⏳ Futuro: sharding de range/segment por range id (cross-vnode), que é o desvio restante
+    do NorthGuard.
 
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
