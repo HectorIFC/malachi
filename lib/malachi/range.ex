@@ -24,13 +24,10 @@ defmodule Malachi.Range do
   implemented here.
   """
 
-  import Bitwise
-
+  alias Malachi.Keyspace
   alias Malachi.Log
 
   @default_keyspace_bits 32
-  # :erlang.phash2/2 supports a range of 1..2^32, so the keyspace can be at most 2^32.
-  @max_keyspace_bits 32
 
   @type id :: String.t()
 
@@ -68,14 +65,7 @@ defmodule Malachi.Range do
   @spec open(Path.t(), keyword()) :: {:ok, t()}
   def open(directory, opts \\ []) do
     keyspace_bits = Keyword.get(opts, :keyspace_bits, @default_keyspace_bits)
-
-    if keyspace_bits < 1 or keyspace_bits > @max_keyspace_bits do
-      raise ArgumentError,
-            "keyspace_bits must be in 1..#{@max_keyspace_bits} (got #{inspect(keyspace_bits)}); " <>
-              ":erlang.phash2/2 only supports a range up to 2^32"
-    end
-
-    keyspace_size = 1 <<< keyspace_bits
+    keyspace_size = Keyspace.size_for_bits!(keyspace_bits, "keyspace_bits")
     # `:base_offset` is the range's keyspace concept, not its log's offset space — each
     # range's log always starts at offset 0, so it must not leak into the segment options.
     segment_opts = Keyword.drop(opts, [:keyspace_bits, :base_offset])
@@ -121,12 +111,17 @@ defmodule Malachi.Range do
   @spec split(t()) :: {:ok, sealed :: t(), left :: t(), right :: t()} | {:error, term()}
   def split(%__MODULE__{state: :sealed}), do: {:error, :sealed}
 
-  def split(%__MODULE__{key_start: key_start, key_end: key_end}) when key_end - key_start < 2,
-    do: {:error, :cannot_split}
-
   def split(%__MODULE__{} = range) do
+    if Keyspace.splittable?(range.key_start, range.key_end) do
+      do_split(range)
+    else
+      {:error, :cannot_split}
+    end
+  end
+
+  defp do_split(range) do
     {:ok, sealed} = seal(range)
-    midpoint = range.key_start + div(range.key_end - range.key_start, 2)
+    midpoint = Keyspace.split_point(range.key_start, range.key_end)
     parents = range.parents ++ [range.id]
 
     {:ok, left} =
@@ -181,24 +176,20 @@ defmodule Malachi.Range do
   """
   @spec buddy?(t(), t()) :: boolean()
   def buddy?(%__MODULE__{} = range_a, %__MODULE__{} = range_b) do
-    size_a = range_a.key_end - range_a.key_start
-    size_b = range_b.key_end - range_b.key_start
-
-    size_a == size_b and range_a.keyspace_size == range_b.keyspace_size and
-      bxor(range_a.key_start, size_a) == range_b.key_start
+    range_a.keyspace_size == range_b.keyspace_size and
+      Keyspace.buddies?(range_a.key_start, range_a.key_end, range_b.key_start, range_b.key_end)
   end
 
   @doc "Whether `key` hashes within this range's keyspace bounds."
   @spec covers?(t(), term()) :: boolean()
   def covers?(%__MODULE__{} = range, key) do
-    position = position_of(range, key)
-    position >= range.key_start and position < range.key_end
+    Keyspace.within?(position_of(range, key), range.key_start, range.key_end)
   end
 
   @doc "The keyspace position a key hashes to within this range's keyspace."
   @spec position_of(t(), term()) :: non_neg_integer()
   def position_of(%__MODULE__{keyspace_size: keyspace_size}, key),
-    do: :erlang.phash2(key, keyspace_size)
+    do: Keyspace.position_of(key, keyspace_size)
 
   @doc """
   Whether every record in `ancestor` happens-before every record in `descendant` — true

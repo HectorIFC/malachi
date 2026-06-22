@@ -166,10 +166,12 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
 - ✅ `Malachi.Cluster.HashRing` — consistent hashing: vnodes em tokens no anel `[0, 2^bits)`,
   `route` por ceiling com wraparound, `boundaries` (arco do vnode), add/remove. Movimentação
   mínima ao adicionar/remover vnode (testado).
+- ✅ `Malachi.Keyspace` — math de keyspace compartilhada (`size_for_bits!`, `position_of`,
+  `within?`, `splittable?`, `split_point`, `buddies?`); `Range` e `HashRing` refatorados para
+  usá-la (mata a duplicação de hash + validação `1..32`).
 - ⏳ `Malachi.Metadata` — máquina de estado do vnode/coordinator (`apply/2` puro): topics,
   ranges e segments (replica set, estado active/sealed/reassigning) como metadado durável.
-  **Resolve a persistência de metadados do topic adiada da Fase 0.** Extrair `Malachi.Keyspace`
-  (position/covers?/split-point/buddy?) p/ compartilhar com `Range` e evitar duplicação (DRY).
+  **Resolve a persistência de metadados do topic adiada da Fase 0.**
 - ⏳ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; roteia comandos
   por hash (topic name / range id) ao vnode dono; split de vnode (parte o estado).
 

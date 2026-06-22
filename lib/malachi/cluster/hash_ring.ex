@@ -16,10 +16,10 @@ defmodule Malachi.Cluster.HashRing do
   which is plenty fast for the ~hundreds of vnodes a cluster has.
   """
 
-  import Bitwise
+  alias Malachi.Keyspace
 
   @default_ring_bits 32
-  @max_ring_bits 32
+  @default_ring_size Integer.pow(2, @default_ring_bits)
 
   @type vnode_id :: term()
   @type token :: non_neg_integer()
@@ -30,7 +30,7 @@ defmodule Malachi.Cluster.HashRing do
           sorted: [{token(), vnode_id()}]
         }
 
-  defstruct ring_size: 1 <<< @default_ring_bits, tokens: %{}, sorted: []
+  defstruct ring_size: @default_ring_size, tokens: %{}, sorted: []
 
   @doc """
   Builds an empty ring over `[0, 2^ring_bits)`.
@@ -42,12 +42,7 @@ defmodule Malachi.Cluster.HashRing do
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     ring_bits = Keyword.get(opts, :ring_bits, @default_ring_bits)
-
-    if ring_bits < 1 or ring_bits > @max_ring_bits do
-      raise ArgumentError, "ring_bits must be in 1..#{@max_ring_bits} (got #{inspect(ring_bits)})"
-    end
-
-    %__MODULE__{ring_size: 1 <<< ring_bits, tokens: %{}, sorted: []}
+    %__MODULE__{ring_size: Keyspace.size_for_bits!(ring_bits, "ring_bits"), tokens: %{}, sorted: []}
   end
 
   @doc """
@@ -82,7 +77,7 @@ defmodule Malachi.Cluster.HashRing do
   def route(%__MODULE__{sorted: []}, _key), do: {:error, :empty}
 
   def route(%__MODULE__{} = ring, key) do
-    hash = :erlang.phash2(key, ring.ring_size)
+    hash = Keyspace.position_of(key, ring.ring_size)
     {:ok, owner_for_hash(ring.sorted, hash)}
   end
 
