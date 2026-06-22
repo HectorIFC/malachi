@@ -178,8 +178,13 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   - ⏳ Futuro: índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
     `seal_topic`/`delete_topic`/`ranges_of_topic`/`segments_of_range` varrem todos os ranges/
     segments (O(n)); aceitável por shard, otimizar quando um vnode acumular muito metadado.
-- ⏳ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; roteia comandos
-  por hash (topic name / range id) ao vnode dono; split de vnode (parte o estado).
+- ✅ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; `command/3` e
+  queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
+  Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode
+  (route por nome) — desvio anotado do range-id sharding do NorthGuard.
+  - ⏳ Futuro: sharding de range/segment por range id (cross-vnode + id global) e **split de
+    vnode** (rebalanceamento, migra metadado entre vnodes — precisa de id de range globalmente
+    único p/ migração segura).
 
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
