@@ -3,8 +3,8 @@ defmodule Malachi.Metadata do
   The deterministic state machine behind a NorthGuard vnode/coordinator: the durable,
   replicated source of truth for **metadata** about topics, ranges and segments.
 
-  Unlike the data-plane modules (`Malachi.Topic`/`Range`/`Log`, which hold open file
-  handles), this holds only metadata — it is pure data and a pure transition function. All
+  Unlike the data-plane storage (`Malachi.Broker`/`Log`, which hold open file handles),
+  this holds only metadata — it is pure data and a pure transition function. All
   mutations go through `apply/2` (`command -> {new_state, reply}`), exactly the contract a
   Raft machine's `apply` needs, so the `ra` integration in Phase 1b replicates this state
   without changes. This is what makes topic structure durable (the item deferred from

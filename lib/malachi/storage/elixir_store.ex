@@ -12,7 +12,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   This is deliberately a plain module operating on an immutable handle (no GenServer), so
   it is deterministic and trivial to property-test. The time-based flush trigger (~10ms)
-  and concurrency belong in a higher layer (`Malachi.TopicServer`) built on top of this.
+  and concurrency belong in a higher layer (`Malachi.BrokerServer`) built on top of this.
 
   Reads via `:file.pread/3` and writes via `:file.pwrite/3` use explicit positions, so
   the single file descriptor serves both append and random read without position races.

@@ -3,7 +3,7 @@ defmodule Malachi.Keyspace do
   Shared keyspace arithmetic: hashing keys into a power-of-two space `[0, 2^bits)` and the
   buddy-allocator block math NorthGuard's ranges use.
 
-  Both the data plane (`Malachi.Range`, which routes record keys to keyspace slices) and
+  Both the data plane (`Malachi.Broker`, which routes record keys to keyspace slices) and
   the control plane (`Malachi.Cluster.HashRing`/DS-RSM, which routes metadata keys to
   vnodes) hash keys the same way and share the same `1..32` bound (because
   `:erlang.phash2/2` supports a range up to `2^32`). Centralizing it here keeps that rule —

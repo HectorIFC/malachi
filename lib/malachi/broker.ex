@@ -26,16 +26,20 @@ defmodule Malachi.Broker do
   @type t :: %__MODULE__{
           directory: Path.t(),
           metadata: Metadata.t(),
-          logs: %{Metadata.range_id() => Log.t()}
+          logs: %{Metadata.range_id() => Log.t()},
+          segment_opts: keyword()
         }
 
-  defstruct directory: nil, metadata: nil, logs: %{}
+  defstruct directory: nil, metadata: nil, logs: %{}, segment_opts: []
 
-  @doc "Opens an empty broker rooted at `directory`."
-  @spec open(Path.t()) :: {:ok, t()}
-  def open(directory) do
+  @doc """
+  Opens an empty broker rooted at `directory`. `opts` are forwarded to each range's
+  `Malachi.Log` (e.g. `:max_bytes`, `:flush_bytes`, `:index_interval`).
+  """
+  @spec open(Path.t(), keyword()) :: {:ok, t()}
+  def open(directory, opts \\ []) do
     File.mkdir_p!(directory)
-    {:ok, %__MODULE__{directory: directory, metadata: Metadata.new(), logs: %{}}}
+    {:ok, %__MODULE__{directory: directory, metadata: Metadata.new(), logs: %{}, segment_opts: opts}}
   end
 
   @doc """
@@ -119,6 +123,12 @@ defmodule Malachi.Broker do
       {_metadata, {:error, _reason} = error} ->
         {broker, error}
     end
+  end
+
+  @doc "The ids of a topic's active ranges (those that currently tile the keyspace)."
+  @spec active_range_ids(t(), Metadata.topic_name()) :: [Metadata.range_id()]
+  def active_range_ids(%__MODULE__{} = broker, topic) do
+    broker.metadata |> Metadata.active_ranges_of_topic(topic) |> Enum.map(& &1.id)
   end
 
   @doc "Whether any open range log has buffered records not yet flushed."
@@ -223,7 +233,7 @@ defmodule Malachi.Broker do
         {broker, log}
 
       :error ->
-        {:ok, log} = Log.open(log_directory(broker, range_id))
+        {:ok, log} = Log.open(log_directory(broker, range_id), broker.segment_opts)
         {%{broker | logs: Map.put(broker.logs, range_id, log)}, log}
     end
   end

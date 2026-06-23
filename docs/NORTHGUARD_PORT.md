@@ -197,9 +197,11 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
 - ✅ Leitura **cross-epoch** migrada para o `Broker` (`read_history`/`stream_history`, linhagem via
   `Metadata.parents`) + `Broker.pending?`. Validação de **nome de topic** no `Metadata.create_topic`
   (allowlist; rejeita `..`/`/`) — fecha o path-traversal no data plane, no control plane.
-  - ⏳ Pendente do bridge (Parte B): `BrokerServer` (GenServer com flush por tempo + concorrência,
-    paridade com `TopicServer`) e então **deletar** `Topic`/`TopicServer`/`Range` + testes —
-    finaliza a remoção da duplicação.
+- ✅ `Malachi.BrokerServer` — GenServer sobre o `Broker`: flush por **tempo** (~10ms) + acesso
+  **serializado** (concorrência), flush no shutdown. Paridade com o antigo `TopicServer`.
+- ✅ **Duplicação removida:** `Topic`/`TopicServer`/`Range` **deletados** (sua orquestração de
+  split/merge/coverage/lineage duplicava o `Metadata`). O caminho único agora é
+  control plane (`Metadata`/`DSRSM`) + `Broker`/`BrokerServer`. **Bridge concluído.**
 
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
