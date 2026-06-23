@@ -194,9 +194,12 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   o data plane (um `Log` por range, indexado por range id). `produce` roteia por chave usando os
   ranges ativos do `Metadata` + `Keyspace`; `split_range`/`merge_ranges` passam pelo `Metadata`
   (estrutura) e selam/flusham os logs afetados. As decisões lógicas vivem só no control plane.
-  - ⏳ Pendente do bridge: aposentar `Topic`/`TopicServer`/`Range` (cuja orquestração duplicava o
-    `Metadata`) e migrar a leitura cross-epoch (`read_history`) para cima do `Broker` — finaliza a
-    remoção da duplicação sem regressão.
+- ✅ Leitura **cross-epoch** migrada para o `Broker` (`read_history`/`stream_history`, linhagem via
+  `Metadata.parents`) + `Broker.pending?`. Validação de **nome de topic** no `Metadata.create_topic`
+  (allowlist; rejeita `..`/`/`) — fecha o path-traversal no data plane, no control plane.
+  - ⏳ Pendente do bridge (Parte B): `BrokerServer` (GenServer com flush por tempo + concorrência,
+    paridade com `TopicServer`) e então **deletar** `Topic`/`TopicServer`/`Range` + testes —
+    finaliza a remoção da duplicação.
 
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).

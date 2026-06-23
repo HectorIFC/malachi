@@ -34,6 +34,18 @@ defmodule Malachi.MetadataTest do
       assert {_state, {:error, :invalid_keyspace_bits}} =
                Metadata.apply(Metadata.new(), {:create_topic, "t", 33})
     end
+
+    test "rejects unsafe/invalid topic names (path-traversal hardening)" do
+      for bad <- ["../evil", "a/b", "..", ".", "", "with space", "tab\t"] do
+        assert {_state, {:error, :invalid_topic_name}} =
+                 Metadata.apply(Metadata.new(), {:create_topic, bad, 4})
+      end
+
+      # safe names are accepted
+      for good <- ["events", "page_view.v2", "orders-2024"] do
+        assert {_state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, good, 4})
+      end
+    end
   end
 
   describe "split_range" do

@@ -121,6 +121,53 @@ defmodule Malachi.Broker do
     end
   end
 
+  @doc "Whether any open range log has buffered records not yet flushed."
+  @spec pending?(t()) :: boolean()
+  def pending?(%__MODULE__{} = broker) do
+    Enum.any?(broker.logs, fn {_range_id, log} -> Log.pending?(log) end)
+  end
+
+  @typedoc "Opaque cursor for `stream_history/4`: `:start`, an internal position, or `:done`."
+  @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
+
+  @doc """
+  Streams one bounded page of a range's **cross-epoch** history: records its sealed
+  ancestors hold for this range's keyspace slice (oldest first, in happens-before order),
+  then the range's own records. The lineage comes from the control plane
+  (`Metadata` `parents`); ancestor records are filtered to the range's slice via `Keyspace`.
+
+  Returns `{:ok, records, next_cursor}`; call again with `next_cursor` until it is `:done`.
+  A page may be empty while `next_cursor` is not `:done`. `{:error, :no_such_range}` if the
+  range is unknown.
+  """
+  @spec stream_history(t(), Metadata.range_id(), history_cursor(), pos_integer()) ::
+          {:ok, [Malachi.Log.Record.t()], history_cursor()} | {:error, term()}
+  def stream_history(broker, range_id, cursor \\ :start, max_records \\ 1000)
+
+  def stream_history(%__MODULE__{}, _range_id, :done, _max_records), do: {:ok, [], :done}
+
+  def stream_history(%__MODULE__{} = broker, range_id, cursor, max_records)
+      when is_integer(max_records) and max_records > 0 do
+    case Metadata.get_range(broker.metadata, range_id) do
+      nil ->
+        {:error, :no_such_range}
+
+      range ->
+        sources = history_sources(range_id, range)
+        {source_index, source_offset} = normalize_cursor(cursor)
+        read_history_page(broker, sources, source_index, source_offset, max_records)
+    end
+  end
+
+  @doc """
+  Convenience that pages `stream_history/4` to the end and returns every record as one
+  ordered list. Loads the whole history into memory — for bounded/administrative use.
+  """
+  @spec read_history(t(), Metadata.range_id()) :: {:ok, [Malachi.Log.Record.t()]} | {:error, term()}
+  def read_history(%__MODULE__{} = broker, range_id) do
+    drain_history(broker, range_id, :start, [])
+  end
+
   @doc "Closes every open range log's file handle."
   @spec close(t()) :: :ok
   def close(%__MODULE__{} = broker) do
@@ -195,4 +242,60 @@ defmodule Malachi.Broker do
   end
 
   defp log_directory(broker, {topic, seq}), do: Path.join(broker.directory, "#{topic}-#{seq}")
+
+  # --- cross-epoch history ---
+
+  # The ordered sources for a range's history: each sealed ancestor (its records filtered to
+  # the target range's slice), then the range itself (no filter).
+  defp history_sources(range_id, range) do
+    ancestors = Enum.map(range.parents, fn ancestor_id -> {ancestor_id, range} end)
+    ancestors ++ [{range_id, nil}]
+  end
+
+  defp normalize_cursor(:start), do: {0, 0}
+  defp normalize_cursor({source_index, source_offset}), do: {source_index, source_offset}
+
+  defp read_history_page(broker, sources, source_index, source_offset, max_records) do
+    case Enum.at(sources, source_index) do
+      nil ->
+        {:ok, [], :done}
+
+      {source_range_id, filter_range} ->
+        case read_source(broker, source_range_id, source_offset, max_records) do
+          :eof ->
+            read_history_page(broker, sources, source_index + 1, 0, max_records)
+
+          {:ok, records} ->
+            filtered = filter_records(records, filter_range)
+            {:ok, filtered, {source_index, source_offset + length(records)}}
+        end
+    end
+  end
+
+  defp read_source(broker, range_id, offset, max_records) do
+    case Map.fetch(broker.logs, range_id) do
+      :error -> :eof
+      {:ok, log} -> Log.read(log, offset, max_records)
+    end
+  end
+
+  defp filter_records(records, nil), do: records
+
+  defp filter_records(records, range) do
+    Enum.filter(records, fn record ->
+      Keyspace.within?(
+        Keyspace.position_of(record.key, range.keyspace_size),
+        range.key_start,
+        range.key_end
+      )
+    end)
+  end
+
+  defp drain_history(broker, range_id, cursor, pages) do
+    case stream_history(broker, range_id, cursor, 1000) do
+      {:ok, records, :done} -> {:ok, [records | pages] |> Enum.reverse() |> List.flatten()}
+      {:ok, records, next_cursor} -> drain_history(broker, range_id, next_cursor, [records | pages])
+      {:error, _reason} = error -> error
+    end
+  end
 end

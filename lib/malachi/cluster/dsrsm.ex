@@ -55,24 +55,13 @@ defmodule Malachi.Cluster.DSRSM do
   def new(opts \\ []), do: %__MODULE__{ring: HashRing.new(opts), vnodes: %{}}
 
   @doc """
-  Adds a vnode at `token` with a fresh, empty metadata shard. Propagates `HashRing`
-  placement errors (`:token_out_of_range`, `:token_taken`, `:already_present`).
-
-  This does **no** migration, so it is only safe before any topic exists (or when the arc
-  it steals holds no topics). Once topics exist, use `split_vnode/3`, which migrates the
-  displaced topics — otherwise their metadata would be orphaned on the old vnode while
-  routing points at the new (empty) one.
+  Adds a vnode at `token`, migrating any displaced topics to it — the general "grow the
+  ring" entry point. Delegates to `split_vnode/3`, so it is safe whether or not topics
+  already exist (migration is a no-op on an empty ring). Propagates `HashRing` placement
+  errors (`:token_out_of_range`, `:token_taken`, `:already_present`).
   """
   @spec add_vnode(t(), vnode_id(), HashRing.token()) :: {:ok, t()} | {:error, atom()}
-  def add_vnode(%__MODULE__{} = dsrsm, vnode_id, token) do
-    case HashRing.add_vnode(dsrsm.ring, vnode_id, token) do
-      {:ok, ring} ->
-        {:ok, %{dsrsm | ring: ring, vnodes: Map.put(dsrsm.vnodes, vnode_id, Metadata.new())}}
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
+  def add_vnode(%__MODULE__{} = dsrsm, vnode_id, token), do: split_vnode(dsrsm, vnode_id, token)
 
   @doc """
   Adds a new vnode at `token` and **migrates** to it every topic that now routes there —

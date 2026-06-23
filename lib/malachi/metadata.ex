@@ -102,13 +102,10 @@ defmodule Malachi.Metadata do
   """
   @spec apply(t(), command()) :: {t(), term()}
   def apply(%__MODULE__{} = state, {:create_topic, name, keyspace_bits}) do
-    if Map.has_key?(state.topics, name) do
-      {state, {:error, :already_exists}}
-    else
-      case Keyspace.size_for_bits(keyspace_bits) do
-        {:error, :out_of_range} -> {state, {:error, :invalid_keyspace_bits}}
-        {:ok, keyspace_size} -> create_topic(state, name, keyspace_size)
-      end
+    cond do
+      not valid_topic_name?(name) -> {state, {:error, :invalid_topic_name}}
+      Map.has_key?(state.topics, name) -> {state, {:error, :already_exists}}
+      true -> create_topic_with_bits(state, name, keyspace_bits)
     end
   end
 
@@ -284,6 +281,19 @@ defmodule Malachi.Metadata do
   end
 
   # --- internals: topic ---
+
+  # Topic names are used in file paths (range log directories), so restrict them to a safe
+  # allowlist and reject "."/".." — preventing path traversal at the data plane.
+  defp valid_topic_name?(name) do
+    is_binary(name) and name not in ["", ".", ".."] and name =~ ~r/\A[A-Za-z0-9._-]+\z/
+  end
+
+  defp create_topic_with_bits(state, name, keyspace_bits) do
+    case Keyspace.size_for_bits(keyspace_bits) do
+      {:error, :out_of_range} -> {state, {:error, :invalid_keyspace_bits}}
+      {:ok, keyspace_size} -> create_topic(state, name, keyspace_size)
+    end
+  end
 
   defp create_topic(state, name, keyspace_size) do
     root_id = {name, 0}
