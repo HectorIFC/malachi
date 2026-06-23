@@ -203,6 +203,14 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   split/merge/coverage/lineage duplicava o `Metadata`). O caminho único agora é
   control plane (`Metadata`/`DSRSM`) + `Broker`/`BrokerServer`. **Bridge concluído.**
 
+**Hardening do DS-RSM (property-based, substituto da simulação determinística):**
+- ✅ Property tests model-based (`stream_data`) para `Metadata` e `DSRSM`: sequências aleatórias
+  de create/split/merge/register/seal/delete + **split de vnode**, sempre escolhendo alvos
+  válidos do estado atual. Invariantes verificadas: cobertura do keyspace por topic ativo,
+  integridade referencial (range→topic, segment→range, id `{topic, seq}` bem-formado), **nenhum
+  topic órfão** (sempre vive no vnode que o roteia, mesmo após split de vnode) e **determinismo**
+  (mesma sequência → mesmo estado).
+
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
 - SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
