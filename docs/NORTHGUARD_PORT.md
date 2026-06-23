@@ -189,6 +189,15 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   - ⏳ Futuro: sharding de range/segment por range id (cross-vnode), que é o desvio restante
     do NorthGuard.
 
+**Bridge control plane → data plane (1a.5):**
+- ✅ `Malachi.Broker` — compõe o control plane (`Metadata`, fonte da verdade da estrutura) com
+  o data plane (um `Log` por range, indexado por range id). `produce` roteia por chave usando os
+  ranges ativos do `Metadata` + `Keyspace`; `split_range`/`merge_ranges` passam pelo `Metadata`
+  (estrutura) e selam/flusham os logs afetados. As decisões lógicas vivem só no control plane.
+  - ⏳ Pendente do bridge: aposentar `Topic`/`TopicServer`/`Range` (cuja orquestração duplicava o
+    `Metadata`) e migrar a leitura cross-epoch (`read_history`) para cima do `Broker` — finaliza a
+    remoção da duplicação sem regressão.
+
 **Fase 1b — Replicação e membership:**
 - Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
 - SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
