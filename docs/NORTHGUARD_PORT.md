@@ -212,11 +212,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   (mesma sequência → mesmo estado).
 
 **Fase 1b — Replicação e membership:**
-- Integrar `ra` (replica a `Metadata` machine; eleição de líder = coordinator).
-- SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
-- **Striping**: segment como unidade de replicação; self-balancing ao criar segments.
-- Replicação de segment (active stream + sealed = consume entre brokers) + self-healing.
-- Storage/metadata policies + attributes.
+- ✅ **`ra` integrado** (Raft real): `Malachi.Cluster.MetadataMachine` é uma `:ra_machine` cujo
+  `apply/3` **delega ao `Metadata.apply/2`** — a lógica de negócio não muda, só ganha replicação.
+  `Malachi.Cluster.MetadataServer` é o wrapper fino (start de cluster single-node, `command` via
+  log Raft, `query` linearizável, restart). Um cluster ra = um vnode; liderança = coordinator.
+  Testado: comandos replicados, query consistente, erro de comando propagado, **estado sobrevive
+  a restart** (log durável). Determinismo do `Metadata` (property tests) é o que torna isso seguro.
+  - ⏳ Próximo: um cluster ra **por vnode** no `DSRSM` (hoje o DSRSM é puro/in-memory); roteamento
+    ao líder do vnode; e cluster multi-node (depende de membership).
+- ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
+- ⏳ **Striping**: segment como unidade de replicação; self-balancing ao criar segments.
+- ⏳ Replicação de segment (active stream + sealed = consume entre brokers) + self-healing.
+- ⏳ Storage/metadata policies + attributes.
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
 - `Malachi.SegmentStore.Native` em Rust (Rustler): O_DIRECT, cache de app, `erlang-rocksdb`.
