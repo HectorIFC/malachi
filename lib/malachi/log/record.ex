@@ -26,6 +26,9 @@ defmodule Malachi.Log.Record do
 
   @magic 0x4D51
   @frame_header_size 10
+  # Fixed payload fields: offset(8) + timestamp(8) + flags(1) + key_length(4) + value_length(4)
+  # + header_count(4). Variable parts (key, value, headers) are added on top.
+  @fixed_payload_size 29
   @key_present 0x01
 
   @type t :: %__MODULE__{
@@ -72,6 +75,23 @@ defmodule Malachi.Log.Record do
         record.value::binary, length(record.headers)::32, headers_binary::binary>>
 
     <<@magic::16, byte_size(payload)::32, :erlang.crc32(payload)::32, payload::binary>>
+  end
+
+  @doc """
+  The exact on-disk frame size, in bytes, this record will occupy — matching `encode/1`
+  byte-for-byte. The `offset` need not be assigned, since it is always a fixed 8 bytes. Used by
+  the broker to drive size-based segment rollover with the same accounting the log writes.
+  """
+  @spec encoded_size(t()) :: pos_integer()
+  def encoded_size(%__MODULE__{} = record) do
+    key_size = if is_binary(record.key), do: byte_size(record.key), else: 0
+
+    headers_size =
+      Enum.reduce(record.headers, 0, fn {key, value}, acc ->
+        acc + 8 + byte_size(key) + byte_size(value)
+      end)
+
+    @frame_header_size + @fixed_payload_size + key_size + byte_size(record.value) + headers_size
   end
 
   @doc """

@@ -2,11 +2,17 @@ defmodule Malachi.BrokerTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Broker
+  alias Malachi.Cluster.Placement
   alias Malachi.Log.Record
+  alias Malachi.Metadata
 
   @moduletag :tmp_dir
 
   defp record(value, key), do: Record.new(value, key: key)
+
+  defp segments(broker, range_id) do
+    broker.metadata |> Metadata.segments_of_range(range_id) |> Enum.sort_by(& &1.start_offset)
+  end
 
   defp broker_with_topic(directory, name \\ "events", bits \\ 4) do
     {:ok, broker} = Broker.open(directory)
@@ -155,6 +161,95 @@ defmodule Malachi.BrokerTest do
 
       # the merged child covers the whole keyspace again, so all records route to it
       assert Map.keys(placements) == [child_id]
+    end
+
+    test "merge seals both parents' active segments", %{tmp_dir: directory} do
+      {broker, root_id} = broker_with_topic(directory)
+      {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
+
+      # land at least one record in each child so both have an open segment
+      records = for index <- 0..29, do: record("v#{index}", "k#{index}")
+      {:ok, broker, _placements} = Broker.produce(broker, "events", records)
+
+      {broker, {:ok, _child_id}} = Broker.merge_ranges(broker, left_id, right_id)
+
+      for parent_id <- [left_id, right_id] do
+        assert Enum.all?(segments(broker, parent_id), &(&1.state == :sealed))
+      end
+    end
+  end
+
+  describe "segments (data-plane lifecycle)" do
+    test "the first produce registers an active segment with a placed replica set", %{tmp_dir: directory} do
+      {broker, root_id} = broker_with_topic(directory)
+      {:ok, broker, _placements} = Broker.produce(broker, "events", [record("v", "k")])
+
+      assert [segment] = segments(broker, root_id)
+      # default policy: single broker (this node), replication factor 1
+      assert segment.id == {root_id, 0}
+      assert segment.state == :active
+      assert segment.start_offset == 0
+      assert segment.replica_set == [node()]
+    end
+
+    test "the replica set comes from Placement over the configured brokers", %{tmp_dir: directory} do
+      brokers = [:a, :b, :c, :d]
+      {:ok, broker} = Broker.open(directory, brokers: brokers, replication_factor: 3)
+      {broker, {:ok, root_id}} = Broker.create_topic(broker, "events", 4)
+      {:ok, broker, _placements} = Broker.produce(broker, "events", [record("v", "k")])
+
+      assert [segment] = segments(broker, root_id)
+      assert {:ok, segment.replica_set} == Placement.place(segment.id, brokers, 3)
+      assert length(segment.replica_set) == 3
+    end
+
+    test "the active segment seals and rolls once it crosses :segment_max_bytes", %{tmp_dir: directory} do
+      one_record = Record.encoded_size(record("value", "key"))
+      # threshold = one record's bytes, so each single-record produce seals immediately
+      {:ok, broker} = Broker.open(directory, segment_max_bytes: one_record)
+      {broker, {:ok, root_id}} = Broker.create_topic(broker, "events", 4)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {:ok, broker, _placements} = Broker.produce(broker, "events", [record("value", "key#{index}")])
+          broker
+        end)
+
+      segs = segments(broker, root_id)
+      # three rolled segments, contiguous, each holding exactly one record
+      assert Enum.map(segs, & &1.id) == [{root_id, 0}, {root_id, 1}, {root_id, 2}]
+      assert Enum.map(segs, & &1.start_offset) == [0, 1, 2]
+      assert Enum.all?(segs, &(&1.state == :sealed and &1.length == 1))
+    end
+
+    test "the byte threshold is soft: a batch may overshoot before sealing", %{tmp_dir: directory} do
+      one_record = Record.encoded_size(record("value", "key"))
+      {:ok, broker} = Broker.open(directory, segment_max_bytes: one_record)
+      {broker, {:ok, root_id}} = Broker.create_topic(broker, "events", 4)
+
+      # one batch of three records overshoots the one-record threshold, sealing as a single segment
+      records = for index <- 0..2, do: record("value", "key#{index}")
+      {:ok, broker, _placements} = Broker.produce(broker, "events", records)
+
+      assert [segment] = segments(broker, root_id)
+      assert segment.state == :sealed
+      assert segment.length == 3
+    end
+
+    test "splitting seals the parent's active segment", %{tmp_dir: directory} do
+      {broker, root_id} = broker_with_topic(directory)
+      {:ok, broker, _placements} = Broker.produce(broker, "events", [record("v", "k")])
+
+      assert [%{state: :active}] = segments(broker, root_id)
+      {broker, {:ok, _left, _right}} = Broker.split_range(broker, root_id)
+      assert [%{state: :sealed, length: 1}] = segments(broker, root_id)
+    end
+
+    test "open/2 rejects an invalid placement policy", %{tmp_dir: directory} do
+      assert_raise ArgumentError, fn -> Broker.open(directory, brokers: []) end
+      assert_raise ArgumentError, fn -> Broker.open(directory, brokers: :not_a_list) end
+      assert_raise ArgumentError, fn -> Broker.open(directory, replication_factor: 0) end
+      assert_raise ArgumentError, fn -> Broker.open(directory, segment_max_bytes: 0) end
     end
   end
 end

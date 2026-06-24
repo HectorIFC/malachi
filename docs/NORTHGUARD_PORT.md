@@ -234,8 +234,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   abstrato — fixa o contrato que a futura membership servirá. Property tests: tamanho/distinção do
   replica set, determinismo independente de ordem, **retenção sob remoção de broker (min-reshuffle)**
   e **fixpoint do `heal` em uma passada**.
-  - ⏳ Próximo: fiar `place`/`heal` no `Broker` (escolher replica set ao abrir segment; ciclo de
-    vida seal/roll) e a replicação de fato entre brokers (active stream + sealed consume).
+- ✅ **Ciclo de vida do segment no `Broker`** — o data plane agora *cria* segments. A cada range
+  ativo o `Broker` mantém um segment aberto (span lógico de offsets sobre o `Log` único do range,
+  A1): no 1º produce registra o segment escolhendo o `replica_set` via `Placement.place` sobre
+  `:brokers`/`:replication_factor` (defaults `[node()]`/`1`); contabiliza os bytes apendados
+  (`Record.encoded_size/1`, casado byte-a-byte com `encode/1`) e **sela + rola** ao cruzar
+  `:segment_max_bytes` (threshold *soft*, checado no limite do batch). `split`/`merge` selam o
+  segment ativo do range afetado. `segment_id = {range_id, seq}` (globalmente único; seq por-range
+  persiste entre selas → id nunca reusado). API de `produce`/`read` inalterada (segments são
+  bookkeeping aditivo). Testado: registro no 1º produce, replica set via HRW, rollover por bytes
+  (1 record/segment e overshoot soft), sela em split/merge, validação de policy.
+  - ⏳ Próximo: fiar `heal` (re-replicação) num gatilho de mudança de membership; replicação de
+    fato entre brokers (active stream + sealed consume); rollover por tempo/contagem além de bytes.
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Replicação de segment (active stream + sealed = consume entre brokers) — o *mecanismo* sob a
   política do `Placement`.
