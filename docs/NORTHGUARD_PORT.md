@@ -225,9 +225,20 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   (cada topic só existe no cluster que o roteia), erro de comando propagado, ring vazio → `:no_vnode`.
   Escopo: **vnodes estáticos** (split-sobre-ra adiado), single-node (multi-node depende de membership).
   - ⏳ Próximo: split de vnode sobre `ra` (migrar metadado entre grupos Raft); cluster multi-node.
+- ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
+  de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
+  Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
+  Raft; mínimo reshuffle), `under_replicated/3` detecta segments com réplica morta (alvo clampado
+  ao nº de brokers vivos), `heal/3` emite comandos `:set_segment_replicas` que restauram a
+  replicação. Cobre segments **sealed** também (durabilidade). `available_brokers` é parâmetro
+  abstrato — fixa o contrato que a futura membership servirá. Property tests: tamanho/distinção do
+  replica set, determinismo independente de ordem, **retenção sob remoção de broker (min-reshuffle)**
+  e **fixpoint do `heal` em uma passada**.
+  - ⏳ Próximo: fiar `place`/`heal` no `Broker` (escolher replica set ao abrir segment; ciclo de
+    vida seal/roll) e a replicação de fato entre brokers (active stream + sealed consume).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
-- ⏳ **Striping**: segment como unidade de replicação; self-balancing ao criar segments.
-- ⏳ Replicação de segment (active stream + sealed = consume entre brokers) + self-healing.
+- ⏳ Replicação de segment (active stream + sealed = consume entre brokers) — o *mecanismo* sob a
+  política do `Placement`.
 - ⏳ Storage/metadata policies + attributes.
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
