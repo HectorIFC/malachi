@@ -244,11 +244,20 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   persiste entre selas → id nunca reusado). API de `produce`/`read` inalterada (segments são
   bookkeeping aditivo). Testado: registro no 1º produce, replica set via HRW, rollover por bytes
   (1 record/segment e overshoot soft), sela em split/merge, validação de policy.
-  - ⏳ Próximo: fiar `heal` (re-replicação) num gatilho de mudança de membership; replicação de
-    fato entre brokers (active stream + sealed consume); rollover por tempo/contagem além de bytes.
+  - ⏳ Próximo: fiar `heal` (re-replicação) num gatilho de mudança de membership; rollover por
+    tempo/contagem além de bytes.
+- ✅ **`Malachi.Cluster.ReplicaTracker`** — núcleo **puro** de commit por quórum da replicação de
+  **um segment** (a lógica determinística do mecanismo, sem processos/rede). `replica_set` ordenado
+  (1º = primário); `ack/3` registra o offset durável de cada réplica (monotônico, ignora regressão);
+  `commit_offset/1` = maior offset presente em **maioria** (⌊N/2⌋+1) das réplicas, ou `:none`;
+  `committed?/2`. Tolera ⌊(N-1)/2⌋ falhas sem esperar a réplica mais lenta. Contraparte (para *dados*
+  de segment) do `Metadata` determinístico (para *metadata*). Property tests: commit = maior offset
+  em quórum, **monotonicidade do commit**, `committed?` sse quórum o tem. Escopo: replica set fixo
+  (failover de primário/mudança de set depois).
+  - ⏳ Próximo: o **transporte** — primário→seguidores sobre Erlang distribuído (peer set
+    configurado), apend local nos seguidores, ack ao primário, avanço do commit; depois SWIM como
+    fonte dinâmica do peer set + catch-up de segment selado.
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
-- ⏳ Replicação de segment (active stream + sealed = consume entre brokers) — o *mecanismo* sob a
-  política do `Placement`.
 - ⏳ Storage/metadata policies + attributes.
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
