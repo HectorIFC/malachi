@@ -218,8 +218,13 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   log Raft, `query` linearizável, restart). Um cluster ra = um vnode; liderança = coordinator.
   Testado: comandos replicados, query consistente, erro de comando propagado, **estado sobrevive
   a restart** (log durável). Determinismo do `Metadata` (property tests) é o que torna isso seguro.
-  - ⏳ Próximo: um cluster ra **por vnode** no `DSRSM` (hoje o DSRSM é puro/in-memory); roteamento
-    ao líder do vnode; e cluster multi-node (depende de membership).
+- ✅ **`Malachi.Cluster.ReplicatedDSRSM`** — o DS-RSM sobre Raft: HashRing + **um cluster `ra` por
+  vnode**. `command`/`query` roteiam por nome do topic ao cluster do vnode dono (sharding +
+  replicação por shard). Contraparte de produção do `DSRSM` puro (que os property tests exercitam).
+  Testado: roteamento ao cluster certo, query consistente, **sharding entre 2 clusters Raft reais**
+  (cada topic só existe no cluster que o roteia), erro de comando propagado, ring vazio → `:no_vnode`.
+  Escopo: **vnodes estáticos** (split-sobre-ra adiado), single-node (multi-node depende de membership).
+  - ⏳ Próximo: split de vnode sobre `ra` (migrar metadado entre grupos Raft); cluster multi-node.
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ **Striping**: segment como unidade de replicação; self-balancing ao criar segments.
 - ⏳ Replicação de segment (active stream + sealed = consume entre brokers) + self-healing.
