@@ -100,6 +100,12 @@ defmodule Malachi.Cluster.Membership do
     for({member, %{status: :alive}} <- view.members, do: member) |> Enum.sort()
   end
 
+  @doc "The full view as a list of `{member, status, incarnation}` updates, for gossiping."
+  @spec updates(t()) :: [update()]
+  def updates(%__MODULE__{} = view) do
+    for {member, %{status: status, incarnation: incarnation}} <- view.members, do: {member, status, incarnation}
+  end
+
   @doc "The status of `member`, or `nil` if unknown."
   @spec status(t(), member()) :: status() | nil
   def status(%__MODULE__{} = view, member) do

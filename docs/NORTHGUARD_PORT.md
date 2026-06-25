@@ -329,9 +329,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   re-anunciando alive (efeito `{:refute, …}` para disseminar). `apply_update/2`, `merge/2`,
   `suspect/2`, `confirm/2`, `alive_members/1`. Property tests: **convergência independente de ordem**
   e **monotonicidade de incarnation**; + unidades de precedência e self-refute.
-  - ⏳ Próximo (SWIM): detector de falha (ping/ping-indireto via timers → eventos suspect) e o
-    transporte/gossip (Erlang distribuído ou UDP); depois fiar `alive_members` no
-    `Placement`/`SelfHealing` e o failover de primário.
+- ✅ **`Malachi.Cluster.MembershipServer` (servidor SWIM: detector + gossip)** — `GenServer` por
+  broker que roda a `Membership` ao vivo. A cada *protocol period* faz **ping** num peer vivo
+  aleatório; sem **ack** no `ack_timeout` → `suspect`; sem refute no `suspicion_timeout` → `dead`.
+  Cada ping/ack faz **piggyback** da view (lista de updates) → anti-entropy → as views **convergem**;
+  um nó falsamente suspeito descobre pelo ack ao seu próprio ping e refuta (sobe incarnation). Refs
+  location-transparent (testável in-process; multi-node sem mudança); envios fire-and-forget (peer
+  morto = sem ack = detecção). Peers semente via `:peers`; timers configuráveis. Testado in-process:
+  **gossip espalha** conhecimento parcial até todos conhecerem todos, **nó parado é detectado e vira
+  `dead`** no cluster, e **refute** de suspeita falsa sobre si. Escopo: ping direto + suspicion +
+  gossip (ping-indireto e join formal depois).
+  - ⏳ Próximo: fiar `alive_members` no `Placement`/`SelfHealing`/`BrokerServer`; failover de
+    primário; ping-indireto + join.
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 

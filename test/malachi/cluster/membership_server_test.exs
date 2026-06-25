@@ -1,0 +1,80 @@
+defmodule Malachi.Cluster.MembershipServerTest do
+  use ExUnit.Case, async: true
+
+  alias Malachi.Cluster.Membership
+  alias Malachi.Cluster.MembershipServer
+
+  # Tight timings so the detector converges quickly in tests.
+  @timings [protocol_period: 15, ack_timeout: 15, suspicion_timeout: 90]
+
+  defp start_node(name, peers) do
+    start_supervised!({MembershipServer, [name: name, peers: peers] ++ @timings}, id: name)
+    name
+  end
+
+  defp eventually(check, remaining_ms \\ 3_000) do
+    cond do
+      check.() -> true
+      remaining_ms <= 0 -> false
+      true -> Process.sleep(15) && eventually(check, remaining_ms - 15)
+    end
+  end
+
+  test "gossip spreads partial seed knowledge until every node knows every node" do
+    suffix = System.unique_integer([:positive])
+    a = :"ms_a_#{suffix}"
+    b = :"ms_b_#{suffix}"
+    c = :"ms_c_#{suffix}"
+
+    # a knows only b; c knows only b; b bridges them
+    start_node(a, [b])
+    start_node(b, [a, c])
+    start_node(c, [b])
+
+    full = Enum.sort([a, b, c])
+    assert eventually(fn -> Enum.all?([a, b, c], &(MembershipServer.alive_members(&1) == full)) end)
+  end
+
+  test "a stopped node is detected and marked dead across the cluster" do
+    suffix = System.unique_integer([:positive])
+    a = :"ms_a_#{suffix}"
+    b = :"ms_b_#{suffix}"
+    c = :"ms_c_#{suffix}"
+
+    start_node(a, [b, c])
+    start_node(b, [a, c])
+    start_node(c, [a, b])
+
+    # let them all see each other first
+    assert eventually(fn -> MembershipServer.alive_members(a) == Enum.sort([a, b, c]) end)
+
+    :ok = stop_supervised!(c)
+
+    # the survivors converge on c being dead (suspect → dead after the suspicion timeout)
+    assert eventually(fn ->
+             Membership.status(MembershipServer.view(a), c) == :dead and
+               Membership.status(MembershipServer.view(b), c) == :dead
+           end)
+
+    assert MembershipServer.alive_members(a) == Enum.sort([a, b])
+    assert MembershipServer.alive_members(b) == Enum.sort([a, b])
+  end
+
+  test "a node refutes a false suspicion about itself" do
+    suffix = System.unique_integer([:positive])
+    a = :"ms_a_#{suffix}"
+    b = :"ms_b_#{suffix}"
+
+    start_node(a, [b])
+    start_node(b, [a])
+
+    # inject gossip (as if from b) that wrongly suspects a at its current incarnation
+    GenServer.cast(a, {:ping, b, [{a, :suspect, 0}]})
+
+    # a stays alive and bumps its incarnation to refute
+    assert eventually(fn ->
+             view = MembershipServer.view(a)
+             Membership.status(view, a) == :alive and Membership.incarnation(view, a) >= 1
+           end)
+  end
+end
