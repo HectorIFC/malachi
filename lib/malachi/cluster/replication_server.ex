@@ -17,13 +17,17 @@ defmodule Malachi.Cluster.ReplicationServer do
   :no_quorum}` otherwise. Both the primary and the followers `fsync` before counting toward the
   quorum, so "committed" means "durable on a majority".
 
-  Scope (first slice): the active segment's happy path with quorum tolerance. A follower that has
-  fallen behind replies `{:error, :out_of_sync}` and simply does not count toward the quorum;
-  catch-up/backfill, sealed-segment replication, and primary failover are later slices.
+  Scope: the active segment's happy path with quorum tolerance, plus **automatic catch-up** of a
+  follower that fell behind — when the primary's fan-out reaches a follower whose end is below the
+  batch's offset, the follower kicks off a background pull from the primary (`Malachi.Cluster.Catchup`)
+  and rejoins the quorum on a later batch. Backfilling a follower that missed a segment's *start*,
+  sealed-segment re-replication (see `Malachi.Cluster.SelfHealing`), and primary failover are
+  later/other slices.
   """
 
   use GenServer
 
+  alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Log
 
@@ -34,7 +38,9 @@ defmodule Malachi.Cluster.ReplicationServer do
            directory: Path.t(),
            log_opts: keyword(),
            logs: %{term() => Log.t()},
-           trackers: %{term() => ReplicaTracker.t()}
+           trackers: %{term() => ReplicaTracker.t()},
+           catching_up: MapSet.t(),
+           catchup_monitors: %{reference() => term()}
          }
 
   @doc """
@@ -95,7 +101,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()} | {:error, :out_of_sync}
   def follow(ref, segment_id, expected_first, records) do
-    GenServer.call(ref, {:follow, segment_id, expected_first, records})
+    # No source: a plain replica append (used by Catchup); never re-triggers a catch-up.
+    GenServer.call(ref, {:follow, segment_id, expected_first, records, nil})
   end
 
   @doc "This server's next offset for `segment_id`, or `:empty` if it stores none of it yet."
@@ -118,7 +125,9 @@ defmodule Malachi.Cluster.ReplicationServer do
       directory: directory,
       log_opts: Keyword.drop(opts, [:name, :directory]),
       logs: %{},
-      trackers: %{}
+      trackers: %{},
+      catching_up: MapSet.new(),
+      catchup_monitors: %{}
     }
 
     {:ok, state}
@@ -141,16 +150,22 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  def handle_call({:follow, segment_id, expected_first, records}, _from, state) do
+  def handle_call({:follow, segment_id, expected_first, records, source}, _from, state) do
     # A new follower segment opens at the batch's first offset, so its offsets match the primary's.
     {state, log} = fetch_or_open(state, segment_id, expected_first)
 
-    if log.next_offset == expected_first do
-      {log, _first, last} = append_durably(log, records)
-      {:reply, {:ok, last}, put_log(state, segment_id, log)}
-    else
-      # The follower is behind (missed an earlier batch); catch-up is a later slice.
-      {:reply, {:error, :out_of_sync}, state}
+    cond do
+      log.next_offset == expected_first ->
+        {log, _first, last} = append_durably(log, records)
+        {:reply, {:ok, last}, put_log(state, segment_id, log)}
+
+      source != nil and log.next_offset < expected_first ->
+        # Behind on the active segment: kick off a background catch-up from the primary and skip
+        # this batch (it commits via the up-to-date replicas). We rejoin on a later batch.
+        {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, source)}
+
+      true ->
+        {:reply, {:error, :out_of_sync}, state}
     end
   end
 
@@ -169,6 +184,17 @@ defmodule Malachi.Cluster.ReplicationServer do
       end
 
     {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, monitor_ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.catchup_monitors, monitor_ref) do
+      {nil, _monitors} ->
+        {:noreply, state}
+
+      {segment_id, monitors} ->
+        {:noreply, %{state | catching_up: MapSet.delete(state.catching_up, segment_id), catchup_monitors: monitors}}
+    end
   end
 
   @impl true
@@ -196,7 +222,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     tracker =
       followers
-      |> gather_acks(segment_id, first, records)
+      |> gather_acks(segment_id, first, records, state.ref)
       |> Enum.reduce(tracker, fn {follower, offset}, acc ->
         {:ok, acc} = ReplicaTracker.ack(acc, follower, offset)
         acc
@@ -216,14 +242,15 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  # Calls each follower concurrently; keeps only those that durably stored the batch. A slow,
-  # unreachable, or out-of-sync follower is simply dropped (it does not count toward the quorum).
-  defp gather_acks(followers, segment_id, expected_first, records) do
+  # Calls each follower concurrently, passing `primary` as the catch-up source so a behind follower
+  # can self-heal. Keeps only those that durably stored the batch; a slow, unreachable, or
+  # out-of-sync follower is dropped (it does not count toward the quorum).
+  defp gather_acks(followers, segment_id, expected_first, records, primary) do
     followers
     |> Task.async_stream(
       fn follower ->
         try do
-          {follower, GenServer.call(follower, {:follow, segment_id, expected_first, records}, @follow_timeout)}
+          {follower, GenServer.call(follower, {:follow, segment_id, expected_first, records, primary}, @follow_timeout)}
         catch
           :exit, _ -> {follower, {:error, :unreachable}}
         end
@@ -235,6 +262,38 @@ defmodule Malachi.Cluster.ReplicationServer do
       {:ok, {follower, {:ok, offset}}} -> [{follower, offset}]
       _ -> []
     end)
+  end
+
+  # Starts one background catch-up per segment (deduped via `catching_up`): it pulls everything the
+  # source has past our current end. Monitored so the in-progress flag is cleared on completion or
+  # crash; the offset check in `follow` keeps concurrent appends safe, so a racing produce just
+  # makes the catch-up abort and the next gap re-trigger.
+  defp trigger_catchup(state, segment_id, source) do
+    if MapSet.member?(state.catching_up, segment_id) do
+      state
+    else
+      target = state.ref
+      {_pid, monitor_ref} = spawn_monitor(fn -> run_catchup(target, source, segment_id) end)
+
+      %{
+        state
+        | catching_up: MapSet.put(state.catching_up, segment_id),
+          catchup_monitors: Map.put(state.catchup_monitors, monitor_ref, segment_id)
+      }
+    end
+  end
+
+  defp run_catchup(target, source, segment_id) do
+    from = current_end(target, segment_id)
+    to = current_end(source, segment_id)
+    if to > from, do: Catchup.run(target, source, segment_id, from, to)
+  end
+
+  defp current_end(ref, segment_id) do
+    case end_offset(ref, segment_id) do
+      :empty -> 0
+      offset -> offset
+    end
   end
 
   # `base_offset` is used only when the segment's log does not exist yet, so a fresh segment starts

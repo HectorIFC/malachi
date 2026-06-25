@@ -110,4 +110,34 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert read_values(primary, @segment) == ["a"]
     assert read_values(f1, @segment) == ["a"]
   end
+
+  test "a follower that fell behind is automatically caught up from the primary" do
+    [primary, behind, other] = full = [start_broker(), start_broker(), start_broker()]
+
+    # all three get the first batch
+    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, full, 0, records(["a", "b"]))
+
+    # `behind` misses the next batch (excluded from this call's replica set, as if it were down)
+    assert {:ok, 3} = ReplicationServer.replicate(primary, @segment, [primary, other], 2, records(["c", "d"]))
+    assert read_values(behind, @segment) == ["a", "b"]
+
+    # the next fan-out reaches `behind` past its end → it triggers a background catch-up and the
+    # write still commits via primary + other
+    assert {:ok, 5} = ReplicationServer.replicate(primary, @segment, full, 4, records(["e", "f"]))
+
+    # out of band, `behind` pulls the gap from the primary and reaches the full log
+    assert eventually(fn -> read_values(behind, @segment) == ~w(a b c d e f) end)
+
+    # having rejoined, a later batch appends to `behind` directly within the fan-out
+    assert {:ok, 7} = ReplicationServer.replicate(primary, @segment, full, 6, records(["g", "h"]))
+    assert read_values(behind, @segment) == ~w(a b c d e f g h)
+  end
+
+  defp eventually(check, remaining_ms \\ 2_000) do
+    cond do
+      check.() -> true
+      remaining_ms <= 0 -> false
+      true -> Process.sleep(20) && eventually(check, remaining_ms - 20)
+    end
+  end
 end

@@ -300,8 +300,20 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   pelo gatilho no write-path (fatia (a), adiada). Brokers vivos vêm como parâmetro (membership
   depois). Testado in-process: backfill da réplica nova + comando + loop fecha (re-heal vazio),
   todas as réplicas mortas → `:no_live_source`, nada a fazer quando ok, ativo ignorado.
-  - ⏳ Próximo: (a) gatilho automático de catch-up no write-path (segment ativo); failover de
-    primário; multi-node (membership/SWIM).
+- ✅ **Catch-up automático no write-path (segment ativo)** — fecha a metade que faltava da
+  recuperação (a de selados é o `SelfHealing`). Quando o fan-out do primário chega num seguidor com
+  `next_offset < expected_first` (ficou para trás), o `ReplicationServer` **dispara um processo
+  monitorado em background** que roda o `Catchup` puxando do primário (`from = seu próprio fim`,
+  `to = fim do primário`), responde `:out_of_sync` (a escrita commita via as réplicas em dia) e o
+  seguidor **reentra no quórum num batch posterior**. Um conjunto `catching_up` deduplica catch-ups
+  por segment; o `:DOWN` do monitor limpa o flag em sucesso/falha; a checagem de offset do `follow`
+  garante segurança sob corrida (um append concorrente faz o catch-up abortar e o próximo gap
+  re-disparar — converge, sem duplicar/corromper). A mensagem de `follow` carrega o ref do primário
+  como fonte; os `follow` do `Catchup` passam `nil` (não re-disparam). Escopo: **missed-middle**
+  (seguidor que oscilou e voltou); missed-start/backfill de ativo fica para depois. Testado in-process:
+  seguidor perde um batch → é caçado de volta ao log completo → reentra no quórum.
+  - ⏳ Próximo: failover de primário; backfill de réplica nova em segment ativo; multi-node
+    (membership/SWIM).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 
