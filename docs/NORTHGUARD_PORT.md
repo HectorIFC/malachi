@@ -320,7 +320,19 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   muito rápida pode não alcançar (sem throttling — refinamento futuro). Testado in-process: réplica
   nova num segment ativo backfilla do começo e passa a seguir ao vivo.
   - ⏳ Próximo: failover de primário; multi-node (membership/SWIM).
-- ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
+- ✅ **`Malachi.Cluster.Membership` (máquina de estado SWIM pura)** — a view determinística de
+  membership: `alive`/`suspect`/`dead` por membro + **incarnation**, sem processos/timers/rede. A
+  regra única é um *join* na ordem lexicográfica `{incarnation, rank}` (`alive < suspect < dead`),
+  que dá a **precedência SWIM** (incarnation maior vence; empate → suspect>alive, dead>ambos; igual
+  → idempotente) e garante **convergência** do merge de gossip em qualquer ordem (CRDT-like).
+  Exceção: update sobre **self** suspeito/morto é **refutado** subindo a própria incarnation e
+  re-anunciando alive (efeito `{:refute, …}` para disseminar). `apply_update/2`, `merge/2`,
+  `suspect/2`, `confirm/2`, `alive_members/1`. Property tests: **convergência independente de ordem**
+  e **monotonicidade de incarnation**; + unidades de precedência e self-refute.
+  - ⏳ Próximo (SWIM): detector de falha (ping/ping-indireto via timers → eventos suspect) e o
+    transporte/gossip (Erlang distribuído ou UDP); depois fiar `alive_members` no
+    `Placement`/`SelfHealing` e o failover de primário.
+- ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
