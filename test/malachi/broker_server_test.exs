@@ -31,19 +31,18 @@ defmodule Malachi.BrokerServerTest do
     end
   end
 
-  describe "time-based flush" do
-    test "buffered records become durable after the flush interval without explicit sync",
-         %{tmp_dir: directory} do
-      {server, root_id} = with_topic(directory, flush_interval_ms: 10)
+  describe "durability" do
+    test "records are durable on return — no explicit sync needed", %{tmp_dir: directory} do
+      {server, root_id} = with_topic(directory)
 
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0"), record("b", "k1")])
 
-      assert eventually(fn -> match?({:ok, [_, _]}, BrokerServer.read(server, root_id, 0, 10)) end)
+      # the replication server fsynced on a quorum before the call returned
       assert read_all(server, root_id) |> Enum.map(& &1.value) == ["a", "b"]
     end
 
-    test "explicit sync commits immediately", %{tmp_dir: directory} do
-      {server, root_id} = with_topic(directory, flush_interval_ms: 60_000)
+    test "sync is a no-op and safe to call", %{tmp_dir: directory} do
+      {server, root_id} = with_topic(directory)
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0")])
       :ok = BrokerServer.sync(server)
       assert {:ok, [record_read]} = BrokerServer.read(server, root_id, 0, 10)
@@ -61,7 +60,6 @@ defmodule Malachi.BrokerServerTest do
       end)
       |> Enum.each(fn task -> assert {:ok, _placements} = Task.await(task) end)
 
-      :ok = BrokerServer.sync(server)
       assert server |> read_all(root_id) |> length() == 50
     end
   end
@@ -74,7 +72,6 @@ defmodule Malachi.BrokerServerTest do
 
       records = for index <- 0..19, do: record("v#{index}", "k#{index}")
       {:ok, _placements} = BrokerServer.produce(server, "events", records)
-      :ok = BrokerServer.sync(server)
 
       left = read_all(server, left_id) |> Enum.map(& &1.value)
       right = read_all(server, right_id) |> Enum.map(& &1.value)
@@ -85,7 +82,6 @@ defmodule Malachi.BrokerServerTest do
       {server, root_id} = with_topic(directory)
       parent_records = for index <- 0..9, do: record("v#{index}", "k#{index}")
       {:ok, _placements} = BrokerServer.produce(server, "events", parent_records)
-      :ok = BrokerServer.sync(server)
       {:ok, left_id, right_id} = BrokerServer.split_range(server, root_id)
 
       left = drain_history(server, left_id)
@@ -105,14 +101,6 @@ defmodule Malachi.BrokerServerTest do
     case BrokerServer.stream_history(server, range_id, cursor, 3) do
       {:ok, records, :done} -> [records | accumulated] |> Enum.reverse() |> List.flatten()
       {:ok, records, next_cursor} -> drain_history(server, range_id, next_cursor, [records | accumulated])
-    end
-  end
-
-  defp eventually(check, remaining_ms \\ 1000) do
-    cond do
-      check.() -> true
-      remaining_ms <= 0 -> false
-      true -> Process.sleep(10) && eventually(check, remaining_ms - 10)
     end
   end
 end

@@ -41,15 +41,20 @@ defmodule Malachi.Cluster.ReplicationServer do
   Starts a replication server.
 
   ## Options
-    * `:name` (required) - the broker reference this server is registered under and known by in
-      replica sets.
+    * `:name` (optional) - the broker reference this server is registered under and known by in
+      replica sets. When omitted, the server is unregistered and its reference is its pid.
     * `:directory` (required) - where replicated segment logs are stored.
     * any remaining options are forwarded to each segment's `Malachi.Log`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    name = Keyword.fetch!(opts, :name)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    gen_server_opts =
+      case Keyword.fetch(opts, :name) do
+        {:ok, name} -> [name: name]
+        :error -> []
+      end
+
+    GenServer.start_link(__MODULE__, opts, gen_server_opts)
   end
 
   @doc """
@@ -84,12 +89,13 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @impl true
   def init(opts) do
-    name = Keyword.fetch!(opts, :name)
+    # When unregistered, the server's reference is its own pid (set in replica sets by the caller).
+    ref = Keyword.get(opts, :name) || self()
     directory = Keyword.fetch!(opts, :directory)
     File.mkdir_p!(directory)
 
     state = %{
-      ref: name,
+      ref: ref,
       directory: directory,
       log_opts: Keyword.drop(opts, [:name, :directory]),
       logs: %{},

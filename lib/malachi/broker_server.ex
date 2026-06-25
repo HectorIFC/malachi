@@ -1,14 +1,16 @@
 defmodule Malachi.BrokerServer do
   @moduledoc """
-  A `GenServer` that owns a `Malachi.Broker`, serializing concurrent access and adding the
-  **time-based flush** trigger (NorthGuard's ~10ms): after a produce leaves buffered
-  records, a flush is scheduled `:flush_interval_ms` later (default 10ms) so a slow trickle
-  of small writes still becomes durable promptly. The size/count triggers already live in
-  `Malachi.Storage.ElixirStore`.
+  A `GenServer` that owns a `Malachi.Broker` (the control-plane router) and a local
+  `Malachi.Cluster.ReplicationServer` (segment storage/replication), serializing concurrent
+  access. It wires the broker's injected effect functions to the replication server:
+  `produce` replicates through it and `read`/`stream_history` read segments from it.
 
-  The `Broker` (and the layers it composes) are pure immutable values; routing all
-  mutations through this single process is what makes concurrent producers/consumers safe.
-  Buffered records are flushed on the timer and again on `terminate/2` for a clean shutdown.
+  Writes are durable on return: each batch is fsynced on a quorum by the replication server
+  before it commits, so there is no buffering and no time-based flush — `sync/1` is a no-op kept
+  for API compatibility.
+
+  The `Broker` (and the layers it composes) are pure immutable values; routing all mutations
+  through this single process is what makes concurrent producers/consumers safe.
 
   Supersedes `Malachi.TopicServer`.
   """
@@ -16,17 +18,18 @@ defmodule Malachi.BrokerServer do
   use GenServer
 
   alias Malachi.Broker
-
-  @default_flush_interval_ms 10
+  alias Malachi.Cluster.ReplicationServer
 
   # --- client API ---
 
   @doc """
-  Starts a server owning a broker rooted at `directory`.
+  Starts a server whose segment storage is rooted at `directory`.
 
   ## Options
-    * `:flush_interval_ms` - time-based flush delay (default 10)
-    * remaining options are forwarded to `Malachi.Broker.open/2` (segment options).
+    * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
+    * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
+    * remaining options are forwarded to the `Malachi.Cluster.ReplicationServer` (segment log
+      options such as `:max_bytes`, `:flush_bytes`, `:index_interval`).
     * standard `GenServer` options (`:name`, etc.) are honored.
   """
   @spec start_link(Path.t(), keyword()) :: GenServer.on_start()
@@ -42,25 +45,25 @@ defmodule Malachi.BrokerServer do
   def create_topic(server, name, keyspace_bits),
     do: GenServer.call(server, {:create_topic, name, keyspace_bits})
 
-  @doc "Routes and appends records; returns `{:ok, placements}` or an error."
+  @doc "Routes, replicates and commits records; returns `{:ok, placements}` or an error."
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
           {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}}
           | {:error, term()}
   def produce(server, topic, records), do: GenServer.call(server, {:produce, topic, records})
 
-  @doc "Reads up to `max_records` committed records from a range's log."
+  @doc "Reads up to `max_records` committed records from a range, starting at `offset`."
   @spec read(GenServer.server(), Malachi.Metadata.range_id(), non_neg_integer(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()]} | :eof | {:error, term()}
   def read(server, range_id, offset, max_records),
     do: GenServer.call(server, {:read, range_id, offset, max_records})
 
-  @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/4`)."
+  @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/5`)."
   @spec stream_history(GenServer.server(), Malachi.Metadata.range_id(), Broker.history_cursor(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()], Broker.history_cursor()} | {:error, term()}
   def stream_history(server, range_id, cursor \\ :start, max_records \\ 1000),
     do: GenServer.call(server, {:stream_history, range_id, cursor, max_records})
 
-  @doc "Forces an immediate flush+fsync of all buffered records."
+  @doc "No-op: writes are already durable on return. Kept for API compatibility."
   @spec sync(GenServer.server()) :: :ok
   def sync(server), do: GenServer.call(server, :sync)
 
@@ -79,19 +82,26 @@ defmodule Malachi.BrokerServer do
   @spec active_range_ids(GenServer.server(), Malachi.Metadata.topic_name()) :: [Malachi.Metadata.range_id()]
   def active_range_ids(server, topic), do: GenServer.call(server, {:active_range_ids, topic})
 
-  @doc "Flushes and stops the server."
+  @doc "Stops the server (and its replication storage)."
   @spec stop(GenServer.server()) :: :ok
   def stop(server), do: GenServer.stop(server)
 
   # --- server callbacks ---
 
   @impl true
-  def init({directory, broker_opts}) do
-    flush_interval_ms = Keyword.get(broker_opts, :flush_interval_ms, @default_flush_interval_ms)
-    broker_opts = Keyword.delete(broker_opts, :flush_interval_ms)
-    {:ok, broker} = Broker.open(directory, broker_opts)
+  def init({directory, opts}) do
+    {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
+    {replication_factor, log_opts} = Keyword.pop(opts, :replication_factor, 1)
 
-    {:ok, %{broker: broker, flush_interval_ms: flush_interval_ms, flush_timer: nil}}
+    {:ok, replication} = ReplicationServer.start_link([directory: directory] ++ log_opts)
+
+    broker_opts =
+      [brokers: [replication], replication_factor: replication_factor]
+      |> maybe_put(:segment_max_bytes, segment_max_bytes)
+
+    {:ok, broker} = Broker.open(broker_opts)
+
+    {:ok, %{broker: broker, replication: replication}}
   end
 
   @impl true
@@ -101,25 +111,21 @@ defmodule Malachi.BrokerServer do
   end
 
   def handle_call({:produce, topic, records}, _from, state) do
-    case Broker.produce(state.broker, topic, records) do
-      {:ok, broker, placements} ->
-        {:reply, {:ok, placements}, arm_flush_timer(%{state | broker: broker})}
-
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
+    {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
+    {:reply, reply, %{state | broker: broker}}
   end
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
-    {:reply, Broker.read(state.broker, range_id, offset, max_records), state}
+    {:reply, Broker.read(state.broker, range_id, offset, max_records, &ReplicationServer.read/4), state}
   end
 
   def handle_call({:stream_history, range_id, cursor, max_records}, _from, state) do
-    {:reply, Broker.stream_history(state.broker, range_id, cursor, max_records), state}
+    reply = Broker.stream_history(state.broker, range_id, cursor, max_records, &ReplicationServer.read/4)
+    {:reply, reply, state}
   end
 
   def handle_call(:sync, _from, state) do
-    {:reply, :ok, flush(state)}
+    {:reply, :ok, state}
   end
 
   def handle_call({:split_range, range_id}, _from, state) do
@@ -137,37 +143,13 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
-  def handle_info(:flush, state) do
-    {:noreply, flush(state)}
-  end
-
-  @impl true
   def terminate(_reason, state) do
-    state = flush(state)
-    Broker.close(state.broker)
+    if Process.alive?(state.replication), do: GenServer.stop(state.replication)
     :ok
   end
 
   # --- internals ---
 
-  # Schedule a flush only when there is buffered data and no timer is already pending, so an
-  # idle broker never triggers wasteful fsyncs.
-  defp arm_flush_timer(%{flush_timer: nil} = state) do
-    if Broker.pending?(state.broker) do
-      %{state | flush_timer: Process.send_after(self(), :flush, state.flush_interval_ms)}
-    else
-      state
-    end
-  end
-
-  defp arm_flush_timer(state), do: state
-
-  defp flush(state) do
-    cancel_flush_timer(state.flush_timer)
-    {:ok, broker} = Broker.sync(state.broker)
-    %{state | broker: broker, flush_timer: nil}
-  end
-
-  defp cancel_flush_timer(nil), do: :ok
-  defp cancel_flush_timer(timer), do: Process.cancel_timer(timer)
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 end

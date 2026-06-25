@@ -267,9 +267,20 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   commit, tolerância a 1 seguidor caído, `:no_quorum` sem maioria, single-replica, offsets contíguos
   entre batches, **base não-zero** (`:out_of_range` abaixo da base), `:not_primary`, batch vazio,
   replica set vazio (sem crash), set duplicado (sem deadlock). Escopo: caminho feliz do segment ativo.
-  - ⏳ Próximo (A2+A3): fiar no `Broker`/`BrokerServer` — `Broker` vira roteador (sem `logs`,
-    `produce` retorna plano), `BrokerServer` executa via `ReplicationServer` e lê por segment;
-    depois catch-up/backfill e failover de primário.
+- ✅ **`ReplicationServer` fiado no `Broker`/`BrokerServer` (A2+A3)** — o `Broker` virou
+  **roteador puro** (control plane): perdeu `logs`/`directory`, mantém só `Metadata` + ciclo de
+  vida do segment + contador de offset por range. O storage é 100% do `ReplicationServer`. A
+  ligação usa **funções de efeito injetadas**: `produce` recebe `replicate_fun`, `read`/
+  `stream_history` recebem `read_fun` — toda a orquestração (rota, offset→segment, commit, paginação
+  e filtro do cross-epoch) fica num só módulo, testado com **fakes in-memory**
+  (`Malachi.Test.FakeSegmentStore`). O `BrokerServer` injeta `&ReplicationServer.replicate/5` e
+  `&ReplicationServer.read/4`, inicia um `ReplicationServer` local (ref = pid) e abre o `Broker` com
+  `brokers: [esse_ref]`. Como a escrita é fsync-por-quórum no retorno, o **flush por tempo (10ms)
+  saiu** e `sync/1` virou no-op. `produce` retorna `{broker, {:ok, placements} | {:error, reason}}`
+  (commit por grupo; valor imutável dá transação grátis). Sem duplicação de storage. Suíte completa
+  verde (831 testes).
+  - ⏳ Próximo: catch-up/backfill de seguidor atrasado; failover de primário; multi-node (peer set
+    via membership/SWIM).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 
