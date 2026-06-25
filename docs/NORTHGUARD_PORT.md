@@ -290,8 +290,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   Testado in-process: backfill de réplica fresca, catch-up só do gap, base não-zero preservada,
   fonte incompleta, no-op quando já alcançado, `:empty`. Escopo: a primitiva (dirigida pelo
   chamador).
-  - ⏳ Próximo: gatilho automático (detectar gap no `follow` → catch-up assíncrono → volta ao
-    quórum) e fiar o `Catchup` ao `Placement.heal`; failover de primário; multi-node (membership/SWIM).
+- ✅ **`Malachi.Cluster.SelfHealing` (heal → backfill de selados)** — fecha o loop de self-healing
+  para segments **selados**: `Placement` decide, `Catchup` executa. `heal_sealed/4` (metadata +
+  brokers vivos + rf) acha os selados sub-replicados, escolhe o replica set curado via
+  `Placement.place`, faz **backfill** de cada réplica nova a partir de uma réplica viva
+  (`Catchup.run`), e devolve os comandos `:set_segment_replicas` (que tiveram backfill ok) para o
+  control plane aplicar, além dos segments que não deu para curar (ex.: `:no_live_source`). Só
+  selados (range `[start, start+length)` fixo → backfill bem-definido); o segment ativo se recupera
+  pelo gatilho no write-path (fatia (a), adiada). Brokers vivos vêm como parâmetro (membership
+  depois). Testado in-process: backfill da réplica nova + comando + loop fecha (re-heal vazio),
+  todas as réplicas mortas → `:no_live_source`, nada a fazer quando ok, ativo ignorado.
+  - ⏳ Próximo: (a) gatilho automático de catch-up no write-path (segment ativo); failover de
+    primário; multi-node (membership/SWIM).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 
