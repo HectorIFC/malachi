@@ -309,11 +309,17 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   por segment; o `:DOWN` do monitor limpa o flag em sucesso/falha; a checagem de offset do `follow`
   garante segurança sob corrida (um append concorrente faz o catch-up abortar e o próximo gap
   re-disparar — converge, sem duplicar/corromper). A mensagem de `follow` carrega o ref do primário
-  como fonte; os `follow` do `Catchup` passam `nil` (não re-disparam). Escopo: **missed-middle**
-  (seguidor que oscilou e voltou); missed-start/backfill de ativo fica para depois. Testado in-process:
+  como fonte; os `follow` do `Catchup` passam `nil` (não re-disparam). Testado in-process:
   seguidor perde um batch → é caçado de volta ao log completo → reentra no quórum.
-  - ⏳ Próximo: failover de primário; backfill de réplica nova em segment ativo; multi-node
-    (membership/SWIM).
+- ✅ **Backfill de réplica nova em segment ativo (missed-start)** — extensão mínima do gatilho: a
+  mensagem de `follow` passa a carregar o `base` do segment e o log fresco abre **no `base`** (não
+  no offset do batch). Assim uma réplica **recém-adicionada** a um segment ativo vê o gap do começo
+  (`next = base < expected`), o gatilho existente puxa `[base, cabeça)` e ela **converge na cabeça
+  móvel** via os re-disparos missed-middle, entrando no write-path ao alcançar (estilo ISR: não conta
+  no quórum até sincronizar). Zero código de gatilho novo. Limitação conhecida: sob escrita sustentada
+  muito rápida pode não alcançar (sem throttling — refinamento futuro). Testado in-process: réplica
+  nova num segment ativo backfilla do começo e passa a seguir ao vivo.
+  - ⏳ Próximo: failover de primário; multi-node (membership/SWIM).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 

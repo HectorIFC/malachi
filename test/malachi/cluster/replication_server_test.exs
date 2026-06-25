@@ -118,19 +118,36 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, full, 0, records(["a", "b"]))
 
     # `behind` misses the next batch (excluded from this call's replica set, as if it were down)
-    assert {:ok, 3} = ReplicationServer.replicate(primary, @segment, [primary, other], 2, records(["c", "d"]))
+    assert {:ok, 3} = ReplicationServer.replicate(primary, @segment, [primary, other], 0, records(["c", "d"]))
     assert read_values(behind, @segment) == ["a", "b"]
 
     # the next fan-out reaches `behind` past its end → it triggers a background catch-up and the
     # write still commits via primary + other
-    assert {:ok, 5} = ReplicationServer.replicate(primary, @segment, full, 4, records(["e", "f"]))
+    assert {:ok, 5} = ReplicationServer.replicate(primary, @segment, full, 0, records(["e", "f"]))
 
     # out of band, `behind` pulls the gap from the primary and reaches the full log
     assert eventually(fn -> read_values(behind, @segment) == ~w(a b c d e f) end)
 
     # having rejoined, a later batch appends to `behind` directly within the fan-out
-    assert {:ok, 7} = ReplicationServer.replicate(primary, @segment, full, 6, records(["g", "h"]))
+    assert {:ok, 7} = ReplicationServer.replicate(primary, @segment, full, 0, records(["g", "h"]))
     assert read_values(behind, @segment) == ~w(a b c d e f g h)
+  end
+
+  test "a brand-new replica added to an active segment backfills from the start and joins" do
+    [a, b, c] = [start_broker(), start_broker(), start_broker()]
+
+    # the segment is active on [a, b]
+    assert {:ok, 1} = ReplicationServer.replicate(a, @segment, [a, b], 0, records(["w", "x"]))
+
+    # c is added to the replica set; the next write fans out to c, which holds none of the segment
+    assert {:ok, 3} = ReplicationServer.replicate(a, @segment, [a, b, c], 0, records(["y", "z"]))
+
+    # c opens at the segment's base, sees the start gap, and backfills [0, head) out of band
+    assert eventually(fn -> read_values(c, @segment) == ~w(w x y z) end)
+
+    # having converged on the head, c now follows live within the fan-out
+    assert {:ok, 5} = ReplicationServer.replicate(a, @segment, [a, b, c], 0, records(["p", "q"]))
+    assert eventually(fn -> read_values(c, @segment) == ~w(w x y z p q) end)
   end
 
   defp eventually(check, remaining_ms \\ 2_000) do

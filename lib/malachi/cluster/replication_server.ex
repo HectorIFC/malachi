@@ -12,17 +12,19 @@ defmodule Malachi.Cluster.ReplicationServer do
   On `replicate/5` the primary appends the batch to its local copy, fans out to the followers
   concurrently, and feeds each ack into a `Malachi.Cluster.ReplicaTracker` to compute the commit
   offset. A segment's log opens at the segment's `base_offset` (its first range-relative offset),
-  so the offsets of a range's segments are contiguous rather than restarting at zero per segment. The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers)
-  has the batch — tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers — or `{:error,
-  :no_quorum}` otherwise. Both the primary and the followers `fsync` before counting toward the
-  quorum, so "committed" means "durable on a majority".
+  so the offsets of a range's segments are contiguous rather than restarting at zero per segment.
+  The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers) has the
+  batch — tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers — or `{:error, :no_quorum}`
+  otherwise. Both the primary and the followers `fsync` before counting toward the quorum, so
+  "committed" means "durable on a majority".
 
   Scope: the active segment's happy path with quorum tolerance, plus **automatic catch-up** of a
-  follower that fell behind — when the primary's fan-out reaches a follower whose end is below the
+  follower that is behind — when the primary's fan-out reaches a follower whose end is below the
   batch's offset, the follower kicks off a background pull from the primary (`Malachi.Cluster.Catchup`)
-  and rejoins the quorum on a later batch. Backfilling a follower that missed a segment's *start*,
-  sealed-segment re-replication (see `Malachi.Cluster.SelfHealing`), and primary failover are
-  later/other slices.
+  and rejoins the quorum on a later batch. This covers both a follower that missed some batches and
+  a **brand-new replica** that joins an active segment: it opens at the segment's `base`, sees the
+  gap, backfills, and converges on the moving head as later fan-outs re-trigger. Sealed-segment
+  re-replication (see `Malachi.Cluster.SelfHealing`) and primary failover are later/other slices.
   """
 
   use GenServer
@@ -101,8 +103,9 @@ defmodule Malachi.Cluster.ReplicationServer do
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()} | {:error, :out_of_sync}
   def follow(ref, segment_id, expected_first, records) do
-    # No source: a plain replica append (used by Catchup); never re-triggers a catch-up.
-    GenServer.call(ref, {:follow, segment_id, expected_first, records, nil})
+    # No source: a plain replica append (used by Catchup); never re-triggers a catch-up. A fresh
+    # log opens exactly where this batch starts.
+    GenServer.call(ref, {:follow, segment_id, expected_first, expected_first, records, nil})
   end
 
   @doc "This server's next offset for `segment_id`, or `:empty` if it stores none of it yet."
@@ -150,9 +153,10 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  def handle_call({:follow, segment_id, expected_first, records, source}, _from, state) do
-    # A new follower segment opens at the batch's first offset, so its offsets match the primary's.
-    {state, log} = fetch_or_open(state, segment_id, expected_first)
+  def handle_call({:follow, segment_id, base, expected_first, records, source}, _from, state) do
+    # Open a fresh segment at its `base` (not the batch's offset), so a brand-new replica that
+    # joins mid-segment sees the start gap and backfills it, rather than silently starting late.
+    {state, log} = fetch_or_open(state, segment_id, base)
 
     cond do
       log.next_offset == expected_first ->
@@ -160,8 +164,9 @@ defmodule Malachi.Cluster.ReplicationServer do
         {:reply, {:ok, last}, put_log(state, segment_id, log)}
 
       source != nil and log.next_offset < expected_first ->
-        # Behind on the active segment: kick off a background catch-up from the primary and skip
-        # this batch (it commits via the up-to-date replicas). We rejoin on a later batch.
+        # Behind on the active segment (a new replica from base, or one that missed batches): kick
+        # off a background catch-up from the primary and skip this batch (it commits via the
+        # up-to-date replicas). We rejoin on a later batch as the catch-up converges on the head.
         {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, source)}
 
       true ->
@@ -222,7 +227,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     tracker =
       followers
-      |> gather_acks(segment_id, first, records, state.ref)
+      |> gather_acks(segment_id, base_offset, first, records, state.ref)
       |> Enum.reduce(tracker, fn {follower, offset}, acc ->
         {:ok, acc} = ReplicaTracker.ack(acc, follower, offset)
         acc
@@ -245,12 +250,13 @@ defmodule Malachi.Cluster.ReplicationServer do
   # Calls each follower concurrently, passing `primary` as the catch-up source so a behind follower
   # can self-heal. Keeps only those that durably stored the batch; a slow, unreachable, or
   # out-of-sync follower is dropped (it does not count toward the quorum).
-  defp gather_acks(followers, segment_id, expected_first, records, primary) do
+  defp gather_acks(followers, segment_id, base, expected_first, records, primary) do
     followers
     |> Task.async_stream(
       fn follower ->
         try do
-          {follower, GenServer.call(follower, {:follow, segment_id, expected_first, records, primary}, @follow_timeout)}
+          {follower,
+           GenServer.call(follower, {:follow, segment_id, base, expected_first, records, primary}, @follow_timeout)}
         catch
           :exit, _ -> {follower, {:error, :unreachable}}
         end
