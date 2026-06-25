@@ -279,8 +279,19 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   saiu** e `sync/1` virou no-op. `produce` retorna `{broker, {:ok, placements} | {:error, reason}}`
   (commit por grupo; valor imutável dá transação grátis). Sem duplicação de storage. Suíte completa
   verde (831 testes).
-  - ⏳ Próximo: catch-up/backfill de seguidor atrasado; failover de primário; multi-node (peer set
-    via membership/SWIM).
+- ✅ **`Malachi.Cluster.Catchup` (primitiva de catch-up/backfill)** — copia os records de um
+  segment de uma réplica **fonte** para uma **alvo** no intervalo `[from, to)`. Serve aos dois
+  casos: seguidor atrasado fechando o gap do segment ativo, e réplica nova (do `Placement.heal`)
+  fazendo **backfill** de um segment selado inteiro. Roda por **orquestração externa** (no processo
+  do chamador, via `ReplicationServer.read/4` na fonte + `follow/4` no alvo) — nada aninhado num
+  `handle_call` que está sendo aguardado, então não há o deadlock primário↔seguidor. Expostos no
+  `ReplicationServer`: `follow/4` (append de réplica) e `end_offset/2` (até onde o alvo está, ou
+  `:empty`). Se a fonte estiver ela mesma atrás, para no que tem e devolve o offset alcançado.
+  Testado in-process: backfill de réplica fresca, catch-up só do gap, base não-zero preservada,
+  fonte incompleta, no-op quando já alcançado, `:empty`. Escopo: a primitiva (dirigida pelo
+  chamador).
+  - ⏳ Próximo: gatilho automático (detectar gap no `follow` → catch-up assíncrono → volta ao
+    quórum) e fiar o `Catchup` ao `Placement.heal`; failover de primário; multi-node (membership/SWIM).
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 

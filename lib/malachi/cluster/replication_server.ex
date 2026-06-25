@@ -85,6 +85,25 @@ defmodule Malachi.Cluster.ReplicationServer do
     GenServer.call(ref, {:read, segment_id, offset, max_records})
   end
 
+  @doc """
+  Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
+  is the offset the batch must start at — it must equal this server's current end for the segment
+  (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
+  or `{:error, :out_of_sync}` if this server is behind. Used by the primary's fan-out and by
+  `Malachi.Cluster.Catchup`.
+  """
+  @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
+          {:ok, non_neg_integer()} | {:error, :out_of_sync}
+  def follow(ref, segment_id, expected_first, records) do
+    GenServer.call(ref, {:follow, segment_id, expected_first, records})
+  end
+
+  @doc "This server's next offset for `segment_id`, or `:empty` if it stores none of it yet."
+  @spec end_offset(term(), term()) :: non_neg_integer() | :empty
+  def end_offset(ref, segment_id) do
+    GenServer.call(ref, {:end_offset, segment_id})
+  end
+
   # --- GenServer ---
 
   @impl true
@@ -140,6 +159,16 @@ defmodule Malachi.Cluster.ReplicationServer do
       :error -> {:reply, :eof, state}
       {:ok, log} -> {:reply, Log.read(log, offset, max_records), state}
     end
+  end
+
+  def handle_call({:end_offset, segment_id}, _from, state) do
+    reply =
+      case Map.fetch(state.logs, segment_id) do
+        {:ok, log} -> log.next_offset
+        :error -> :empty
+      end
+
+    {:reply, reply, state}
   end
 
   @impl true
