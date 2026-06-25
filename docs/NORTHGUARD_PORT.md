@@ -254,9 +254,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   de segment) do `Metadata` determinístico (para *metadata*). Property tests: commit = maior offset
   em quórum, **monotonicidade do commit**, `committed?` sse quórum o tem. Escopo: replica set fixo
   (failover de primário/mudança de set depois).
-  - ⏳ Próximo: o **transporte** — primário→seguidores sobre Erlang distribuído (peer set
-    configurado), apend local nos seguidores, ack ao primário, avanço do commit; depois SWIM como
-    fonte dinâmica do peer set + catch-up de segment selado.
+- ✅ **`Malachi.Cluster.ReplicationServer`** — o **transporte** da replicação: um `GenServer` por
+  broker que envia o stream do segment ativo do **primário** aos **seguidores** e dá ack quando um
+  **quórum** armazenou de forma durável. Broker = referência do processo (nome local nos testes;
+  `{nome, node}` entre nós — `GenServer.call` aceita ambos, então o mesmo caminho roda in-process e
+  multi-node). `replicate/4` no primário apenda+fsync local, faz fan-out concorrente aos seguidores,
+  alimenta o `ReplicaTracker` e retorna `{:ok, last}` quando o quórum tem o batch (tolera ⌊(N-1)/2⌋
+  seguidores lentos/caídos) ou `{:error, :no_quorum}`. Primário e seguidores fazem `fsync` antes de
+  contar para o quórum → "committed" = durável na maioria. Testado in-process: replica a todos +
+  commit, tolerância a 1 seguidor caído, `:no_quorum` sem maioria, single-replica, offsets contíguos
+  entre batches, `:not_primary`, batch vazio. Escopo: caminho feliz do segment ativo.
+  - ⏳ Próximo: fiar no `Broker`/`BrokerServer` (produce → primário do segment ativo); catch-up de
+    seguidor atrasado + backfill de segment selado; failover de primário.
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 
