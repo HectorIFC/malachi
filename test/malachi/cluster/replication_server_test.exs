@@ -16,8 +16,8 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
 
-  defp read_values(ref, segment) do
-    case ReplicationServer.read(ref, segment, 0, 100) do
+  defp read_values(ref, segment, offset \\ 0) do
+    case ReplicationServer.read(ref, segment, offset, 100) do
       {:ok, records} -> Enum.map(records, & &1.value)
       :eof -> []
     end
@@ -26,7 +26,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   test "the primary replicates to all followers and commits the batch" do
     [primary, f1, f2] = replica_set = [start_broker(), start_broker(), start_broker()]
 
-    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, records(["a", "b"]))
+    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a", "b"]))
 
     # every replica (primary included) durably stored the same records at the same offsets
     for ref <- [primary, f1, f2] do
@@ -39,7 +39,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     :ok = stop_supervised!(f2)
 
     # primary + f1 = 2 of 3 is a quorum
-    assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, replica_set, records(["a"]))
+    assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a"]))
     assert read_values(primary, @segment) == ["a"]
     assert read_values(f1, @segment) == ["a"]
   end
@@ -49,50 +49,63 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     :ok = stop_supervised!(f1)
     :ok = stop_supervised!(f2)
 
-    assert {:error, :no_quorum} = ReplicationServer.replicate(primary, @segment, replica_set, records(["a"]))
+    assert {:error, :no_quorum} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a"]))
   end
 
   test "a single-replica segment commits on the primary alone" do
     primary = start_broker()
-    assert {:ok, 2} = ReplicationServer.replicate(primary, @segment, [primary], records(["a", "b", "c"]))
+    assert {:ok, 2} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["a", "b", "c"]))
     assert read_values(primary, @segment) == ["a", "b", "c"]
   end
 
   test "successive batches replicate with contiguous offsets" do
     [primary | _] = replica_set = [start_broker(), start_broker(), start_broker()]
 
-    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, records(["a", "b"]))
-    assert {:ok, 3} = ReplicationServer.replicate(primary, @segment, replica_set, records(["c", "d"]))
+    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a", "b"]))
+    assert {:ok, 3} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["c", "d"]))
 
     for ref <- replica_set do
       assert read_values(ref, @segment) == ["a", "b", "c", "d"]
     end
   end
 
+  test "a segment opens at its base_offset so offsets continue the range" do
+    [primary, f1, _f2] = replica_set = [start_broker(), start_broker(), start_broker()]
+
+    # this segment starts at range-relative offset 100
+    assert {:ok, 101} = ReplicationServer.replicate(primary, @segment, replica_set, 100, records(["a", "b"]))
+
+    # records live at offsets 100..101 on every replica; nothing exists below the base
+    for ref <- [primary, f1] do
+      assert read_values(ref, @segment, 100) == ["a", "b"]
+      assert {:error, :out_of_range} = ReplicationServer.read(ref, @segment, 0, 100)
+    end
+  end
+
   test "replicate on a non-primary is rejected" do
     [primary, f1, _f2] = replica_set = [start_broker(), start_broker(), start_broker()]
-    assert {:error, :not_primary} = ReplicationServer.replicate(f1, @segment, replica_set, records(["a"]))
+    assert {:error, :not_primary} = ReplicationServer.replicate(f1, @segment, replica_set, 0, records(["a"]))
     # nothing was stored anywhere
     assert read_values(primary, @segment) == []
   end
 
   test "an empty batch is rejected" do
     [primary | _] = replica_set = [start_broker(), start_broker(), start_broker()]
-    assert {:error, :empty} = ReplicationServer.replicate(primary, @segment, replica_set, [])
+    assert {:error, :empty} = ReplicationServer.replicate(primary, @segment, replica_set, 0, [])
   end
 
   test "an empty replica set is rejected (no crash)" do
     primary = start_broker()
-    assert {:error, :empty_replica_set} = ReplicationServer.replicate(primary, @segment, [], records(["a"]))
+    assert {:error, :empty_replica_set} = ReplicationServer.replicate(primary, @segment, [], 0, records(["a"]))
     # the server is still alive and usable afterwards
-    assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], records(["a"]))
+    assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["a"]))
   end
 
   test "a duplicated replica set does not deadlock the primary" do
     [primary, f1] = [start_broker(), start_broker()]
     # primary listed twice: must not make the server call itself
     assert {:ok, 0} =
-             ReplicationServer.replicate(primary, @segment, [primary, primary, f1], records(["a"]))
+             ReplicationServer.replicate(primary, @segment, [primary, primary, f1], 0, records(["a"]))
 
     assert read_values(primary, @segment) == ["a"]
     assert read_values(f1, @segment) == ["a"]

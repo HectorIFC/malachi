@@ -261,11 +261,15 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   multi-node). `replicate/4` no primário apenda+fsync local, faz fan-out concorrente aos seguidores,
   alimenta o `ReplicaTracker` e retorna `{:ok, last}` quando o quórum tem o batch (tolera ⌊(N-1)/2⌋
   seguidores lentos/caídos) ou `{:error, :no_quorum}`. Primário e seguidores fazem `fsync` antes de
-  contar para o quórum → "committed" = durável na maioria. Testado in-process: replica a todos +
+  contar para o quórum → "committed" = durável na maioria. Cada segment abre seu `Log` em
+  `base_offset = start_offset` (carregado no `replicate/5`), então os offsets dos segments de um
+  range são **contíguos** (não reiniciam em 0 por segment). Testado in-process: replica a todos +
   commit, tolerância a 1 seguidor caído, `:no_quorum` sem maioria, single-replica, offsets contíguos
-  entre batches, `:not_primary`, batch vazio. Escopo: caminho feliz do segment ativo.
-  - ⏳ Próximo: fiar no `Broker`/`BrokerServer` (produce → primário do segment ativo); catch-up de
-    seguidor atrasado + backfill de segment selado; failover de primário.
+  entre batches, **base não-zero** (`:out_of_range` abaixo da base), `:not_primary`, batch vazio,
+  replica set vazio (sem crash), set duplicado (sem deadlock). Escopo: caminho feliz do segment ativo.
+  - ⏳ Próximo (A2+A3): fiar no `Broker`/`BrokerServer` — `Broker` vira roteador (sem `logs`,
+    `produce` retorna plano), `BrokerServer` executa via `ReplicationServer` e lê por segment;
+    depois catch-up/backfill e failover de primário.
 - ⏳ SWIM (`partisan`) + estado global mínimo + roteamento de requests unários.
 - ⏳ Storage/metadata policies + attributes.
 

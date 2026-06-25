@@ -9,9 +9,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   in-process for tests and over distributed Erlang in production). A segment's `replica_set` (from
   `Malachi.Cluster.Placement`) is a list of those references; the first is the primary.
 
-  On `replicate/4` the primary appends the batch to its local copy, fans out to the followers
+  On `replicate/5` the primary appends the batch to its local copy, fans out to the followers
   concurrently, and feeds each ack into a `Malachi.Cluster.ReplicaTracker` to compute the commit
-  offset. The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers)
+  offset. A segment's log opens at the segment's `base_offset` (its first range-relative offset),
+  so the offsets of a range's segments are contiguous rather than restarting at zero per segment. The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers)
   has the batch — tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers — or `{:error,
   :no_quorum}` otherwise. Both the primary and the followers `fsync` before counting toward the
   quorum, so "committed" means "durable on a majority".
@@ -53,15 +54,23 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @doc """
   Replicates `records` for `segment_id` across `replica_set`, called on the primary (the first
-  broker of the set). Returns `{:ok, last_offset}` once a quorum has the batch durably,
-  `{:error, :no_quorum}` if too few replicas acked, `{:error, :not_primary}` if this server is not
-  the set's primary, or `{:error, :empty}` for an empty batch.
+  broker of the set). `base_offset` is the segment's first offset; it is used only when the
+  segment's log is opened for the first time, so a segment's offsets continue its range
+  (`start_offset, start_offset + 1, ...`) rather than restarting at zero.
+
+  Returns `{:ok, last_offset}` once a quorum has the batch durably, `{:error, :no_quorum}` if too
+  few replicas acked, `{:error, :not_primary}` if this server is not the set's primary, or
+  `{:error, :empty}` for an empty batch.
   """
-  @spec replicate(term(), term(), [term()], [Malachi.Log.Record.t()]) ::
+  @spec replicate(term(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()}
           | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
-  def replicate(primary, segment_id, replica_set, records) do
-    GenServer.call(primary, {:replicate, segment_id, replica_set, records}, @follow_timeout + 10_000)
+  def replicate(primary, segment_id, replica_set, base_offset, records) do
+    GenServer.call(
+      primary,
+      {:replicate, segment_id, replica_set, base_offset, records},
+      @follow_timeout + 10_000
+    )
   end
 
   @doc "Reads up to `max_records` records of `segment_id` stored on this server, from `offset`."
@@ -91,24 +100,25 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @impl true
-  def handle_call({:replicate, _segment_id, _replica_set, []}, _from, state) do
+  def handle_call({:replicate, _segment_id, _replica_set, _base_offset, []}, _from, state) do
     {:reply, {:error, :empty}, state}
   end
 
-  def handle_call({:replicate, _segment_id, [], _records}, _from, state) do
+  def handle_call({:replicate, _segment_id, [], _base_offset, _records}, _from, state) do
     {:reply, {:error, :empty_replica_set}, state}
   end
 
-  def handle_call({:replicate, segment_id, replica_set, records}, _from, state) do
+  def handle_call({:replicate, segment_id, replica_set, base_offset, records}, _from, state) do
     if hd(replica_set) == state.ref do
-      do_replicate(state, segment_id, replica_set, records)
+      do_replicate(state, segment_id, replica_set, base_offset, records)
     else
       {:reply, {:error, :not_primary}, state}
     end
   end
 
   def handle_call({:follow, segment_id, expected_first, records}, _from, state) do
-    {state, log} = fetch_or_open(state, segment_id)
+    # A new follower segment opens at the batch's first offset, so its offsets match the primary's.
+    {state, log} = fetch_or_open(state, segment_id, expected_first)
 
     if log.next_offset == expected_first do
       {log, _first, last} = append_durably(log, records)
@@ -134,15 +144,15 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   # --- internals ---
 
-  @spec do_replicate(state(), term(), [term()], [Malachi.Log.Record.t()]) ::
+  @spec do_replicate(state(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:reply, {:ok, non_neg_integer()} | {:error, :no_quorum}, state()}
-  defp do_replicate(state, segment_id, replica_set, records) do
+  defp do_replicate(state, segment_id, replica_set, base_offset, records) do
     # Distinct replicas, and never the primary itself among the followers — otherwise the server
     # would synchronously call itself (deadlock). The ack math also assumes distinct replicas.
     replica_set = Enum.uniq(replica_set)
     followers = replica_set -- [state.ref]
 
-    {state, log} = fetch_or_open(state, segment_id)
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
     {log, first, last} = append_durably(log, records)
     state = put_log(state, segment_id, log)
 
@@ -192,13 +202,16 @@ defmodule Malachi.Cluster.ReplicationServer do
     end)
   end
 
-  defp fetch_or_open(state, segment_id) do
+  # `base_offset` is used only when the segment's log does not exist yet, so a fresh segment starts
+  # at its range-relative first offset.
+  defp fetch_or_open(state, segment_id, base_offset) do
     case Map.fetch(state.logs, segment_id) do
       {:ok, log} ->
         {state, log}
 
       :error ->
-        {:ok, log} = Log.open(segment_directory(state.directory, segment_id), state.log_opts)
+        opts = [base_offset: base_offset] ++ state.log_opts
+        {:ok, log} = Log.open(segment_directory(state.directory, segment_id), opts)
         {put_log(state, segment_id, log), log}
     end
   end
