@@ -337,8 +337,13 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   location-transparent (testável in-process; multi-node sem mudança); envios fire-and-forget (peer
   morto = sem ack = detecção). Peers semente via `:peers`; timers configuráveis. Testado in-process:
   **gossip espalha** conhecimento parcial até todos conhecerem todos, **nó parado é detectado e vira
-  `dead`** no cluster, e **refute** de suspeita falsa sobre si. Escopo: ping direto + suspicion +
-  gossip (ping-indireto e join formal depois).
+  `dead`** no cluster, e **refute** de suspeita falsa sobre si.
+- ✅ **Ping indireto** — quando o ack direto não chega, o nó pede a `indirect_fanout` peers (default 3)
+  que **pinguem o alvo por ele** (`ping_req` → relay proba o alvo → relaia o ack ao requester); só
+  suspeita se nem o direto nem o indireto responderem no `indirect_timeout`. Reduz falsos positivos sob
+  perda transitória da rota direta. Testado: a **cadeia de relay** entrega o ack do alvo ao requester
+  (determinístico); o teste de nó morto agora exercita o caminho completo (direto→indireto→suspect→dead).
+  Escopo SWIM: ping direto+indireto + suspicion + gossip (**join formal** depois).
 - ✅ **`Malachi.Cluster.HealCoordinator` (self-healing reativo)** — `GenServer` periódico que fecha
   o loop **broker morre → detectado → curado**: a cada intervalo roda `SelfHealing.heal_sealed` com
   o conjunto **vivo** e aplica os comandos. Desacoplado por **seams injetados** (`live_brokers`,

@@ -60,6 +60,21 @@ defmodule Malachi.Cluster.MembershipServerTest do
     assert MembershipServer.alive_members(b) == Enum.sort([a, b])
   end
 
+  test "an indirect ping relays the target's ack back to the requester" do
+    suffix = System.unique_integer([:positive])
+    relay = :"ms_relay_#{suffix}"
+    target = :"ms_target_#{suffix}"
+
+    start_node(relay, [])
+    start_node(target, [])
+
+    # ask the relay to probe the target on our behalf (as the failure detector would)
+    GenServer.cast(relay, {:ping_req, target, self(), []})
+
+    # the relay probes the target, the target acks the relay, and the relay forwards the ack to us
+    assert_receive {:"$gen_cast", {:ack, ^target, _updates}}, 1_000
+  end
+
   test "a node refutes a false suspicion about itself" do
     suffix = System.unique_integer([:positive])
     a = :"ms_a_#{suffix}"

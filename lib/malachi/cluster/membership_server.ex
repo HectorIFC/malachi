@@ -4,20 +4,22 @@ defmodule Malachi.Cluster.MembershipServer do
   `Malachi.Cluster.Membership` view with a failure detector and gossip dissemination.
 
   Each **protocol period** it pings a random alive peer; if no `ack` arrives within `ack_timeout`,
-  it marks the peer `:suspect`; if the suspicion is not refuted within `suspicion_timeout`, it
-  confirms the peer `:dead`. Every ping and ack **piggybacks** the sender's view (a list of
-  `{member, status, incarnation}` updates), so peers learn of joins, suspicions, deaths and
-  refutations by anti-entropy and the views **converge**. A node that is wrongly suspected learns
-  of it from the ack to its own next ping and refutes by bumping its incarnation.
+  it does not suspect immediately — it asks `indirect_fanout` random other peers to ping the target
+  on its behalf (**indirect ping**), and only marks the peer `:suspect` if no ack (direct or
+  relayed) arrives within `indirect_timeout`. This cuts false positives from a transiently lost
+  direct path. If the suspicion is not refuted within `suspicion_timeout`, it confirms the peer
+  `:dead`. Every message **piggybacks** the sender's view (a list of `{member, status,
+  incarnation}` updates), so peers learn of joins, suspicions, deaths and refutations by
+  anti-entropy and the views **converge**. A node that is wrongly suspected learns of it from the
+  ack to its own next ping and refutes by bumping its incarnation.
 
   Peers are reachable by `GenServer` references (a registered name locally, a `{name, node}` tuple
   across nodes), so the same code runs in-process for tests and over distributed Erlang. Sends are
   fire-and-forget: pinging a dead peer simply yields no ack, which is exactly how failure is
   detected.
 
-  Scope (first slice): direct ping, suspicion, and gossip. Indirect ping (asking k peers to relay,
-  which cuts false positives under transient loss) and a formal join handshake are later slices;
-  for now peers are seeded via `:peers` and the rest spreads by gossip.
+  Scope: direct ping, indirect ping, suspicion, and gossip. A formal join handshake is a later
+  slice; for now peers are seeded via `:peers` and the rest spreads by gossip.
   """
 
   use GenServer
@@ -27,6 +29,7 @@ defmodule Malachi.Cluster.MembershipServer do
   @default_protocol_period 1_000
   @default_ack_timeout 500
   @default_suspicion_timeout 3_000
+  @default_indirect_fanout 3
 
   @doc """
   Starts a membership server.
@@ -35,6 +38,8 @@ defmodule Malachi.Cluster.MembershipServer do
     * `:name` (optional) - the reference this server is known by; its pid when omitted.
     * `:peers` - seed peer references, learned as `:alive`.
     * `:protocol_period` / `:ack_timeout` / `:suspicion_timeout` - detector timings in ms.
+    * `:indirect_timeout` - ms to wait for an indirect (relayed) ack (default `ack_timeout`).
+    * `:indirect_fanout` - number of peers asked to relay a ping (default 3).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -60,12 +65,15 @@ defmodule Malachi.Cluster.MembershipServer do
   @impl true
   def init(opts) do
     self_ref = Keyword.get(opts, :name) || self()
+    ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
     state = %{
       view: Membership.new(self_ref, peers: Keyword.get(opts, :peers, [])),
       self: self_ref,
       protocol_period: Keyword.get(opts, :protocol_period, @default_protocol_period),
-      ack_timeout: Keyword.get(opts, :ack_timeout, @default_ack_timeout),
+      ack_timeout: ack_timeout,
+      indirect_timeout: Keyword.get(opts, :indirect_timeout, ack_timeout),
+      indirect_fanout: Keyword.get(opts, :indirect_fanout, @default_indirect_fanout),
       suspicion_timeout: Keyword.get(opts, :suspicion_timeout, @default_suspicion_timeout),
       awaiting: MapSet.new()
     }
@@ -90,6 +98,27 @@ defmodule Malachi.Cluster.MembershipServer do
     {:noreply, %{state | awaiting: MapSet.delete(state.awaiting, from)}}
   end
 
+  # A peer asks us to probe `target` on behalf of `requester` (indirect ping).
+  def handle_cast({:ping_req, target, requester, updates}, state) do
+    state = merge_updates(state, updates)
+    cast(target, {:ping_relay, state.self, requester, Membership.updates(state.view)})
+    {:noreply, state}
+  end
+
+  # We are the target of a relayed probe; ack back to the relay so it can forward to the requester.
+  def handle_cast({:ping_relay, relay, requester, updates}, state) do
+    state = merge_updates(state, updates)
+    cast(relay, {:ack_relay, state.self, requester, Membership.updates(state.view)})
+    {:noreply, state}
+  end
+
+  # The relay heard back from the target; forward an ack to the requester as if from the target.
+  def handle_cast({:ack_relay, target, requester, updates}, state) do
+    state = merge_updates(state, updates)
+    cast(requester, {:ack, target, Membership.updates(state.view)})
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info(:protocol_period, state) do
     state = ping_random_peer(state)
@@ -98,6 +127,16 @@ defmodule Malachi.Cluster.MembershipServer do
   end
 
   def handle_info({:ack_timeout, target}, state) do
+    # Direct ping went unanswered: try indirect ping (keep awaiting) before suspecting.
+    if MapSet.member?(state.awaiting, target) do
+      {:noreply, start_indirect(state, target)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:indirect_timeout, target}, state) do
+    # Neither the direct nor any relayed ack arrived: now suspect.
     if MapSet.member?(state.awaiting, target) do
       state = %{state | awaiting: MapSet.delete(state.awaiting, target)}
       {:noreply, suspect(state, target)}
@@ -132,6 +171,22 @@ defmodule Malachi.Cluster.MembershipServer do
         Process.send_after(self(), {:ack_timeout, target}, state.ack_timeout)
         %{state | awaiting: MapSet.put(state.awaiting, target)}
     end
+  end
+
+  defp start_indirect(state, target) do
+    relays =
+      state.view
+      |> Membership.alive_members()
+      |> Kernel.--([state.self, target])
+      |> Enum.take_random(state.indirect_fanout)
+
+    Enum.each(relays, fn relay ->
+      cast(relay, {:ping_req, target, state.self, Membership.updates(state.view)})
+    end)
+
+    # Even with no relays available, schedule the timeout so an unreachable target is still suspected.
+    Process.send_after(self(), {:indirect_timeout, target}, state.indirect_timeout)
+    state
   end
 
   defp suspect(state, target) do
