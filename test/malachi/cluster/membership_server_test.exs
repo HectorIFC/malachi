@@ -75,6 +75,43 @@ defmodule Malachi.Cluster.MembershipServerTest do
     assert_receive {:"$gen_cast", {:ack, ^target, _updates}}, 1_000
   end
 
+  test "a join records the joiner and replies with the seed's full view" do
+    suffix = System.unique_integer([:positive])
+    seed = :"ms_seed_#{suffix}"
+    other = :"ms_other_#{suffix}"
+
+    start_node(seed, [other])
+
+    # join as if we were a new node
+    GenServer.cast(seed, {:join, self(), []})
+
+    assert_receive {:"$gen_cast", {:join_ok, ^seed, updates}}, 1_000
+    # the seed shares its cluster view (itself and the member it knew)
+    members = for {member, _status, _inc} <- updates, do: member
+    assert seed in members and other in members
+
+    # and the seed now knows us as alive
+    assert Membership.status(MembershipServer.view(seed), self()) == :alive
+  end
+
+  test "a new node learns the whole cluster by joining a single seed" do
+    suffix = System.unique_integer([:positive])
+    a = :"ms_a_#{suffix}"
+    b = :"ms_b_#{suffix}"
+    c = :"ms_c_#{suffix}"
+
+    start_node(a, [b])
+    start_node(b, [a])
+    assert eventually(fn -> MembershipServer.alive_members(a) == Enum.sort([a, b]) end)
+
+    # c is seeded with only a, yet should learn b (and a should learn c)
+    start_node(c, [a])
+
+    full = Enum.sort([a, b, c])
+    assert eventually(fn -> MembershipServer.alive_members(c) == full end)
+    assert eventually(fn -> MembershipServer.alive_members(a) == full end)
+  end
+
   test "a node refutes a false suspicion about itself" do
     suffix = System.unique_integer([:positive])
     a = :"ms_a_#{suffix}"

@@ -18,8 +18,14 @@ defmodule Malachi.Cluster.MembershipServer do
   fire-and-forget: pinging a dead peer simply yields no ack, which is exactly how failure is
   detected.
 
-  Scope: direct ping, indirect ping, suspicion, and gossip. A formal join handshake is a later
-  slice; for now peers are seeded via `:peers` and the rest spreads by gossip.
+  On startup a node **joins** by sending each seed (its `:peers`) a `{:join, ...}`; the seed adds
+  the joiner as `:alive` and replies with its full view, so the joiner learns the whole cluster at
+  once instead of waiting for gossip to converge. Join is best-effort — gossip is the safety net if
+  a seed is unreachable. (A node that restarts after being declared dead would rejoin at
+  incarnation 0, which an existing `:dead` entry outranks; durable/higher rejoin incarnations are a
+  later concern.)
+
+  Scope: direct ping, indirect ping, suspicion, gossip, and a join handshake.
   """
 
   use GenServer
@@ -79,6 +85,7 @@ defmodule Malachi.Cluster.MembershipServer do
     }
 
     schedule_period(state)
+    send_joins(state)
     {:ok, state}
   end
 
@@ -117,6 +124,20 @@ defmodule Malachi.Cluster.MembershipServer do
     state = merge_updates(state, updates)
     cast(requester, {:ack, target, Membership.updates(state.view)})
     {:noreply, state}
+  end
+
+  # A node is joining via us as a seed: record it alive and reply with our full view.
+  def handle_cast({:join, joiner, updates}, state) do
+    state = merge_updates(state, updates)
+    {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0})
+    state = %{state | view: view}
+    cast(joiner, {:join_ok, state.self, Membership.updates(state.view)})
+    {:noreply, state}
+  end
+
+  # A seed answered our join with its full view of the cluster.
+  def handle_cast({:join_ok, _seed, updates}, state) do
+    {:noreply, merge_updates(state, updates)}
   end
 
   @impl true
@@ -204,6 +225,13 @@ defmodule Malachi.Cluster.MembershipServer do
   defp merge_updates(state, updates) do
     {view, _effects} = Membership.merge(state.view, updates)
     %{state | view: view}
+  end
+
+  # Best-effort join: ask each seed (the initially known peers) for its view of the cluster.
+  defp send_joins(state) do
+    Enum.each(alive_peers(state), fn seed ->
+      cast(seed, {:join, state.self, Membership.updates(state.view)})
+    end)
   end
 
   defp alive_peers(state), do: Membership.alive_members(state.view) -- [state.self]

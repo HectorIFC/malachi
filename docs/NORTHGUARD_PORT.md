@@ -343,7 +343,12 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   suspeita se nem o direto nem o indireto responderem no `indirect_timeout`. Reduz falsos positivos sob
   perda transitória da rota direta. Testado: a **cadeia de relay** entrega o ack do alvo ao requester
   (determinístico); o teste de nó morto agora exercita o caminho completo (direto→indireto→suspect→dead).
-  Escopo SWIM: ping direto+indireto + suspicion + gossip (**join formal** depois).
+- ✅ **Join formal** — ao iniciar, o nó manda `{:join}` a cada seed (`:peers`); o seed **registra o
+  joiner vivo** e responde com sua **view completa**, então o joiner conhece o cluster de uma vez (em
+  vez de só convergir por gossip). Best-effort (gossip é a rede de segurança). Testado: handshake
+  (seed responde `join_ok` com a view e passa a conhecer o joiner) e **nó novo aprende o cluster
+  inteiro via um único seed**. Ressalva: rejoin-após-morte (reinício com incarnation 0 < `dead@n`)
+  fica para depois. **SWIM fechado:** ping direto+indireto + suspicion + gossip + join.
 - ✅ **`Malachi.Cluster.HealCoordinator` (self-healing reativo)** — `GenServer` periódico que fecha
   o loop **broker morre → detectado → curado**: a cada intervalo roda `SelfHealing.heal_sealed` com
   o conjunto **vivo** e aplica os comandos. Desacoplado por **seams injetados** (`live_brokers`,
