@@ -230,6 +230,18 @@ defmodule Malachi.BrokerTest do
       assert [%{state: :sealed, length: 1}] = segments(broker, root_id)
     end
 
+    test "apply_heal updates both the metadata and the active segment's cached replica set", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      new_set = [:b, :a, :c]
+      broker = Broker.apply_heal(broker, [{:set_segment_replicas, segment.id, new_set}])
+
+      assert Metadata.get_segment(broker.metadata, segment.id).replica_set == new_set
+      assert broker.segments[root_id].replica_set == new_set
+    end
+
     test "open/1 rejects an invalid placement policy" do
       assert_raise ArgumentError, fn -> Broker.open(brokers: []) end
       assert_raise ArgumentError, fn -> Broker.open(brokers: :not_a_list) end

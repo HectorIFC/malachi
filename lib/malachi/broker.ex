@@ -197,19 +197,35 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  Applies control-plane healing `commands` (the `:set_segment_replicas` produced by
-  `Malachi.Cluster.SelfHealing`) to the metadata. The commands heal **sealed** segments, which are
-  not in the broker's active-segment cache, so only the metadata changes.
+  Applies control-plane `:set_segment_replicas` `commands` (from `Malachi.Cluster.SelfHealing`
+  healing sealed segments, or `Malachi.Cluster.Failover` promoting an active segment's primary).
+  Each command updates the metadata; when it targets a range's **active** segment, the broker's
+  active-segment cache is updated too, so the next produce routes to the new replica set/primary.
   """
   @spec apply_heal(t(), [Metadata.command()]) :: t()
   def apply_heal(%__MODULE__{} = broker, commands) do
-    metadata =
-      Enum.reduce(commands, broker.metadata, fn command, metadata ->
-        {metadata, _reply} = Metadata.apply(metadata, command)
-        metadata
-      end)
+    Enum.reduce(commands, broker, &apply_replica_command/2)
+  end
 
+  defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker) do
+    {metadata, _reply} = Metadata.apply(broker.metadata, command)
+    broker = %{broker | metadata: metadata}
+    update_active_replica_set(broker, segment_id, replica_set)
+  end
+
+  defp apply_replica_command(command, broker) do
+    {metadata, _reply} = Metadata.apply(broker.metadata, command)
     %{broker | metadata: metadata}
+  end
+
+  defp update_active_replica_set(broker, {range_id, _seq} = segment_id, replica_set) do
+    case Map.get(broker.segments, range_id) do
+      %{id: ^segment_id} = active ->
+        %{broker | segments: Map.put(broker.segments, range_id, %{active | replica_set: replica_set})}
+
+      _other ->
+        broker
+    end
   end
 
   @doc "The current metadata (the control-plane source of truth held by this broker)."

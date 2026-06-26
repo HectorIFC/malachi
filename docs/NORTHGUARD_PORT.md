@@ -374,8 +374,15 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   segment recém-aberto (rollback grátis via valor imutável — sem segment fantasma; o retry re-placeia
   nos vivos). Testado: após um data-broker morrer e sair do conjunto vivo, um segment recém-produzido
   **exclui o morto** do `replica_set`.
-  - ⏳ Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA); failover de
-    primário.
+- ✅ **Failover de primário** — `Malachi.Cluster.Failover.plan/2` (puro): para cada segment **ativo**
+  cujo primário (`hd(replica_set)`) está morto, emite `set_segment_replicas` **reordenado** com uma
+  réplica viva no topo (a morta fica como seguidor que não dá ack; o `heal` a troca após o seal —
+  sem mover dado). O `Broker.apply_heal` foi generalizado para atualizar também o **cache do segment
+  ativo** (um só caminho de apply serve heal e failover), e o `HealCoordinator` virou um loop de
+  **reconciliação** (heal selados + failover ativos a cada tick). Testado: `plan` puro (promove vivo,
+  ignora selado, pula tudo-morto), `apply_heal` atualiza cache+metadata, e **integração**: primário
+  de segment ativo morre → promovido → escrita continua no novo primário (ambos os records lidos).
+  - ⏳ Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA).
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 

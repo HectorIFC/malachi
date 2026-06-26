@@ -17,13 +17,16 @@ defmodule Malachi.Cluster.HealCoordinator do
     * `:interval` - the healing period in ms (default 5000);
     * `:heal_opts` - forwarded to `Malachi.Cluster.SelfHealing.heal_sealed/4` (e.g. `:batch_size`).
 
-  Each pass runs `Malachi.Cluster.SelfHealing.heal_sealed/4` (which backfills new replicas via
-  `Malachi.Cluster.Catchup`) and applies the resulting commands. `heal_now/1` runs one pass
-  synchronously and returns the result, for tests and manual triggers.
+  Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
+  (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
+  `Malachi.Cluster.Failover.plan/2` (promoting a live replica to primary for active segments whose
+  primary died), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
+  returns the combined result, for tests and manual triggers.
   """
 
   use GenServer
 
+  alias Malachi.Cluster.Failover
   alias Malachi.Cluster.SelfHealing
 
   @default_interval 5_000
@@ -71,9 +74,13 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp run(state) do
     live = state.live_brokers.()
     metadata = state.metadata_source.()
-    result = SelfHealing.heal_sealed(metadata, live, state.replication_factor, state.heal_opts)
-    Enum.each(result.applied, state.apply_command)
-    result
+
+    healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, state.heal_opts)
+    promotions = Failover.plan(metadata, live)
+
+    applied = healed.applied ++ promotions
+    Enum.each(applied, state.apply_command)
+    %{applied: applied, failed: healed.failed}
   end
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)

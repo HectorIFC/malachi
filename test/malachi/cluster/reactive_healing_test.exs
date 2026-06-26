@@ -31,12 +31,12 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
   end
 
   test "a dead data broker's sealed segments are re-replicated to the live set" do
-    brokers = [r1, r2, r3, r4] = for _ <- 1..4, do: start_replication()
+    brokers = for _ <- 1..4, do: start_replication()
 
     {:ok, control} =
       BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, segment_max_bytes: one_record_bytes())
 
-    {:ok, _root} = BrokerServer.create_topic(control, "events", 4)
+    {:ok, root} = BrokerServer.create_topic(control, "events", 4)
 
     # each single-record produce rolls a new sealed segment, placed on 3 of the 4 brokers
     for index <- 0..7 do
@@ -44,12 +44,11 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     end
 
     {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live)
-    live_brokers = fn -> Agent.get(live_agent, & &1) end
 
     {:ok, coordinator} =
       start_supervised(
         {HealCoordinator,
-         live_brokers: live_brokers,
+         live_brokers: fn -> Agent.get(live_agent, & &1) end,
          metadata_source: fn -> BrokerServer.metadata(control) end,
          apply_command: fn command -> BrokerServer.apply_heal(control, [command]) end,
          replication_factor: 3,
@@ -59,26 +58,38 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     # all four alive: nothing to heal
     assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: []}
 
-    # r3 leaves the cluster
-    Agent.update(live_agent, fn _ -> [r1, r2, r4] end)
-    :ok = GenServer.stop(r3)
+    # kill a broker that actually hosts segments (HRW excludes one broker per segment, so a fixed
+    # broker is not guaranteed to host any) and drop it from the live set
+    victim = most_used_broker(BrokerServer.metadata(control), root)
+    live = brokers -- [victim]
+    Agent.update(live_agent, fn _ -> live end)
+    :ok = GenServer.stop(victim)
 
     result = HealCoordinator.heal_now(coordinator)
     metadata = BrokerServer.metadata(control)
 
-    # everything r3 hosted has been re-replicated; nothing is under-replicated anymore
+    # everything the victim hosted has been re-replicated; nothing is under-replicated anymore
     assert result.failed == []
     refute result.applied == []
-    assert Placement.under_replicated(metadata, [r1, r2, r4], 3) == []
+    assert Placement.under_replicated(metadata, live, 3) == []
 
     # each healed segment's replicas all hold its data (backfill succeeded) and exclude the dead one
     for {:set_segment_replicas, segment_id, new_set} <- result.applied do
       segment = Metadata.get_segment(metadata, segment_id)
-      refute r3 in new_set
+      refute victim in new_set
       expected = segment_values(hd(new_set), segment_id, segment)
       assert expected != []
       for replica <- new_set, do: assert(segment_values(replica, segment_id, segment) == expected)
     end
+  end
+
+  defp most_used_broker(metadata, range_id) do
+    metadata
+    |> Metadata.segments_of_range(range_id)
+    |> Enum.flat_map(& &1.replica_set)
+    |> Enum.frequencies()
+    |> Enum.max_by(fn {_broker, count} -> count end)
+    |> elem(0)
   end
 
   test "new segments are placed only on live brokers once the set refreshes" do
@@ -111,6 +122,60 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
 
                {:error, _reason} ->
                  false
+             end
+           end)
+  end
+
+  test "failover promotes a live replica when an active segment's primary dies" do
+    brokers = [r1, r2, r3, r4] = for _ <- 1..4, do: start_replication()
+    {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live_fo)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: brokers,
+        replication_factor: 3,
+        # large, so the segment stays active across both produces
+        segment_max_bytes: 1_000_000,
+        live_brokers: fn -> Agent.get(live_agent, & &1) end,
+        brokers_refresh_interval: 60_000
+      )
+
+    {:ok, root} = BrokerServer.create_topic(control, "events", 4)
+    {:ok, _placements} = BrokerServer.produce(control, "events", [Record.new("a", key: "a")])
+
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+    [primary | _] = segment.replica_set
+
+    {:ok, coordinator} =
+      start_supervised(
+        {HealCoordinator,
+         live_brokers: fn -> Agent.get(live_agent, & &1) end,
+         metadata_source: fn -> BrokerServer.metadata(control) end,
+         apply_command: fn command -> BrokerServer.apply_heal(control, [command]) end,
+         replication_factor: 3,
+         interval: 60_000}
+      )
+
+    # the segment's primary dies
+    Agent.update(live_agent, fn live -> live -- [primary] end)
+    :ok = GenServer.stop(primary)
+
+    result = HealCoordinator.heal_now(coordinator)
+    assert [{:set_segment_replicas, _id, _set}] = result.applied
+
+    # the active segment now has a live primary (different from the dead one)
+    [healed] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+    [new_primary | _] = healed.replica_set
+    refute new_primary == primary
+    assert new_primary in ([r1, r2, r3, r4] -- [primary])
+
+    # writes continue to the new primary, and both records read back
+    {:ok, _placements} = BrokerServer.produce(control, "events", [Record.new("b", key: "b")])
+
+    assert eventually(fn ->
+             case BrokerServer.read(control, root, 0, 100) do
+               {:ok, records} -> Enum.map(records, & &1.value) == ["a", "b"]
+               _ -> false
              end
            end)
   end
