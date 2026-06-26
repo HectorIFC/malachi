@@ -339,8 +339,16 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   **gossip espalha** conhecimento parcial até todos conhecerem todos, **nó parado é detectado e vira
   `dead`** no cluster, e **refute** de suspeita falsa sobre si. Escopo: ping direto + suspicion +
   gossip (ping-indireto e join formal depois).
-  - ⏳ Próximo: fiar `alive_members` no `Placement`/`SelfHealing`/`BrokerServer`; failover de
-    primário; ping-indireto + join.
+- ✅ **`Malachi.Cluster.HealCoordinator` (self-healing reativo)** — `GenServer` periódico que fecha
+  o loop **broker morre → detectado → curado**: a cada intervalo roda `SelfHealing.heal_sealed` com
+  o conjunto **vivo** e aplica os comandos. Desacoplado por **seams injetados** (`live_brokers`,
+  `metadata_source`, `apply_command`, `rf`, `interval`) — testável in-process e fiável depois ao
+  `MembershipServer` (live) e ao control plane (apply) sem mudança. `heal_now/1` roda uma passada
+  síncrona (testes/trigger manual). Testado in-process: cura sob réplica perdida (backfill +
+  comando aplicado + loop fecha), `:no_live_source`, e **cura automática no timer**.
+  - ⏳ Próximo: a **fiação fina** que resolve as 2 questões em aberto — mapear member-id ↔ broker-ref
+    (`live_brokers` ← `MembershipServer`) e a autoridade do metadata (`Broker` vs `ra`/`ReplicatedDSRSM`,
+    `apply` ← control plane); depois failover de primário; ping-indireto + join.
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 
