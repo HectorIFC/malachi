@@ -84,6 +84,9 @@ defmodule Malachi.Cluster.ReplicationServer do
       {:replicate, segment_id, replica_set, base_offset, records},
       @follow_timeout + 10_000
     )
+  catch
+    # A dead/unreachable primary must not crash the caller; surface it as an error to handle.
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc "Reads up to `max_records` records of `segment_id` stored on this server, from `offset`."

@@ -81,6 +81,40 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     end
   end
 
+  test "new segments are placed only on live brokers once the set refreshes" do
+    brokers = [r1, r2, r3, r4] = for _ <- 1..4, do: start_replication()
+
+    {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live2)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: brokers,
+        replication_factor: 3,
+        segment_max_bytes: one_record_bytes(),
+        live_brokers: fn -> Agent.get(live_agent, & &1) end,
+        brokers_refresh_interval: 15
+      )
+
+    {:ok, root} = BrokerServer.create_topic(control, "events", 4)
+
+    # r3 dies and is dropped from the live set
+    Agent.update(live_agent, fn _ -> [r1, r2, r4] end)
+    :ok = GenServer.stop(r3)
+
+    # after the placement set refreshes, a freshly produced segment lands only on live brokers
+    assert eventually(fn ->
+             case BrokerServer.produce(control, "events", [Record.new("z", key: "z")]) do
+               {:ok, _placements} ->
+                 segments = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+                 latest = Enum.max_by(segments, & &1.start_offset)
+                 r3 not in latest.replica_set
+
+               {:error, _reason} ->
+                 false
+             end
+           end)
+  end
+
   test "live_brokers bridges membership member ids to broker references" do
     suffix = System.unique_integer([:positive])
     a = :"rh_ms_a_#{suffix}"

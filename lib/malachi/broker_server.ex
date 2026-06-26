@@ -20,6 +20,8 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Broker
   alias Malachi.Cluster.ReplicationServer
 
+  @default_brokers_refresh_interval 1_000
+
   # --- client API ---
 
   @doc """
@@ -29,6 +31,10 @@ defmodule Malachi.BrokerServer do
     * `:brokers` - references of the `Malachi.Cluster.ReplicationServer`s that segments are placed
       on. When given, this server uses them and does not start its own; when omitted, it starts a
       single local replication server rooted at `directory` (single-node default).
+    * `:live_brokers` - a `(-> [broker])` (e.g. from membership); when given, the placement broker
+      set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
+      currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
+    * `:brokers_refresh_interval` - refresh period in ms (default 1000).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
@@ -103,6 +109,8 @@ defmodule Malachi.BrokerServer do
   def init({directory, opts}) do
     {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
     {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
+    {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
+    {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -122,7 +130,15 @@ defmodule Malachi.BrokerServer do
 
     {:ok, broker} = Broker.open(broker_opts)
 
-    {:ok, %{broker: broker, replication: owned_replication}}
+    state = %{
+      broker: broker,
+      replication: owned_replication,
+      live_brokers: live_brokers,
+      refresh_interval: refresh_interval
+    }
+
+    if live_brokers, do: schedule_refresh(state)
+    {:ok, state}
   end
 
   @impl true
@@ -172,6 +188,18 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  def handle_info(:refresh_brokers, state) do
+    broker =
+      case state.live_brokers.() do
+        [] -> state.broker
+        live -> Broker.set_brokers(state.broker, live)
+      end
+
+    schedule_refresh(state)
+    {:noreply, %{state | broker: broker}}
+  end
+
+  @impl true
   def terminate(_reason, state) do
     # Only stop the replication server we started ourselves; an external broker set is not ours.
     if state.replication && Process.alive?(state.replication), do: GenServer.stop(state.replication)
@@ -179,6 +207,8 @@ defmodule Malachi.BrokerServer do
   end
 
   # --- internals ---
+
+  defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)

@@ -365,9 +365,17 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   Testado: **data-broker morre → membership detecta → segments selados re-replicados** ao conjunto
   vivo (sem sub-replicação restante, dados conferidos nas novas réplicas), e a bridge derruba a
   broker-ref do nó morto.
-  - ⏳ Diferido: placement de novo segment sobre o conjunto **vivo** (hoje sobre os configurados,
-    heal corrige). Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA);
-    failover de primário.
+- ✅ **Placement dinâmico** — o `BrokerServer` agora **refresca** periodicamente os brokers de
+  placement do `Broker` a partir de `:live_brokers` (`Broker.set_brokers/2`), então um **novo segment
+  nasce no conjunto vivo** em vez de nos configurados (fallback: mantém o último não-vazio; sem custo
+  no hot path). Completa a simetria do reativo (cura **e** criação reagem ao vivo). Robustez junto:
+  `ReplicationServer.replicate/5` agora **não derruba** o chamador se o primário estiver morto
+  (retorna `{:error, :unreachable}` → `produce` propaga erro), e um `produce` falho **descarta** o
+  segment recém-aberto (rollback grátis via valor imutável — sem segment fantasma; o retry re-placeia
+  nos vivos). Testado: após um data-broker morrer e sair do conjunto vivo, um segment recém-produzido
+  **exclui o morto** do `replica_set`.
+  - ⏳ Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA); failover de
+    primário.
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 

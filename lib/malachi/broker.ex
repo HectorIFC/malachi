@@ -216,6 +216,13 @@ defmodule Malachi.Broker do
   @spec metadata(t()) :: Metadata.t()
   def metadata(%__MODULE__{} = broker), do: broker.metadata
 
+  @doc """
+  Replaces the broker set new segments are placed on (e.g. refreshed from live membership), so
+  freshly opened segments land on currently-alive brokers. Must be non-empty.
+  """
+  @spec set_brokers(t(), [Metadata.broker()]) :: t()
+  def set_brokers(%__MODULE__{} = broker, [_ | _] = brokers), do: %{broker | brokers: brokers}
+
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
 
@@ -301,16 +308,18 @@ defmodule Malachi.Broker do
   end
 
   defp replicate_group(broker, range_id, records, placements, replicate_fun) do
-    {broker, segment} = ensure_segment(broker, range_id)
-    first = next_offset(broker, range_id)
+    {opened, segment} = ensure_segment(broker, range_id)
+    first = next_offset(opened, range_id)
     count = length(records)
     last = first + count - 1
 
     case replicate_fun.(primary(segment), segment.id, segment.replica_set, segment.start_offset, records) do
       {:ok, ^last} ->
-        broker = commit_batch(broker, range_id, count, batch_bytes(records))
-        {:cont, {broker, Map.put(placements, range_id, {first, last})}}
+        committed = commit_batch(opened, range_id, count, batch_bytes(records))
+        {:cont, {committed, Map.put(placements, range_id, {first, last})}}
 
+      # On failure, discard the just-opened segment by returning the pre-open broker (immutable
+      # value = free rollback), so a failed produce leaves no phantom segment and a retry re-places.
       {:ok, other} ->
         {:halt, {:error, {:offset_mismatch, expected: last, got: other}, broker}}
 
