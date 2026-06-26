@@ -26,10 +26,13 @@ defmodule Malachi.BrokerServer do
   Starts a server whose segment storage is rooted at `directory`.
 
   ## Options
+    * `:brokers` - references of the `Malachi.Cluster.ReplicationServer`s that segments are placed
+      on. When given, this server uses them and does not start its own; when omitted, it starts a
+      single local replication server rooted at `directory` (single-node default).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
-    * remaining options are forwarded to the `Malachi.Cluster.ReplicationServer` (segment log
-      options such as `:max_bytes`, `:flush_bytes`, `:index_interval`).
+    * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
+      options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
     * standard `GenServer` options (`:name`, etc.) are honored.
   """
   @spec start_link(Path.t(), keyword()) :: GenServer.on_start()
@@ -82,6 +85,14 @@ defmodule Malachi.BrokerServer do
   @spec active_range_ids(GenServer.server(), Malachi.Metadata.topic_name()) :: [Malachi.Metadata.range_id()]
   def active_range_ids(server, topic), do: GenServer.call(server, {:active_range_ids, topic})
 
+  @doc "The current control-plane metadata (e.g. for a healing coordinator to inspect)."
+  @spec metadata(GenServer.server()) :: Malachi.Metadata.t()
+  def metadata(server), do: GenServer.call(server, :metadata)
+
+  @doc "Applies `:set_segment_replicas` healing commands to the control plane."
+  @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok
+  def apply_heal(server, commands), do: GenServer.call(server, {:apply_heal, commands})
+
   @doc "Stops the server (and its replication storage)."
   @spec stop(GenServer.server()) :: :ok
   def stop(server), do: GenServer.stop(server)
@@ -91,17 +102,27 @@ defmodule Malachi.BrokerServer do
   @impl true
   def init({directory, opts}) do
     {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
-    {replication_factor, log_opts} = Keyword.pop(opts, :replication_factor, 1)
+    {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
+    {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
-    {:ok, replication} = ReplicationServer.start_link([directory: directory] ++ log_opts)
+    # With an external broker set we use it as-is; otherwise we own a single local store.
+    {owned_replication, brokers} =
+      case external_brokers do
+        nil ->
+          {:ok, replication} = ReplicationServer.start_link([directory: directory] ++ log_opts)
+          {replication, [replication]}
+
+        list ->
+          {nil, list}
+      end
 
     broker_opts =
-      [brokers: [replication], replication_factor: replication_factor]
+      [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
 
     {:ok, broker} = Broker.open(broker_opts)
 
-    {:ok, %{broker: broker, replication: replication}}
+    {:ok, %{broker: broker, replication: owned_replication}}
   end
 
   @impl true
@@ -142,9 +163,18 @@ defmodule Malachi.BrokerServer do
     {:reply, Broker.active_range_ids(state.broker, topic), state}
   end
 
+  def handle_call(:metadata, _from, state) do
+    {:reply, Broker.metadata(state.broker), state}
+  end
+
+  def handle_call({:apply_heal, commands}, _from, state) do
+    {:reply, :ok, %{state | broker: Broker.apply_heal(state.broker, commands)}}
+  end
+
   @impl true
   def terminate(_reason, state) do
-    if Process.alive?(state.replication), do: GenServer.stop(state.replication)
+    # Only stop the replication server we started ourselves; an external broker set is not ours.
+    if state.replication && Process.alive?(state.replication), do: GenServer.stop(state.replication)
     :ok
   end
 

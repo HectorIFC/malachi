@@ -196,6 +196,26 @@ defmodule Malachi.Broker do
     broker.metadata |> Metadata.active_ranges_of_topic(topic) |> Enum.map(& &1.id)
   end
 
+  @doc """
+  Applies control-plane healing `commands` (the `:set_segment_replicas` produced by
+  `Malachi.Cluster.SelfHealing`) to the metadata. The commands heal **sealed** segments, which are
+  not in the broker's active-segment cache, so only the metadata changes.
+  """
+  @spec apply_heal(t(), [Metadata.command()]) :: t()
+  def apply_heal(%__MODULE__{} = broker, commands) do
+    metadata =
+      Enum.reduce(commands, broker.metadata, fn command, metadata ->
+        {metadata, _reply} = Metadata.apply(metadata, command)
+        metadata
+      end)
+
+    %{broker | metadata: metadata}
+  end
+
+  @doc "The current metadata (the control-plane source of truth held by this broker)."
+  @spec metadata(t()) :: Metadata.t()
+  def metadata(%__MODULE__{} = broker), do: broker.metadata
+
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
 

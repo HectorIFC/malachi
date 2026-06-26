@@ -356,9 +356,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   `MembershipServer` (live) e ao control plane (apply) sem mudança. `heal_now/1` roda uma passada
   síncrona (testes/trigger manual). Testado in-process: cura sob réplica perdida (backfill +
   comando aplicado + loop fecha), `:no_live_source`, e **cura automática no timer**.
-  - ⏳ Próximo: a **fiação fina** que resolve as 2 questões em aberto — mapear member-id ↔ broker-ref
-    (`live_brokers` ← `MembershipServer`) e a autoridade do metadata (`Broker` vs `ra`/`ReplicatedDSRSM`,
-    `apply` ← control plane); depois failover de primário; ping-indireto + join.
+- ✅ **Fiação fina 1a — membership → self-healing reativo (controle único + N data-brokers)** — o
+  loop reativo agora roda ponta a ponta na topologia **1 nó de controle + N data-brokers**: o
+  `BrokerServer` aceita `:brokers` externos (refs de `ReplicationServer`) e é a autoridade do
+  metadata; ganhou `metadata/1` e `apply_heal/2` (que aplica `set_segment_replicas` via novo
+  `Broker.apply_heal/2`). O `HealCoordinator` é fiado com `metadata_source`/`apply` ← `BrokerServer`
+  e `live_brokers` ← **bridge** `MembershipServer.alive_members |> mapa(member-id → broker-ref)`.
+  Testado: **data-broker morre → membership detecta → segments selados re-replicados** ao conjunto
+  vivo (sem sub-replicação restante, dados conferidos nas novas réplicas), e a bridge derruba a
+  broker-ref do nó morto.
+  - ⏳ Diferido: placement de novo segment sobre o conjunto **vivo** (hoje sobre os configurados,
+    heal corrige). Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA);
+    failover de primário.
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 
