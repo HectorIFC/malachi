@@ -382,7 +382,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   **reconciliação** (heal selados + failover ativos a cada tick). Testado: `plan` puro (promove vivo,
   ignora selado, pula tudo-morto), `apply_heal` atualiza cache+metadata, e **integração**: primário
   de segment ativo morre → promovido → escrita continua no novo primário (ambos os records lidos).
-  - ⏳ Próximo: **1b** (autoridade do metadata via `ra` — control plane replicado/HA).
+- 🚧 **1b — autoridade do metadata via `ra` (em fatias).**
+  - ✅ **`Malachi.Cluster.ReplicatedMetadata`** (componente) — pareia um `MetadataServer` (cluster `ra`
+    rodando `Metadata.apply`) com um **cache `Metadata` local**: `command/2` vai ao log Raft e, no
+    commit, aplica o **mesmo** comando no cache (determinismo → cache == estado replicado), então as
+    leituras são locais (sem round-trip Raft no hot path) com **read-your-writes**. `metadata/1` (leitura),
+    `refresh/1` (re-lê o estado replicado p/ multi-writer/recovery), `start/1`, `delete/1`. Testado:
+    comando commitado atualiza o cache, comando rejeitado deixa o cache intacto + erro da máquina,
+    cache == estado replicado (refresh no-op p/ escritor único). Cluster `ra` single-node (durabilidade;
+    HA multi-nó depois).
+  - ⏳ Próximo: fiar o `BrokerServer` no `ReplicatedMetadata` (mutações `create_topic`/`split`/`merge`/
+    `register`/`seal`/`set_segment_replicas` → comando; leituras do cache; bookkeeping local); depois
+    cluster `ra` multi-nó (HA).
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 
