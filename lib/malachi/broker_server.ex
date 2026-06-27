@@ -40,6 +40,8 @@ defmodule Malachi.BrokerServer do
     * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
       authoritative via that `ra` cluster (mutations go through the log; reads come from a local
       cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
+    * `:metadata_nodes` - the nodes the metadata Raft cluster spans (default `[node()]`); several
+      nodes make the control plane HA (the metadata survives losing a member).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
@@ -117,6 +119,7 @@ defmodule Malachi.BrokerServer do
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
+    {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -133,7 +136,7 @@ defmodule Malachi.BrokerServer do
     broker_opts =
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
-      |> with_metadata_authority(metadata_cluster)
+      |> with_metadata_authority(metadata_cluster, metadata_nodes)
 
     {:ok, broker} = Broker.open(broker_opts)
 
@@ -219,10 +222,10 @@ defmodule Malachi.BrokerServer do
 
   # In-memory metadata by default; with a cluster name, route mutations through that ra cluster and
   # seed the broker's cache from the replicated state (so it recovers prior metadata on start).
-  defp with_metadata_authority(opts, nil), do: opts
+  defp with_metadata_authority(opts, nil, _nodes), do: opts
 
-  defp with_metadata_authority(opts, cluster_name) do
-    {:ok, server_id} = MetadataServer.start(cluster_name)
+  defp with_metadata_authority(opts, cluster_name, nodes) do
+    {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
     {:ok, seed} = MetadataServer.query(server_id, & &1)
 
     opts

@@ -406,8 +406,15 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
     `ensure_segment` → `produce` como `{:error, reason}` (rollback do open — sem segment fantasma),
     em vez de derrubar o `BrokerServer`. Testado: `command_fun` que falha o register → produce
     `{:error, :ra_down}`, nenhum segment registrado, offset não avançado.
-  - ⏳ Próximo: cluster `ra` **multi-nó** (HA do control plane — o último SPOF) e/ou sharding via
-    `ReplicatedDSRSM`.
+  - ✅ **Cluster `ra` multi-nó (HA do control plane — último SPOF eliminado)** — `MetadataServer.start/2`
+    forma o cluster `ra` em **vários nós** (`server_ids` entre nós); `BrokerServer` aceita
+    `:metadata_nodes`. Com ≥3 membros o metadata é replicado e **sobrevive à queda de um nó de
+    controle** (um seguidor é eleito líder). Testado de verdade (`test/.../metadata_ha_test.exs`, tag
+    `:multinode`, opt-in via `mix test --include multinode`): 3 nós BEAM reais via `:peer`, comando
+    replicado a todos, **kill abrupto do nó-líder**, e um comando seguinte ainda comita (novo líder) com
+    o metadata anterior intacto — flake-checado 5×. (Excluído do `mix test` padrão por exigir
+    epmd/distribuição.) **1b concluído.**
+  - ⏳ Opcional/futuro: sharding via `ReplicatedDSRSM` (escala do control plane, não HA).
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 

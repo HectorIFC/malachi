@@ -18,16 +18,18 @@ defmodule Malachi.Cluster.MetadataServer do
   @type server_id :: {cluster_name(), node()}
 
   @doc """
-  Starts a single-node Raft cluster named `cluster_name` running the metadata machine, and
-  returns its `server_id`. (Multi-node membership comes with SWIM later.)
+  Starts a Raft cluster named `cluster_name` running the metadata machine across `nodes` (default
+  the local node), and returns the **local** `server_id`. With several nodes the metadata is
+  replicated and survives the loss of a member: a follower is elected leader, so the control plane
+  has no single point of failure. `ra` must be running on every node (`:ra.start_in/1`).
   """
-  @spec start(cluster_name()) :: {:ok, server_id()} | {:error, term()}
-  def start(cluster_name) do
-    server_id = {cluster_name, node()}
+  @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
+  def start(cluster_name, nodes \\ [node()]) do
+    server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, MetadataMachine, %{}}
 
-    case :ra.start_cluster(@system, cluster_name, machine, [server_id]) do
-      {:ok, _started, _not_started} -> {:ok, server_id}
+    case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
+      {:ok, _started, _not_started} -> {:ok, {cluster_name, node()}}
       {:error, reason} -> {:error, reason}
     end
   end
