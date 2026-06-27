@@ -242,6 +242,23 @@ defmodule Malachi.BrokerTest do
       assert broker.segments[root_id].replica_set == new_set
     end
 
+    test "a failed register command aborts the produce instead of crashing", %{store: store} do
+      # a command_fun that fails register_segment (as a Raft timeout would), passing others through
+      failing = fn
+        metadata, {:register_segment, _range, _seg, _replicas, _offset} -> {metadata, {:error, :ra_down}}
+        metadata, command -> Metadata.apply(metadata, command)
+      end
+
+      {:ok, broker} = Broker.open(brokers: [:a], command_fun: failing)
+      {broker, {:ok, root_id}} = Broker.create_topic(broker, "events", 4)
+
+      assert {broker, {:error, :ra_down}} = produce(broker, store, "events", [record("v", "k")])
+
+      # nothing was opened: no segment registered, no offset advanced
+      assert segments(broker, root_id) == []
+      assert broker.offsets == %{}
+    end
+
     test "open/1 rejects an invalid placement policy" do
       assert_raise ArgumentError, fn -> Broker.open(brokers: []) end
       assert_raise ArgumentError, fn -> Broker.open(brokers: :not_a_list) end

@@ -401,10 +401,11 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
     read-your-writes intra-operação). Testado (ra): mutações (topic + segment) ficam no **estado
     replicado** (query direto no `ra`) e o cache == replicado; comando rejeitado propaga o erro da
     máquina. Default (sem `:metadata_cluster`) segue in-memory.
-  - ⚠ Limitação conhecida (adiada p/ o hardening de HA): `open_segment` casa `:ok` no `register`;
-    uma falha de transporte do `ra` (timeout) derrubaria o produce (no caminho feliz / ra single-node
-    saudável, `register` é sempre `:ok`). Tratar = propagar o erro pelo `produce` (mesma plumbing do
-    `replicate`), junto com o `ra` multi-nó.
+  - ✅ **Hardening do crash-path do `register`** — `open_segment` agora retorna `{:ok, broker}` |
+    `{:error, reason}`; uma falha do `register_segment` (ex.: timeout do `ra`) é propagada pelo
+    `ensure_segment` → `produce` como `{:error, reason}` (rollback do open — sem segment fantasma),
+    em vez de derrubar o `BrokerServer`. Testado: `command_fun` que falha o register → produce
+    `{:error, :ra_down}`, nenhum segment registrado, offset não avançado.
   - ⏳ Próximo: cluster `ra` **multi-nó** (HA do control plane — o último SPOF) e/ou sharding via
     `ReplicatedDSRSM`.
 - ⏳ Storage/metadata policies + attributes.

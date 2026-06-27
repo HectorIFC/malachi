@@ -337,7 +337,18 @@ defmodule Malachi.Broker do
   end
 
   defp replicate_group(broker, range_id, records, placements, replicate_fun) do
-    {opened, segment} = ensure_segment(broker, range_id)
+    case ensure_segment(broker, range_id) do
+      # Opening the segment (its register_segment command) failed — abort this group, keeping the
+      # pre-open broker (no phantom segment); a retry re-places.
+      {:error, reason} ->
+        {:halt, {:error, reason, broker}}
+
+      {:ok, opened, segment} ->
+        replicate_to_segment(broker, opened, segment, range_id, records, placements, replicate_fun)
+    end
+  end
+
+  defp replicate_to_segment(broker, opened, segment, range_id, records, placements, replicate_fun) do
     first = next_offset(opened, range_id)
     count = length(records)
     last = first + count - 1
@@ -361,14 +372,15 @@ defmodule Malachi.Broker do
 
   defp ensure_segment(broker, range_id) do
     case Map.fetch(broker.segments, range_id) do
-      {:ok, segment} -> {broker, segment}
-      :error -> open_and_fetch_segment(broker, range_id)
-    end
-  end
+      {:ok, segment} ->
+        {:ok, broker, segment}
 
-  defp open_and_fetch_segment(broker, range_id) do
-    broker = open_segment(broker, range_id, next_offset(broker, range_id))
-    {broker, Map.fetch!(broker.segments, range_id)}
+      :error ->
+        case open_segment(broker, range_id, next_offset(broker, range_id)) do
+          {:ok, broker} -> {:ok, broker, Map.fetch!(broker.segments, range_id)}
+          {:error, reason} -> {:error, reason}
+        end
+    end
   end
 
   # Registers a new segment for `range_id` starting at `start_offset`, choosing its replica set
@@ -379,17 +391,27 @@ defmodule Malachi.Broker do
     segment_id = {range_id, seq}
     {:ok, replica_set} = Placement.place(segment_id, broker.brokers, broker.replication_factor)
 
-    {metadata, :ok} =
-      apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset})
+    # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
+    # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
+    case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
+      {metadata, :ok} ->
+        active = %{id: segment_id, start_offset: start_offset, records: 0, bytes: 0, replica_set: replica_set}
 
-    active = %{id: segment_id, start_offset: start_offset, records: 0, bytes: 0, replica_set: replica_set}
+        broker = %{
+          broker
+          | metadata: metadata,
+            segments: Map.put(broker.segments, range_id, active),
+            segment_seq: Map.put(broker.segment_seq, range_id, seq + 1)
+        }
 
-    %{
-      broker
-      | metadata: metadata,
-        segments: Map.put(broker.segments, range_id, active),
-        segment_seq: Map.put(broker.segment_seq, range_id, seq + 1)
-    }
+        {:ok, broker}
+
+      {_metadata, {:error, reason}} ->
+        {:error, reason}
+
+      {_metadata, other} ->
+        {:error, {:unexpected_register_reply, other}}
+    end
   end
 
   # Advances the range's offset and the active segment's tallies, sealing the segment (soft
