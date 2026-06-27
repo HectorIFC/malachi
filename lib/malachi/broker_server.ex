@@ -18,6 +18,8 @@ defmodule Malachi.BrokerServer do
   use GenServer
 
   alias Malachi.Broker
+  alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
 
   @default_brokers_refresh_interval 1_000
@@ -35,6 +37,9 @@ defmodule Malachi.BrokerServer do
       set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
       currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
+    * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
+      authoritative via that `ra` cluster (mutations go through the log; reads come from a local
+      cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
@@ -111,6 +116,7 @@ defmodule Malachi.BrokerServer do
     {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
+    {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -127,6 +133,7 @@ defmodule Malachi.BrokerServer do
     broker_opts =
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
+      |> with_metadata_authority(metadata_cluster)
 
     {:ok, broker} = Broker.open(broker_opts)
 
@@ -209,6 +216,19 @@ defmodule Malachi.BrokerServer do
   # --- internals ---
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
+
+  # In-memory metadata by default; with a cluster name, route mutations through that ra cluster and
+  # seed the broker's cache from the replicated state (so it recovers prior metadata on start).
+  defp with_metadata_authority(opts, nil), do: opts
+
+  defp with_metadata_authority(opts, cluster_name) do
+    {:ok, server_id} = MetadataServer.start(cluster_name)
+    {:ok, seed} = MetadataServer.query(server_id, & &1)
+
+    opts
+    |> Keyword.put(:metadata, seed)
+    |> Keyword.put(:command_fun, &ReplicatedMetadata.apply_command(server_id, &1, &2))
+  end
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)

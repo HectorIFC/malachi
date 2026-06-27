@@ -391,9 +391,22 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
     comando commitado atualiza o cache, comando rejeitado deixa o cache intacto + erro da máquina,
     cache == estado replicado (refresh no-op p/ escritor único). Cluster `ra` single-node (durabilidade;
     HA multi-nó depois).
-  - ⏳ Próximo: fiar o `BrokerServer` no `ReplicatedMetadata` (mutações `create_topic`/`split`/`merge`/
-    `register`/`seal`/`set_segment_replicas` → comando; leituras do cache; bookkeeping local); depois
-    cluster `ra` multi-nó (HA).
+  - ✅ **`BrokerServer` fiado no metadata via `ra`** — o `Broker` ganhou um **`command_fun` injetado**
+    `(metadata, command) -> {metadata, reply}` (default `&Metadata.apply/2` → comportamento in-memory
+    intacto); **todas** as mutações (`create_topic`/`split`/`merge`/`register`/`seal`/
+    `set_segment_replicas`) passam por ele, leituras seguem no `broker.metadata` (cache). Com a opção
+    `:metadata_cluster`, o `BrokerServer` inicia um `MetadataServer`, **semeia** o cache do estado
+    replicado, e injeta `command_fun = ReplicatedMetadata.apply_command(server_id, …)` — comando Raft +
+    apply no cache **threadado pelo `broker.metadata`** (um produce pode abrir+selar segment com
+    read-your-writes intra-operação). Testado (ra): mutações (topic + segment) ficam no **estado
+    replicado** (query direto no `ra`) e o cache == replicado; comando rejeitado propaga o erro da
+    máquina. Default (sem `:metadata_cluster`) segue in-memory.
+  - ⚠ Limitação conhecida (adiada p/ o hardening de HA): `open_segment` casa `:ok` no `register`;
+    uma falha de transporte do `ra` (timeout) derrubaria o produce (no caminho feliz / ra single-node
+    saudável, `register` é sempre `:ok`). Tratar = propagar o erro pelo `produce` (mesma plumbing do
+    `replicate`), junto com o `ra` multi-nó.
+  - ⏳ Próximo: cluster `ra` **multi-nó** (HA do control plane — o último SPOF) e/ou sharding via
+    `ReplicatedDSRSM`.
 - ⏳ Storage/metadata policies + attributes.
 - ⏳ Storage/metadata policies + attributes.
 

@@ -38,16 +38,26 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   `{:error, :already_exists}`), or `{:error, reason}` on a transport failure (cache unchanged).
   """
   @spec command(t(), Metadata.command()) :: {term(), t()}
-  def command(%__MODULE__{} = replicated, command) do
-    case MetadataServer.command(replicated.server_id, command) do
-      {:ok, reply} ->
-        # Deterministic apply ⇒ the cache tracks the replicated state (a rejected command leaves
-        # both unchanged).
-        {cache, _local_reply} = Metadata.apply(replicated.cache, command)
-        {reply, %{replicated | cache: cache}}
+  def command(%__MODULE__{server_id: server_id, cache: cache} = replicated, command) do
+    {cache, reply} = apply_command(server_id, cache, command)
+    {reply, %{replicated | cache: cache}}
+  end
 
-      {:error, reason} ->
-        {{:error, reason}, replicated}
+  @doc """
+  Stateless form: submit `command` to the Raft cluster `server_id` and apply it to the **caller's**
+  `metadata` cache, returning `{metadata, reply}` (the same shape as `Malachi.Metadata.apply/2`, so
+  it is a drop-in metadata command function). The caller threads the cache, which lets a single
+  operation perform several mutations with read-your-writes between them (e.g. a produce that opens
+  and seals a segment). On a transport failure the cache is left unchanged.
+  """
+  @spec apply_command(MetadataServer.server_id(), Metadata.t(), Metadata.command()) ::
+          {Metadata.t(), term()}
+  def apply_command(server_id, metadata, command) do
+    case MetadataServer.command(server_id, command) do
+      # Deterministic apply ⇒ the cache tracks the replicated state (a rejected command leaves
+      # both unchanged).
+      {:ok, reply} -> {elem(Metadata.apply(metadata, command), 0), reply}
+      {:error, reason} -> {metadata, {:error, reason}}
     end
   end
 

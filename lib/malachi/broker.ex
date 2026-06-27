@@ -58,8 +58,16 @@ defmodule Malachi.Broker do
           (Metadata.broker(), Metadata.segment_id(), non_neg_integer(), pos_integer() ->
              {:ok, [Record.t()]} | :eof | {:error, term()})
 
+  @typedoc """
+  Applies a metadata command, returning `{metadata, reply}` — the same shape as
+  `Malachi.Metadata.apply/2` (the default), or a Raft-backed variant
+  (`Malachi.Cluster.ReplicatedMetadata.apply_command/3`) that makes the metadata authoritative.
+  """
+  @type command_fun :: (Metadata.t(), Metadata.command() -> {Metadata.t(), term()})
+
   @type t :: %__MODULE__{
           metadata: Metadata.t(),
+          command_fun: command_fun(),
           brokers: [Metadata.broker()],
           replication_factor: pos_integer(),
           segment_max_bytes: pos_integer(),
@@ -69,6 +77,7 @@ defmodule Malachi.Broker do
         }
 
   defstruct metadata: nil,
+            command_fun: nil,
             brokers: nil,
             replication_factor: 1,
             segment_max_bytes: @default_segment_max_bytes,
@@ -85,6 +94,9 @@ defmodule Malachi.Broker do
     * `:replication_factor` - replicas per segment, clamped to the broker count (default `1`).
     * `:segment_max_bytes` - the active segment seals once it reaches this many encoded bytes
       (default 64 MiB).
+    * `:command_fun` - how metadata mutations are applied (default `&Malachi.Metadata.apply/2`, an
+      in-memory single node); pass a Raft-backed function to make the metadata authoritative.
+    * `:metadata` - the initial metadata view (default empty), e.g. seeded from a replicated cluster.
   """
   @spec open(keyword()) :: {:ok, t()}
   def open(opts \\ []) do
@@ -96,7 +108,8 @@ defmodule Malachi.Broker do
 
     {:ok,
      %__MODULE__{
-       metadata: Metadata.new(),
+       metadata: Keyword.get(opts, :metadata) || Metadata.new(),
+       command_fun: Keyword.get(opts, :command_fun, &Metadata.apply/2),
        brokers: brokers,
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes
@@ -125,7 +138,7 @@ defmodule Malachi.Broker do
   """
   @spec create_topic(t(), Metadata.topic_name(), pos_integer()) :: {t(), term()}
   def create_topic(%__MODULE__{} = broker, name, keyspace_bits) do
-    {metadata, reply} = Metadata.apply(broker.metadata, {:create_topic, name, keyspace_bits})
+    {metadata, reply} = apply_metadata(broker, {:create_topic, name, keyspace_bits})
     {%{broker | metadata: metadata}, reply}
   end
 
@@ -165,7 +178,7 @@ defmodule Malachi.Broker do
   """
   @spec split_range(t(), Metadata.range_id()) :: {t(), term()}
   def split_range(%__MODULE__{} = broker, range_id) do
-    case Metadata.apply(broker.metadata, {:split_range, range_id}) do
+    case apply_metadata(broker, {:split_range, range_id}) do
       {metadata, {:ok, _left, _right} = reply} ->
         {seal_active_segment(%{broker | metadata: metadata}, range_id), reply}
 
@@ -180,7 +193,7 @@ defmodule Malachi.Broker do
   """
   @spec merge_ranges(t(), Metadata.range_id(), Metadata.range_id()) :: {t(), term()}
   def merge_ranges(%__MODULE__{} = broker, range_id_a, range_id_b) do
-    case Metadata.apply(broker.metadata, {:merge_ranges, range_id_a, range_id_b}) do
+    case apply_metadata(broker, {:merge_ranges, range_id_a, range_id_b}) do
       {metadata, {:ok, _child} = reply} ->
         broker = %{broker | metadata: metadata}
         {seal_active_segment(seal_active_segment(broker, range_id_a), range_id_b), reply}
@@ -208,13 +221,13 @@ defmodule Malachi.Broker do
   end
 
   defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker) do
-    {metadata, _reply} = Metadata.apply(broker.metadata, command)
+    {metadata, _reply} = apply_metadata(broker, command)
     broker = %{broker | metadata: metadata}
     update_active_replica_set(broker, segment_id, replica_set)
   end
 
   defp apply_replica_command(command, broker) do
-    {metadata, _reply} = Metadata.apply(broker.metadata, command)
+    {metadata, _reply} = apply_metadata(broker, command)
     %{broker | metadata: metadata}
   end
 
@@ -367,7 +380,7 @@ defmodule Malachi.Broker do
     {:ok, replica_set} = Placement.place(segment_id, broker.brokers, broker.replication_factor)
 
     {metadata, :ok} =
-      Metadata.apply(broker.metadata, {:register_segment, range_id, segment_id, replica_set, start_offset})
+      apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset})
 
     active = %{id: segment_id, start_offset: start_offset, records: 0, bytes: 0, replica_set: replica_set}
 
@@ -407,10 +420,14 @@ defmodule Malachi.Broker do
         broker
 
       {:ok, active} ->
-        {metadata, _reply} = Metadata.apply(broker.metadata, {:seal_segment, active.id, active.records})
+        {metadata, _reply} = apply_metadata(broker, {:seal_segment, active.id, active.records})
         %{broker | metadata: metadata, segments: Map.delete(broker.segments, range_id)}
     end
   end
+
+  # Applies a metadata mutation via the configured command function (in-memory by default, or
+  # Raft-backed), threading the cache so multiple mutations in one operation see each other.
+  defp apply_metadata(broker, command), do: broker.command_fun.(broker.metadata, command)
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 
