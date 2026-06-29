@@ -934,6 +934,54 @@ defmodule Malachi.TCPProtocol do
   end
 
   # Invalid request (catch-all)
+  # --- NorthGuard log protocol (topic + key + opaque cursor; no partitions/offsets exposed) ---
+
+  defp handle_action(socket, %{"action" => "create_topic", "topic" => topic}, session, transport, _client_ip) do
+    with_permission(session, :produce, socket, transport, fn ->
+      case Malachi.LogApi.create_topic(Malachi.LogBroker, topic) do
+        :ok -> send_ok(socket, %{}, transport)
+        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
+      end
+
+      :ok
+    end)
+  end
+
+  defp handle_action(
+         socket,
+         %{"action" => "produce", "topic" => topic, "records" => records},
+         session,
+         transport,
+         _client_ip
+       )
+       when is_list(records) do
+    with_permission(session, :produce, socket, transport, fn ->
+      case Malachi.LogApi.produce(Malachi.LogBroker, topic, records) do
+        {:ok, count} -> send_ok(socket, %{"count" => count}, transport)
+        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
+      end
+
+      :ok
+    end)
+  end
+
+  defp handle_action(socket, %{"action" => "fetch", "topic" => topic} = msg, session, transport, _client_ip) do
+    with_permission(session, :consume, socket, transport, fn ->
+      cursor = Map.get(msg, "cursor", :start)
+      max = fetch_max(Map.get(msg, "max"))
+
+      case Malachi.LogApi.fetch(Malachi.LogBroker, topic, cursor, max) do
+        {:ok, records, next_cursor} ->
+          send_ok(socket, %{"records" => Enum.map(records, &record_to_json/1), "cursor" => next_cursor}, transport)
+
+        {:error, reason} ->
+          send_error(socket, normalize_reason(reason), transport)
+      end
+
+      :ok
+    end)
+  end
+
   defp handle_action(socket, _msg, _session, transport, _client_ip) do
     send_error(socket, :invalid_request, transport)
     :ok
@@ -957,6 +1005,26 @@ defmodule Malachi.TCPProtocol do
     Enum.any?(permissions, fn perm ->
       Malachi.Auth.has_permission?(session.permissions, perm)
     end)
+  end
+
+  # --- log protocol helpers ---
+
+  # send_error wants an atom or binary; tuple reasons (e.g. {:unroutable, key}) are made JSON-safe.
+  defp normalize_reason(reason) when is_atom(reason) or is_binary(reason), do: reason
+  defp normalize_reason(reason), do: inspect(reason)
+
+  # Bound the client-supplied page size: a positive integer, capped, defaulting to 100.
+  defp fetch_max(max) when is_integer(max) and max > 0, do: min(max, 1_000)
+  defp fetch_max(_max), do: 100
+
+  # The client gets key/value/headers/timestamp — never an offset (the cursor carries position).
+  defp record_to_json(record) do
+    %{
+      "key" => record.key,
+      "value" => record.value,
+      "headers" => Map.new(record.headers),
+      "timestamp" => record.timestamp
+    }
   end
 
   defp maybe_add_field(map, msg, json_key, atom_key) do

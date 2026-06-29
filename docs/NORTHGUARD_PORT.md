@@ -431,11 +431,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
   de propósito, para o sistema split/merge/restripe por baixo sem quebrar o cliente; é o diferencial vs
   Kafka). O cursor é um token que hoje codifica `%{range_id => offset}` por dentro, mas o cliente o trata
   como opaco. **Prioridade #1.** Fatias:
-  - 1ª fatia: `create_topic` + `produce` (por chave) + `fetch` (por cursor opaco), aditivo sobre o TCP
-    JSON existente, `BrokerServer` single-node no app. Decode do cursor **seguro** (`binary_to_term`
-    `[:safe]` + validação de forma — input não-confiável do cliente).
-  - Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), consumer groups +
-    posição commitada server-side, long-poll, deploy multi-nó/replicado.
+  - ✅ **1ª fatia — núcleo `Malachi.LogApi`:** `create_topic`/`produce` (por chave)/`fetch` (cursor
+    opaco) sobre `BrokerServer`; decode do cursor **seguro** (`binary_to_term [:safe]` + validação de
+    forma). Cliente nunca vê partition/offset. Testado isolado.
+  - ✅ **1ª fatia — fiação:** `BrokerServer` (`Malachi.LogBroker`) subido na árvore de supervisão
+    (`application.ex`, single-node/in-memory por default; data dir via `:log_data_dir`); ações
+    `create_topic`/`produce`/`fetch` adicionadas ao `tcp_protocol` (aditivo — filas/canais continuam),
+    com auth (`:produce`/`:consume`), `max` limitado, records→JSON **sem offset**. **Cliente alcança o
+    stack NorthGuard de ponta a ponta** — testado e2e via TCP real (produce por chave → fetch por
+    cursor opaco; permissões; re-fetch vazio).
+  - ⏳ Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), consumer groups +
+    posição commitada server-side, long-poll, deploy multi-nó/replicado, payloads binários (base64).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

@@ -61,12 +61,23 @@ defmodule Malachi.Application do
       Malachi.Auth,
       Malachi.AckManager,
       Malachi.ConnectionRegistry,
+      # NorthGuard log broker (the new replicated-log stack), reachable by clients via the log
+      # protocol actions. Single-node/in-memory metadata by default; set :metadata_cluster /
+      # :metadata_nodes for a replicated control plane.
+      %{
+        id: Malachi.LogBroker,
+        start: {Malachi.BrokerServer, :start_link, [log_data_dir(), [name: Malachi.LogBroker]]}
+      },
       {Malachi.TCPAcceptorPool, port},
       {Malachi.Dashboard, dashboard_port}
     ]
 
     opts = [strategy: :one_for_one, name: Malachi.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp log_data_dir do
+    Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
   end
 
   @doc """
