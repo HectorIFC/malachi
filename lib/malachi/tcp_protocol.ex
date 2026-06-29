@@ -967,15 +967,42 @@ defmodule Malachi.TCPProtocol do
 
   defp handle_action(socket, %{"action" => "fetch", "topic" => topic} = msg, session, transport, _client_ip) do
     with_permission(session, :consume, socket, transport, fn ->
-      cursor = Map.get(msg, "cursor", :start)
       max = fetch_max(Map.get(msg, "max"))
 
-      case Malachi.LogApi.fetch(Malachi.LogBroker, topic, cursor, max) do
+      result =
+        cond do
+          # An explicit cursor (client-managed paging) takes precedence over a group resume. Any
+          # present, non-null cursor is forwarded to `fetch`, which validates it and returns
+          # `:invalid_cursor` for a malformed token (rather than silently restarting the stream).
+          msg["cursor"] != nil -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, msg["cursor"], max)
+          is_binary(msg["group"]) -> Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, msg["group"], max)
+          true -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, max)
+        end
+
+      case result do
         {:ok, records, next_cursor} ->
           send_ok(socket, %{"records" => Enum.map(records, &record_to_json/1), "cursor" => next_cursor}, transport)
 
         {:error, reason} ->
           send_error(socket, normalize_reason(reason), transport)
+      end
+
+      :ok
+    end)
+  end
+
+  defp handle_action(
+         socket,
+         %{"action" => "commit", "topic" => topic, "group" => group, "cursor" => cursor},
+         session,
+         transport,
+         _client_ip
+       )
+       when is_binary(group) and is_binary(cursor) do
+    with_permission(session, :consume, socket, transport, fn ->
+      case Malachi.LogApi.commit(Malachi.LogBroker, topic, group, cursor) do
+        :ok -> send_ok(socket, %{}, transport)
+        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
       end
 
       :ok

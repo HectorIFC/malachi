@@ -61,10 +61,20 @@ defmodule Malachi.Metadata do
           length: non_neg_integer() | nil
         }
 
+  @typedoc "A consumer group's name."
+  @type group :: String.t()
+
+  @typedoc "A consumer position: the next offset to read in each range of a topic."
+  @type offsets :: %{range_id() => non_neg_integer()}
+
+  @typedoc "Identifies a consumer group's position for a topic."
+  @type group_topic :: {group(), topic_name()}
+
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
           ranges: %{range_id() => range_meta()},
-          segments: %{segment_id() => segment_meta()}
+          segments: %{segment_id() => segment_meta()},
+          committed_offsets: %{group_topic() => offsets()}
         }
 
   @typedoc "A topic's complete metadata, extracted for migration between vnodes."
@@ -83,8 +93,9 @@ defmodule Malachi.Metadata do
           | {:register_segment, range_id(), segment_id(), [broker()], non_neg_integer()}
           | {:seal_segment, segment_id(), non_neg_integer()}
           | {:set_segment_replicas, segment_id(), [broker()]}
+          | {:commit_offset, group(), topic_name(), offsets()}
 
-  defstruct topics: %{}, ranges: %{}, segments: %{}
+  defstruct topics: %{}, ranges: %{}, segments: %{}, committed_offsets: %{}
 
   @doc "An empty metadata state."
   @spec new() :: t()
@@ -193,6 +204,13 @@ defmodule Malachi.Metadata do
     update_segment(state, segment_id, fn segment -> %{segment | replica_set: replica_set} end)
   end
 
+  def apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
+    # A consumer group's durable position. Last commit wins (the client owns its position); no
+    # topic-existence check, so an offset can be committed before/independently of routing.
+    committed = Map.put(state.committed_offsets, {group, topic}, offsets)
+    {%{state | committed_offsets: committed}, :ok}
+  end
+
   # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
   # replicated by Raft, a command that raises in `apply` would crash every replica
   # deterministically (and again on replay) — e.g. an older replica seeing a newer
@@ -229,6 +247,12 @@ defmodule Malachi.Metadata do
   @spec segments_of_range(t(), range_id()) :: [segment_meta()]
   def segments_of_range(%__MODULE__{} = state, range_id) do
     state.segments |> Map.values() |> Enum.filter(&(&1.range_id == range_id))
+  end
+
+  @doc "A consumer group's committed offsets for a topic, or `%{}` if it has never committed."
+  @spec committed_offsets(t(), group(), topic_name()) :: offsets()
+  def committed_offsets(%__MODULE__{} = state, group, topic) do
+    Map.get(state.committed_offsets, {group, topic}, %{})
   end
 
   # --- migration (vnode split) ---

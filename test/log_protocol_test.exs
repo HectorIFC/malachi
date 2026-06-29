@@ -57,6 +57,49 @@ defmodule Malachi.LogProtocolTest do
     end)
   end
 
+  test "consumer group: fetch resumes from the server-committed position" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_grp_#{System.unique_integer([:positive])}"
+
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+
+      assert %{"s" => "ok", "count" => 3} =
+               request(socket, %{
+                 "action" => "produce",
+                 "topic" => topic,
+                 "records" => [%{"value" => "a"}, %{"value" => "b"}, %{"value" => "c"}]
+               })
+
+      # fetch for a group, then commit the returned cursor durably
+      assert %{"s" => "ok", "records" => records, "cursor" => cursor} =
+               request(socket, %{"action" => "fetch", "topic" => topic, "group" => "g1"})
+
+      assert length(records) == 3
+
+      assert %{"s" => "ok"} =
+               request(socket, %{"action" => "commit", "topic" => topic, "group" => "g1", "cursor" => cursor})
+
+      # the group resumes past the committed position (nothing new)
+      assert %{"s" => "ok", "records" => []} =
+               request(socket, %{"action" => "fetch", "topic" => topic, "group" => "g1"})
+    end)
+  end
+
+  test "fetch rejects a malformed (non-string) cursor instead of silently restarting" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_badcur_#{System.unique_integer([:positive])}"
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+
+      # a wrong-typed cursor must error, not fall through to a fetch from the start
+      assert %{"s" => "err", "reason" => "invalid_cursor"} =
+               request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => 123})
+
+      # a null cursor is "no cursor": with a group it still resumes the group (not suppressed)
+      assert %{"s" => "ok", "records" => _} =
+               request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => nil, "group" => "g"})
+    end)
+  end
+
   test "produce needs :produce and fetch needs :consume" do
     topic = "logproto_perm_#{System.unique_integer([:positive])}"
 

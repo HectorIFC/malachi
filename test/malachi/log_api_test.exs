@@ -65,4 +65,41 @@ defmodule Malachi.LogApiTest do
     server = start_broker(directory)
     assert {:error, :no_such_topic} = LogApi.produce(server, "nope", [%{"value" => "a"}])
   end
+
+  test "a consumer group resumes from its durably committed position", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    {:ok, 3} = LogApi.produce(server, "events", [%{"value" => "a"}, %{"value" => "b"}, %{"value" => "c"}])
+
+    {:ok, records, cursor} = LogApi.fetch_group(server, "events", "g1", 100)
+    assert records |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b", "c"]
+
+    # committing advances the group's durable position past those records
+    assert :ok = LogApi.commit(server, "events", "g1", cursor)
+    assert {:ok, [], _cursor} = LogApi.fetch_group(server, "events", "g1", 100)
+
+    # later records are delivered to the committed group
+    {:ok, 1} = LogApi.produce(server, "events", [%{"value" => "d"}])
+    assert {:ok, [%{value: "d"}], _next} = LogApi.fetch_group(server, "events", "g1", 100)
+
+    # a different group still starts from the beginning
+    assert {:ok, fresh, _} = LogApi.fetch_group(server, "events", "g2", 100)
+    assert length(fresh) == 4
+  end
+
+  test "without a commit, a group re-reads from its last committed position (at-least-once)", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    {:ok, 2} = LogApi.produce(server, "events", [%{"value" => "a"}, %{"value" => "b"}])
+
+    {:ok, first, _cursor} = LogApi.fetch_group(server, "events", "g", 100)
+    {:ok, again, _cursor} = LogApi.fetch_group(server, "events", "g", 100)
+    assert Enum.map(first, & &1.value) == Enum.map(again, & &1.value)
+  end
+
+  test "commit rejects a malformed cursor", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    assert {:error, :invalid_cursor} = LogApi.commit(server, "events", "g", "not-base64!!")
+  end
 end

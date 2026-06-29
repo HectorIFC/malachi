@@ -246,6 +246,22 @@ defmodule Malachi.Broker do
   def metadata(%__MODULE__{} = broker), do: broker.metadata
 
   @doc """
+  Durably records a consumer `group`'s committed position (`offsets`, per range) for `topic`,
+  through the control plane (Raft-backed when configured). Returns `{broker, reply}`.
+  """
+  @spec commit_offset(t(), Metadata.group(), Metadata.topic_name(), Metadata.offsets()) :: {t(), term()}
+  def commit_offset(%__MODULE__{} = broker, group, topic, offsets) do
+    {metadata, reply} = apply_metadata(broker, {:commit_offset, group, topic, offsets})
+    {%{broker | metadata: metadata}, reply}
+  end
+
+  @doc "A consumer group's committed offsets for `topic` (empty if it never committed)."
+  @spec committed_offsets(t(), Metadata.group(), Metadata.topic_name()) :: Metadata.offsets()
+  def committed_offsets(%__MODULE__{} = broker, group, topic) do
+    Metadata.committed_offsets(broker.metadata, group, topic)
+  end
+
+  @doc """
   Replaces the broker set new segments are placed on (e.g. refreshed from live membership), so
   freshly opened segments land on currently-alive brokers. Must be non-empty.
   """

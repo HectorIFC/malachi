@@ -65,13 +65,44 @@ defmodule Malachi.LogApi do
   def fetch(server, topic, cursor, max) when is_integer(max) and max > 0 do
     case decode_cursor(cursor) do
       {:ok, positions} ->
-        ranges = BrokerServer.active_range_ids(server, topic)
-        {records, positions} = read_ranges(server, ranges, positions, max)
-        {:ok, records, encode_cursor(positions)}
+        {records, next_cursor} = do_fetch(server, topic, positions, max)
+        {:ok, records, next_cursor}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Fetches for a consumer `group`, resuming from the group's durably committed position (or the
+  beginning if it never committed). Returns `{:ok, records, next_cursor}`; the client processes the
+  records and then `commit/4`s `next_cursor` to advance the durable position (at-least-once).
+  """
+  @spec fetch_group(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer()) ::
+          {:ok, [Record.t()], cursor()}
+  def fetch_group(server, topic, group, max) when is_integer(max) and max > 0 do
+    positions = BrokerServer.committed_offsets(server, group, topic)
+    {records, next_cursor} = do_fetch(server, topic, positions, max)
+    {:ok, records, next_cursor}
+  end
+
+  @doc """
+  Durably commits a consumer `group`'s position for `topic` from `cursor` (a token from `fetch`/
+  `fetch_group`). Returns `:ok`, or `{:error, :invalid_cursor}` for a bad token.
+  """
+  @spec commit(GenServer.server(), Metadata.topic_name(), Metadata.group(), cursor()) ::
+          :ok | {:error, term()}
+  def commit(server, topic, group, cursor) do
+    case decode_cursor(cursor) do
+      {:ok, positions} -> BrokerServer.commit_offset(server, group, topic, positions)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_fetch(server, topic, positions, max) do
+    ranges = BrokerServer.active_range_ids(server, topic)
+    {records, positions} = read_ranges(server, ranges, positions, max)
+    {records, encode_cursor(positions)}
   end
 
   # --- records ---

@@ -440,8 +440,19 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     com auth (`:produce`/`:consume`), `max` limitado, records→JSON **sem offset**. **Cliente alcança o
     stack NorthGuard de ponta a ponta** — testado e2e via TCP real (produce por chave → fetch por
     cursor opaco; permissões; re-fetch vazio).
-  - ⏳ Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), consumer groups +
-    posição commitada server-side, long-poll, deploy multi-nó/replicado, payloads binários (base64).
+  - ✅ **Consumer groups + posição commitada server-side (Opção A — offsets no Metadata RSM).** Um grupo
+    consome com `fetch_group(topic, group)` (retoma da posição **duravelmente** commitada do grupo) e
+    avança-a com `commit(topic, group, cursor)` (estilo at-least-once / commit manual do Kafka). O cursor
+    segue **opaco** (o cliente nunca vê offset). Os offsets vivem no `Metadata` determinístico
+    (`{:commit_offset, group, topic, offsets}` + query `committed_offsets/3`), então ganham durabilidade
+    e HA **de graça** pelo caminho `command_fun`/`ra` existente. Exposto no `BrokerServer`/`LogApi` e no
+    `tcp_protocol` (`fetch` aceita `"group"`; nova ação `commit`). Testado: unit do Metadata (last-commit-wins,
+    grupos/topics independentes), round-trip `LogApi` (retoma após commit; re-leitura sem commit = at-least-once),
+    e2e via TCP (produce → fetch por grupo → commit → fetch retoma vazio). **Limitações conhecidas:**
+    `fetch_group` lê só ranges **ativos** (split deferido); offsets commitados crescem o estado do Metadata
+    (escala → futuro store log-based, estilo `__consumer_offsets`, alinhado ao roadmap D).
+  - ⏳ Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), long-poll, deploy
+    multi-nó/replicado, payloads binários (base64).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

@@ -199,4 +199,20 @@ defmodule Malachi.MetadataTest do
       assert replay.() == replay.()
     end
   end
+
+  describe "consumer offsets" do
+    test "commit_offset stores a group's position; committed_offsets reads it (last commit wins)" do
+      metadata = Metadata.new()
+      assert Metadata.committed_offsets(metadata, "g", "events") == %{}
+
+      {metadata, :ok} = Metadata.apply(metadata, {:commit_offset, "g", "events", %{{"events", 0} => 5}})
+      assert Metadata.committed_offsets(metadata, "g", "events") == %{{"events", 0} => 5}
+
+      # last commit wins; groups and topics are independent
+      {metadata, :ok} = Metadata.apply(metadata, {:commit_offset, "g", "events", %{{"events", 0} => 9}})
+      {metadata, :ok} = Metadata.apply(metadata, {:commit_offset, "other", "events", %{{"events", 0} => 1}})
+      assert Metadata.committed_offsets(metadata, "g", "events") == %{{"events", 0} => 9}
+      assert Metadata.committed_offsets(metadata, "other", "events") == %{{"events", 0} => 1}
+    end
+  end
 end

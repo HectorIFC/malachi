@@ -106,6 +106,22 @@ defmodule Malachi.BrokerServer do
   @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok
   def apply_heal(server, commands), do: GenServer.call(server, {:apply_heal, commands})
 
+  @doc "Durably commits a consumer group's position for a topic; returns the control-plane reply."
+  @spec commit_offset(
+          GenServer.server(),
+          Malachi.Metadata.group(),
+          Malachi.Metadata.topic_name(),
+          Malachi.Metadata.offsets()
+        ) ::
+          term()
+  def commit_offset(server, group, topic, offsets),
+    do: GenServer.call(server, {:commit_offset, group, topic, offsets})
+
+  @doc "A consumer group's committed offsets for a topic (empty if it never committed)."
+  @spec committed_offsets(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) ::
+          Malachi.Metadata.offsets()
+  def committed_offsets(server, group, topic), do: GenServer.call(server, {:committed_offsets, group, topic})
+
   @doc "Stops the server (and its replication storage)."
   @spec stop(GenServer.server()) :: :ok
   def stop(server), do: GenServer.stop(server)
@@ -195,6 +211,15 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:apply_heal, commands}, _from, state) do
     {:reply, :ok, %{state | broker: Broker.apply_heal(state.broker, commands)}}
+  end
+
+  def handle_call({:commit_offset, group, topic, offsets}, _from, state) do
+    {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:committed_offsets, group, topic}, _from, state) do
+    {:reply, Broker.committed_offsets(state.broker, group, topic), state}
   end
 
   @impl true
