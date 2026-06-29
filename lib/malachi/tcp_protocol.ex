@@ -485,9 +485,6 @@ defmodule Malachi.TCPProtocol do
 
         {:error, :queue_has_buffered_messages} ->
           send_error(socket, :queue_has_buffered_messages, transport)
-
-        {:error, reason} ->
-          send_error(socket, reason, transport)
       end
 
       :ok
@@ -743,10 +740,6 @@ defmodule Malachi.TCPProtocol do
 
             {:error, :queue_not_found} ->
               send_error(socket, :queue_not_found, transport)
-              :ok
-
-            {:error, reason} ->
-              send_error(socket, reason, transport)
               :ok
           end
 
