@@ -5,9 +5,15 @@
 
 Objetivo: reimplementar a **arquitetura** do [NorthGuard](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)
 (log storage escalável da LinkedIn) como projeto **open source em Elixir**, partindo do
-malachi atual (broker TCP 100% in-memory). Não buscamos a *escala* da LinkedIn (PB/dia em
-10k brokers); buscamos a *fidelidade de design* com performance adequada para escala
-pequena/média e um caminho claro de evolução.
+malachi atual (broker TCP 100% in-memory).
+
+> **Objetivo evoluído (a partir de 2026-06-27):** com a arquitetura NorthGuard concluída e sem SPOF
+> (control plane Raft multi-nó + data plane com replicação por quórum, self-healing, failover,
+> catch-up e membership SWIM), o novo norte é tornar o **malachi um produto escalável e vendável,
+> melhor que o Kafka open source**, usando os conceitos do NorthGuard. Hoje há **dois mundos
+> desconectados**: o broker TCP in-memory vivo (modelo de filas/pub-sub, estilo RabbitMQ) e o stack
+> NorthGuard (modelo de log, estilo Kafka). **A prioridade #1 é conectá-los** (expor o stack
+> NorthGuard ao cliente — a "Fase 3" abaixo); escala (incl. sharding) deixa de ser fora do alvo.
 
 ---
 
@@ -414,9 +420,27 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
     replicado a todos, **kill abrupto do nó-líder**, e um comando seguinte ainda comita (novo líder) com
     o metadata anterior intacto — flake-checado 5×. (Excluído do `mix test` padrão por exigir
     epmd/distribuição.) **1b concluído.**
-  - ⏳ Opcional/futuro: sharding via `ReplicatedDSRSM` (escala do control plane, não HA).
-- ⏳ Storage/metadata policies + attributes.
-- ⏳ Storage/metadata policies + attributes.
+
+### Fase 3 — Produto: conectar os dois mundos + escala (novo norte)
+Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS.
+
+- 🚧 **B — Conectar TCP/cliente ↔ stack NorthGuard (log API com cursor opaco).** Hoje o `tcp_protocol`
+  fala filas (`publish`/`subscribe`/`ack`/`channel_*`) sobre `Queue`/`Channel`; o stack NorthGuard fala
+  log sobre `BrokerServer`. **Contrato de cliente = jeito NorthGuard, NÃO Kafka:** o cliente usa
+  `topic` + **chave** (produce) + **cursor opaco** (consume) — **nunca** vê partition/offset (escondidos
+  de propósito, para o sistema split/merge/restripe por baixo sem quebrar o cliente; é o diferencial vs
+  Kafka). O cursor é um token que hoje codifica `%{range_id => offset}` por dentro, mas o cliente o trata
+  como opaco. **Prioridade #1.** Fatias:
+  - 1ª fatia: `create_topic` + `produce` (por chave) + `fetch` (por cursor opaco), aditivo sobre o TCP
+    JSON existente, `BrokerServer` single-node no app. Decode do cursor **seguro** (`binary_to_term`
+    `[:safe]` + validação de forma — input não-confiável do cliente).
+  - Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), consumer groups +
+    posição commitada server-side, long-poll, deploy multi-nó/replicado.
+- ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
+  (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
+- ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
+  por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
+  do `BrokerServer` vira por-vnode/roteado por topic).
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
 - `Malachi.SegmentStore.Native` em Rust (Rustler): O_DIRECT, cache de app, `erlang-rocksdb`.
