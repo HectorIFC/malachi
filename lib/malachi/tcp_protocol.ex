@@ -956,8 +956,10 @@ defmodule Malachi.TCPProtocol do
        )
        when is_list(records) do
     with_permission(session, :produce, socket, transport, fn ->
-      case Malachi.LogApi.produce(Malachi.LogBroker, topic, records) do
-        {:ok, count} -> send_ok(socket, %{"count" => count}, transport)
+      with {:ok, decoded} <- decode_record_values(records),
+           {:ok, count} <- Malachi.LogApi.produce(Malachi.LogBroker, topic, decoded) do
+        send_ok(socket, %{"count" => count}, transport)
+      else
         {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
       end
 
@@ -1048,11 +1050,36 @@ defmodule Malachi.TCPProtocol do
   defp record_to_json(record) do
     %{
       "key" => record.key,
-      "value" => record.value,
+      # value is always base64 on the wire, so arbitrary (non-UTF-8) bytes survive JSON transport.
+      "value" => Base.encode64(record.value),
       "headers" => Map.new(record.headers),
       "timestamp" => record.timestamp
     }
   end
+
+  # Every record `value` is base64 on the JSON wire; decode each to raw bytes before handing them to
+  # the binary-native LogApi (key/headers stay UTF-8). A non-string or non-base64 value is rejected.
+  defp decode_record_values(records) do
+    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, acc} ->
+      case decode_record_value(record) do
+        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      error -> error
+    end
+  end
+
+  defp decode_record_value(%{"value" => value} = record) when is_binary(value) do
+    case Base.decode64(value) do
+      {:ok, bytes} -> {:ok, %{record | "value" => bytes}}
+      :error -> {:error, :invalid_base64}
+    end
+  end
+
+  defp decode_record_value(_record), do: {:error, :invalid_record}
 
   defp maybe_add_field(map, msg, json_key, atom_key) do
     case Map.get(msg, json_key) do

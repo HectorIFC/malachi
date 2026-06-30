@@ -463,7 +463,16 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     (at-least-once, zero perda; splits são raros/administrativos). Testado: `Broker` (entrega cross-epoch
     exata pós-split, tailing de novos registros, range inexistente) e integração `LogApi`/`BrokerServer`
     (fresh consumer vê todos os pré+pós-split; grupo commitado reprocessa após split).
-  - ⏳ Próximas: long-poll, deploy multi-nó/replicado, payloads binários (base64).
+  - ✅ **Payloads binários (base64 no protocolo JSON).** O storage e o `LogApi` sempre aceitaram bytes
+    arbitrários (`build_record` é `is_binary(value)`); o gargalo era só a borda JSON: o `value` vinha do
+    `Jason.decode` (sempre UTF-8) e, no fetch, um `value` não-UTF-8 **derrubava o `Jason.encode!`**.
+    Agora **todo `value` no wire é base64** (escolha do esquema: uniforme): o `produce` decodifica
+    (`Base.decode64`) cada `value` para bytes antes de chamar o `LogApi`, e o `record_to_json` codifica
+    (`Base.encode64`) no fetch. base64 vive **só no `tcp_protocol`** (o `LogApi` segue binário-nativo);
+    `key`/`headers` permanecem UTF-8. base64 inválido → `:invalid_base64`. **Breaking** (clientes JSON
+    agora mandam/recebem `value` em base64). Testado e2e: round-trip de bytes não-UTF-8, base64 inválido
+    rejeitado, e os testes existentes migrados para base64.
+  - ⏳ Próximas: long-poll, deploy multi-nó/replicado.
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

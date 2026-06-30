@@ -40,7 +40,10 @@ defmodule Malachi.LogProtocolTest do
                request(socket, %{
                  "action" => "produce",
                  "topic" => topic,
-                 "records" => [%{"key" => "k1", "value" => "v1"}, %{"key" => "k2", "value" => "v2"}]
+                 "records" => [
+                   %{"key" => "k1", "value" => Base.encode64("v1")},
+                   %{"key" => "k2", "value" => Base.encode64("v2")}
+                 ]
                })
 
       assert %{"s" => "ok", "records" => records, "cursor" => cursor} =
@@ -48,7 +51,8 @@ defmodule Malachi.LogProtocolTest do
 
       # opaque cursor (a string token, not an integer offset); records carry key/value, no offset
       assert is_binary(cursor)
-      assert records |> Enum.map(& &1["value"]) |> Enum.sort() == ["v1", "v2"]
+      # value is base64 on the wire — decode to recover the original bytes
+      assert records |> Enum.map(&Base.decode64!(&1["value"])) |> Enum.sort() == ["v1", "v2"]
       assert Enum.all?(records, &(not Map.has_key?(&1, "offset")))
 
       # the cursor carries position: re-fetching with it yields nothing new
@@ -67,7 +71,11 @@ defmodule Malachi.LogProtocolTest do
                request(socket, %{
                  "action" => "produce",
                  "topic" => topic,
-                 "records" => [%{"value" => "a"}, %{"value" => "b"}, %{"value" => "c"}]
+                 "records" => [
+                   %{"value" => Base.encode64("a")},
+                   %{"value" => Base.encode64("b")},
+                   %{"value" => Base.encode64("c")}
+                 ]
                })
 
       # fetch for a group, then commit the returned cursor durably
@@ -97,6 +105,42 @@ defmodule Malachi.LogProtocolTest do
       # a null cursor is "no cursor": with a group it still resumes the group (not suppressed)
       assert %{"s" => "ok", "records" => _} =
                request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => nil, "group" => "g"})
+    end)
+  end
+
+  test "produces and fetches arbitrary binary payloads (non-UTF-8 bytes survive the round trip)" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_bin_#{System.unique_integer([:positive])}"
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+
+      payload = <<0, 159, 146, 150, 255, 0, 1>>
+      refute String.valid?(payload)
+
+      assert %{"s" => "ok", "count" => 1} =
+               request(socket, %{
+                 "action" => "produce",
+                 "topic" => topic,
+                 "records" => [%{"value" => Base.encode64(payload)}]
+               })
+
+      assert %{"s" => "ok", "records" => [record]} =
+               request(socket, %{"action" => "fetch", "topic" => topic})
+
+      assert Base.decode64!(record["value"]) == payload
+    end)
+  end
+
+  test "produce rejects a value that is not valid base64" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_badb64_#{System.unique_integer([:positive])}"
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+
+      assert %{"s" => "err", "reason" => "invalid_base64"} =
+               request(socket, %{
+                 "action" => "produce",
+                 "topic" => topic,
+                 "records" => [%{"value" => "not valid base64 !!!"}]
+               })
     end)
   end
 
