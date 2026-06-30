@@ -271,6 +271,13 @@ defmodule Malachi.Broker do
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
 
+  @typedoc """
+  Opaque per-range consume position for `read_consume/5`: `:start`, or an internal
+  `{source_index, source_offset}`. Unlike `history_cursor`, it has no `:done`: the active range is
+  tailed, so consumption never terminates.
+  """
+  @type consume_cursor :: :start | {non_neg_integer(), non_neg_integer()}
+
   @doc """
   Streams one bounded page of a range's **cross-epoch** history: records its sealed ancestors
   hold for this range's keyspace slice (oldest first, in happens-before order), then the range's
@@ -308,6 +315,33 @@ defmodule Malachi.Broker do
           {:ok, [Record.t()]} | {:error, term()}
   def read_history(%__MODULE__{} = broker, range_id, read_fun) do
     drain_history(broker, range_id, :start, [], read_fun)
+  end
+
+  @doc """
+  Reads up to `max_records` of `range_id`'s **cross-epoch** stream for live consumption: first the
+  records its sealed ancestors hold for this range's keyspace slice (oldest first, in
+  happens-before order), then the range's own records — and it **tails** the active range. Unlike
+  `stream_history/5`, the self source never terminates: when the range is caught up it returns an
+  empty page whose cursor stays on the self source, so records produced later are delivered on a
+  later call. This is what lets a consumer drain a range's full history across splits/merges (the
+  pre-split records live in the now-sealed parent's segments) without ever seeing partition/offset.
+
+  Returns `{:ok, records, next_cursor}` (call again with `next_cursor`), or `{:error,
+  :no_such_range}` if the range is unknown.
+  """
+  @spec read_consume(t(), Metadata.range_id(), consume_cursor(), pos_integer(), read_fun()) ::
+          {:ok, [Record.t()], consume_cursor()} | {:error, term()}
+  def read_consume(%__MODULE__{} = broker, range_id, cursor, max_records, read_fun)
+      when is_integer(max_records) and max_records > 0 do
+    case Metadata.get_range(broker.metadata, range_id) do
+      nil ->
+        {:error, :no_such_range}
+
+      range ->
+        sources = history_sources(range_id, range)
+        {index, offset} = normalize_cursor(cursor)
+        consume_page(broker, sources, index, offset, max_records, [], 0, read_fun)
+    end
   end
 
   # --- routing & replication ---
@@ -532,6 +566,47 @@ defmodule Malachi.Broker do
         range.key_end
       )
     end)
+  end
+
+  # Like `read_history_page`, but accumulates across sources up to `max_records` and tails the self
+  # source (the last one): when self yields :eof it pauses there (no `:done`), so a later produce is
+  # picked up on the next call. Ancestors (filtered to the target slice) are drained then skipped.
+  # A cursor's source_index past the end (e.g. a forged/stale client cursor) has nothing to read:
+  # pause here rather than crash, mirroring how an out-of-range offset yields :eof gracefully.
+  defp consume_page(_broker, sources, index, offset, _max_records, acc, _count, _read_fun)
+       when index >= length(sources) do
+    {:ok, Enum.reverse(acc), {index, offset}}
+  end
+
+  defp consume_page(broker, sources, index, offset, max_records, acc, count, read_fun) do
+    last_index = length(sources) - 1
+    {source_range_id, filter_range} = Enum.at(sources, index)
+
+    case read(broker, source_range_id, offset, max_records, read_fun) do
+      {:ok, [_ | _] = records} ->
+        kept = filter_records(records, filter_range)
+        acc = Enum.reverse(kept) ++ acc
+        count = count + length(kept)
+        next_offset = offset + length(records)
+
+        if count >= max_records do
+          {:ok, Enum.reverse(acc), {index, next_offset}}
+        else
+          consume_page(broker, sources, index, next_offset, max_records, acc, count, read_fun)
+        end
+
+      {:error, _reason} = error ->
+        error
+
+      # :eof, or a defensive empty page: this source is drained. Advance to the next ancestor, or
+      # pause on the self source so records produced later tail in on a subsequent call.
+      _eof_or_empty ->
+        if index < last_index do
+          consume_page(broker, sources, index + 1, 0, max_records, acc, count, read_fun)
+        else
+          {:ok, Enum.reverse(acc), {index, offset}}
+        end
+    end
   end
 
   defp drain_history(broker, range_id, cursor, pages, read_fun) do

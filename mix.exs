@@ -55,7 +55,8 @@ defmodule Malachi.MixProject do
       {:ra, "~> 2.16"},
 
       # Development and test dependencies - PINNED to patch-level
-      {:credo, "~> 1.7.15", only: [:dev, :test], runtime: false},
+      # 1.7.19 fixes the Credo.Code.Token sigil-token crash under Elixir 1.20 (1.7.15 crashed on ~r//).
+      {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.39.3", only: :dev, runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},

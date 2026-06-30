@@ -73,6 +73,12 @@ defmodule Malachi.BrokerServer do
   def read(server, range_id, offset, max_records),
     do: GenServer.call(server, {:read, range_id, offset, max_records})
 
+  @doc "Reads one cross-epoch consume page of a range, tailing the active range (see `Malachi.Broker.read_consume/5`)."
+  @spec read_consume(GenServer.server(), Malachi.Metadata.range_id(), Broker.consume_cursor(), pos_integer()) ::
+          {:ok, [Malachi.Log.Record.t()], Broker.consume_cursor()} | {:error, term()}
+  def read_consume(server, range_id, cursor, max_records),
+    do: GenServer.call(server, {:read_consume, range_id, cursor, max_records})
+
   @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/5`)."
   @spec stream_history(GenServer.server(), Malachi.Metadata.range_id(), Broker.history_cursor(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()], Broker.history_cursor()} | {:error, term()}
@@ -180,6 +186,10 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
     {:reply, Broker.read(state.broker, range_id, offset, max_records, &ReplicationServer.read/4), state}
+  end
+
+  def handle_call({:read_consume, range_id, cursor, max_records}, _from, state) do
+    {:reply, Broker.read_consume(state.broker, range_id, cursor, max_records, &ReplicationServer.read/4), state}
   end
 
   def handle_call({:stream_history, range_id, cursor, max_records}, _from, state) do

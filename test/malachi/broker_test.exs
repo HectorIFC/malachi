@@ -37,6 +37,17 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  # Pages `read_consume` from `cursor` until it pauses (an empty page = caught up), returning the
+  # accumulated records and the paused cursor (which can be passed back later to tail new records).
+  defp consume(broker, store, range_id, cursor), do: consume(broker, store, range_id, cursor, [])
+
+  defp consume(broker, store, range_id, cursor, accumulated) do
+    case Broker.read_consume(broker, range_id, cursor, 100, read_fun(store)) do
+      {:ok, [], next} -> {accumulated |> Enum.reverse() |> List.flatten(), next}
+      {:ok, records, next} -> consume(broker, store, range_id, next, [records | accumulated])
+    end
+  end
+
   defp segments(broker, range_id) do
     broker.metadata |> Metadata.segments_of_range(range_id) |> Enum.sort_by(& &1.start_offset)
   end
@@ -137,6 +148,55 @@ defmodule Malachi.BrokerTest do
     test "read_history of an unknown range fails", %{store: store} do
       {broker, _root_id} = broker_with_topic()
       assert Broker.read_history(broker, {"events", 999}, read_fun(store)) == {:error, :no_such_range}
+    end
+  end
+
+  describe "cross-epoch live consume (read_consume)" do
+    test "delivers pre-split records via the active children, exactly once (no loss)", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+
+      # produced before the split — these live in the parent's segments, which leave active_range_ids
+      parent_records = for index <- 0..19, do: record("v#{index}", "k#{index}")
+      {broker, {:ok, _placements}} = produce(broker, store, "events", parent_records)
+      {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
+
+      child_records = for index <- 20..39, do: record("v#{index}", "k#{index}")
+      {broker, {:ok, _placements}} = produce(broker, store, "events", child_records)
+
+      # consuming the two active children from :start reconstructs every record (pre- and post-split)
+      {left, _left_cursor} = consume(broker, store, left_id, :start)
+      {right, _right_cursor} = consume(broker, store, right_id, :start)
+      delivered = Enum.map(left ++ right, & &1.value)
+      assert Enum.sort(delivered) == Enum.sort(Enum.map(parent_records ++ child_records, & &1.value))
+    end
+
+    test "tails the active range: records produced after catching up are delivered later", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1"), record("b", "k2")])
+
+      {first, cursor} = consume(broker, store, root_id, :start)
+      assert first |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b"]
+
+      # caught up: resuming from the paused cursor yields nothing and keeps the same cursor
+      assert {:ok, [], ^cursor} = Broker.read_consume(broker, root_id, cursor, 100, read_fun(store))
+
+      # a record produced after the pause is delivered when resuming from that same cursor
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("c", "k3")])
+      {more, _cursor} = consume(broker, store, root_id, cursor)
+      assert Enum.map(more, & &1.value) == ["c"]
+    end
+
+    test "read_consume of an unknown range fails", %{store: store} do
+      {broker, _root_id} = broker_with_topic()
+      assert Broker.read_consume(broker, {"events", 999}, :start, 100, read_fun(store)) == {:error, :no_such_range}
+    end
+
+    test "read_consume with a source_index past the end pauses instead of crashing", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1")])
+
+      # a forged/stale cursor pointing past the range's sources has nothing to read — pause, no crash
+      assert {:ok, [], {9999, 0}} = Broker.read_consume(broker, root_id, {9999, 0}, 100, read_fun(store))
     end
   end
 

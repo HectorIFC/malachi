@@ -448,11 +448,22 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     e HA **de graça** pelo caminho `command_fun`/`ra` existente. Exposto no `BrokerServer`/`LogApi` e no
     `tcp_protocol` (`fetch` aceita `"group"`; nova ação `commit`). Testado: unit do Metadata (last-commit-wins,
     grupos/topics independentes), round-trip `LogApi` (retoma após commit; re-leitura sem commit = at-least-once),
-    e2e via TCP (produce → fetch por grupo → commit → fetch retoma vazio). **Limitações conhecidas:**
-    `fetch_group` lê só ranges **ativos** (split deferido); offsets commitados crescem o estado do Metadata
-    (escala → futuro store log-based, estilo `__consumer_offsets`, alinhado ao roadmap D).
-  - ⏳ Próximas: consumo multi-range com split (cursor cobrindo ranges que dividem), long-poll, deploy
-    multi-nó/replicado, payloads binários (base64).
+    e2e via TCP (produce → fetch por grupo → commit → fetch retoma vazio). Offsets commitados crescem o
+    estado do Metadata (escala → futuro store log-based, estilo `__consumer_offsets`, alinhado ao roadmap D).
+  - ✅ **Consumo split-aware (cursor cobrindo ranges que dividem).** Antes, o consumo lia só o offset
+    linear de cada range **ativo**, então registros escritos **antes** de um split (que vivem nos segments
+    do range-pai, agora selado e fora do conjunto ativo) eram **perdidos**. Agora `read_consume/5` no
+    `Broker` faz leitura **cross-epoch ao vivo**: drena os ancestrais selados (filtrados à fatia de
+    keyspace do range, via `parents` + `Keyspace`) e depois faz **tailing** do range ativo — sem marcar
+    `:done` no self (diferente de `stream_history/5`, que é para história *bounded*), reusando
+    `history_sources`/`filter_records` (DRY). A posição por range vira um `consume_cursor`
+    (`:start | {source_index, source_offset}`), carregada opacamente no cursor do cliente e nos offsets
+    commitados (tipo `Metadata.position`). `fetch`/`fetch_group` herdam o fix. **Split durante o consumo
+    (decisão A):** os filhos não herdam a posição do pai → recomeçam do início e **reprocessam** sua fatia
+    (at-least-once, zero perda; splits são raros/administrativos). Testado: `Broker` (entrega cross-epoch
+    exata pós-split, tailing de novos registros, range inexistente) e integração `LogApi`/`BrokerServer`
+    (fresh consumer vê todos os pré+pós-split; grupo commitado reprocessa após split).
+  - ⏳ Próximas: long-poll, deploy multi-nó/replicado, payloads binários (base64).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

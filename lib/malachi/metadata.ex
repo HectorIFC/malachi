@@ -64,8 +64,14 @@ defmodule Malachi.Metadata do
   @typedoc "A consumer group's name."
   @type group :: String.t()
 
-  @typedoc "A consumer position: the next offset to read in each range of a topic."
-  @type offsets :: %{range_id() => non_neg_integer()}
+  @typedoc """
+  A consumer's per-range stream position. Opaque to the metadata (it only stores/returns it); set
+  by the log layer as a `Malachi.Broker.consume_cursor` — `:start` or `{source_index, source_offset}`.
+  """
+  @type position :: :start | {non_neg_integer(), non_neg_integer()}
+
+  @typedoc "A consumer's position across the ranges of a topic."
+  @type offsets :: %{range_id() => position()}
 
   @typedoc "Identifies a consumer group's position for a topic."
   @type group_topic :: {group(), topic_name()}

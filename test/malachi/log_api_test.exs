@@ -102,4 +102,60 @@ defmodule Malachi.LogApiTest do
     :ok = LogApi.create_topic(server, "events")
     assert {:error, :invalid_cursor} = LogApi.commit(server, "events", "g", "not-base64!!")
   end
+
+  test "a forged cursor with an out-of-range source_index is handled gracefully (no crash)", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    {:ok, 1} = LogApi.produce(server, "events", [%{"value" => "a"}])
+
+    # passes shape validation, but the position points past the range's sources: empty, not a crash
+    forged = Base.url_encode64(:erlang.term_to_binary(%{{"events", 0} => {9999, 0}}))
+    assert {:ok, [], _cursor} = LogApi.fetch(server, "events", forged, 100)
+
+    # the server is still alive and serves a normal fetch
+    assert {:ok, [%{value: "a"}], _next} = LogApi.fetch(server, "events", :start, 100)
+  end
+
+  test "split-aware consume: records produced before a split are still delivered", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    # produced before the split — these live in the parent's segments, which leave the active set
+    before_split = for index <- 0..19, do: %{"key" => "k#{index}", "value" => "v#{index}"}
+    {:ok, 20} = LogApi.produce(server, "events", before_split)
+
+    [root_id] = BrokerServer.active_range_ids(server, "events")
+    {:ok, _left, _right} = BrokerServer.split_range(server, root_id)
+
+    after_split = for index <- 20..39, do: %{"key" => "k#{index}", "value" => "v#{index}"}
+    {:ok, 20} = LogApi.produce(server, "events", after_split)
+
+    # a fresh consumer sees every record (pre- and post-split); none are lost to the sealed parent
+    {:ok, records, _cursor} = LogApi.fetch_group(server, "events", "g_fresh", 100)
+    values = Enum.map(records, & &1.value)
+    assert length(values) == 40
+    assert Enum.sort(values) == Enum.sort(Enum.map(before_split ++ after_split, & &1["value"]))
+  end
+
+  test "after a split, a committed group reprocesses its slice from the active children", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    before_split = for index <- 0..9, do: %{"key" => "k#{index}", "value" => "v#{index}"}
+    {:ok, 10} = LogApi.produce(server, "events", before_split)
+
+    # the group consumes the root range and commits its position
+    {:ok, first, cursor} = LogApi.fetch_group(server, "events", "g", 100)
+    assert length(first) == 10
+    :ok = LogApi.commit(server, "events", "g", cursor)
+    assert {:ok, [], _cursor} = LogApi.fetch_group(server, "events", "g", 100)
+
+    # the range the group was reading splits; the children carry no inherited position
+    [root_id] = BrokerServer.active_range_ids(server, "events")
+    {:ok, _left, _right} = BrokerServer.split_range(server, root_id)
+
+    # resuming reprocesses the slice via the active children (at-least-once, no loss)
+    {:ok, again, _cursor} = LogApi.fetch_group(server, "events", "g", 100)
+    assert again |> Enum.map(& &1.value) |> Enum.sort() == Enum.sort(Enum.map(before_split, & &1["value"]))
+  end
 end

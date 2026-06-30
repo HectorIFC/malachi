@@ -137,13 +137,19 @@ defmodule Malachi.LogApi do
 
   # --- reading ---
 
+  # Each active range is consumed cross-epoch (its sealed ancestors' records for this range's slice,
+  # then its own records — tailing the active range), so records produced before a split (which live
+  # in the now-sealed parent's segments) are still delivered. The per-range position is an opaque
+  # `Broker.consume_cursor` (`:start` until the range is first read). When a range being read splits,
+  # the active children carry no inherited position, so they resume from `:start` and reprocess their
+  # slice — at-least-once, no loss (splits are rare/administrative).
   defp read_ranges(server, ranges, positions, max) do
     Enum.reduce(ranges, {[], positions}, fn range_id, {acc, positions} ->
-      offset = Map.get(positions, range_id, 0)
+      cursor = Map.get(positions, range_id, :start)
 
-      case BrokerServer.read(server, range_id, offset, max) do
-        {:ok, records} -> {acc ++ records, Map.put(positions, range_id, offset + length(records))}
-        _eof_or_error -> {acc, positions}
+      case BrokerServer.read_consume(server, range_id, cursor, max) do
+        {:ok, records, next_cursor} -> {acc ++ records, Map.put(positions, range_id, next_cursor)}
+        {:error, _reason} -> {acc, positions}
       end
     end)
   end
@@ -176,8 +182,8 @@ defmodule Malachi.LogApi do
 
   defp valid_positions?(positions) when is_map(positions) do
     Enum.all?(positions, fn
-      {{topic, seq}, offset} ->
-        is_binary(topic) and is_integer(seq) and seq >= 0 and is_integer(offset) and offset >= 0
+      {{topic, seq}, position} ->
+        is_binary(topic) and is_integer(seq) and seq >= 0 and valid_position?(position)
 
       _other ->
         false
@@ -185,4 +191,13 @@ defmodule Malachi.LogApi do
   end
 
   defp valid_positions?(_other), do: false
+
+  # A per-range consume position (a `Broker.consume_cursor`): the start sentinel or an internal
+  # `{source_index, source_offset}` pair, both non-negative.
+  defp valid_position?(:start), do: true
+
+  defp valid_position?({source_index, source_offset}),
+    do: is_integer(source_index) and source_index >= 0 and is_integer(source_offset) and source_offset >= 0
+
+  defp valid_position?(_other), do: false
 end
