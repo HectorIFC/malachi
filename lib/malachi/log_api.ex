@@ -11,9 +11,10 @@ defmodule Malachi.LogApi do
   `%{range_id => next_offset}`, but its contents are not part of the contract. Because it comes from
   an untrusted client, `decode_cursor/1` uses `binary_to_term(_, [:safe])` and validates the shape.
 
-  This is the first slice: `create_topic`, `produce` (by key), and `fetch` (by cursor) on a topic's
-  current ranges. Consumer groups, server-side committed positions, long-poll, and consuming across
-  ranges that split are later slices.
+  `create_topic`, `produce` (by key) and `fetch`/`fetch_group` (by opaque cursor) over a topic's
+  ranges, including consumer groups with server-side committed positions, cross-epoch consume across
+  ranges that split, and long-poll (`fetch`/`fetch_group` with `wait_ms`). The read orchestration
+  itself lives in `Malachi.BrokerServer` (one coherent call that can also park long-poll waiters).
   """
 
   alias Malachi.BrokerServer
@@ -60,12 +61,12 @@ defmodule Malachi.LogApi do
   `:start` begins at the beginning). Returns `{:ok, records, next_cursor}` — advance by passing
   `next_cursor` back. Records carry no client-visible offset.
   """
-  @spec fetch(GenServer.server(), Metadata.topic_name(), cursor() | nil | :start, pos_integer()) ::
+  @spec fetch(GenServer.server(), Metadata.topic_name(), cursor() | nil | :start, pos_integer(), non_neg_integer()) ::
           {:ok, [Record.t()], cursor()} | {:error, term()}
-  def fetch(server, topic, cursor, max) when is_integer(max) and max > 0 do
+  def fetch(server, topic, cursor, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     case decode_cursor(cursor) do
       {:ok, positions} ->
-        {records, next_cursor} = do_fetch(server, topic, positions, max)
+        {records, next_cursor} = do_fetch(server, topic, positions, max, wait_ms)
         {:ok, records, next_cursor}
 
       {:error, reason} ->
@@ -78,11 +79,11 @@ defmodule Malachi.LogApi do
   beginning if it never committed). Returns `{:ok, records, next_cursor}`; the client processes the
   records and then `commit/4`s `next_cursor` to advance the durable position (at-least-once).
   """
-  @spec fetch_group(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer()) ::
+  @spec fetch_group(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer(), non_neg_integer()) ::
           {:ok, [Record.t()], cursor()}
-  def fetch_group(server, topic, group, max) when is_integer(max) and max > 0 do
+  def fetch_group(server, topic, group, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     positions = BrokerServer.committed_offsets(server, group, topic)
-    {records, next_cursor} = do_fetch(server, topic, positions, max)
+    {records, next_cursor} = do_fetch(server, topic, positions, max, wait_ms)
     {:ok, records, next_cursor}
   end
 
@@ -99,10 +100,9 @@ defmodule Malachi.LogApi do
     end
   end
 
-  defp do_fetch(server, topic, positions, max) do
-    ranges = BrokerServer.active_range_ids(server, topic)
-    {records, positions} = read_ranges(server, ranges, positions, max)
-    {records, encode_cursor(positions)}
+  defp do_fetch(server, topic, positions, max, wait_ms) do
+    {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
+    {records, encode_cursor(next_positions)}
   end
 
   # --- records ---
@@ -134,25 +134,6 @@ defmodule Malachi.LogApi do
   end
 
   defp headers(_record), do: []
-
-  # --- reading ---
-
-  # Each active range is consumed cross-epoch (its sealed ancestors' records for this range's slice,
-  # then its own records — tailing the active range), so records produced before a split (which live
-  # in the now-sealed parent's segments) are still delivered. The per-range position is an opaque
-  # `Broker.consume_cursor` (`:start` until the range is first read). When a range being read splits,
-  # the active children carry no inherited position, so they resume from `:start` and reprocess their
-  # slice — at-least-once, no loss (splits are rare/administrative).
-  defp read_ranges(server, ranges, positions, max) do
-    Enum.reduce(ranges, {[], positions}, fn range_id, {acc, positions} ->
-      cursor = Map.get(positions, range_id, :start)
-
-      case BrokerServer.read_consume(server, range_id, cursor, max) do
-        {:ok, records, next_cursor} -> {acc ++ records, Map.put(positions, range_id, next_cursor)}
-        {:error, _reason} -> {acc, positions}
-      end
-    end)
-  end
 
   # --- opaque cursor ---
 

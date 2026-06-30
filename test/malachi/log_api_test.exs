@@ -103,6 +103,34 @@ defmodule Malachi.LogApiTest do
     assert {:error, :invalid_cursor} = LogApi.commit(server, "events", "g", "not-base64!!")
   end
 
+  test "fetch with wait blocks until a record is produced (long-poll)", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    task = Task.async(fn -> LogApi.fetch(server, "events", :start, 100, 2_000) end)
+    wait_for_park(server)
+
+    {:ok, 1} = LogApi.produce(server, "events", [%{"value" => "a"}])
+
+    assert {:ok, [%{value: "a"}], _cursor} = Task.await(task)
+  end
+
+  test "fetch with wait returns empty after the timeout when nothing is produced", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    assert {:ok, [], _cursor} = LogApi.fetch(server, "events", :start, 100, 50)
+  end
+
+  defp wait_for_park(server, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+
+    cond do
+      length(:sys.get_state(server).waiters) >= 1 -> :ok
+      System.monotonic_time(:millisecond) > deadline -> flunk("expected a parked waiter")
+      true -> Process.sleep(2) && wait_for_park(server, deadline)
+    end
+  end
+
   test "a forged cursor with an out-of-range source_index is handled gracefully (no crash)", %{tmp_dir: directory} do
     server = start_broker(directory)
     :ok = LogApi.create_topic(server, "events")

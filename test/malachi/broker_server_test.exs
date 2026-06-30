@@ -31,6 +31,57 @@ defmodule Malachi.BrokerServerTest do
     end
   end
 
+  # Deterministically wait until `count` long-poll waiters are parked (avoids sleep-based flakiness).
+  defp wait_for_park(server, count \\ 1, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+
+    cond do
+      length(:sys.get_state(server).waiters) >= count -> :ok
+      System.monotonic_time(:millisecond) > deadline -> flunk("expected #{count} parked waiter(s)")
+      true -> Process.sleep(2) && wait_for_park(server, count, deadline)
+    end
+  end
+
+  describe "long-poll consume" do
+    test "consume returns immediately when wait_ms is 0", %{tmp_dir: directory} do
+      {server, _root} = with_topic(directory)
+      assert {[], _positions} = BrokerServer.consume(server, "events", %{}, 100, 0)
+    end
+
+    test "consume with wait blocks until a produce wakes it", %{tmp_dir: directory} do
+      {server, _root} = with_topic(directory)
+
+      task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
+      wait_for_park(server)
+
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0")])
+
+      assert {records, _positions} = Task.await(task)
+      assert Enum.map(records, & &1.value) == ["a"]
+    end
+
+    test "consume with wait returns empty after the timeout when nothing is produced", %{tmp_dir: directory} do
+      {server, _root} = with_topic(directory)
+      assert {[], _positions} = BrokerServer.consume(server, "events", %{}, 100, 50)
+    end
+
+    test "a produce wakes only waiters on the produced topic", %{tmp_dir: directory} do
+      server = start(directory)
+      {:ok, _} = BrokerServer.create_topic(server, "events", 4)
+      {:ok, _} = BrokerServer.create_topic(server, "other", 4)
+
+      events_task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 300) end)
+      other_task = Task.async(fn -> BrokerServer.consume(server, "other", %{}, 100, 300) end)
+      wait_for_park(server, 2)
+
+      {:ok, _} = BrokerServer.produce(server, "events", [record("a", "k0")])
+
+      # the events waiter wakes with data; the other waiter is untouched and times out empty
+      assert {[%{value: "a"}], _} = Task.await(events_task)
+      assert {[], _} = Task.await(other_task, 1_000)
+    end
+  end
+
   describe "durability" do
     test "records are durable on return — no explicit sync needed", %{tmp_dir: directory} do
       {server, root_id} = with_topic(directory)

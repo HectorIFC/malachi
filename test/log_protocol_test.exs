@@ -13,6 +13,24 @@ defmodule Malachi.LogProtocolTest do
     Jason.decode!(String.trim(line))
   end
 
+  # Deterministically wait until the live LogBroker has a parked long-poll waiter.
+  defp wait_for_park(deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 3_000
+
+    cond do
+      log_broker_waiters() >= 1 -> :ok
+      System.monotonic_time(:millisecond) > deadline -> flunk("the long-poll consumer did not park")
+      true -> Process.sleep(5) && wait_for_park(deadline)
+    end
+  end
+
+  defp log_broker_waiters do
+    case Process.whereis(Malachi.LogBroker) do
+      nil -> 0
+      pid -> length(:sys.get_state(pid).waiters)
+    end
+  end
+
   defp with_session(username, password, fun) do
     case TCPHelper.connect(port: @port) do
       {:ok, socket} ->
@@ -141,6 +159,46 @@ defmodule Malachi.LogProtocolTest do
                  "topic" => topic,
                  "records" => [%{"value" => "not valid base64 !!!"}]
                })
+    end)
+  end
+
+  test "fetch with wait resumes when another client produces (long-poll)" do
+    topic = "logproto_lp_#{System.unique_integer([:positive])}"
+
+    with_session("app", "app123", fn socket ->
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+    end)
+
+    # a consumer long-polls an empty topic in a separate task; it parks until a produce arrives
+    consumer =
+      Task.async(fn ->
+        with_session("app", "app123", fn socket ->
+          request(socket, %{"action" => "fetch", "topic" => topic, "wait" => 3_000})
+        end)
+      end)
+
+    wait_for_park()
+
+    with_session("app", "app123", fn socket ->
+      assert %{"s" => "ok", "count" => 1} =
+               request(socket, %{
+                 "action" => "produce",
+                 "topic" => topic,
+                 "records" => [%{"value" => Base.encode64("a")}]
+               })
+    end)
+
+    assert %{"s" => "ok", "records" => [record]} = Task.await(consumer, 5_000)
+    assert Base.decode64!(record["value"]) == "a"
+  end
+
+  test "fetch with wait returns empty after the timeout (long-poll)" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_lpto_#{System.unique_integer([:positive])}"
+      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+
+      assert %{"s" => "ok", "records" => []} =
+               request(socket, %{"action" => "fetch", "topic" => topic, "wait" => 100})
     end)
   end
 

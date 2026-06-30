@@ -970,15 +970,16 @@ defmodule Malachi.TCPProtocol do
   defp handle_action(socket, %{"action" => "fetch", "topic" => topic} = msg, session, transport, _client_ip) do
     with_permission(session, :consume, socket, transport, fn ->
       max = fetch_max(Map.get(msg, "max"))
+      wait_ms = fetch_wait(Map.get(msg, "wait"))
 
       result =
         cond do
           # An explicit cursor (client-managed paging) takes precedence over a group resume. Any
           # present, non-null cursor is forwarded to `fetch`, which validates it and returns
           # `:invalid_cursor` for a malformed token (rather than silently restarting the stream).
-          msg["cursor"] != nil -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, msg["cursor"], max)
-          is_binary(msg["group"]) -> Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, msg["group"], max)
-          true -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, max)
+          msg["cursor"] != nil -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, msg["cursor"], max, wait_ms)
+          is_binary(msg["group"]) -> Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, msg["group"], max, wait_ms)
+          true -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
         end
 
       case result do
@@ -1045,6 +1046,10 @@ defmodule Malachi.TCPProtocol do
   # Bound the client-supplied page size: a positive integer, capped, defaulting to 100.
   defp fetch_max(max) when is_integer(max) and max > 0, do: min(max, 1_000)
   defp fetch_max(_max), do: 100
+
+  # Long-poll wait in ms, opt-in and clamped to a 30s ceiling. Absent/invalid means no wait (0).
+  defp fetch_wait(wait) when is_integer(wait) and wait > 0, do: min(wait, 30_000)
+  defp fetch_wait(_wait), do: 0
 
   # The client gets key/value/headers/timestamp — never an offset (the cursor carries position).
   defp record_to_json(record) do

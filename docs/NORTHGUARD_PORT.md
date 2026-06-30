@@ -472,7 +472,21 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `key`/`headers` permanecem UTF-8. base64 inválido → `:invalid_base64`. **Breaking** (clientes JSON
     agora mandam/recebem `value` em base64). Testado e2e: round-trip de bytes não-UTF-8, base64 inválido
     rejeitado, e os testes existentes migrados para base64.
-  - ⏳ Próximas: long-poll, deploy multi-nó/replicado.
+  - ✅ **Long-poll no `fetch`/`fetch_group` (event-driven, *waiters* no `BrokerServer`).** Antes, um
+    consumidor *caught up* recebia `[]` na hora e tinha que re-pollar (busy-poll). Agora um `wait_ms`
+    opcional (clampado a 30s no `tcp_protocol`) faz a chamada **bloquear** até um produce ao topic
+    entregar dados ou o timeout expirar (`[]`). Mecanismo escolhido após **benchmark** (`bench/`): A —
+    *waiters* dentro do `BrokerServer` (o GenServer que já serializa produce+fetch) guardam os fetches
+    pendentes vazios (`{from, topic, positions, max}` + timer); o `produce` ao topic re-consome cada
+    waiter e responde (`GenServer.reply`) os que têm dados, o timeout responde `[]`. Medições: A entrega
+    ~35-47% mais rápido que pub/sub via Registry (B) em todas as escalas e é **self-contained** (sem
+    estado global); o contra de A (produtor bloqueia no fan-out) só é material com milhares de
+    consumidores no mesmo topic — fora do single-node atual; ao ir multi-nó, o fan-out migra para um
+    mecanismo distribuído. A orquestração de leitura multi-range **migrou** do `LogApi` para o
+    `BrokerServer` (`consume_ranges`): 1 call coesa em vez de N+1, e é o que o produce re-executa para
+    acordar waiters. Testado: `BrokerServer` (acorda no produce, timeout vazio, acorda só o topic
+    produzido), `LogApi` (bloqueia até produce; timeout), e2e TCP (wake por produtor concorrente; timeout).
+  - ⏳ Próximas: deploy multi-nó/replicado.
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

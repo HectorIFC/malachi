@@ -79,6 +79,19 @@ defmodule Malachi.BrokerServer do
   def read_consume(server, range_id, cursor, max_records),
     do: GenServer.call(server, {:read_consume, range_id, cursor, max_records})
 
+  @doc """
+  Consumes a topic's current ranges from `positions`, returning `{records, next_positions}`. When
+  `wait_ms > 0` and nothing is available yet, the call blocks (long-poll) until a produce to the
+  topic delivers data or `wait_ms` elapses (then `records` is `[]`). With `wait_ms == 0` it returns
+  immediately. `positions`/`next_positions` map each range id to its `Broker.consume_cursor`.
+  """
+  @spec consume(GenServer.server(), Malachi.Metadata.topic_name(), map(), pos_integer(), non_neg_integer()) ::
+          {[Malachi.Log.Record.t()], map()}
+  def consume(server, topic, positions, max_records, wait_ms) do
+    # The call may block up to wait_ms server-side; give it headroom over the default 5s call timeout.
+    GenServer.call(server, {:consume, topic, positions, max_records, wait_ms}, wait_ms + 5_000)
+  end
+
   @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/5`)."
   @spec stream_history(GenServer.server(), Malachi.Metadata.range_id(), Broker.history_cursor(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()], Broker.history_cursor()} | {:error, term()}
@@ -166,7 +179,10 @@ defmodule Malachi.BrokerServer do
       broker: broker,
       replication: owned_replication,
       live_brokers: live_brokers,
-      refresh_interval: refresh_interval
+      refresh_interval: refresh_interval,
+      # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
+      # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
+      waiters: []
     }
 
     if live_brokers, do: schedule_refresh(state)
@@ -181,7 +197,23 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:produce, topic, records}, _from, state) do
     {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
-    {:reply, reply, %{state | broker: broker}}
+    state = wake_waiters(%{state | broker: broker}, topic, reply)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:consume, topic, positions, max_records, wait_ms}, from, state) do
+    case consume_ranges(state.broker, topic, positions, max_records) do
+      # Caught up and willing to wait: park the request; a later produce to this topic (or the
+      # timeout) replies. Hold the original positions so the wake re-consumes from the same place.
+      {[], _positions} when wait_ms > 0 ->
+        ref = make_ref()
+        timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
+        waiter = %{ref: ref, timer: timer, from: from, topic: topic, positions: positions, max: max_records}
+        {:noreply, %{state | waiters: [waiter | state.waiters]}}
+
+      {records, next_positions} ->
+        {:reply, {records, next_positions}, state}
+    end
   end
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
@@ -233,6 +265,18 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  def handle_info({:longpoll_timeout, ref}, state) do
+    case Enum.split_with(state.waiters, &(&1.ref == ref)) do
+      {[waiter], rest} ->
+        GenServer.reply(waiter.from, {[], waiter.positions})
+        {:noreply, %{state | waiters: rest}}
+
+      # Already woken by a produce (timer raced the reply); nothing to do.
+      {[], _rest} ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(:refresh_brokers, state) do
     broker =
       case state.live_brokers.() do
@@ -254,6 +298,45 @@ defmodule Malachi.BrokerServer do
   # --- internals ---
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
+
+  # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
+  # returns {records, next_positions}. This is the read orchestration the LogApi used to do client-side;
+  # holding it here lets a single call serve a fetch and lets produce re-run it to wake long-pollers.
+  defp consume_ranges(broker, topic, positions, max_records) do
+    broker
+    |> Broker.active_range_ids(topic)
+    |> Enum.reduce({[], positions}, fn range_id, {acc, positions} ->
+      cursor = Map.get(positions, range_id, :start)
+
+      case Broker.read_consume(broker, range_id, cursor, max_records, &ReplicationServer.read/4) do
+        {:ok, records, next_cursor} -> {acc ++ records, Map.put(positions, range_id, next_cursor)}
+        {:error, _reason} -> {acc, positions}
+      end
+    end)
+  end
+
+  # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
+  # drop) the ones that now have data, leaving the rest parked until their timeout.
+  defp wake_waiters(state, _topic, {:error, _reason}), do: state
+
+  defp wake_waiters(state, topic, {:ok, _placements}) do
+    {on_topic, others} = Enum.split_with(state.waiters, &(&1.topic == topic))
+
+    still_waiting =
+      Enum.reduce(on_topic, [], fn waiter, keep ->
+        case consume_ranges(state.broker, waiter.topic, waiter.positions, waiter.max) do
+          {[], _positions} ->
+            [waiter | keep]
+
+          {records, next_positions} ->
+            Process.cancel_timer(waiter.timer)
+            GenServer.reply(waiter.from, {records, next_positions})
+            keep
+        end
+      end)
+
+    %{state | waiters: others ++ still_waiting}
+  end
 
   # In-memory metadata by default; with a cluster name, route mutations through that ra cluster and
   # seed the broker's cache from the replicated state (so it recovers prior metadata on start).
