@@ -97,6 +97,14 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @doc """
+  Deletes `segment_id`'s stored data from this server (used by retention once the control plane has
+  dropped the segment). Idempotent — deleting an unknown or already-removed segment is `:ok`, and it
+  also clears any on-disk files left after a restart when the log was not reopened.
+  """
+  @spec delete(term(), term()) :: :ok
+  def delete(ref, segment_id), do: GenServer.call(ref, {:delete, segment_id})
+
+  @doc """
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
   is the offset the batch must start at — it must equal this server's current end for the segment
   (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
@@ -181,6 +189,20 @@ defmodule Malachi.Cluster.ReplicationServer do
     case Map.fetch(state.logs, segment_id) do
       :error -> {:reply, :eof, state}
       {:ok, log} -> {:reply, Log.read(log, offset, max_records), state}
+    end
+  end
+
+  def handle_call({:delete, segment_id}, _from, state) do
+    case Map.pop(state.logs, segment_id) do
+      # Open here: close and drop its whole directory.
+      {%Log{} = log, logs} ->
+        :ok = Log.delete(log)
+        {:reply, :ok, %{state | logs: logs}}
+
+      # Not open (never replicated here, or not reopened after a restart): clear any files on disk.
+      {nil, logs} ->
+        _ = File.rm_rf(segment_directory(state.directory, segment_id))
+        {:reply, :ok, %{state | logs: logs}}
     end
   end
 

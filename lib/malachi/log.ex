@@ -158,6 +158,18 @@ defmodule Malachi.Log do
   def close(%__MODULE__{active: nil}), do: :ok
   def close(%__MODULE__{} = log), do: log.store.close(log.active)
 
+  @doc """
+  Closes the log and removes its directory with every segment file — irreversible. The log owns its
+  directory, so this drops all of its data (used by retention to expire a whole segment). Best-effort
+  on the file removal: a leftover file without control-plane metadata is harmless.
+  """
+  @spec delete(t()) :: :ok
+  def delete(%__MODULE__{} = log) do
+    _ = close(log)
+    _ = File.rm_rf(log.directory)
+    :ok
+  end
+
   # --- internals ---
 
   defp recover_with_segments(directory, store, segment_opts, base_offsets) do

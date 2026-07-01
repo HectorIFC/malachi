@@ -540,8 +540,15 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     determinístico entre réplicas). Novo comando `{:delete_segment, segment_id}`: remove um segment
     **selado** do control plane (`:segment_active` se ainda ativo — nunca dropa o ativo; `:no_such_segment`
     se ausente). Testado: unit do `delete_segment` (selado/ativo/inexistente), `sealed_at` no seal,
-    determinismo preservado (property tests). **Próximo:** storage delete (`SegmentStore`/`Log`/
-    `ReplicationServer`), depois C1b (coordenador + read path que avança em dado expirado).
+    determinismo preservado (property tests).
+  - ✅ **C1a — storage delete.** Cada segment do broker é um `Log` num subdiretório próprio, e o
+    `ReplicationServer` guarda `logs: %{segment_id => Log}`; então deletar é **fechar o `Log` + apagar o
+    diretório** — sem precisar de delete granular no `SegmentStore`. `Log.delete/1` (fecha + `rm_rf` do
+    diretório, best-effort). `ReplicationServer.delete/2` (client + handle_call): fecha/apaga se o log
+    está aberto, senão limpa arquivos órfãos em disco (pós-restart); **idempotente** (deletar um segment
+    desconhecido é `:ok`). Testado: `Log.delete` (diretório some), `ReplicationServer.delete` (dados
+    somem → read vira `:eof`; idempotência). **Próximo:** C1b (RetentionCoordinator + política tempo/tamanho
+    + read path que avança em dado expirado + fiação).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

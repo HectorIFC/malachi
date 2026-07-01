@@ -47,6 +47,15 @@ defmodule Malachi.LogTest do
       :ok = Log.close(log)
     end
 
+    test "delete closes the log and removes its directory and all data", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
+      assert Path.wildcard(Path.join(directory, "*.log")) != []
+
+      assert Log.delete(log) == :ok
+      refute File.exists?(directory)
+    end
+
     test "reads from a sealed segment use the persisted index", %{tmp_dir: directory} do
       {:ok, log} = open(directory)
       log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)

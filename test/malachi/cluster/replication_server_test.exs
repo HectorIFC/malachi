@@ -34,6 +34,19 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  test "delete removes a stored segment's data and is idempotent" do
+    ref = start_broker()
+    assert {:ok, 1} = ReplicationServer.replicate(ref, @segment, [ref], 0, records(["a", "b"]))
+    assert read_values(ref, @segment) == ["a", "b"]
+
+    assert ReplicationServer.delete(ref, @segment) == :ok
+    # the segment is gone — a read finds nothing (:eof -> [])
+    assert read_values(ref, @segment) == []
+
+    # deleting an already-removed (now unknown) segment is still :ok
+    assert ReplicationServer.delete(ref, @segment) == :ok
+  end
+
   test "a write still commits with one follower down (quorum tolerated)" do
     [primary, f1, f2] = replica_set = [start_broker(), start_broker(), start_broker()]
     :ok = stop_supervised!(f2)
