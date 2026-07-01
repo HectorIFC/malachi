@@ -20,6 +20,16 @@ defmodule Malachi.Cluster.MembershipServerTest do
     end
   end
 
+  test "self_ref is the member's gossiped identity, distinct from the local registered name" do
+    name = :"msr_#{System.unique_integer([:positive])}"
+    self_ref = {:msr_id, name}
+
+    start_supervised!({MembershipServer, [name: name, self_ref: self_ref, peers: []] ++ @timings}, id: name)
+
+    # the server registers under `name` (callable), but its own identity in the view is `self_ref`
+    assert MembershipServer.alive_members(name) == [self_ref]
+  end
+
   test "gossip spreads partial seed knowledge until every node knows every node" do
     suffix = System.unique_integer([:positive])
     a = :"ms_a_#{suffix}"

@@ -41,21 +41,27 @@ defmodule Malachi.Cluster.MembershipServer do
   Starts a membership server.
 
   ## Options
-    * `:name` (optional) - the reference this server is known by; its pid when omitted.
+    * `:name` (optional) - the local registered name to start the GenServer under.
+    * `:self_ref` (optional) - the reference this member is **known by to peers** and gossips as its
+      own identity. Across nodes this must be a node-qualified `{name, node()}` (not a bare local
+      name, which would resolve to a different server on each node). Defaults to `:name`, then the pid.
     * `:peers` - seed peer references, learned as `:alive`.
     * `:protocol_period` / `:ack_timeout` / `:suspicion_timeout` - detector timings in ms.
     * `:indirect_timeout` - ms to wait for an indirect (relayed) ack (default `ack_timeout`).
     * `:indirect_fanout` - number of peers asked to relay a ping (default 3).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts) do
-    gen_server_opts =
-      case Keyword.fetch(opts, :name) do
-        {:ok, name} -> [name: name]
-        :error -> []
-      end
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, gen_server_opts(opts))
 
-    GenServer.start_link(__MODULE__, opts, gen_server_opts)
+  @doc "Like `start_link/1` but not linked to the caller (e.g. to start on a remote node)."
+  @spec start(keyword()) :: GenServer.on_start()
+  def start(opts), do: GenServer.start(__MODULE__, opts, gen_server_opts(opts))
+
+  defp gen_server_opts(opts) do
+    case Keyword.fetch(opts, :name) do
+      {:ok, name} -> [name: name]
+      :error -> []
+    end
   end
 
   @doc "The sorted list of currently alive members (the live broker set)."
@@ -70,7 +76,9 @@ defmodule Malachi.Cluster.MembershipServer do
 
   @impl true
   def init(opts) do
-    self_ref = Keyword.get(opts, :name) || self()
+    # Identity gossiped to peers: prefer an explicit node-qualified :self_ref, else the local :name,
+    # else the pid. The local :name still registers the process (see gen_server_opts/1).
+    self_ref = Keyword.get(opts, :self_ref) || Keyword.get(opts, :name) || self()
     ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
     state = %{

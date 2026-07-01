@@ -509,8 +509,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       Fiação testável por funções puras (`Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
       quórum/tolerância já é coberto por `replication_server_test`, e a integração (BrokerServer + 3 brokers
       + rf=3 + ra → produce/consume por quórum ponta a ponta) por `broker_server_ra_test`.
-    - ⏳ **D3 — Membership + healing/failover ao vivo** (`MembershipServer` SWIM alimentando `live_brokers`
-      + `HealCoordinator`).
+    - 🚧 **D3 — Membership + healing/failover ao vivo.**
+      - ✅ **D3a — `MembershipServer` cross-node.** O SWIM identificava cada membro pelo `self_ref`, que
+        era o `:name` de registro — os testes eram todos in-process (átomos únicos). Cross-node isso
+        colidia: o mesmo átomo `Malachi.LogMembership` resolve para o servidor **local** em cada nó, então
+        o remetente gossipado apontava para o próprio receptor e a view não convergia. Agora o
+        `MembershipServer` aceita `:self_ref` (identidade **node-qualified** `{name, node()}`, gossipada)
+        distinto do `:name` (registro local), + `start/1` (não-linkado, p/ iniciar em nós remotos). Provado
+        por **teste multinode** real (`membership_ha_test`): 3 nós `:peer` convergem via seeds e detectam a
+        morte de um nó (SWIM: suspeita → dead → sai do alive set).
+      - ⏳ **D3b — Fiação na app**: subir o `MembershipServer` (seeds estáticos = `log_nodes`), derivar
+        `live_brokers` de `alive_members` (→ refs `{Malachi.LogReplication, node}`), e subir o
+        `HealCoordinator` (self-healing de segments sob-replicados + failover de primário).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
