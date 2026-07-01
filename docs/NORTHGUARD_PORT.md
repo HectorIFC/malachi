@@ -486,7 +486,22 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `BrokerServer` (`consume_ranges`): 1 call coesa em vez de N+1, e é o que o produce re-executa para
     acordar waiters. Testado: `BrokerServer` (acorda no produce, timeout vazio, acorda só o topic
     produzido), `LogApi` (bloqueia até produce; timeout), e2e TCP (wake por produtor concorrente; timeout).
-  - ⏳ Próximas: deploy multi-nó/replicado.
+  - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
+    testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
+    failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
+    detecta falhas em runtime; `libcluster` fica para depois).
+    - ✅ **D1 — Control plane HA (metadata via `ra`).** `application.ex` sobe o `Malachi.LogBroker` com
+      `metadata_cluster`/`metadata_nodes` quando `:log_cluster` está configurado (env
+      `MALACHIMQ_LOG_CLUSTER`/`MALACHIMQ_LOG_NODES`/`MALACHIMQ_RA_DATA_DIR`), iniciando `ra`; **ausente
+      = single-node in-memory** (default preservado). A decisão config→opções é uma função pura
+      testável (`Application.metadata_cluster_opts/2`). O mecanismo (metadata sobrevive à perda do
+      líder) já é provado por `metadata_ha_test`/`broker_server_ra_test` — não duplicado. Também
+      **isolado o `log_data_dir` por execução de teste** (`config/test.exs`): o dir fixo persistia entre
+      runs e, com metadata in-memory reiniciando, um topic reusado colidia com um segment em disco
+      (`Log.ensure_active :already_exists`) → flakiness e2e; agora cada run usa um dir próprio, limpo no
+      `after_suite`.
+    - ⏳ **D2 — Data plane replicado** (`ReplicationServer` por nó, `replication_factor > 1`, brokers
+      remotos). ⏳ **D3 — Membership + healing/failover ao vivo** (`MembershipServer` SWIM + `HealCoordinator`).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

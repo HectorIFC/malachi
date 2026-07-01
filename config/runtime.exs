@@ -93,7 +93,20 @@ config :malachi,
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
   channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),
   shard_count: String.to_integer(System.get_env("MALACHIMQ_SHARD_COUNT") || "1000"),
-  mnesia_dir: System.get_env("MALACHIMQ_MNESIA_DIR") || "./data/mnesia"
+  mnesia_dir: System.get_env("MALACHIMQ_MNESIA_DIR") || "./data/mnesia",
+  # NorthGuard log control plane. Absent MALACHIMQ_LOG_CLUSTER => single-node in-memory metadata
+  # (the default). Set it (with the peer node names) for a replicated, HA control plane over `ra`.
+  # Node/cluster names come from a trusted operator (deploy config), so String.to_atom is fine here.
+  log_cluster:
+    (case System.get_env("MALACHIMQ_LOG_CLUSTER") do
+       cluster when cluster in [nil, ""] -> nil
+       cluster -> String.to_atom(cluster)
+     end),
+  log_nodes:
+    (System.get_env("MALACHIMQ_LOG_NODES") || "")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.to_atom(String.trim(&1))),
+  ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments
 # Test environment sets these in test.exs with permissive values
