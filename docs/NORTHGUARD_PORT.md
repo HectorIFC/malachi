@@ -531,8 +531,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
   - ✅ **Deploy multi-nó/replicado completo** (D1 control plane HA + D2 data plane replicado + D3
     membership/healing/failover ao vivo). Ligado por config estática; `libcluster` (descoberta dinâmica)
     fica como conveniência futura.
-- ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
-  (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
+- 🚧 **C — Features NorthGuard restantes.** Decisão: começar por **C1 — retenção (tempo+tamanho)**;
+  attributes (C2) e policies (C3) depois. Design aprovado: `sealed_at` explícito no segment (idade),
+  retenção por tamanho **por range**, e consumidor num dado expirado **avança para o início disponível**
+  (mantém o cursor opaco). Sub-fatias: C1a (primitiva de delete) → C1b (coordenador + política + fiação).
+  - ✅ **C1a — control plane.** `segment_meta` ganha `sealed_at` (epoch ms, `nil` enquanto ativo); o
+    comando `seal_segment` carrega o `sealed_at` (gerado no `Broker` como os timestamps de `Record`, então
+    determinístico entre réplicas). Novo comando `{:delete_segment, segment_id}`: remove um segment
+    **selado** do control plane (`:segment_active` se ainda ativo — nunca dropa o ativo; `:no_such_segment`
+    se ausente). Testado: unit do `delete_segment` (selado/ativo/inexistente), `sealed_at` no seal,
+    determinismo preservado (property tests). **Próximo:** storage delete (`SegmentStore`/`Log`/
+    `ReplicationServer`), depois C1b (coordenador + read path que avança em dado expirado).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

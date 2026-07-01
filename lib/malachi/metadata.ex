@@ -58,7 +58,10 @@ defmodule Malachi.Metadata do
           replica_set: [broker()],
           state: :active | :sealed,
           start_offset: non_neg_integer(),
-          length: non_neg_integer() | nil
+          length: non_neg_integer() | nil,
+          # Epoch ms the segment was sealed (`nil` while active). Set from the seal command, so it is
+          # deterministic across replicas; used by retention to expire sealed segments by age.
+          sealed_at: non_neg_integer() | nil
         }
 
   @typedoc "A consumer group's name."
@@ -97,7 +100,8 @@ defmodule Malachi.Metadata do
           | {:split_range, range_id()}
           | {:merge_ranges, range_id(), range_id()}
           | {:register_segment, range_id(), segment_id(), [broker()], non_neg_integer()}
-          | {:seal_segment, segment_id(), non_neg_integer()}
+          | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer()}
+          | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
           | {:commit_offset, group(), topic_name(), offsets()}
 
@@ -192,7 +196,8 @@ defmodule Malachi.Metadata do
             replica_set: replica_set,
             state: :active,
             start_offset: start_offset,
-            length: nil
+            length: nil,
+            sealed_at: nil
           }
 
           {%{state | segments: Map.put(state.segments, segment_id, segment)}, :ok}
@@ -200,10 +205,20 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:seal_segment, segment_id, length}) do
+  def apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, sealed_at}) do
     update_segment(state, segment_id, fn segment ->
-      %{segment | state: :sealed, length: length}
+      %{segment | state: :sealed, length: length, sealed_at: sealed_at}
     end)
+  end
+
+  def apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
+    # Retention removes an expired segment from the control plane. Only sealed segments are
+    # deletable — the active segment is still being written and must never be dropped.
+    case Map.fetch(state.segments, segment_id) do
+      :error -> {state, {:error, :no_such_segment}}
+      {:ok, %{state: :active}} -> {state, {:error, :segment_active}}
+      {:ok, _sealed} -> {%{state | segments: Map.delete(state.segments, segment_id)}, :ok}
+    end
   end
 
   def apply(%__MODULE__{} = state, {:set_segment_replicas, segment_id, replica_set}) do

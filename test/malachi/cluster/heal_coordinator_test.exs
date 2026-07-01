@@ -39,7 +39,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
     segment_id = {root, 0}
     {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
-    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, length(values)})
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, length(values), 0})
     {:ok, _last} = ReplicationServer.replicate(source, segment_id, [source], 0, records(values))
     {metadata, segment_id}
   end

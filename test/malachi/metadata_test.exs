@@ -142,8 +142,8 @@ defmodule Malachi.MetadataTest do
       assert segment.length == nil
       assert Metadata.segments_of_range(state, root_id) |> length() == 1
 
-      {state, :ok} = apply!(state, {:seal_segment, "seg1", 1024})
-      assert %{state: :sealed, length: 1024} = Metadata.get_segment(state, "seg1")
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 1024, 1_700_000_000_000})
+      assert %{state: :sealed, length: 1024, sealed_at: 1_700_000_000_000} = Metadata.get_segment(state, "seg1")
 
       {state, :ok} = apply!(state, {:set_segment_replicas, "seg1", [:b1, :b4]})
       assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b4]
@@ -167,10 +167,35 @@ defmodule Malachi.MetadataTest do
 
     test "errors sealing/reassigning an unknown segment" do
       {state, _root_id} = create_topic()
-      assert {_state, {:error, :no_such_segment}} = Metadata.apply(state, {:seal_segment, "nope", 1})
+      assert {_state, {:error, :no_such_segment}} = Metadata.apply(state, {:seal_segment, "nope", 1, 0})
 
       assert {_state, {:error, :no_such_segment}} =
                Metadata.apply(state, {:set_segment_replicas, "nope", [:b1]})
+    end
+  end
+
+  describe "delete_segment (retention)" do
+    test "deletes a sealed segment from the control plane" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 10, 0})
+
+      {state, :ok} = apply!(state, {:delete_segment, "seg1"})
+      assert Metadata.get_segment(state, "seg1") == nil
+      assert Metadata.segments_of_range(state, root_id) == []
+    end
+
+    test "refuses to delete the active segment (still being written)" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+
+      assert {^state, {:error, :segment_active}} = Metadata.apply(state, {:delete_segment, "seg1"})
+      assert Metadata.get_segment(state, "seg1").state == :active
+    end
+
+    test "errors deleting an unknown segment" do
+      {state, _root_id} = create_topic()
+      assert {^state, {:error, :no_such_segment}} = Metadata.apply(state, {:delete_segment, "nope"})
     end
   end
 
@@ -190,7 +215,7 @@ defmodule Malachi.MetadataTest do
         {:split_range, {"logs", 0}},
         {:merge_ranges, {"events", 1}, {"events", 2}},
         {:register_segment, {"events", 3}, "s1", [:b1, :b2], 0},
-        {:seal_segment, "s1", 512},
+        {:seal_segment, "s1", 512, 0},
         {:seal_topic, "logs"}
       ]
 
