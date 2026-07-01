@@ -493,9 +493,10 @@ defmodule Malachi.Broker do
 
       {:ok, active} ->
         # sealed_at is generated here (like Record timestamps) and carried in the command, so every
-        # replica applies the same value deterministically. Retention uses it to expire by age.
+        # replica applies the same value deterministically. Retention uses byte_size + sealed_at.
         sealed_at = System.system_time(:millisecond)
-        {metadata, _reply} = apply_metadata(broker, {:seal_segment, active.id, active.records, sealed_at})
+        command = {:seal_segment, active.id, active.records, active.bytes, sealed_at}
+        {metadata, _reply} = apply_metadata(broker, command)
         %{broker | metadata: metadata, segments: Map.delete(broker.segments, range_id)}
     end
   end

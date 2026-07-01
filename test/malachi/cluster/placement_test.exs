@@ -69,7 +69,7 @@ defmodule Malachi.Cluster.PlacementTest do
       metadata =
         [{"s1", [:a, :b, :c]}]
         |> with_segments(rf: 3)
-        |> apply!({:seal_segment, "s1", 100, 0})
+        |> apply!({:seal_segment, "s1", 100, 0, 0})
 
       assert Placement.under_replicated(metadata, [:a, :b, :d], 3) == ["s1"]
     end

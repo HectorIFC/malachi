@@ -10,7 +10,7 @@ defmodule Malachi.Cluster.FailoverTest do
     {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
 
     metadata =
-      if seal?, do: elem(Metadata.apply(metadata, {:seal_segment, segment_id, 1, 0}), 0), else: metadata
+      if seal?, do: elem(Metadata.apply(metadata, {:seal_segment, segment_id, 1, 0, 0}), 0), else: metadata
 
     {metadata, segment_id}
   end

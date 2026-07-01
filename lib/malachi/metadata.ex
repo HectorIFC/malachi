@@ -59,6 +59,9 @@ defmodule Malachi.Metadata do
           state: :active | :sealed,
           start_offset: non_neg_integer(),
           length: non_neg_integer() | nil,
+          # Encoded byte size of the segment (`nil` while active). Set from the seal command, so it is
+          # deterministic across replicas; used by retention to expire by total size per range.
+          byte_size: non_neg_integer() | nil,
           # Epoch ms the segment was sealed (`nil` while active). Set from the seal command, so it is
           # deterministic across replicas; used by retention to expire sealed segments by age.
           sealed_at: non_neg_integer() | nil
@@ -100,7 +103,7 @@ defmodule Malachi.Metadata do
           | {:split_range, range_id()}
           | {:merge_ranges, range_id(), range_id()}
           | {:register_segment, range_id(), segment_id(), [broker()], non_neg_integer()}
-          | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer()}
+          | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer(), non_neg_integer()}
           | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
           | {:commit_offset, group(), topic_name(), offsets()}
@@ -197,6 +200,7 @@ defmodule Malachi.Metadata do
             state: :active,
             start_offset: start_offset,
             length: nil,
+            byte_size: nil,
             sealed_at: nil
           }
 
@@ -205,9 +209,9 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, sealed_at}) do
+  def apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
     update_segment(state, segment_id, fn segment ->
-      %{segment | state: :sealed, length: length, sealed_at: sealed_at}
+      %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
     end)
   end
 

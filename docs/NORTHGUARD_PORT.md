@@ -547,8 +547,20 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     diretório, best-effort). `ReplicationServer.delete/2` (client + handle_call): fecha/apaga se o log
     está aberto, senão limpa arquivos órfãos em disco (pós-restart); **idempotente** (deletar um segment
     desconhecido é `:ok`). Testado: `Log.delete` (diretório some), `ReplicationServer.delete` (dados
-    somem → read vira `:eof`; idempotência). **Próximo:** C1b (RetentionCoordinator + política tempo/tamanho
-    + read path que avança em dado expirado + fiação).
+    somem → read vira `:eof`; idempotência).
+  - 🚧 **C1b — coordenador + read path + fiação** (incremental).
+    - ✅ **C1b-1 — política + `RetentionCoordinator`.** `segment_meta` ganha `byte_size` (via `seal_segment`,
+      do `active.bytes` do Broker — determinístico, como `sealed_at`; retenção por tamanho precisa de bytes).
+      Módulo **puro** `Malachi.Cluster.Retention`: `expired(metadata, now_ms, policy)` → ids de segments
+      **selados** a expirar por **idade** (`sealed_at` > `max_age_ms`) e por **tamanho** (soma `byte_size`
+      por **range** > `max_bytes` → mais antigos primeiro), unidos; nunca o ativo; bound `nil` desliga a
+      regra. `RetentionCoordinator` (GenServer periódico, modelo `HealCoordinator`) com seams
+      (`metadata_source`, `expire_segment`, `policy`, `clock`, `interval`): cada sweep resolve os ids para
+      seus metas e chama `expire_segment`. Testado: `Retention` (idade, tamanho por-range, união, nunca o
+      ativo, `nil` desliga) e o coordenador (sweep via `run_now` e via tick, meta completa ao seam).
+    - ⏳ **C1b-2 — read path** (consumidor num dado expirado avança para o início disponível). ⏳ **C1b-3 —
+      config + fiação** (a `expire_segment` real: `:delete_segment` no control plane + `ReplicationServer.delete`
+      nas réplicas; env de política; `RetentionCoordinator` na árvore).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).
