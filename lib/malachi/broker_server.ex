@@ -117,6 +117,10 @@ defmodule Malachi.BrokerServer do
   @spec active_range_ids(GenServer.server(), Malachi.Metadata.topic_name()) :: [Malachi.Metadata.range_id()]
   def active_range_ids(server, topic), do: GenServer.call(server, {:active_range_ids, topic})
 
+  @doc "Removes a sealed segment from the control plane (retention); returns the control-plane reply."
+  @spec delete_segment(GenServer.server(), Malachi.Metadata.segment_id()) :: term()
+  def delete_segment(server, segment_id), do: GenServer.call(server, {:delete_segment, segment_id})
+
   @doc "The current control-plane metadata (e.g. for a healing coordinator to inspect)."
   @spec metadata(GenServer.server()) :: Malachi.Metadata.t()
   def metadata(server), do: GenServer.call(server, :metadata)
@@ -253,6 +257,11 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:apply_heal, commands}, _from, state) do
     {:reply, :ok, %{state | broker: Broker.apply_heal(state.broker, commands)}}
+  end
+
+  def handle_call({:delete_segment, segment_id}, _from, state) do
+    {broker, reply} = Broker.delete_segment(state.broker, segment_id)
+    {:reply, reply, %{state | broker: broker}}
   end
 
   def handle_call({:commit_offset, group, topic, offsets}, _from, state) do

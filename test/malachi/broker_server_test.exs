@@ -3,6 +3,7 @@ defmodule Malachi.BrokerServerTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
+  alias Malachi.Metadata
 
   @moduletag :tmp_dir
 
@@ -90,6 +91,22 @@ defmodule Malachi.BrokerServerTest do
 
       # the replication server fsynced on a quorum before the call returned
       assert read_all(server, root_id) |> Enum.map(& &1.value) == ["a", "b"]
+    end
+
+    test "delete_segment drops a sealed segment from the control plane (retention)", %{tmp_dir: directory} do
+      one_record = Record.encoded_size(record("value", "key"))
+      {server, root_id} = with_topic(directory, segment_max_bytes: one_record)
+
+      # each record fills a segment, sealing it and rolling to the next
+      {:ok, _} = BrokerServer.produce(server, "events", [record("value", "k0")])
+      {:ok, _} = BrokerServer.produce(server, "events", [record("value", "k1")])
+
+      sealed = Metadata.segments_of_range(BrokerServer.metadata(server), root_id) |> Enum.find(&(&1.state == :sealed))
+      assert sealed != nil
+
+      assert BrokerServer.delete_segment(server, sealed.id) == :ok
+      refute Enum.any?(Metadata.segments_of_range(BrokerServer.metadata(server), root_id), &(&1.id == sealed.id))
+      # (refusing the active segment is covered by the Metadata unit test)
     end
 
     test "sync is a no-op and safe to call", %{tmp_dir: directory} do

@@ -16,6 +16,8 @@ defmodule Malachi.Application do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.I18n
   alias Malachi.TLSValidator
 
@@ -96,15 +98,60 @@ defmodule Malachi.Application do
         configured -> configured
       end
 
-    if cluster do
-      start_ra!()
-      # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
-      # precede the broker that references it; the healer references the broker + membership.
-      [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes), healer_child()]
-    else
-      [log_broker_child(nil, nodes)]
-    end
+    log_stack =
+      if cluster do
+        start_ra!()
+        # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
+        # precede the broker that references it; the healer references the broker + membership.
+        [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes), healer_child()]
+      else
+        [log_broker_child(nil, nodes)]
+      end
+
+    # Retention runs whenever a policy is configured (it matters single-node too); it references the
+    # broker, so it comes last.
+    log_stack ++ retention_children()
   end
+
+  defp retention_children do
+    if retention_configured?(), do: [retention_child()], else: []
+  end
+
+  defp retention_child do
+    %{
+      id: Malachi.LogRetention,
+      start:
+        {RetentionCoordinator, :start_link,
+         [
+           [
+             name: Malachi.LogRetention,
+             metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+             expire_segment: &expire_segment/1,
+             policy: retention_policy(),
+             interval: Application.get_env(:malachi, :retention_interval_ms, 60_000)
+           ]
+         ]}
+    }
+  end
+
+  # Removes an expired segment from the control plane, then deletes its stored data on each replica.
+  # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
+  # segment, so a replica that is momentarily unreachable just leaves harmless files to be retried.
+  defp expire_segment(segment) do
+    _ = BrokerServer.delete_segment(Malachi.LogBroker, segment.id)
+    Enum.each(segment.replica_set, fn broker -> ReplicationServer.delete(broker, segment.id) end)
+  end
+
+  @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."
+  @spec retention_policy() :: Malachi.Cluster.Retention.policy()
+  def retention_policy do
+    %{
+      max_age_ms: Application.get_env(:malachi, :retention_max_age_ms),
+      max_bytes: Application.get_env(:malachi, :retention_max_bytes)
+    }
+  end
+
+  defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes) do
     %{

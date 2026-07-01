@@ -47,6 +47,14 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert ReplicationServer.delete(ref, @segment) == :ok
   end
 
+  test "delete on an unreachable replica is best-effort (:ok, does not crash the caller)" do
+    ref = start_broker()
+    :ok = stop_supervised!(ref)
+
+    # a dead/unreachable replica (a down cluster node during a retention sweep) must not crash us
+    assert ReplicationServer.delete(ref, @segment) == :ok
+  end
+
   test "a write still commits with one follower down (quorum tolerated)" do
     [primary, f1, f2] = replica_set = [start_broker(), start_broker(), start_broker()]
     :ok = stop_supervised!(f2)

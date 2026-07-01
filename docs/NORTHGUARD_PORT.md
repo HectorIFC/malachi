@@ -565,8 +565,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       transparentemente para o dado vivo (at-least-once, cursor opaco intacto) em vez de ver `:eof` enganoso;
       como não há buracos internos, `offset + length` continua correto (sem mudar `read`/`locate_segment`).
       Testado: consumidor abaixo do earliest pula os segments expirados e lê o que resta.
-    - ⏳ **C1b-3 — config + fiação** (a `expire_segment` real: `:delete_segment` no control plane +
-      `ReplicationServer.delete` nas réplicas; env de política; `RetentionCoordinator` na árvore).
+    - ✅ **C1b-3 — config + fiação (retenção C1 completa).** `Broker.delete_segment/2` +
+      `BrokerServer.delete_segment/2` (aplicam `:delete_segment` pelo control plane, Raft-backed quando
+      configurado). A `expire_segment` real (na `application.ex`): remove do control plane e então deleta
+      o storage em cada réplica (`ReplicationServer.delete`), **best-effort** (control plane idempotente,
+      storage tolera segment ausente). Config por env: `MALACHIMQ_RETENTION_MAX_AGE_MS` /
+      `MALACHIMQ_RETENTION_MAX_BYTES` (ambos ausentes = **guarda para sempre**, coordenador não sobe) /
+      `MALACHIMQ_RETENTION_INTERVAL_MS`. O `RetentionCoordinator` sobe na árvore **sempre que há política**
+      (importa single-node também), após o `LogBroker`. Testado: `BrokerServer.delete_segment` (drop do
+      selado), e **e2e** (produce → sela → sweep do coordenador → segment some do control plane **e** do
+      storage). **C1 (retenção tempo+tamanho) completa.**
+- ⏳ **C2 — Attributes** (k/v em brokers) e **C3 — Policies** (retenção/constraints por-topic sobre
+  attributes) seguem, se/quando priorizados.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

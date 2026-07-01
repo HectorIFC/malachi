@@ -108,6 +108,11 @@ config :malachi,
     |> Enum.map(&String.to_atom(String.trim(&1))),
   # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
   log_replication_factor: String.to_integer(System.get_env("MALACHIMQ_LOG_REPLICATION_FACTOR") || "3"),
+  # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
+  # either to expire sealed segments older than an age and/or over a per-range byte budget.
+  retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),
+  retention_max_bytes: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_BYTES"), nil),
+  retention_interval_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_INTERVAL_MS"), 60_000),
   ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments

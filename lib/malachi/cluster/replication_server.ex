@@ -102,7 +102,13 @@ defmodule Malachi.Cluster.ReplicationServer do
   also clears any on-disk files left after a restart when the log was not reopened.
   """
   @spec delete(term(), term()) :: :ok
-  def delete(ref, segment_id), do: GenServer.call(ref, {:delete, segment_id})
+  def delete(ref, segment_id) do
+    GenServer.call(ref, {:delete, segment_id})
+  catch
+    # An unreachable replica must not crash the caller (e.g. retention's periodic sweep): the files
+    # are left in place, harmless without control-plane metadata, and cleaned up on a later sweep.
+    :exit, _reason -> :ok
+  end
 
   @doc """
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`

@@ -255,6 +255,17 @@ defmodule Malachi.Broker do
     {%{broker | metadata: metadata}, reply}
   end
 
+  @doc """
+  Removes a sealed `segment_id` from the control plane (retention), through the control plane
+  (Raft-backed when configured). Returns `{broker, reply}` (`:ok`, or a `Metadata` error such as
+  `:segment_active`/`:no_such_segment`).
+  """
+  @spec delete_segment(t(), Metadata.segment_id()) :: {t(), term()}
+  def delete_segment(%__MODULE__{} = broker, segment_id) do
+    {metadata, reply} = apply_metadata(broker, {:delete_segment, segment_id})
+    {%{broker | metadata: metadata}, reply}
+  end
+
   @doc "A consumer group's committed offsets for `topic` (empty if it never committed)."
   @spec committed_offsets(t(), Metadata.group(), Metadata.topic_name()) :: Metadata.offsets()
   def committed_offsets(%__MODULE__{} = broker, group, topic) do
