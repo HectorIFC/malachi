@@ -97,7 +97,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
     assert_receive {:"$gen_cast", {:join_ok, ^seed, updates}}, 1_000
     # the seed shares its cluster view (itself and the member it knew)
-    members = for {member, _status, _inc} <- updates, do: member
+    members = for {member, _status, _inc, _attrs} <- updates, do: member
     assert seed in members and other in members
 
     # and the seed now knows us as alive
@@ -131,7 +131,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
     start_node(b, [a])
 
     # inject gossip (as if from b) that wrongly suspects a at its current incarnation
-    GenServer.cast(a, {:ping, b, [{a, :suspect, 0}]})
+    GenServer.cast(a, {:ping, b, [{a, :suspect, 0, %{}}]})
 
     # a stays alive and bumps its incarnation to refute
     assert eventually(fn ->

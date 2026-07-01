@@ -24,8 +24,10 @@ defmodule Malachi.Cluster.Membership do
   @type member :: term()
   @type status :: :alive | :suspect | :dead
   @type incarnation :: non_neg_integer()
-  @type member_state :: %{status: status(), incarnation: incarnation()}
-  @type update :: {member(), status(), incarnation()}
+  @typedoc "Opaque k/v an admin attaches to a broker (e.g. `rack`, `dc`); disseminated with the member."
+  @type attributes :: %{optional(term()) => term()}
+  @type member_state :: %{status: status(), incarnation: incarnation(), attributes: attributes()}
+  @type update :: {member(), status(), incarnation(), attributes()}
   @typedoc "What an applied update produced: a state change or a self-refutation to disseminate."
   @type effect :: {:applied, update()} | {:refute, update()} | :ignored
 
@@ -37,12 +39,20 @@ defmodule Malachi.Cluster.Membership do
 
   @doc """
   Builds a membership view local to `self` (which starts `:alive` at incarnation 0). `:peers`
-  seeds other members, also `:alive` at incarnation 0.
+  seeds other members, also `:alive` at incarnation 0. `:attributes` are `self`'s own attributes
+  (peers' attributes are learned via gossip).
   """
   @spec new(member(), keyword()) :: t()
   def new(self, opts \\ []) do
     peers = Keyword.get(opts, :peers, [])
-    members = Map.new([self | peers], fn member -> {member, %{status: :alive, incarnation: 0}} end)
+    self_attributes = Keyword.get(opts, :attributes, %{})
+
+    members =
+      Map.new([self | peers], fn member ->
+        attributes = if member == self, do: self_attributes, else: %{}
+        {member, %{status: :alive, incarnation: 0, attributes: attributes}}
+      end)
+
     %__MODULE__{self: self, members: members}
   end
 
@@ -52,13 +62,14 @@ defmodule Malachi.Cluster.Membership do
   `{:refute, update}` if it was a false suspicion about us (announce the refutation), or `:ignored`.
   """
   @spec apply_update(t(), update()) :: {t(), effect()}
-  def apply_update(%__MODULE__{self: self} = view, {member, status, incarnation}) when member == self do
+  def apply_update(%__MODULE__{self: self} = view, {member, status, incarnation, _attributes}) when member == self do
+    # We are the authority on our own attributes, so ignore the peer's copy of them here.
     refute_or_ignore(view, status, incarnation)
   end
 
-  def apply_update(%__MODULE__{} = view, {member, status, incarnation}) do
+  def apply_update(%__MODULE__{} = view, {member, status, incarnation, attributes}) do
     if overrides?(Map.get(view.members, member), status, incarnation) do
-      {put_member(view, member, status, incarnation), {:applied, {member, status, incarnation}}}
+      {put_member(view, member, status, incarnation, attributes), {:applied, {member, status, incarnation, attributes}}}
     else
       {view, :ignored}
     end
@@ -85,13 +96,13 @@ defmodule Malachi.Cluster.Membership do
   @doc "Marks `member` `:suspect` at its currently known incarnation (a no-op if already overridden)."
   @spec suspect(t(), member()) :: {t(), effect()}
   def suspect(%__MODULE__{} = view, member) do
-    apply_update(view, {member, :suspect, incarnation(view, member) || 0})
+    apply_update(view, {member, :suspect, incarnation(view, member) || 0, attributes(view, member)})
   end
 
   @doc "Confirms `member` `:dead` at its currently known incarnation."
   @spec confirm(t(), member()) :: {t(), effect()}
   def confirm(%__MODULE__{} = view, member) do
-    apply_update(view, {member, :dead, incarnation(view, member) || 0})
+    apply_update(view, {member, :dead, incarnation(view, member) || 0, attributes(view, member)})
   end
 
   @doc "The sorted list of `:alive` members — the live broker set for placement and healing."
@@ -100,10 +111,32 @@ defmodule Malachi.Cluster.Membership do
     for({member, %{status: :alive}} <- view.members, do: member) |> Enum.sort()
   end
 
-  @doc "The full view as a list of `{member, status, incarnation}` updates, for gossiping."
+  @doc "The full view as a list of `{member, status, incarnation, attributes}` updates, for gossiping."
   @spec updates(t()) :: [update()]
   def updates(%__MODULE__{} = view) do
-    for {member, %{status: status, incarnation: incarnation}} <- view.members, do: {member, status, incarnation}
+    for {member, %{status: status, incarnation: incarnation, attributes: attributes}} <- view.members do
+      {member, status, incarnation, attributes}
+    end
+  end
+
+  @doc """
+  Sets `self`'s `attributes`, raising its own incarnation so the change wins the merge everywhere.
+  Returns the new view and `{:applied, update}` to disseminate (attributes are owned by their member).
+  """
+  @spec set_attributes(t(), attributes()) :: {t(), effect()}
+  def set_attributes(%__MODULE__{self: self} = view, attributes) do
+    incarnation = Map.fetch!(view.members, self).incarnation + 1
+    update = {self, :alive, incarnation, attributes}
+    {put_member(view, self, :alive, incarnation, attributes), {:applied, update}}
+  end
+
+  @doc "The attributes of `member` (`%{}` if unknown or none set)."
+  @spec attributes(t(), member()) :: attributes()
+  def attributes(%__MODULE__{} = view, member) do
+    case Map.get(view.members, member) do
+      nil -> %{}
+      %{attributes: attributes} -> attributes
+    end
   end
 
   @doc "The status of `member`, or `nil` if unknown."
@@ -128,21 +161,23 @@ defmodule Malachi.Cluster.Membership do
 
   defp refute_or_ignore(view, :alive, incarnation) do
     # An alive about ourselves: only adopt a strictly higher incarnation (normally never happens,
-    # since only we raise our own); never needs dissemination.
+    # since only we raise our own); never needs dissemination. We keep our own attributes.
     self_state = Map.fetch!(view.members, view.self)
 
     if incarnation > self_state.incarnation do
-      {put_member(view, view.self, :alive, incarnation), :ignored}
+      {put_member(view, view.self, :alive, incarnation, self_state.attributes), :ignored}
     else
       {view, :ignored}
     end
   end
 
   defp refute_or_ignore(view, _suspect_or_dead, incarnation) do
-    # A suspicion/confirmation about ourselves: refute by jumping past it and re-announcing alive.
+    # A suspicion/confirmation about ourselves: refute by jumping past it and re-announcing alive,
+    # carrying our own attributes so peers keep them.
     self_state = Map.fetch!(view.members, view.self)
     refuted = max(incarnation, self_state.incarnation) + 1
-    {put_member(view, view.self, :alive, refuted), {:refute, {view.self, :alive, refuted}}}
+    update = {view.self, :alive, refuted, self_state.attributes}
+    {put_member(view, view.self, :alive, refuted, self_state.attributes), {:refute, update}}
   end
 
   defp overrides?(nil, _status, _incarnation), do: true
@@ -151,7 +186,8 @@ defmodule Malachi.Cluster.Membership do
     {incarnation, @ranks[status]} > {current_incarnation, @ranks[current_status]}
   end
 
-  defp put_member(view, member, status, incarnation) do
-    %{view | members: Map.put(view.members, member, %{status: status, incarnation: incarnation})}
+  defp put_member(view, member, status, incarnation, attributes) do
+    member_state = %{status: status, incarnation: incarnation, attributes: attributes}
+    %{view | members: Map.put(view.members, member, member_state)}
   end
 end

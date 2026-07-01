@@ -575,8 +575,22 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       (importa single-node também), após o `LogBroker`. Testado: `BrokerServer.delete_segment` (drop do
       selado), e **e2e** (produce → sela → sweep do coordenador → segment some do control plane **e** do
       storage). **C1 (retenção tempo+tamanho) completa.**
-- ⏳ **C2 — Attributes** (k/v em brokers) e **C3 — Policies** (retenção/constraints por-topic sobre
-  attributes) seguem, se/quando priorizados.
+- 🚧 **C2 — Attributes** (k/v opacos que o admin liga a brokers; base de rack/DC-awareness).
+  **Decisão:** disseminar via **Membership/SWIM** (fiel ao NorthGuard: "membership piggyback host/port/
+  attributes"), não no Metadata — o usuário priorizou fidelidade. Incremental: C2a (Membership puro) →
+  C2b (server + API + gossip) → C2c (fiação + config).
+  - ✅ **C2a — `Membership` puro com attributes.** Os attrs de um membro **viajam com o update**,
+    governados pela mesma **incarnation**: o `update` vira 4-tupla `{member, status, incarnation,
+    attributes}` e o `member_state` ganha `attributes`. Só o dono muda seus attrs — via `set_attributes/2`,
+    que **sobe a própria incarnation** para a mudança vencer o merge em todo lugar; uma suspeita/confirmação
+    de outro nó carrega os attrs **já conhecidos** (preserva-os). O `overrides?` (precedência `{incarnation,
+    rank}`) não muda. `new/2` aceita `:attributes` do self; query `attributes/2`. Testado: propagação/troca
+    por incarnation, `set_attributes`, preservação em suspect, gossip via `updates`; convergência
+    order-independent preservada (property; attrs são consistentes por-incarnation, então os generators
+    usam `%{}`). Multinode SWIM (D3a) segue convergindo com a 4-tupla.
+  - ⏳ **C2b** (`MembershipServer`: `:attributes` inicial + `set_attributes`/leitura em runtime; gossip já
+    propaga) e **C2c** (attrs do self via config/env no boot). Depois **C3 — Policies** (constraints
+    por-topic sobre attributes → placement rack-aware).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

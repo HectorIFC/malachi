@@ -134,10 +134,11 @@ defmodule Malachi.Cluster.MembershipServer do
     {:noreply, state}
   end
 
-  # A node is joining via us as a seed: record it alive and reply with our full view.
+  # A node is joining via us as a seed: record it alive and reply with our full view. Its own
+  # attributes arrive in `updates` (merged above); this is just the belt-and-suspenders alive record.
   def handle_cast({:join, joiner, updates}, state) do
     state = merge_updates(state, updates)
-    {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0})
+    {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0, %{}})
     state = %{state | view: view}
     cast(joiner, {:join_ok, state.self, Membership.updates(state.view)})
     {:noreply, state}
