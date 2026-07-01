@@ -558,9 +558,15 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       (`metadata_source`, `expire_segment`, `policy`, `clock`, `interval`): cada sweep resolve os ids para
       seus metas e chama `expire_segment`. Testado: `Retention` (idade, tamanho por-range, união, nunca o
       ativo, `nil` desliga) e o coordenador (sweep via `run_now` e via tick, meta completa ao seam).
-    - ⏳ **C1b-2 — read path** (consumidor num dado expirado avança para o início disponível). ⏳ **C1b-3 —
-      config + fiação** (a `expire_segment` real: `:delete_segment` no control plane + `ReplicationServer.delete`
-      nas réplicas; env de política; `RetentionCoordinator` na árvore).
+    - ✅ **C1b-2 — read path (avança em dado expirado).** Retenção deleta sempre um **prefixo contíguo**
+      (os segments mais antigos), então o read path só precisa saber o menor `start_offset` ainda armazenado
+      (`earliest_offset/2`) e **clampar o offset a ele** antes de ler. `consume_page` (consumo ao vivo) e
+      `read_history_page` (admin) clampam: um consumidor cujo cursor caiu num buraco expirado avança
+      transparentemente para o dado vivo (at-least-once, cursor opaco intacto) em vez de ver `:eof` enganoso;
+      como não há buracos internos, `offset + length` continua correto (sem mudar `read`/`locate_segment`).
+      Testado: consumidor abaixo do earliest pula os segments expirados e lê o que resta.
+    - ⏳ **C1b-3 — config + fiação** (a `expire_segment` real: `:delete_segment` no control plane +
+      `ReplicationServer.delete` nas réplicas; env de política; `RetentionCoordinator` na árvore).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

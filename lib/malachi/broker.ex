@@ -507,6 +507,16 @@ defmodule Malachi.Broker do
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 
+  # The earliest offset still stored for a range: the smallest segment start_offset (0 if none).
+  # Retention deletes the oldest segments — a contiguous prefix — so a consumer positioned below this
+  # has had its data expired; read callers clamp up to it to skip transparently to what still exists.
+  defp earliest_offset(broker, range_id) do
+    broker.metadata
+    |> Metadata.segments_of_range(range_id)
+    |> Enum.map(& &1.start_offset)
+    |> Enum.min(fn -> 0 end)
+  end
+
   defp primary(%{replica_set: [primary | _]}), do: primary
 
   defp batch_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + Record.encoded_size(record) end)
@@ -546,6 +556,8 @@ defmodule Malachi.Broker do
         {:ok, [], :done}
 
       {source_range_id, filter_range} ->
+        source_offset = max(source_offset, earliest_offset(broker, source_range_id))
+
         case read(broker, source_range_id, source_offset, max_records, read_fun) do
           :eof ->
             read_history_page(broker, sources, source_index + 1, 0, max_records, read_fun)
@@ -585,6 +597,9 @@ defmodule Malachi.Broker do
   defp consume_page(broker, sources, index, offset, max_records, acc, count, read_fun) do
     last_index = length(sources) - 1
     {source_range_id, filter_range} = Enum.at(sources, index)
+    # Skip data retention expired: never read below the range's earliest available offset, so a
+    # consumer whose position was deleted advances to the earliest data still stored (at-least-once).
+    offset = max(offset, earliest_offset(broker, source_range_id))
 
     case read(broker, source_range_id, offset, max_records, read_fun) do
       {:ok, [_ | _] = records} ->

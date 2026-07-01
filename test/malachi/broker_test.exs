@@ -269,6 +269,33 @@ defmodule Malachi.BrokerTest do
       assert read_all(broker, store, root_id) |> Enum.map(& &1.value) == ["value", "value", "value"]
     end
 
+    test "a consumer below the earliest available offset skips retention-expired data", %{store: store} do
+      one_record = Record.encoded_size(record("value", "key"))
+      {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
+
+      # five records, each rolling into its own sealed segment (offsets 0..4)
+      broker =
+        Enum.reduce(0..4, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      # retention expires the two oldest segments (control plane drops them)
+      [s0, s1 | _] = segments(broker, root_id) |> Enum.sort_by(& &1.start_offset)
+
+      metadata =
+        broker.metadata
+        |> then(&elem(Metadata.apply(&1, {:delete_segment, s0.id}), 0))
+        |> then(&elem(Metadata.apply(&1, {:delete_segment, s1.id}), 0))
+
+      broker = %{broker | metadata: metadata}
+
+      # a consumer starting at the beginning advances to the earliest data still stored
+      earliest = segments(broker, root_id) |> Enum.map(& &1.start_offset) |> Enum.min()
+      {records, _cursor} = consume(broker, store, root_id, :start)
+      assert Enum.map(records, & &1.value) == Enum.map(earliest..4, &"v#{&1}")
+    end
+
     test "the byte threshold is soft: a batch may overshoot before sealing", %{store: store} do
       one_record = Record.encoded_size(record("value", "key"))
       {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
