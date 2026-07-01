@@ -35,6 +35,26 @@ defmodule Malachi.ApplicationTest do
                [{Malachi.LogReplication, :"a@127.0.0.1"}, {Malachi.LogReplication, :"b@127.0.0.1"}]
 
       assert is_integer(Keyword.fetch!(opts, :replication_factor))
+      # live_brokers narrows placement to the alive set as membership converges
+      assert is_function(Keyword.fetch!(opts, :live_brokers), 0)
+    end
+  end
+
+  describe "membership_seeds/1" do
+    test "seeds with the other nodes' membership servers, excluding self" do
+      others = [:"a@127.0.0.1", :"b@127.0.0.1"]
+
+      assert App.membership_seeds([node() | others]) ==
+               [{Malachi.LogMembership, :"a@127.0.0.1"}, {Malachi.LogMembership, :"b@127.0.0.1"}]
+    end
+  end
+
+  describe "live_replication_refs/1" do
+    test "maps membership members to their nodes' ReplicationServer references" do
+      members = [{Malachi.LogMembership, :"a@127.0.0.1"}, {Malachi.LogMembership, :"b@127.0.0.1"}]
+
+      assert App.live_replication_refs(members) ==
+               [{Malachi.LogReplication, :"a@127.0.0.1"}, {Malachi.LogReplication, :"b@127.0.0.1"}]
     end
   end
 end

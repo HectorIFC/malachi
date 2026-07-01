@@ -13,6 +13,9 @@ defmodule Malachi.Application do
   use Application
   require Logger
   alias Malachi.Auth.ConfigValidator
+  alias Malachi.BrokerServer
+  alias Malachi.Cluster.HealCoordinator
+  alias Malachi.Cluster.MembershipServer
   alias Malachi.I18n
   alias Malachi.TLSValidator
 
@@ -95,10 +98,21 @@ defmodule Malachi.Application do
 
     if cluster do
       start_ra!()
-      [replication_child(), log_broker_child(cluster, nodes)]
+      # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
+      # precede the broker that references it; the healer references the broker + membership.
+      [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes), healer_child()]
     else
       [log_broker_child(nil, nodes)]
     end
+  end
+
+  defp membership_child(nodes) do
+    %{
+      id: Malachi.LogMembership,
+      start:
+        {MembershipServer, :start_link,
+         [[name: Malachi.LogMembership, self_ref: {Malachi.LogMembership, node()}, peers: membership_seeds(nodes)]]}
+    }
   end
 
   defp replication_child do
@@ -106,6 +120,25 @@ defmodule Malachi.Application do
       id: Malachi.LogReplication,
       start:
         {Malachi.Cluster.ReplicationServer, :start_link, [[name: Malachi.LogReplication, directory: log_data_dir()]]}
+    }
+  end
+
+  # Closes the loop broker dies -> membership marks it gone -> its segments are re-replicated and any
+  # active-segment primary it held is promoted. Uses the live broker set and control plane by name.
+  defp healer_child do
+    %{
+      id: Malachi.LogHealer,
+      start:
+        {HealCoordinator, :start_link,
+         [
+           [
+             name: Malachi.LogHealer,
+             live_brokers: &live_brokers/0,
+             metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+             apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
+             replication_factor: replication_factor()
+           ]
+         ]}
     }
   end
 
@@ -132,12 +165,27 @@ defmodule Malachi.Application do
   def data_plane_opts(nil, _nodes), do: []
 
   def data_plane_opts(_cluster, nodes) do
-    [brokers: broker_refs(nodes), replication_factor: replication_factor()]
+    # :brokers is the static full set (initial placement); :live_brokers narrows new placements to the
+    # currently-alive nodes as membership converges/changes (an empty result is ignored by the broker).
+    [brokers: broker_refs(nodes), replication_factor: replication_factor(), live_brokers: &live_brokers/0]
   end
 
   @doc "The ReplicationServer references (one per node) that segment replicas are placed across."
   @spec broker_refs([node()]) :: [{module(), node()}]
   def broker_refs(nodes), do: for(n <- nodes, do: {Malachi.LogReplication, n})
+
+  @doc "The membership seeds this node joins with — the other nodes' membership servers (not self)."
+  @spec membership_seeds([node()]) :: [{module(), node()}]
+  def membership_seeds(nodes), do: for(n <- nodes, n != node(), do: {Malachi.LogMembership, n})
+
+  @doc "Maps membership members (`{name, node}`) to their nodes' ReplicationServer references."
+  @spec live_replication_refs([{term(), node()}]) :: [{module(), node()}]
+  def live_replication_refs(members), do: for({_name, node} <- members, do: {Malachi.LogReplication, node})
+
+  # The currently-alive broker set, derived from SWIM membership (fed to the broker + healer).
+  defp live_brokers do
+    Malachi.LogMembership |> MembershipServer.alive_members() |> live_replication_refs()
+  end
 
   defp replication_factor, do: Application.get_env(:malachi, :log_replication_factor, 3)
 

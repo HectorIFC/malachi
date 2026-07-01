@@ -518,9 +518,19 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         distinto do `:name` (registro local), + `start/1` (não-linkado, p/ iniciar em nós remotos). Provado
         por **teste multinode** real (`membership_ha_test`): 3 nós `:peer` convergem via seeds e detectam a
         morte de um nó (SWIM: suspeita → dead → sai do alive set).
-      - ⏳ **D3b — Fiação na app**: subir o `MembershipServer` (seeds estáticos = `log_nodes`), derivar
-        `live_brokers` de `alive_members` (→ refs `{Malachi.LogReplication, node}`), e subir o
-        `HealCoordinator` (self-healing de segments sob-replicados + failover de primário).
+      - ✅ **D3b — Fiação na app.** Em modo cluster, `application.ex` sobe (nesta ordem)
+        `MembershipServer` → `ReplicationServer` → `LogBroker` → `HealCoordinator`. O `MembershipServer`
+        usa `self_ref: {Malachi.LogMembership, node()}` e `peers: membership_seeds(log_nodes)` (os outros
+        nós). O `live_brokers` (fun) deriva de `alive_members` → refs `{Malachi.LogReplication, node}`, e é
+        passado ao `LogBroker` (que estreita o placement de novos segments ao conjunto vivo; `:brokers`
+        estático é o placement inicial) **e** ao `HealCoordinator`. O `HealCoordinator` (`metadata_source:
+        BrokerServer.metadata`, `apply_command: BrokerServer.apply_heal`, `replication_factor`) fecha o loop
+        *broker morre → membership marca gone → segments re-replicados + primário promovido*. Fiação pura
+        testável (`membership_seeds/1`, `live_replication_refs/1`); o loop de healing/failover já é coberto
+        por `heal_coordinator_test`/`self_healing_test`/`failover_test`, e o membership cross-node por D3a.
+  - ✅ **Deploy multi-nó/replicado completo** (D1 control plane HA + D2 data plane replicado + D3
+    membership/healing/failover ao vivo). Ligado por config estática; `libcluster` (descoberta dinâmica)
+    fica como conveniência futura.
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
