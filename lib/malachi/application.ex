@@ -35,42 +35,42 @@ defmodule Malachi.Application do
 
     :erlang.system_flag(:schedulers_online, schedulers_to_use)
 
-    children = [
-      {Registry, keys: :unique, name: Malachi.QueueRegistry, partitions: System.schedulers_online()},
-      {Registry, keys: :unique, name: Malachi.ChannelRegistry},
-      {DynamicSupervisor, name: Malachi.QueueSupervisor, strategy: :one_for_one, max_children: 100_000},
-      {DynamicSupervisor, name: Malachi.ChannelSupervisor, strategy: :one_for_one, max_children: 100_000},
-      # Increase max_children for Task.Supervisor to allow large parallel broadcasts
-      {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
-      Malachi.PartitionManager,
-      Malachi.QueueConfig,
-      Malachi.Metrics,
-      # Audit logging (must start early for security event tracking)
-      Malachi.AuditLog,
-      # Resource monitors (must start after AuditLog for alert logging)
-      Malachi.AtomMonitor,
-      Malachi.MemoryMonitor,
-      # Account lockout manager (must start before Auth)
-      Malachi.Auth.LockoutManager,
-      # Input validation with ETS cache (must start before Queue/Channel creation)
-      Malachi.Validator,
-      Malachi.RateLimiter,
-      Malachi.ConnectionLimiter,
-      # User persistence (must start before Auth to load persisted users into ETS)
-      Malachi.Auth.UserStore,
-      Malachi.Auth,
-      Malachi.AckManager,
-      Malachi.ConnectionRegistry,
-      # NorthGuard log broker (the new replicated-log stack), reachable by clients via the log
-      # protocol actions. Single-node/in-memory metadata by default; with :log_cluster configured
-      # the control plane is replicated over `ra` (HA — the metadata survives losing a node).
-      %{
-        id: Malachi.LogBroker,
-        start: {Malachi.BrokerServer, :start_link, [log_data_dir(), log_broker_opts()]}
-      },
-      {Malachi.TCPAcceptorPool, port},
-      {Malachi.Dashboard, dashboard_port}
-    ]
+    children =
+      [
+        {Registry, keys: :unique, name: Malachi.QueueRegistry, partitions: System.schedulers_online()},
+        {Registry, keys: :unique, name: Malachi.ChannelRegistry},
+        {DynamicSupervisor, name: Malachi.QueueSupervisor, strategy: :one_for_one, max_children: 100_000},
+        {DynamicSupervisor, name: Malachi.ChannelSupervisor, strategy: :one_for_one, max_children: 100_000},
+        # Increase max_children for Task.Supervisor to allow large parallel broadcasts
+        {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
+        Malachi.PartitionManager,
+        Malachi.QueueConfig,
+        Malachi.Metrics,
+        # Audit logging (must start early for security event tracking)
+        Malachi.AuditLog,
+        # Resource monitors (must start after AuditLog for alert logging)
+        Malachi.AtomMonitor,
+        Malachi.MemoryMonitor,
+        # Account lockout manager (must start before Auth)
+        Malachi.Auth.LockoutManager,
+        # Input validation with ETS cache (must start before Queue/Channel creation)
+        Malachi.Validator,
+        Malachi.RateLimiter,
+        Malachi.ConnectionLimiter,
+        # User persistence (must start before Auth to load persisted users into ETS)
+        Malachi.Auth.UserStore,
+        Malachi.Auth,
+        Malachi.AckManager,
+        Malachi.ConnectionRegistry
+        # NorthGuard log stack (reachable by clients via the log protocol actions). Single-node/
+        # in-memory by default; with :log_cluster configured the control plane is replicated over `ra`
+        # (HA metadata) and the data plane is replicated across nodes (see `log_children/0`).
+      ] ++
+        log_children() ++
+        [
+          {Malachi.TCPAcceptorPool, port},
+          {Malachi.Dashboard, dashboard_port}
+        ]
 
     opts = [strategy: :one_for_one, name: Malachi.Supervisor]
     Supervisor.start_link(children, opts)
@@ -80,9 +80,11 @@ defmodule Malachi.Application do
     Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
   end
 
-  # Options for the LogBroker: single-node in-memory metadata by default; when :log_cluster is set,
-  # start `ra` and run the control plane over a replicated Raft cluster spanning :log_nodes.
-  defp log_broker_opts do
+  # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which
+  # owns a local ReplicationServer. Clustered: start `ra`, plus a named ReplicationServer (this node's
+  # data-plane broker) and the BrokerServer wired to every node's ReplicationServer with a replication
+  # factor. The ReplicationServer must precede the BrokerServer (the latter references it).
+  defp log_children do
     cluster = Application.get_env(:malachi, :log_cluster)
 
     nodes =
@@ -91,18 +93,53 @@ defmodule Malachi.Application do
         configured -> configured
       end
 
-    if cluster, do: start_ra!()
-    [name: Malachi.LogBroker] ++ metadata_cluster_opts(cluster, nodes)
+    if cluster do
+      start_ra!()
+      [replication_child(), log_broker_child(cluster, nodes)]
+    else
+      [log_broker_child(nil, nodes)]
+    end
+  end
+
+  defp replication_child do
+    %{
+      id: Malachi.LogReplication,
+      start:
+        {Malachi.Cluster.ReplicationServer, :start_link, [[name: Malachi.LogReplication, directory: log_data_dir()]]}
+    }
+  end
+
+  defp log_broker_child(cluster, nodes) do
+    opts = [name: Malachi.LogBroker] ++ metadata_cluster_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    %{id: Malachi.LogBroker, start: {Malachi.BrokerServer, :start_link, [log_data_dir(), opts]}}
   end
 
   @doc """
   The metadata options passed to `Malachi.BrokerServer` for the given control-plane `cluster` and
   `nodes`: none (single-node in-memory) when `cluster` is `nil`, otherwise the `ra`-backed cluster.
-  Pure — the `ra` runtime is started separately (see `log_broker_opts/0`).
+  Pure — the `ra` runtime is started separately (see `log_children/0`).
   """
   @spec metadata_cluster_opts(atom() | nil, [node()]) :: keyword()
   def metadata_cluster_opts(nil, _nodes), do: []
   def metadata_cluster_opts(cluster, nodes), do: [metadata_cluster: cluster, metadata_nodes: nodes]
+
+  @doc """
+  The data-plane options for `Malachi.BrokerServer`: none when `cluster` is `nil` (the BrokerServer
+  owns a single local ReplicationServer, `replication_factor` 1); otherwise it places segment
+  replicas across every node's named ReplicationServer with the configured replication factor.
+  """
+  @spec data_plane_opts(atom() | nil, [node()]) :: keyword()
+  def data_plane_opts(nil, _nodes), do: []
+
+  def data_plane_opts(_cluster, nodes) do
+    [brokers: broker_refs(nodes), replication_factor: replication_factor()]
+  end
+
+  @doc "The ReplicationServer references (one per node) that segment replicas are placed across."
+  @spec broker_refs([node()]) :: [{module(), node()}]
+  def broker_refs(nodes), do: for(n <- nodes, do: {Malachi.LogReplication, n})
+
+  defp replication_factor, do: Application.get_env(:malachi, :log_replication_factor, 3)
 
   defp start_ra! do
     {:ok, _apps} = Application.ensure_all_started(:ra)

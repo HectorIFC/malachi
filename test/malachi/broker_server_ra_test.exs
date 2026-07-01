@@ -63,4 +63,32 @@ defmodule Malachi.BrokerServerRaTest do
 
     :ok = BrokerServer.stop(control)
   end
+
+  test "produces across a 3-broker replica set and reads the records back (replicated data plane)" do
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    # The data-plane wiring D2 sets up: several ReplicationServers as the broker set + a replication
+    # factor, with ra as the control plane. This is the shape Malachi.Application builds when clustered.
+    brokers = for _ <- 1..3, do: start_replication()
+
+    {:ok, control} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    {:ok, _root} = BrokerServer.create_topic(control, "events", 4)
+
+    records = for index <- 0..4, do: Record.new("v#{index}", key: "k#{index}")
+    {:ok, _placements} = BrokerServer.produce(control, "events", records)
+
+    # a segment landed on a 3-broker replica set (placement across the whole broker set)
+    [range_id] = BrokerServer.active_range_ids(control, "events")
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(control), range_id)
+    assert length(segment.replica_set) == 3
+
+    # committed (quorum-durable) records read back through the broker's primary
+    {read, _cursor} = BrokerServer.consume(control, "events", %{}, 100, 0)
+    assert read |> Enum.map(& &1.value) |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
+
+    :ok = BrokerServer.stop(control)
+  end
 end

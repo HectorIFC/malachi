@@ -500,8 +500,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       runs e, com metadata in-memory reiniciando, um topic reusado colidia com um segment em disco
       (`Log.ensure_active :already_exists`) → flakiness e2e; agora cada run usa um dir próprio, limpo no
       `after_suite`.
-    - ⏳ **D2 — Data plane replicado** (`ReplicationServer` por nó, `replication_factor > 1`, brokers
-      remotos). ⏳ **D3 — Membership + healing/failover ao vivo** (`MembershipServer` SWIM + `HealCoordinator`).
+    - ✅ **D2 — Data plane replicado.** Em modo cluster, `application.ex` sobe um `ReplicationServer`
+      **nomeado** (`Malachi.LogReplication`) por nó e liga o `LogBroker` a `brokers: [{Malachi.LogReplication,
+      n} | n ← log_nodes]` + `replication_factor` (env `MALACHIMQ_LOG_REPLICATION_FACTOR`, default 3,
+      clampado ao nº de nós pelo broker). O `Placement` (HRW) escolhe o `replica_set` entre esses brokers;
+      o primário replica cross-node via `{name, node}` e commita por **quórum**. Broker set **estático**
+      (todos os nós da config); um follower caído é tolerado pelo quórum (o `live_brokers` ao vivo é D3).
+      Fiação testável por funções puras (`Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
+      quórum/tolerância já é coberto por `replication_server_test`, e a integração (BrokerServer + 3 brokers
+      + rf=3 + ra → produce/consume por quórum ponta a ponta) por `broker_server_ra_test`.
+    - ⏳ **D3 — Membership + healing/failover ao vivo** (`MembershipServer` SWIM alimentando `live_brokers`
+      + `HealCoordinator`).
 - ⏳ **C — Features NorthGuard restantes:** storage/metadata policies, attributes, **retenção**
   (time/size), compaction. Médio valor; não muda a usabilidade, mas é esperado de um produto.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`

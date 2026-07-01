@@ -106,6 +106,8 @@ config :malachi,
     (System.get_env("MALACHIMQ_LOG_NODES") || "")
     |> String.split(",", trim: true)
     |> Enum.map(&String.to_atom(String.trim(&1))),
+  # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
+  log_replication_factor: String.to_integer(System.get_env("MALACHIMQ_LOG_REPLICATION_FACTOR") || "3"),
   ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments
