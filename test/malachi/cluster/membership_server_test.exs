@@ -139,4 +139,32 @@ defmodule Malachi.Cluster.MembershipServerTest do
              Membership.status(view, a) == :alive and Membership.incarnation(view, a) >= 1
            end)
   end
+
+  describe "attributes" do
+    test "a node's own attributes are set at start and readable" do
+      a = :"msattr_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: %{rack: "a"}] ++ @timings}, id: a)
+
+      assert MembershipServer.attributes(a, a) == %{rack: "a"}
+    end
+
+    test "set_attributes updates own attributes and gossip propagates them to peers" do
+      suffix = System.unique_integer([:positive])
+      a = :"msattr_a_#{suffix}"
+      b = :"msattr_b_#{suffix}"
+
+      start_node(a, [b])
+      start_node(b, [a])
+
+      # both learn of each other first
+      full = Enum.sort([a, b])
+      assert eventually(fn -> MembershipServer.alive_members(b) == full end)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "x"})
+
+      # b learns a's attributes through gossip (and a knows its own immediately)
+      assert MembershipServer.attributes(a, a) == %{rack: "x"}
+      assert eventually(fn -> MembershipServer.attributes(b, a) == %{rack: "x"} end)
+    end
+  end
 end

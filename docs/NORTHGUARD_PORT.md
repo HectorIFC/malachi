@@ -588,9 +588,14 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     por incarnation, `set_attributes`, preservação em suspect, gossip via `updates`; convergência
     order-independent preservada (property; attrs são consistentes por-incarnation, então os generators
     usam `%{}`). Multinode SWIM (D3a) segue convergindo com a 4-tupla.
-  - ⏳ **C2b** (`MembershipServer`: `:attributes` inicial + `set_attributes`/leitura em runtime; gossip já
-    propaga) e **C2c** (attrs do self via config/env no boot). Depois **C3 — Policies** (constraints
-    por-topic sobre attributes → placement rack-aware).
+  - ✅ **C2b — `MembershipServer` com attributes.** Opção `:attributes` (attrs iniciais do self,
+    passados ao `Membership.new`); API `set_attributes/2` (muda os próprios attrs em runtime — sobe a
+    incarnation) e `attributes/2` (lê os de um membro). Disseminação é **passiva** (anti-entropy): o
+    server ignora os effects e o gossip periódico (ping/ack piggyback `updates`) propaga — nenhum push
+    proativo, consistente com o resto do server. Testado: attrs iniciais legíveis, e `set_attributes` num
+    nó propaga a um peer via gossip.
+  - ⏳ **C2c** (attrs do self via config/env no boot, ligados no `MembershipServer` da app). Depois
+    **C3 — Policies** (constraints por-topic sobre attributes → placement rack-aware).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

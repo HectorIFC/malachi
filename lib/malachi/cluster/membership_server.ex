@@ -46,6 +46,7 @@ defmodule Malachi.Cluster.MembershipServer do
       own identity. Across nodes this must be a node-qualified `{name, node()}` (not a bare local
       name, which would resolve to a different server on each node). Defaults to `:name`, then the pid.
     * `:peers` - seed peer references, learned as `:alive`.
+    * `:attributes` - this member's own attributes (opaque k/v, e.g. `%{rack: "a"}`); gossiped to peers.
     * `:protocol_period` / `:ack_timeout` / `:suspicion_timeout` - detector timings in ms.
     * `:indirect_timeout` - ms to wait for an indirect (relayed) ack (default `ack_timeout`).
     * `:indirect_fanout` - number of peers asked to relay a ping (default 3).
@@ -72,6 +73,17 @@ defmodule Malachi.Cluster.MembershipServer do
   @spec view(GenServer.server()) :: Membership.t()
   def view(server), do: GenServer.call(server, :view)
 
+  @doc """
+  Sets this node's own `attributes`, raising its incarnation so the change propagates and wins.
+  Gossip disseminates it on the next protocol period (no proactive push, like every other update).
+  """
+  @spec set_attributes(GenServer.server(), Membership.attributes()) :: :ok
+  def set_attributes(server, attributes), do: GenServer.call(server, {:set_attributes, attributes})
+
+  @doc "The attributes known for `member` (`%{}` if unknown or none set)."
+  @spec attributes(GenServer.server(), Membership.member()) :: Membership.attributes()
+  def attributes(server, member), do: GenServer.call(server, {:attributes, member})
+
   # --- server ---
 
   @impl true
@@ -81,8 +93,10 @@ defmodule Malachi.Cluster.MembershipServer do
     self_ref = Keyword.get(opts, :self_ref) || Keyword.get(opts, :name) || self()
     ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
+    membership_opts = [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})]
+
     state = %{
-      view: Membership.new(self_ref, peers: Keyword.get(opts, :peers, [])),
+      view: Membership.new(self_ref, membership_opts),
       self: self_ref,
       protocol_period: Keyword.get(opts, :protocol_period, @default_protocol_period),
       ack_timeout: ack_timeout,
@@ -100,6 +114,16 @@ defmodule Malachi.Cluster.MembershipServer do
   @impl true
   def handle_call(:alive_members, _from, state), do: {:reply, Membership.alive_members(state.view), state}
   def handle_call(:view, _from, state), do: {:reply, state.view, state}
+
+  def handle_call({:attributes, member}, _from, state) do
+    {:reply, Membership.attributes(state.view, member), state}
+  end
+
+  def handle_call({:set_attributes, attributes}, _from, state) do
+    # Update our own attributes locally (raising our incarnation); gossip carries it onward.
+    {view, _effect} = Membership.set_attributes(state.view, attributes)
+    {:reply, :ok, %{state | view: view}}
+  end
 
   @impl true
   def handle_cast({:ping, from, updates}, state) do
