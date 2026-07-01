@@ -57,4 +57,20 @@ defmodule Malachi.ApplicationTest do
                [{Malachi.LogReplication, :"a@127.0.0.1"}, {Malachi.LogReplication, :"b@127.0.0.1"}]
     end
   end
+
+  describe "parse_attributes/1" do
+    test "absent or empty yields no attributes" do
+      assert App.parse_attributes(nil) == %{}
+      assert App.parse_attributes("") == %{}
+    end
+
+    test "parses key=value pairs, trimming whitespace" do
+      assert App.parse_attributes("rack=a,dc=east") == %{"rack" => "a", "dc" => "east"}
+      assert App.parse_attributes(" rack = a , dc = east ") == %{"rack" => "a", "dc" => "east"}
+    end
+
+    test "ignores entries without an = and keeps a value that contains =" do
+      assert App.parse_attributes("rack=a,bogus,url=http://x=y") == %{"rack" => "a", "url" => "http://x=y"}
+    end
+  end
 end

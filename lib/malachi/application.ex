@@ -154,12 +154,33 @@ defmodule Malachi.Application do
   defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes) do
-    %{
-      id: Malachi.LogMembership,
-      start:
-        {MembershipServer, :start_link,
-         [[name: Malachi.LogMembership, self_ref: {Malachi.LogMembership, node()}, peers: membership_seeds(nodes)]]}
-    }
+    opts = [
+      name: Malachi.LogMembership,
+      self_ref: {Malachi.LogMembership, node()},
+      peers: membership_seeds(nodes),
+      attributes: parse_attributes(Application.get_env(:malachi, :log_attributes))
+    ]
+
+    %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
+  end
+
+  @doc ~S"""
+  Parses this node's broker attributes from a `"key=value,key2=value2"` string into a `%{}` of string
+  k/v (`nil`/`""` → `%{}`). Entries without exactly one `=` are ignored; keys and values are trimmed.
+  """
+  @spec parse_attributes(String.t() | nil) :: %{optional(String.t()) => String.t()}
+  def parse_attributes(raw) when raw in [nil, ""], do: %{}
+
+  def parse_attributes(raw) do
+    raw
+    |> String.split(",", trim: true)
+    |> Enum.flat_map(fn entry ->
+      case String.split(entry, "=", parts: 2) do
+        [key, value] -> [{String.trim(key), String.trim(value)}]
+        _no_equals -> []
+      end
+    end)
+    |> Map.new()
   end
 
   defp replication_child do

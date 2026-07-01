@@ -594,8 +594,13 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     server ignora os effects e o gossip periódico (ping/ack piggyback `updates`) propaga — nenhum push
     proativo, consistente com o resto do server. Testado: attrs iniciais legíveis, e `set_attributes` num
     nó propaga a um peer via gossip.
-  - ⏳ **C2c** (attrs do self via config/env no boot, ligados no `MembershipServer` da app). Depois
-    **C3 — Policies** (constraints por-topic sobre attributes → placement rack-aware).
+  - ✅ **C2c — fiação na app (C2 completa).** `application.ex` liga os attributes do self no
+    `MembershipServer` do cluster: `MALACHIMQ_LOG_ATTRIBUTES` (formato `"rack=a,dc=east"`) é parseado por
+    `Application.parse_attributes/1` (função pura testável: ignora entradas sem `=`, trima, preserva `=` no
+    valor) e passado como `:attributes`. Ausente → `%{}`. Testado: parse (vazio, pares, trim, entradas
+    inválidas, valor com `=`). **C2 (attributes via SWIM) completa** — os brokers disseminam seus attrs por
+    gossip, prontos para o placement rack-aware de C3.
+- ⏳ **C3 — Policies** (constraints por-topic sobre attributes → placement rack-aware), se/quando priorizado.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

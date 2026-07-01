@@ -108,6 +108,9 @@ config :malachi,
     |> Enum.map(&String.to_atom(String.trim(&1))),
   # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
   log_replication_factor: String.to_integer(System.get_env("MALACHIMQ_LOG_REPLICATION_FACTOR") || "3"),
+  # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
+  # later by placement policies. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
+  log_attributes: System.get_env("MALACHIMQ_LOG_ATTRIBUTES"),
   # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
   # either to expire sealed segments older than an age and/or over a per-range byte budget.
   retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),
