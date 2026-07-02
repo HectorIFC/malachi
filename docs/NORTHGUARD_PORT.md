@@ -622,8 +622,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `broker_attributes_for/2` (pura, testável) mapeia cada membro vivo `{LogMembership, node}` →
     `{LogReplication, node}` com os attrs gossipados (C2). Com isso o **placement rack-aware funciona ponta
     a ponta na aplicação** (attrs do membership → spread do placement). Ausente `spread_by` → HRW puro.
-  - ⏳ **C3c-2 — policies por-topic** (o guarda-chuva NorthGuard: `nome + retenção + constraints` como
-    objeto de 1ª classe, associado a topics; retenção por-topic sobrepondo a global de C1).
+  - 🚧 **C3c-2 — policies por-topic** (o guarda-chuva NorthGuard). Decisão: policies **dinâmicas no
+    Metadata (`ra`)** + escopo **ambos** (retenção + placement por-topic). Incremental: 2a (Metadata:
+    policies + associação) → 2b (retenção por-topic) → 2c (placement por-topic).
+    - ✅ **C3c-2a — Metadata: policies + associação.** `Metadata` ganha `policies: %{name => policy}`
+      (`policy = %{optional(:retention) => %{max_age_ms, max_bytes}, optional(:spread_by) => term}`), o
+      `topic_meta` ganha `policy: name | nil`, e dois comandos: `{:define_policy, name, policy}` (valida
+      name binário não-vazio + policy map; `:invalid_policy` senão) e `{:set_topic_policy, topic,
+      name | nil}` (`:no_such_topic`/`:no_such_policy`; `nil` desassocia → volta aos globais). Queries
+      `get_policy/2` e `topic_policy/2` (resolve a policy do topic). Determinismo preservado (property).
+      **Sem uso ainda** — 2b/2c ligam retenção/placement à policy do topic.
+    - ⏳ **C3c-2b** (retenção usa `topic_policy` do range, sobrepondo a global) e **C3c-2c** (placement usa
+      o `spread_by` da policy do topic, sobrepondo o global).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

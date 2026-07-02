@@ -39,7 +39,9 @@ defmodule Malachi.Metadata do
           name: topic_name(),
           keyspace_size: pos_integer(),
           state: :active | :sealed,
-          next_range_seq: non_neg_integer()
+          next_range_seq: non_neg_integer(),
+          # The name of the storage policy governing this topic's retention/placement (nil = globals).
+          policy: policy_name() | nil
         }
 
   @type range_meta :: %{
@@ -82,11 +84,26 @@ defmodule Malachi.Metadata do
   @typedoc "Identifies a consumer group's position for a topic."
   @type group_topic :: {group(), topic_name()}
 
+  @type policy_name :: String.t()
+
+  @typedoc """
+  A named storage policy: per-topic retention overrides and a placement spread attribute. Both keys
+  are optional; a policy applies only the ones it sets, falling back to the global defaults otherwise.
+  """
+  @type policy :: %{
+          optional(:retention) => %{
+            optional(:max_age_ms) => non_neg_integer() | nil,
+            optional(:max_bytes) => non_neg_integer() | nil
+          },
+          optional(:spread_by) => term() | nil
+        }
+
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
           ranges: %{range_id() => range_meta()},
           segments: %{segment_id() => segment_meta()},
-          committed_offsets: %{group_topic() => offsets()}
+          committed_offsets: %{group_topic() => offsets()},
+          policies: %{policy_name() => policy()}
         }
 
   @typedoc "A topic's complete metadata, extracted for migration between vnodes."
@@ -107,8 +124,10 @@ defmodule Malachi.Metadata do
           | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
           | {:commit_offset, group(), topic_name(), offsets()}
+          | {:define_policy, policy_name(), policy()}
+          | {:set_topic_policy, topic_name(), policy_name() | nil}
 
-  defstruct topics: %{}, ranges: %{}, segments: %{}, committed_offsets: %{}
+  defstruct topics: %{}, ranges: %{}, segments: %{}, committed_offsets: %{}, policies: %{}
 
   @doc "An empty metadata state."
   @spec new() :: t()
@@ -236,6 +255,28 @@ defmodule Malachi.Metadata do
     {%{state | committed_offsets: committed}, :ok}
   end
 
+  def apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
+    if is_binary(name) and name != "" and is_map(policy) do
+      {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
+    else
+      {state, {:error, :invalid_policy}}
+    end
+  end
+
+  def apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
+    cond do
+      not Map.has_key?(state.topics, topic) ->
+        {state, {:error, :no_such_topic}}
+
+      policy_name != nil and not Map.has_key?(state.policies, policy_name) ->
+        {state, {:error, :no_such_policy}}
+
+      true ->
+        topics = Map.update!(state.topics, topic, fn topic -> %{topic | policy: policy_name} end)
+        {%{state | topics: topics}, :ok}
+    end
+  end
+
   # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
   # replicated by Raft, a command that raises in `apply` would crash every replica
   # deterministically (and again on replay) — e.g. an older replica seeing a newer
@@ -278,6 +319,19 @@ defmodule Malachi.Metadata do
   @spec committed_offsets(t(), group(), topic_name()) :: offsets()
   def committed_offsets(%__MODULE__{} = state, group, topic) do
     Map.get(state.committed_offsets, {group, topic}, %{})
+  end
+
+  @doc "The policy named `name`, or `nil` if undefined."
+  @spec get_policy(t(), policy_name()) :: policy() | nil
+  def get_policy(%__MODULE__{} = state, name), do: Map.get(state.policies, name)
+
+  @doc "The policy governing `topic` (its associated policy), or `nil` if none/unknown (use globals)."
+  @spec topic_policy(t(), topic_name()) :: policy() | nil
+  def topic_policy(%__MODULE__{} = state, topic) do
+    case Map.get(state.topics, topic) do
+      %{policy: name} when is_binary(name) -> Map.get(state.policies, name)
+      _topic_without_policy_or_unknown -> nil
+    end
   end
 
   # --- migration (vnode split) ---
@@ -347,7 +401,7 @@ defmodule Malachi.Metadata do
   defp create_topic(state, name, keyspace_size) do
     root_id = {name, 0}
     # next_range_seq is the per-topic counter; the root takes seq 0, so the next is 1.
-    topic = %{name: name, keyspace_size: keyspace_size, state: :active, next_range_seq: 1}
+    topic = %{name: name, keyspace_size: keyspace_size, state: :active, next_range_seq: 1, policy: nil}
 
     root_range = %{
       id: root_id,

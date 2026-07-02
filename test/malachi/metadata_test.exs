@@ -201,6 +201,46 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "storage policies" do
+    test "define_policy stores a named policy; get_policy reads it (last write wins)" do
+      state = Metadata.new()
+      assert Metadata.get_policy(state, "durable") == nil
+
+      {state, :ok} =
+        Metadata.apply(state, {:define_policy, "durable", %{retention: %{max_age_ms: 1_000}, spread_by: "rack"}})
+
+      assert Metadata.get_policy(state, "durable") == %{retention: %{max_age_ms: 1_000}, spread_by: "rack"}
+
+      {state, :ok} = Metadata.apply(state, {:define_policy, "durable", %{spread_by: "dc"}})
+      assert Metadata.get_policy(state, "durable") == %{spread_by: "dc"}
+    end
+
+    test "define_policy rejects an invalid name or policy" do
+      state = Metadata.new()
+      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, "", %{}})
+      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, 123, %{}})
+      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, "p", :not_a_map})
+    end
+
+    test "set_topic_policy associates a policy with a topic; topic_policy resolves it; nil detaches" do
+      {state, _root} = create_topic()
+      {state, :ok} = apply!(state, {:define_policy, "durable", %{retention: %{max_bytes: 500}}})
+      assert Metadata.topic_policy(state, "events") == nil
+
+      {state, :ok} = apply!(state, {:set_topic_policy, "events", "durable"})
+      assert Metadata.topic_policy(state, "events") == %{retention: %{max_bytes: 500}}
+
+      {state, :ok} = apply!(state, {:set_topic_policy, "events", nil})
+      assert Metadata.topic_policy(state, "events") == nil
+    end
+
+    test "set_topic_policy errors on an unknown topic or unknown policy" do
+      {state, _root} = create_topic()
+      assert {^state, {:error, :no_such_topic}} = Metadata.apply(state, {:set_topic_policy, "nope", "durable"})
+      assert {^state, {:error, :no_such_policy}} = Metadata.apply(state, {:set_topic_policy, "events", "ghost"})
+    end
+  end
+
   describe "unknown commands" do
     test "an unrecognized command is rejected, not crashed (replica safety)" do
       {state, _root_id} = create_topic()
