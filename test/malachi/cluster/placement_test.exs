@@ -166,6 +166,48 @@ defmodule Malachi.Cluster.PlacementTest do
   defp live_subset([]), do: constant([])
   defp live_subset(all_brokers), do: member_subset(all_brokers)
 
+  describe "place/4 — spread (rack-aware)" do
+    # rack of each broker; brokers a1/a2 share rack "a"
+    @attrs %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}, c1: %{"rack" => "c"}}
+
+    defp racks(replicas), do: Enum.map(replicas, fn broker -> @attrs[broker]["rack"] end)
+
+    test "places each replica in a distinct value when rf <= number of values" do
+      {:ok, replicas} = Placement.place("seg", [:a1, :a2, :b1, :c1], 3, spread: {"rack", @attrs})
+
+      assert length(replicas) == 3
+      assert Enum.sort(racks(replicas)) == ["a", "b", "c"]
+    end
+
+    test "prioritizes diversity over pure rank: rf=2 across racks a,a,b picks a and b" do
+      {:ok, replicas} = Placement.place("seg", [:a1, :a2, :b1], 2, spread: {"rack", @attrs})
+
+      # without spread the top two could both be in rack "a"; spread guarantees two racks
+      assert Enum.sort(racks(replicas)) == ["a", "b"]
+    end
+
+    test "is best-effort round-robin when rf exceeds the number of values" do
+      {:ok, replicas} = Placement.place("seg", [:a1, :a2, :b1, :c1], 4, spread: {"rack", @attrs})
+
+      assert Enum.sort(replicas) == [:a1, :a2, :b1, :c1]
+      assert Enum.frequencies(racks(replicas)) == %{"a" => 2, "b" => 1, "c" => 1}
+    end
+
+    test "brokers missing the attribute form their own group and are still placed" do
+      attrs = %{a1: %{"rack" => "a"}}
+      {:ok, replicas} = Placement.place("seg", [:a1, :x1], 2, spread: {"rack", attrs})
+
+      assert Enum.sort(replicas) == [:a1, :x1]
+    end
+
+    test "is deterministic" do
+      opts = [spread: {"rack", @attrs}]
+
+      assert Placement.place("seg", [:a1, :a2, :b1, :c1], 3, opts) ==
+               Placement.place("seg", [:a1, :a2, :b1, :c1], 3, opts)
+    end
+  end
+
   # Builds a Metadata with one topic/range, registering each {segment_id, replica_set}.
   defp with_segments(specs, rf: _rf) do
     {metadata, {:ok, root_id}} = Metadata.apply(Metadata.new(), {:create_topic, "t", 8})

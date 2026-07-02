@@ -39,19 +39,29 @@ defmodule Malachi.Cluster.Placement do
   returning the `min(replication_factor, length(available_brokers))` highest-scoring brokers
   (all distinct). Duplicate brokers in the input are ignored.
 
+  ## Options
+    * `:spread` - `{attribute_key, attributes}` to spread replicas across the distinct values of an
+      attribute (e.g. `{"rack", %{broker => %{"rack" => "a"}}}`): the best-ranked broker of each
+      value is taken first, then the next of each, until `replication_factor`. With `rf <= number of
+      values` every replica lands in a different value; otherwise it is best-effort round-robin. This
+      is deterministic (rendezvous ranking + stable grouping) and is what makes placement rack/DC
+      aware. Omitted → the plain top-`rf` ranking.
+
   Returns `{:error, :no_brokers}` if there are none, or `{:error, :invalid_replication_factor}`
   if `replication_factor < 1`.
   """
-  @spec place(Metadata.segment_id(), [Metadata.broker()], pos_integer()) ::
+  @spec place(Metadata.segment_id(), [Metadata.broker()], pos_integer(), keyword()) ::
           {:ok, [Metadata.broker()]} | {:error, :no_brokers | :invalid_replication_factor}
-  def place(_segment_id, _available_brokers, replication_factor) when replication_factor < 1 do
+  def place(segment_id, available_brokers, replication_factor, opts \\ [])
+
+  def place(_segment_id, _available_brokers, replication_factor, _opts) when replication_factor < 1 do
     {:error, :invalid_replication_factor}
   end
 
-  def place(segment_id, available_brokers, replication_factor) do
+  def place(segment_id, available_brokers, replication_factor, opts) do
     case Enum.uniq(available_brokers) do
       [] -> {:error, :no_brokers}
-      brokers -> {:ok, ranked(segment_id, brokers) |> Enum.take(replication_factor)}
+      brokers -> {:ok, ranked(segment_id, brokers) |> select(replication_factor, opts)}
     end
   end
 
@@ -101,6 +111,34 @@ defmodule Malachi.Cluster.Placement do
   # input-order-independent ranking.
   defp ranked(segment_id, brokers) do
     Enum.sort_by(brokers, fn broker -> {:erlang.phash2({segment_id, broker}), broker} end, :desc)
+  end
+
+  # Picks the replica set from the rank-ordered brokers: plain top-`rf`, or spread across an
+  # attribute's values when `:spread` is set.
+  defp select(ranked, replication_factor, opts) do
+    case Keyword.get(opts, :spread) do
+      nil -> Enum.take(ranked, replication_factor)
+      {attribute_key, attributes} -> spread(ranked, replication_factor, attribute_key, attributes)
+    end
+  end
+
+  # Round-robin across the distinct values of `attribute_key`, taking the best-ranked broker of each
+  # value first, then the next of each. Groups keep rank order internally and are visited by their
+  # best rank, so the result is deterministic and spreads replicas across values (rack/DC aware).
+  defp spread(ranked, replication_factor, attribute_key, attributes) do
+    ranked
+    |> Enum.group_by(fn broker -> attributes |> Map.get(broker, %{}) |> Map.get(attribute_key) end)
+    |> Enum.sort_by(fn {_value, [best | _]} -> Enum.find_index(ranked, &(&1 == best)) end)
+    |> Enum.map(fn {_value, brokers} -> brokers end)
+    |> round_robin()
+    |> Enum.take(replication_factor)
+  end
+
+  defp round_robin(groups) do
+    case Enum.reject(groups, &(&1 == [])) do
+      [] -> []
+      non_empty -> Enum.map(non_empty, &hd/1) ++ round_robin(Enum.map(non_empty, &tl/1))
+    end
   end
 
   # Count *distinct* live replicas: a replica set that happens to list a broker twice still

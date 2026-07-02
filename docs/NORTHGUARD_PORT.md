@@ -600,7 +600,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     valor) e passado como `:attributes`. Ausente → `%{}`. Testado: parse (vazio, pares, trim, entradas
     inválidas, valor com `=`). **C2 (attributes via SWIM) completa** — os brokers disseminam seus attrs por
     gossip, prontos para o placement rack-aware de C3.
-- ⏳ **C3 — Policies** (constraints por-topic sobre attributes → placement rack-aware), se/quando priorizado.
+- 🚧 **C3 — Policies** (nome + retenção + constraints sobre attributes → replica sets; fiel ao NorthGuard,
+  que unifica tudo em *policies*). Incremental: C3a (Placement puro com spread) → C3b (integração: attrs do
+  membership → placement) → C3c (policies por-topic: definição + associação + retenção por-topic).
+  - ✅ **C3a — `Placement` puro com spread (rack-aware).** `place/4` ganha a opção `:spread =
+    {attribute_key, attributes}`: sobre o ranking HRW (determinístico), faz **round-robin pelos valores
+    distintos** do attribute — o melhor-rankeado de cada valor primeiro, depois o próximo de cada, até `rf`.
+    Com `rf ≤ nº de valores`, cada réplica num rack/DC distinto; senão best-effort round-robin. Determinístico
+    (ranking HRW + agrupamento estável); sem `:spread` → top-`rf` de antes (todos os callers de `place/3`
+    intactos). Testado: valores distintos, prioriza diversidade sobre rank puro (rf=2 em a,a,b → a,b),
+    best-effort com rf > valores, brokers sem o attribute agrupam à parte, determinismo.
+  - ⏳ **C3b** (levar os attributes do membership ao `Placement` via `BrokerServer`/`Broker`; elo = `node`)
+    e **C3c** (policies por-topic + retenção por-topic).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).
