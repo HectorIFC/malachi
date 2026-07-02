@@ -678,8 +678,37 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       `snapshot/1` usa `&Function.identity/1` (query linearizável roda no líder, possivelmente remoto).
       Testado (`:multinode`): 2 vnodes sobre 3 nós, mata um membro do vnode dono (o líder se for peer →
       failover; senão um follower), o vnode ainda commita e os metadados (dele e do outro vnode) intactos.
-  - ⏳ **D-c** (coordinators — retention/healing/failover — iterando por vnode em vez de um `Metadata`
-    único; hoje consomem `merged_metadata`).
+  - 🚧 **D-c — gestão do control plane por vnode** (retention/healing/failover). **Estado atual:** as
+    *escritas* de metadata já são sharded (D-b), mas a *gestão* segue **centralizada** — um
+    `RetentionCoordinator` e um `HealCoordinator` no nó do `BrokerServer` leem `merged_metadata` (a
+    **união** de todos os shards) e emitem comandos (`delete_segment`/`set_segment_replicas`) que
+    **roteiam de volta** por topic ao vnode dono (via `command_topic/1`). Isso é **correto** sob
+    sharding (a união é exata; os comandos roteiam), mas reintroduz conceitualmente o ponto único que
+    o sharding elimina — um **débito de fidelidade de sequenciamento**, não de correção.
+
+    O alvo fiel ao NorthGuard é **1C: um coordinator vivendo na liderança do grupo Raft de cada vnode**
+    (cada nó gerencia retention/healing dos vnodes que lidera). Isso **pertence à Fase 1** (distribuição),
+    **não** à Fase 2 (eficiência nativa/profiling). O motivo de 1C não vir já não é ser "otimização",
+    e sim ter **pré-requisitos**:
+      1. **Placement de vnodes por subconjuntos de nós** (hoje todos os vnodes vivem nos mesmos M nós —
+         adiado em D-b-2). Sem espalhar os vnodes, "o líder do vnode" é qualquer um dos M nós e há pouca
+         distribuição real a fazer. **Fatia D-c-1** (decisão: **1A** HRW reusando `Placement`; **2A**
+         núcleo puro primeiro):
+           - ✅ **D-c-1a — núcleo puro.** `Application.place_vnodes/3` atribui a cada vnode
+             (`{vnode_id, token}`) os `R` nós do seu cluster `ra`, escolhidos de `nodes` por rendezvous
+             (o mesmo HRW `Placement.place/4` dos segments) → `{vnode_id, token, nodes}`; determinístico,
+             mínimo movimento, `R` efetivo = `min(R, M)`. Testado isolado (HRW espalha, determinismo,
+             clamp). **Sem uso ainda** — D-c-1b liga ao `ReplicatedDSRSM`/`BrokerServer`.
+           - ⏳ **D-c-1b** — ligar ao runtime: `metadata_vnodes` passa a carregar os nós por-vnode e o
+             `BrokerServer`/`ReplicatedDSRSM` roteia ao vnode mesmo quando ele **não** tem réplica no nó
+             local (o server local `{vnode_id, node()}` deixa de existir sempre) — o ponto difícil.
+      2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
+         conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
+    Sequência: D-b ✅ → **D-c-1 placement de vnodes** → detecção de liderança → **1C** coordinators
+    per-vnode-leader. Fazer 1C antes dos pré-requisitos é que não rende — a fatia em si é Fase 1.
+
+    (A alternativa **1B** — coordinators iterando por-vnode mas ainda centralizados — evita materializar
+    o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
 - `Malachi.SegmentStore.Native` em Rust (Rustler): O_DIRECT, cache de app, `erlang-rocksdb`.

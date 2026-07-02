@@ -39,6 +39,44 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "place_vnodes/3" do
+    test "assigns each vnode replication_factor nodes by HRW, carrying the token" do
+      vnodes = App.sharded_vnodes(:log_meta, 4)
+      nodes = [:a@h, :b@h, :c@h, :d@h, :e@h]
+
+      placed = App.place_vnodes(vnodes, nodes, 3)
+
+      # every vnode keeps its {id, token} and gains exactly 3 distinct nodes drawn from the set
+      assert length(placed) == 4
+
+      for {{vnode_id, token}, {p_id, p_token, chosen}} <- Enum.zip(vnodes, placed) do
+        assert {p_id, p_token} == {vnode_id, token}
+        assert length(chosen) == 3
+        assert length(Enum.uniq(chosen)) == 3
+        assert Enum.all?(chosen, &(&1 in nodes))
+      end
+
+      # HRW spreads the vnodes' primaries rather than piling them on one node
+      primaries = Enum.map(placed, fn {_id, _token, [primary | _]} -> primary end)
+      assert length(Enum.uniq(primaries)) > 1, "expected vnode primaries to spread across nodes"
+    end
+
+    test "is deterministic: the same inputs yield the same placement" do
+      vnodes = App.sharded_vnodes(:log_meta, 3)
+      nodes = [:a@h, :b@h, :c@h]
+      assert App.place_vnodes(vnodes, nodes, 2) == App.place_vnodes(vnodes, nodes, 2)
+    end
+
+    test "clamps the replica count to the number of nodes" do
+      vnodes = App.sharded_vnodes(:log_meta, 2)
+      nodes = [:a@h, :b@h]
+
+      for {_id, _token, chosen} <- App.place_vnodes(vnodes, nodes, 3) do
+        assert Enum.sort(chosen) == [:a@h, :b@h]
+      end
+    end
+  end
+
   describe "broker_refs/1" do
     test "one named ReplicationServer reference per node" do
       assert App.broker_refs([:"a@127.0.0.1", :"b@127.0.0.1"]) ==

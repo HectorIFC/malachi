@@ -16,6 +16,7 @@ defmodule Malachi.Application do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.Placement
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.I18n
@@ -246,6 +247,22 @@ defmodule Malachi.Application do
   def sharded_vnodes(base, count) when is_integer(count) and count > 0 do
     ring_size = Integer.pow(2, 32)
     for index <- 0..(count - 1), do: {:"#{base}_vn_#{index}", div(index * ring_size, count)}
+  end
+
+  @doc """
+  Assigns each vnode (`{vnode_id, token}`) the nodes its ra cluster lives on: the `replication_factor`
+  nodes chosen from `nodes` by rendezvous hashing (the same HRW that places segment replicas), so
+  vnodes spread across the cluster and a node join/leave moves the fewest vnodes. Returns
+  `{vnode_id, token, nodes}`. The effective replica count is `min(replication_factor, length(nodes))`.
+  Pure. Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
+  """
+  @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer()) ::
+          [{atom(), non_neg_integer(), [node()]}]
+  def place_vnodes(vnodes, nodes, replication_factor) do
+    Enum.map(vnodes, fn {vnode_id, token} ->
+      {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor)
+      {vnode_id, token, chosen}
+    end)
   end
 
   @doc """
