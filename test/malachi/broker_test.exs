@@ -386,4 +386,49 @@ defmodule Malachi.BrokerTest do
       assert Enum.sort(racks) == ["a", "b", "c"]
     end
   end
+
+  describe "per-topic placement policy (spread_by override)" do
+    @brokers [:a1, :a2, :b1, :c1]
+
+    # Seeds a broker holding topic "events" governed by a policy `policy`, opened with `opts`.
+    defp broker_with_policy(policy, opts) do
+      metadata =
+        [{:create_topic, "events", 4}, {:define_policy, "p", policy}, {:set_topic_policy, "events", "p"}]
+        |> Enum.reduce(Metadata.new(), fn command, metadata -> elem(Metadata.apply(metadata, command), 0) end)
+
+      {open_broker(Keyword.put(opts, :metadata, metadata)), {"events", 0}}
+    end
+
+    test "a topic's policy spread_by turns spreading on over a global-off", %{store: store} do
+      # global spread_by is nil (off); the topic's policy spreads over "rack"
+      {broker, root_id} =
+        broker_with_policy(%{spread_by: "rack"},
+          brokers: @brokers,
+          replication_factor: 3,
+          broker_attributes: @attrs
+        )
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      racks = Enum.map(segment.replica_set, fn broker -> @attrs[broker]["rack"] end)
+      assert Enum.sort(racks) == ["a", "b", "c"]
+    end
+
+    test "a policy spread_by: nil opts the topic out, overriding the global spread", %{store: store} do
+      {broker, root_id} =
+        broker_with_policy(%{spread_by: nil},
+          brokers: @brokers,
+          replication_factor: 3,
+          spread_by: "rack",
+          broker_attributes: @attrs
+        )
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      # opted out => plain rendezvous ranking (no spread), ignoring the broker attributes
+      [segment] = segments(broker, root_id)
+      assert {:ok, segment.replica_set} == Placement.place(segment.id, @brokers, 3)
+    end
+  end
 end

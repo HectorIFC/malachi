@@ -81,8 +81,9 @@ defmodule Malachi.Broker do
             brokers: nil,
             replication_factor: 1,
             segment_max_bytes: @default_segment_max_bytes,
-            # Rack/DC-aware placement: `spread_by` is the attribute key to spread replicas over (nil =
-            # off), `broker_attributes` maps each broker to its attributes (refreshed from membership).
+            # Rack/DC-aware placement: `spread_by` is the global attribute key to spread replicas over
+            # (nil = off; a topic's storage policy can override it), `broker_attributes` maps each
+            # broker to its attributes (refreshed from membership).
             spread_by: nil,
             broker_attributes: %{},
             segments: %{},
@@ -465,7 +466,9 @@ defmodule Malachi.Broker do
   defp open_segment(broker, range_id, start_offset) do
     seq = Map.get(broker.segment_seq, range_id, 0)
     segment_id = {range_id, seq}
-    {:ok, replica_set} = Placement.place(segment_id, broker.brokers, broker.replication_factor, place_opts(broker))
+
+    {:ok, replica_set} =
+      Placement.place(segment_id, broker.brokers, broker.replication_factor, place_opts(broker, range_id))
 
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
@@ -531,10 +534,24 @@ defmodule Malachi.Broker do
   # Raft-backed), threading the cache so multiple mutations in one operation see each other.
   defp apply_metadata(broker, command), do: broker.command_fun.(broker.metadata, command)
 
-  # Placement options: spread new segments over `spread_by` using the current broker attributes when
-  # configured, else none (plain rendezvous ranking).
-  defp place_opts(%__MODULE__{spread_by: nil}), do: []
-  defp place_opts(%__MODULE__{spread_by: key, broker_attributes: attributes}), do: [spread: {key, attributes}]
+  # Placement options for a new segment of `range_id`: spread it over the effective attribute using
+  # the current broker attributes, else none (plain rendezvous ranking).
+  defp place_opts(broker, range_id) do
+    case effective_spread_by(broker, range_id) do
+      nil -> []
+      key -> [spread: {key, broker.broker_attributes}]
+    end
+  end
+
+  # The spread attribute for `range_id`: its topic policy's `spread_by` when the policy sets that key
+  # (an explicit nil opts the topic out of spreading), overriding the global; otherwise the broker's
+  # global `spread_by`. Mirrors the per-topic retention resolution (a set key wins, nil included).
+  defp effective_spread_by(broker, range_id) do
+    case Metadata.topic_policy(broker.metadata, elem(range_id, 0)) do
+      %{spread_by: spread_by} -> spread_by
+      _no_policy_spread_by -> broker.spread_by
+    end
+  end
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 

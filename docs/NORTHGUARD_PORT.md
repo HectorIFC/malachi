@@ -622,9 +622,9 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `broker_attributes_for/2` (pura, testável) mapeia cada membro vivo `{LogMembership, node}` →
     `{LogReplication, node}` com os attrs gossipados (C2). Com isso o **placement rack-aware funciona ponta
     a ponta na aplicação** (attrs do membership → spread do placement). Ausente `spread_by` → HRW puro.
-  - 🚧 **C3c-2 — policies por-topic** (o guarda-chuva NorthGuard). Decisão: policies **dinâmicas no
+  - ✅ **C3c-2 — policies por-topic** (o guarda-chuva NorthGuard). Decisão: policies **dinâmicas no
     Metadata (`ra`)** + escopo **ambos** (retenção + placement por-topic). Incremental: 2a (Metadata:
-    policies + associação) → 2b (retenção por-topic) → 2c (placement por-topic).
+    policies + associação) → 2b (retenção por-topic) → 2c (placement por-topic). **Fecha C3.**
     - ✅ **C3c-2a — Metadata: policies + associação.** `Metadata` ganha `policies: %{name => policy}`
       (`policy = %{optional(:retention) => %{max_age_ms, max_bytes}, optional(:spread_by) => term}`), o
       `topic_meta` ganha `policy: name | nil`, e dois comandos: `{:define_policy, name, policy}` (valida
@@ -637,7 +637,12 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       global (a policy sobrepõe só as chaves que define; `Map.merge`), ou a global quando o topic não tem
       policy. O `RetentionCoordinator` não muda (já passa o metadata + a global). Testado: policy do topic
       sobrepõe a global, merge (chave não-definida cai na global), topic sem policy usa a global.
-    - ⏳ **C3c-2c** (placement usa o `spread_by` da policy do topic, sobrepondo o global).
+    - ✅ **C3c-2c — placement por-topic.** `Broker.open_segment` resolve, por range, o `spread_by`
+      efetivo = o `:spread_by` da policy do topic (`Metadata.topic_policy/2`) quando a policy **define**
+      essa chave (`nil` explícito opta o topic **fora** do spread — rendezvous puro), sobrepondo o global;
+      senão o `spread_by` global do broker. Simétrico ao 2b (chave definida vence, `nil` incluso). Só
+      `place_opts/effective_spread_by` mudam. Testado: policy liga o spread sobre um global-off; `nil`
+      explícito desliga sobre um global-on (== rendezvous puro).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).
