@@ -58,6 +58,18 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "broker_attributes_for/2" do
+    test "maps members to their ReplicationServer refs with each member's attributes (by node)" do
+      members = [{Malachi.LogMembership, :"a@127.0.0.1"}, {Malachi.LogMembership, :"b@127.0.0.1"}]
+      attributes_of = fn {_name, node} -> %{"rack" => to_string(node)} end
+
+      assert App.broker_attributes_for(members, attributes_of) == %{
+               {Malachi.LogReplication, :"a@127.0.0.1"} => %{"rack" => "a@127.0.0.1"},
+               {Malachi.LogReplication, :"b@127.0.0.1"} => %{"rack" => "b@127.0.0.1"}
+             }
+    end
+  end
+
   describe "parse_attributes/1" do
     test "absent or empty yields no attributes" do
       assert App.parse_attributes(nil) == %{}

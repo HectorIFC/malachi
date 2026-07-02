@@ -617,9 +617,13 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `:broker_attributes` e a **refresca periodicamente** (mesmo timer de `:live_brokers`) para o broker —
     então os attrs disseminados pelo membership (C2) fluem ao placement. Testado: produce espalha réplicas
     por rack, `set_broker_attributes` afeta o placement seguinte, refresh do `BrokerServer` puxa os attrs.
-  - ⏳ **C3c** (policies por-topic: definir/associar `nome + retenção + constraints` a topics; retenção
-    por-topic). A app ainda precisa derivar a fun `:broker_attributes` do `MembershipServer` (elo = `node`)
-    e ligar `spread_by`/attrs por config — parte de C3c/fiação.
+  - ✅ **C3c-1 — fiação do rack-aware na app.** `data_plane_opts` liga `spread_by` (env
+    `MALACHIMQ_LOG_SPREAD_BY`, ex: `"rack"`) e uma fun `broker_attributes` derivada do `MembershipServer`:
+    `broker_attributes_for/2` (pura, testável) mapeia cada membro vivo `{LogMembership, node}` →
+    `{LogReplication, node}` com os attrs gossipados (C2). Com isso o **placement rack-aware funciona ponta
+    a ponta na aplicação** (attrs do membership → spread do placement). Ausente `spread_by` → HRW puro.
+  - ⏳ **C3c-2 — policies por-topic** (o guarda-chuva NorthGuard: `nome + retenção + constraints` como
+    objeto de 1ª classe, associado a topics; retenção por-topic sobrepondo a global de C1).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

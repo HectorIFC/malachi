@@ -235,7 +235,14 @@ defmodule Malachi.Application do
   def data_plane_opts(_cluster, nodes) do
     # :brokers is the static full set (initial placement); :live_brokers narrows new placements to the
     # currently-alive nodes as membership converges/changes (an empty result is ignored by the broker).
-    [brokers: broker_refs(nodes), replication_factor: replication_factor(), live_brokers: &live_brokers/0]
+    # :spread_by + :broker_attributes make placement rack/DC-aware from the attributes gossiped in C2.
+    [
+      brokers: broker_refs(nodes),
+      replication_factor: replication_factor(),
+      live_brokers: &live_brokers/0,
+      spread_by: Application.get_env(:malachi, :log_spread_by),
+      broker_attributes: &broker_attributes/0
+    ]
   end
 
   @doc "The ReplicationServer references (one per node) that segment replicas are placed across."
@@ -253,6 +260,19 @@ defmodule Malachi.Application do
   # The currently-alive broker set, derived from SWIM membership (fed to the broker + healer).
   defp live_brokers do
     Malachi.LogMembership |> MembershipServer.alive_members() |> live_replication_refs()
+  end
+
+  # Each alive member's ReplicationServer ref mapped to that member's attributes (both keyed by node),
+  # so placement can spread replicas over an attribute (e.g. rack). Absent attrs => an empty map.
+  defp broker_attributes do
+    members = MembershipServer.alive_members(Malachi.LogMembership)
+    broker_attributes_for(members, &MembershipServer.attributes(Malachi.LogMembership, &1))
+  end
+
+  @doc "Maps membership `members` to `%{ReplicationServer ref => attributes}`, keyed by node."
+  @spec broker_attributes_for([{term(), node()}], (term() -> map())) :: %{{module(), node()} => map()}
+  def broker_attributes_for(members, attributes_of) do
+    Map.new(members, fn {_name, node} = member -> {{Malachi.LogReplication, node}, attributes_of.(member)} end)
   end
 
   defp replication_factor, do: Application.get_env(:malachi, :log_replication_factor, 3)
