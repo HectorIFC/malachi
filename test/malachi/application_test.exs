@@ -16,6 +16,29 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "sharded_vnodes/2" do
+    test "names vnodes from the base and spreads distinct tokens evenly over the 32-bit ring" do
+      vnodes = App.sharded_vnodes(:log_meta, 4)
+      ring_size = Integer.pow(2, 32)
+
+      assert vnodes == [
+               {:log_meta_vn_0, 0},
+               {:log_meta_vn_1, div(ring_size, 4)},
+               {:log_meta_vn_2, div(ring_size, 2)},
+               {:log_meta_vn_3, div(3 * ring_size, 4)}
+             ]
+
+      # tokens are distinct and in range (the ring rejects duplicates / out-of-range placement)
+      tokens = Enum.map(vnodes, &elem(&1, 1))
+      assert length(Enum.uniq(tokens)) == 4
+      assert Enum.all?(tokens, &(&1 >= 0 and &1 < ring_size))
+    end
+
+    test "a single vnode sits at token 0" do
+      assert App.sharded_vnodes(:log_meta, 1) == [{:log_meta_vn_0, 0}]
+    end
+  end
+
   describe "broker_refs/1" do
     test "one named ReplicationServer reference per node" do
       assert App.broker_refs([:"a@127.0.0.1", :"b@127.0.0.1"]) ==

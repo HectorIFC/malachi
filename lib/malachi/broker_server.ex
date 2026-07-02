@@ -20,6 +20,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Broker
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
 
@@ -162,6 +163,7 @@ defmodule Malachi.BrokerServer do
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
+    {metadata_vnodes, opts} = Keyword.pop(opts, :metadata_vnodes)
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -179,7 +181,7 @@ defmodule Malachi.BrokerServer do
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
       |> maybe_put(:spread_by, spread_by)
-      |> with_metadata_authority(metadata_cluster, metadata_nodes)
+      |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes)
 
     {:ok, broker} = Broker.open(broker_opts)
 
@@ -365,11 +367,24 @@ defmodule Malachi.BrokerServer do
     %{state | waiters: others ++ still_waiting}
   end
 
-  # In-memory metadata by default; with a cluster name, route mutations through that ra cluster and
-  # seed the broker's cache from the replicated state (so it recovers prior metadata on start).
-  defp with_metadata_authority(opts, nil, _nodes), do: opts
+  # Control-plane authority, most specific first:
+  #   * `:metadata_vnodes` — a sharded control plane: one ra cluster per vnode, routed by topic (D-b).
+  #   * `:metadata_cluster` — a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
+  #   * neither — in-memory metadata (single node).
+  # In every case the broker threads a local DSRSM cache (reads served locally) and mutations go
+  # through the authoritative apply; with one vnode the sharded and single paths coincide.
+  defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes) do
+    replicated = start_vnodes(vnodes)
+    {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
 
-  defp with_metadata_authority(opts, cluster_name, nodes) do
+    opts
+    |> Keyword.put(:dsrsm, cache)
+    |> Keyword.put(:command_fun, sharded_command_fun(replicated))
+  end
+
+  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes), do: opts
+
+  defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
     {:ok, seed} = MetadataServer.query(server_id, & &1)
 
@@ -378,9 +393,30 @@ defmodule Malachi.BrokerServer do
     |> Keyword.put(:command_fun, raft_command_fun(server_id))
   end
 
+  # Starts each `{vnode_id, token}`'s ra cluster and places it on the ring (single-node per vnode in
+  # D-b-1; HA per vnode comes later). Returns the authoritative ReplicatedDSRSM captured by the
+  # command function.
+  defp start_vnodes(vnodes) do
+    Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token}, replicated ->
+      {:ok, replicated} = ReplicatedDSRSM.add_vnode(replicated, vnode_id, token)
+      replicated
+    end)
+  end
+
+  # A command function over the sharded control plane: route the command's topic (via the cache's
+  # ring, shared with `replicated`) to its vnode and apply it through that vnode's ra cluster, keeping
+  # the local cache in step (deterministic apply).
+  defp sharded_command_fun(replicated) do
+    fn dsrsm, topic, command ->
+      {:ok, vnode_id} = DSRSM.vnode_for(dsrsm, topic)
+      server_id = ReplicatedDSRSM.server_for(replicated, vnode_id)
+      DSRSM.update_vnode(dsrsm, topic, &ReplicatedMetadata.apply_command(server_id, &1, command))
+    end
+  end
+
   # A command function over a single-vnode DSRSM whose lone vnode is an authoritative ra cluster:
   # route by topic to that vnode and apply the command through the Raft log (the deterministic apply
-  # keeps the local cache in step). D-b replaces this with a real multi-vnode `ReplicatedDSRSM`.
+  # keeps the local cache in step).
   defp raft_command_fun(server_id) do
     fn dsrsm, topic, command ->
       DSRSM.update_vnode(dsrsm, topic, &ReplicatedMetadata.apply_command(server_id, &1, command))

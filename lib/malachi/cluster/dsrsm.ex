@@ -66,6 +66,17 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
+  A DS-RSM over `ring` whose vnodes already hold `metadata_by_vnode` (`%{vnode_id => Metadata}`) —
+  used to seed a local read cache that mirrors an authoritative `Malachi.Cluster.ReplicatedDSRSM`
+  sharing the same ring: reads are served from this cache, writes routed back through the vnodes' ra
+  clusters. `metadata_by_vnode` must key exactly the ring's vnodes.
+  """
+  @spec seed(HashRing.t(), %{vnode_id() => Metadata.t()}) :: t()
+  def seed(%HashRing{} = ring, metadata_by_vnode) when is_map(metadata_by_vnode) do
+    %__MODULE__{ring: ring, vnodes: metadata_by_vnode}
+  end
+
+  @doc """
   Adds a vnode at `token`, migrating any displaced topics to it — the general "grow the
   ring" entry point. Delegates to `split_vnode/3`, so it is safe whether or not topics
   already exist (migration is a no-op on an empty ring). Propagates `HashRing` placement

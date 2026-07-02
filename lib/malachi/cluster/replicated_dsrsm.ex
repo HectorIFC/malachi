@@ -21,6 +21,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   comes with SWIM).
   """
 
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Metadata
@@ -80,6 +81,28 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc "The vnode id owning `topic_name`, or `{:error, :empty}` if there are no vnodes."
   @spec vnode_for(t(), Metadata.topic_name()) :: {:ok, vnode_id()} | {:error, :empty}
   def vnode_for(%__MODULE__{} = state, topic_name), do: HashRing.route(state.ring, topic_name)
+
+  @doc "The ra server id of `vnode_id` — for routing a write to that vnode's cluster."
+  @spec server_for(t(), vnode_id()) :: MetadataServer.server_id()
+  def server_for(%__MODULE__{} = state, vnode_id), do: Map.fetch!(state.vnodes, vnode_id)
+
+  @doc """
+  Reads every vnode's replicated `Metadata` into a local `Malachi.Cluster.DSRSM` cache sharing this
+  ring — the read-side mirror a broker threads (reads served locally; writes routed back through the
+  vnodes' ra clusters via `server_for/2`). Propagates a query error from any vnode.
+  """
+  @spec snapshot(t()) :: {:ok, DSRSM.t()} | {:error, term()}
+  def snapshot(%__MODULE__{} = state) do
+    result =
+      Enum.reduce_while(state.vnodes, {:ok, %{}}, fn {vnode_id, server_id}, {:ok, acc} ->
+        case MetadataServer.query(server_id, & &1) do
+          {:ok, metadata} -> {:cont, {:ok, Map.put(acc, vnode_id, metadata)}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+
+    with {:ok, metadata_by_vnode} <- result, do: {:ok, DSRSM.seed(state.ring, metadata_by_vnode)}
+  end
 
   @doc "The ids of the vnodes."
   @spec vnode_ids(t()) :: [vnode_id()]

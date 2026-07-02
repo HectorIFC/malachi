@@ -659,8 +659,19 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     o caminho Raft embrulha o cluster único como `DSRSM.single(seed)` + um `command_fun/3` que injeta
     `ReplicatedMetadata.apply_command` no `update_vnode` (D-b troca pelo `ReplicatedDSRSM` real). Com 1
     vnode, comportamento idêntico: suite completa verde (981) como rede de segurança.
-  - ⏳ **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes, config de tokens; policies
-    globais — `define_policy` sem topic — precisam ser resolvidas p/ sharding).
+  - 🚧 **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes). Decisão: **1A** — D-b-1
+    (N vnodes **single-node**) primeiro; HA-por-vnode (D-b-2) depois.
+    - ✅ **D-b-1 — control plane sharded single-node.** `BrokerServer` ganha o caminho `:metadata_vnodes`
+      (`[{cluster_name, token}]`): inicia N clusters `ra` via `ReplicatedDSRSM` (um por vnode), materializa
+      o cache local com `ReplicatedDSRSM.snapshot/1` (novo — lê o `Metadata` de cada vnode → `DSRSM.seed/2`,
+      novo, compartilhando o ring), e um `command_fun/3` sharded que roteia por topic ao cluster `ra` do
+      vnode (`ReplicatedDSRSM.server_for/2`, novo) aplicando via `ReplicatedMetadata.apply_command` no
+      `update_vnode`. O caminho `:metadata_cluster` (1 vnode, D-a/D1) segue intacto. Config: `log_vnodes`
+      (inteiro N; `Application.sharded_vnodes/2` gera N vnodes com tokens uniformes no ring de 32 bits).
+      Testado: 2 vnodes, cada topic vive em exatamente o cluster `ra` que seu nome roteia (nunca no outro),
+      e os topics se distribuem entre os vnodes; `sharded_vnodes/2` (tokens distintos, em range).
+    - ⏳ **D-b-2** (HA por vnode: cada vnode replicado sobre M nós — estende `ReplicatedDSRSM.add_vnode`
+      com `nodes`, config 2-D, testes multinode).
   - ⏳ **D-c** (coordinators — retention/healing/failover — iterando por vnode em vez de um `Metadata`
     único; hoje consomem `merged_metadata`).
 

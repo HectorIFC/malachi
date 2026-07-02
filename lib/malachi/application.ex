@@ -211,8 +211,20 @@ defmodule Malachi.Application do
   end
 
   defp log_broker_child(cluster, nodes) do
-    opts = [name: Malachi.LogBroker] ++ metadata_cluster_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    opts = [name: Malachi.LogBroker] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
     %{id: Malachi.LogBroker, start: {Malachi.BrokerServer, :start_link, [log_data_dir(), opts]}}
+  end
+
+  # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata
+  # is sharded across that many vnodes, each its own ra cluster routed by topic (D-b-1).
+  defp metadata_opts(cluster, nodes) do
+    case Application.get_env(:malachi, :log_vnodes, 1) do
+      count when is_integer(count) and count > 1 and not is_nil(cluster) ->
+        [metadata_vnodes: sharded_vnodes(cluster, count)]
+
+      _one_or_unclustered ->
+        metadata_cluster_opts(cluster, nodes)
+    end
   end
 
   @doc """
@@ -223,6 +235,17 @@ defmodule Malachi.Application do
   @spec metadata_cluster_opts(atom() | nil, [node()]) :: keyword()
   def metadata_cluster_opts(nil, _nodes), do: []
   def metadata_cluster_opts(cluster, nodes), do: [metadata_cluster: cluster, metadata_nodes: nodes]
+
+  @doc """
+  The `count` vnodes (`{cluster_name, token}`) of a sharded control plane, named from `base` and
+  spread evenly over the 32-bit ring. Each vnode is its own ra cluster (D-b-1: single-node per vnode;
+  HA per vnode comes later). Pure.
+  """
+  @spec sharded_vnodes(atom(), pos_integer()) :: [{atom(), non_neg_integer()}]
+  def sharded_vnodes(base, count) when is_integer(count) and count > 0 do
+    ring_size = Integer.pow(2, 32)
+    for index <- 0..(count - 1), do: {:"#{base}_vn_#{index}", div(index * ring_size, count)}
+  end
 
   @doc """
   The data-plane options for `Malachi.BrokerServer`: none when `cluster` is `nil` (the BrokerServer

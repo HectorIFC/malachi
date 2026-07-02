@@ -108,6 +108,10 @@ config :malachi,
     |> Enum.map(&String.to_atom(String.trim(&1))),
   # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
   log_replication_factor: String.to_integer(System.get_env("MALACHIMQ_LOG_REPLICATION_FACTOR") || "3"),
+  # Control-plane shards. 1 (default) => a single ra cluster holds all metadata. >1 (with a clustered
+  # control plane) shards the metadata across that many vnodes, each its own ra cluster routed by
+  # topic (D-b-1: single-node per vnode), so metadata mutations scale past one Raft group.
+  log_vnodes: String.to_integer(System.get_env("MALACHIMQ_LOG_VNODES") || "1"),
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHIMQ_LOG_ATTRIBUTES"),

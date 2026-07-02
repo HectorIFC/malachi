@@ -64,6 +64,37 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(control)
   end
 
+  test "shards the control plane across vnodes: each topic's metadata lives in its own ra cluster" do
+    # two vnodes at opposite ends of the ring, each its own ra cluster (D-b-1: single-node per vnode)
+    vnodes = for i <- 0..1, do: {:"bs_vn_#{i}_#{System.unique_integer([:positive])}", i * div(Integer.pow(2, 32), 2)}
+    on_exit(fn -> Enum.each(vnodes, fn {name, _token} -> MetadataServer.delete(name) end) end)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused", brokers: [start_replication()], metadata_vnodes: vnodes)
+
+    names = for i <- 0..9, do: "t#{i}"
+    for name <- names, do: assert({:ok, _root} = BrokerServer.create_topic(control, name, 4))
+
+    # each topic is retrievable through the broker's cache, and its metadata was committed to exactly
+    # the ra cluster its name routes to (queried directly) — and to no other vnode
+    home = fn name ->
+      Enum.filter(vnodes, fn {vnode, _token} ->
+        match?(%{name: ^name}, elem(MetadataServer.query({vnode, node()}, &Metadata.get_topic(&1, name)), 1))
+      end)
+    end
+
+    homes =
+      Map.new(names, fn name ->
+        assert BrokerServer.active_range_ids(control, name) == [{name, 0}]
+        assert [{owner, _token}] = home.(name), "topic #{name} must live in exactly one vnode's cluster"
+        {name, owner}
+      end)
+
+    assert homes |> Map.values() |> Enum.uniq() |> length() == 2, "expected topics to shard across both vnodes"
+
+    :ok = BrokerServer.stop(control)
+  end
+
   test "produces across a 3-broker replica set and reads the records back (replicated data plane)" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
