@@ -18,6 +18,7 @@ defmodule Malachi.BrokerServer do
   use GenServer
 
   alias Malachi.Broker
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
@@ -373,8 +374,17 @@ defmodule Malachi.BrokerServer do
     {:ok, seed} = MetadataServer.query(server_id, & &1)
 
     opts
-    |> Keyword.put(:metadata, seed)
-    |> Keyword.put(:command_fun, &ReplicatedMetadata.apply_command(server_id, &1, &2))
+    |> Keyword.put(:dsrsm, DSRSM.single(seed))
+    |> Keyword.put(:command_fun, raft_command_fun(server_id))
+  end
+
+  # A command function over a single-vnode DSRSM whose lone vnode is an authoritative ra cluster:
+  # route by topic to that vnode and apply the command through the Raft log (the deterministic apply
+  # keeps the local cache in step). D-b replaces this with a real multi-vnode `ReplicatedDSRSM`.
+  defp raft_command_fun(server_id) do
+    fn dsrsm, topic, command ->
+      DSRSM.update_vnode(dsrsm, topic, &ReplicatedMetadata.apply_command(server_id, &1, command))
+    end
   end
 
   defp maybe_put(opts, _key, nil), do: opts

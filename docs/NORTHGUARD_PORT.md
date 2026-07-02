@@ -643,9 +643,26 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       senão o `spread_by` global do broker. Simétrico ao 2b (chave definida vence, `nil` incluso). Só
       `place_opts/effective_spread_by` mudam. Testado: policy liga o spread sobre um global-off; `nil`
       explícito desliga sobre um global-on (== rendezvous puro).
-- ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
-  por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
-  do `BrokerServer` vira por-vnode/roteado por topic).
+- 🚧 **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
+  por vnode) para **escalar o control plane** além de um cluster Raft único. Decisão: **1A** — o cache
+  do `Broker` vira um `DSRSM` (espelha o par `Metadata`/`ReplicatedMetadata`), roteando leituras/escritas
+  por topic; e **2A** — incremental, núcleo puro primeiro. Infra já pronta: `HashRing`, `DSRSM` (puro),
+  `ReplicatedDSRSM` (ra), `MetadataMachine`/`MetadataServer`.
+  - ✅ **D-a — `Broker` sobre `DSRSM` (in-memory, 1 vnode).** O cache do `Broker` deixa de ser um
+    `Metadata` e passa a ser um `DSRSM` (`broker.dsrsm`), roteado por topic (derivável do `range_id`
+    `{topic, seq}`/`segment_id`). Novo combinador puro `DSRSM.update_vnode/3` (roteia + aplica uma
+    função ao `Metadata` do vnode); `DSRSM.command/3` delega a ele com `&Metadata.apply/2` (property
+    tests intactos). `command_fun` do `Broker` vira `(DSRSM, topic, command) -> {DSRSM, reply}` (default
+    `&DSRSM.command/3`); `apply_metadata` deriva o topic via `command_topic/1`. Acessores novos no
+    `DSRSM`: `single/1` (forma trivial 1-vnode p/ seed), `committed_offsets/3`, `topic_policy/2`,
+    `merged_metadata/1` (união dos shards → `Broker.metadata/1` p/ retention/healing). No `BrokerServer`,
+    o caminho Raft embrulha o cluster único como `DSRSM.single(seed)` + um `command_fun/3` que injeta
+    `ReplicatedMetadata.apply_command` no `update_vnode` (D-b troca pelo `ReplicatedDSRSM` real). Com 1
+    vnode, comportamento idêntico: suite completa verde (981) como rede de segurança.
+  - ⏳ **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes, config de tokens; policies
+    globais — `define_policy` sem topic — precisam ser resolvidas p/ sharding).
+  - ⏳ **D-c** (coordinators — retention/healing/failover — iterando por vnode em vez de um `Metadata`
+    único; hoje consomem `merged_metadata`).
 
 ### Fase 2 — Eficiência nativa (condicional, guiada por profiling)
 - `Malachi.SegmentStore.Native` em Rust (Rustler): O_DIRECT, cache de app, `erlang-rocksdb`.

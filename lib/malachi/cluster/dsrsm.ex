@@ -55,6 +55,17 @@ defmodule Malachi.Cluster.DSRSM do
   def new(opts \\ []), do: %__MODULE__{ring: HashRing.new(opts), vnodes: %{}}
 
   @doc """
+  A DS-RSM with a single vnode holding `metadata` — the trivial, unsharded shape. Seeds a one-vnode
+  control plane (the current single-cluster runtime and tests) before real multi-vnode sharding: with
+  one vnode every topic routes to it, so behavior matches a plain `Malachi.Metadata`.
+  """
+  @spec single(Metadata.t()) :: t()
+  def single(metadata \\ Metadata.new()) do
+    {:ok, ring} = HashRing.add_vnode(HashRing.new(), :vnode_0, 0)
+    %__MODULE__{ring: ring, vnodes: %{vnode_0: metadata}}
+  end
+
+  @doc """
   Adds a vnode at `token`, migrating any displaced topics to it — the general "grow the
   ring" entry point. Delegates to `split_vnode/3`, so it is safe whether or not topics
   already exist (migration is a no-op on an empty ring). Propagates `HashRing` placement
@@ -95,13 +106,29 @@ defmodule Malachi.Cluster.DSRSM do
   """
   @spec command(t(), Metadata.topic_name(), Metadata.command()) :: {t(), term()}
   def command(%__MODULE__{} = dsrsm, topic_name, command) do
+    update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
+  end
+
+  @doc """
+  Routes `topic_name` to its vnode and updates that vnode's `Metadata` with `update_fun` — the
+  general single-vnode mutation combinator. `update_fun` receives the vnode's `Metadata` and returns
+  `{new_metadata, reply}` (the `Malachi.Metadata.apply/2` shape); the new metadata replaces the
+  vnode's and `reply` is returned as-is. `{dsrsm, {:error, :no_vnode}}` if the ring is empty.
+
+  `command/3` is this with `&Malachi.Metadata.apply(&1, command)` (pure). A Raft-backed control plane
+  injects an authoritative apply here instead (see `Malachi.BrokerServer`), so purity/determinism
+  hold only when `update_fun` is itself pure.
+  """
+  @spec update_vnode(t(), Metadata.topic_name(), (Metadata.t() -> {Metadata.t(), reply})) ::
+          {t(), reply | {:error, :no_vnode}}
+        when reply: term()
+  def update_vnode(%__MODULE__{} = dsrsm, topic_name, update_fun) do
     case HashRing.route(dsrsm.ring, topic_name) do
       {:error, :empty} ->
         {dsrsm, {:error, :no_vnode}}
 
       {:ok, vnode_id} ->
-        metadata = Map.fetch!(dsrsm.vnodes, vnode_id)
-        {metadata, reply} = Metadata.apply(metadata, command)
+        {metadata, reply} = update_fun.(Map.fetch!(dsrsm.vnodes, vnode_id))
         {%{dsrsm | vnodes: Map.put(dsrsm.vnodes, vnode_id, metadata)}, reply}
     end
   end
@@ -154,7 +181,44 @@ defmodule Malachi.Cluster.DSRSM do
     query(dsrsm, topic_name, &Metadata.segments_of_range(&1, range_id)) || []
   end
 
+  @doc "A consumer group's committed offsets for `topic_name` (empty if it never committed)."
+  @spec committed_offsets(t(), Metadata.group(), Metadata.topic_name()) :: Metadata.offsets()
+  def committed_offsets(%__MODULE__{} = dsrsm, group, topic_name) do
+    query(dsrsm, topic_name, &Metadata.committed_offsets(&1, group, topic_name)) || %{}
+  end
+
+  @doc "The storage policy governing `topic_name`, or `nil` if none/unknown (use the globals)."
+  @spec topic_policy(t(), Metadata.topic_name()) :: Metadata.policy() | nil
+  def topic_policy(%__MODULE__{} = dsrsm, topic_name) do
+    query(dsrsm, topic_name, &Metadata.topic_policy(&1, topic_name))
+  end
+
+  @doc """
+  The union of every vnode's `Metadata` — a single flat view for whole-cluster consumers (retention,
+  healing) that iterate all segments. Topics/ranges/segments/offsets are disjoint across vnodes (each
+  topic lives on one vnode), so the union is unambiguous; with one vnode it is that vnode's metadata.
+  """
+  @spec merged_metadata(t()) :: Metadata.t()
+  def merged_metadata(%__MODULE__{vnodes: vnodes}) do
+    case Map.values(vnodes) do
+      [single] -> single
+      many -> Enum.reduce(many, Metadata.new(), &merge_metadata/2)
+    end
+  end
+
   # --- internals ---
+
+  # Unions one vnode's metadata into the accumulator. Shards are disjoint by topic, so the per-field
+  # `Map.merge` never collides; folded from an empty `Metadata`, so one vnode yields exactly it.
+  defp merge_metadata(from, acc) do
+    %Metadata{
+      topics: Map.merge(acc.topics, from.topics),
+      ranges: Map.merge(acc.ranges, from.ranges),
+      segments: Map.merge(acc.segments, from.segments),
+      committed_offsets: Map.merge(acc.committed_offsets, from.committed_offsets),
+      policies: Map.merge(acc.policies, from.policies)
+    }
+  end
 
   # Routes `topic_name` to its vnode and runs `fun` over that vnode's metadata. Returns nil
   # when the ring is empty (the caller turns that into nil/[] per its return contract).

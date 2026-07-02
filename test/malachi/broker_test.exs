@@ -2,6 +2,7 @@ defmodule Malachi.BrokerTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Broker
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -49,7 +50,7 @@ defmodule Malachi.BrokerTest do
   end
 
   defp segments(broker, range_id) do
-    broker.metadata |> Metadata.segments_of_range(range_id) |> Enum.sort_by(& &1.start_offset)
+    broker |> Broker.metadata() |> Metadata.segments_of_range(range_id) |> Enum.sort_by(& &1.start_offset)
   end
 
   describe "create_topic / produce / read" do
@@ -283,12 +284,8 @@ defmodule Malachi.BrokerTest do
       # retention expires the two oldest segments (control plane drops them)
       [s0, s1 | _] = segments(broker, root_id) |> Enum.sort_by(& &1.start_offset)
 
-      metadata =
-        broker.metadata
-        |> then(&elem(Metadata.apply(&1, {:delete_segment, s0.id}), 0))
-        |> then(&elem(Metadata.apply(&1, {:delete_segment, s1.id}), 0))
-
-      broker = %{broker | metadata: metadata}
+      {broker, :ok} = Broker.delete_segment(broker, s0.id)
+      {broker, :ok} = Broker.delete_segment(broker, s1.id)
 
       # a consumer starting at the beginning advances to the earliest data still stored
       earliest = segments(broker, root_id) |> Enum.map(& &1.start_offset) |> Enum.min()
@@ -325,15 +322,15 @@ defmodule Malachi.BrokerTest do
       new_set = [:b, :a, :c]
       broker = Broker.apply_heal(broker, [{:set_segment_replicas, segment.id, new_set}])
 
-      assert Metadata.get_segment(broker.metadata, segment.id).replica_set == new_set
+      assert Metadata.get_segment(Broker.metadata(broker), segment.id).replica_set == new_set
       assert broker.segments[root_id].replica_set == new_set
     end
 
     test "a failed register command aborts the produce instead of crashing", %{store: store} do
       # a command_fun that fails register_segment (as a Raft timeout would), passing others through
       failing = fn
-        metadata, {:register_segment, _range, _seg, _replicas, _offset} -> {metadata, {:error, :ra_down}}
-        metadata, command -> Metadata.apply(metadata, command)
+        dsrsm, _topic, {:register_segment, _range, _seg, _replicas, _offset} -> {dsrsm, {:error, :ra_down}}
+        dsrsm, topic, command -> DSRSM.command(dsrsm, topic, command)
       end
 
       {:ok, broker} = Broker.open(brokers: [:a], command_fun: failing)
@@ -396,7 +393,7 @@ defmodule Malachi.BrokerTest do
         [{:create_topic, "events", 4}, {:define_policy, "p", policy}, {:set_topic_policy, "events", "p"}]
         |> Enum.reduce(Metadata.new(), fn command, metadata -> elem(Metadata.apply(metadata, command), 0) end)
 
-      {open_broker(Keyword.put(opts, :metadata, metadata)), {"events", 0}}
+      {open_broker(Keyword.put(opts, :dsrsm, DSRSM.single(metadata))), {"events", 0}}
     end
 
     test "a topic's policy spread_by turns spreading on over a global-off", %{store: store} do

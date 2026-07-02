@@ -131,6 +131,76 @@ defmodule Malachi.Cluster.DSRSMTest do
     end
   end
 
+  describe "single vnode (unsharded shape)" do
+    alias Malachi.Metadata
+
+    test "single/1 holds the seed metadata and routes every topic to it" do
+      seed = elem(Metadata.apply(Metadata.new(), {:create_topic, "events", 4}), 0)
+      dsrsm = DSRSM.single(seed)
+
+      assert DSRSM.vnode_ids(dsrsm) == [:vnode_0]
+      # any topic name resolves to the lone vnode, whether or not it exists yet
+      assert DSRSM.vnode_for(dsrsm, "events") == {:ok, :vnode_0}
+      assert DSRSM.vnode_for(dsrsm, "anything") == {:ok, :vnode_0}
+      assert %{name: "events"} = DSRSM.get_topic(dsrsm, "events")
+    end
+
+    test "merged_metadata/1 of one vnode is exactly that vnode's metadata" do
+      seed = elem(Metadata.apply(Metadata.new(), {:create_topic, "events", 4}), 0)
+      assert DSRSM.merged_metadata(DSRSM.single(seed)) == seed
+    end
+
+    test "committed_offsets/3 and topic_policy/2 route by topic" do
+      dsrsm = DSRSM.single()
+      {dsrsm, {:ok, _root}} = DSRSM.command(dsrsm, "events", {:create_topic, "events", 4})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:commit_offset, "g", "events", %{{"events", 0} => 7}})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:define_policy, "p", %{spread_by: "rack"}})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:set_topic_policy, "events", "p"})
+
+      assert DSRSM.committed_offsets(dsrsm, "g", "events") == %{{"events", 0} => 7}
+      assert DSRSM.committed_offsets(dsrsm, "g", "other") == %{}
+      assert DSRSM.topic_policy(dsrsm, "events") == %{spread_by: "rack"}
+      assert DSRSM.topic_policy(dsrsm, "other") == nil
+    end
+  end
+
+  describe "update_vnode (mutation combinator)" do
+    test "routes to the owning vnode, applies the update, and returns its reply" do
+      dsrsm = with_vnodes(a: 4, b: 12)
+      {:ok, owner} = DSRSM.vnode_for(dsrsm, "events")
+
+      {dsrsm, :applied} =
+        DSRSM.update_vnode(dsrsm, "events", fn metadata ->
+          {elem(Malachi.Metadata.apply(metadata, {:create_topic, "events", 4}), 0), :applied}
+        end)
+
+      # the update landed in the routed vnode's shard, and command/3 is update_vnode + Metadata.apply
+      assert Malachi.Metadata.get_topic(Map.fetch!(dsrsm.vnodes, owner), "events")
+      assert DSRSM.get_topic(dsrsm, "events")
+    end
+
+    test "an empty ring reports no vnode and leaves the state unchanged" do
+      dsrsm = DSRSM.new(ring_bits: 4)
+      assert {^dsrsm, {:error, :no_vnode}} = DSRSM.update_vnode(dsrsm, "events", fn m -> {m, :ok} end)
+    end
+  end
+
+  describe "merged_metadata across shards" do
+    test "unions disjoint topics from every vnode" do
+      dsrsm = with_vnodes([{:a, 4}, {:b, 8}, {:c, 12}, {:d, 15}])
+
+      dsrsm =
+        Enum.reduce(0..19, dsrsm, fn index, dsrsm ->
+          {dsrsm, {:ok, _root}} = DSRSM.command(dsrsm, "topic-#{index}", {:create_topic, "topic-#{index}", 4})
+          dsrsm
+        end)
+
+      merged = DSRSM.merged_metadata(dsrsm)
+      assert map_size(merged.topics) == 20
+      for index <- 0..19, do: assert(Malachi.Metadata.get_topic(merged, "topic-#{index}"))
+    end
+  end
+
   describe "determinism" do
     test "the same command sequence yields identical state" do
       build = fn ->

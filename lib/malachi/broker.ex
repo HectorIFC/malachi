@@ -27,6 +27,7 @@ defmodule Malachi.Broker do
   wires the real `ReplicationServer`-backed effects and serializes access.
   """
 
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
   alias Malachi.Keyspace
   alias Malachi.Log.Record
@@ -59,14 +60,15 @@ defmodule Malachi.Broker do
              {:ok, [Record.t()]} | :eof | {:error, term()})
 
   @typedoc """
-  Applies a metadata command, returning `{metadata, reply}` — the same shape as
-  `Malachi.Metadata.apply/2` (the default), or a Raft-backed variant
-  (`Malachi.Cluster.ReplicatedMetadata.apply_command/3`) that makes the metadata authoritative.
+  Routes a metadata command to the vnode owning `topic_name` and applies it there, returning
+  `{dsrsm, reply}` — the `Malachi.Cluster.DSRSM.command/3` shape. The default `&DSRSM.command/3`
+  applies in memory; a Raft-backed variant (see `Malachi.BrokerServer`) injects an authoritative
+  apply through `Malachi.Cluster.ReplicatedMetadata` into the routed vnode.
   """
-  @type command_fun :: (Metadata.t(), Metadata.command() -> {Metadata.t(), term()})
+  @type command_fun :: (DSRSM.t(), Metadata.topic_name(), Metadata.command() -> {DSRSM.t(), term()})
 
   @type t :: %__MODULE__{
-          metadata: Metadata.t(),
+          dsrsm: DSRSM.t(),
           command_fun: command_fun(),
           brokers: [Metadata.broker()],
           replication_factor: pos_integer(),
@@ -76,7 +78,7 @@ defmodule Malachi.Broker do
           offsets: %{Metadata.range_id() => non_neg_integer()}
         }
 
-  defstruct metadata: nil,
+  defstruct dsrsm: nil,
             command_fun: nil,
             brokers: nil,
             replication_factor: 1,
@@ -99,9 +101,10 @@ defmodule Malachi.Broker do
     * `:replication_factor` - replicas per segment, clamped to the broker count (default `1`).
     * `:segment_max_bytes` - the active segment seals once it reaches this many encoded bytes
       (default 64 MiB).
-    * `:command_fun` - how metadata mutations are applied (default `&Malachi.Metadata.apply/2`, an
-      in-memory single node); pass a Raft-backed function to make the metadata authoritative.
-    * `:metadata` - the initial metadata view (default empty), e.g. seeded from a replicated cluster.
+    * `:command_fun` - how metadata mutations are routed and applied (default `&DSRSM.command/3`, an
+      in-memory single vnode); pass a Raft-backed function to make the metadata authoritative.
+    * `:dsrsm` - the initial sharded metadata view (default a single-vnode `DSRSM.single/1`), e.g.
+      seeded from a replicated cluster.
   """
   @spec open(keyword()) :: {:ok, t()}
   def open(opts \\ []) do
@@ -113,8 +116,8 @@ defmodule Malachi.Broker do
 
     {:ok,
      %__MODULE__{
-       metadata: Keyword.get(opts, :metadata) || Metadata.new(),
-       command_fun: Keyword.get(opts, :command_fun, &Metadata.apply/2),
+       dsrsm: Keyword.get(opts, :dsrsm) || DSRSM.single(),
+       command_fun: Keyword.get(opts, :command_fun, &DSRSM.command/3),
        brokers: brokers,
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes,
@@ -145,8 +148,8 @@ defmodule Malachi.Broker do
   """
   @spec create_topic(t(), Metadata.topic_name(), pos_integer()) :: {t(), term()}
   def create_topic(%__MODULE__{} = broker, name, keyspace_bits) do
-    {metadata, reply} = apply_metadata(broker, {:create_topic, name, keyspace_bits})
-    {%{broker | metadata: metadata}, reply}
+    {dsrsm, reply} = apply_metadata(broker, {:create_topic, name, keyspace_bits})
+    {%{broker | dsrsm: dsrsm}, reply}
   end
 
   @doc """
@@ -159,7 +162,7 @@ defmodule Malachi.Broker do
   @spec produce(t(), Metadata.topic_name(), [Record.t()], replicate_fun()) ::
           {t(), {:ok, placements()} | {:error, term()}}
   def produce(%__MODULE__{} = broker, topic, records, replicate_fun) when is_list(records) do
-    case Metadata.get_topic(broker.metadata, topic) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
       nil -> {broker, {:error, :no_such_topic}}
       topic_meta -> route_and_replicate(broker, topic, topic_meta, records, replicate_fun)
     end
@@ -186,10 +189,10 @@ defmodule Malachi.Broker do
   @spec split_range(t(), Metadata.range_id()) :: {t(), term()}
   def split_range(%__MODULE__{} = broker, range_id) do
     case apply_metadata(broker, {:split_range, range_id}) do
-      {metadata, {:ok, _left, _right} = reply} ->
-        {seal_active_segment(%{broker | metadata: metadata}, range_id), reply}
+      {dsrsm, {:ok, _left, _right} = reply} ->
+        {seal_active_segment(%{broker | dsrsm: dsrsm}, range_id), reply}
 
-      {_metadata, {:error, _reason} = error} ->
+      {_dsrsm, {:error, _reason} = error} ->
         {broker, error}
     end
   end
@@ -201,11 +204,11 @@ defmodule Malachi.Broker do
   @spec merge_ranges(t(), Metadata.range_id(), Metadata.range_id()) :: {t(), term()}
   def merge_ranges(%__MODULE__{} = broker, range_id_a, range_id_b) do
     case apply_metadata(broker, {:merge_ranges, range_id_a, range_id_b}) do
-      {metadata, {:ok, _child} = reply} ->
-        broker = %{broker | metadata: metadata}
+      {dsrsm, {:ok, _child} = reply} ->
+        broker = %{broker | dsrsm: dsrsm}
         {seal_active_segment(seal_active_segment(broker, range_id_a), range_id_b), reply}
 
-      {_metadata, {:error, _reason} = error} ->
+      {_dsrsm, {:error, _reason} = error} ->
         {broker, error}
     end
   end
@@ -213,7 +216,7 @@ defmodule Malachi.Broker do
   @doc "The ids of a topic's active ranges (those that currently tile the keyspace)."
   @spec active_range_ids(t(), Metadata.topic_name()) :: [Metadata.range_id()]
   def active_range_ids(%__MODULE__{} = broker, topic) do
-    broker.metadata |> Metadata.active_ranges_of_topic(topic) |> Enum.map(& &1.id)
+    broker.dsrsm |> DSRSM.active_ranges_of_topic(topic) |> Enum.map(& &1.id)
   end
 
   @doc """
@@ -228,14 +231,14 @@ defmodule Malachi.Broker do
   end
 
   defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker) do
-    {metadata, _reply} = apply_metadata(broker, command)
-    broker = %{broker | metadata: metadata}
+    {dsrsm, _reply} = apply_metadata(broker, command)
+    broker = %{broker | dsrsm: dsrsm}
     update_active_replica_set(broker, segment_id, replica_set)
   end
 
   defp apply_replica_command(command, broker) do
-    {metadata, _reply} = apply_metadata(broker, command)
-    %{broker | metadata: metadata}
+    {dsrsm, _reply} = apply_metadata(broker, command)
+    %{broker | dsrsm: dsrsm}
   end
 
   defp update_active_replica_set(broker, {range_id, _seq} = segment_id, replica_set) do
@@ -248,9 +251,12 @@ defmodule Malachi.Broker do
     end
   end
 
-  @doc "The current metadata (the control-plane source of truth held by this broker)."
+  @doc """
+  The current metadata as one flat view — the union of the sharded vnodes (see
+  `Malachi.Cluster.DSRSM.merged_metadata/1`), for whole-cluster consumers like retention and healing.
+  """
   @spec metadata(t()) :: Metadata.t()
-  def metadata(%__MODULE__{} = broker), do: broker.metadata
+  def metadata(%__MODULE__{} = broker), do: DSRSM.merged_metadata(broker.dsrsm)
 
   @doc """
   Durably records a consumer `group`'s committed position (`offsets`, per range) for `topic`,
@@ -258,8 +264,8 @@ defmodule Malachi.Broker do
   """
   @spec commit_offset(t(), Metadata.group(), Metadata.topic_name(), Metadata.offsets()) :: {t(), term()}
   def commit_offset(%__MODULE__{} = broker, group, topic, offsets) do
-    {metadata, reply} = apply_metadata(broker, {:commit_offset, group, topic, offsets})
-    {%{broker | metadata: metadata}, reply}
+    {dsrsm, reply} = apply_metadata(broker, {:commit_offset, group, topic, offsets})
+    {%{broker | dsrsm: dsrsm}, reply}
   end
 
   @doc """
@@ -269,14 +275,14 @@ defmodule Malachi.Broker do
   """
   @spec delete_segment(t(), Metadata.segment_id()) :: {t(), term()}
   def delete_segment(%__MODULE__{} = broker, segment_id) do
-    {metadata, reply} = apply_metadata(broker, {:delete_segment, segment_id})
-    {%{broker | metadata: metadata}, reply}
+    {dsrsm, reply} = apply_metadata(broker, {:delete_segment, segment_id})
+    {%{broker | dsrsm: dsrsm}, reply}
   end
 
   @doc "A consumer group's committed offsets for `topic` (empty if it never committed)."
   @spec committed_offsets(t(), Metadata.group(), Metadata.topic_name()) :: Metadata.offsets()
   def committed_offsets(%__MODULE__{} = broker, group, topic) do
-    Metadata.committed_offsets(broker.metadata, group, topic)
+    DSRSM.committed_offsets(broker.dsrsm, group, topic)
   end
 
   @doc """
@@ -323,7 +329,7 @@ defmodule Malachi.Broker do
 
   def stream_history(%__MODULE__{} = broker, range_id, cursor, max_records, read_fun)
       when is_integer(max_records) and max_records > 0 do
-    case Metadata.get_range(broker.metadata, range_id) do
+    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
       nil ->
         {:error, :no_such_range}
 
@@ -360,7 +366,7 @@ defmodule Malachi.Broker do
           {:ok, [Record.t()], consume_cursor()} | {:error, term()}
   def read_consume(%__MODULE__{} = broker, range_id, cursor, max_records, read_fun)
       when is_integer(max_records) and max_records > 0 do
-    case Metadata.get_range(broker.metadata, range_id) do
+    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
       nil ->
         {:error, :no_such_range}
 
@@ -374,7 +380,7 @@ defmodule Malachi.Broker do
   # --- routing & replication ---
 
   defp route_and_replicate(broker, topic, topic_meta, records, replicate_fun) do
-    active_ranges = Metadata.active_ranges_of_topic(broker.metadata, topic)
+    active_ranges = DSRSM.active_ranges_of_topic(broker.dsrsm, topic)
 
     case group_by_owning_range(records, active_ranges, topic_meta.keyspace_size) do
       {:error, _reason} = error -> {broker, error}
@@ -473,22 +479,22 @@ defmodule Malachi.Broker do
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
     case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
-      {metadata, :ok} ->
+      {dsrsm, :ok} ->
         active = %{id: segment_id, start_offset: start_offset, records: 0, bytes: 0, replica_set: replica_set}
 
         broker = %{
           broker
-          | metadata: metadata,
+          | dsrsm: dsrsm,
             segments: Map.put(broker.segments, range_id, active),
             segment_seq: Map.put(broker.segment_seq, range_id, seq + 1)
         }
 
         {:ok, broker}
 
-      {_metadata, {:error, reason}} ->
+      {_dsrsm, {:error, reason}} ->
         {:error, reason}
 
-      {_metadata, other} ->
+      {_dsrsm, other} ->
         {:error, {:unexpected_register_reply, other}}
     end
   end
@@ -525,14 +531,32 @@ defmodule Malachi.Broker do
         # replica applies the same value deterministically. Retention uses byte_size + sealed_at.
         sealed_at = System.system_time(:millisecond)
         command = {:seal_segment, active.id, active.records, active.bytes, sealed_at}
-        {metadata, _reply} = apply_metadata(broker, command)
-        %{broker | metadata: metadata, segments: Map.delete(broker.segments, range_id)}
+        {dsrsm, _reply} = apply_metadata(broker, command)
+        %{broker | dsrsm: dsrsm, segments: Map.delete(broker.segments, range_id)}
     end
   end
 
   # Applies a metadata mutation via the configured command function (in-memory by default, or
-  # Raft-backed), threading the cache so multiple mutations in one operation see each other.
-  defp apply_metadata(broker, command), do: broker.command_fun.(broker.metadata, command)
+  # Raft-backed), routing it to the vnode owning the command's topic and threading the sharded cache
+  # so multiple mutations in one operation see each other. Returns `{dsrsm, reply}`.
+  defp apply_metadata(broker, command) do
+    broker.command_fun.(broker.dsrsm, command_topic(command), command)
+  end
+
+  # The topic whose shard owns each control-plane command the broker emits — so the DSRSM dispatches
+  # it to the right vnode. Every such command targets exactly one topic, named directly or derivable
+  # from its range id (`{topic, seq}`) or segment id (`{range_id, seq}`).
+  defp command_topic({:create_topic, name, _bits}), do: name
+  defp command_topic({:commit_offset, _group, topic, _offsets}), do: topic
+  defp command_topic({:split_range, range_id}), do: topic_of_range(range_id)
+  defp command_topic({:merge_ranges, range_id_a, _range_id_b}), do: topic_of_range(range_id_a)
+  defp command_topic({:register_segment, range_id, _id, _replicas, _start}), do: topic_of_range(range_id)
+  defp command_topic({:seal_segment, segment_id, _len, _bytes, _at}), do: topic_of_segment(segment_id)
+  defp command_topic({:delete_segment, segment_id}), do: topic_of_segment(segment_id)
+  defp command_topic({:set_segment_replicas, segment_id, _replicas}), do: topic_of_segment(segment_id)
+
+  defp topic_of_range(range_id), do: elem(range_id, 0)
+  defp topic_of_segment(segment_id), do: topic_of_range(elem(segment_id, 0))
 
   # Placement options for a new segment of `range_id`: spread it over the effective attribute using
   # the current broker attributes, else none (plain rendezvous ranking).
@@ -547,7 +571,7 @@ defmodule Malachi.Broker do
   # (an explicit nil opts the topic out of spreading), overriding the global; otherwise the broker's
   # global `spread_by`. Mirrors the per-topic retention resolution (a set key wins, nil included).
   defp effective_spread_by(broker, range_id) do
-    case Metadata.topic_policy(broker.metadata, elem(range_id, 0)) do
+    case DSRSM.topic_policy(broker.dsrsm, topic_of_range(range_id)) do
       %{spread_by: spread_by} -> spread_by
       _no_policy_spread_by -> broker.spread_by
     end
@@ -559,8 +583,8 @@ defmodule Malachi.Broker do
   # Retention deletes the oldest segments — a contiguous prefix — so a consumer positioned below this
   # has had its data expired; read callers clamp up to it to skip transparently to what still exists.
   defp earliest_offset(broker, range_id) do
-    broker.metadata
-    |> Metadata.segments_of_range(range_id)
+    broker.dsrsm
+    |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
     |> Enum.map(& &1.start_offset)
     |> Enum.min(fn -> 0 end)
   end
@@ -577,8 +601,8 @@ defmodule Malachi.Broker do
       :eof
     else
       segment =
-        broker.metadata
-        |> Metadata.segments_of_range(range_id)
+        broker.dsrsm
+        |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
         |> Enum.sort_by(& &1.start_offset, :desc)
         |> Enum.find(&(&1.start_offset <= offset))
 
