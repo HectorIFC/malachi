@@ -165,6 +165,33 @@ defmodule Malachi.BrokerServerTest do
     end
   end
 
+  describe "rack-aware placement wiring" do
+    test "the periodic refresh pulls broker attributes from the source into placement", %{tmp_dir: directory} do
+      attributes = %{a1: %{"rack" => "a"}, b1: %{"rack" => "b"}}
+
+      server =
+        start(directory,
+          brokers: [:a1, :b1],
+          replication_factor: 2,
+          spread_by: "rack",
+          broker_attributes: fn -> attributes end,
+          brokers_refresh_interval: 5
+        )
+
+      assert wait_until(fn -> :sys.get_state(server).broker.broker_attributes == attributes end)
+    end
+  end
+
+  defp wait_until(check, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+
+    cond do
+      check.() -> true
+      System.monotonic_time(:millisecond) > deadline -> false
+      true -> Process.sleep(2) && wait_until(check, deadline)
+    end
+  end
+
   defp drain_history(server, range_id, cursor \\ :start, accumulated \\ []) do
     case BrokerServer.stream_history(server, range_id, cursor, 3) do
       {:ok, records, :done} -> [records | accumulated] |> Enum.reverse() |> List.flatten()

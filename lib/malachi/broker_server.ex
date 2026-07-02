@@ -156,6 +156,8 @@ defmodule Malachi.BrokerServer do
     {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
     {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
+    {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
+    {spread_by, opts} = Keyword.pop(opts, :spread_by)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
@@ -175,6 +177,7 @@ defmodule Malachi.BrokerServer do
     broker_opts =
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
+      |> maybe_put(:spread_by, spread_by)
       |> with_metadata_authority(metadata_cluster, metadata_nodes)
 
     {:ok, broker} = Broker.open(broker_opts)
@@ -183,13 +186,15 @@ defmodule Malachi.BrokerServer do
       broker: broker,
       replication: owned_replication,
       live_brokers: live_brokers,
+      broker_attributes: broker_attributes,
       refresh_interval: refresh_interval,
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
       waiters: []
     }
 
-    if live_brokers, do: schedule_refresh(state)
+    # Refresh the placement inputs (live broker set and their attributes) from the given sources.
+    if live_brokers || broker_attributes, do: schedule_refresh(state)
     {:ok, state}
   end
 
@@ -288,10 +293,9 @@ defmodule Malachi.BrokerServer do
 
   def handle_info(:refresh_brokers, state) do
     broker =
-      case state.live_brokers.() do
-        [] -> state.broker
-        live -> Broker.set_brokers(state.broker, live)
-      end
+      state.broker
+      |> refresh_broker_set(state.live_brokers)
+      |> refresh_broker_attributes(state.broker_attributes)
 
     schedule_refresh(state)
     {:noreply, %{state | broker: broker}}
@@ -307,6 +311,19 @@ defmodule Malachi.BrokerServer do
   # --- internals ---
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
+
+  # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.
+  defp refresh_broker_set(broker, nil), do: broker
+
+  defp refresh_broker_set(broker, live_brokers) do
+    case live_brokers.() do
+      [] -> broker
+      live -> Broker.set_brokers(broker, live)
+    end
+  end
+
+  defp refresh_broker_attributes(broker, nil), do: broker
+  defp refresh_broker_attributes(broker, attributes_fun), do: Broker.set_broker_attributes(broker, attributes_fun.())
 
   # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
   # returns {records, next_positions}. This is the read orchestration the LogApi used to do client-side;

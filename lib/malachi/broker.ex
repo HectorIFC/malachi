@@ -81,6 +81,10 @@ defmodule Malachi.Broker do
             brokers: nil,
             replication_factor: 1,
             segment_max_bytes: @default_segment_max_bytes,
+            # Rack/DC-aware placement: `spread_by` is the attribute key to spread replicas over (nil =
+            # off), `broker_attributes` maps each broker to its attributes (refreshed from membership).
+            spread_by: nil,
+            broker_attributes: %{},
             segments: %{},
             segment_seq: %{},
             offsets: %{}
@@ -112,7 +116,9 @@ defmodule Malachi.Broker do
        command_fun: Keyword.get(opts, :command_fun, &Metadata.apply/2),
        brokers: brokers,
        replication_factor: replication_factor,
-       segment_max_bytes: segment_max_bytes
+       segment_max_bytes: segment_max_bytes,
+       spread_by: Keyword.get(opts, :spread_by),
+       broker_attributes: Keyword.get(opts, :broker_attributes, %{})
      }}
   end
 
@@ -278,6 +284,15 @@ defmodule Malachi.Broker do
   """
   @spec set_brokers(t(), [Metadata.broker()]) :: t()
   def set_brokers(%__MODULE__{} = broker, [_ | _] = brokers), do: %{broker | brokers: brokers}
+
+  @doc """
+  Replaces the per-broker attributes used for rack/DC-aware placement (refreshed from membership).
+  New segments spread over `spread_by` using these; a broker absent here has no attributes.
+  """
+  @spec set_broker_attributes(t(), %{Metadata.broker() => map()}) :: t()
+  def set_broker_attributes(%__MODULE__{} = broker, attributes) when is_map(attributes) do
+    %{broker | broker_attributes: attributes}
+  end
 
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
@@ -450,7 +465,7 @@ defmodule Malachi.Broker do
   defp open_segment(broker, range_id, start_offset) do
     seq = Map.get(broker.segment_seq, range_id, 0)
     segment_id = {range_id, seq}
-    {:ok, replica_set} = Placement.place(segment_id, broker.brokers, broker.replication_factor)
+    {:ok, replica_set} = Placement.place(segment_id, broker.brokers, broker.replication_factor, place_opts(broker))
 
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
@@ -515,6 +530,11 @@ defmodule Malachi.Broker do
   # Applies a metadata mutation via the configured command function (in-memory by default, or
   # Raft-backed), threading the cache so multiple mutations in one operation see each other.
   defp apply_metadata(broker, command), do: broker.command_fun.(broker.metadata, command)
+
+  # Placement options: spread new segments over `spread_by` using the current broker attributes when
+  # configured, else none (plain rendezvous ranking).
+  defp place_opts(%__MODULE__{spread_by: nil}), do: []
+  defp place_opts(%__MODULE__{spread_by: key, broker_attributes: attributes}), do: [spread: {key, attributes}]
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 

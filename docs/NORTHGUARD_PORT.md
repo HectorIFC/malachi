@@ -610,8 +610,16 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     (ranking HRW + agrupamento estável); sem `:spread` → top-`rf` de antes (todos os callers de `place/3`
     intactos). Testado: valores distintos, prioriza diversidade sobre rank puro (rf=2 em a,a,b → a,b),
     best-effort com rf > valores, brokers sem o attribute agrupam à parte, determinismo.
-  - ⏳ **C3b** (levar os attributes do membership ao `Placement` via `BrokerServer`/`Broker`; elo = `node`)
-    e **C3c** (policies por-topic + retenção por-topic).
+  - ✅ **C3b — integração (attributes → placement).** O `Broker` ganha `spread_by` (a chave de attribute)
+    e `broker_attributes` (map broker→attrs); `open` os aceita, `set_broker_attributes/2` os atualiza (como
+    `set_brokers`), e `open_segment` passa `:spread` ao `Placement.place` quando `spread_by` está setado
+    (senão placement normal — todos os callers intactos). O `BrokerServer` aceita `:spread_by` + uma fun
+    `:broker_attributes` e a **refresca periodicamente** (mesmo timer de `:live_brokers`) para o broker —
+    então os attrs disseminados pelo membership (C2) fluem ao placement. Testado: produce espalha réplicas
+    por rack, `set_broker_attributes` afeta o placement seguinte, refresh do `BrokerServer` puxa os attrs.
+  - ⏳ **C3c** (policies por-topic: definir/associar `nome + retenção + constraints` a topics; retenção
+    por-topic). A app ainda precisa derivar a fun `:broker_attributes` do `MembershipServer` (elo = `node`)
+    e ligar `spread_by`/attrs por config — parte de C3c/fiação.
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).

@@ -353,4 +353,37 @@ defmodule Malachi.BrokerTest do
       assert_raise ArgumentError, fn -> Broker.open(brokers: [:a], segment_max_bytes: 0) end
     end
   end
+
+  describe "rack-aware placement (spread_by + broker_attributes)" do
+    @attrs %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}, c1: %{"rack" => "c"}}
+
+    test "new segments spread replicas across racks", %{store: store} do
+      {broker, root_id} =
+        broker_with_topic("events", 4,
+          brokers: [:a1, :a2, :b1, :c1],
+          replication_factor: 3,
+          spread_by: "rack",
+          broker_attributes: @attrs
+        )
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      racks = Enum.map(segment.replica_set, fn broker -> @attrs[broker]["rack"] end)
+      assert Enum.sort(racks) == ["a", "b", "c"]
+    end
+
+    test "set_broker_attributes updates the attributes used for the next placement", %{store: store} do
+      # start with no attributes: placement can't spread (everything is one nil group)
+      {broker, _root} =
+        broker_with_topic("events", 4, brokers: [:a1, :a2, :b1, :c1], replication_factor: 3, spread_by: "rack")
+
+      broker = Broker.set_broker_attributes(broker, @attrs)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, "events" |> then(&{&1, 0}))
+      racks = Enum.map(segment.replica_set, fn broker -> @attrs[broker]["rack"] end)
+      assert Enum.sort(racks) == ["a", "b", "c"]
+    end
+  end
 end
