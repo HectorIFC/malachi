@@ -67,4 +67,37 @@ defmodule Malachi.Cluster.RetentionTest do
     # by age: s0. by size (oldest-first until <= 150): s0, s1. union: s0, s1
     assert result == ["s0", "s1"]
   end
+
+  describe "per-topic policy" do
+    defp with_policy(metadata, topic, policy) do
+      {metadata, :ok} = Metadata.apply(metadata, {:define_policy, "p", policy})
+      {metadata, :ok} = Metadata.apply(metadata, {:set_topic_policy, topic, "p"})
+      metadata
+    end
+
+    test "a topic's policy retention overrides the global policy" do
+      metadata =
+        [{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}]
+        |> with_sealed()
+        |> with_policy("t", %{retention: %{max_age_ms: 5_000}})
+
+      # global has no age limit, but the topic's policy expires anything older than 5_000
+      assert expired(metadata, 10_000, %{}) == ["old"]
+    end
+
+    test "a topic policy merges over the global (keys it does not set fall back)" do
+      metadata =
+        [{"s0", 0, 100, 1_000}, {"s1", 1, 100, 9_900}, {"s2", 2, 100, 9_900}]
+        |> with_sealed()
+        |> with_policy("t", %{retention: %{max_age_ms: 5_000}})
+
+      # policy sets only max_age_ms (s0 by age); max_bytes falls back to the global 150 (s0, s1 by size)
+      assert expired(metadata, 10_000, %{max_bytes: 150}) == ["s0", "s1"]
+    end
+
+    test "a topic without a policy uses the global policy" do
+      metadata = with_sealed([{"old", 0, 100, 1_000}])
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}) == ["old"]
+    end
+  end
 end

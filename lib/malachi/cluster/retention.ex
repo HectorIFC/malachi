@@ -12,6 +12,10 @@ defmodule Malachi.Cluster.Retention do
   Size is scoped **per range** (the natural unit; a range's segments have contiguous offsets), age
   is per segment. The **active** segment is never returned — it is still being written. A `nil`
   bound disables that rule. `Malachi.Cluster.RetentionCoordinator` executes the returned ids.
+
+  The bound applied to each range is its **topic's policy retention merged over the global policy**
+  (the policy overrides only the keys it sets; `Malachi.Metadata.topic_policy/2`), or the global
+  policy passed in when the topic has no policy — so retention is per-topic (C3c-2b).
   """
 
   alias Malachi.Metadata
@@ -22,21 +26,33 @@ defmodule Malachi.Cluster.Retention do
           optional(:max_bytes) => non_neg_integer() | nil
         }
 
-  @doc "The sealed segment ids to expire under `policy` at `now_ms` (epoch ms)."
+  @doc """
+  The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
+  range uses its topic's policy retention merged over it (see the module doc).
+  """
   @spec expired(Metadata.t(), non_neg_integer(), policy()) :: [Metadata.segment_id()]
-  def expired(%Metadata{} = metadata, now_ms, policy) do
-    max_age = Map.get(policy, :max_age_ms)
-    max_bytes = Map.get(policy, :max_bytes)
-
+  def expired(%Metadata{} = metadata, now_ms, global_policy) do
     metadata.segments
     |> Map.values()
     |> Enum.filter(&(&1.state == :sealed))
     |> Enum.group_by(& &1.range_id)
-    |> Enum.flat_map(fn {_range_id, sealed} ->
+    |> Enum.flat_map(fn {range_id, sealed} ->
+      retention = effective_retention(metadata, range_id, global_policy)
       oldest_first = Enum.sort_by(sealed, & &1.start_offset)
-      expired_by_age(oldest_first, now_ms, max_age) ++ expired_by_size(oldest_first, max_bytes)
+
+      expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
+        expired_by_size(oldest_first, Map.get(retention, :max_bytes))
     end)
     |> Enum.uniq()
+  end
+
+  # A range's effective retention: its topic's policy retention merged over the global policy (the
+  # policy overrides only the keys it sets), or the global policy when the topic has no policy.
+  defp effective_retention(metadata, range_id, global_policy) do
+    case Metadata.topic_policy(metadata, elem(range_id, 0)) do
+      %{retention: retention} when is_map(retention) -> Map.merge(global_policy, retention)
+      _no_policy_retention -> global_policy
+    end
   end
 
   defp expired_by_age(_segments, _now_ms, nil), do: []

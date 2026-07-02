@@ -632,8 +632,12 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       name | nil}` (`:no_such_topic`/`:no_such_policy`; `nil` desassocia → volta aos globais). Queries
       `get_policy/2` e `topic_policy/2` (resolve a policy do topic). Determinismo preservado (property).
       **Sem uso ainda** — 2b/2c ligam retenção/placement à policy do topic.
-    - ⏳ **C3c-2b** (retenção usa `topic_policy` do range, sobrepondo a global) e **C3c-2c** (placement usa
-      o `spread_by` da policy do topic, sobrepondo o global).
+    - ✅ **C3c-2b — retenção por-topic.** `Retention.expired/3` passa a resolver, **por range**, a retenção
+      efetiva = a `:retention` da policy do topic (`Metadata.topic_policy/2`) **mesclada sobre** a policy
+      global (a policy sobrepõe só as chaves que define; `Map.merge`), ou a global quando o topic não tem
+      policy. O `RetentionCoordinator` não muda (já passa o metadata + a global). Testado: policy do topic
+      sobrepõe a global, merge (chave não-definida cai na global), topic sem policy usa a global.
+    - ⏳ **C3c-2c** (placement usa o `spread_by` da policy do topic, sobrepondo o global).
 - ⏳ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Refactor (o cache único
   do `BrokerServer` vira por-vnode/roteado por topic).
