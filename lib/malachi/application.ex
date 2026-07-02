@@ -216,11 +216,12 @@ defmodule Malachi.Application do
   end
 
   # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata
-  # is sharded across that many vnodes, each its own ra cluster routed by topic (D-b-1).
+  # is sharded across that many vnodes, each its own ra cluster routed by topic, and each replicated
+  # over the same `nodes` for HA per vnode (D-b).
   defp metadata_opts(cluster, nodes) do
     case Application.get_env(:malachi, :log_vnodes, 1) do
       count when is_integer(count) and count > 1 and not is_nil(cluster) ->
-        [metadata_vnodes: sharded_vnodes(cluster, count)]
+        [metadata_vnodes: sharded_vnodes(cluster, count), metadata_nodes: nodes]
 
       _one_or_unclustered ->
         metadata_cluster_opts(cluster, nodes)

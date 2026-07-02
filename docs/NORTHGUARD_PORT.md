@@ -659,7 +659,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     o caminho Raft embrulha o cluster único como `DSRSM.single(seed)` + um `command_fun/3` que injeta
     `ReplicatedMetadata.apply_command` no `update_vnode` (D-b troca pelo `ReplicatedDSRSM` real). Com 1
     vnode, comportamento idêntico: suite completa verde (981) como rede de segurança.
-  - 🚧 **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes). Decisão: **1A** — D-b-1
+  - ✅ **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes). Decisão: **1A** — D-b-1
     (N vnodes **single-node**) primeiro; HA-por-vnode (D-b-2) depois.
     - ✅ **D-b-1 — control plane sharded single-node.** `BrokerServer` ganha o caminho `:metadata_vnodes`
       (`[{cluster_name, token}]`): inicia N clusters `ra` via `ReplicatedDSRSM` (um por vnode), materializa
@@ -670,8 +670,14 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       (inteiro N; `Application.sharded_vnodes/2` gera N vnodes com tokens uniformes no ring de 32 bits).
       Testado: 2 vnodes, cada topic vive em exatamente o cluster `ra` que seu nome roteia (nunca no outro),
       e os topics se distribuem entre os vnodes; `sharded_vnodes/2` (tokens distintos, em range).
-    - ⏳ **D-b-2** (HA por vnode: cada vnode replicado sobre M nós — estende `ReplicatedDSRSM.add_vnode`
-      com `nodes`, config 2-D, testes multinode).
+    - ✅ **D-b-2 — HA por vnode.** `ReplicatedDSRSM.add_vnode/4` passa a receber os `nodes`, iniciando o
+      cluster `ra` de cada vnode sobre eles (`MetadataServer.start/2`), então cada vnode sobrevive à perda
+      de um membro. Modelo: **todos os vnodes sobre o mesmo conjunto de M nós** (espelha o D1; placement de
+      vnodes por subconjuntos de nós fica para depois). `BrokerServer` passa os `metadata_nodes` ao caminho
+      sharded (`start_vnodes/2`); `Application.metadata_opts` inclui `metadata_nodes` no caminho sharded.
+      `snapshot/1` usa `&Function.identity/1` (query linearizável roda no líder, possivelmente remoto).
+      Testado (`:multinode`): 2 vnodes sobre 3 nós, mata um membro do vnode dono (o líder se for peer →
+      failover; senão um follower), o vnode ainda commita e os metadados (dele e do outro vnode) intactos.
   - ⏳ **D-c** (coordinators — retention/healing/failover — iterando por vnode em vez de um `Metadata`
     único; hoje consomem `merged_metadata`).
 

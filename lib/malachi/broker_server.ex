@@ -373,8 +373,8 @@ defmodule Malachi.BrokerServer do
   #   * neither — in-memory metadata (single node).
   # In every case the broker threads a local DSRSM cache (reads served locally) and mutations go
   # through the authoritative apply; with one vnode the sharded and single paths coincide.
-  defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes) do
-    replicated = start_vnodes(vnodes)
+  defp with_metadata_authority(opts, _cluster, nodes, [_ | _] = vnodes) do
+    replicated = start_vnodes(vnodes, nodes)
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
 
     opts
@@ -393,12 +393,12 @@ defmodule Malachi.BrokerServer do
     |> Keyword.put(:command_fun, raft_command_fun(server_id))
   end
 
-  # Starts each `{vnode_id, token}`'s ra cluster and places it on the ring (single-node per vnode in
-  # D-b-1; HA per vnode comes later). Returns the authoritative ReplicatedDSRSM captured by the
+  # Starts each `{vnode_id, token}`'s ra cluster across `nodes` (every vnode over the same node set —
+  # HA per vnode) and places it on the ring. Returns the authoritative ReplicatedDSRSM captured by the
   # command function.
-  defp start_vnodes(vnodes) do
+  defp start_vnodes(vnodes, nodes) do
     Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token}, replicated ->
-      {:ok, replicated} = ReplicatedDSRSM.add_vnode(replicated, vnode_id, token)
+      {:ok, replicated} = ReplicatedDSRSM.add_vnode(replicated, vnode_id, token, nodes)
       replicated
     end)
   end

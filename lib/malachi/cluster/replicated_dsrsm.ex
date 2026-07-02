@@ -16,9 +16,10 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   effect). `ra` must already be running (e.g. `:ra.start_in/1`), as with
   `Malachi.Cluster.MetadataServer`.
 
-  Phase 1b scope: **static vnodes** (no vnode split yet — migrating committed metadata
-  between Raft groups is a separate step) and single-node clusters (multi-node membership
-  comes with SWIM).
+  Each vnode's cluster can span several nodes (`add_vnode/4`), so a vnode survives losing a member —
+  HA per vnode. Phase 1b scope: **static vnodes** (no vnode split yet — migrating committed metadata
+  between Raft groups is a separate step) and every vnode over the same node set (no per-vnode node
+  placement yet — distributing vnodes across node subsets is a later step).
   """
 
   alias Malachi.Cluster.DSRSM
@@ -40,13 +41,14 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   def new(opts \\ []), do: %__MODULE__{ring: HashRing.new(opts), vnodes: %{}}
 
   @doc """
-  Adds a vnode at `token` and starts its Raft cluster (named `vnode_id`). Propagates ring
-  placement errors and `ra` start errors.
+  Adds a vnode at `token` and starts its Raft cluster (named `vnode_id`) across `nodes` (default the
+  local node). With several nodes the vnode is replicated and survives losing a member — HA per
+  vnode. Returns the **local** server id. Propagates ring placement errors and `ra` start errors.
   """
-  @spec add_vnode(t(), vnode_id(), HashRing.token()) :: {:ok, t()} | {:error, term()}
-  def add_vnode(%__MODULE__{} = state, vnode_id, token) do
+  @spec add_vnode(t(), vnode_id(), HashRing.token(), [node()]) :: {:ok, t()} | {:error, term()}
+  def add_vnode(%__MODULE__{} = state, vnode_id, token, nodes \\ [node()]) do
     with {:ok, ring} <- HashRing.add_vnode(state.ring, vnode_id, token),
-         {:ok, server_id} <- MetadataServer.start(vnode_id) do
+         {:ok, server_id} <- MetadataServer.start(vnode_id, nodes) do
       {:ok, %{state | ring: ring, vnodes: Map.put(state.vnodes, vnode_id, server_id)}}
     end
   end
@@ -95,7 +97,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   def snapshot(%__MODULE__{} = state) do
     result =
       Enum.reduce_while(state.vnodes, {:ok, %{}}, fn {vnode_id, server_id}, {:ok, acc} ->
-        case MetadataServer.query(server_id, & &1) do
+        # A linearizable query runs on the (possibly remote) leader, so use a named stdlib function
+        # rather than a module-local closure, which the leader node may not have loaded.
+        case MetadataServer.query(server_id, &Function.identity/1) do
           {:ok, metadata} -> {:cont, {:ok, Map.put(acc, vnode_id, metadata)}}
           {:error, _reason} = error -> {:halt, error}
         end
