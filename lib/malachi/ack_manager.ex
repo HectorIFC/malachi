@@ -10,6 +10,7 @@ defmodule Malachi.AckManager do
   @pending_table :malachi_pending_acks
   @default_timeout_ms 30_000
 
+  @doc "Starts the ack manager, which tracks in-flight messages and their per-message ack timeouts."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end

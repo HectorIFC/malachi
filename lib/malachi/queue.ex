@@ -19,10 +19,16 @@ defmodule Malachi.Queue do
     decentralized_counters: true
   ]
 
+  @doc "Starts the GenServer for one queue partition `{name, partition}`, registered under its name."
   def start_link({name, partition}) do
     GenServer.start_link(__MODULE__, {name, partition}, name: via_tuple({name, partition}))
   end
 
+  @doc """
+  Enqueues `payload` (with optional `headers`) into `queue_name`, routed to its partition and creating
+  the queue on first use. Returns the enqueue reply (`{:ok, ...}` or a backpressure/error) or a
+  `{:error, reason}` name-validation error.
+  """
   def enqueue(queue_name, payload, headers \\ %{}) do
     with :ok <- Malachi.Validator.validate_queue_name(queue_name) do
       {name, partition} = Malachi.PartitionManager.get_partition(queue_name)
@@ -51,6 +57,10 @@ defmodule Malachi.Queue do
     end
   end
 
+  @doc """
+  Subscribes `consumer_pid` to `queue_name` (created on first use); delivered messages are pushed to
+  it. Returns `:ok` or a `{:error, reason}` name-validation error.
+  """
   def subscribe(queue_name, consumer_pid) do
     with :ok <- Malachi.Validator.validate_queue_name(queue_name) do
       {name, partition} = Malachi.PartitionManager.get_partition(queue_name)
@@ -60,6 +70,10 @@ defmodule Malachi.Queue do
     end
   end
 
+  @doc """
+  The queue's stats — `:consumers`, `:producers`, `:buffered`, `:partition`, and `:exists`. A zeroed
+  map with `exists: false` if the partition is not running, or a `{:error, reason}` name error.
+  """
   def get_stats(queue_name) do
     case Malachi.Validator.validate_queue_name(queue_name) do
       :ok ->

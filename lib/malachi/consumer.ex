@@ -6,6 +6,10 @@ defmodule Malachi.Consumer do
   require Logger
   alias Malachi.I18n
 
+  @doc """
+  Starts a consumer that subscribes to `queue_name` and runs `callback` on each delivered message
+  (`opts` reserved). A temporary process that hibernates aggressively when idle.
+  """
   def start_link({queue_name, callback, opts}) do
     GenServer.start_link(__MODULE__, {queue_name, callback, opts})
   end

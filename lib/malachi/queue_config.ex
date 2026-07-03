@@ -9,6 +9,7 @@ defmodule Malachi.QueueConfig do
 
   @config_table :malachi_queue_config
 
+  @doc "Starts the queue-config store — an ETS-backed `GenServer` holding per-queue configuration."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
