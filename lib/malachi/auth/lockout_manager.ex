@@ -29,6 +29,7 @@ defmodule Malachi.Auth.LockoutManager do
 
   ## Client API
 
+  @doc "Starts the lockout manager, which tracks failed-login attempts and account lockouts."
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

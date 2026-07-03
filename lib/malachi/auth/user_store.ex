@@ -31,6 +31,7 @@ defmodule Malachi.Auth.UserStore do
 
   # -- Public API --
 
+  @doc "Starts the user store, which persists users in Mnesia and mirrors them into ETS for fast reads."
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end

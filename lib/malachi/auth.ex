@@ -12,6 +12,7 @@ defmodule Malachi.Auth do
   @users_table :malachi_users
   @sessions_table :malachi_sessions
 
+  @doc "Starts the auth server, which owns the in-memory user and session ETS tables."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
@@ -167,7 +168,8 @@ defmodule Malachi.Auth do
   end
 
   @doc """
-  Checks if user has a specific permission.
+  Whether the subject has `permission` (or is `:admin`). Accepts either a `username` — looked up in
+  the user table, where an unknown user has no permissions — or a permission list directly.
   """
   def has_permission?(username, permission) when is_binary(username) do
     case :ets.lookup(@users_table, username) do
