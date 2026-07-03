@@ -236,7 +236,7 @@ defmodule Malachi.AuditLog do
     schedule_cleanup()
     schedule_flush()
 
-    Logger.info(Malachi.I18n.t(:audit_log_started, %{retention_days: @retention_days}))
+    Logger.info(Malachi.I18n.t(:audit_log_started, retention_days: @retention_days))
 
     {:ok,
      %{
