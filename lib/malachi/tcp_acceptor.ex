@@ -1,10 +1,24 @@
 defmodule Malachi.TCPAcceptor do
+  @moduledoc """
+  One acceptor of the `Malachi.TCPAcceptorPool`: a `GenServer` that owns a listen socket on a port and
+  accepts client connections in a loop, one at a time.
+
+  Each accepted connection is completed — a TLS handshake for `:ssl` (recording the negotiated version
+  and success/failure metrics), or the raw socket for `:gen_tcp` — and handed to a fresh process that
+  runs `Malachi.TCPProtocol` for that client. The accept loop self-schedules with an idle backoff: the
+  poll timeout grows as consecutive accepts time out (capped at 30s), so an idle server does not
+  busy-wait. Several acceptors share the same port (`reuseport`), spreading accepts across schedulers.
+  """
   use GenServer
   require Logger
   alias Malachi.Auth.LockoutManager
   alias Malachi.I18n
   alias Malachi.TCPProtocol
 
+  @doc """
+  Starts an acceptor for `{port, opts, id, transport}`: `opts` are the `:gen_tcp`/`:ssl` listen
+  options, `id` labels this acceptor in logs, and `transport` is `:gen_tcp` or `:ssl`.
+  """
   def start_link({port, opts, id, transport}) do
     GenServer.start_link(__MODULE__, {port, opts, id, transport})
   end

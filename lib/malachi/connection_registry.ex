@@ -9,6 +9,7 @@ defmodule Malachi.ConnectionRegistry do
 
   @table :malachi_connections
 
+  @doc "Starts the registry — a named, ETS-backed `GenServer` (started once for the node)."
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end

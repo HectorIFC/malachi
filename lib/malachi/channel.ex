@@ -10,10 +10,16 @@ defmodule Malachi.Channel do
   require Logger
   alias Malachi.I18n
 
+  @doc "Starts the channel process for `channel_name`, registered under its name."
   def start_link(channel_name) do
     GenServer.start_link(__MODULE__, channel_name, name: via_tuple(channel_name))
   end
 
+  @doc """
+  Broadcasts `payload` (with optional `headers`) to every current subscriber of `channel_name`,
+  best-effort: the channel is created on first use and the message is dropped if it has no
+  subscribers. Returns `:ok` (delivery is an async cast) or a `{:error, reason}` name-validation error.
+  """
   def publish(channel_name, payload, headers \\ %{}) do
     with :ok <- Malachi.Validator.validate_channel_name(channel_name) do
       ensure_started(channel_name)
@@ -31,6 +37,10 @@ defmodule Malachi.Channel do
     end
   end
 
+  @doc """
+  Subscribes `subscriber_pid` to `channel_name` (created on first use). The channel monitors the
+  subscriber and drops it automatically when it exits. Returns the call reply or a name-validation error.
+  """
   def subscribe(channel_name, subscriber_pid) do
     with :ok <- Malachi.Validator.validate_channel_name(channel_name) do
       ensure_started(channel_name)
@@ -38,6 +48,7 @@ defmodule Malachi.Channel do
     end
   end
 
+  @doc "Removes `subscriber_pid` from `channel_name`; `:ok` if the channel does not exist."
   def unsubscribe(channel_name, subscriber_pid) do
     with :ok <- Malachi.Validator.validate_channel_name(channel_name) do
       case GenServer.whereis(via_tuple(channel_name)) do
@@ -47,6 +58,10 @@ defmodule Malachi.Channel do
     end
   end
 
+  @doc """
+  The channel's counters — `:subscribers`, `:published`, `:delivered`, `:dropped`, and `:exists`. A
+  zeroed map with `exists: false` if the channel was never started, or a `{:error, reason}` name error.
+  """
   def get_stats(channel_name) do
     case Malachi.Validator.validate_channel_name(channel_name) do
       :ok ->
@@ -63,6 +78,7 @@ defmodule Malachi.Channel do
     end
   end
 
+  @doc "The pids currently subscribed to `channel_name` (empty if the channel does not exist)."
   def list_subscribers(channel_name) do
     case GenServer.whereis(via_tuple(channel_name)) do
       nil -> []
@@ -70,6 +86,10 @@ defmodule Malachi.Channel do
     end
   end
 
+  @doc """
+  Forcibly removes `subscriber_pid` from `channel_name`; `{:error, :channel_not_found}` if the channel
+  does not exist.
+  """
   def kick_subscriber(channel_name, subscriber_pid) do
     case GenServer.whereis(via_tuple(channel_name)) do
       nil -> {:error, :channel_not_found}
