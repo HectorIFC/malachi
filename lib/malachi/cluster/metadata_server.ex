@@ -19,9 +19,11 @@ defmodule Malachi.Cluster.MetadataServer do
 
   @doc """
   Starts a Raft cluster named `cluster_name` running the metadata machine across `nodes` (default
-  the local node), and returns the **local** `server_id`. With several nodes the metadata is
-  replicated and survives the loss of a member: a follower is elected leader, so the control plane
-  has no single point of failure. `ra` must be running on every node (`:ra.start_in/1`).
+  the local node), and returns a `server_id` for a **real member** — the local node when it is one,
+  otherwise the first of `nodes`. (The starter need not be a member: a sharded control plane places a
+  vnode on a subset of nodes, so the node bootstrapping it may not host a replica; `ra` still routes
+  commands/queries from that member to the leader.) With several nodes the metadata is replicated and
+  survives the loss of a member. `ra` must be running on every node (`:ra.start_in/1`).
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
@@ -29,9 +31,15 @@ defmodule Malachi.Cluster.MetadataServer do
     machine = {:module, MetadataMachine, %{}}
 
     case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} -> {:ok, {cluster_name, node()}}
+      {:ok, _started, _not_started} -> {:ok, {cluster_name, member_node(nodes)}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # A node that actually hosts a replica, to address the cluster through: the local node when it is a
+  # member (no network hop for reads), otherwise the first placement node.
+  defp member_node(nodes) do
+    if node() in nodes, do: node(), else: hd(nodes)
   end
 
   @doc "Submits a `Malachi.Metadata` command through the Raft log; returns the machine reply."

@@ -699,9 +699,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              (o mesmo HRW `Placement.place/4` dos segments) → `{vnode_id, token, nodes}`; determinístico,
              mínimo movimento, `R` efetivo = `min(R, M)`. Testado isolado (HRW espalha, determinismo,
              clamp). **Sem uso ainda** — D-c-1b liga ao `ReplicatedDSRSM`/`BrokerServer`.
-           - ⏳ **D-c-1b** — ligar ao runtime: `metadata_vnodes` passa a carregar os nós por-vnode e o
-             `BrokerServer`/`ReplicatedDSRSM` roteia ao vnode mesmo quando ele **não** tem réplica no nó
-             local (o server local `{vnode_id, node()}` deixa de existir sempre) — o ponto difícil.
+           - ✅ **D-c-1b — roteamento cross-node.** `MetadataServer.start/2` passa a devolver o server de um
+             **membro real** (o nó local quando é membro; senão o primeiro do placement) em vez do local
+             sempre — então um vnode colocado num subconjunto de nós é alcançável de um nó que **não** hospeda
+             réplica dele (o `ra` roteia `command`/`query` desse membro ao líder; o chamador não precisa ser
+             membro). `ReplicatedDSRSM` armazena esse server; `command`/`query`/`snapshot`/`server_for`
+             passam a funcionar cross-node. Testado (`:multinode`): 2 vnodes em subconjuntos **disjuntos** de
+             3 nós, orquestrados de um nó que **não** hospeda nenhum — commits/queries roteiam ao membro certo
+             e o `snapshot` materializa tudo. (Decisão **1A**: mecanismo isolado do bootstrap distribuído.)
+           - ⏳ **D-c-1c** — ligar ao runtime: `Application.metadata_opts` usa `place_vnodes` (`metadata_vnodes`
+             carrega os nós por-vnode); e o **bootstrap distribuído** (quais nós iniciam cada vnode; ordem de
+             boot; snapshot tolerante a vnode ainda não pronto) — o ponto espinhoso, já latente no D1/D-b-2.
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** → detecção de liderança → **1C** coordinators

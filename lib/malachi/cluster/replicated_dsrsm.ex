@@ -43,7 +43,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Adds a vnode at `token` and starts its Raft cluster (named `vnode_id`) across `nodes` (default the
   local node). With several nodes the vnode is replicated and survives losing a member — HA per
-  vnode. Returns the **local** server id. Propagates ring placement errors and `ra` start errors.
+  vnode. The stored server id addresses a **real member** (see `MetadataServer.start/2`), so a vnode
+  placed on a subset of nodes is reachable even from a node that hosts no replica of it. Propagates
+  ring placement errors and `ra` start errors.
   """
   @spec add_vnode(t(), vnode_id(), HashRing.token(), [node()]) :: {:ok, t()} | {:error, term()}
   def add_vnode(%__MODULE__{} = state, vnode_id, token, nodes \\ [node()]) do
