@@ -254,61 +254,7 @@ defmodule Malachi.TCPProtocol do
          transport,
          _client_ip
        ) do
-    with_permission(session, :produce, socket, transport, fn ->
-      h = Map.get(msg, "headers", %{})
-
-      # Check publish rate limit FIRST (before expensive validations)
-      publish_limit = Application.get_env(:malachi, :publish_rate_limit, 1_000)
-      publish_window_ms = Application.get_env(:malachi, :publish_rate_window_ms, 1_000)
-
-      case Malachi.RateLimiter.check_limit(session.username, :publish, %{
-             limit: publish_limit,
-             window_ms: publish_window_ms
-           }) do
-        :ok ->
-          # Validate inputs (message size first, before struct creation)
-          config = Malachi.QueueConfig.get_config(q)
-          max_size = config.max_message_size_bytes
-
-          with :ok <- Malachi.Validator.validate_message_size(p, max_size),
-               :ok <- Malachi.Validator.validate_queue_name(q),
-               :ok <- Malachi.Validator.validate_payload(p),
-               :ok <- Malachi.Validator.validate_headers(h) do
-            case Malachi.Queue.enqueue(q, p, h) do
-              {:ok, _message} ->
-                Malachi.ConnectionRegistry.set_connection_type(self(), :producer, q)
-                response_data = build_backpressure_response(q)
-                send_ok(socket, response_data, transport)
-                :ok
-
-              {:error, :queue_full} ->
-                send_error(socket, :queue_full, transport)
-                :ok
-
-              {:error, {:producer_blocked, timeout_ms}} ->
-                send_error(socket, :producer_blocked, %{"timeout_ms" => timeout_ms}, transport)
-                :ok
-
-              {:error, reason} ->
-                send_error(socket, reason, transport)
-                :ok
-            end
-          else
-            {:error, {:message_too_large, actual, max}} ->
-              send_error(socket, :message_too_large, %{"actual_bytes" => actual, "max_bytes" => max}, transport)
-              :ok
-
-            {:error, reason} when is_atom(reason) ->
-              send_error(socket, reason, transport)
-              :ok
-          end
-
-        {:error, :rate_limit_exceeded, retry_after_ms} ->
-          Malachi.Metrics.increment_rate_limit_blocked(:publish)
-          send_error(socket, :rate_limit_exceeded, %{"retry_after_ms" => retry_after_ms}, transport)
-          :ok
-      end
-    end)
+    publish(socket, q, p, Map.get(msg, "headers", %{}), session, transport)
   end
 
   # Subscribe to queue
@@ -346,61 +292,7 @@ defmodule Malachi.TCPProtocol do
 
   # Shorthand publish (without explicit "action" field)
   defp handle_action(socket, %{"queue_name" => q, "payload" => p} = msg, session, transport, _client_ip) do
-    with_permission(session, :produce, socket, transport, fn ->
-      h = Map.get(msg, "headers", %{})
-
-      # Check publish rate limit FIRST (before expensive validations)
-      publish_limit = Application.get_env(:malachi, :publish_rate_limit, 1_000)
-      publish_window_ms = Application.get_env(:malachi, :publish_rate_window_ms, 1_000)
-
-      case Malachi.RateLimiter.check_limit(session.username, :publish, %{
-             limit: publish_limit,
-             window_ms: publish_window_ms
-           }) do
-        :ok ->
-          # Validate inputs (message size first, before struct creation)
-          config = Malachi.QueueConfig.get_config(q)
-          max_size = config.max_message_size_bytes
-
-          with :ok <- Malachi.Validator.validate_message_size(p, max_size),
-               :ok <- Malachi.Validator.validate_queue_name(q),
-               :ok <- Malachi.Validator.validate_payload(p),
-               :ok <- Malachi.Validator.validate_headers(h) do
-            case Malachi.Queue.enqueue(q, p, h) do
-              {:ok, _message} ->
-                Malachi.ConnectionRegistry.set_connection_type(self(), :producer, q)
-                response_data = build_backpressure_response(q)
-                send_ok(socket, response_data, transport)
-                :ok
-
-              {:error, :queue_full} ->
-                send_error(socket, :queue_full, transport)
-                :ok
-
-              {:error, {:producer_blocked, timeout_ms}} ->
-                send_error(socket, :producer_blocked, %{"timeout_ms" => timeout_ms}, transport)
-                :ok
-
-              {:error, reason} ->
-                send_error(socket, reason, transport)
-                :ok
-            end
-          else
-            {:error, {:message_too_large, actual, max}} ->
-              send_error(socket, :message_too_large, %{"actual_bytes" => actual, "max_bytes" => max}, transport)
-              :ok
-
-            {:error, reason} when is_atom(reason) ->
-              send_error(socket, reason, transport)
-              :ok
-          end
-
-        {:error, :rate_limit_exceeded, retry_after_ms} ->
-          Malachi.Metrics.increment_rate_limit_blocked(:publish)
-          send_error(socket, :rate_limit_exceeded, %{"retry_after_ms" => retry_after_ms}, transport)
-          :ok
-      end
-    end)
+    publish(socket, q, p, Map.get(msg, "headers", %{}), session, transport)
   end
 
   # Acknowledge message
@@ -1020,6 +912,71 @@ defmodule Malachi.TCPProtocol do
   # ============================================================
   # PRIVATE - Helper Functions
   # ============================================================
+
+  # Shared produce path for both the explicit "publish" action and the shorthand form: gate on
+  # produce permission, then the publish rate limit, then validation, then enqueue.
+  defp publish(socket, q, p, h, session, transport) do
+    with_permission(session, :produce, socket, transport, fn ->
+      # Check publish rate limit FIRST (before expensive validations)
+      case check_publish_rate_limit(session.username) do
+        :ok ->
+          enqueue_validated(socket, q, p, h, transport)
+
+        {:error, :rate_limit_exceeded, retry_after_ms} ->
+          Malachi.Metrics.increment_rate_limit_blocked(:publish)
+          send_error(socket, :rate_limit_exceeded, %{"retry_after_ms" => retry_after_ms}, transport)
+          :ok
+      end
+    end)
+  end
+
+  defp check_publish_rate_limit(username) do
+    limit = Application.get_env(:malachi, :publish_rate_limit, 1_000)
+    window_ms = Application.get_env(:malachi, :publish_rate_window_ms, 1_000)
+    Malachi.RateLimiter.check_limit(username, :publish, %{limit: limit, window_ms: window_ms})
+  end
+
+  # Validates the message (size first, before struct creation) and, if valid, enqueues it and replies.
+  defp enqueue_validated(socket, q, p, h, transport) do
+    max_size = Malachi.QueueConfig.get_config(q).max_message_size_bytes
+
+    with :ok <- Malachi.Validator.validate_message_size(p, max_size),
+         :ok <- Malachi.Validator.validate_queue_name(q),
+         :ok <- Malachi.Validator.validate_payload(p),
+         :ok <- Malachi.Validator.validate_headers(h) do
+      reply_enqueue(socket, Malachi.Queue.enqueue(q, p, h), q, transport)
+    else
+      {:error, {:message_too_large, actual, max}} ->
+        send_error(socket, :message_too_large, %{"actual_bytes" => actual, "max_bytes" => max}, transport)
+        :ok
+
+      {:error, reason} when is_atom(reason) ->
+        send_error(socket, reason, transport)
+        :ok
+    end
+  end
+
+  # Replies to the client with the outcome of Malachi.Queue.enqueue/3.
+  defp reply_enqueue(socket, {:ok, _message}, q, transport) do
+    Malachi.ConnectionRegistry.set_connection_type(self(), :producer, q)
+    send_ok(socket, build_backpressure_response(q), transport)
+    :ok
+  end
+
+  defp reply_enqueue(socket, {:error, :queue_full}, _q, transport) do
+    send_error(socket, :queue_full, transport)
+    :ok
+  end
+
+  defp reply_enqueue(socket, {:error, {:producer_blocked, timeout_ms}}, _q, transport) do
+    send_error(socket, :producer_blocked, %{"timeout_ms" => timeout_ms}, transport)
+    :ok
+  end
+
+  defp reply_enqueue(socket, {:error, reason}, _q, transport) do
+    send_error(socket, reason, transport)
+    :ok
+  end
 
   defp with_permission(session, permission, socket, transport, action_fn) do
     if Malachi.Auth.has_permission?(session.permissions, permission) do
