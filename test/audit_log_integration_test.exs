@@ -96,8 +96,16 @@ defmodule Malachi.AuditLogIntegrationTest do
     end
 
     test "stdout mode writes to stdout" do
+      # Use a path only this test references. restart_audit_log/1 tears down the previously configured
+      # AuditLog, whose terminate/2 does a final flush; if that process was in :file mode its flush
+      # recreates the shared @test_log_file after setup's File.rm. Pointing this test at its own file
+      # makes the assertion immune to that leftover (which lands in @test_log_file, not here).
+      stdout_file = "/tmp/malachi_test_audit_stdout_#{System.unique_integer([:positive])}.log"
+      on_exit(fn -> File.rm(stdout_file) end)
+
       # Configure stdout output
       Application.put_env(:malachi, :audit_log_output, :stdout)
+      Application.put_env(:malachi, :audit_log_file, stdout_file)
 
       # Start audit log
       _pid = restart_audit_log()
@@ -113,12 +121,10 @@ defmodule Malachi.AuditLogIntegrationTest do
       # Wait for flush
       :timer.sleep(1200)
 
-      # Verify file was NOT created (stdout only)
-      refute File.exists?(@test_log_file)
-
-      # Verify event was processed (check ETS or logs)
-      # We can't reliably capture stdout from async GenServer,
-      # so we verify the file was not created instead
+      # Verify no file was written (stdout only): this test's own file stays absent regardless of a
+      # final flush from a previously file-configured process. Stdout from an async GenServer is not
+      # reliably capturable, so the absence of the file is what we assert.
+      refute File.exists?(stdout_file)
     end
 
     test "both mode writes to file and stdout" do
