@@ -707,9 +707,20 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              passam a funcionar cross-node. Testado (`:multinode`): 2 vnodes em subconjuntos **disjuntos** de
              3 nós, orquestrados de um nó que **não** hospeda nenhum — commits/queries roteiam ao membro certo
              e o `snapshot` materializa tudo. (Decisão **1A**: mecanismo isolado do bootstrap distribuído.)
-           - ⏳ **D-c-1c** — ligar ao runtime: `Application.metadata_opts` usa `place_vnodes` (`metadata_vnodes`
-             carrega os nós por-vnode); e o **bootstrap distribuído** (quais nós iniciam cada vnode; ordem de
-             boot; snapshot tolerante a vnode ainda não pronto) — o ponto espinhoso, já latente no D1/D-b-2.
+           - ✅ **D-c-1c — bootstrap distribuído (seed estático).** `Application.metadata_opts` liga o
+             `place_vnodes` (`metadata_vnodes` vira `[{vnode_id, token, nodes}]`, R = `log_vnode_replication_factor`)
+             e injeta a política `bootstrap_orchestrator?` = `Application.static_seed/1` (verdade só no menor nó).
+             No `BrokerServer`, o **orquestrador** faz `add_vnode` (start_cluster) de cada vnode; os **não-orquestradores**
+             fazem `ReplicatedDSRSM.route_vnode/4` (novo — registra no ring + server de um membro, **sem** iniciar), de
+             modo que exatamente um nó bootstrapa cada vnode (padrão RabbitMQ/`ra`). O `snapshot/1` ficou **tolerante**
+             (vnode não-pronto → `Metadata` vazio, sem crash) e o `BrokerServer` **re-seeda o cache** dos clusters `ra`
+             logo após o boot (janela de eleição) e periodicamente (`Broker.put_cache/2`), o que também cobre o
+             multi-writer. Escolha **1B/seed estático** (vs 1A concorrente, arriscado no `ra`; vs orquestração-pelo-líder,
+             que é a D-c-1d com fencing). Testado: `static_seed` (só o menor nó), `route_vnode` + `snapshot` tolerante
+             (single-node), e `:multinode` — orquestrador inicia sobre 2 nós, não-orquestrador só roteia e lê/escreve
+             cross-node. **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
+           - ⏳ **D-c-1d** — política `:membership_leader` com **fencing** (lease/idempotência) no lugar do seed
+             estático — o "jeito k8s" (leader election dos controllers). Casa com o **1C** (coordinator no líder).
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** → detecção de liderança → **1C** coordinators

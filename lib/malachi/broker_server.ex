@@ -164,6 +164,7 @@ defmodule Malachi.BrokerServer do
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
     {metadata_vnodes, opts} = Keyword.pop(opts, :metadata_vnodes)
+    {bootstrap_orchestrator, opts} = Keyword.pop(opts, :bootstrap_orchestrator, fn -> true end)
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -177,11 +178,11 @@ defmodule Malachi.BrokerServer do
           {nil, list}
       end
 
-    broker_opts =
+    {broker_opts, metadata_refresh} =
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
       |> maybe_put(:spread_by, spread_by)
-      |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes)
+      |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes, bootstrap_orchestrator)
 
     {:ok, broker} = Broker.open(broker_opts)
 
@@ -191,6 +192,10 @@ defmodule Malachi.BrokerServer do
       live_brokers: live_brokers,
       broker_attributes: broker_attributes,
       refresh_interval: refresh_interval,
+      # Re-seeds the local metadata cache from the authoritative ra clusters (fills vnodes not yet ready
+      # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. See
+      # `refresh_metadata_cache/1`.
+      metadata_refresh: metadata_refresh,
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
       waiters: []
@@ -198,7 +203,14 @@ defmodule Malachi.BrokerServer do
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
     if live_brokers || broker_attributes, do: schedule_refresh(state)
-    {:ok, state}
+
+    # A replicated control plane re-seeds its cache right after boot (to cover the election window) and
+    # then periodically; in-memory metadata needs no refresh.
+    if metadata_refresh do
+      {:ok, state, {:continue, :refresh_metadata}}
+    else
+      {:ok, state}
+    end
   end
 
   @impl true
@@ -304,6 +316,15 @@ defmodule Malachi.BrokerServer do
     {:noreply, %{state | broker: broker}}
   end
 
+  def handle_info(:refresh_metadata, state) do
+    {:noreply, refresh_metadata_cache(state)}
+  end
+
+  @impl true
+  def handle_continue(:refresh_metadata, state) do
+    {:noreply, refresh_metadata_cache(state)}
+  end
+
   @impl true
   def terminate(_reason, state) do
     # Only stop the replication server we started ourselves; an external broker set is not ours.
@@ -314,6 +335,19 @@ defmodule Malachi.BrokerServer do
   # --- internals ---
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
+
+  defp schedule_metadata_refresh(state), do: Process.send_after(self(), :refresh_metadata, state.refresh_interval)
+
+  # Re-seeds the local metadata cache from the authoritative ra clusters and reschedules. The ra log is
+  # the source of truth, so this only moves the cache forward (a nil refresh leaves it untouched).
+  defp refresh_metadata_cache(state) do
+    schedule_metadata_refresh(state)
+
+    case state.metadata_refresh.() do
+      nil -> state
+      dsrsm -> %{state | broker: Broker.put_cache(state.broker, dsrsm)}
+    end
+  end
 
   # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.
   defp refresh_broker_set(broker, nil), do: broker
@@ -367,40 +401,65 @@ defmodule Malachi.BrokerServer do
     %{state | waiters: others ++ still_waiting}
   end
 
-  # Control-plane authority, most specific first:
-  #   * `:metadata_vnodes` — a sharded control plane: one ra cluster per vnode, routed by topic (D-b).
+  # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh}` where
+  # `metadata_refresh` re-seeds the local cache from the ra clusters (`nil` for in-memory):
+  #   * `:metadata_vnodes` — a sharded control plane: one ra cluster per vnode, each placed on its own
+  #     `nodes`, routed by topic. Exactly one node (the bootstrap orchestrator) starts the clusters;
+  #     the others only route to a member. `metadata_vnodes` is `[{vnode_id, token, nodes}]` (D-c).
   #   * `:metadata_cluster` — a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
   #   * neither — in-memory metadata (single node).
-  # In every case the broker threads a local DSRSM cache (reads served locally) and mutations go
-  # through the authoritative apply; with one vnode the sharded and single paths coincide.
-  defp with_metadata_authority(opts, _cluster, nodes, [_ | _] = vnodes) do
-    replicated = start_vnodes(vnodes, nodes)
+  defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do
+    replicated = build_replicated(vnodes, orchestrator?.())
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
 
-    opts
-    |> Keyword.put(:dsrsm, cache)
-    |> Keyword.put(:command_fun, sharded_command_fun(replicated))
+    new_opts =
+      opts
+      |> Keyword.put(:dsrsm, cache)
+      |> Keyword.put(:command_fun, sharded_command_fun(replicated))
+
+    {new_opts, fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end}
   end
 
-  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes), do: opts
+  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes, _orchestrator?), do: {opts, nil}
 
-  defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes) do
+  defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
-    {:ok, seed} = MetadataServer.query(server_id, & &1)
+    {:ok, seed} = MetadataServer.query(server_id, &Function.identity/1)
 
-    opts
-    |> Keyword.put(:dsrsm, DSRSM.single(seed))
-    |> Keyword.put(:command_fun, raft_command_fun(server_id))
+    new_opts =
+      opts
+      |> Keyword.put(:dsrsm, DSRSM.single(seed))
+      |> Keyword.put(:command_fun, raft_command_fun(server_id))
+
+    {new_opts, single_cluster_refresh(server_id)}
   end
 
-  # Starts each `{vnode_id, token}`'s ra cluster across `nodes` (every vnode over the same node set —
-  # HA per vnode) and places it on the ring. Returns the authoritative ReplicatedDSRSM captured by the
-  # command function.
-  defp start_vnodes(vnodes, nodes) do
-    Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token}, replicated ->
+  # Builds the sharded control plane's ReplicatedDSRSM. The bootstrap orchestrator starts each vnode's
+  # ra cluster across its placement `nodes`; a non-orchestrator only routes to a real member (the first
+  # placement node) without starting anything — so exactly one node bootstraps each vnode.
+  defp build_replicated(vnodes, true = _orchestrator?) do
+    Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
       {:ok, replicated} = ReplicatedDSRSM.add_vnode(replicated, vnode_id, token, nodes)
       replicated
     end)
+  end
+
+  defp build_replicated(vnodes, false = _orchestrator?) do
+    Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
+      {:ok, replicated} = ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, {vnode_id, hd(nodes)})
+      replicated
+    end)
+  end
+
+  # A refresh that re-reads the single ra cluster into a one-vnode DSRSM; nil if the cluster is
+  # momentarily unreachable (a leader election), so the cache is simply left as-is that tick.
+  defp single_cluster_refresh(server_id) do
+    fn ->
+      case MetadataServer.query(server_id, &Function.identity/1) do
+        {:ok, metadata} -> DSRSM.single(metadata)
+        {:error, _reason} -> nil
+      end
+    end
   end
 
   # A command function over the sharded control plane: route the command's topic (via the cache's

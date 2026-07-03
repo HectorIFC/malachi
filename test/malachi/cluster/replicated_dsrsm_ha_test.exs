@@ -140,4 +140,32 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
     for name <- names, do: assert(DSRSM.get_topic(cache, name).name == name)
   end
+
+  test "distributed bootstrap: the orchestrator starts a vnode, a non-orchestrator only routes to it" do
+    peers = for _ <- 1..2, do: start_peer()
+    [n0, n1] = Enum.map(peers, &elem(&1, 1))
+    placement = [n0, n1]
+    # the test node hosts no replica, so both views must reach the cluster cross-node
+    refute node() in placement
+
+    unique = System.unique_integer([:positive])
+    vnode = :"rd_boot_#{unique}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+
+    # orchestrator: starts the vnode's ra cluster across the placement and writes a topic
+    {:ok, orchestrator} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), vnode, 0, placement)
+    assert {:ok, _root} = commit(orchestrator, "events", {:create_topic, "events", 4})
+
+    # non-orchestrator: only routes to a placement member (route_vnode) — it never calls start
+    {:ok, router} = ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(), vnode, 0, {vnode, hd(placement)})
+
+    # the router reaches the same remote cluster: it reads the orchestrator's write and commits its own
+    {:ok, metadata} = ReplicatedDSRSM.query(router, "events", &Function.identity/1)
+    assert Metadata.get_topic(metadata, "events").name == "events"
+    assert {:ok, _root2} = commit(router, "events", {:create_topic, "events_via_router", 4})
+
+    {:ok, cache} = ReplicatedDSRSM.snapshot(router)
+    assert DSRSM.get_topic(cache, "events").name == "events"
+    assert DSRSM.get_topic(cache, "events_via_router").name == "events_via_router"
+  end
 end

@@ -2,6 +2,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
   # async: false — ra is global/stateful.
   use ExUnit.Case, async: false
 
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Metadata
@@ -72,5 +73,32 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
     empty = ReplicatedDSRSM.new(ring_bits: 4)
     assert {:error, :no_vnode} = ReplicatedDSRSM.command(empty, "events", {:create_topic, "events", 4})
     assert {:error, :no_vnode} = ReplicatedDSRSM.query(empty, "events", &Metadata.get_topic(&1, "events"))
+  end
+
+  test "snapshot tolerates a vnode whose cluster is not ready (empty metadata, no crash)" do
+    # route to a server that was never started; snapshot must not fail, only yield empty metadata
+    {:ok, state} =
+      ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(ring_bits: 4), :rd_ghost, 0, {:rd_ghost_never_started, node()})
+
+    assert {:ok, cache} = ReplicatedDSRSM.snapshot(state)
+    assert DSRSM.get_topic(cache, "anything") == nil
+  end
+
+  test "route_vnode reaches an already-started vnode without starting it" do
+    # one view (the orchestrator) starts the vnode's cluster
+    suffix = System.unique_integer([:positive])
+    vnode = :"rd_route_#{suffix}"
+    {:ok, orchestrator} = ReplicatedDSRSM.new(ring_bits: 4) |> ReplicatedDSRSM.add_vnode(vnode, 0)
+    on_exit(fn -> ReplicatedDSRSM.delete(orchestrator) end)
+    {:ok, _root} = ReplicatedDSRSM.command(orchestrator, "events", {:create_topic, "events", 4})
+
+    # a second view only routes to it (no start) and still reads/commits through the same cluster
+    {:ok, router} = ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(ring_bits: 4), vnode, 0, {vnode, node()})
+    assert {:ok, %{name: "events"}} = ReplicatedDSRSM.query(router, "events", &Metadata.get_topic(&1, "events"))
+    assert {:ok, _root2} = ReplicatedDSRSM.command(router, "events", {:create_topic, "events2", 4})
+
+    {:ok, cache} = ReplicatedDSRSM.snapshot(router)
+    assert DSRSM.get_topic(cache, "events").name == "events"
+    assert DSRSM.get_topic(cache, "events2").name == "events2"
   end
 end

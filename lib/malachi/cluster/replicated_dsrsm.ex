@@ -56,6 +56,20 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   @doc """
+  Places `vnode_id` at `token` on the ring pointing at `server_id`, **without** starting its ra cluster
+  — the routing-only counterpart of `add_vnode/4` for a node that is not the bootstrap orchestrator: the
+  orchestrator started the cluster (across the placement nodes), and this node only routes to it.
+  `server_id` must address a real member of the vnode's placement. Propagates ring placement errors.
+  """
+  @spec route_vnode(t(), vnode_id(), HashRing.token(), MetadataServer.server_id()) ::
+          {:ok, t()} | {:error, term()}
+  def route_vnode(%__MODULE__{} = state, vnode_id, token, server_id) do
+    with {:ok, ring} <- HashRing.add_vnode(state.ring, vnode_id, token) do
+      {:ok, %{state | ring: ring, vnodes: Map.put(state.vnodes, vnode_id, server_id)}}
+    end
+  end
+
+  @doc """
   Routes a `Malachi.Metadata` command to the vnode owning `topic_name` and submits it through
   that vnode's Raft log. Returns the machine reply (e.g. `{:ok, root_id}` or
   `{:error, :already_exists}`), `{:error, :no_vnode}` if the ring is empty, or
@@ -93,21 +107,16 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Reads every vnode's replicated `Metadata` into a local `Malachi.Cluster.DSRSM` cache sharing this
   ring — the read-side mirror a broker threads (reads served locally; writes routed back through the
-  vnodes' ra clusters via `server_for/2`). Propagates a query error from any vnode.
-  """
-  @spec snapshot(t()) :: {:ok, DSRSM.t()} | {:error, term()}
-  def snapshot(%__MODULE__{} = state) do
-    result =
-      Enum.reduce_while(state.vnodes, {:ok, %{}}, fn {vnode_id, server_id}, {:ok, acc} ->
-        # A linearizable query runs on the (possibly remote) leader, so use a named stdlib function
-        # rather than a module-local closure, which the leader node may not have loaded.
-        case MetadataServer.query(server_id, &Function.identity/1) do
-          {:ok, metadata} -> {:cont, {:ok, Map.put(acc, vnode_id, metadata)}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
+  vnodes' ra clusters via `server_for/2`).
 
-    with {:ok, metadata_by_vnode} <- result, do: {:ok, DSRSM.seed(state.ring, metadata_by_vnode)}
+  A vnode whose cluster is not ready yet (still electing, or the orchestrator has not bootstrapped it)
+  contributes an **empty** `Metadata`, so this never fails on a not-ready vnode; re-snapshotting later
+  fills it in (the ra log is authoritative, so a refresh only ever moves the cache forward).
+  """
+  @spec snapshot(t()) :: {:ok, DSRSM.t()}
+  def snapshot(%__MODULE__{} = state) do
+    metadata_by_vnode = Map.new(state.vnodes, fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id)} end)
+    {:ok, DSRSM.seed(state.ring, metadata_by_vnode)}
   end
 
   @doc "The ids of the vnodes."
@@ -122,6 +131,16 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   # --- internals ---
+
+  # The vnode's replicated Metadata, or an empty one when its cluster is unreachable / not ready yet.
+  # A linearizable query runs on the (possibly remote) leader, so use a named stdlib function rather
+  # than a module-local closure, which the leader node may not have loaded.
+  defp vnode_metadata(server_id) do
+    case MetadataServer.query(server_id, &Function.identity/1) do
+      {:ok, metadata} -> metadata
+      {:error, _reason} -> Metadata.new()
+    end
+  end
 
   defp with_vnode(state, topic_name, fun) do
     case HashRing.route(state.ring, topic_name) do

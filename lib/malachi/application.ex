@@ -216,17 +216,32 @@ defmodule Malachi.Application do
     %{id: Malachi.LogBroker, start: {Malachi.BrokerServer, :start_link, [log_data_dir(), opts]}}
   end
 
-  # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata
-  # is sharded across that many vnodes, each its own ra cluster routed by topic, and each replicated
-  # over the same `nodes` for HA per vnode (D-b).
+  # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is
+  # sharded across that many vnodes, each its own ra cluster placed on a subset of `nodes` (rendezvous,
+  # `:log_vnode_replication_factor` members), routed by topic. A single deterministic seed node
+  # bootstraps them; the others only route (D-c-1c).
   defp metadata_opts(cluster, nodes) do
     case Application.get_env(:malachi, :log_vnodes, 1) do
       count when is_integer(count) and count > 1 and not is_nil(cluster) ->
-        [metadata_vnodes: sharded_vnodes(cluster, count), metadata_nodes: nodes]
+        rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
+        vnodes = place_vnodes(sharded_vnodes(cluster, count), nodes, rf)
+        [metadata_vnodes: vnodes, bootstrap_orchestrator: static_seed(nodes)]
 
       _one_or_unclustered ->
         metadata_cluster_opts(cluster, nodes)
     end
+  end
+
+  @doc """
+  The bootstrap-orchestrator policy for the sharded control plane: a `(-> boolean())` that is true only
+  on the deterministic seed node (the lowest-sorted of `nodes`), so exactly one node starts each vnode's
+  ra cluster and the rest only route to it. Pure. D-c-1d swaps this for a membership-leader policy with
+  fencing (the mature, k8s-style approach).
+  """
+  @spec static_seed([node()]) :: (-> boolean())
+  def static_seed(nodes) do
+    seed = nodes |> Enum.sort() |> List.first()
+    fn -> node() == seed end
   end
 
   @doc """

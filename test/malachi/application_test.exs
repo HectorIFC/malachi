@@ -77,6 +77,19 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "static_seed/1" do
+    test "self is the orchestrator only when it is the lowest-sorted node" do
+      higher = :zzzz_higher@h
+      lower = :"0000_lower@h"
+
+      assert App.static_seed([node()]).()
+      assert App.static_seed([node(), higher]).()
+      refute App.static_seed([lower, node()]).()
+      # order-independent: still the same seed regardless of input order
+      refute App.static_seed([higher, lower, node()]).()
+    end
+  end
+
   describe "broker_refs/1" do
     test "one named ReplicationServer reference per node" do
       assert App.broker_refs([:"a@127.0.0.1", :"b@127.0.0.1"]) ==
