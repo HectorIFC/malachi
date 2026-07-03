@@ -122,15 +122,17 @@ defmodule Malachi.Cluster.ReplicaTrackerTest do
   defp match_assignment(replicas) do
     bind(list_of(offset(), length: length(replicas)), fn offsets ->
       bind(list_of(boolean(), length: length(replicas)), fn present ->
-        assignment =
-          [replicas, offsets, present]
-          |> Enum.zip()
-          |> Enum.flat_map(fn {broker, offset, present?} -> if present?, do: [{broker, offset}], else: [] end)
-          |> Map.new()
-
-        constant(assignment)
+        constant(present_offsets(replicas, offsets, present))
       end)
     end)
+  end
+
+  # Zips replicas with their offsets, keeping only those flagged present, as a broker => offset map.
+  defp present_offsets(replicas, offsets, present) do
+    [replicas, offsets, present]
+    |> Enum.zip()
+    |> Enum.flat_map(fn {broker, offset, present?} -> if present?, do: [{broker, offset}], else: [] end)
+    |> Map.new()
   end
 
   defp build(replicas, assignment) do
