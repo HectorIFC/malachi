@@ -306,20 +306,7 @@ defmodule Malachi.Auth.UserStore do
 
   defp setup_mnesia do
     node = node()
-    mnesia_dir = Application.get_env(:malachi, :mnesia_dir)
-
-    if mnesia_dir do
-      # Ensure the directory exists before create_schema writes the schema file there
-      File.mkdir_p!(mnesia_dir)
-      Application.put_env(:mnesia, :dir, to_charlist(mnesia_dir))
-    end
-
-    # Ensure schema exists on this node
-    case :mnesia.create_schema([node]) do
-      :ok -> :ok
-      {:error, {_, {:already_exists, _}}} -> :ok
-      {:error, reason} -> Logger.warning("Mnesia schema creation warning: #{inspect(reason)}")
-    end
+    ensure_mnesia_schema(node)
 
     # Start Mnesia
     :ok = :mnesia.start()
@@ -332,7 +319,30 @@ defmodule Malachi.Auth.UserStore do
         :disc_copies
       end
 
-    # Create table if not exists
+    create_users_table(storage_type, node)
+  end
+
+  # Points mnesia at the configured data dir (if any) and creates the schema on `node`, tolerating a
+  # schema that already exists.
+  defp ensure_mnesia_schema(node) do
+    mnesia_dir = Application.get_env(:malachi, :mnesia_dir)
+
+    if mnesia_dir do
+      # Ensure the directory exists before create_schema writes the schema file there
+      File.mkdir_p!(mnesia_dir)
+      Application.put_env(:mnesia, :dir, to_charlist(mnesia_dir))
+    end
+
+    case :mnesia.create_schema([node]) do
+      :ok -> :ok
+      {:error, {_, {:already_exists, _}}} -> :ok
+      {:error, reason} -> Logger.warning("Mnesia schema creation warning: #{inspect(reason)}")
+    end
+  end
+
+  # Creates the users table with `storage_type`, waiting on it if it already exists. A bad_type for
+  # disc_copies (an unnamed node) falls back to ram_copies.
+  defp create_users_table(storage_type, node) do
     table_opts = [
       {:attributes, @record_fields},
       {:type, :set},
@@ -353,24 +363,28 @@ defmodule Malachi.Auth.UserStore do
         # disc_copies requires a named Erlang node (--sname/--name).
         # Falls back to ram_copies when running on an unnamed node (e.g. plain mix run).
         Logger.warning(I18n.t(:user_store_disc_copies_fallback, node: inspect(node_name)))
+        create_ram_users_table(node)
 
-        ram_opts = [
-          {:attributes, @record_fields},
-          {:type, :set},
-          {:ram_copies, [node()]}
-        ]
+      {:aborted, reason} ->
+        {:error, reason}
+    end
+  end
 
-        case :mnesia.create_table(@mnesia_table, ram_opts) do
-          {:atomic, :ok} ->
-            :ok
+  # Creates the users table as ram_copies — the fallback when disc_copies is unavailable.
+  defp create_ram_users_table(node) do
+    ram_opts = [
+      {:attributes, @record_fields},
+      {:type, :set},
+      {:ram_copies, [node]}
+    ]
 
-          {:aborted, {:already_exists, @mnesia_table}} ->
-            :mnesia.wait_for_tables([@mnesia_table], 10_000)
-            :ok
+    case :mnesia.create_table(@mnesia_table, ram_opts) do
+      {:atomic, :ok} ->
+        :ok
 
-          {:aborted, reason} ->
-            {:error, reason}
-        end
+      {:aborted, {:already_exists, @mnesia_table}} ->
+        :mnesia.wait_for_tables([@mnesia_table], 10_000)
+        :ok
 
       {:aborted, reason} ->
         {:error, reason}
