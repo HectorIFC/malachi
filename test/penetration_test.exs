@@ -11,7 +11,7 @@ defmodule Malachi.PenetrationTest do
 
   alias Malachi.Auth
   alias Malachi.Auth.LockoutManager
-  alias Malachi.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.Test.{SecurityHelper, TCPHelper}
 
   @moduletag :security
   @moduletag :penetration

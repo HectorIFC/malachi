@@ -31,7 +31,7 @@ defmodule Malachi.TLSValidatorTest do
 
     # Use OTP's built-in test certificate generator (compatible with OTP 28+)
     root_opts = [
-      key: {:rsa, key_size, 65537},
+      key: {:rsa, key_size, 65_537},
       validity: {not_before_date, not_after_date},
       digest: :sha256
     ]

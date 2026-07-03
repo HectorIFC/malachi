@@ -125,7 +125,7 @@ defmodule Malachi.LogApiTest do
     deadline = deadline || System.monotonic_time(:millisecond) + 2_000
 
     cond do
-      length(:sys.get_state(server).waiters) >= 1 -> :ok
+      :sys.get_state(server).waiters != [] -> :ok
       System.monotonic_time(:millisecond) > deadline -> flunk("expected a parked waiter")
       true -> Process.sleep(2) && wait_for_park(server, deadline)
     end

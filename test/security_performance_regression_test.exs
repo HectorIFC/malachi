@@ -7,7 +7,7 @@ defmodule Malachi.SecurityPerformanceRegressionTest do
   """
   use ExUnit.Case, async: false
 
-  alias Malachi.{Auth, Validator, RateLimiter, ConnectionLimiter}
+  alias Malachi.{Auth, ConnectionLimiter, RateLimiter, Validator}
   alias Malachi.Test.SecurityHelper
 
   @moduletag :security

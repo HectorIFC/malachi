@@ -2,6 +2,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
   # async: false — ra is global/stateful.
   use ExUnit.Case, async: false
 
+  alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Metadata
 
@@ -54,7 +55,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
       for other <- ReplicatedDSRSM.vnode_ids(state) -- [owner] do
         # querying the non-owning vnode directly must not find the topic
         {:ok, server_id} = Map.fetch(state.vnodes, other)
-        assert {:ok, nil} = Malachi.Cluster.MetadataServer.query(server_id, &Metadata.get_topic(&1, name))
+        assert {:ok, nil} = MetadataServer.query(server_id, &Metadata.get_topic(&1, name))
       end
     end
 

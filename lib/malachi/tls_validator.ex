@@ -227,29 +227,27 @@ defmodule Malachi.TLSValidator do
 
   @doc false
   def parse_certificate_validity(pem_content) do
-    try do
-      entries = :public_key.pem_decode(pem_content)
+    entries = :public_key.pem_decode(pem_content)
 
-      case entries do
-        [] ->
-          {:error, :no_certificate_entries}
+    case entries do
+      [] ->
+        {:error, :no_certificate_entries}
 
-        [{:Certificate, der_cert, _} | _] ->
-          cert = :public_key.pkix_decode_cert(der_cert, :otp)
-          tbs = elem(cert, 1)
-          validity = elem(tbs, 5)
+      [{:Certificate, der_cert, _} | _] ->
+        cert = :public_key.pkix_decode_cert(der_cert, :otp)
+        tbs = elem(cert, 1)
+        validity = elem(tbs, 5)
 
-          not_before = parse_asn1_time(elem(validity, 1))
-          not_after = parse_asn1_time(elem(validity, 2))
+        not_before = parse_asn1_time(elem(validity, 1))
+        not_after = parse_asn1_time(elem(validity, 2))
 
-          {:ok, not_before, not_after}
+        {:ok, not_before, not_after}
 
-        _ ->
-          {:error, :invalid_certificate_entry}
-      end
-    rescue
-      e -> {:error, Exception.message(e)}
+      _ ->
+        {:error, :invalid_certificate_entry}
     end
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   defp parse_asn1_time({:utcTime, charlist}) do
@@ -300,20 +298,18 @@ defmodule Malachi.TLSValidator do
 
   @doc false
   def parse_key_size(pem_content) do
-    try do
-      entries = :public_key.pem_decode(pem_content)
+    entries = :public_key.pem_decode(pem_content)
 
-      case entries do
-        [] ->
-          {:error, :no_key_entries}
+    case entries do
+      [] ->
+        {:error, :no_key_entries}
 
-        [entry | _] ->
-          key = :public_key.pem_entry_decode(entry)
-          extract_key_info(key)
-      end
-    rescue
-      e -> {:error, Exception.message(e)}
+      [entry | _] ->
+        key = :public_key.pem_entry_decode(entry)
+        extract_key_info(key)
     end
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   defp extract_key_info(key) when is_tuple(key) and elem(key, 0) == :RSAPrivateKey do
@@ -358,27 +354,25 @@ defmodule Malachi.TLSValidator do
 
   @doc false
   def do_validate_key_cert_match(cert_pem, key_pem) do
-    try do
-      # Extract public key from certificate
-      [{:Certificate, cert_der, _} | _] = :public_key.pem_decode(cert_pem)
-      cert = :public_key.pkix_decode_cert(cert_der, :otp)
-      tbs = elem(cert, 1)
-      spki = elem(tbs, 7)
-      cert_public_key = elem(spki, 2)
+    # Extract public key from certificate
+    [{:Certificate, cert_der, _} | _] = :public_key.pem_decode(cert_pem)
+    cert = :public_key.pkix_decode_cert(cert_der, :otp)
+    tbs = elem(cert, 1)
+    spki = elem(tbs, 7)
+    cert_public_key = elem(spki, 2)
 
-      # Extract public key from private key
-      [key_entry | _] = :public_key.pem_decode(key_pem)
-      private_key = :public_key.pem_entry_decode(key_entry)
-      key_public = derive_public_key(private_key)
+    # Extract public key from private key
+    [key_entry | _] = :public_key.pem_decode(key_pem)
+    private_key = :public_key.pem_entry_decode(key_entry)
+    key_public = derive_public_key(private_key)
 
-      if keys_match?(cert_public_key, key_public) do
-        :ok
-      else
-        {:error, :mismatch}
-      end
-    rescue
-      _ -> {:error, :parse_error}
+    if keys_match?(cert_public_key, key_public) do
+      :ok
+    else
+      {:error, :mismatch}
     end
+  rescue
+    _ -> {:error, :parse_error}
   end
 
   defp derive_public_key(key) when is_tuple(key) and elem(key, 0) == :RSAPrivateKey do

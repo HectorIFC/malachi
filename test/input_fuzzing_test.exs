@@ -9,8 +9,8 @@ defmodule Malachi.InputFuzzingTest do
   """
   use ExUnit.Case, async: false
 
-  alias Malachi.Validator
   alias Malachi.Test.SecurityHelper
+  alias Malachi.Validator
 
   @moduletag :security
 

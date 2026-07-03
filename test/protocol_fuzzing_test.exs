@@ -10,7 +10,7 @@ defmodule Malachi.ProtocolFuzzingTest do
   """
   use ExUnit.Case, async: false
 
-  alias Malachi.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.Test.{SecurityHelper, TCPHelper}
 
   @moduletag :security
 

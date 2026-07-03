@@ -60,7 +60,7 @@ defmodule Malachi.AttackSimulationTest do
 
       # Verify locked accounts list includes this entry
       locked = LockoutManager.list_locked_accounts()
-      assert length(locked) > 0
+      assert locked != []
     end
 
     test "unlock_account restores access", %{victim: victim, attacker_ip: ip} do
@@ -213,7 +213,7 @@ defmodule Malachi.AttackSimulationTest do
         end)
 
       # Should have at least one hijack-related event
-      assert length(hijack_events) > 0 or
+      assert hijack_events != [] or
                Enum.any?(events, fn e ->
                  to_string(e.event_type) =~ "hijack" or
                    inspect(e.metadata) =~ "hijack"

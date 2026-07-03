@@ -393,7 +393,7 @@ defmodule Malachi.Auth.UserStore do
           :ets.insert(@users_table, {username, hash, permissions})
         end)
 
-        if length(users) > 0 do
+        if users != [] do
           Logger.info(I18n.t(:user_store_loaded_from_mnesia, count: length(users)))
         end
 

@@ -8,9 +8,9 @@ defmodule Malachi.ComprehensiveSecurityTest do
   """
   use ExUnit.Case, async: false
 
-  alias Malachi.{Auth, Validator, RateLimiter, ConnectionLimiter}
+  alias Malachi.{Auth, ConnectionLimiter, RateLimiter, Validator}
   alias Malachi.Auth.{LockoutManager, SessionManager}
-  alias Malachi.Test.{TCPHelper, SecurityHelper}
+  alias Malachi.Test.{SecurityHelper, TCPHelper}
 
   @moduletag :security
 
@@ -277,7 +277,7 @@ defmodule Malachi.ComprehensiveSecurityTest do
       end
 
       # Strong versions should be present (when TLS is configured)
-      if length(tls_versions) > 0 do
+      if tls_versions != [] do
         assert :"tlsv1.2" in tls_versions or :"tlsv1.3" in tls_versions,
                "No strong TLS version configured"
       end
@@ -459,7 +459,7 @@ defmodule Malachi.ComprehensiveSecurityTest do
 
       events = Malachi.AuditLog.get_events(10)
 
-      if length(events) > 0 do
+      if events != [] do
         event = hd(events)
 
         # Verify essential audit fields

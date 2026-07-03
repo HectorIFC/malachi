@@ -1,6 +1,8 @@
 defmodule Malachi.TLSEnforcementTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Dashboard.SecurityHeaders
+
   describe "TLS enforcement configuration" do
     test "TLS is disabled by default in test environment" do
       assert Application.get_env(:malachi, :enable_tls) == false
@@ -61,7 +63,7 @@ defmodule Malachi.TLSEnforcementTest do
         Application.put_env(:malachi, :hsts_enabled, true)
         Application.put_env(:malachi, :hsts_include_subdomains, true)
 
-        headers = Malachi.Dashboard.SecurityHeaders.build_hsts_header()
+        headers = SecurityHeaders.build_hsts_header()
         assert [{"strict-transport-security", value}] = headers
         assert String.contains?(value, "includeSubDomains")
       after
@@ -86,7 +88,7 @@ defmodule Malachi.TLSEnforcementTest do
         Application.put_env(:malachi, :hsts_enabled, true)
         Application.put_env(:malachi, :hsts_include_subdomains, false)
 
-        headers = Malachi.Dashboard.SecurityHeaders.build_hsts_header()
+        headers = SecurityHeaders.build_hsts_header()
         assert [{"strict-transport-security", value}] = headers
         refute String.contains?(value, "includeSubDomains")
       after
@@ -107,7 +109,7 @@ defmodule Malachi.TLSEnforcementTest do
       try do
         Application.put_env(:malachi, :enable_tls, false)
 
-        headers = Malachi.Dashboard.SecurityHeaders.build_hsts_header()
+        headers = SecurityHeaders.build_hsts_header()
         assert headers == []
       after
         Application.put_env(:malachi, :enable_tls, original_tls || false)
