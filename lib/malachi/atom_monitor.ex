@@ -29,6 +29,7 @@ defmodule Malachi.AtomMonitor do
     :critical_sent
   ]
 
+  @doc "Starts the atom monitor, which periodically samples atom-table usage and warns as it nears the VM limit."
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

@@ -5,6 +5,10 @@ defmodule Malachi.Benchmark do
   require Logger
   alias Malachi.I18n
 
+  @doc """
+  Load helper: spawns `count` consumers subscribed to `queue_name`, each running `callback` (default
+  logs progress every N messages), and logs the creation rate and memory used per consumer.
+  """
   def spawn_consumers(queue_name, count, callback \\ nil) do
     callback =
       callback ||
@@ -48,6 +52,7 @@ defmodule Malachi.Benchmark do
     Logger.info(I18n.t(:memory_per_consumer, memory: memory_per))
   end
 
+  @doc "Load helper: concurrently enqueues `count` messages into `queue_name` and logs the send rate."
   def send_messages(queue_name, count) do
     Logger.info(I18n.t(:sending_messages, count: count))
 
@@ -74,6 +79,10 @@ defmodule Malachi.Benchmark do
     Logger.info(I18n.t(:messages_rate, rate: rate))
   end
 
+  @doc """
+  Returns (and logs) a snapshot of VM limits and usage: schedulers, process count/limit, total memory,
+  and ETS table count/limit.
+  """
   def system_info do
     info = %{
       schedulers: :erlang.system_info(:schedulers_online),

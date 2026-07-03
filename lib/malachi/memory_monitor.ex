@@ -25,6 +25,7 @@ defmodule Malachi.MemoryMonitor do
     :total_reclaimed_bytes
   ]
 
+  @doc "Starts the memory monitor, which periodically samples VM memory and can trigger GC under pressure."
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

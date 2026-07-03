@@ -44,6 +44,7 @@ defmodule Malachi.AuditLog do
 
   ## Client API
 
+  @doc "Starts the audit log, which buffers security events and periodically flushes them to ETS and, if configured, a file or stdout."
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
