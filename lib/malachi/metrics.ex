@@ -1,6 +1,11 @@
 defmodule Malachi.Metrics do
   @moduledoc """
-  Real-time metrics system using ETS and atomic counters.
+  Real-time metrics: per-queue and per-channel counters kept in ETS (atomic `update_counter`), plus a
+  periodically-sampled system snapshot.
+
+  The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free); the `get_*`
+  functions read them back as maps for the dashboard and API. A counter is created on first touch, so
+  callers never need to initialize one.
   """
   use GenServer
   require Logger
@@ -9,64 +14,75 @@ defmodule Malachi.Metrics do
 
   @metrics_table :malachi_metrics
 
+  @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
 
+  @doc "Increments the count of messages enqueued to `queue_name`."
   def increment_enqueued(queue_name) do
     key = {:enqueued, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the count of messages processed (delivered) for `queue_name`."
   def increment_processed(queue_name) do
     key = {:processed, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the error count for `queue_name`."
   def increment_errors(queue_name) do
     key = {:errors, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the acknowledged-message count for `queue_name`."
   def increment_acked(queue_name) do
     key = {:acked, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the negatively-acknowledged (nack) count for `queue_name`."
   def increment_nacked(queue_name) do
     key = {:nacked, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the retried-message count for `queue_name`."
   def increment_retried(queue_name) do
     key = {:retried, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the dead-lettered-message count for `queue_name`."
   def increment_dead_lettered(queue_name) do
     key = {:dead_lettered, queue_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Increments the count of messages published to channel `channel_name`."
   def increment_channel_published(channel_name) do
     key = {:channel_published, channel_name}
     :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
+  @doc "Adds `count` (default 1) to the delivered-message count for channel `channel_name`."
   def increment_channel_delivered(channel_name, count \\ 1) do
     key = {:channel_delivered, channel_name}
     :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
     :ok
   end
 
+  @doc "Adds `count` (default 1) to the dropped-message count for channel `channel_name`."
   def increment_channel_dropped(channel_name, count \\ 1) do
     key = {:channel_dropped, channel_name}
     :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
@@ -261,6 +277,7 @@ defmodule Malachi.Metrics do
     :ok
   end
 
+  @doc "Records a processing `latency_us` (microseconds) sample for `queue_name`, updating its latency aggregates."
   def record_latency(queue_name, latency_us) do
     count_key = {:latency_count, queue_name}
     sum_key = {:latency_sum, queue_name}
@@ -288,6 +305,7 @@ defmodule Malachi.Metrics do
     :ok
   end
 
+  @doc "The per-queue metrics map for `queue_name` (counts, rates, and latency)."
   def get_metrics(queue_name) do
     enqueued = get_counter({:enqueued, queue_name})
     processed = get_counter({:processed, queue_name})
@@ -370,6 +388,7 @@ defmodule Malachi.Metrics do
     }
   end
 
+  @doc "The per-queue metrics maps for every queue seen so far."
   def get_all_metrics do
     queues = get_all_queues()
 
@@ -378,6 +397,7 @@ defmodule Malachi.Metrics do
     end)
   end
 
+  @doc "The metrics map for channel `channel_name` (published/delivered/dropped)."
   def get_channel_metrics(channel_name) do
     published = get_counter({:channel_published, channel_name})
     delivered = get_counter({:channel_delivered, channel_name})
@@ -400,6 +420,7 @@ defmodule Malachi.Metrics do
     }
   end
 
+  @doc "The metrics maps for every channel seen so far."
   def get_all_channel_metrics do
     channels = get_all_channels()
 
@@ -408,6 +429,7 @@ defmodule Malachi.Metrics do
     end)
   end
 
+  @doc "A snapshot of system-wide metrics (memory, processes, connections, auth) for the dashboard."
   def get_system_metrics do
     memory = :erlang.memory()
     {{:input, input_bytes}, {:output, output_bytes}} = :erlang.statistics(:io)
@@ -513,6 +535,7 @@ defmodule Malachi.Metrics do
     end
   end
 
+  @doc "Clears all counters for `queue_name`."
   def reset_metrics(queue_name) do
     :ets.delete(@metrics_table, {:enqueued, queue_name})
     :ets.delete(@metrics_table, {:processed, queue_name})
@@ -675,6 +698,7 @@ defmodule Malachi.Metrics do
     ])
   end
 
+  @doc "The recent per-second history samples for the last `seconds` (default 60)."
   def get_history(seconds \\ 60) do
     cutoff = System.system_time(:second) - seconds
 
