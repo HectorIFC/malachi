@@ -40,52 +40,9 @@ defmodule Malachi.TCPAcceptor do
 
     case accept_result do
       {:ok, client} ->
-        client_socket =
-          if transport == :ssl do
-            case :ssl.handshake(client, timeout) do
-              {:ok, tls_socket} ->
-                Malachi.Metrics.increment_tls_handshake_success()
-
-                # Extract and record negotiated TLS version
-                case :ssl.connection_information(tls_socket, [:protocol]) do
-                  {:ok, [{:protocol, version}]} ->
-                    Malachi.Metrics.record_tls_version(version)
-
-                  _ ->
-                    :ok
-                end
-
-                tls_socket
-
-              {:error, reason} ->
-                Malachi.Metrics.increment_tls_handshake_failed()
-                Logger.warning(I18n.t(:tls_handshake_failed, reason: inspect(reason)))
-                :ssl.close(client)
-                nil
-            end
-          else
-            client
-          end
-
-        if client_socket do
-          pid =
-            spawn(fn ->
-              # Wait for socket ownership transfer before proceeding
-              receive do
-                :socket_ready -> handle_client(client_socket, transport)
-              after
-                5000 -> :timeout
-              end
-            end)
-
-          # Transfer socket ownership to the spawned process
-          case transport do
-            :ssl -> :ssl.controlling_process(client_socket, pid)
-            :gen_tcp -> :gen_tcp.controlling_process(client_socket, pid)
-          end
-
-          # Signal that transfer is complete
-          send(pid, :socket_ready)
+        case establish_client_socket(client, transport, timeout) do
+          nil -> :ok
+          client_socket -> hand_off_client(client_socket, transport)
         end
 
         send(self(), :accept)
@@ -101,6 +58,55 @@ defmodule Malachi.TCPAcceptor do
         send(self(), :accept)
         {:noreply, state}
     end
+  end
+
+  # Completes the accepted client socket. For TLS, performs the handshake (recording success/failure
+  # metrics and the negotiated version) and returns the TLS socket, or nil when the handshake fails;
+  # for plain TCP, returns the accepted socket as-is.
+  defp establish_client_socket(client, :gen_tcp, _timeout), do: client
+
+  defp establish_client_socket(client, :ssl, timeout) do
+    case :ssl.handshake(client, timeout) do
+      {:ok, tls_socket} ->
+        Malachi.Metrics.increment_tls_handshake_success()
+        record_negotiated_tls_version(tls_socket)
+        tls_socket
+
+      {:error, reason} ->
+        Malachi.Metrics.increment_tls_handshake_failed()
+        Logger.warning(I18n.t(:tls_handshake_failed, reason: inspect(reason)))
+        :ssl.close(client)
+        nil
+    end
+  end
+
+  # Records the negotiated TLS protocol version in metrics (best-effort).
+  defp record_negotiated_tls_version(tls_socket) do
+    case :ssl.connection_information(tls_socket, [:protocol]) do
+      {:ok, [{:protocol, version}]} -> Malachi.Metrics.record_tls_version(version)
+      _ -> :ok
+    end
+  end
+
+  # Hands the connected client socket to a fresh process, transferring socket ownership to it and then
+  # signaling that the transfer is complete so it can start serving.
+  defp hand_off_client(client_socket, transport) do
+    pid =
+      spawn(fn ->
+        # Wait for socket ownership transfer before proceeding
+        receive do
+          :socket_ready -> handle_client(client_socket, transport)
+        after
+          5000 -> :timeout
+        end
+      end)
+
+    case transport do
+      :ssl -> :ssl.controlling_process(client_socket, pid)
+      :gen_tcp -> :gen_tcp.controlling_process(client_socket, pid)
+    end
+
+    send(pid, :socket_ready)
   end
 
   defp handle_client(socket, transport) do
