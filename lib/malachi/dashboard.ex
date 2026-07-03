@@ -249,6 +249,10 @@ defmodule Malachi.Dashboard do
     end
   end
 
+  # The ip here is always a tuple (or an :inet error atom, caught by the catch-all), so dialyzer flags
+  # the is_binary/1 clause as unreachable. Keep it as defense in case a caller ever passes a string ip
+  # and suppress the warning rather than drop the clause.
+  @dialyzer {:nowarn_function, format_ip_for_rate_limit: 1}
   defp format_ip_for_rate_limit(ip) when is_tuple(ip) do
     ip |> :inet.ntoa() |> to_string()
   end

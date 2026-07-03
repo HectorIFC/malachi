@@ -451,6 +451,10 @@ defmodule Malachi.AuditLog do
     }
   end
 
+  # :inet.gethostname/0 is specced to always return {:ok, _}, so dialyzer flags the fallback as
+  # unreachable. Keep it as defense against that contract changing (or an unusual host) and suppress
+  # the warning rather than drop the guard.
+  @dialyzer {:nowarn_function, get_hostname: 0}
   defp get_hostname do
     case :inet.gethostname() do
       {:ok, hostname} -> to_string(hostname)

@@ -200,11 +200,8 @@ defmodule Malachi.Auth do
       write_concurrency: true
     ])
 
-    # Load persisted users from Mnesia into ETS
-    case UserStore.load_into_ets() do
-      :ok -> :ok
-      _error -> :ok
-    end
+    # Load persisted users from Mnesia into ETS (best-effort at boot; the result is ignored)
+    _ = UserStore.load_into_ets()
 
     # Seed default users from config into Mnesia (only if they don't exist yet)
     seed_default_users()

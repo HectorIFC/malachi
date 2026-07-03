@@ -277,9 +277,7 @@ defmodule Malachi.TCPAcceptor do
           :subscribed ->
             {:subscribed, rest, state}
 
-          :ok ->
-            process_buffered_lines(rest, state)
-
+          # :ok, or defensively any other return: keep processing the rest of the buffer
           _ ->
             process_buffered_lines(rest, state)
         end
