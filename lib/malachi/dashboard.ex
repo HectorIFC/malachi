@@ -1,4 +1,13 @@
 defmodule Malachi.Dashboard do
+  @moduledoc """
+  The built-in HTTP dashboard: a `GenServer` that listens on a port and serves the operational UI and
+  metrics endpoints over plain HTTP.
+
+  It accepts connections on its listen socket and handles each request in a spawned process, wrapping
+  the routed handlers with authentication (`Malachi.Auth`), per-IP rate limiting
+  (`Malachi.RateLimiter`), security headers (`Malachi.Dashboard.SecurityHeaders`), and audit logging
+  (`Malachi.AuditLog`).
+  """
   use GenServer
   require Logger
   alias Malachi.AuditLog
@@ -9,6 +18,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.Metrics
   alias Malachi.RateLimiter
 
+  @doc "Starts the dashboard HTTP server listening on `port` (registered under the module name)."
   def start_link(port) do
     GenServer.start_link(__MODULE__, port, name: __MODULE__)
   end
