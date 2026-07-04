@@ -773,3 +773,78 @@ Substitutos:
 3. Compatibilidade de protocolo: manter o protocolo TCP atual do malachi ou desenhar o
    sessionizado do NorthGuard desde a Fase 0?
 4. Formato de offset: opaco (estilo Xinfra) desde já, ou `long` simples no início?
+
+---
+
+## 8. Referências de design externas: riak_core e Kubernetes
+
+Analisamos três repositórios **riak_core** (a biblioteca de consistent hashing / vnodes / membership /
+handoff do Riak) e o **Kubernetes**, para aprender como sistemas maduros resolvem os problemas que a
+Fase 1 (distribuição) enfrenta: bootstrap distribuído, leader election com fencing, placement com
+tolerância a falha, e reconcile loops.
+
+**Enquadramento comum.** Os três convergem no mesmo padrão para coordenar shards: um **coordenador único
+eleito**, com **fencing via consenso**. RabbitMQ (mesma lib `ra` que usamos) fencia pelo **nome do
+cluster**; riak_core usa um *claimant* (fencing **fraco**, gossip); k8s usa um *Lease* sobre etcd
+(fencing **forte**, CAS linearizável). **Veredito geral: referência de design, não dependência** — o
+riak_core é **AP** (gossip + vector clocks; consenso forte só no `riak_ensemble`, externo) e o k8s
+centraliza o metadata num **único** cluster **etcd** (Raft, não-sharded). O malachi é **CP e sharded**
+(um cluster `ra` por vnode), então nenhum serve como dependência direta, mas os **algoritmos e padrões
+são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
+
+### 8.1 riak_core (AP) — referência: OpenRiak (`~/riak_core`, Apache 2.0, fork ativo)
+
+- **Onde o malachi já está à frente (por ser CP):** metadata em Raft (> gossip); SWIM com suspicion
+  (> gossip simples); failover automático; retention; atributos rack/DC. *Não regredir ao portar.*
+- **`riak_core_claimant` → D-c-1d + rebalancing:** o modelo **staged → planned → committed** (o *plan*
+  computa o ring novo sem mudar estado; o *commit* valida que nada divergiu) + eleição **lexicográfica**
+  (menor node = o nosso `static_seed`). O fencing do claimant é **fraco** (gossip + vclock, split-brain
+  possível) — o que **valida** a decisão do malachi de fenciar o bootstrap pelo **nome** do cluster `ra`.
+- **`riak_core_claim_binring` V4 → upgrade do `place_vnodes`:** garante réplicas em nós **e** *locations*
+  (rack/DC) distintos (`target_n_val`), balanceamento uniforme (k ou k+1 por nó) e rebalanceamento com
+  **movimento mínimo** (`update()` antes de `solve()`). Doc bem comentada: `~/riak_core/docs/claim-version4.md`.
+- **Ring versioning + ciclo de claim → re-clustering dinâmico** (add/remove nós; hoje é `add_vnode` manual).
+- **Ignorar:** gossip do ring, vector clocks (o Raft já dá ordem/consenso), `node_watcher` (o SWIM
+  resolve), preflist-sobre-vnodes (desvio intencional — o malachi sharda **metadata por topic**, não
+  distribui keys de dados sobre o ring).
+
+### 8.2 Kubernetes (CP via etcd único)
+
+- **Leader election + Lease → D-c-1d e, sobretudo, 1C (coordinators no líder):** o "triângulo"
+  `LeaseDuration > RenewDeadline > RetryPeriod` + **CAS linearizável** (etcd; o nosso `ra` dá o mesmo) +
+  **desistir proativo** ao não conseguir renovar (`OnStoppedLeading` — evita split-brain) + **relógio
+  local** (tolera clock skew; premissa: NTP, drift ≤ ~`lease/10`). Traduz para um **lease armazenado num
+  cluster `ra`** (comando CAS versionado). **Nuance-chave:** o fencing-por-nome do `ra` **basta para o
+  bootstrap** (start único, auto-fencido); o **lease** só é necessário para o **trabalho contínuo** do
+  líder — retention/healing/rebalancing (o 1C). Arquivos: `client-go/tools/leaderelection/`
+  (`leaderelection.go`, `resourcelock/leaselock.go`), `api/coordination/v1/types.go`.
+- **Controller/reconcile → coordinators + reconcile de bootstrap:** **level-triggered** (reconciliar o
+  estado completo *desejado × atual* — os coordinators do malachi já fazem isso); **idempotência**;
+  **workqueue** com dedupe + rate-limit + retry/backoff; **expectations** (rastrear operações em voo com
+  TTL, para não re-agir cedo demais); **só-o-líder-age**; **observabilidade** (healthz de convergência).
+  Referência: `pkg/controller/replicaset/replica_set.go`, `client-go/util/workqueue`.
+- **Scheduler / PodTopologySpread → `place_vnodes`:** `topologyKey` (= o nosso `spread_by`/atributos),
+  **`maxSkew`** (desbalanceamento máximo entre racks/zonas), **`minDomains`** (domínios distintos
+  mínimos), **`whenUnsatisfiable`** (hard `DoNotSchedule` vs soft `ScheduleAnyway`), e pipeline
+  **Filter → Score**. **Ressalva crítica:** o k8s **randomiza** o tie-break; o `place_vnodes` deve
+  permanecer **determinístico** (raft-safe: toda réplica computa o mesmo placement). Portar as *ideias*
+  (maxSkew / minDomains / hard-soft) sobre funções puras, sem randomização; e adotar *sticky preference*
+  no `heal()` (preferir réplicas sobreviventes → menos churn). Referência:
+  `pkg/scheduler/framework/plugins/podtopologyspread/`.
+- **Trade-off registrado:** o etcd único é simples, mas é o **gargalo de escala** do k8s (~5000 nodes por
+  cluster). O sharding do malachi paga complexidade (bootstrap / leader / fencing) justamente para
+  **escalar além de um quórum** — a motivação da fatia D.
+
+### 8.3 Síntese — como isso informa as próximas fatias
+
+- **D-c-1d (`membership_leader`):** eleição pelo menor nó **vivo** (SWIM) + fencing por nome do `ra` no
+  bootstrap; reconcile loop **level-triggered / idempotente** (padrão *controller* do k8s).
+- **1C (coordinators no líder):** aqui entra o **Lease sobre `ra`** (k8s) para fenciar o trabalho
+  **contínuo**, e o modelo **staged / planned / committed** (riak_core claimant) para mudanças de ring.
+- **Upgrade do `place_vnodes`:** `target_n_val` / location-awareness (riak_core binring) + `maxSkew` /
+  `minDomains` / hard-soft (k8s topology spread), **mantendo o determinismo**.
+- **Rebalancing dinâmico (futuro):** ring versioning + claim cycle (riak_core) + workqueue / expectations
+  (k8s).
+
+> Nenhuma dessas ideias está implementada — esta seção é um mapa de aproveitamento. A ordem de execução
+> das fatias (D-c-1d, Lease/1C, `place_vnodes`, rebalancing) é decidida quando cada uma for atacada.
