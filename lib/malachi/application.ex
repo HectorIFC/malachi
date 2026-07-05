@@ -225,7 +225,7 @@ defmodule Malachi.Application do
       count when is_integer(count) and count > 1 and not is_nil(cluster) ->
         rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
         vnodes = place_vnodes(sharded_vnodes(cluster, count), nodes, rf)
-        [metadata_vnodes: vnodes, bootstrap_orchestrator: static_seed(nodes)]
+        [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
 
       _one_or_unclustered ->
         metadata_cluster_opts(cluster, nodes)
@@ -242,6 +242,33 @@ defmodule Malachi.Application do
   def static_seed(nodes) do
     seed = nodes |> Enum.sort() |> List.first()
     fn -> node() == seed end
+  end
+
+  @doc """
+  The bootstrap-orchestrator policy used at runtime (D-c-1d): a `(-> boolean())` true only on the
+  lowest-sorted **live** member (per SWIM membership on `membership_server`), so the role **fails over**
+  when the current leader dies — unlike `static_seed/1`, which is fixed to the lowest configured node.
+  Conservative: if membership is unavailable it returns false (never risking two orchestrators); a
+  transient double-leader is still fenced by the ra cluster name at bootstrap.
+  """
+  @spec membership_leader(GenServer.server()) :: (-> boolean())
+  def membership_leader(membership_server) do
+    fn -> node() == live_leader(membership_server) end
+  end
+
+  # The lowest-sorted live member's node, or nil when membership is unavailable/empty (→ not leader).
+  # alive_members/1 returns the members sorted, so the head is the lowest node.
+  defp live_leader(membership_server) do
+    case safe_alive_members(membership_server) do
+      [{_name, leader_node} | _] -> leader_node
+      _empty_or_unavailable -> nil
+    end
+  end
+
+  defp safe_alive_members(membership_server) do
+    MembershipServer.alive_members(membership_server)
+  catch
+    _kind, _reason -> []
   end
 
   @doc """

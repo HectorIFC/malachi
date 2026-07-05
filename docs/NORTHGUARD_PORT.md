@@ -719,8 +719,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              que é a D-c-1d com fencing). Testado: `static_seed` (só o menor nó), `route_vnode` + `snapshot` tolerante
              (single-node), e `:multinode` — orquestrador inicia sobre 2 nós, não-orquestrador só roteia e lê/escreve
              cross-node. **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
-           - ⏳ **D-c-1d** — política `:membership_leader` com **fencing** (lease/idempotência) no lugar do seed
-             estático — o "jeito k8s" (leader election dos controllers). Casa com o **1C** (coordinator no líder).
+           - ✅ **D-c-1d — `membership_leader` + reconcile loop.** A política de orquestração passa do seed
+             estático para `Application.membership_leader/1` — verdade só no menor nó **vivo** (`MembershipServer.
+             alive_members`, SWIM), então o papel **faz failover** quando o líder cai (tolerante: se a membership
+             não responde → não-líder, nunca dois). O bootstrap vira **reconcile** (controller-style, k8s): no
+             boot **todo** nó só faz `route_vnode` (`build_replicated` sem `start`); o `BrokerServer` reconcilia
+             (level-triggered, idempotente) logo após o boot e periodicamente — e **só no líder** — chamando
+             `MetadataServer.start/2` nos vnodes cujo cluster ainda não está pronto (`MetadataServer.ready?/1`,
+             novo). O **fencing** é o nome do cluster `ra` (um segundo `start` do mesmo vnode falha sem
+             duplicar — validado empiricamente); o *lease* (jeito k8s literal) fica para o **1C**, onde o líder
+             passa a fazer trabalho **contínuo** (retention/healing/rebalancing). `static_seed/1` permanece como
+             alternativa (testada). Testado: `membership_leader` (menor-vivo, tolerância); integração — o líder
+             bootstrapa os vnodes via reconcile e um `create_topic` commita. Ver seção 8 (referências k8s/riak_core).
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** → detecção de liderança → **1C** coordinators

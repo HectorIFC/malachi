@@ -98,6 +98,28 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(control)
   end
 
+  test "the membership leader bootstraps the vnodes via the reconcile loop (D-c-1d)" do
+    # membership where this node is the sole (thus lowest) live member → it is the bootstrap leader
+    {:ok, membership} = Malachi.Test.AliveMembersStub.start_link([{Malachi.LogMembership, node()}])
+    vnode = :"bs_ml_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{vnode, 0, [node()]}],
+        bootstrap_orchestrator: Malachi.Application.membership_leader(membership)
+      )
+
+    # nothing is started at boot (build_replicated only routes); the reconcile loop on the leader
+    # bootstraps the vnode's cluster, so a create_topic through the broker then commits
+    assert {:ok, _root} = BrokerServer.create_topic(control, "events", 4)
+    assert %{name: "events"} = Metadata.get_topic(BrokerServer.metadata(control), "events")
+    assert MetadataServer.ready?({vnode, node()})
+
+    :ok = BrokerServer.stop(control)
+  end
+
   test "produces across a 3-broker replica set and reads the records back (replicated data plane)" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)

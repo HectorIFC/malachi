@@ -90,6 +90,31 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "membership_leader/1" do
+    alias Malachi.Test.AliveMembersStub
+
+    test "not the leader when membership is unavailable" do
+      # a server that does not exist / does not answer → conservative false (never risk two orchestrators)
+      refute App.membership_leader(:no_such_membership_server).()
+    end
+
+    test "leader iff this node is the lowest-sorted live member" do
+      # alive_members is sorted, so the head is the lowest node
+      {:ok, self_lowest} =
+        AliveMembersStub.start_link([{Malachi.LogMembership, node()}, {Malachi.LogMembership, :zzzz@h}])
+
+      assert App.membership_leader(self_lowest).()
+
+      {:ok, other_lower} =
+        AliveMembersStub.start_link([{Malachi.LogMembership, :"0000@h"}, {Malachi.LogMembership, node()}])
+
+      refute App.membership_leader(other_lower).()
+
+      {:ok, empty} = AliveMembersStub.start_link([])
+      refute App.membership_leader(empty).()
+    end
+  end
+
   describe "broker_refs/1" do
     test "one named ReplicationServer reference per node" do
       assert App.broker_refs([:"a@127.0.0.1", :"b@127.0.0.1"]) ==

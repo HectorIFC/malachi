@@ -178,7 +178,7 @@ defmodule Malachi.BrokerServer do
           {nil, list}
       end
 
-    {broker_opts, metadata_refresh} =
+    {broker_opts, metadata_refresh, bootstrap} =
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
       |> maybe_put(:spread_by, spread_by)
@@ -194,8 +194,12 @@ defmodule Malachi.BrokerServer do
       refresh_interval: refresh_interval,
       # Re-seeds the local metadata cache from the authoritative ra clusters (fills vnodes not yet ready
       # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. See
-      # `refresh_metadata_cache/1`.
+      # `reconcile_metadata/1`.
       metadata_refresh: metadata_refresh,
+      # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
+      # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
+      # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
+      bootstrap: bootstrap,
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
       waiters: []
@@ -204,10 +208,10 @@ defmodule Malachi.BrokerServer do
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
     if live_brokers || broker_attributes, do: schedule_refresh(state)
 
-    # A replicated control plane re-seeds its cache right after boot (to cover the election window) and
-    # then periodically; in-memory metadata needs no refresh.
+    # A replicated control plane reconciles right after boot (bootstrap missing vnodes if leader; seed
+    # the cache once the clusters are ready) and then periodically; in-memory metadata needs neither.
     if metadata_refresh do
-      {:ok, state, {:continue, :refresh_metadata}}
+      {:ok, state, {:continue, :reconcile}}
     else
       {:ok, state}
     end
@@ -316,13 +320,13 @@ defmodule Malachi.BrokerServer do
     {:noreply, %{state | broker: broker}}
   end
 
-  def handle_info(:refresh_metadata, state) do
-    {:noreply, refresh_metadata_cache(state)}
+  def handle_info(:reconcile, state) do
+    {:noreply, reconcile_metadata(state)}
   end
 
   @impl true
-  def handle_continue(:refresh_metadata, state) do
-    {:noreply, refresh_metadata_cache(state)}
+  def handle_continue(:reconcile, state) do
+    {:noreply, reconcile_metadata(state)}
   end
 
   @impl true
@@ -336,17 +340,36 @@ defmodule Malachi.BrokerServer do
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
 
-  defp schedule_metadata_refresh(state), do: Process.send_after(self(), :refresh_metadata, state.refresh_interval)
+  defp schedule_reconcile(state), do: Process.send_after(self(), :reconcile, state.refresh_interval)
 
-  # Re-seeds the local metadata cache from the authoritative ra clusters and reschedules. The ra log is
-  # the source of truth, so this only moves the cache forward (a nil refresh leaves it untouched).
-  defp refresh_metadata_cache(state) do
-    schedule_metadata_refresh(state)
+  # The reconcile loop (level-triggered, controller-style, D-c-1d): while this node is the leader,
+  # bootstrap any vnode whose ra cluster is not up yet; then re-seed the local cache from the clusters.
+  # Reschedules itself. Idempotent: bootstrapping an already-formed vnode is a no-op, and the cache
+  # re-seed only moves forward (the ra log is the source of truth).
+  defp reconcile_metadata(state) do
+    schedule_reconcile(state)
+    bootstrap_missing_vnodes(state.bootstrap)
 
     case state.metadata_refresh.() do
       nil -> state
       dsrsm -> %{state | broker: Broker.put_cache(state.broker, dsrsm)}
     end
+  end
+
+  # Bootstrap step: only the leader acts, and only on vnodes whose cluster is not yet ready. Starting a
+  # vnode whose cluster already exists returns an error and is ignored (the name fences a double start).
+  defp bootstrap_missing_vnodes(nil), do: :ok
+
+  defp bootstrap_missing_vnodes(%{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}) do
+    if orchestrator?.() do
+      Enum.each(vnodes, fn {vnode_id, _token, nodes} ->
+        unless MetadataServer.ready?(ReplicatedDSRSM.server_for(replicated, vnode_id)) do
+          _ = MetadataServer.start(vnode_id, nodes)
+        end
+      end)
+    end
+
+    :ok
   end
 
   # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.
@@ -401,15 +424,17 @@ defmodule Malachi.BrokerServer do
     %{state | waiters: others ++ still_waiting}
   end
 
-  # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh}` where
-  # `metadata_refresh` re-seeds the local cache from the ra clusters (`nil` for in-memory):
+  # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh, bootstrap}`
+  # where `metadata_refresh` re-seeds the local cache from the ra clusters (`nil` for in-memory) and
+  # `bootstrap` drives the leader's reconcile loop (`nil` unless sharded):
   #   * `:metadata_vnodes` — a sharded control plane: one ra cluster per vnode, each placed on its own
-  #     `nodes`, routed by topic. Exactly one node (the bootstrap orchestrator) starts the clusters;
-  #     the others only route to a member. `metadata_vnodes` is `[{vnode_id, token, nodes}]` (D-c).
+  #     `nodes`, routed by topic. Every node only *routes* at boot; the reconcile loop bootstraps the
+  #     clusters on whichever node is currently the leader. `metadata_vnodes` is `[{vnode_id, token,
+  #     nodes}]` (D-c).
   #   * `:metadata_cluster` — a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
   #   * neither — in-memory metadata (single node).
   defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do
-    replicated = build_replicated(vnodes, orchestrator?.())
+    replicated = build_replicated(vnodes)
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
 
     new_opts =
@@ -417,10 +442,12 @@ defmodule Malachi.BrokerServer do
       |> Keyword.put(:dsrsm, cache)
       |> Keyword.put(:command_fun, sharded_command_fun(replicated))
 
-    {new_opts, fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end}
+    refresh = fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end
+    bootstrap = %{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}
+    {new_opts, refresh, bootstrap}
   end
 
-  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes, _orchestrator?), do: {opts, nil}
+  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes, _orchestrator?), do: {opts, nil, nil}
 
   defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
@@ -431,20 +458,14 @@ defmodule Malachi.BrokerServer do
       |> Keyword.put(:dsrsm, DSRSM.single(seed))
       |> Keyword.put(:command_fun, raft_command_fun(server_id))
 
-    {new_opts, single_cluster_refresh(server_id)}
+    {new_opts, single_cluster_refresh(server_id), nil}
   end
 
-  # Builds the sharded control plane's ReplicatedDSRSM. The bootstrap orchestrator starts each vnode's
-  # ra cluster across its placement `nodes`; a non-orchestrator only routes to a real member (the first
-  # placement node) without starting anything — so exactly one node bootstraps each vnode.
-  defp build_replicated(vnodes, true = _orchestrator?) do
-    Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
-      {:ok, replicated} = ReplicatedDSRSM.add_vnode(replicated, vnode_id, token, nodes)
-      replicated
-    end)
-  end
-
-  defp build_replicated(vnodes, false = _orchestrator?) do
+  # Builds the sharded control plane's ReplicatedDSRSM as routing-only: every vnode points at a real
+  # placement member (the first) without starting its cluster. The reconcile loop starts the clusters
+  # on the current leader (see `bootstrap_missing_vnodes/1`), so exactly one node bootstraps each vnode
+  # and the role fails over with leadership.
+  defp build_replicated(vnodes) do
     Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
       {:ok, replicated} = ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, {vnode_id, hd(nodes)})
       replicated

@@ -66,6 +66,15 @@ defmodule Malachi.Cluster.MetadataServer do
     end
   end
 
+  @doc """
+  Whether the cluster addressed by `server_id` is formed and reachable (a member answers `:ra.members`).
+  Used by the reconcile loop to decide if a vnode still needs bootstrapping.
+  """
+  @spec ready?(server_id()) :: boolean()
+  def ready?(server_id) do
+    match?({:ok, _members, _leader}, :ra.members(server_id))
+  end
+
   @doc "Stops and deletes the vnode's Raft cluster (removing its on-disk state)."
   @spec delete(cluster_name()) :: :ok
   def delete(cluster_name) do
