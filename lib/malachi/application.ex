@@ -467,6 +467,24 @@ defmodule Malachi.Application do
   end
 
   @doc """
+  The **desired** vnode placement for a given set of (live) `nodes`: the `count` logical vnodes of
+  control plane `base` (`sharded_vnodes/2`, node-independent) placed over `nodes` by rendezvous hashing
+  (`place_vnodes/4`). Deterministic and, crucially for rebalancing, **minimal-movement** — because the
+  vnode ids/tokens are fixed and HRW is stable, adding or removing a node re-places only the vnodes that
+  must move (a vnode changes only if it adopts a joined node, or held a left one), leaving the rest put.
+
+  This is the target that the rebalancing plan (R2) diffs the *current* placement against: recomputing
+  it over the live membership (vs the static `:log_nodes`) is how the ring follows nodes joining/leaving.
+  `place_opts` is forwarded for rack/zone spread (A1). Pure — the caller supplies `nodes` (e.g. the live
+  members), so a coordinated recompute stays deterministic across the cluster.
+  """
+  @spec desired_placement(atom(), pos_integer(), [node()], pos_integer(), keyword()) ::
+          [{atom(), non_neg_integer(), [node()]}]
+  def desired_placement(base, count, nodes, replication_factor, place_opts \\ []) do
+    base |> sharded_vnodes(count) |> place_vnodes(nodes, replication_factor, place_opts)
+  end
+
+  @doc """
   The vnode ids `this_node` both **hosts** (its placement includes `this_node`) and currently **leads**
   (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
   (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local

@@ -910,8 +910,27 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
     (`:log_spread_by` + `:log_topology`). Testado: cada vnode com R=2 abrange os 2 racks; determinismo.
   - ⏳ **A2 (futuro)** — balanceamento **global** de carga (`maxSkew` sobre o total de vnodes por nó,
     estilo *claim binring*): exige visão global (não por-vnode). Resolve carga, não perda de dados.
-- **Rebalancing dinâmico (futuro):** ring versioning + claim cycle (riak_core) + workqueue / expectations
-  (k8s).
+- **Rebalancing dinâmico** — quando a membership muda (nó entra/sai), redistribuir os vnodes ao vivo.
+  Escopo: **control plane** (os membros dos clusters `ra` de cada vnode); adicionar/remover membro
+  (`:ra.add_member`/`:ra.remove_member`) faz o **próprio `ra` transferir o estado** (Raft log/snapshot),
+  então não movemos dados de metadata à mão; o **data plane** (segments) já é coberto pelo *healing*
+  (1C-b). Modelo **manual** *staged → planned → committed* (riak_core; gatilho automático fica para
+  depois, por cima do mesmo motor). Decomposto em:
+  - ✅ **R1 — `desired_placement` (núcleo puro).** `Application.desired_placement/5` recomputa o placement
+    desejado sobre um conjunto de nós arbitrário (a membership **viva**, vs a config estática `:log_nodes`):
+    compõe `sharded_vnodes/2` (vnodes lógicos fixos) + `place_vnodes/4` (HRW). Determinístico e
+    **movimento mínimo** — um vnode só muda se **adotar** um nó que entrou ou **detinha** um que saiu; o
+    resto fica posto. Testado: determinismo; ao **adicionar** um nó, um vnode só muda se adota o novo nó
+    (e algum adota); ao **remover**, só muda quem o detinha (e ele some do placement); clamp a `min(rf, |nós|)`.
+  - ⏳ **R2 (futuro)** — **plano** de rebalanceamento: diff do placement atual × `desired_placement` por
+    vnode (`{vnode_id, add: [...], remove: [...]}`), *staged/planned* (computa sem aplicar). Núcleo puro.
+  - ⏳ **R0 (futuro)** — **Lease sobre `ra`** (fencing forte, k8s): CAS versionado, triângulo
+    `LeaseDuration > RenewDeadline > RetryPeriod`, largar o lease proativo ao não-renovar. Pré-requisito
+    de R3 (o movimento de vnodes é **não-idempotente** — é aqui que o lease finalmente entra, como
+    antecipado no 1C-b).
+  - ⏳ **R3 (futuro)** — **execução** (*committed*): aplica o plano via `:ra.add_member`/`remove_member`
+    por vnode, **sob o lease**, e atualiza o ring (`ReplicatedDSRSM`). Ring versioning + workqueue /
+    expectations (k8s) para retry/backoff.
 
-> A ordem de execução das fatias restantes (Lease/1C-b, `place_vnodes` A2, rebalancing) é decidida quando
-> cada uma for atacada.
+> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R2 → R0 → R3) é decidida
+> quando cada uma for atacada.

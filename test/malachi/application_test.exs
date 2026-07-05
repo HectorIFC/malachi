@@ -100,6 +100,54 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "desired_placement/5" do
+    test "places every vnode over the given live nodes, deterministically" do
+      nodes = [:a@h, :b@h, :c@h]
+      placement = App.desired_placement(:log_meta, 6, nodes, 2)
+
+      assert placement == App.desired_placement(:log_meta, 6, nodes, 2)
+      assert length(placement) == 6
+
+      for {_id, _token, chosen} <- placement do
+        assert length(chosen) == 2
+        assert Enum.all?(chosen, &(&1 in nodes))
+      end
+    end
+
+    test "adding a node re-places only vnodes that adopt it (minimal movement)" do
+      before = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h], 2)
+      after_join = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h, :d@h], 2)
+
+      # a vnode's replica set changes only if it took on the new node; everything else stays put
+      for {{id, _t, ns_before}, {id, _t2, ns_after}} <- Enum.zip(before, after_join),
+          ns_after != ns_before do
+        assert :d@h in ns_after
+      end
+
+      # and the join is not a no-op: some vnode actually adopts the new node
+      assert Enum.any?(after_join, fn {_id, _t, ns} -> :d@h in ns end)
+    end
+
+    test "removing a node re-places only vnodes that held it (minimal movement)" do
+      before = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h, :d@h], 2)
+      after_leave = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h], 2)
+
+      for {{id, _t, ns_before}, {id, _t2, ns_after}} <- Enum.zip(before, after_leave),
+          ns_after != ns_before do
+        assert :d@h in ns_before
+      end
+
+      # the departed node no longer appears anywhere
+      refute Enum.any?(after_leave, fn {_id, _t, ns} -> :d@h in ns end)
+    end
+
+    test "clamps replicas to the number of live nodes" do
+      for {_id, _token, chosen} <- App.desired_placement(:log_meta, 4, [:a@h, :b@h], 3) do
+        assert Enum.sort(chosen) == [:a@h, :b@h]
+      end
+    end
+  end
+
   describe "leading_vnodes/3" do
     test "returns the vnodes this node both hosts and leads, preserving order" do
       this = :n1@h
