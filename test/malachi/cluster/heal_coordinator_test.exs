@@ -97,6 +97,24 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     assert eventually(fn -> read_values(d, segment_id) == ["x", "y"] end)
   end
 
+  test "a non-leader ticks but skips healing (only the leader acts)" do
+    a = start_broker()
+    d = start_broker()
+    {metadata, segment_id} = sealed_segment([a, :b, :c], a, ["x", "y"])
+    {source, apply} = metadata_store(metadata)
+
+    start_coordinator(
+      live_brokers: fn -> [a, :b, d] end,
+      metadata_source: source,
+      apply_command: apply,
+      interval: 15,
+      leader?: fn -> false end
+    )
+
+    # not the membership leader → no healing happens; d never receives the segment
+    refute eventually(fn -> read_values(d, segment_id) == ["x", "y"] end, 300)
+  end
+
   defp eventually(check, remaining_ms \\ 2_000) do
     cond do
       check.() -> true

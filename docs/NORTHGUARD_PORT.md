@@ -733,8 +733,21 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              bootstrapa os vnodes via reconcile e um `create_topic` commita. Ver seção 8 (referências k8s/riak_core).
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
-    Sequência: D-b ✅ → **D-c-1 placement de vnodes** → detecção de liderança → **1C** coordinators
-    per-vnode-leader. Fazer 1C antes dos pré-requisitos é que não rende — a fatia em si é Fase 1.
+    Sequência: D-b ✅ → **D-c-1 placement de vnodes** ✅ → **1C-a coordinators só-no-líder** ✅ →
+    (futuro) 1C-b coordinators per-vnode-leader.
+
+    - ✅ **1C-a — coordinators só-no-líder (sem lease).** `RetentionCoordinator` e `HealCoordinator`
+      ganham o seam `:leader?` (`(-> boolean())`, default sempre); a cada tick, só varrem/curam se
+      `leader?()` — senão o tick corre mas pula. O `Application` injeta `membership_leader(Malachi.
+      LogMembership)` (reusa D-c-1d) nos dois quando clustered (`coordinator_leader?/1`; single-node =
+      sempre age). Elimina a **redundância** (N nós faziam o mesmo trabalho) mantendo o modelo
+      level-triggered. **Sem lease:** o trabalho é idempotente + roteado ao `ra` (serial), então dois
+      coordinators transitórios (convergência SWIM) só refazem trabalho, não corrompem — o mesmo
+      raciocínio do bootstrap. `run_now/1`/`heal_now/1` ignoram o gate (triggers manuais). Testado:
+      não-líder pula o tick; o trigger manual age mesmo assim.
+    - ⏳ **1C-b (futuro)** — coordinator na liderança **Raft de cada vnode** (distribui a carga; o
+      NorthGuard literal), e o **lease sobre `ra`** quando o coordinator ganhar trabalho **não-idempotente**
+      (rebalancing com movimento de dados). Requer detectar liderança Raft por vnode (eventos do `ra`).
 
     (A alternativa **1B** — coordinators iterando por-vnode mas ainda centralizados — evita materializar
     o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)

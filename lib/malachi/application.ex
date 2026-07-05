@@ -111,14 +111,14 @@ defmodule Malachi.Application do
 
     # Retention runs whenever a policy is configured (it matters single-node too); it references the
     # broker, so it comes last.
-    log_stack ++ retention_children()
+    log_stack ++ retention_children(cluster)
   end
 
-  defp retention_children do
-    if retention_configured?(), do: [retention_child()], else: []
+  defp retention_children(cluster) do
+    if retention_configured?(), do: [retention_child(cluster)], else: []
   end
 
-  defp retention_child do
+  defp retention_child(cluster) do
     %{
       id: Malachi.LogRetention,
       start:
@@ -129,11 +129,17 @@ defmodule Malachi.Application do
              metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
              expire_segment: &expire_segment/1,
              policy: retention_policy(),
-             interval: Application.get_env(:malachi, :retention_interval_ms, 60_000)
+             interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),
+             leader?: coordinator_leader?(cluster)
            ]
          ]}
     }
   end
+
+  # The leader gate for a cluster coordinator: only the membership leader acts (1C). A single node (no
+  # `:log_cluster`, so no membership server) always acts.
+  defp coordinator_leader?(nil), do: fn -> true end
+  defp coordinator_leader?(_cluster), do: membership_leader(Malachi.LogMembership)
 
   # Removes an expired segment from the control plane, then deletes its stored data on each replica.
   # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
@@ -205,7 +211,8 @@ defmodule Malachi.Application do
              live_brokers: &live_brokers/0,
              metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
              apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
-             replication_factor: replication_factor()
+             replication_factor: replication_factor(),
+             leader?: membership_leader(Malachi.LogMembership)
            ]
          ]}
     }

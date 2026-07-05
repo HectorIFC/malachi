@@ -15,6 +15,9 @@ defmodule Malachi.Cluster.HealCoordinator do
       command to the control plane;
     * `:replication_factor` - the target replica count;
     * `:interval` - the healing period in ms (default 5000);
+    * `:leader?` - `(-> boolean())`, whether this node should heal this pass (default always). Only the
+      cluster's membership leader heals, so N nodes do not redo the same work (1C); a non-leader still
+      ticks but skips the pass. `heal_now/1` is a manual trigger and always runs;
     * `:heal_opts` - forwarded to `Malachi.Cluster.SelfHealing.heal_sealed/4` (e.g. `:batch_size`).
 
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
@@ -52,6 +55,7 @@ defmodule Malachi.Cluster.HealCoordinator do
       apply_command: Keyword.fetch!(opts, :apply_command),
       replication_factor: Keyword.fetch!(opts, :replication_factor),
       interval: Keyword.get(opts, :interval, @default_interval),
+      leader?: Keyword.get(opts, :leader?, fn -> true end),
       heal_opts: Keyword.get(opts, :heal_opts, [])
     }
 
@@ -64,7 +68,7 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   @impl true
   def handle_info(:tick, state) do
-    run(state)
+    if state.leader?.(), do: run(state)
     schedule(state)
     {:noreply, state}
   end

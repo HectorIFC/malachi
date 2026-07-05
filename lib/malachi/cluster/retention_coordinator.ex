@@ -9,10 +9,14 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       from the control plane **and** deletes its stored data on the replicas;
     * `:policy` - a `Malachi.Cluster.Retention.policy()` (`:max_age_ms` / `:max_bytes`; `nil` = off);
     * `:clock` - `(-> non_neg_integer())` epoch ms (default `System.system_time/1`);
-    * `:interval` - the sweep period in ms (default 60_000).
+    * `:interval` - the sweep period in ms (default 60_000);
+    * `:leader?` - `(-> boolean())`, whether this node should sweep (default always). Only the cluster's
+      membership leader sweeps, so N nodes do not redo the same work (1C); a non-leader still ticks but
+      skips the sweep.
 
   Each sweep asks `Retention.expired/3` which sealed segments to drop, resolves each to its metadata
-  (for its replica set), and calls `expire_segment` on it. `run_now/1` runs one sweep synchronously.
+  (for its replica set), and calls `expire_segment` on it. `run_now/1` runs one sweep synchronously,
+  ignoring `:leader?` (it is a manual trigger).
   """
 
   use GenServer
@@ -40,7 +44,8 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       expire_segment: Keyword.fetch!(opts, :expire_segment),
       policy: Keyword.fetch!(opts, :policy),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
-      interval: Keyword.get(opts, :interval, @default_interval)
+      interval: Keyword.get(opts, :interval, @default_interval),
+      leader?: Keyword.get(opts, :leader?, fn -> true end)
     }
 
     schedule(state)
@@ -52,7 +57,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   @impl true
   def handle_info(:tick, state) do
-    run(state)
+    if state.leader?.(), do: run(state)
     schedule(state)
     {:noreply, state}
   end

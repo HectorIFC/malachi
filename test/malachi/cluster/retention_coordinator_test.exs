@@ -58,6 +58,25 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     assert_receive {:expired, "old"}, 1_000
   end
 
+  test "a non-leader ticks but skips the sweep (only the leader acts)" do
+    test_pid = self()
+
+    _server =
+      start(
+        expire_segment: fn segment -> send(test_pid, {:expired, segment.id}) end,
+        interval: 20,
+        leader?: fn -> false end
+      )
+
+    # the tick fires but does not sweep while this node is not the membership leader
+    refute_receive {:expired, _}, 200
+  end
+
+  test "run_now sweeps regardless of the leader gate (manual trigger)" do
+    server = start(leader?: fn -> false end)
+    assert RetentionCoordinator.run_now(server) == ["old"]
+  end
+
   @tag :tmp_dir
   test "end to end: a sweep expires a real sealed segment from the control plane and storage", %{tmp_dir: directory} do
     # a real broker over a named ReplicationServer we can inspect (the same shape the app wires up)
