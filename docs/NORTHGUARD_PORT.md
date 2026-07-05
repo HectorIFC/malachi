@@ -734,7 +734,8 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** ✅ → **1C-a coordinators só-no-líder** ✅ →
-    **1C-b-i detecção de liderança Raft por vnode** ✅ → (futuro) 1C-b-ii supervisor per-vnode-leader.
+    **1C-b-i detecção de liderança Raft por vnode** ✅ → **1C-b-ii-α coordinator apontado a um vnode** ✅
+      → (futuro) 1C-b-ii-β supervisor/manager per-vnode-leader.
 
     - ✅ **1C-a — coordinators só-no-líder (sem lease).** `RetentionCoordinator` e `HealCoordinator`
       ganham o seam `:leader?` (`(-> boolean())`, default sempre); a cada tick, só varrem/curam se
@@ -756,10 +757,22 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       coordinators, um por vnode, no líder Raft dele (o NorthGuard literal, distribuindo a carga vs o
       líder único de membership do 1C-a). Testado: `leader?` no líder single-node (ra real) + não-formado
       → false; `leading_vnodes` filtra host×lidera, preserva ordem, não consulta liderança de não-hospedado.
-    - ⏳ **1C-b-ii (futuro)** — supervisor que sobe/derruba os coordinators por vnode conforme a liderança
-      Raft muda (via 1C-b-i, tolerando oscilação/split-brain momentâneo) + a fiação no `Application`. O
-      **lease sobre `ra`** só entra quando o coordinator ganhar trabalho **não-idempotente** (rebalancing
-      com movimento de dados); 1C-b-ii em si continua idempotente + roteado ao `ra`, então ainda sem lease.
+    - ✅ **1C-b-ii-α — coordinator apontado a um vnode.** `Application.vnode_metadata_source/1` é um
+      `metadata_source` ligado a **um** vnode: lê a visão local do `Metadata` daquele vnode via
+      `MetadataServer.query({vnode_id, node()}, & &1)` (consistent query ao ra do vnode), **tolerante**
+      (vnode não-formado/inalcançável → `Metadata.new()`, sem crashar o coordinator). Como o tipo é o
+      mesmo (`Metadata.t()`) e `expire_segment`/`apply_heal` já roteiam ao vnode dono por topic, o
+      `RetentionCoordinator`/`HealCoordinator` **não mudam** — basta trocar o source (por-vnode em vez do
+      merge global) e o gate (`MetadataServer.leader?({vnode_id, node()})`). Testado (ra real): source
+      tolerante em vnode não-formado; lê só o shard do vnode; um `RetentionCoordinator` ligado a um vnode
+      expira só os segments **daquele** vnode.
+    - ⏳ **1C-b-ii-β (futuro)** — `VnodeCoordinatorManager` (GenServer) + `DynamicSupervisor` que sobem/
+      derrubam um par retention+heal por vnode liderado, reconciliando por **polling level-triggered**
+      (via `leading_vnodes/3`, como o reconcile de bootstrap do D-c-1d; tolera oscilação/split-brain
+      momentâneo) + a fiação no `Application` (substitui os coordinators únicos do 1C-a quando sharded).
+      O **lease sobre `ra`** só entra quando o coordinator ganhar trabalho **não-idempotente**
+      (rebalancing com movimento de dados); β em si continua idempotente + roteado ao `ra`, então ainda
+      sem lease.
 
     (A alternativa **1B** — coordinators iterando por-vnode mas ainda centralizados — evita materializar
     o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)

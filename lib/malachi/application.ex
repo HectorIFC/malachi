@@ -21,6 +21,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.I18n
+  alias Malachi.Metadata
   alias Malachi.TLSValidator
 
   def start(_type, _args) do
@@ -365,6 +366,25 @@ defmodule Malachi.Application do
   def leading_vnodes(vnodes, this_node \\ node(), leader? \\ &MetadataServer.leader?/1) do
     for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, leader?.({vnode_id, this_node}) do
       vnode_id
+    end
+  end
+
+  @doc """
+  A `metadata_source` bound to a single vnode: reads this node's view of the vnode's replicated
+  `Metadata` via a consistent query to its ra cluster (`{vnode_id, node()}`). Tolerant — an unreachable
+  or not-yet-formed vnode yields empty `Metadata` (no work) instead of crashing the coordinator. Used by
+  1C-b so each vnode's retention/heal coordinator sees only that vnode's shard, versus 1C-a's global
+  merge routed through the single membership leader.
+  """
+  @spec vnode_metadata_source(atom()) :: (-> Metadata.t())
+  def vnode_metadata_source(vnode_id) do
+    server_id = {vnode_id, node()}
+
+    fn ->
+      case MetadataServer.query(server_id, & &1) do
+        {:ok, metadata} -> metadata
+        {:error, _unformed_or_unreachable} -> Metadata.new()
+      end
     end
   end
 
