@@ -78,13 +78,13 @@ defmodule Malachi.ApplicationTest do
 
     test "with a topology, each vnode's replicas land in distinct racks (A1)" do
       vnodes = App.sharded_vnodes(:log_meta, 6)
-      nodes = [:"a1@h", :"a2@h", :"b1@h", :"b2@h"]
+      nodes = [:a1@h, :a2@h, :b1@h, :b2@h]
 
       attrs = %{
-        :"a1@h" => %{"rack" => "a"},
-        :"a2@h" => %{"rack" => "a"},
-        :"b1@h" => %{"rack" => "b"},
-        :"b2@h" => %{"rack" => "b"}
+        :a1@h => %{"rack" => "a"},
+        :a2@h => %{"rack" => "a"},
+        :b1@h => %{"rack" => "b"},
+        :b2@h => %{"rack" => "b"}
       }
 
       placed = App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs})
@@ -97,6 +97,35 @@ defmodule Malachi.ApplicationTest do
 
       # still deterministic
       assert App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs}) == placed
+    end
+  end
+
+  describe "leading_vnodes/3" do
+    test "returns the vnodes this node both hosts and leads, preserving order" do
+      this = :n1@h
+
+      vnodes = [
+        {:vn_a, 0, [:n1@h, :n2@h]},
+        {:vn_b, 1, [:n2@h, :n3@h]},
+        {:vn_c, 2, [:n1@h, :n3@h]},
+        {:vn_d, 3, [:n1@h]}
+      ]
+
+      # this node leads its local server for vn_a and vn_d only
+      leader? = fn server_id -> server_id in [{:vn_a, this}, {:vn_d, this}] end
+
+      assert App.leading_vnodes(vnodes, this, leader?) == [:vn_a, :vn_d]
+    end
+
+    test "excludes a vnode this node hosts but does not lead" do
+      this = :n1@h
+      assert App.leading_vnodes([{:vn_a, 0, [:n1@h, :n2@h]}], this, fn _ -> false end) == []
+    end
+
+    test "never even queries leadership for a vnode this node does not host" do
+      this = :n1@h
+      leader? = fn _ -> flunk("must not query leadership for a non-hosted vnode") end
+      assert App.leading_vnodes([{:vn_b, 0, [:n2@h, :n3@h]}], this, leader?) == []
     end
   end
 
@@ -215,12 +244,12 @@ defmodule Malachi.ApplicationTest do
     end
 
     test "parses node=value pairs into a node => value map, trimming" do
-      assert App.parse_topology("n1@h=a,n2@h=b") == %{:"n1@h" => "a", :"n2@h" => "b"}
-      assert App.parse_topology(" n1@h = a , n2@h = b ") == %{:"n1@h" => "a", :"n2@h" => "b"}
+      assert App.parse_topology("n1@h=a,n2@h=b") == %{:n1@h => "a", :n2@h => "b"}
+      assert App.parse_topology(" n1@h = a , n2@h = b ") == %{:n1@h => "a", :n2@h => "b"}
     end
 
     test "ignores entries without an =" do
-      assert App.parse_topology("n1@h=a,bogus,n2@h=b") == %{:"n1@h" => "a", :"n2@h" => "b"}
+      assert App.parse_topology("n1@h=a,bogus,n2@h=b") == %{:n1@h => "a", :n2@h => "b"}
     end
   end
 end

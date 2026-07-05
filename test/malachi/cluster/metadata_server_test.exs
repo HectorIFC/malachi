@@ -56,4 +56,16 @@ defmodule Malachi.Cluster.MetadataServerTest do
 
     assert {:ok, %{name: "durable"}} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "durable"))
   end
+
+  test "leader?/1 is true for the local server of a formed single-node cluster (1C-b)" do
+    server_id = start_cluster()
+    # a successful command guarantees a formed cluster with an elected leader
+    {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+
+    assert MetadataServer.leader?(server_id)
+  end
+
+  test "leader?/1 is false for an unformed / unreachable cluster (never assume leadership)" do
+    refute MetadataServer.leader?({:"no_such_vnode_#{System.unique_integer([:positive])}", node()})
+  end
 end

@@ -16,6 +16,7 @@ defmodule Malachi.Application do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
@@ -348,6 +349,23 @@ defmodule Malachi.Application do
       {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor, place_opts)
       {vnode_id, token, chosen}
     end)
+  end
+
+  @doc """
+  The vnode ids `this_node` both **hosts** (its placement includes `this_node`) and currently **leads**
+  (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
+  (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local
+  server id (defaults to `MetadataServer.leader?/1`). This is where 1C-b runs each vnode's
+  retention/healing coordinators, so every vnode is managed by exactly one node — the one leading its
+  Raft group — distributing the control-plane work the NorthGuard-faithful way (vs 1C-a's single
+  membership leader). Pure given `leader?`; deterministic given the current leadership.
+  """
+  @spec leading_vnodes([{atom(), non_neg_integer(), [node()]}], node(), (MetadataServer.server_id() ->
+                                                                           boolean())) :: [atom()]
+  def leading_vnodes(vnodes, this_node \\ node(), leader? \\ &MetadataServer.leader?/1) do
+    for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, leader?.({vnode_id, this_node}) do
+      vnode_id
+    end
   end
 
   @doc """

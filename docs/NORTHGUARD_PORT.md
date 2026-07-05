@@ -734,7 +734,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       2. **Detecção/reação a liderança Raft por vnode** — um supervisor que sobe/derruba coordinators
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** ✅ → **1C-a coordinators só-no-líder** ✅ →
-    (futuro) 1C-b coordinators per-vnode-leader.
+    **1C-b-i detecção de liderança Raft por vnode** ✅ → (futuro) 1C-b-ii supervisor per-vnode-leader.
 
     - ✅ **1C-a — coordinators só-no-líder (sem lease).** `RetentionCoordinator` e `HealCoordinator`
       ganham o seam `:leader?` (`(-> boolean())`, default sempre); a cada tick, só varrem/curam se
@@ -745,9 +745,21 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       coordinators transitórios (convergência SWIM) só refazem trabalho, não corrompem — o mesmo
       raciocínio do bootstrap. `run_now/1`/`heal_now/1` ignoram o gate (triggers manuais). Testado:
       não-líder pula o tick; o trigger manual age mesmo assim.
-    - ⏳ **1C-b (futuro)** — coordinator na liderança **Raft de cada vnode** (distribui a carga; o
-      NorthGuard literal), e o **lease sobre `ra`** quando o coordinator ganhar trabalho **não-idempotente**
-      (rebalancing com movimento de dados). Requer detectar liderança Raft por vnode (eventos do `ra`).
+    - ✅ **1C-b-i — detecção de liderança Raft por vnode (núcleo puro).** `MetadataServer.leader?/1`
+      espelha `ready?/1`: lê o líder que `:ra.members` reporta (qualquer membro alcançável responde) e
+      é verdade só se ele for o **próprio** `server_id` — passe o server **local** (`{vnode_id, node()}`)
+      para perguntar "este nó lidera este vnode?". Cluster não-formado/inalcançável → false (nunca
+      assume liderança). `Application.leading_vnodes/3` é o seletor puro: dado o placement
+      (`[{vnode_id, token, nodes}]` do bootstrap), o nó local e o predicado `leader?` (default
+      `MetadataServer.leader?/1`), retorna os vnodes que o nó **hospeda** (placement o inclui) **e**
+      **lidera** — curto-circuitando `leader?` para vnodes não-hospedados. É onde 1C-b-ii vai rodar os
+      coordinators, um por vnode, no líder Raft dele (o NorthGuard literal, distribuindo a carga vs o
+      líder único de membership do 1C-a). Testado: `leader?` no líder single-node (ra real) + não-formado
+      → false; `leading_vnodes` filtra host×lidera, preserva ordem, não consulta liderança de não-hospedado.
+    - ⏳ **1C-b-ii (futuro)** — supervisor que sobe/derruba os coordinators por vnode conforme a liderança
+      Raft muda (via 1C-b-i, tolerando oscilação/split-brain momentâneo) + a fiação no `Application`. O
+      **lease sobre `ra`** só entra quando o coordinator ganhar trabalho **não-idempotente** (rebalancing
+      com movimento de dados); 1C-b-ii em si continua idempotente + roteado ao `ra`, então ainda sem lease.
 
     (A alternativa **1B** — coordinators iterando por-vnode mas ainda centralizados — evita materializar
     o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)

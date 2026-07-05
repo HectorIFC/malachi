@@ -75,6 +75,18 @@ defmodule Malachi.Cluster.MetadataServer do
     match?({:ok, _members, _leader}, :ra.members(server_id))
   end
 
+  @doc """
+  Whether `server_id` is currently the **leader** of its Raft cluster. `:ra.members` (answered by any
+  reachable member) reports the leader as a `server_id`; this returns true iff it equals `server_id`
+  itself — so pass the **local** server id (`{cluster_name, node()}`) to ask "does this node lead this
+  vnode?". Unreachable/unformed clusters answer false (never assume leadership). Used by 1C-b to run a
+  vnode's coordinators only on the node that leads its Raft group (the NorthGuard-faithful placement).
+  """
+  @spec leader?(server_id()) :: boolean()
+  def leader?(server_id) do
+    match?({:ok, _members, ^server_id}, :ra.members(server_id))
+  end
+
   @doc "Stops and deletes the vnode's Raft cluster (removing its on-disk state)."
   @spec delete(cluster_name()) :: :ok
   def delete(cluster_name) do
