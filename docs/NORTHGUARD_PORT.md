@@ -735,7 +735,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
          conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
     Sequência: D-b ✅ → **D-c-1 placement de vnodes** ✅ → **1C-a coordinators só-no-líder** ✅ →
     **1C-b-i detecção de liderança Raft por vnode** ✅ → **1C-b-ii-α coordinator apontado a um vnode** ✅
-      → (futuro) 1C-b-ii-β supervisor/manager per-vnode-leader.
+      → **1C-b-ii-β supervisor/manager per-vnode-leader** ✅. **1C-b completo.**
 
     - ✅ **1C-a — coordinators só-no-líder (sem lease).** `RetentionCoordinator` e `HealCoordinator`
       ganham o seam `:leader?` (`(-> boolean())`, default sempre); a cada tick, só varrem/curam se
@@ -766,13 +766,23 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       merge global) e o gate (`MetadataServer.leader?({vnode_id, node()})`). Testado (ra real): source
       tolerante em vnode não-formado; lê só o shard do vnode; um `RetentionCoordinator` ligado a um vnode
       expira só os segments **daquele** vnode.
-    - ⏳ **1C-b-ii-β (futuro)** — `VnodeCoordinatorManager` (GenServer) + `DynamicSupervisor` que sobem/
-      derrubam um par retention+heal por vnode liderado, reconciliando por **polling level-triggered**
-      (via `leading_vnodes/3`, como o reconcile de bootstrap do D-c-1d; tolera oscilação/split-brain
-      momentâneo) + a fiação no `Application` (substitui os coordinators únicos do 1C-a quando sharded).
-      O **lease sobre `ra`** só entra quando o coordinator ganhar trabalho **não-idempotente**
-      (rebalancing com movimento de dados); β em si continua idempotente + roteado ao `ra`, então ainda
-      sem lease.
+    - ✅ **1C-b-ii-β — supervisor/manager per-vnode-leader.** `Malachi.Cluster.VnodeCoordinatorManager`
+      (GenServer genérico, testável por seams `leading`/`spawn`/`stop`) reconcilia por **polling
+      level-triggered** (logo após o boot via `handle_continue`, depois a cada `:vnode_reconcile_interval_ms`,
+      default 5s): compara os vnodes que este nó lidera agora (`leading_vnodes/3` sobre `MetadataServer.
+      leader?`) com os que já roda, **sobe** um par retention+heal para os recém-liderados e **derruba** os
+      que deixou de liderar. Cada par vive sob um **supervisor por-vnode** (`:one_for_one`) num
+      `DynamicSupervisor` (`Malachi.LogVnodeCoordinatorSupervisor`), para que um coordinator que crashe
+      reinicie sem o manager perder o handle. No `Application`, `coordinator_children/2` **substitui** os
+      coordinators únicos do 1C-a pelo par supervisor+manager **quando sharded** (`vnode_placement/2` ≠
+      nil, extraído e reusado por `metadata_opts`); single-node / cluster de 1 vnode seguem no 1C-a.
+      Cada coordinator mantém o gate `MetadataServer.leader?({vnode_id, node()})` como **defesa em
+      profundidade** (se o manager atrasar numa oscilação, o coordinator não age após perder a liderança).
+      **Idempotente + sem lease** (mesmo raciocínio do 1C-a): um flap transitório só refaz trabalho
+      roteado ao `ra`, não corrompe. Testado: reconcile por seams (sobe/derruba/idempotente/esvazia) +
+      integração (ra real, single-node) — o manager sobe um `RetentionCoordinator` real por vnode liderado
+      e cada um expira só os segments do **seu** vnode. O **lease sobre `ra`** fica para quando o
+      coordinator ganhar trabalho **não-idempotente** (rebalancing com movimento de dados).
 
     (A alternativa **1B** — coordinators iterando por-vnode mas ainda centralizados — evita materializar
     o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)

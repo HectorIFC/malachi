@@ -20,6 +20,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.Placement
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.TLSValidator
@@ -105,15 +106,26 @@ defmodule Malachi.Application do
       if cluster do
         start_ra!()
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
-        # precede the broker that references it; the healer references the broker + membership.
-        [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes), healer_child()]
+        # precede the broker that references it.
+        [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes)]
       else
         [log_broker_child(nil, nodes)]
       end
 
-    # Retention runs whenever a policy is configured (it matters single-node too); it references the
-    # broker, so it comes last.
-    log_stack ++ retention_children(cluster)
+    # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last.
+    log_stack ++ coordinator_children(cluster, vnode_placement(cluster, nodes))
+  end
+
+  # The retention/heal coordinators. Sharded control plane (1C-b-ii): a DynamicSupervisor plus a manager
+  # that runs one coordinator pair per vnode this node leads. Otherwise (single-node, or a single-vnode
+  # cluster): the node-wide coordinators of 1C-a — heal whenever clustered, retention when a policy is set.
+  defp coordinator_children(cluster, nil) do
+    heal = if cluster, do: [healer_child()], else: []
+    heal ++ retention_children(cluster)
+  end
+
+  defp coordinator_children(_cluster, vnodes) do
+    [vnode_coordinator_tree_spec(vnodes)]
   end
 
   defp retention_children(cluster) do
@@ -121,21 +133,35 @@ defmodule Malachi.Application do
   end
 
   defp retention_child(cluster) do
-    %{
-      id: Malachi.LogRetention,
-      start:
-        {RetentionCoordinator, :start_link,
-         [
-           [
-             name: Malachi.LogRetention,
-             metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
-             expire_segment: &expire_segment/1,
-             policy: retention_policy(),
-             interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),
-             leader?: coordinator_leader?(cluster)
-           ]
-         ]}
-    }
+    opts =
+      [name: Malachi.LogRetention] ++
+        retention_opts(fn -> BrokerServer.metadata(Malachi.LogBroker) end, coordinator_leader?(cluster))
+
+    %{id: Malachi.LogRetention, start: {RetentionCoordinator, :start_link, [opts]}}
+  end
+
+  # The retention coordinator opts shared by the node-wide (1C-a) and per-vnode (1C-b) coordinators; only
+  # the metadata source (global merge vs one vnode) and the leader gate differ.
+  defp retention_opts(metadata_source, leader?) do
+    [
+      metadata_source: metadata_source,
+      expire_segment: &expire_segment/1,
+      policy: retention_policy(),
+      interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),
+      leader?: leader?
+    ]
+  end
+
+  # The heal coordinator opts shared by the node-wide (1C-a) and per-vnode (1C-b) coordinators; only the
+  # metadata source and the leader gate differ.
+  defp heal_opts(metadata_source, leader?) do
+    [
+      live_brokers: &live_brokers/0,
+      metadata_source: metadata_source,
+      apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
+      replication_factor: replication_factor(),
+      leader?: leader?
+    ]
   end
 
   # The leader gate for a cluster coordinator: only the membership leader acts (1C). A single node (no
@@ -218,22 +244,98 @@ defmodule Malachi.Application do
   # Closes the loop broker dies -> membership marks it gone -> its segments are re-replicated and any
   # active-segment primary it held is promoted. Uses the live broker set and control plane by name.
   defp healer_child do
+    opts =
+      [name: Malachi.LogHealer] ++
+        heal_opts(
+          fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+          membership_leader(Malachi.LogMembership)
+        )
+
+    %{id: Malachi.LogHealer, start: {HealCoordinator, :start_link, [opts]}}
+  end
+
+  @vnode_coordinator_supervisor Malachi.LogVnodeCoordinatorSupervisor
+
+  # Groups the dynamic supervisor and its manager under a one_for_all supervisor: if the manager crashes
+  # and restarts, the dynamic supervisor (and thus every running coordinator) restarts with it, so the
+  # manager never rebuilds its set on top of orphaned coordinators. The dynamic supervisor starts first
+  # (the manager references it by name on its first reconcile).
+  defp vnode_coordinator_tree_spec(vnodes) do
     %{
-      id: Malachi.LogHealer,
+      id: Malachi.LogVnodeCoordinatorTree,
+      type: :supervisor,
       start:
-        {HealCoordinator, :start_link,
+        {Supervisor, :start_link,
+         [
+           [vnode_coordinator_supervisor_spec(), vnode_coordinator_manager_spec(vnodes)],
+           [strategy: :one_for_all]
+         ]}
+    }
+  end
+
+  # The dynamic supervisor under which the manager starts each led vnode's coordinator pair (1C-b-ii).
+  defp vnode_coordinator_supervisor_spec do
+    {DynamicSupervisor, name: @vnode_coordinator_supervisor, strategy: :one_for_one}
+  end
+
+  # The manager that reconciles the running coordinators against the vnodes this node leads. It is
+  # level-triggered (polls Raft leadership via `leading_vnodes/3`), so it tolerates leadership flaps.
+  defp vnode_coordinator_manager_spec(vnodes) do
+    %{
+      id: Malachi.LogVnodeCoordinatorManager,
+      start:
+        {VnodeCoordinatorManager, :start_link,
          [
            [
-             name: Malachi.LogHealer,
-             live_brokers: &live_brokers/0,
-             metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
-             apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
-             replication_factor: replication_factor(),
-             leader?: membership_leader(Malachi.LogMembership)
+             name: Malachi.LogVnodeCoordinatorManager,
+             leading: fn -> leading_vnodes(vnodes, node(), &MetadataServer.leader?/1) end,
+             spawn: &start_vnode_coordinators/1,
+             stop: &stop_vnode_coordinators/1,
+             interval: Application.get_env(:malachi, :vnode_reconcile_interval_ms, 5_000)
            ]
          ]}
     }
   end
+
+  # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
+  # restarted without the manager losing its handle), returning that supervisor's pid — the handle the
+  # manager stops the vnode by. Heal always; retention only when a policy is configured.
+  defp start_vnode_coordinators(vnode_id) do
+    children =
+      [heal_vnode_child(vnode_id)] ++
+        if retention_configured?(), do: [retention_vnode_child(vnode_id)], else: []
+
+    spec = %{
+      id: {Malachi.LogVnodeCoordinators, vnode_id},
+      start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]},
+      type: :supervisor,
+      restart: :temporary
+    }
+
+    {:ok, pid} = DynamicSupervisor.start_child(@vnode_coordinator_supervisor, spec)
+    pid
+  end
+
+  defp stop_vnode_coordinators(pid) do
+    _ = DynamicSupervisor.terminate_child(@vnode_coordinator_supervisor, pid)
+    :ok
+  end
+
+  # A single vnode's retention coordinator: reads only that vnode's Metadata and acts only while this
+  # node leads its ra group (defense-in-depth on top of the manager). Reuses expire_segment/1 (routed).
+  defp retention_vnode_child(vnode_id) do
+    opts = retention_opts(vnode_metadata_source(vnode_id), vnode_leader_gate(vnode_id))
+    %{id: Malachi.LogRetention, start: {RetentionCoordinator, :start_link, [opts]}}
+  end
+
+  # A single vnode's heal coordinator (per-vnode analogue of healer_child/0).
+  defp heal_vnode_child(vnode_id) do
+    opts = heal_opts(vnode_metadata_source(vnode_id), vnode_leader_gate(vnode_id))
+    %{id: Malachi.LogHealer, start: {HealCoordinator, :start_link, [opts]}}
+  end
+
+  # The per-vnode leader gate: true only while this node leads the vnode's ra group.
+  defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
   defp log_broker_child(cluster, nodes) do
     opts = [name: Malachi.LogBroker] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
@@ -245,14 +347,26 @@ defmodule Malachi.Application do
   # `:log_vnode_replication_factor` members), routed by topic. A single deterministic seed node
   # bootstraps them; the others only route (D-c-1c).
   defp metadata_opts(cluster, nodes) do
+    case vnode_placement(cluster, nodes) do
+      nil ->
+        metadata_cluster_opts(cluster, nodes)
+
+      vnodes ->
+        [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
+    end
+  end
+
+  # The sharded-control-plane vnode placement (`[{vnode_id, token, nodes}]`), or `nil` when the control
+  # plane is single-node/unclustered or configured with a single vnode. Shared by `metadata_opts/2` (to
+  # bootstrap the vnodes) and `coordinator_children/2` (to run a coordinator pair per led vnode, 1C-b-ii).
+  defp vnode_placement(cluster, nodes) do
     case Application.get_env(:malachi, :log_vnodes, 1) do
       count when is_integer(count) and count > 1 and not is_nil(cluster) ->
         rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
-        vnodes = place_vnodes(sharded_vnodes(cluster, count), nodes, rf, vnode_place_opts())
-        [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
+        place_vnodes(sharded_vnodes(cluster, count), nodes, rf, vnode_place_opts())
 
       _one_or_unclustered ->
-        metadata_cluster_opts(cluster, nodes)
+        nil
     end
   end
 
