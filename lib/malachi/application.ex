@@ -176,14 +176,29 @@ defmodule Malachi.Application do
   k/v (`nil`/`""` → `%{}`). Entries without exactly one `=` are ignored; keys and values are trimmed.
   """
   @spec parse_attributes(String.t() | nil) :: %{optional(String.t()) => String.t()}
-  def parse_attributes(raw) when raw in [nil, ""], do: %{}
+  def parse_attributes(raw), do: parse_kv(raw, & &1)
 
-  def parse_attributes(raw) do
+  @doc ~S"""
+  Parses a `"node1=rack_a,node2=rack_b"` cluster topology string into `%{node => value}` (node atom →
+  attribute string, e.g. rack/zone) — the static per-node placement attribute used by `place_vnodes/4`
+  for rack-aware vnode placement (A1). `nil`/`""` => `%{}`. Entries without exactly one `=` are ignored;
+  node and value are trimmed. Node names come from a trusted operator (deploy config), so
+  `String.to_atom` is fine here. Being static config identical on every node keeps placement deterministic.
+  """
+  @spec parse_topology(String.t() | nil) :: %{optional(node()) => String.t()}
+  def parse_topology(raw), do: parse_kv(raw, &String.to_atom/1)
+
+  # Parses a `"k1=v1,k2=v2"` string into a `%{key => value}` map, applying `key_fun` to each trimmed key
+  # (identity for attributes, `String.to_atom` for node names). Entries without exactly one `=` are
+  # dropped; keys and values are trimmed. `nil`/`""` => `%{}`.
+  defp parse_kv(raw, _key_fun) when raw in [nil, ""], do: %{}
+
+  defp parse_kv(raw, key_fun) do
     raw
     |> String.split(",", trim: true)
     |> Enum.flat_map(fn entry ->
       case String.split(entry, "=", parts: 2) do
-        [key, value] -> [{String.trim(key), String.trim(value)}]
+        [key, value] -> [{key_fun.(String.trim(key)), String.trim(value)}]
         _no_equals -> []
       end
     end)
@@ -231,11 +246,27 @@ defmodule Malachi.Application do
     case Application.get_env(:malachi, :log_vnodes, 1) do
       count when is_integer(count) and count > 1 and not is_nil(cluster) ->
         rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
-        vnodes = place_vnodes(sharded_vnodes(cluster, count), nodes, rf)
+        vnodes = place_vnodes(sharded_vnodes(cluster, count), nodes, rf, vnode_place_opts())
         [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
 
       _one_or_unclustered ->
         metadata_cluster_opts(cluster, nodes)
+    end
+  end
+
+  # Placement options for the vnodes: when a spread attribute (`:log_spread_by`) and a static topology
+  # (`:log_topology`, `node => value`) are configured, spread each vnode's replicas across distinct
+  # values of that attribute (A1, rack/zone aware). Otherwise plain HRW. The topology is static config
+  # (identical on every node), so the placement is deterministic across the cluster.
+  defp vnode_place_opts do
+    spread_by = Application.get_env(:malachi, :log_spread_by)
+    topology = parse_topology(Application.get_env(:malachi, :log_topology))
+
+    if spread_by && topology != %{} do
+      node_attributes = Map.new(topology, fn {node, value} -> {node, %{spread_by => value}} end)
+      [spread: {spread_by, node_attributes}]
+    else
+      []
     end
   end
 
@@ -303,13 +334,18 @@ defmodule Malachi.Application do
   nodes chosen from `nodes` by rendezvous hashing (the same HRW that places segment replicas), so
   vnodes spread across the cluster and a node join/leave moves the fewest vnodes. Returns
   `{vnode_id, token, nodes}`. The effective replica count is `min(replication_factor, length(nodes))`.
-  Pure. Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
+
+  `place_opts` is forwarded to `Malachi.Cluster.Placement.place/4`; pass
+  `[spread: {attribute_key, node_attributes}]` to keep a vnode's replicas in **distinct racks/zones**
+  (topology-aware placement, so losing a whole rack does not take a majority of a vnode's replicas).
+  Pure and deterministic — every node computes the same placement from the same static topology.
+  Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
   """
-  @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer()) ::
+  @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer(), keyword()) ::
           [{atom(), non_neg_integer(), [node()]}]
-  def place_vnodes(vnodes, nodes, replication_factor) do
+  def place_vnodes(vnodes, nodes, replication_factor, place_opts \\ []) do
     Enum.map(vnodes, fn {vnode_id, token} ->
-      {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor)
+      {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor, place_opts)
       {vnode_id, token, chosen}
     end)
   end

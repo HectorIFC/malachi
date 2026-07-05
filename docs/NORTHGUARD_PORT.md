@@ -866,8 +866,17 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
   **contínuo**, e o modelo **staged / planned / committed** (riak_core claimant) para mudanças de ring.
 - **Upgrade do `place_vnodes`:** `target_n_val` / location-awareness (riak_core binring) + `maxSkew` /
   `minDomains` / hard-soft (k8s topology spread), **mantendo o determinismo**.
+  - ✅ **A1 — rack-spread (feito).** `place_vnodes/4` ganha `place_opts`, repassado a `Placement.place/4`;
+    com `[spread: {attribute_key, node_attributes}]` as R réplicas de cada vnode caem em **racks/zonas
+    distintos** (`target_n_val`/`minDomains`), então perder um rack inteiro não leva a maioria das réplicas
+    de um vnode. Reusa o `spread` já existente (round-robin por valor de atributo, do C3a). A topologia é
+    **config estática** (`log_topology`, `"node=rack,..."`, `parse_topology/1`), idêntica em todo nó →
+    placement **determinístico**. `Application.metadata_opts` liga o spread via `vnode_place_opts/0`
+    (`:log_spread_by` + `:log_topology`). Testado: cada vnode com R=2 abrange os 2 racks; determinismo.
+  - ⏳ **A2 (futuro)** — balanceamento **global** de carga (`maxSkew` sobre o total de vnodes por nó,
+    estilo *claim binring*): exige visão global (não por-vnode). Resolve carga, não perda de dados.
 - **Rebalancing dinâmico (futuro):** ring versioning + claim cycle (riak_core) + workqueue / expectations
   (k8s).
 
-> Nenhuma dessas ideias está implementada — esta seção é um mapa de aproveitamento. A ordem de execução
-> das fatias (D-c-1d, Lease/1C, `place_vnodes`, rebalancing) é decidida quando cada uma for atacada.
+> A ordem de execução das fatias restantes (Lease/1C-b, `place_vnodes` A2, rebalancing) é decidida quando
+> cada uma for atacada.

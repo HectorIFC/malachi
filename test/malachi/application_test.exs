@@ -75,6 +75,29 @@ defmodule Malachi.ApplicationTest do
         assert Enum.sort(chosen) == [:a@h, :b@h]
       end
     end
+
+    test "with a topology, each vnode's replicas land in distinct racks (A1)" do
+      vnodes = App.sharded_vnodes(:log_meta, 6)
+      nodes = [:"a1@h", :"a2@h", :"b1@h", :"b2@h"]
+
+      attrs = %{
+        :"a1@h" => %{"rack" => "a"},
+        :"a2@h" => %{"rack" => "a"},
+        :"b1@h" => %{"rack" => "b"},
+        :"b2@h" => %{"rack" => "b"}
+      }
+
+      placed = App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs})
+
+      # every vnode's 2 replicas span both racks — a whole rack can fail without losing a majority
+      for {_id, _token, chosen} <- placed do
+        racks = Enum.map(chosen, fn n -> attrs[n]["rack"] end)
+        assert Enum.sort(racks) == ["a", "b"]
+      end
+
+      # still deterministic
+      assert App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs}) == placed
+    end
   end
 
   describe "static_seed/1" do
@@ -182,6 +205,22 @@ defmodule Malachi.ApplicationTest do
 
     test "ignores entries without an = and keeps a value that contains =" do
       assert App.parse_attributes("rack=a,bogus,url=http://x=y") == %{"rack" => "a", "url" => "http://x=y"}
+    end
+  end
+
+  describe "parse_topology/1" do
+    test "absent or empty yields no topology" do
+      assert App.parse_topology(nil) == %{}
+      assert App.parse_topology("") == %{}
+    end
+
+    test "parses node=value pairs into a node => value map, trimming" do
+      assert App.parse_topology("n1@h=a,n2@h=b") == %{:"n1@h" => "a", :"n2@h" => "b"}
+      assert App.parse_topology(" n1@h = a , n2@h = b ") == %{:"n1@h" => "a", :"n2@h" => "b"}
+    end
+
+    test "ignores entries without an =" do
+      assert App.parse_topology("n1@h=a,bogus,n2@h=b") == %{:"n1@h" => "a", :"n2@h" => "b"}
     end
   end
 end

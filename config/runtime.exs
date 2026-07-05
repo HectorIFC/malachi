@@ -120,6 +120,10 @@ config :malachi,
   log_attributes: System.get_env("MALACHIMQ_LOG_ATTRIBUTES"),
   # The attribute key to spread segment replicas over (e.g. "rack"); absent => no spread (plain HRW).
   log_spread_by: System.get_env("MALACHIMQ_LOG_SPREAD_BY"),
+  # Static cluster topology "node1=rack_a,node2=rack_b,..." — the per-node value of :log_spread_by,
+  # identical on every node. With both set, control-plane vnode replicas spread across distinct
+  # racks/zones (A1, deterministic). Absent => plain HRW placement. Parsed by parse_topology/1.
+  log_topology: System.get_env("MALACHIMQ_LOG_TOPOLOGY"),
   # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
   # either to expire sealed segments older than an age and/or over a per-range byte budget.
   retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),
