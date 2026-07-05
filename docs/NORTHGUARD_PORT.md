@@ -932,10 +932,25 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
     (segue a ordem do desejado). Testado: vazio quando nada muda; add/remove por vnode alterado (omite os
     iguais); num *join* o RF fica constante (add/remove equilibrados → nunca abaixo do quórum); num
     *leave* só os vnodes que detinham o nó que saiu entram no plano e nenhum re-adiciona o nó removido.
-  - ⏳ **R0 (futuro)** — **Lease sobre `ra`** (fencing forte, k8s): CAS versionado, triângulo
-    `LeaseDuration > RenewDeadline > RetryPeriod`, largar o lease proativo ao não-renovar. Pré-requisito
-    de R3 (o movimento de vnodes é **não-idempotente** — é aqui que o lease finalmente entra, como
-    antecipado no 1C-b).
+  - **R0 — Lease sobre `ra`** (fencing forte, k8s): pré-requisito de R3 (o movimento de vnodes é
+    **não-idempotente** — é aqui que o lease finalmente entra, como antecipado no 1C-b).
+    - ✅ **R0-a — máquina de estado do lease (núcleo puro + `ra`).** `Malachi.Cluster.Lease` é o estado
+      puro (`holder`, `fence`, `renew_at`, `duration_ms`): `acquire_or_renew` concede se **livre**, **já é
+      o holder** (renovação) ou **expirado** (`now >= renew_at + duration_ms`), senão `{:error, {:held,
+      holder}}`; `release` é idempotente. O **fencing token** (`fence`) é monotônico e sobe **só quando o
+      holder muda** (renovação mantém) — o holder o carrega para o trabalho que fencia, e uma escrita de
+      ex-holder com token obsoleto pode ser rejeitada (a proteção contra dois chefes). O tempo (`now`) é
+      **injetado**, nunca lido dentro do `apply` (seria não-determinístico e quebraria o Raft):
+      `LeaseMachine` (`:ra_machine`) alimenta o `meta.system_time` do `ra` (relógio do **líder**,
+      carimbado uma vez e replicado no log), então um único relógio decide a expiração — sem o skew
+      entre nós que um tempo vindo do cliente carregaria. `LeaseServer` espelha o `MetadataServer` sobre
+      um cluster `ra` **dedicado** (isolado do metadata). Testado: `Lease` puro exaustivo (aquisição/
+      renovação mantém fence/roubo na expiração incrementa fence/fronteira exata do deadline/release
+      idempotente com token obsoleto) + integração `ra` real (acquire/renew/held/release/durável a restart).
+    - ⏳ **R0-b (futuro)** — **`LeaseHolder`** (o client): GenServer com o triângulo `LeaseDuration >
+      RenewDeadline > RetryPeriod` — renova a cada `RetryPeriod`, e se não renovar até o `RenewDeadline`
+      **larga proativo** (`on_lost`, o *OnStoppedLeading* do k8s, para nunca haver dois líderes); ao
+      adquirir chama `on_acquired`. A parte sensível a tempo/timers.
   - ⏳ **R3 (futuro)** — **execução** (*committed*): aplica o plano via `:ra.add_member`/`remove_member`
     por vnode, **sob o lease**, e atualiza o ring (`ReplicatedDSRSM`). Ring versioning + workqueue /
     expectations (k8s) para retry/backoff.
