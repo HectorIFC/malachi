@@ -485,6 +485,31 @@ defmodule Malachi.Application do
   end
 
   @doc """
+  The **rebalancing plan** (R2): the per-vnode membership changes to move from the `current` placement to
+  the `desired` one (from `desired_placement/5`), *staged* — it computes what to change without applying
+  anything. For each vnode whose node set differs it yields `%{vnode_id:, add:, remove:}`, where `add`
+  are the nodes to join that vnode's ra cluster and `remove` the ones to drop; vnodes that already match
+  are omitted (so an empty plan means "nothing to do"). R3 executes each change **add-before-remove**, so
+  a vnode never drops below its replica count mid-move (when the replication factor is unchanged, `add`
+  and `remove` are equal-sized).
+
+  Assumes `current` and `desired` cover the **same vnode ids** (rebalancing follows membership; changing
+  the vnode count is re-sharding, out of scope). Deterministic — the plan follows `desired`'s order. Pure.
+  """
+  @spec rebalance_plan([{atom(), non_neg_integer(), [node()]}], [{atom(), non_neg_integer(), [node()]}]) ::
+          [%{vnode_id: atom(), add: [node()], remove: [node()]}]
+  def rebalance_plan(current, desired) do
+    current_nodes_by_id = Map.new(current, fn {vnode_id, _token, nodes} -> {vnode_id, nodes} end)
+
+    desired
+    |> Enum.map(fn {vnode_id, _token, desired_nodes} ->
+      current_nodes = Map.get(current_nodes_by_id, vnode_id, [])
+      %{vnode_id: vnode_id, add: desired_nodes -- current_nodes, remove: current_nodes -- desired_nodes}
+    end)
+    |> Enum.reject(fn %{add: add, remove: remove} -> add == [] and remove == [] end)
+  end
+
+  @doc """
   The vnode ids `this_node` both **hosts** (its placement includes `this_node`) and currently **leads**
   (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
   (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local

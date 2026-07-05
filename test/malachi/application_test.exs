@@ -148,6 +148,44 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "rebalance_plan/2" do
+    test "is empty when the current placement already matches the desired one" do
+      placement = [{:vn_0, 0, [:a@h, :b@h]}, {:vn_1, 1, [:b@h, :c@h]}]
+      assert App.rebalance_plan(placement, placement) == []
+    end
+
+    test "yields add/remove per changed vnode and omits unchanged ones" do
+      current = [{:vn_0, 0, [:a@h, :b@h]}, {:vn_1, 1, [:b@h, :c@h]}]
+      desired = [{:vn_0, 0, [:a@h, :d@h]}, {:vn_1, 1, [:b@h, :c@h]}]
+
+      assert App.rebalance_plan(current, desired) ==
+               [%{vnode_id: :vn_0, add: [:d@h], remove: [:b@h]}]
+    end
+
+    test "a join keeps every vnode's replica count constant (add and remove balance, so add-before-remove never drops below quorum)" do
+      current = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h], 2)
+      desired = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h, :d@h], 2)
+      plan = App.rebalance_plan(current, desired)
+
+      refute plan == []
+      for %{add: add, remove: remove} <- plan, do: assert(length(add) == length(remove))
+    end
+
+    test "a leave plans to add the same node it removes for exactly the vnodes that held the departed node" do
+      current = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h, :d@h], 2)
+      desired = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h], 2)
+      plan = App.rebalance_plan(current, desired)
+
+      # every planned vnode is one that held the departed node
+      for %{remove: remove} <- plan, do: assert(:d@h in remove)
+      # and no planned change re-adds the departed node
+      for %{add: add} <- plan, do: refute(:d@h in add)
+
+      changed_ids = Enum.map(plan, & &1.vnode_id)
+      assert changed_ids == Enum.uniq(changed_ids)
+    end
+  end
+
   describe "leading_vnodes/3" do
     test "returns the vnodes this node both hosts and leads, preserving order" do
       this = :n1@h

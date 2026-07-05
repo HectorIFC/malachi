@@ -922,8 +922,16 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
     **movimento mínimo** — um vnode só muda se **adotar** um nó que entrou ou **detinha** um que saiu; o
     resto fica posto. Testado: determinismo; ao **adicionar** um nó, um vnode só muda se adota o novo nó
     (e algum adota); ao **remover**, só muda quem o detinha (e ele some do placement); clamp a `min(rf, |nós|)`.
-  - ⏳ **R2 (futuro)** — **plano** de rebalanceamento: diff do placement atual × `desired_placement` por
-    vnode (`{vnode_id, add: [...], remove: [...]}`), *staged/planned* (computa sem aplicar). Núcleo puro.
+  - ✅ **R2 — plano de rebalanceamento (núcleo puro).** `Application.rebalance_plan/2` faz o diff do
+    placement **atual** × `desired_placement` (R1) por vnode: para cada vnode cujo conjunto de nós difere,
+    devolve `%{vnode_id:, add:, remove:}` (nós a entrar / a sair do cluster `ra`); vnodes já corretos são
+    omitidos (plano vazio = nada a fazer). *Staged/planned* — computa sem aplicar. A ordem segura é
+    **add-before-remove** (o R3 adiciona antes de remover, então um vnode nunca cai abaixo do quórum no
+    meio da mudança; com RF constante, `add` e `remove` têm o mesmo tamanho). Assume o **mesmo conjunto de
+    vnode ids** em atual e desejado (mudar a contagem é re-sharding, fora de escopo). Determinístico
+    (segue a ordem do desejado). Testado: vazio quando nada muda; add/remove por vnode alterado (omite os
+    iguais); num *join* o RF fica constante (add/remove equilibrados → nunca abaixo do quórum); num
+    *leave* só os vnodes que detinham o nó que saiu entram no plano e nenhum re-adiciona o nó removido.
   - ⏳ **R0 (futuro)** — **Lease sobre `ra`** (fencing forte, k8s): CAS versionado, triângulo
     `LeaseDuration > RenewDeadline > RetryPeriod`, largar o lease proativo ao não-renovar. Pré-requisito
     de R3 (o movimento de vnodes é **não-idempotente** — é aqui que o lease finalmente entra, como
