@@ -947,10 +947,19 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       um cluster `ra` **dedicado** (isolado do metadata). Testado: `Lease` puro exaustivo (aquisição/
       renovação mantém fence/roubo na expiração incrementa fence/fronteira exata do deadline/release
       idempotente com token obsoleto) + integração `ra` real (acquire/renew/held/release/durável a restart).
-    - ⏳ **R0-b (futuro)** — **`LeaseHolder`** (o client): GenServer com o triângulo `LeaseDuration >
-      RenewDeadline > RetryPeriod` — renova a cada `RetryPeriod`, e se não renovar até o `RenewDeadline`
-      **larga proativo** (`on_lost`, o *OnStoppedLeading* do k8s, para nunca haver dois líderes); ao
-      adquirir chama `on_acquired`. A parte sensível a tempo/timers.
+    - ✅ **R0-b — `LeaseHolder` (o client).** GenServer que roda o triângulo de timers `duração >
+      renew_deadline_ms > retry_period_ms`: a cada `retry_period` chama o seam `renew` (acquire-or-renew);
+      um *follower* que adquire vira *leader* e chama `on_acquired(fence)`; um *leader* que renova segue
+      líder (marca o instante do renew no **relógio local**); se lhe dizem que o lease está com **outro**
+      larga na hora (`on_lost`); se **não alcança** o lease, segue tentando até passar `renew_deadline_ms`
+      desde o último renew bem-sucedido e então **larga proativo** (`on_lost`, o *OnStoppedLeading* do k8s
+      — desiste antes de o lease poder expirar/ser roubado, para nunca haver dois líderes). Um salto do
+      **fencing token** durante a liderança (gap: perdeu e reganhou) dispara `on_lost` seguido de
+      `on_acquired` sob o novo token. No shutdown normal, um líder **libera** o lease (failover sem
+      esperar expiração). Tudo por **seams injetados** (`renew`/`release`/`clock`/callbacks), então a
+      lógica de tempo é testada sem `ra`, controlando o relógio. Testado: adquire→líder; renova sem
+      re-`on_acquired`; segura até o deadline e larga; largada imediata quando held-por-outro; troca de
+      token → lost+acquired; release no shutdown do líder (e não do follower). **R0 completo.**
   - ⏳ **R3 (futuro)** — **execução** (*committed*): aplica o plano via `:ra.add_member`/`remove_member`
     por vnode, **sob o lease**, e atualiza o ring (`ReplicatedDSRSM`). Ring versioning + workqueue /
     expectations (k8s) para retry/backoff.
