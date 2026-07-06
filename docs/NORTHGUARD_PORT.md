@@ -960,9 +960,21 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       lógica de tempo é testada sem `ra`, controlando o relógio. Testado: adquire→líder; renova sem
       re-`on_acquired`; segura até o deadline e larga; largada imediata quando held-por-outro; troca de
       token → lost+acquired; release no shutdown do líder (e não do follower). **R0 completo.**
-  - ⏳ **R3 (futuro)** — **execução** (*committed*): aplica o plano via `:ra.add_member`/`remove_member`
-    por vnode, **sob o lease**, e atualiza o ring (`ReplicatedDSRSM`). Ring versioning + workqueue /
-    expectations (k8s) para retry/backoff.
+  - **R3 — execução** (*committed*): aplica o plano por vnode via `ra`, **sob o lease**. Escopo: control
+    plane (o `ra` transfere o estado ao adicionar membro); o data plane fica com o *healing*.
+    - ✅ **R3-a — executor de uma mudança (núcleo com seams).** `Malachi.Cluster.Rebalance`: `apply_change/3`
+      aplica cada `add` **antes** de cada `remove` (add-before-remove, para o vnode nunca cair abaixo do
+      quórum) via seams `add_member`/`remove_member` (`(vnode_id, node -> :ok | {:error, _})`); **idempotente**
+      (add de quem já é membro / remove de quem já saiu = `:ok`, então um commit interrompido é
+      re-executável); **fail-fast** (um `add` que falha **não** tenta os removes — protege o quórum).
+      `apply_plan/4` aplica o plano mudança-a-mudança, fail-fast entre vnodes (para no 1º erro, devolve
+      `{:error, {aplicados, falha}}`), e **revalida `leader?` antes de cada mudança** (para com
+      `:lost_leadership` se o holder soltou o lease no meio). Testado (seams que gravam a ordem): add
+      antes de remove; add que falha não remove; erro no remove reportado; idempotência; plano completo;
+      fail-fast entre vnodes; parada por perda de liderança.
+    - ⏳ **R3-b (futuro)** — as **ops `ra` reais** (`start_server`+`add_member` / `remove_member`+stop) +
+      o **coordenador plan/commit** (manual, gated pelo `LeaseHolder`) + o wiring (`LeaseServer`/`Holder`).
+      Ao adicionar membro, o `ra` replica o estado do vnode ao novo nó automaticamente.
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R2 → R0 → R3) é decidida
-> quando cada uma for atacada.
+> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b) é decidida quando cada
+> uma for atacada.
