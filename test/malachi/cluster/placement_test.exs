@@ -208,6 +208,90 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
+  describe "place_balanced/4 — global load balancing (A2)" do
+    test "empty brokers give each item an empty replica set" do
+      assert Placement.place_balanced([:x, :y], [], 2) == [{:x, []}, {:y, []}]
+    end
+
+    test "fewer brokers than rf degrades to all brokers per item" do
+      for {_item, replicas} <- Placement.place_balanced([:x, :y], [:a, :b], 3) do
+        assert Enum.sort(replicas) == [:a, :b]
+      end
+    end
+
+    test "is deterministic" do
+      run = fn -> Placement.place_balanced(Enum.to_list(1..12), [:a, :b, :c, :d], 2, 1) end
+      assert run.() == run.()
+    end
+
+    test "with generous slack it matches plain top-rf HRW (no capacity pressure)" do
+      items = Enum.to_list(1..8)
+      brokers = [:a, :b, :c, :d]
+
+      for {item, replicas} <- Placement.place_balanced(items, brokers, 2, 1_000) do
+        {:ok, hrw} = Placement.place(item, brokers, 2)
+        assert replicas == hrw, "with a huge max_skew, no broker is capped, so it is plain HRW"
+      end
+    end
+
+    test "balances load that plain HRW would concentrate" do
+      items = Enum.to_list(1..9)
+      brokers = [:a, :b, :c]
+
+      hrw_load =
+        for(item <- items, {:ok, [broker]} <- [Placement.place(item, brokers, 1)], do: broker)
+        |> Enum.frequencies()
+        |> Map.values()
+
+      balanced_load =
+        Placement.place_balanced(items, brokers, 1, 1)
+        |> Enum.flat_map(fn {_item, replicas} -> replicas end)
+        |> Enum.frequencies()
+        |> Map.values()
+
+      # plain HRW piles most of the 9 items onto one broker; balancing spreads them evenly (3/3/3)
+      assert Enum.max(hrw_load) > 3
+      assert Enum.max(balanced_load) == 3 and Enum.min(balanced_load) == 3
+    end
+
+    property "every item gets min(rf, brokers) distinct replicas (rf is never sacrificed)" do
+      check all(
+              item_count <- integer(1..40),
+              broker_count <- integer(1..6),
+              rf <- integer(1..6),
+              max_skew <- integer(1..3)
+            ) do
+        brokers = Enum.map(1..broker_count, &:"b#{&1}")
+        target = min(rf, broker_count)
+
+        for {_item, replicas} <-
+              Placement.place_balanced(Enum.to_list(1..item_count), brokers, rf, max_skew) do
+          assert length(Enum.uniq(replicas)) == target
+          assert Enum.all?(replicas, &(&1 in brokers))
+        end
+      end
+    end
+
+    property "with rf 1 the load cap ceil(items/brokers) + max_skew - 1 is a hard bound" do
+      check all(
+              item_count <- integer(1..40),
+              broker_count <- integer(1..6),
+              max_skew <- integer(1..3)
+            ) do
+        brokers = Enum.map(1..broker_count, &:"b#{&1}")
+        cap = div(item_count + broker_count - 1, broker_count) + max_skew - 1
+
+        loads =
+          Placement.place_balanced(Enum.to_list(1..item_count), brokers, 1, max_skew)
+          |> Enum.flat_map(fn {_item, replicas} -> replicas end)
+          |> Enum.frequencies()
+          |> Map.values()
+
+        assert Enum.max(loads) <= cap
+      end
+    end
+  end
+
   # Builds a Metadata with one topic/range, registering each {segment_id, replica_set}.
   defp with_segments(specs, rf: _rf) do
     {metadata, {:ok, root_id}} = Metadata.apply(Metadata.new(), {:create_topic, "t", 8})

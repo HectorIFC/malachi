@@ -472,7 +472,16 @@ defmodule Malachi.Application do
   # (`:log_topology`, `node => value`) are configured, spread each vnode's replicas across distinct
   # values of that attribute (A1, rack/zone aware). Otherwise plain HRW. The topology is static config
   # (identical on every node), so the placement is deterministic across the cluster.
+  # A2 (`:log_max_skew`, global load balancing) takes precedence over A1 (`:log_spread_by` rack-spread);
+  # they are mutually exclusive for now. Neither set → plain HRW.
   defp vnode_place_opts do
+    case Application.get_env(:malachi, :log_max_skew) do
+      nil -> spread_place_opts()
+      max_skew -> [max_skew: max_skew]
+    end
+  end
+
+  defp spread_place_opts do
     spread_by = Application.get_env(:malachi, :log_spread_by)
     topology = parse_topology(Application.get_env(:malachi, :log_topology))
 
@@ -549,19 +558,28 @@ defmodule Malachi.Application do
   vnodes spread across the cluster and a node join/leave moves the fewest vnodes. Returns
   `{vnode_id, token, nodes}`. The effective replica count is `min(replication_factor, length(nodes))`.
 
-  `place_opts` is forwarded to `Malachi.Cluster.Placement.place/4`; pass
-  `[spread: {attribute_key, node_attributes}]` to keep a vnode's replicas in **distinct racks/zones**
-  (topology-aware placement, so losing a whole rack does not take a majority of a vnode's replicas).
-  Pure and deterministic — every node computes the same placement from the same static topology.
+  `place_opts` selects the placement policy: `[spread: {attribute_key, node_attributes}]` keeps a vnode's
+  replicas in **distinct racks/zones** (A1, topology-aware — losing a whole rack does not take a majority
+  of a vnode's replicas); `[max_skew: n]` instead balances the **whole set's** load across nodes (A2,
+  `Placement.place_balanced/4`, a global decision), so no node is overloaded. The two are mutually
+  exclusive (standalone A2). Pure and deterministic — every node computes the same placement.
   Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
   """
   @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer(), keyword()) ::
           [{atom(), non_neg_integer(), [node()]}]
   def place_vnodes(vnodes, nodes, replication_factor, place_opts \\ []) do
-    Enum.map(vnodes, fn {vnode_id, token} ->
-      {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor, place_opts)
-      {vnode_id, token, chosen}
-    end)
+    case Keyword.get(place_opts, :max_skew) do
+      nil ->
+        Enum.map(vnodes, fn {vnode_id, token} ->
+          {:ok, chosen} = Placement.place(vnode_id, nodes, replication_factor, place_opts)
+          {vnode_id, token, chosen}
+        end)
+
+      max_skew ->
+        ids = Enum.map(vnodes, fn {vnode_id, _token} -> vnode_id end)
+        chosen_by_id = Map.new(Placement.place_balanced(ids, nodes, replication_factor, max_skew))
+        Enum.map(vnodes, fn {vnode_id, token} -> {vnode_id, token, Map.fetch!(chosen_by_id, vnode_id)} end)
+    end
   end
 
   @doc """

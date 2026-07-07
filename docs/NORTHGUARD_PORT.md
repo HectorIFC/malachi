@@ -908,8 +908,19 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
     **config estática** (`log_topology`, `"node=rack,..."`, `parse_topology/1`), idêntica em todo nó →
     placement **determinístico**. `Application.metadata_opts` liga o spread via `vnode_place_opts/0`
     (`:log_spread_by` + `:log_topology`). Testado: cada vnode com R=2 abrange os 2 racks; determinismo.
-  - ⏳ **A2 (futuro)** — balanceamento **global** de carga (`maxSkew` sobre o total de vnodes por nó,
-    estilo *claim binring*): exige visão global (não por-vnode). Resolve carga, não perda de dados.
+  - ✅ **A2 — balanceamento global de carga (`maxSkew`).** `Placement.place_balanced/4` coloca o
+    **conjunto inteiro** de vnodes com **carga limitada** (visão global, não por-vnode): cada vnode ainda
+    rankeia por HRW, mas um nó no teto (`ceil(total/nós) + max_skew - 1`) é **pulado** para o próximo, de
+    modo que nenhum nó fica sobrecarregado. Determinístico (ranking + ordem + contadores iguais em todo
+    nó). O teto é **best-effort** — o RF **nunca** é sacrificado por balanceamento, então um vnode que não
+    alcançaria `min(rf, nós)` réplicas distintas pega o nó menos-carregado mesmo acima do teto (possível
+    com `rf > 1`, onde o greedy por-vnode não empacota perfeito); com `rf = 1` o teto é **rígido**. Com
+    `max_skew` grande degrada a HRW puro (movimento mínimo). É **standalone** (não combina com o
+    `:spread` do A1 — mutuamente exclusivos; A2 tem precedência). `place_vnodes/4` usa `place_balanced`
+    quando `[max_skew: n]`; `vnode_place_opts` liga via `:log_max_skew` (`MALACHIMQ_LOG_MAX_SKEW`).
+    Testado: HRW puro empilha 6 de 9 vnodes num nó, balanceado espalha 3/3/3; property do teto rígido
+    (rf=1) e de que todo vnode recebe `min(rf,nós)` distintas; determinismo; degradação a HRW com folga.
+    Resolve **carga**, não perda de dados (a segurança de rack é o A1).
 - **Rebalancing dinâmico** — quando a membership muda (nó entra/sai), redistribuir os vnodes ao vivo.
   Escopo: **control plane** (os membros dos clusters `ra` de cada vnode); adicionar/remover membro
   (`:ra.add_member`/`:ra.remove_member`) faz o **próprio `ra` transferir o estado** (Raft log/snapshot),

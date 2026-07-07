@@ -124,6 +124,10 @@ config :malachi,
   # identical on every node. With both set, control-plane vnode replicas spread across distinct
   # racks/zones (A1, deterministic). Absent => plain HRW placement. Parsed by parse_topology/1.
   log_topology: System.get_env("MALACHIMQ_LOG_TOPOLOGY"),
+  # A2 global load balancing: cap how unevenly vnodes spread over nodes (max extra replicas a node may
+  # hold beyond the even share). Set => balanced placement (takes precedence over :log_spread_by, which
+  # it does not combine with). Absent => plain HRW / rack-spread.
+  log_max_skew: parse_int.(System.get_env("MALACHIMQ_LOG_MAX_SKEW"), nil),
   # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
   # either to expire sealed segments older than an age and/or over a per-range byte budget.
   retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),

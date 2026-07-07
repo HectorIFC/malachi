@@ -66,6 +66,45 @@ defmodule Malachi.Cluster.Placement do
   end
 
   @doc """
+  Places a **whole set** of `items` across `available_brokers` with **best-effort load balancing** (A2 —
+  global balancing). Each item still ranks brokers by rendezvous hashing, but a broker at capacity is
+  skipped in favour of the next-ranked one, so load spreads instead of piling on the highest-ranked few.
+  The soft capacity is `ceil(total_replicas / brokers) + max_skew - 1`: with `max_skew` 1 it targets the
+  even share (rounded up); a larger `max_skew` leaves slack, staying closer to plain HRW (which reshuffles
+  fewer replicas when membership changes). Returns `[{item, replica_set}]` in the input order; `[]`
+  brokers → each item gets `[]`.
+
+  The cap is a **preference, not a hard bound**: replication factor is never sacrificed for balance, so
+  when an item cannot otherwise reach `min(rf, brokers)` distinct replicas it takes the least-loaded
+  broker even if that exceeds the cap (this can happen with `rf > 1`, where a per-item greedy cannot
+  always pack perfectly). In practice HRW is uniform, so the cap holds and load lands even; the hard
+  guarantees are that every item gets `min(rf, brokers)` **distinct** replicas and the result is
+  **deterministic** (ranking, input order, and running counts are identical on every node). This is a
+  **standalone** balancer: it does not combine with `:spread` (rack-aware placement); use one or the
+  other for now.
+  """
+  @spec place_balanced([term()], [Metadata.broker()], pos_integer(), pos_integer()) ::
+          [{term(), [Metadata.broker()]}]
+  def place_balanced(items, available_brokers, replication_factor, max_skew \\ 1) do
+    case Enum.uniq(available_brokers) do
+      [] ->
+        Enum.map(items, &{&1, []})
+
+      brokers ->
+        target = min(replication_factor, length(brokers))
+        cap = capacity(length(items) * target, length(brokers), max_skew)
+
+        {placed, _counts} =
+          Enum.map_reduce(items, Map.new(brokers, &{&1, 0}), fn item, counts ->
+            chosen = pick_balanced(ranked(item, brokers), target, cap, counts)
+            {{item, chosen}, bump(counts, chosen)}
+          end)
+
+        placed
+    end
+  end
+
+  @doc """
   The ids of segments that are under-replicated for the given live broker set: those with fewer
   live replicas than the achievable target `min(replication_factor, length(available_brokers))`.
 
@@ -112,6 +151,29 @@ defmodule Malachi.Cluster.Placement do
   defp ranked(segment_id, brokers) do
     Enum.sort_by(brokers, fn broker -> {:erlang.phash2({segment_id, broker}), broker} end, :desc)
   end
+
+  # Max replicas a broker may hold so counts differ by at most `max_skew`: ceil(total / brokers) rounds
+  # the even share up, and max_skew - 1 adds the allowed slack. ceil via integer division (no floats).
+  defp capacity(total_replicas, num_brokers, max_skew) do
+    div(total_replicas + num_brokers - 1, num_brokers) + max_skew - 1
+  end
+
+  # Picks `target` distinct brokers from the rank-ordered list, preferring ones still under `cap`; if too
+  # few remain under cap for this item (a corner case), fills from the least-loaded of the rest so the
+  # item still gets `target` replicas.
+  defp pick_balanced(ranked, target, cap, counts) do
+    {under, at_cap} = Enum.split_with(ranked, fn broker -> Map.fetch!(counts, broker) < cap end)
+    chosen = Enum.take(under, target)
+
+    if length(chosen) == target do
+      chosen
+    else
+      fill = at_cap |> Enum.sort_by(&Map.fetch!(counts, &1)) |> Enum.take(target - length(chosen))
+      chosen ++ fill
+    end
+  end
+
+  defp bump(counts, chosen), do: Enum.reduce(chosen, counts, &Map.update!(&2, &1, fn n -> n + 1 end))
 
   # Picks the replica set from the rank-ordered brokers: plain top-`rf`, or spread across an
   # attribute's values when `:spread` is set.

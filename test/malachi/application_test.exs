@@ -98,6 +98,24 @@ defmodule Malachi.ApplicationTest do
       # still deterministic
       assert App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs}) == placed
     end
+
+    test "with :max_skew, balances vnode replicas across nodes (A2)" do
+      vnodes = App.sharded_vnodes(:log_meta, 9)
+      nodes = [:a@h, :b@h, :c@h]
+
+      placed = App.place_vnodes(vnodes, nodes, 1, max_skew: 1)
+
+      assert length(placed) == 9
+      for {_id, _token, chosen} <- placed, do: assert(length(chosen) == 1)
+
+      # evenly spread (3/3/3) instead of HRW's lopsided split, and each vnode keeps its {id, token}
+      loads = placed |> Enum.flat_map(fn {_id, _token, ns} -> ns end) |> Enum.frequencies() |> Map.values()
+      assert Enum.max(loads) - Enum.min(loads) <= 1
+
+      for {{vnode_id, token}, {p_id, p_token, _ns}} <- Enum.zip(vnodes, placed) do
+        assert {p_id, p_token} == {vnode_id, token}
+      end
+    end
   end
 
   describe "desired_placement/5" do
