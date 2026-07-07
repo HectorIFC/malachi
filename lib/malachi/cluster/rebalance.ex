@@ -12,6 +12,11 @@ defmodule Malachi.Cluster.Rebalance do
   seam and stops if leadership was lost mid-commit (the lease holder dropped the lease).
   """
 
+  alias Malachi.Cluster.MetadataMachine
+
+  @system :default
+  @machine {:module, MetadataMachine, %{}}
+
   @type change :: %{vnode_id: atom(), add: [node()], remove: [node()]}
   @type member_op :: (atom(), node() -> :ok | {:error, term()})
   @type failure :: {:add | :remove, atom(), node(), term()} | :lost_leadership
@@ -64,5 +69,88 @@ defmodule Malachi.Cluster.Rebalance do
         {:error, reason} -> {:halt, {:error, {step, vnode_id, node, reason}}}
       end
     end)
+  end
+
+  @doc """
+  Adds `new_node` to vnode `vnode_id`'s ra cluster (the real `add_member` seam `apply_plan/4` uses in
+  production): starts the ra server on `new_node` (via `:erpc`, as a member of the existing cluster) then
+  adds it to the consensus, routing the change through `current_members` (any of them reaches the
+  leader). **Idempotent** — an already-running server or already-present member counts as `:ok`. On
+  success ra replicates the vnode's state (log/snapshot) to the new member automatically.
+  """
+  @spec ra_add_member(atom(), node(), [node()]) :: :ok | {:error, term()}
+  def ra_add_member(vnode_id, new_node, current_members) do
+    server_ids = Enum.map(current_members, &{vnode_id, &1})
+
+    # announce the member to the cluster first (it need not be running yet), then start its server, which
+    # the leader then replicates the vnode's log/snapshot to (the order ra's add_member doc prescribes)
+    with :ok <- join_consensus(server_ids, {vnode_id, new_node}) do
+      start_member(vnode_id, new_node, server_ids)
+    end
+  end
+
+  @doc """
+  Removes `leaving_node` from vnode `vnode_id`'s ra cluster: removes it from the consensus (routing
+  through `current_members`), then stops its server. **Idempotent** — a non-member counts as `:ok`.
+  """
+  @spec ra_remove_member(atom(), node(), [node()]) :: :ok | {:error, term()}
+  def ra_remove_member(vnode_id, leaving_node, current_members) do
+    server_ids = Enum.map(current_members, &{vnode_id, &1})
+
+    with :ok <- leave_consensus(server_ids, {vnode_id, leaving_node}) do
+      _ = safe_erpc(leaving_node, :ra, :stop_server, [@system, {vnode_id, leaving_node}])
+      :ok
+    end
+  end
+
+  defp start_member(vnode_id, new_node, server_ids) do
+    case safe_erpc(new_node, :ra, :start_server, [@system, vnode_id, {vnode_id, new_node}, @machine, server_ids]) do
+      :ok -> :ok
+      {:error, reason} -> if already_started?(reason), do: :ok, else: {:error, reason}
+    end
+  end
+
+  # ra wraps an already-running server as {:already_started, pid}, possibly nested inside a supervisor
+  # start failure; either shape means the member's server is up, which is what we want (idempotent).
+  defp already_started?({:already_started, _pid}), do: true
+  defp already_started?({:shutdown, {:failed_to_start_child, _id, reason}}), do: already_started?(reason)
+  defp already_started?(_other), do: false
+
+  defp join_consensus(server_ids, new_server) do
+    change_membership(fn -> :ra.add_member(server_ids, new_server) end)
+  end
+
+  defp leave_consensus(server_ids, target) do
+    change_membership(fn -> :ra.remove_member(server_ids, target) end)
+  end
+
+  # Runs a membership change (add/remove), treating already-done as :ok (idempotent) and retrying while
+  # a prior change is still settling (ra allows one membership change at a time, so add-then-remove on the
+  # same vnode - or a repeated op - would otherwise get :cluster_change_not_permitted).
+  defp change_membership(op, remaining_ms \\ 5_000) do
+    case op.() do
+      {:ok, _reply, _leader} ->
+        :ok
+
+      {:error, benign} when benign in [:already_member, :not_member] ->
+        :ok
+
+      {:error, :cluster_change_not_permitted} when remaining_ms > 0 ->
+        Process.sleep(100)
+        change_membership(op, remaining_ms - 100)
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:timeout, _server} ->
+        {:error, :timeout}
+    end
+  end
+
+  # :erpc.call raises on rpc/node errors; normalize to {:error, _} so callers see a uniform result.
+  defp safe_erpc(node, module, fun, args) do
+    :erpc.call(node, module, fun, args)
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 end

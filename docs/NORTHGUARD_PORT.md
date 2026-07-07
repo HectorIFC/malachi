@@ -982,10 +982,23 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         *commit*, sob o lease). Fica junto de R1/R2 no `Application` (evita ciclo com `Rebalance`, que só
         executa). Testado: `readable_placement` omite ilegível; `live_rebalance_plan` = diff atual×desejado
         sobre vivos; vazio quando já casa; nunca planeja vnode ilegível.
-      - ⏳ **R3-b-ii (futuro)** — as **ops `ra` reais** (`start_server`+`add_member` / `remove_member`+stop,
-        idempotentes) como os seams do `apply_plan`; o **coordenador manual** plan/commit gated pelo
-        `LeaseHolder`; e o **wiring** (`LeaseServer`/`Holder` na árvore). Ao adicionar membro o `ra`
-        replica o estado do vnode ao novo nó. Teste `:multinode`.
+      - ✅ **R3-b-ii — ops `ra` reais + coordenador (motor).** `Rebalance.ra_add_member/3` e
+        `ra_remove_member/3` são os seams reais do `apply_plan`: **add** = `add_member` (anuncia o membro —
+        ele nem precisa estar rodando) **depois** `start_server` no nó via `:erpc` (a ordem que a doc do
+        `ra` prescreve; o líder então replica log/snapshot ao novo membro); **remove** = `remove_member`
+        depois `stop_server`. **Idempotentes** (`already_member`/`not_member`/`already_started` aninhado →
+        `:ok`) e com **retry** em `:cluster_change_not_permitted` — o `ra` só permite **uma** mudança de
+        membership por vez, então o `add`-then-`remove` de um mesmo change (e ops repetidas) esperam a
+        anterior assentar. `RebalanceCoordinator` (GenServer, seams `plan_fun`/`add_member`/`remove_member`/
+        `leader?`) expõe `plan/1` (calcula, não aplica) e `commit/1` (**recusa `:not_leader`** se não for o
+        holder do lease; senão `apply_plan` fail-fast, passando o mesmo `leader?` para parar se o lease cair
+        no meio). Commit **sempre manual**. Testado: coordenador por seams (plan/commit/recusa/fail-fast) +
+        **`:multinode`** real — `ra_add_member` cresce um vnode para um novo nó e o `ra` transfere o estado,
+        `ra_remove_member` encolhe, ambos idempotentes.
+      - ⏳ **R3-b-iii (futuro)** — **wiring** (\"ligar na tomada\"): bootstrap do `LeaseServer` (cluster `ra`
+        dedicado) + `LeaseHolder` + `RebalanceCoordinator` na árvore de supervisão quando sharded, com os
+        seams reais (`live_rebalance_plan` + `ra_*` + o gate do `LeaseHolder`). Muda o caminho de boot
+        (sobe o lease sempre que sharded); commit segue manual. Verificação de não-regressão do boot.
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b-ii) é decidida quando
+> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b-iii) é decidida quando
 > cada uma for atacada.
