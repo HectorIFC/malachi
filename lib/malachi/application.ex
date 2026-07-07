@@ -510,6 +510,42 @@ defmodule Malachi.Application do
   end
 
   @doc """
+  The **current** placement read from the vnodes' live ra memberships: for each `{vnode_id, token}` in
+  `vnode_configs`, `members_of.(vnode_id)` returns `{:ok, nodes}` (its current member nodes) or
+  `{:error, _}`. A vnode whose membership cannot be read is **omitted** — conservative: we never plan a
+  change for a vnode we cannot currently see. Returns `[{vnode_id, token, nodes}]`. Pure given the seam.
+  """
+  @spec readable_placement([{atom(), non_neg_integer()}], (atom() -> {:ok, [node()]} | {:error, term()})) ::
+          [{atom(), non_neg_integer(), [node()]}]
+  def readable_placement(vnode_configs, members_of) do
+    for {vnode_id, token} <- vnode_configs, {:ok, nodes} <- [members_of.(vnode_id)] do
+      {vnode_id, token, nodes}
+    end
+  end
+
+  @doc """
+  The rebalancing plan for the **live** cluster (R3-b-i): diffs the current placement — read from the
+  vnodes' ra memberships via `members_of` (`readable_placement/2`) — against the placement **desired**
+  over `alive_nodes` (the live members), for the **readable** vnodes only, so an unreachable vnode is
+  neither planned for nor recomputed. `rf`/`place_opts` are the replication factor and spread options.
+  Reads the world through the `members_of` seam (real: `:ra.members`); pure otherwise. The result feeds
+  `Malachi.Cluster.Rebalance.apply_plan/4` (the commit), run under the lease.
+  """
+  @spec live_rebalance_plan(
+          [{atom(), non_neg_integer()}],
+          (atom() -> {:ok, [node()]} | {:error, term()}),
+          [node()],
+          pos_integer(),
+          keyword()
+        ) :: [%{vnode_id: atom(), add: [node()], remove: [node()]}]
+  def live_rebalance_plan(vnode_configs, members_of, alive_nodes, rf, place_opts \\ []) do
+    current = readable_placement(vnode_configs, members_of)
+    readable_configs = Enum.map(current, fn {vnode_id, token, _nodes} -> {vnode_id, token} end)
+    desired = place_vnodes(readable_configs, alive_nodes, rf, place_opts)
+    rebalance_plan(current, desired)
+  end
+
+  @doc """
   The vnode ids `this_node` both **hosts** (its placement includes `this_node`) and currently **leads**
   (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
   (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local

@@ -972,9 +972,20 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       `:lost_leadership` se o holder soltou o lease no meio). Testado (seams que gravam a ordem): add
       antes de remove; add que falha não remove; erro no remove reportado; idempotência; plano completo;
       fail-fast entre vnodes; parada por perda de liderança.
-    - ⏳ **R3-b (futuro)** — as **ops `ra` reais** (`start_server`+`add_member` / `remove_member`+stop) +
-      o **coordenador plan/commit** (manual, gated pelo `LeaseHolder`) + o wiring (`LeaseServer`/`Holder`).
-      Ao adicionar membro, o `ra` replica o estado do vnode ao novo nó automaticamente.
+    - **R3-b — coordenador plan/commit + ops `ra`/wiring.**
+      - ✅ **R3-b-i — plano do estado vivo (núcleo com seams).** `Application.readable_placement/2` monta o
+        placement **atual** a partir das memberships `ra` dos vnodes via o seam `members_of`
+        (`vnode_id -> {:ok, nodes} | {:error, _}`), **omitindo** vnodes ilegíveis (conservador: nunca
+        planejar um vnode que não conseguimos ver). `Application.live_rebalance_plan/5` é o *plan*: faz o
+        diff do atual (legível) contra o `place_vnodes` **desejado** sobre os nós **vivos**, só para os
+        vnodes legíveis, e devolve o plano (`rebalance_plan/2`) que alimenta `Rebalance.apply_plan/4` (o
+        *commit*, sob o lease). Fica junto de R1/R2 no `Application` (evita ciclo com `Rebalance`, que só
+        executa). Testado: `readable_placement` omite ilegível; `live_rebalance_plan` = diff atual×desejado
+        sobre vivos; vazio quando já casa; nunca planeja vnode ilegível.
+      - ⏳ **R3-b-ii (futuro)** — as **ops `ra` reais** (`start_server`+`add_member` / `remove_member`+stop,
+        idempotentes) como os seams do `apply_plan`; o **coordenador manual** plan/commit gated pelo
+        `LeaseHolder`; e o **wiring** (`LeaseServer`/`Holder` na árvore). Ao adicionar membro o `ra`
+        replica o estado do vnode ao novo nó. Teste `:multinode`.
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b) é decidida quando cada
-> uma for atacada.
+> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b-ii) é decidida quando
+> cada uma for atacada.

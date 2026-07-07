@@ -186,6 +186,59 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "readable_placement/2" do
+    test "reads each vnode's current members, omitting ones that cannot be read" do
+      configs = [{:vn_0, 0}, {:vn_1, 1}, {:vn_2, 2}]
+
+      members_of = fn
+        :vn_0 -> {:ok, [:a@h, :b@h]}
+        :vn_1 -> {:error, :noproc}
+        :vn_2 -> {:ok, [:b@h, :c@h]}
+      end
+
+      # vn_1 is unreachable, so it is left out of the current placement
+      assert App.readable_placement(configs, members_of) ==
+               [{:vn_0, 0, [:a@h, :b@h]}, {:vn_2, 2, [:b@h, :c@h]}]
+    end
+  end
+
+  describe "live_rebalance_plan/5" do
+    test "plans the moves from current ra memberships to the placement desired over live members" do
+      configs = App.sharded_vnodes(:log_meta, 12)
+      # current: every vnode lives on {a,b,c}; desired: recomputed over {a,b,c,d} (d joined)
+      current = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h], 2)
+      members_of = fn id -> {:ok, current |> Enum.find(&(elem(&1, 0) == id)) |> elem(2)} end
+
+      plan = App.live_rebalance_plan(configs, members_of, [:a@h, :b@h, :c@h, :d@h], 2)
+
+      # equivalent to diffing the current against the desired-over-live directly
+      desired = App.desired_placement(:log_meta, 12, [:a@h, :b@h, :c@h, :d@h], 2)
+      assert plan == App.rebalance_plan(current, desired)
+      refute plan == []
+    end
+
+    test "is empty when the live membership already matches the current placement" do
+      configs = App.sharded_vnodes(:log_meta, 6)
+      current = App.desired_placement(:log_meta, 6, [:a@h, :b@h, :c@h], 2)
+      members_of = fn id -> {:ok, current |> Enum.find(&(elem(&1, 0) == id)) |> elem(2)} end
+
+      assert App.live_rebalance_plan(configs, members_of, [:a@h, :b@h, :c@h], 2) == []
+    end
+
+    test "never plans for an unreadable vnode (it is excluded from both current and desired)" do
+      configs = App.sharded_vnodes(:log_meta, 6)
+      # vn 3 is unreadable; every other vnode currently lives on {a,b}
+      members_of = fn
+        :log_meta_vn_3 -> {:error, :noproc}
+        _other -> {:ok, [:a@h, :b@h]}
+      end
+
+      plan = App.live_rebalance_plan(configs, members_of, [:a@h, :b@h, :c@h, :d@h], 2)
+
+      refute Enum.any?(plan, &(&1.vnode_id == :log_meta_vn_3))
+    end
+  end
+
   describe "leading_vnodes/3" do
     test "returns the vnodes this node both hosts and leads, preserving order" do
       this = :n1@h
