@@ -486,6 +486,29 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `BrokerServer` (`consume_ranges`): 1 call coesa em vez de N+1, e é o que o produce re-executa para
     acordar waiters. Testado: `BrokerServer` (acorda no produce, timeout vazio, acorda só o topic
     produzido), `LogApi` (bloqueia até produce; timeout), e2e TCP (wake por produtor concorrente; timeout).
+  - 🚧 **Rearquitetura da camada de cliente (protocolo binário + streaming), guiada por benchmark.** A
+    funcionalidade de log sobre TCP estava completa, mas o **estilo** era JSON+base64 request/response —
+    não o "sessionized streaming com windowing" do NorthGuard. Decidido **empiricamente** (`bench/`,
+    1M msgs): (a) **protocolo binário** vs JSON+base64 — **-29% bytes on-wire, 8.9x menos CPU no encode,
+    17.3x no decode** (`protocol_bench.exs`); (b) **entrega push** (subscribers no broker) 35-44% mais
+    rápida que Registry pub/sub, **mas sem windowing a mailbox explode** (consumidor lento → pico 190.276)
+    → **OOM**; com janela fica em 999 (`streaming_bench.exs`); (c) baseline do sistema 657k produce /
+    1.2M consume rec/s, memória plana (`throughput_1m.exs`). Alvo NorthGuard-fiel = **push + windowing** +
+    **protocolo binário**. Autorizado **remover o modelo de fila legado** (queues/channels) e **substituir**
+    o JSON pelo binário. Frentes: **B1** protocolo binário → **B2** streaming push+windowing → **B3** remover
+    filas legado. Cada uma fatiada (núcleo testável + fiação).
+    - ✅ **B1a — codec binário (`Malachi.Wire`, núcleo puro).** Framing length-prefixed
+      (`<<len::32, body>>`), envelope request `<<api_key::16, correlation_id::32, payload>>` / response
+      `<<correlation_id::32, error_code::16, payload>>` (o `correlation_id` habilita **pipelining**), e os
+      codecs das 4 operações de log (create_topic/produce/fetch/commit). Records **sem offset** no wire (o
+      cliente nunca vê offset; o cursor opaco carrega a posição) — encoding próprio, distinto do
+      `Record.encode/1` de disco. Cursor/key são byte-strings com flag de presença (`nil` ≠ vazio). Puro;
+      a fiação no socket é B1b. Testado: round-trip de frame (+ `:incomplete` em prefixo parcial, dois
+      frames num buffer), envelope, wire-record (nil-key vs vazio, bytes não-UTF-8, property de round-trip),
+      e as 4 operações.
+    - ⏳ **B1b (próximo)** — fiação: o acceptor lê frames binários length-prefixed (em vez de linhas
+      `\n`/JSON), roteia por `api_key` ao handler de log, responde binário; substitui o path JSON de log
+      e reescreve os testes e2e para o binário.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

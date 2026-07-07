@@ -1,0 +1,172 @@
+defmodule Malachi.Wire do
+  @moduledoc """
+  The binary wire protocol for the NorthGuard log client (B1) — a length-prefixed, request/response
+  framing that replaces the JSON+base64 line protocol (measured ~29% fewer bytes and 9-17x less
+  serialization CPU in `bench/protocol_bench.exs`).
+
+      Frame:     <<len::32, body::binary-size(len)>>
+      Request:   <<api_key::16, correlation_id::32, payload::binary>>
+      Response:  <<correlation_id::32, error_code::16, payload::binary>>
+
+  `correlation_id` lets a client pipeline (match each response to its request). Records on the wire carry
+  **no offset** — the client never sees one; the opaque cursor carries position — so this is a distinct
+  encoding from `Record.encode/1` (the on-disk frame, which includes the offset). Keys and cursors are
+  length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure — this module
+  only encodes/decodes binaries; the socket wiring is B1b.
+
+  `decode_frame/1` is tolerant (returns `:incomplete` for a partial frame), but the payload decoders
+  (`decode_request/1`, `decode_produce_req/1`, …) assume a **well-formed** body and raise on a malformed
+  one. A frame body comes from an untrusted client, so B1b must decode inside a `try` and answer an error
+  (or close) on a raise — keeping the malformed-input handling at the connection boundary, not in the codec.
+  """
+
+  alias Malachi.Log.Record
+
+  # api keys (request operations)
+  @create_topic 1
+  @produce 2
+  @fetch 3
+  @commit 4
+
+  # error codes (responses)
+  @ok 0
+
+  @type api_key :: 1..4
+  @type error_code :: non_neg_integer()
+
+  @spec create_topic_key() :: api_key()
+  def create_topic_key, do: @create_topic
+  def produce_key, do: @produce
+  def fetch_key, do: @fetch
+  def commit_key, do: @commit
+  def ok_code, do: @ok
+
+  # ---- frame ----
+
+  @doc "Wraps a body in a length-prefixed frame."
+  @spec encode_frame(binary()) :: binary()
+  def encode_frame(body) when is_binary(body), do: <<byte_size(body)::32, body::binary>>
+
+  @doc "Peels one frame off a buffer: `{:ok, body, rest}` or `:incomplete` if the frame is not all here."
+  @spec decode_frame(binary()) :: {:ok, binary(), binary()} | :incomplete
+  def decode_frame(<<len::32, body::binary-size(len), rest::binary>>), do: {:ok, body, rest}
+  def decode_frame(_partial), do: :incomplete
+
+  # ---- request / response envelope ----
+
+  @spec encode_request(api_key(), non_neg_integer(), binary()) :: binary()
+  def encode_request(api_key, correlation_id, payload) do
+    encode_frame(<<api_key::16, correlation_id::32, payload::binary>>)
+  end
+
+  @spec decode_request(binary()) :: {api_key(), non_neg_integer(), binary()}
+  def decode_request(<<api_key::16, correlation_id::32, payload::binary>>), do: {api_key, correlation_id, payload}
+
+  @spec encode_response(non_neg_integer(), error_code(), binary()) :: binary()
+  def encode_response(correlation_id, error_code, payload) do
+    encode_frame(<<correlation_id::32, error_code::16, payload::binary>>)
+  end
+
+  @spec decode_response(binary()) :: {non_neg_integer(), error_code(), binary()}
+  def decode_response(<<correlation_id::32, error_code::16, payload::binary>>),
+    do: {correlation_id, error_code, payload}
+
+  # ---- operation payloads (round-trip: encode_*_req/decode_*_req) ----
+
+  def encode_create_topic_req(topic, keyspace_bits), do: <<put_str(topic)::binary, keyspace_bits::8>>
+
+  def decode_create_topic_req(payload) do
+    {topic, <<keyspace_bits::8>>} = take_str(payload)
+    {topic, keyspace_bits}
+  end
+
+  def encode_produce_req(topic, records) do
+    <<put_str(topic)::binary, length(records)::32, encode_records(records)::binary>>
+  end
+
+  def decode_produce_req(payload) do
+    {topic, <<count::32, rest::binary>>} = take_str(payload)
+    {records, <<>>} = take_records(rest, count, [])
+    {topic, records}
+  end
+
+  # cursor is an opaque byte string (nil = start); max and wait_ms are the fetch bounds
+  def encode_fetch_req(topic, cursor, max, wait_ms) do
+    <<put_str(topic)::binary, put_str(cursor)::binary, max::32, wait_ms::32>>
+  end
+
+  def decode_fetch_req(payload) do
+    {topic, rest} = take_str(payload)
+    {cursor, <<max::32, wait_ms::32>>} = take_str(rest)
+    {topic, cursor, max, wait_ms}
+  end
+
+  def encode_fetch_resp(records, next_cursor) do
+    <<length(records)::32, encode_records(records)::binary, put_str(next_cursor)::binary>>
+  end
+
+  def decode_fetch_resp(payload) do
+    <<count::32, rest::binary>> = payload
+    {records, rest} = take_records(rest, count, [])
+    {next_cursor, <<>>} = take_str(rest)
+    {records, next_cursor}
+  end
+
+  def encode_commit_req(topic, group, cursor) do
+    <<put_str(topic)::binary, put_str(group)::binary, put_str(cursor)::binary>>
+  end
+
+  def decode_commit_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {cursor, <<>>} = take_str(rest)
+    {topic, group, cursor}
+  end
+
+  # ---- wire record (no offset; key/value/headers/timestamp only) ----
+
+  @doc "Encodes a record for the wire (no offset — the client never sees one)."
+  @spec encode_record(Record.t()) :: binary()
+  def encode_record(%Record{key: key, value: value, timestamp: ts, headers: headers}) do
+    <<put_str(key)::binary, byte_size(value)::32, value::binary, ts::64, encode_headers(headers)::binary>>
+  end
+
+  @spec decode_record(binary()) :: {Record.t(), binary()}
+  def decode_record(binary) do
+    {key, <<value_len::32, value::binary-size(value_len), ts::64, rest::binary>>} = take_str(binary)
+    {headers, rest} = take_headers(rest)
+    {%Record{key: key, value: value, timestamp: ts, headers: headers, offset: nil}, rest}
+  end
+
+  # ---- internals ----
+
+  # length-prefixed byte string with a presence flag: 0 => nil, 1 => len+bytes
+  defp put_str(nil), do: <<0::8>>
+  defp put_str(s) when is_binary(s), do: <<1::8, byte_size(s)::32, s::binary>>
+
+  defp take_str(<<0::8, rest::binary>>), do: {nil, rest}
+  defp take_str(<<1::8, len::32, s::binary-size(len), rest::binary>>), do: {s, rest}
+
+  defp encode_records(records), do: records |> Enum.map(&encode_record/1) |> IO.iodata_to_binary()
+
+  defp take_records(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_records(rest, n, acc) do
+    {record, rest} = decode_record(rest)
+    take_records(rest, n - 1, [record | acc])
+  end
+
+  defp encode_headers(headers) do
+    body = for {k, v} <- headers, into: <<>>, do: <<put_str(k)::binary, put_str(v)::binary>>
+    <<length(headers)::32, body::binary>>
+  end
+
+  defp take_headers(<<count::32, rest::binary>>), do: take_headers(rest, count, [])
+  defp take_headers(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_headers(rest, n, acc) do
+    {k, rest} = take_str(rest)
+    {v, rest} = take_str(rest)
+    take_headers(rest, n - 1, [{k, v} | acc])
+  end
+end
