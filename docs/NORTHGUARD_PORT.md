@@ -1019,5 +1019,17 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         caminho **não-sharded é inalterado**. Testado: `leader?/1` e `try_members/2` isolados + suíte
         completa (1048 testes) verde = boot não regride; comportamento das ops apoiado no `:multinode` de
         R3-b-ii. **Rebalancing dinâmico completo — a Fase 1 (distribuição) fecha aqui.**
+      - ✅ **Reconcile do lease (endurecimento).** O bootstrap `auto-fencido` acima forma o cluster do
+        lease só com a **maioria** (Raft); um nó que estava down quando o cluster formou fica membro da
+        **config** (o `start_cluster` inicial lista todos os nós) mas sem servidor rodando, reduzindo a
+        tolerância a falha do lease. `LeaseServer.reconcile/2` faz **self-join** — best-effort e idempotente:
+        (re)tenta formar o cluster (`start/2`, auto-fencido) e iniciar o servidor **local** (`:ra.start_server`),
+        que se re-junta ao cluster existente (já é membro da config) e o `ra` replica o estado do lease a
+        ele. `Malachi.Cluster.LeaseReconciler` (GenServer genérico, seam `:reconcile`) o chama após o boot
+        e a cada `lease_reconcile_interval_ms` (default 30s), *level-triggered* — mantém o `LeaseHolder`
+        livre de `ra`/membership. Subido no `rebalance_children` (primeiro, antes do holder). Testado:
+        reconcile bootstrapa quando não iniciado + é no-op idempotente num cluster formado (não perturba o
+        lease); o reconciler reconcilia no boot e sob demanda.
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2) é decidida quando cada uma for atacada.
+> A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
+> cada uma for atacada.

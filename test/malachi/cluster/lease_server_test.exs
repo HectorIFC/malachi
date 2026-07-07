@@ -62,4 +62,23 @@ defmodule Malachi.Cluster.LeaseServerTest do
 
     assert {:ok, %Lease{holder: :node_a, fence: 1}} = LeaseServer.get(server_id)
   end
+
+  test "reconcile/2 bootstraps the cluster when it has not been started yet" do
+    name = :"lease_#{System.unique_integer([:positive])}"
+    on_exit(fn -> LeaseServer.delete(name) end)
+
+    # no prior start/2: reconcile forms the (single-node) cluster itself
+    assert LeaseServer.reconcile(name, [node()]) == :ok
+    assert {:ok, {:ok, 1}} = LeaseServer.acquire_or_renew({name, node()}, :node_a, @duration)
+  end
+
+  test "reconcile/2 is an idempotent no-op on an already-formed cluster (does not disrupt the lease)" do
+    server = start_lease()
+    assert {:ok, {:ok, 1}} = LeaseServer.acquire_or_renew(server, :node_a, @duration)
+
+    assert LeaseServer.reconcile(elem(server, 0), [node()]) == :ok
+
+    # the held lease is untouched
+    assert {:ok, %Lease{holder: :node_a, fence: 1}} = LeaseServer.get(server)
+  end
 end

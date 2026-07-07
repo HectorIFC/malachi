@@ -39,6 +39,30 @@ defmodule Malachi.Cluster.LeaseServer do
   end
 
   @doc """
+  Ensures this node participates in the lease cluster (self-join), so a **staggered boot** converges to a
+  fully-replicated lease. Idempotent and best-effort: it tries to form the cluster if it is not yet
+  formed (`start/2`, auto-fenced) **and** to start the local server if it is not running
+  (`:ra.start_server`). The local node is already a config member (the initial `start_cluster` lists every
+  node), so starting its server rejoins the existing cluster and `ra` replicates the lease state to it —
+  recovering a node that was down when the cluster first formed. A no-op once the local server is up.
+  Meant to be called periodically by `Malachi.Cluster.LeaseReconciler` until the node has joined.
+  """
+  @spec reconcile(cluster_name(), [node()]) :: :ok
+  def reconcile(cluster_name, nodes) do
+    _ = start(cluster_name, nodes)
+    ensure_local_server(cluster_name, nodes)
+  end
+
+  # Best-effort: starts the local lease server so it (re)joins the cluster. Any error (already started, or
+  # the cluster not yet formed) is ignored — reconcile is idempotent and LeaseReconciler retries.
+  defp ensure_local_server(cluster_name, nodes) do
+    server_ids = Enum.map(nodes, &{cluster_name, &1})
+    machine = {:module, LeaseMachine, %{}}
+    _ = :ra.start_server(@system, cluster_name, {cluster_name, node()}, machine, server_ids)
+    :ok
+  end
+
+  @doc """
   Acquires the lease for `candidate` (or renews it if already held), for `duration_ms`. Returns
   `{:ok, {:ok, fence}}` on grant, `{:ok, {:error, {:held, holder}}}` when held by another, or
   `{:error, reason}` when the cluster is unreachable.

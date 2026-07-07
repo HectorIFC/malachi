@@ -16,6 +16,7 @@ defmodule Malachi.Application do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
+  alias Malachi.Cluster.LeaseReconciler
   alias Malachi.Cluster.LeaseServer
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataServer
@@ -133,7 +134,19 @@ defmodule Malachi.Application do
 
   defp rebalance_children(nodes, vnodes) do
     _ = LeaseServer.start(@log_lease, nodes)
-    [lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)]
+    [lease_reconciler_child(nodes), lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)]
+  end
+
+  # Keeps this node joined to the lease cluster (self-join reconcile), so a staggered boot converges to a
+  # fully-replicated lease. First in the list so the local server is coming up before the holder renews.
+  defp lease_reconciler_child(nodes) do
+    opts = [
+      name: Malachi.LogLeaseReconciler,
+      reconcile: fn -> LeaseServer.reconcile(@log_lease, nodes) end,
+      interval: Application.get_env(:malachi, :lease_reconcile_interval_ms, 30_000)
+    ]
+
+    %{id: Malachi.LogLeaseReconciler, start: {LeaseReconciler, :start_link, [opts]}}
   end
 
   defp lease_holder_child do

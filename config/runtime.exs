@@ -138,6 +138,9 @@ config :malachi,
   lease_duration_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_DURATION_MS"), 15_000),
   lease_renew_deadline_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RENEW_DEADLINE_MS"), 10_000),
   lease_retry_period_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RETRY_PERIOD_MS"), 2_000),
+  # How often each node reconciles itself into the lease cluster (self-join, so a staggered boot converges
+  # to a fully-replicated lease). Idempotent once joined.
+  lease_reconcile_interval_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RECONCILE_INTERVAL_MS"), 30_000),
   ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments
