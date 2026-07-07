@@ -239,6 +239,22 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "try_members/2" do
+    test "returns the members of the first node that answers, skipping ones that cannot be reached" do
+      members_fun = fn
+        :a@h -> :error
+        :b@h -> {:ok, [:b@h, :c@h]}
+        :c@h -> {:ok, [:should_not_reach]}
+      end
+
+      assert App.try_members([:a@h, :b@h, :c@h], members_fun) == {:ok, [:b@h, :c@h]}
+    end
+
+    test "returns {:error, :unreachable} when no node answers" do
+      assert App.try_members([:a@h, :b@h], fn _node -> :error end) == {:error, :unreachable}
+    end
+  end
+
   describe "leading_vnodes/3" do
     test "returns the vnodes this node both hosts and leads, preserving order" do
       this = :n1@h

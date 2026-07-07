@@ -995,10 +995,18 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         no meio). Commit **sempre manual**. Testado: coordenador por seams (plan/commit/recusa/fail-fast) +
         **`:multinode`** real — `ra_add_member` cresce um vnode para um novo nó e o `ra` transfere o estado,
         `ra_remove_member` encolhe, ambos idempotentes.
-      - ⏳ **R3-b-iii (futuro)** — **wiring** (\"ligar na tomada\"): bootstrap do `LeaseServer` (cluster `ra`
-        dedicado) + `LeaseHolder` + `RebalanceCoordinator` na árvore de supervisão quando sharded, com os
-        seams reais (`live_rebalance_plan` + `ra_*` + o gate do `LeaseHolder`). Muda o caminho de boot
-        (sobe o lease sempre que sharded); commit segue manual. Verificação de não-regressão do boot.
+      - ✅ **R3-b-iii — wiring (\"ligar na tomada\").** Quando **sharded**, `Application.log_children`
+        adiciona `rebalance_children`: bootstrapa o `LeaseServer` (cluster `ra` dedicado `Malachi.LogLease`,
+        **auto-fencido** no boot — todo nó chama, um forma) e sobe o `LeaseHolder` (`Malachi.LogLeaseHolder`,
+        triângulo default 15s/10s/2s via `lease_duration_ms`/`lease_renew_deadline_ms`/`lease_retry_period_ms`,
+        `renew`/`release` reais sobre o `LeaseServer`) e o `RebalanceCoordinator` (`Malachi.LogRebalanceCoordinator`)
+        com os seams reais: `plan_fun`=`live_rebalance_plan`, `add_member`/`remove_member`=`Rebalance.ra_*`
+        resolvendo os membros via `try_members/2` (tenta cada nó como ponto de entrada — o holder pode não
+        hospedar o vnode; qualquer membro roteia ao líder), `leader?`=`LeaseHolder.leader?`. Adicionei
+        `LeaseHolder.leader?/1` (lê o papel sem forçar tick). O **commit segue manual** (o operador chama
+        `RebalanceCoordinator.plan/1`/`commit/1`); o `LeaseHolder` só mantém a eleição rodando (k8s). O
+        caminho **não-sharded é inalterado**. Testado: `leader?/1` e `try_members/2` isolados + suíte
+        completa (1048 testes) verde = boot não regride; comportamento das ops apoiado no `:multinode` de
+        R3-b-ii. **Rebalancing dinâmico completo — a Fase 1 (distribuição) fecha aqui.**
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2; rebalancing R3-b-iii) é decidida quando
-> cada uma for atacada.
+> A ordem de execução das fatias restantes (`place_vnodes` A2) é decidida quando cada uma for atacada.

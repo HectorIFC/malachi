@@ -47,6 +47,10 @@ defmodule Malachi.Cluster.LeaseHolder do
   @spec tick_now(GenServer.server()) :: {:follower | :leader, non_neg_integer() | nil}
   def tick_now(server), do: GenServer.call(server, :tick_now)
 
+  @doc "Whether this node currently holds the lease. A plain read — does not force a tick."
+  @spec leader?(GenServer.server()) :: boolean()
+  def leader?(server), do: GenServer.call(server, :leader?)
+
   @impl true
   def init(opts) do
     state = %{
@@ -70,6 +74,10 @@ defmodule Malachi.Cluster.LeaseHolder do
   def handle_call(:tick_now, _from, state) do
     state = tick(state)
     {:reply, {state.role, state.fence}, state}
+  end
+
+  def handle_call(:leader?, _from, state) do
+    {:reply, state.role == :leader, state}
   end
 
   @impl true

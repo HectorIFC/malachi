@@ -129,6 +129,11 @@ config :malachi,
   retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),
   retention_max_bytes: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_BYTES"), nil),
   retention_interval_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_INTERVAL_MS"), 60_000),
+  # Rebalancing lease (only used by a sharded control plane). The k8s-style timer triangle must satisfy
+  # lease_duration_ms > lease_renew_deadline_ms > lease_retry_period_ms.
+  lease_duration_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_DURATION_MS"), 15_000),
+  lease_renew_deadline_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RENEW_DEADLINE_MS"), 10_000),
+  lease_retry_period_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RETRY_PERIOD_MS"), 2_000),
   ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments

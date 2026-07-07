@@ -15,9 +15,13 @@ defmodule Malachi.Application do
   alias Malachi.Auth.ConfigValidator
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
+  alias Malachi.Cluster.LeaseHolder
+  alias Malachi.Cluster.LeaseServer
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.Rebalance
+  alias Malachi.Cluster.RebalanceCoordinator
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.VnodeCoordinatorManager
@@ -112,8 +116,102 @@ defmodule Malachi.Application do
         [log_broker_child(nil, nodes)]
       end
 
-    # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last.
-    log_stack ++ coordinator_children(cluster, vnode_placement(cluster, nodes))
+    # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
+    # the sharded control plane also gets the lease + manual rebalancing coordinator (R3-b-iii).
+    vnodes = vnode_placement(cluster, nodes)
+    log_stack ++ coordinator_children(cluster, vnodes) ++ rebalance_children(nodes, vnodes)
+  end
+
+  @log_lease Malachi.LogLease
+  @log_lease_holder Malachi.LogLeaseHolder
+  @log_rebalance_coordinator Malachi.LogRebalanceCoordinator
+
+  # The dynamic-rebalancing stack, only for a sharded control plane: bootstrap the dedicated lease ra
+  # cluster (auto-fenced — every node calls, one forms), run the lease holder (election), and the manual
+  # plan/commit coordinator. Nothing moves automatically; an operator drives `RebalanceCoordinator`.
+  defp rebalance_children(_nodes, nil), do: []
+
+  defp rebalance_children(nodes, vnodes) do
+    _ = LeaseServer.start(@log_lease, nodes)
+    [lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)]
+  end
+
+  defp lease_holder_child do
+    lease_server = {@log_lease, node()}
+    duration = Application.get_env(:malachi, :lease_duration_ms, 15_000)
+
+    opts = [
+      name: @log_lease_holder,
+      renew: fn -> renew_lease(lease_server, duration) end,
+      release: fn fence -> LeaseServer.release(lease_server, node(), fence) end,
+      retry_period_ms: Application.get_env(:malachi, :lease_retry_period_ms, 2_000),
+      renew_deadline_ms: Application.get_env(:malachi, :lease_renew_deadline_ms, 10_000)
+    ]
+
+    %{id: @log_lease_holder, start: {LeaseHolder, :start_link, [opts]}}
+  end
+
+  # Normalizes a LeaseServer.acquire_or_renew result into the holder's renew seam contract.
+  defp renew_lease(lease_server, duration) do
+    case LeaseServer.acquire_or_renew(lease_server, node(), duration) do
+      {:ok, {:ok, fence}} -> {:ok, fence}
+      {:ok, {:error, {:held, _holder}}} -> {:error, :held}
+      {:error, _reason} -> {:error, :unavailable}
+    end
+  end
+
+  defp rebalance_coordinator_child(nodes, vnodes) do
+    vnode_configs = Enum.map(vnodes, fn {vnode_id, token, _nodes} -> {vnode_id, token} end)
+    rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
+    place_opts = vnode_place_opts()
+    members_of = fn vnode_id -> try_members(nodes, &ra_member_nodes({vnode_id, &1})) end
+
+    opts = [
+      name: @log_rebalance_coordinator,
+      plan_fun: fn -> live_rebalance_plan(vnode_configs, members_of, alive_nodes(), rf, place_opts) end,
+      add_member: fn vnode_id, node ->
+        rebalance_op(members_of, vnode_id, &Rebalance.ra_add_member(vnode_id, node, &1))
+      end,
+      remove_member: fn vnode_id, node ->
+        rebalance_op(members_of, vnode_id, &Rebalance.ra_remove_member(vnode_id, node, &1))
+      end,
+      leader?: fn -> LeaseHolder.leader?(@log_lease_holder) end
+    ]
+
+    %{id: @log_rebalance_coordinator, start: {RebalanceCoordinator, :start_link, [opts]}}
+  end
+
+  defp rebalance_op(members_of, vnode_id, op) do
+    with {:ok, members} <- members_of.(vnode_id), do: op.(members)
+  end
+
+  @doc """
+  Tries each node in `nodes` as an entry point, returning the first `{:ok, members}` from `members_fun`
+  (`node -> {:ok, members} | :error`), or `{:error, :unreachable}` if none answers — how the rebalancing
+  coordinator finds a live member of a vnode it may not host locally. Pure given `members_fun`.
+  """
+  @spec try_members([node()], (node() -> {:ok, [node()]} | :error)) ::
+          {:ok, [node()]} | {:error, :unreachable}
+  def try_members(nodes, members_fun) do
+    Enum.find_value(nodes, {:error, :unreachable}, fn node ->
+      case members_fun.(node) do
+        {:ok, _members} = ok -> ok
+        :error -> false
+      end
+    end)
+  end
+
+  defp ra_member_nodes(server_id) do
+    case :ra.members(server_id) do
+      {:ok, members, _leader} -> {:ok, Enum.map(members, fn {_name, node} -> node end)}
+      _unreachable -> :error
+    end
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp alive_nodes do
+    Malachi.LogMembership |> MembershipServer.alive_members() |> Enum.map(fn {_name, node} -> node end)
   end
 
   # The retention/heal coordinators. Sharded control plane (1C-b-ii): a DynamicSupervisor plus a manager

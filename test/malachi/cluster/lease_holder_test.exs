@@ -41,6 +41,20 @@ defmodule Malachi.Cluster.LeaseHolderTest do
     refute_received {:acquired, _}
   end
 
+  test "leader?/1 reports the current role without forcing a tick" do
+    {:ok, renew} = Agent.start_link(fn -> {:error, :held} end)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    holder = start_holder(renew, clock)
+
+    # a plain read: still a follower (no tick has run), and it did not try to acquire
+    refute LeaseHolder.leader?(holder)
+    refute_received {:acquired, _}
+
+    Agent.update(renew, fn _ -> {:ok, 1} end)
+    assert LeaseHolder.tick_now(holder) == {:leader, 1}
+    assert LeaseHolder.leader?(holder)
+  end
+
   test "a leader that renews stays leader without calling on_acquired again" do
     {:ok, renew} = Agent.start_link(fn -> {:ok, 1} end)
     {:ok, clock} = Agent.start_link(fn -> 0 end)
