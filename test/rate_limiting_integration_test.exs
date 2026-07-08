@@ -1,6 +1,11 @@
 defmodule Malachi.RateLimitingIntegrationTest do
   use ExUnit.Case, async: false
 
+  # SKIP (B3a): exercises the JSON queue/log protocol via socket; to be rewritten against the
+  # binary Malachi.Wire protocol in B1b. The underlying infra (Auth/RateLimiter/Validator) stays
+  # covered by its own unit tests.
+  @moduletag :skip
+
   @tcp_port Application.compile_env(:malachi, :tcp_port, 4040)
 
   setup do

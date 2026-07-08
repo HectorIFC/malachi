@@ -1,6 +1,9 @@
 defmodule Malachi.ChannelIntegrationTest do
   use ExUnit.Case, async: false
 
+  # SKIP (B3a): exercises the JSON channel protocol via socket; the queue/channel model was removed.
+  @moduletag :skip
+
   @port 4040
   @host ~c"localhost"
 

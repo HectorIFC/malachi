@@ -506,9 +506,23 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       a fiação no socket é B1b. Testado: round-trip de frame (+ `:incomplete` em prefixo parcial, dois
       frames num buffer), envelope, wire-record (nil-key vs vazio, bytes não-UTF-8, property de round-trip),
       e as 4 operações.
+    - ✅ **B3a — remover o *protocolo* de fila (antes de B1b).** Ordem invertida: mudar o loop de conexão
+      para frames binários torna as 14 ações JSON de fila/canal inacessíveis e quebraria seus testes;
+      então o legado de *protocolo* de fila sai primeiro, deixando o `tcp_protocol` só com log — aí B1b
+      converte log JSON→binário limpo. Removidas as 14 `handle_action` de fila/canal e seus helpers
+      (`publish`/`enqueue`/`build_queue_options`/backpressure/…) do `tcp_protocol` (1130→~200 linhas, só
+      create_topic/produce/fetch/commit + auth/permissão compartilhados); removido o modo `subscribed`/
+      `receive_active_loop` do `tcp_acceptor` (era push de fila — B2 reintroduz um loop de *streaming de
+      log* próprio). Os **módulos** `Queue`/`Channel`/etc. ficam (B3b os deleta + ajusta metrics/dashboard).
+      Testes: `tcp_queue_management` (100% fila) deletado; os 7 de protocolo/segurança via socket
+      (`tcp_protocol`, `channel_integration`, `comprehensive_security`, `protocol_fuzzing`, `rate_limiting`,
+      `validation`, `penetration`) **pulados** (`@moduletag :skip`) para reescrever contra o binário em B1b
+      (evita migrá-los para um log-JSON que some) — a infra (`Auth`/`RateLimiter`/`Validator`) segue coberta
+      por seus unit tests, e o **log e2e** (`log_protocol_test`) continua verde. Suíte: 1087 testes, 0
+      falhas, 94 skipped; credo + dialyzer limpos.
     - ⏳ **B1b (próximo)** — fiação: o acceptor lê frames binários length-prefixed (em vez de linhas
       `\n`/JSON), roteia por `api_key` ao handler de log, responde binário; substitui o path JSON de log
-      e reescreve os testes e2e para o binário.
+      e **reescreve os testes de protocolo/segurança pulados no B3a** contra o `Malachi.Wire`.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

@@ -140,7 +140,6 @@ defmodule Malachi.TCPAcceptor do
             transport: transport,
             client_ip: client_ip,
             session: nil,
-            subscribed: false,
             buffer: ""
           }
 
@@ -259,114 +258,33 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # New state-based receive_loop
-  defp receive_loop(%{subscribed: false} = state) do
-    # Passive mode: only receive socket data
-    %{socket: socket, transport: transport, buffer: buffer, session: _session} = state
+  # Reads client requests line by line and dispatches each; loops until the socket closes or errors.
+  # (The queue/channel push mode was removed with B3a; B2 reintroduces a streaming loop for the log.)
+  defp receive_loop(%{socket: socket, transport: transport, buffer: buffer} = state) do
     recv_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
     case recv_data(socket, transport, 0, recv_timeout) do
       {:ok, data} ->
-        new_buffer = buffer <> data
-
-        case process_buffered_lines(new_buffer, state) do
-          {:subscribed, remaining, updated_state} ->
-            receive_loop(%{updated_state | subscribed: true, buffer: remaining})
-
-          {:ok, remaining, updated_state} ->
-            receive_loop(%{updated_state | buffer: remaining})
-        end
+        {remaining, updated_state} = process_buffered_lines(buffer <> data, state)
+        receive_loop(%{updated_state | buffer: remaining})
 
       {:error, _} ->
         close_socket(socket, transport)
     end
   end
 
-  defp receive_loop(%{subscribed: true} = state) do
-    # Active mode: receive both socket data and queue messages
-    %{socket: socket, transport: transport} = state
-    set_socket_opts(socket, transport, active: :once)
-    receive_active_loop(state)
-  end
-
-  # Process complete lines from buffer, return remaining incomplete data
+  # Processes each complete line and returns the trailing incomplete data (kept in the buffer).
   defp process_buffered_lines(buffer, state) do
     case String.split(buffer, "\n", parts: 2) do
       [complete_line, rest] when complete_line != "" ->
-        case process_authenticated(complete_line, state) do
-          :subscribed ->
-            {:subscribed, rest, state}
-
-          # :ok, or defensively any other return: keep processing the rest of the buffer
-          _ ->
-            process_buffered_lines(rest, state)
-        end
-
-      [incomplete] ->
-        # No complete line yet, keep buffering
-        {:ok, incomplete, state}
-
-      ["", rest] ->
-        # Empty line (double newline), skip it
-        process_buffered_lines(rest, state)
-    end
-  end
-
-  defp receive_active_loop(%{socket: socket, session: _session, transport: transport, buffer: buffer} = state) do
-    receive do
-      # TCP data received
-      {:tcp, ^socket, data} ->
-        new_buffer = buffer <> data
-        remaining = process_active_buffered_lines(new_buffer, state)
-        set_socket_opts(socket, transport, active: :once)
-        receive_active_loop(%{state | buffer: remaining})
-
-      # SSL data received
-      {:ssl, ^socket, data} ->
-        new_buffer = buffer <> data
-        remaining = process_active_buffered_lines(new_buffer, state)
-        set_socket_opts(socket, transport, active: :once)
-        receive_active_loop(%{state | buffer: remaining})
-
-      # Queue message to forward to client
-      {:queue_message, message} ->
-        TCPProtocol.send_queue_message(socket, message, transport)
-        set_socket_opts(socket, transport, active: :once)
-        receive_active_loop(state)
-
-      # Channel message to forward to client
-      {:channel_message, message} ->
-        TCPProtocol.send_channel_message(socket, message, transport)
-        set_socket_opts(socket, transport, active: :once)
-        receive_active_loop(state)
-
-      # Connection closed
-      {:tcp_closed, ^socket} ->
-        :ok
-
-      {:ssl_closed, ^socket} ->
-        :ok
-
-      # Connection error
-      {:tcp_error, ^socket, _reason} ->
-        close_socket(socket, transport)
-
-      {:ssl_error, ^socket, _reason} ->
-        close_socket(socket, transport)
-    end
-  end
-
-  defp process_active_buffered_lines(buffer, state) do
-    case String.split(buffer, "\n", parts: 2) do
-      [complete_line, rest] when complete_line != "" ->
         process_authenticated(complete_line, state)
-        process_active_buffered_lines(rest, state)
+        process_buffered_lines(rest, state)
 
       [incomplete] ->
-        incomplete
+        {incomplete, state}
 
       ["", rest] ->
-        process_active_buffered_lines(rest, state)
+        process_buffered_lines(rest, state)
     end
   end
 
