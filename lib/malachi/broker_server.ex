@@ -147,6 +147,44 @@ defmodule Malachi.BrokerServer do
           Malachi.Metadata.offsets()
   def committed_offsets(server, group, topic), do: GenServer.call(server, {:committed_offsets, group, topic})
 
+  @doc """
+  Subscribes the calling process as a streaming consumer of `topic` for consumer `group` (B2): records
+  are pushed to it as `{:log_records, topic, records, next_positions}` as they are produced, resuming
+  from the group's committed position and bounded by a credit `window` (at most `window` records in
+  flight, at most `max` per push). Ack with `stream_ack/5` to return credit and commit progress. `:ok`.
+  """
+  @spec subscribe(
+          GenServer.server(),
+          Malachi.Metadata.topic_name(),
+          Malachi.Metadata.group(),
+          pos_integer(),
+          pos_integer()
+        ) ::
+          :ok
+  def subscribe(server, topic, group, window, max) do
+    GenServer.call(server, {:subscribe, topic, group, window, max, self()})
+  end
+
+  @doc """
+  Acks `count` streamed records of `topic`/`group` at `positions` (a decoded cursor): returns that much
+  window credit (unblocking further pushes) and durably commits the group's position. Returns `:ok`.
+  """
+  @spec stream_ack(
+          GenServer.server(),
+          Malachi.Metadata.topic_name(),
+          Malachi.Metadata.group(),
+          Malachi.Metadata.offsets(),
+          non_neg_integer()
+        ) ::
+          :ok
+  def stream_ack(server, topic, group, positions, count) do
+    GenServer.call(server, {:stream_ack, topic, group, positions, count, self()})
+  end
+
+  @doc "Removes the calling process's streaming subscription to `topic`. Returns `:ok`."
+  @spec unsubscribe(GenServer.server(), Malachi.Metadata.topic_name()) :: :ok
+  def unsubscribe(server, topic), do: GenServer.call(server, {:unsubscribe, topic, self()})
+
   @doc "Stops the server (and its replication storage)."
   @spec stop(GenServer.server()) :: :ok
   def stop(server), do: GenServer.stop(server)
@@ -202,7 +240,11 @@ defmodule Malachi.BrokerServer do
       bootstrap: bootstrap,
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
-      waiters: []
+      waiters: [],
+      # Streaming subscribers (B2): `%{topic => [subscriber]}`. A subscriber is pushed records as they
+      # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
+      # commit the group's position. See `wake_subscribers/2` / `push_subscriber/2`.
+      subscribers: %{}
     }
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
@@ -225,7 +267,12 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:produce, topic, records}, _from, state) do
     {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
-    state = wake_waiters(%{state | broker: broker}, topic, reply)
+
+    state =
+      %{state | broker: broker}
+      |> wake_waiters(topic, reply)
+      |> wake_subscribers(topic, reply)
+
     {:reply, reply, state}
   end
 
@@ -297,6 +344,44 @@ defmodule Malachi.BrokerServer do
     {:reply, Broker.committed_offsets(state.broker, group, topic), state}
   end
 
+  def handle_call({:subscribe, topic, group, window, max, pid}, _from, state) do
+    ref = Process.monitor(pid)
+    positions = Broker.committed_offsets(state.broker, group, topic)
+
+    subscriber =
+      push_subscriber(state.broker, %{
+        pid: pid,
+        ref: ref,
+        topic: topic,
+        group: group,
+        positions: positions,
+        window: window,
+        in_flight: 0,
+        max: max
+      })
+
+    subscribers = Map.update(state.subscribers, topic, [subscriber], &[subscriber | &1])
+    {:reply, :ok, %{state | subscribers: subscribers}}
+  end
+
+  def handle_call({:stream_ack, topic, group, positions, count, pid}, _from, state) do
+    # commit the group's position durably, then return `count` credit to this subscriber and push more
+    {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
+
+    subs =
+      state.subscribers
+      |> Map.get(topic, [])
+      |> Enum.map(fn sub ->
+        if sub.pid == pid, do: push_subscriber(broker, %{sub | in_flight: max(sub.in_flight - count, 0)}), else: sub
+      end)
+
+    {:reply, :ok, %{state | broker: broker, subscribers: Map.put(state.subscribers, topic, subs)}}
+  end
+
+  def handle_call({:unsubscribe, topic, pid}, _from, state) do
+    {:reply, :ok, drop_subscriber(state, topic, pid)}
+  end
+
   @impl true
   def handle_info({:longpoll_timeout, ref}, state) do
     case Enum.split_with(state.waiters, &(&1.ref == ref)) do
@@ -308,6 +393,14 @@ defmodule Malachi.BrokerServer do
       {[], _rest} ->
         {:noreply, state}
     end
+  end
+
+  # A streaming subscriber's process died: drop it from every topic it was subscribed to.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    subscribers =
+      Map.new(state.subscribers, fn {topic, subs} -> {topic, Enum.reject(subs, &(&1.ref == ref))} end)
+
+    {:noreply, %{state | subscribers: subscribers}}
   end
 
   def handle_info(:refresh_brokers, state) do
@@ -422,6 +515,47 @@ defmodule Malachi.BrokerServer do
       end)
 
     %{state | waiters: others ++ still_waiting}
+  end
+
+  # After a successful produce to `topic`, push newly-available records to each of its subscribers, each
+  # bounded by its own window credit.
+  defp wake_subscribers(state, _topic, {:error, _reason}), do: state
+
+  defp wake_subscribers(state, topic, {:ok, _placements}) do
+    case Map.get(state.subscribers, topic) do
+      nil ->
+        state
+
+      subs ->
+        %{state | subscribers: Map.put(state.subscribers, topic, Enum.map(subs, &push_subscriber(state.broker, &1)))}
+    end
+  end
+
+  # Pushes up to the subscriber's remaining window credit (min with `max`) of records from its current
+  # position, advancing the position and the in-flight count. A no-op when out of credit or caught up.
+  defp push_subscriber(broker, subscriber) do
+    budget = min(subscriber.max, subscriber.window - subscriber.in_flight)
+
+    if budget <= 0 do
+      subscriber
+    else
+      case consume_ranges(broker, subscriber.topic, subscriber.positions, budget) do
+        {[], _positions} ->
+          subscriber
+
+        {records, next_positions} ->
+          send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})
+          %{subscriber | positions: next_positions, in_flight: subscriber.in_flight + length(records)}
+      end
+    end
+  end
+
+  # Removes `pid`'s subscription to `topic` (and stops monitoring it).
+  defp drop_subscriber(state, topic, pid) do
+    subs = Map.get(state.subscribers, topic, [])
+    {removed, kept} = Enum.split_with(subs, &(&1.pid == pid))
+    Enum.each(removed, &Process.demonitor(&1.ref, [:flush]))
+    %{state | subscribers: Map.put(state.subscribers, topic, kept)}
   end
 
   # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh, bootstrap}`

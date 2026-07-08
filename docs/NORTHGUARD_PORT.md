@@ -547,6 +547,26 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       binário resta); a infra (`Auth`/`RateLimiter`/`Validator`/`LockoutManager`) segue coberta por seus
       unit tests (`input_fuzzing`/`attack_simulation`/`security_performance_regression`, via o
       `SecurityHelper` puro). **Suíte: 969 testes, 0 falhas, 0 skipped; credo + dialyzer limpos. B1 completo.**
+    - **B2 — streaming push+windowing (sessionized streaming NorthGuard).** O gap da tabela ("windowing
+      por stream"). Decisões (alinhadas ao NorthGuard, revistas por dúvida do usuário): flow control por
+      **ack explícito de crédito** (o que o benchmark validou; sem ele → OOM) e posição por **grupo
+      durável** (o *consumer-group management* do NorthGuard, não cursor efêmero — reusa o `commit`
+      existente). O ack faz **dupla função: devolve crédito da janela E commita a posição do grupo**
+      (at-least-once).
+      - ✅ **B2-a — subscribers no `BrokerServer` (núcleo).** Estado `subscribers: %{topic => [sub]}`
+        (`sub = %{pid, ref, topic, group, positions, window, in_flight, max}`). `subscribe/5` registra
+        (+`Process.monitor`), carrega a posição commitada do grupo (`committed_offsets`) e faz um push
+        inicial; o `produce` chama `wake_subscribers/3` (irmão do `wake_waiters/3`) que empurra o que
+        **couber na janela** (`min(max, window - in_flight)` via `consume_ranges`, enviando
+        `{:log_records, topic, records, next_positions}`); `stream_ack/5` **commita** a posição
+        (`commit_offset`, durável) e **devolve `count` crédito** liberando mais pushes; `:DOWN`/
+        `unsubscribe/2` removem. Puro do lado do socket — o subscriber é um pid. Testado (in-process):
+        backlog no subscribe + push no produce; a janela limita in-flight até o ack; o ack commita
+        durável; nova subscrição do grupo retoma da posição commitada; subscriber morto é removido via
+        `:DOWN`. Dialyzer/credo limpos; broker+log e2e verdes.
+      - ⏳ **B2-b (próximo)** — fiação binária: `api_key` de `subscribe`/`ack` no `Wire`, o
+        `receive_active_loop` reintroduzido no `tcp_acceptor` (full-duplex: recebe acks do cliente E
+        encaminha `{:log_records}` como frames de push), decode do cursor opaco → positions. E2e via TCP.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
