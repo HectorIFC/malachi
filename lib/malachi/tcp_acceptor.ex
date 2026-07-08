@@ -148,8 +148,9 @@ defmodule Malachi.TCPAcceptor do
             {:ok, updated_state} ->
               receive_loop(updated_state)
 
-            {:error, reason} ->
-              send_error(socket, reason, transport)
+            # the auth flow already answered an error frame (with the real correlation id) where it
+            # could; here we just close the connection.
+            {:error, _reason} ->
               close_socket(socket, transport)
           end
         after
@@ -233,6 +234,7 @@ defmodule Malachi.TCPAcceptor do
 
               {:error, _reason} ->
                 LockoutManager.record_failed_attempt(username, client_ip)
+                transport.send(socket, Wire.encode_error(correlation_id, :invalid_credentials))
                 {:error, :invalid_credentials}
             end
 

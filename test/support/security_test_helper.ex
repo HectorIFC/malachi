@@ -1,11 +1,8 @@
 defmodule Malachi.Test.SecurityHelper do
   @moduledoc """
-  Shared helpers for security test suite.
-  Provides utility functions for random data generation, performance measurement,
-  TCP operations, and common attack payloads.
+  Shared helpers for the security test suite: random data generation, performance measurement, and
+  common attack payloads (fuzzing the pure infra — validators, limiters — not the socket protocol).
   """
-
-  alias Malachi.Test.TCPHelper
 
   @doc "Generate a random IPv4 tuple for testing."
   def random_ip do
@@ -73,27 +70,6 @@ defmodule Malachi.Test.SecurityHelper do
           {input, val}
       end
     end)
-  end
-
-  @doc "TCP connect, authenticate, and return {socket, token}."
-  def tcp_auth(username, password, opts \\ []) do
-    {:ok, socket} = TCPHelper.connect(opts)
-    {:ok, token} = TCPHelper.authenticate(socket, username, password)
-    {socket, token}
-  end
-
-  @doc "Send a TCP action map (as JSON) and parse the JSON response."
-  def tcp_action(socket, action_map) when is_map(action_map) do
-    json = Jason.encode!(action_map)
-    :ok = TCPHelper.send_line(socket, json)
-
-    case TCPHelper.recv_line(socket, timeout: 5000) do
-      {:ok, response} ->
-        {:ok, Jason.decode!(String.trim(response))}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 
   @doc "Common OWASP injection payloads for security testing."

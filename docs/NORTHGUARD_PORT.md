@@ -533,10 +533,20 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       nativos; o de cursor malformado virou bytes inválidos). Testado: log e2e binário (create/produce/
       fetch/grupos/commit/binário/long-poll/permissões) + `Wire` (auth/ok/error round-trip). Suíte: 1055
       testes, 0 falhas, 94 skipped; credo + dialyzer limpos.
-    - ⏳ **B1b-ii (próximo)** — reescrever os 6 testes de protocolo/segurança pulados no B3a
-      (`tcp_protocol`, `comprehensive_security`, `protocol_fuzzing`, `rate_limiting`, `validation`,
-      `penetration`) contra o `Malachi.Wire`, restaurando a cobertura de segurança sobre o binário;
-      deletar `channel_integration` (canal não existe mais) e remover os helpers JSON do `TCPHelper`.
+    - ✅ **B1b-ii — cobertura de segurança do binário.** Os 6 testes de protocolo pulados no B3a eram
+      ~100% fila/JSON (queue/channel/publish/subscribe como veículo, fuzzing de **JSON**, validação de
+      `queue_name` — tudo obsoleto no binário sem filas), então em vez de adaptá-los 1:1 foram **deletados**
+      (+ `channel_integration`) e substituídos por um `binary_protocol_security_test` coeso sobre o
+      protocolo que **de fato** roda: auth (credenciais inválidas → frame de erro; primeiro frame não-auth
+      → `auth_required`; primeiro frame malformado não crasha), permissões (produce→`:produce`,
+      fetch→`:consume`), frames malformados autenticados (`api_key` desconhecido → erro e a conexão segue
+      servindo; payload truncado → `malformed_request` com o correlation id preservado) e fuzzing
+      (bytes aleatórios + length-prefix mentiroso → o servidor sobrevive, provado por uma conexão nova).
+      Ajuste no acceptor: credenciais inválidas agora respondem um frame de erro (o auth JSON antigo só
+      fechava). Os helpers JSON do `TCPHelper` (`send_line`/`recv_line`/`authenticate`) foram removidos (só
+      binário resta); a infra (`Auth`/`RateLimiter`/`Validator`/`LockoutManager`) segue coberta por seus
+      unit tests (`input_fuzzing`/`attack_simulation`/`security_performance_regression`, via o
+      `SecurityHelper` puro). **Suíte: 969 testes, 0 falhas, 0 skipped; credo + dialyzer limpos. B1 completo.**
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

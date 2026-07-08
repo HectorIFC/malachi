@@ -7,12 +7,9 @@ defmodule Malachi.Test.TCPHelper do
 
   ## Socket Mode
 
-  Uses `packet: 0` (raw mode) instead of `packet: :line` to avoid 64KB line
-  length limits. Messages are manually framed with newlines.
-
-  The binary log protocol (`Malachi.Wire`) helpers are `request/4`, `recv_frame/2` and
-  `authenticate_wire/3`; the JSON `send_line`/`recv_line`/`authenticate` remain for the skipped queue
-  tests until they are rewritten (B1b-ii).
+  Uses `packet: 0` (raw mode) so the binary `Malachi.Wire` protocol frames messages itself. The helpers
+  are `connect/1`, `authenticate_wire/3`, `request/4` (send a Wire request, read its response) and
+  `recv_frame/2` (read one length-prefixed frame).
   """
 
   alias Malachi.Wire
@@ -43,100 +40,6 @@ defmodule Malachi.Test.TCPHelper do
       [:binary, packet: 0, active: false],
       timeout
     )
-  end
-
-  @doc """
-  Sends a message through the socket with newline framing.
-
-  Automatically appends a newline if not present.
-
-  ## Examples
-
-      send_line(socket, "{\"action\": \"auth\"}")
-      send_line(socket, "message\\n")  # Already has newline
-  """
-  def send_line(socket, message) do
-    data = if String.ends_with?(message, "\n"), do: message, else: message <> "\n"
-    :gen_tcp.send(socket, data)
-  end
-
-  @doc """
-  Receives a single line from the socket.
-
-  Reads data until a newline is encountered or timeout occurs.
-
-  ## Options
-
-  - `:timeout` - Read timeout in ms (default: 5000)
-
-  ## Examples
-
-      {:ok, line} = recv_line(socket)
-      {:ok, line} = recv_line(socket, timeout: 1000)
-  """
-  def recv_line(socket, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 5000)
-    recv_line_loop(socket, "", timeout, :os.system_time(:millisecond))
-  end
-
-  defp recv_line_loop(socket, buffer, timeout, start_time) do
-    elapsed = :os.system_time(:millisecond) - start_time
-    remaining = max(timeout - elapsed, 0)
-
-    if remaining == 0 do
-      {:error, :timeout}
-    else
-      case :gen_tcp.recv(socket, 0, remaining) do
-        {:ok, data} ->
-          new_buffer = buffer <> data
-
-          case String.split(new_buffer, "\n", parts: 2) do
-            [line, _rest] ->
-              {:ok, line <> "\n"}
-
-            [partial] ->
-              recv_line_loop(socket, partial, timeout, start_time)
-          end
-
-        {:error, _} = error ->
-          error
-      end
-    end
-  end
-
-  @doc """
-  Authenticates with the server and returns the auth token.
-
-  ## Examples
-
-      {:ok, token} = authenticate(socket, "admin", "admin123")
-  """
-  def authenticate(socket, username, password) do
-    auth_msg =
-      Jason.encode!(%{
-        "action" => "auth",
-        "username" => username,
-        "password" => password
-      })
-
-    :ok = send_line(socket, auth_msg)
-
-    case recv_line(socket) do
-      {:ok, response} ->
-        case Jason.decode(String.trim(response)) do
-          {:ok, %{"s" => "ok", "token" => token}} ->
-            {:ok, token}
-
-          {:ok, %{"s" => "err"} = error} ->
-            {:error, error}
-
-          {:error, _} = error ->
-            error
-        end
-
-      error ->
-        error
-    end
   end
 
   # ---- binary Wire protocol helpers ----
