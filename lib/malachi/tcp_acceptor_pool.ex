@@ -25,7 +25,9 @@ defmodule Malachi.TCPAcceptorPool do
 
     base_opts = [
       :binary,
-      packet: :line,
+      # raw mode: the binary Malachi.Wire protocol frames messages itself (length-prefixed), so we do not
+      # want line framing.
+      packet: 0,
       active: false,
       reuseaddr: true,
       reuseport: true,

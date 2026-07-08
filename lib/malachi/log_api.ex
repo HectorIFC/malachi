@@ -45,14 +45,22 @@ defmodule Malachi.LogApi do
           {:ok, non_neg_integer()} | {:error, term()}
   def produce(server, topic, records) when is_list(records) do
     case build_records(records) do
-      {:ok, built} ->
-        case BrokerServer.produce(server, topic, built) do
-          {:ok, _placements} -> {:ok, length(built)}
-          {:error, reason} -> {:error, reason}
-        end
+      {:ok, built} -> produce_records(server, topic, built)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  @doc """
+  Appends already-built `Malachi.Log.Record`s (offset unassigned) to `topic` — the binary protocol path,
+  which decodes records off the wire directly, skipping the JSON map→record step of `produce/3`. Returns
+  `{:ok, count}` or `{:error, reason}`.
+  """
+  @spec produce_records(GenServer.server(), Metadata.topic_name(), [Record.t()]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def produce_records(server, topic, records) when is_list(records) do
+    case BrokerServer.produce(server, topic, records) do
+      {:ok, _placements} -> {:ok, length(records)}
+      {:error, reason} -> {:error, reason}
     end
   end
 

@@ -520,9 +520,23 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       (evita migrá-los para um log-JSON que some) — a infra (`Auth`/`RateLimiter`/`Validator`) segue coberta
       por seus unit tests, e o **log e2e** (`log_protocol_test`) continua verde. Suíte: 1087 testes, 0
       falhas, 94 skipped; credo + dialyzer limpos.
-    - ⏳ **B1b (próximo)** — fiação: o acceptor lê frames binários length-prefixed (em vez de linhas
-      `\n`/JSON), roteia por `api_key` ao handler de log, responde binário; substitui o path JSON de log
-      e **reescreve os testes de protocolo/segurança pulados no B3a** contra o `Malachi.Wire`.
+    - ✅ **B1b-i — fiação binária (e2e).** O `tcp_acceptor` lê frames `Wire` length-prefixed (o listen
+      socket mudou de `packet: :line` para `packet: 0` — raw; o `Wire` faz o framing) num buffer que
+      tolera frames divididos em vários `recv` (`decode_frame` → `:incomplete`); o **auth** também virou
+      binário (novo `api_key` 0, req username/password → resp token). O `tcp_protocol.process_frame/4`
+      decodifica o request **na borda com `try`** (frame malformado → um frame de erro, sem crashar),
+      roteia por `api_key` e responde binário via `Wire.encode_ok`/`encode_error` (error_code 0 = ok, 1 =
+      erro com a reason como string). `LogApi.produce_records/3` (novo) aceita `%Record{}` direto do wire,
+      pulando o passo map→record do `produce/3` JSON; o `fetch_req` ganhou `group` (cursor tem
+      precedência). O `TCPHelper` ganhou os helpers binários (`request`/`recv_frame`/`authenticate_wire`)
+      e o `log_protocol_test` foi **reescrito** para o binário (o caso de base64 saiu — o valor é bytes
+      nativos; o de cursor malformado virou bytes inválidos). Testado: log e2e binário (create/produce/
+      fetch/grupos/commit/binário/long-poll/permissões) + `Wire` (auth/ok/error round-trip). Suíte: 1055
+      testes, 0 falhas, 94 skipped; credo + dialyzer limpos.
+    - ⏳ **B1b-ii (próximo)** — reescrever os 6 testes de protocolo/segurança pulados no B3a
+      (`tcp_protocol`, `comprehensive_security`, `protocol_fuzzing`, `rate_limiting`, `validation`,
+      `penetration`) contra o `Malachi.Wire`, restaurando a cobertura de segurança sobre o binário;
+      deletar `channel_integration` (canal não existe mais) e remover os helpers JSON do `TCPHelper`.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

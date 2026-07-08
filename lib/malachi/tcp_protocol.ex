@@ -1,233 +1,122 @@
 defmodule Malachi.TCPProtocol do
   @moduledoc """
-  The Malachi TCP/JSON log protocol.
+  The Malachi binary log protocol (`Malachi.Wire`). `process_frame/4` decodes a request frame,
+  dispatches by `api_key` to the NorthGuard log operations (create_topic/produce/fetch/commit), and sends
+  a response frame. Auth is handled by the acceptor (`TCPAcceptor`).
 
-  Parses client requests and generates responses for the NorthGuard log actions, keeping connection
-  handling (`TCPAcceptor`) separate from protocol logic (this module). Messages are newline-delimited
-  JSON; responses are `{"s":"ok", ...}` or `{"s":"err","reason":"..."}`.
-
-  ## Log actions
-
-    * `create_topic` — create a topic (requires `:produce`)
-    * `produce` — append records to a topic by key (requires `:produce`); `value`s are base64
-    * `fetch` — read records by opaque cursor or consumer group (requires `:consume`)
-    * `commit` — durably advance a consumer group's position (requires `:consume`)
-
-  The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets. This JSON
-  protocol is being replaced by the binary wire protocol (`Malachi.Wire`); the queue/channel model was
-  removed (B3a).
+  A frame body comes from an untrusted client, so `process_frame/4` decodes inside a `try`: Wire's payload
+  decoders raise on a malformed body, and the boundary answers a single error frame rather than crashing
+  the connection. The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets.
   """
 
-  require Logger
-  alias Malachi.I18n
+  alias Malachi.LogApi
+  alias Malachi.Wire
 
-  # ============================================================
-  # PUBLIC API - Response Helpers
-  # ============================================================
+  @doc "Processes one request frame body: decode, dispatch, and send a response frame. Returns `:ok`."
+  @spec process_frame(term(), binary(), map(), atom()) :: :ok
+  def process_frame(socket, frame_body, session, transport) do
+    frame =
+      case frame_body do
+        # header readable → the correlation id is known, so an error still matches the request
+        <<_api_key::16, correlation_id::32, _rest::binary>> ->
+          {api_key, ^correlation_id, payload} = Wire.decode_request(frame_body)
 
-  @doc "Sends a success response with `data` merged into the ok envelope."
-  def send_ok(socket, data, transport) when is_map(data) do
-    response = Jason.encode!(Map.put(data, "s", "ok")) <> "\n"
-    send_response(socket, response, transport)
+          try do
+            dispatch(api_key, correlation_id, payload, session)
+          rescue
+            _malformed -> Wire.encode_error(correlation_id, :malformed_request)
+          end
+
+        # too short to even read the envelope header
+        _short ->
+          Wire.encode_error(0, :malformed_request)
+      end
+
+    transport.send(socket, frame)
+    :ok
   end
 
-  @doc "Sends an error response with an atom or string reason."
-  @compile {:inline, send_error: 3}
-  def send_error(socket, reason, transport) when is_atom(reason) do
-    json_msg = Jason.encode!(%{"s" => "err", "reason" => reason}) <> "\n"
-    send_response(socket, json_msg, transport)
-  end
-
-  def send_error(socket, reason, transport) when is_binary(reason) do
-    json_msg = Jason.encode!(%{"s" => "err", "reason" => reason}) <> "\n"
-    send_response(socket, json_msg, transport)
-  end
-
-  @doc "Sends an error with extra context merged in, e.g. `retry_after_ms` (used by the auth flow)."
-  def send_error(socket, reason, extra_data, transport) when is_map(extra_data) do
-    base = %{"s" => "err", "reason" => to_string(reason)}
-    json_msg = Jason.encode!(Map.merge(base, extra_data)) <> "\n"
-    send_response(socket, json_msg, transport)
-  end
-
-  # ============================================================
-  # PUBLIC API - Message Processing
-  # ============================================================
-
-  @doc "Processes an authenticated client request (compatibility wrapper without client IP)."
-  @compile {:inline, process_message: 4}
-  def process_message(socket, json_data, session, transport) do
-    process_message(socket, json_data, session, transport, "unknown")
-  end
-
-  @doc """
-  Processes a JSON message from an authenticated client: decodes, checks permissions, and dispatches to
-  the log action handlers. Returns `:ok`.
-  """
-  @compile {:inline, process_message: 5}
-  def process_message(socket, json_data, session, transport, client_ip) do
-    case Jason.decode(json_data) do
-      {:ok, decoded} ->
-        handle_action(socket, decoded, session, transport, client_ip)
-
-      {:error, _} ->
-        send_error(socket, :invalid_json, transport)
-        :ok
+  # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
+  defp dispatch(api_key, correlation_id, payload, session) do
+    cond do
+      api_key == Wire.create_topic_key() -> create_topic(correlation_id, payload, session)
+      api_key == Wire.produce_key() -> produce(correlation_id, payload, session)
+      api_key == Wire.fetch_key() -> fetch(correlation_id, payload, session)
+      api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
+      true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
 
-  # ============================================================
-  # PRIVATE - Action Handlers (NorthGuard log; topic + key + opaque cursor, no offsets exposed)
-  # ============================================================
-
-  defp handle_action(socket, %{"action" => "create_topic", "topic" => topic}, session, transport, _client_ip) do
-    with_permission(session, :produce, socket, transport, fn ->
-      case Malachi.LogApi.create_topic(Malachi.LogBroker, topic) do
-        :ok -> send_ok(socket, %{}, transport)
-        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
-      end
-
-      :ok
+  defp create_topic(correlation_id, payload, session) do
+    with_permission(session, :produce, correlation_id, fn ->
+      {topic, _keyspace_bits} = Wire.decode_create_topic_req(payload)
+      ok_or_error(correlation_id, LogApi.create_topic(Malachi.LogBroker, topic), <<>>)
     end)
   end
 
-  defp handle_action(
-         socket,
-         %{"action" => "produce", "topic" => topic, "records" => records},
-         session,
-         transport,
-         _client_ip
-       )
-       when is_list(records) do
-    with_permission(session, :produce, socket, transport, fn ->
-      with {:ok, decoded} <- decode_record_values(records),
-           {:ok, count} <- Malachi.LogApi.produce(Malachi.LogBroker, topic, decoded) do
-        send_ok(socket, %{"count" => count}, transport)
-      else
-        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
-      end
+  defp produce(correlation_id, payload, session) do
+    with_permission(session, :produce, correlation_id, fn ->
+      {topic, records} = Wire.decode_produce_req(payload)
 
-      :ok
+      case LogApi.produce_records(Malachi.LogBroker, topic, records) do
+        {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
+        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+      end
     end)
   end
 
-  defp handle_action(socket, %{"action" => "fetch", "topic" => topic} = msg, session, transport, _client_ip) do
-    with_permission(session, :consume, socket, transport, fn ->
-      max = fetch_max(Map.get(msg, "max"))
-      wait_ms = fetch_wait(Map.get(msg, "wait"))
+  defp fetch(correlation_id, payload, session) do
+    with_permission(session, :consume, correlation_id, fn ->
+      {topic, cursor, group, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
+      max = fetch_max(max_raw)
+      wait_ms = fetch_wait(wait_raw)
 
       result =
         cond do
-          # An explicit cursor (client-managed paging) takes precedence over a group resume. Any
-          # present, non-null cursor is forwarded to `fetch`, which validates it and returns
-          # `:invalid_cursor` for a malformed token (rather than silently restarting the stream).
-          msg["cursor"] != nil -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, msg["cursor"], max, wait_ms)
-          is_binary(msg["group"]) -> Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, msg["group"], max, wait_ms)
-          true -> Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
+          # an explicit cursor (client-managed paging) takes precedence over a group resume
+          cursor != nil -> LogApi.fetch(Malachi.LogBroker, topic, cursor, max, wait_ms)
+          group != nil -> LogApi.fetch_group(Malachi.LogBroker, topic, group, max, wait_ms)
+          true -> LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
         end
 
       case result do
         {:ok, records, next_cursor} ->
-          send_ok(socket, %{"records" => Enum.map(records, &record_to_json/1), "cursor" => next_cursor}, transport)
+          Wire.encode_ok(correlation_id, Wire.encode_fetch_resp(records, next_cursor))
 
         {:error, reason} ->
-          send_error(socket, normalize_reason(reason), transport)
+          Wire.encode_error(correlation_id, normalize(reason))
       end
-
-      :ok
     end)
   end
 
-  defp handle_action(
-         socket,
-         %{"action" => "commit", "topic" => topic, "group" => group, "cursor" => cursor},
-         session,
-         transport,
-         _client_ip
-       )
-       when is_binary(group) and is_binary(cursor) do
-    with_permission(session, :consume, socket, transport, fn ->
-      case Malachi.LogApi.commit(Malachi.LogBroker, topic, group, cursor) do
-        :ok -> send_ok(socket, %{}, transport)
-        {:error, reason} -> send_error(socket, normalize_reason(reason), transport)
-      end
-
-      :ok
+  defp commit(correlation_id, payload, session) do
+    with_permission(session, :consume, correlation_id, fn ->
+      {topic, group, cursor} = Wire.decode_commit_req(payload)
+      ok_or_error(correlation_id, LogApi.commit(Malachi.LogBroker, topic, group, cursor), <<>>)
     end)
   end
 
-  defp handle_action(socket, _msg, _session, transport, _client_ip) do
-    send_error(socket, :invalid_request, transport)
-    :ok
-  end
-
-  # ============================================================
-  # PRIVATE - Helper Functions
-  # ============================================================
-
-  defp with_permission(session, permission, socket, transport, action_fn) do
+  # Runs `fun` (which returns a response frame) only if the session holds `permission`; otherwise a
+  # permission-denied error frame.
+  defp with_permission(session, permission, correlation_id, fun) do
     if Malachi.Auth.has_permission?(session.permissions, permission) do
-      action_fn.()
+      fun.()
     else
-      Logger.warning(I18n.t(:permission_denied, username: session.username, action: to_string(permission)))
-      send_error(socket, :permission_denied, transport)
-      :ok
+      Wire.encode_error(correlation_id, :permission_denied)
     end
   end
 
-  # send_error wants an atom or binary; tuple reasons (e.g. {:unroutable, key}) are made JSON-safe.
-  defp normalize_reason(reason) when is_atom(reason) or is_binary(reason), do: reason
-  defp normalize_reason(reason), do: inspect(reason)
+  defp ok_or_error(correlation_id, :ok, ok_payload), do: Wire.encode_ok(correlation_id, ok_payload)
+  defp ok_or_error(correlation_id, {:error, reason}, _ok_payload), do: Wire.encode_error(correlation_id, normalize(reason))
 
-  # Bound the client-supplied page size: a positive integer, capped, defaulting to 100.
+  # error reasons must be an atom or string on the wire; tuple reasons (e.g. {:unroutable, key}) are inspected.
+  defp normalize(reason) when is_atom(reason) or is_binary(reason), do: reason
+  defp normalize(reason), do: inspect(reason)
+
+  # Bound the client-supplied page size and long-poll wait (opt-in, capped).
   defp fetch_max(max) when is_integer(max) and max > 0, do: min(max, 1_000)
   defp fetch_max(_max), do: 100
 
-  # Long-poll wait in ms, opt-in and clamped to a 30s ceiling. Absent/invalid means no wait (0).
   defp fetch_wait(wait) when is_integer(wait) and wait > 0, do: min(wait, 30_000)
   defp fetch_wait(_wait), do: 0
-
-  # The client gets key/value/headers/timestamp — never an offset (the cursor carries position).
-  defp record_to_json(record) do
-    %{
-      "key" => record.key,
-      # value is always base64 on the wire, so arbitrary (non-UTF-8) bytes survive JSON transport.
-      "value" => Base.encode64(record.value),
-      "headers" => Map.new(record.headers),
-      "timestamp" => record.timestamp
-    }
-  end
-
-  # Every record `value` is base64 on the JSON wire; decode each to raw bytes before handing them to
-  # the binary-native LogApi (key/headers stay UTF-8). A non-string or non-base64 value is rejected.
-  defp decode_record_values(records) do
-    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, acc} ->
-      case decode_record_value(record) do
-        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
-      error -> error
-    end
-  end
-
-  defp decode_record_value(%{"value" => value} = record) when is_binary(value) do
-    case Base.decode64(value) do
-      {:ok, bytes} -> {:ok, %{record | "value" => bytes}}
-      :error -> {:error, :invalid_base64}
-    end
-  end
-
-  defp decode_record_value(_record), do: {:error, :invalid_record}
-
-  # ============================================================
-  # PRIVATE - Socket Operations
-  # ============================================================
-
-  @compile {:inline, send_response: 3}
-  defp send_response(socket, data, :ssl), do: :ssl.send(socket, data)
-  defp send_response(socket, data, :gen_tcp), do: :gen_tcp.send(socket, data)
-  defp send_response(socket, data, transport) when is_atom(transport), do: transport.send(socket, data)
 end

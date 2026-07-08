@@ -14,6 +14,7 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.Auth.LockoutManager
   alias Malachi.I18n
   alias Malachi.TCPProtocol
+  alias Malachi.Wire
 
   @doc """
   Starts an acceptor for `{port, opts, id, transport}`: `opts` are the `:gen_tcp`/`:ssl` listen
@@ -169,50 +170,52 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  defp authenticate_client(%{socket: socket, transport: transport} = state) do
+  # The auth handshake is a binary frame: read one, and (if it is an auth request) validate it. Frames may
+  # arrive split across recvs, so an incomplete buffer loops for more bytes.
+  defp authenticate_client(%{socket: socket, transport: transport, buffer: buffer} = state) do
     set_socket_opts(socket, transport, active: false)
     recv_timeout = Application.get_env(:malachi, :auth_timeout_ms, 10_000)
 
     case recv_data(socket, transport, 0, recv_timeout) do
       {:ok, data} ->
-        process_auth_data(data, state)
+        case Wire.decode_frame(buffer <> data) do
+          {:ok, frame_body, rest} -> process_auth_frame(frame_body, %{state | buffer: rest})
+          :incomplete -> authenticate_client(%{state | buffer: buffer <> data})
+        end
 
       {:error, _} ->
         {:error, :connection_error}
     end
   end
 
-  defp process_auth_data(data, %{socket: _socket, transport: _transport} = state) do
-    case Jason.decode(data) do
-      {:ok, %{"action" => "auth", "username" => username, "password" => password}} ->
-        validate_and_authenticate(username, password, state)
+  # The first frame must be an auth request; any other api_key or a malformed frame is rejected.
+  defp process_auth_frame(frame_body, %{socket: socket, transport: transport} = state) do
+    {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
 
-      _ ->
-        {:error, :auth_required}
+    if api_key == Wire.auth_key() do
+      {username, password} = Wire.decode_auth_req(payload)
+      validate_and_authenticate(username, password, correlation_id, state)
+    else
+      transport.send(socket, Wire.encode_error(correlation_id, :auth_required))
+      {:error, :auth_required}
     end
+  rescue
+    _malformed ->
+      transport.send(socket, Wire.encode_error(0, :auth_required))
+      {:error, :auth_required}
   end
 
   defp validate_and_authenticate(
          username,
          password,
+         correlation_id,
          %{socket: socket, transport: transport, client_ip: client_ip} = state
        ) do
     # STEP 1: Check account lockout (OWASP: most specific control first)
     case LockoutManager.locked?(username, client_ip) do
-      {:locked, time_remaining_ms} ->
-        # Account is locked - reject immediately
+      {:locked, _time_remaining_ms} ->
         Malachi.Metrics.increment_account_lockout_blocked()
-
-        TCPProtocol.send_error(
-          socket,
-          :account_locked,
-          %{
-            "time_remaining_ms" => time_remaining_ms,
-            "locked_until" => System.system_time(:millisecond) + time_remaining_ms
-          },
-          transport
-        )
-
+        transport.send(socket, Wire.encode_error(correlation_id, :account_locked))
         {:error, :account_locked}
 
       :not_locked ->
@@ -225,32 +228,26 @@ defmodule Malachi.TCPAcceptor do
             # STEP 3: Perform authentication
             case Malachi.Auth.authenticate(username, password, client_ip) do
               {:ok, token} ->
-                # Success - clear lockout data
                 LockoutManager.record_successful_auth(username, client_ip)
-                validate_token_and_respond(token, state, client_ip)
+                validate_token_and_respond(token, correlation_id, state, client_ip)
 
               {:error, _reason} ->
-                # Failed - record attempt (may trigger lockout)
                 LockoutManager.record_failed_attempt(username, client_ip)
                 {:error, :invalid_credentials}
             end
 
-          {:error, :rate_limit_exceeded, retry_after_ms} ->
-            # Rate limit exceeded
+          {:error, :rate_limit_exceeded, _retry_after_ms} ->
             Malachi.Metrics.increment_rate_limit_blocked(:auth)
-            TCPProtocol.send_error(socket, :rate_limit_exceeded, %{"retry_after_ms" => retry_after_ms}, transport)
+            transport.send(socket, Wire.encode_error(correlation_id, :rate_limit_exceeded))
             {:error, :rate_limit_exceeded}
         end
     end
   end
 
-  defp validate_token_and_respond(token, state, client_ip) do
-    %{socket: socket, transport: transport} = state
-
+  defp validate_token_and_respond(token, correlation_id, %{socket: socket, transport: transport} = state, client_ip) do
     case Malachi.Auth.validate_token(token, client_ip) do
       {:ok, session} ->
-        response = Jason.encode!(%{"s" => "ok", "token" => token})
-        transport.send(socket, response <> "\n")
+        transport.send(socket, Wire.encode_ok(correlation_id, Wire.encode_auth_resp(token)))
         {:ok, %{state | session: session}}
 
       {:error, _} ->
@@ -258,49 +255,44 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Reads client requests line by line and dispatches each; loops until the socket closes or errors.
-  # (The queue/channel push mode was removed with B3a; B2 reintroduces a streaming loop for the log.)
+  # Reads request frames and dispatches each; loops until the socket closes or errors. (B2 will add a
+  # streaming subscribe mode on top of this.)
   defp receive_loop(%{socket: socket, transport: transport, buffer: buffer} = state) do
     recv_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
     case recv_data(socket, transport, 0, recv_timeout) do
       {:ok, data} ->
-        {remaining, updated_state} = process_buffered_lines(buffer <> data, state)
-        receive_loop(%{updated_state | buffer: remaining})
+        remaining = process_buffered_frames(buffer <> data, state)
+        receive_loop(%{state | buffer: remaining})
 
       {:error, _} ->
         close_socket(socket, transport)
     end
   end
 
-  # Processes each complete line and returns the trailing incomplete data (kept in the buffer).
-  defp process_buffered_lines(buffer, state) do
-    case String.split(buffer, "\n", parts: 2) do
-      [complete_line, rest] when complete_line != "" ->
-        process_authenticated(complete_line, state)
-        process_buffered_lines(rest, state)
+  # Processes each complete frame and returns the trailing partial data (kept in the buffer).
+  defp process_buffered_frames(buffer, state) do
+    case Wire.decode_frame(buffer) do
+      {:ok, frame_body, rest} ->
+        process_authenticated(frame_body, state)
+        process_buffered_frames(rest, state)
 
-      [incomplete] ->
-        {incomplete, state}
-
-      ["", rest] ->
-        process_buffered_lines(rest, state)
+      :incomplete ->
+        buffer
     end
   end
 
   @compile {:inline, process_authenticated: 2}
-  defp process_authenticated(
-         data,
-         %{socket: socket, session: session, transport: transport, client_ip: client_ip} = _state
-       ) do
-    TCPProtocol.process_message(socket, data, session, transport, client_ip)
+  defp process_authenticated(frame_body, %{socket: socket, session: session, transport: transport}) do
+    TCPProtocol.process_frame(socket, frame_body, session, transport)
   end
 
   defp close_socket(socket, :ssl), do: :ssl.close(socket)
   defp close_socket(socket, :gen_tcp), do: :gen_tcp.close(socket)
 
+  # Pre-auth errors (limits) have no correlation id yet, so they use 0.
   defp send_error(socket, reason, transport) do
-    TCPProtocol.send_error(socket, reason, transport)
+    transport.send(socket, Wire.encode_error(0, reason))
   end
 
   # Socket helper functions

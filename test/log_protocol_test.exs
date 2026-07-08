@@ -1,16 +1,43 @@
 defmodule Malachi.LogProtocolTest do
-  # End-to-end over the real TCP server (started by the app): the NorthGuard log protocol
-  # (create_topic / produce by key / fetch by opaque cursor) against the live Malachi.LogBroker.
+  # End-to-end over the real TCP server (started by the app): the NorthGuard log protocol over the binary
+  # Malachi.Wire framing (create_topic / produce by key / fetch by opaque cursor / groups / long-poll)
+  # against the live Malachi.LogBroker.
   use ExUnit.Case, async: false
 
+  alias Malachi.Log.Record
   alias Malachi.Test.TCPHelper
+  alias Malachi.Wire
 
   @port Application.compile_env(:malachi, :tcp_port, 4040)
 
-  defp request(socket, action) do
-    :ok = TCPHelper.send_line(socket, Jason.encode!(action))
-    {:ok, line} = TCPHelper.recv_line(socket, timeout: 2_000)
-    Jason.decode!(String.trim(line))
+  defp ok?(code), do: code == Wire.ok_code()
+  # an error response carries the reason as a length-prefixed string
+  defp reason(payload), do: Wire.decode_auth_resp(payload)
+
+  defp create_topic(socket, topic) do
+    TCPHelper.request(socket, Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8))
+  end
+
+  # records: a list of `value` binaries or `{key, value}` tuples
+  defp produce(socket, topic, records) do
+    wire =
+      Enum.map(records, fn
+        {key, value} -> %Record{key: key, value: value}
+        value when is_binary(value) -> %Record{value: value}
+      end)
+
+    TCPHelper.request(socket, Wire.produce_key(), 1, Wire.encode_produce_req(topic, wire))
+  end
+
+  defp fetch(socket, topic, opts \\ []) do
+    payload =
+      Wire.encode_fetch_req(topic, opts[:cursor], opts[:group], opts[:max] || 100, opts[:wait] || 0)
+
+    TCPHelper.request(socket, Wire.fetch_key(), 1, payload)
+  end
+
+  defp commit(socket, topic, group, cursor) do
+    TCPHelper.request(socket, Wire.commit_key(), 1, Wire.encode_commit_req(topic, group, cursor))
   end
 
   # Deterministically wait until the live LogBroker has a parked long-poll waiter.
@@ -34,7 +61,7 @@ defmodule Malachi.LogProtocolTest do
   defp with_session(username, password, fun) do
     case TCPHelper.connect(port: @port) do
       {:ok, socket} ->
-        {:ok, _token} = TCPHelper.authenticate(socket, username, password)
+        {:ok, _token} = TCPHelper.authenticate_wire(socket, username, password)
 
         try do
           fun.(socket)
@@ -51,114 +78,86 @@ defmodule Malachi.LogProtocolTest do
   test "produce by key then fetch by opaque cursor (no offsets exposed)" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_#{System.unique_integer([:positive])}"
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, <<2::32>>} = produce(socket, topic, [{"k1", "v1"}, {"k2", "v2"}])
+      assert ok?(code)
 
-      assert %{"s" => "ok", "count" => 2} =
-               request(socket, %{
-                 "action" => "produce",
-                 "topic" => topic,
-                 "records" => [
-                   %{"key" => "k1", "value" => Base.encode64("v1")},
-                   %{"key" => "k2", "value" => Base.encode64("v2")}
-                 ]
-               })
+      assert {code, payload} = fetch(socket, topic)
+      assert ok?(code)
+      {records, cursor} = Wire.decode_fetch_resp(payload)
 
-      assert %{"s" => "ok", "records" => records, "cursor" => cursor} =
-               request(socket, %{"action" => "fetch", "topic" => topic})
-
-      # opaque cursor (a string token, not an integer offset); records carry key/value, no offset
+      # opaque cursor (a byte token, not an integer offset); records carry key/value, never an offset
       assert is_binary(cursor)
-      # value is base64 on the wire — decode to recover the original bytes
-      assert records |> Enum.map(&Base.decode64!(&1["value"])) |> Enum.sort() == ["v1", "v2"]
-      assert Enum.all?(records, &(not Map.has_key?(&1, "offset")))
+      assert records |> Enum.map(& &1.value) |> Enum.sort() == ["v1", "v2"]
+      assert Enum.all?(records, &(&1.offset == nil))
 
       # the cursor carries position: re-fetching with it yields nothing new
-      assert %{"s" => "ok", "records" => []} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => cursor})
+      assert {code, payload} = fetch(socket, topic, cursor: cursor)
+      assert ok?(code)
+      assert {[], _cursor} = Wire.decode_fetch_resp(payload)
     end)
   end
 
   test "consumer group: fetch resumes from the server-committed position" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_grp_#{System.unique_integer([:positive])}"
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
-
-      assert %{"s" => "ok", "count" => 3} =
-               request(socket, %{
-                 "action" => "produce",
-                 "topic" => topic,
-                 "records" => [
-                   %{"value" => Base.encode64("a")},
-                   %{"value" => Base.encode64("b")},
-                   %{"value" => Base.encode64("c")}
-                 ]
-               })
+      assert {code, <<3::32>>} = produce(socket, topic, ["a", "b", "c"])
+      assert ok?(code)
 
       # fetch for a group, then commit the returned cursor durably
-      assert %{"s" => "ok", "records" => records, "cursor" => cursor} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "group" => "g1"})
-
+      assert {code, payload} = fetch(socket, topic, group: "g1")
+      assert ok?(code)
+      {records, cursor} = Wire.decode_fetch_resp(payload)
       assert length(records) == 3
 
-      assert %{"s" => "ok"} =
-               request(socket, %{"action" => "commit", "topic" => topic, "group" => "g1", "cursor" => cursor})
+      assert {code, _} = commit(socket, topic, "g1", cursor)
+      assert ok?(code)
 
       # the group resumes past the committed position (nothing new)
-      assert %{"s" => "ok", "records" => []} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "group" => "g1"})
+      assert {code, payload} = fetch(socket, topic, group: "g1")
+      assert ok?(code)
+      assert {[], _cursor} = Wire.decode_fetch_resp(payload)
     end)
   end
 
-  test "fetch rejects a malformed (non-string) cursor instead of silently restarting" do
+  test "fetch rejects a malformed opaque cursor instead of silently restarting" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_badcur_#{System.unique_integer([:positive])}"
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
-      # a wrong-typed cursor must error, not fall through to a fetch from the start
-      assert %{"s" => "err", "reason" => "invalid_cursor"} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => 123})
+      # bytes that are not a valid cursor token must error, not fall through to a fetch from the start
+      assert {code, payload} = fetch(socket, topic, cursor: "!!!not-a-cursor!!!")
+      refute ok?(code)
+      assert reason(payload) == "invalid_cursor"
 
-      # a null cursor is "no cursor": with a group it still resumes the group (not suppressed)
-      assert %{"s" => "ok", "records" => _} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "cursor" => nil, "group" => "g"})
+      # no cursor + a group still resumes the group (a nil cursor is "no cursor", not suppressed)
+      assert {code, _payload} = fetch(socket, topic, group: "g")
+      assert ok?(code)
     end)
   end
 
   test "produces and fetches arbitrary binary payloads (non-UTF-8 bytes survive the round trip)" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_bin_#{System.unique_integer([:positive])}"
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
       payload = <<0, 159, 146, 150, 255, 0, 1>>
       refute String.valid?(payload)
 
-      assert %{"s" => "ok", "count" => 1} =
-               request(socket, %{
-                 "action" => "produce",
-                 "topic" => topic,
-                 "records" => [%{"value" => Base.encode64(payload)}]
-               })
+      assert {code, <<1::32>>} = produce(socket, topic, [payload])
+      assert ok?(code)
 
-      assert %{"s" => "ok", "records" => [record]} =
-               request(socket, %{"action" => "fetch", "topic" => topic})
-
-      assert Base.decode64!(record["value"]) == payload
-    end)
-  end
-
-  test "produce rejects a value that is not valid base64" do
-    with_session("app", "app123", fn socket ->
-      topic = "logproto_badb64_#{System.unique_integer([:positive])}"
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
-
-      assert %{"s" => "err", "reason" => "invalid_base64"} =
-               request(socket, %{
-                 "action" => "produce",
-                 "topic" => topic,
-                 "records" => [%{"value" => "not valid base64 !!!"}]
-               })
+      assert {code, resp} = fetch(socket, topic)
+      assert ok?(code)
+      {[record], _cursor} = Wire.decode_fetch_resp(resp)
+      assert record.value == payload
     end)
   end
 
@@ -166,39 +165,40 @@ defmodule Malachi.LogProtocolTest do
     topic = "logproto_lp_#{System.unique_integer([:positive])}"
 
     with_session("app", "app123", fn socket ->
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
     end)
 
     # a consumer long-polls an empty topic in a separate task; it parks until a produce arrives
     consumer =
       Task.async(fn ->
         with_session("app", "app123", fn socket ->
-          request(socket, %{"action" => "fetch", "topic" => topic, "wait" => 3_000})
+          {code, resp} = fetch(socket, topic, wait: 3_000)
+          {code, Wire.decode_fetch_resp(resp)}
         end)
       end)
 
     wait_for_park()
 
     with_session("app", "app123", fn socket ->
-      assert %{"s" => "ok", "count" => 1} =
-               request(socket, %{
-                 "action" => "produce",
-                 "topic" => topic,
-                 "records" => [%{"value" => Base.encode64("a")}]
-               })
+      assert {code, <<1::32>>} = produce(socket, topic, ["a"])
+      assert ok?(code)
     end)
 
-    assert %{"s" => "ok", "records" => [record]} = Task.await(consumer, 5_000)
-    assert Base.decode64!(record["value"]) == "a"
+    assert {code, {[record], _cursor}} = Task.await(consumer, 5_000)
+    assert ok?(code)
+    assert record.value == "a"
   end
 
   test "fetch with wait returns empty after the timeout (long-poll)" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_lpto_#{System.unique_integer([:positive])}"
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
-      assert %{"s" => "ok", "records" => []} =
-               request(socket, %{"action" => "fetch", "topic" => topic, "wait" => 100})
+      assert {code, resp} = fetch(socket, topic, wait: 100)
+      assert ok?(code)
+      assert {[], _cursor} = Wire.decode_fetch_resp(resp)
     end)
   end
 
@@ -207,16 +207,19 @@ defmodule Malachi.LogProtocolTest do
 
     # consumer (only :consume) may fetch but not produce
     with_session("consumer", "consumer123", fn socket ->
-      assert %{"s" => "err", "reason" => "permission_denied"} =
-               request(socket, %{"action" => "produce", "topic" => topic, "records" => [%{"value" => "x"}]})
+      assert {code, payload} = produce(socket, topic, ["x"])
+      refute ok?(code)
+      assert reason(payload) == "permission_denied"
     end)
 
     # producer (only :produce) may produce/create but not fetch
     with_session("producer", "producer123", fn socket ->
-      assert %{"s" => "ok"} = request(socket, %{"action" => "create_topic", "topic" => topic})
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
 
-      assert %{"s" => "err", "reason" => "permission_denied"} =
-               request(socket, %{"action" => "fetch", "topic" => topic})
+      assert {code, payload} = fetch(socket, topic)
+      refute ok?(code)
+      assert reason(payload) == "permission_denied"
     end)
   end
 end

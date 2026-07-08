@@ -58,10 +58,12 @@ defmodule Malachi.WireTest do
     end
 
     property "round-trips any key/value/headers" do
-      check all key <- one_of([constant(nil), binary()]),
-                value <- binary(),
-                headers <- list_of({binary(min_length: 1), binary()}, max_length: 4),
-                ts <- integer(0..2_000_000_000_000) do
+      check all(
+              key <- one_of([constant(nil), binary()]),
+              value <- binary(),
+              headers <- list_of({binary(min_length: 1), binary()}, max_length: 4),
+              ts <- integer(0..2_000_000_000_000)
+            ) do
         record = %Record{key: key, value: value, timestamp: ts, headers: headers, offset: nil}
         assert {^record, ""} = Wire.decode_record(Wire.encode_record(record))
       end
@@ -78,9 +80,28 @@ defmodule Malachi.WireTest do
       assert Wire.decode_produce_req(Wire.encode_produce_req("t", records)) == {"t", records}
     end
 
-    test "fetch req round-trip with an opaque cursor and with :start (nil)" do
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", <<1, 2, 3>>, 500, 30_000)) == {"t", <<1, 2, 3>>, 500, 30_000}
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, 100, 0)) == {"t", nil, 100, 0}
+    test "fetch req round-trip: cursor, group, and :start (both nil)" do
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", <<1, 2, 3>>, nil, 500, 30_000)) ==
+               {"t", <<1, 2, 3>>, nil, 500, 30_000}
+
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", 100, 0)) == {"t", nil, "grp", 100, 0}
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, nil, 100, 0)) == {"t", nil, nil, 100, 0}
+    end
+
+    test "auth req/resp round-trip" do
+      assert Wire.decode_auth_req(Wire.encode_auth_req("user", "pass")) == {"user", "pass"}
+      assert Wire.decode_auth_resp(Wire.encode_auth_resp("token123")) == "token123"
+    end
+
+    test "encode_ok / encode_error produce framed responses with the right code" do
+      {:ok, ok_body, ""} = Wire.decode_frame(Wire.encode_ok(7, "PL"))
+      assert Wire.decode_response(ok_body) == {7, Wire.ok_code(), "PL"}
+
+      {:ok, err_body, ""} = Wire.decode_frame(Wire.encode_error(7, :not_found))
+      assert {7, error_code, payload} = Wire.decode_response(err_body)
+      assert error_code == Wire.error_code()
+      # the reason travels as a length-prefixed string in the payload
+      assert Wire.decode_auth_resp(payload) == "not_found"
     end
 
     test "fetch resp round-trip (records + next cursor)" do

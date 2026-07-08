@@ -9,7 +9,13 @@ defmodule Malachi.Test.TCPHelper do
 
   Uses `packet: 0` (raw mode) instead of `packet: :line` to avoid 64KB line
   length limits. Messages are manually framed with newlines.
+
+  The binary log protocol (`Malachi.Wire`) helpers are `request/4`, `recv_frame/2` and
+  `authenticate_wire/3`; the JSON `send_line`/`recv_line`/`authenticate` remain for the skipped queue
+  tests until they are rewritten (B1b-ii).
   """
+
+  alias Malachi.Wire
 
   @doc """
   Connects to the Malachi TCP server with test-appropriate settings.
@@ -130,6 +136,55 @@ defmodule Malachi.Test.TCPHelper do
 
       error ->
         error
+    end
+  end
+
+  # ---- binary Wire protocol helpers ----
+
+  @doc "Reads one length-prefixed Wire frame body from the socket (accumulating until complete)."
+  def recv_frame(socket, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5000)
+    recv_frame_loop(socket, "", timeout, :os.system_time(:millisecond))
+  end
+
+  defp recv_frame_loop(socket, buffer, timeout, start_time) do
+    case Wire.decode_frame(buffer) do
+      {:ok, body, _rest} ->
+        {:ok, body}
+
+      :incomplete ->
+        remaining = max(timeout - (:os.system_time(:millisecond) - start_time), 0)
+
+        if remaining == 0 do
+          {:error, :timeout}
+        else
+          case :gen_tcp.recv(socket, 0, remaining) do
+            {:ok, data} -> recv_frame_loop(socket, buffer <> data, timeout, start_time)
+            {:error, _} = error -> error
+          end
+        end
+    end
+  end
+
+  @doc """
+  Sends a Wire request frame and reads its response frame; returns `{error_code, payload}`. Asserts the
+  response `correlation_id` matches the request's.
+  """
+  def request(socket, api_key, correlation_id, payload) do
+    :ok = :gen_tcp.send(socket, Wire.encode_request(api_key, correlation_id, payload))
+    {:ok, frame_body} = recv_frame(socket)
+    {^correlation_id, error_code, resp_payload} = Wire.decode_response(frame_body)
+    {error_code, resp_payload}
+  end
+
+  @doc "Authenticates over the binary protocol; returns `{:ok, token}` or `{:error, reason}`."
+  def authenticate_wire(socket, username, password) do
+    {error_code, payload} = request(socket, Wire.auth_key(), 1, Wire.encode_auth_req(username, password))
+
+    if error_code == Wire.ok_code() do
+      {:ok, Wire.decode_auth_resp(payload)}
+    else
+      {:error, Wire.decode_auth_resp(payload)}
     end
   end
 

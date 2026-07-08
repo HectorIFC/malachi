@@ -23,23 +23,37 @@ defmodule Malachi.Wire do
   alias Malachi.Log.Record
 
   # api keys (request operations)
+  @auth 0
   @create_topic 1
   @produce 2
   @fetch 3
   @commit 4
 
-  # error codes (responses)
+  # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
+  @error 1
 
-  @type api_key :: 1..4
+  @type api_key :: 0..4
   @type error_code :: non_neg_integer()
 
-  @spec create_topic_key() :: api_key()
+  @spec auth_key() :: api_key()
+  def auth_key, do: @auth
   def create_topic_key, do: @create_topic
   def produce_key, do: @produce
   def fetch_key, do: @fetch
   def commit_key, do: @commit
   def ok_code, do: @ok
+  def error_code, do: @error
+
+  @doc "A success response frame (error_code 0) for `correlation_id` carrying `payload`."
+  @spec encode_ok(non_neg_integer(), binary()) :: binary()
+  def encode_ok(correlation_id, payload), do: encode_response(correlation_id, @ok, payload)
+
+  @doc "An error response frame (error_code 1) whose payload is `reason` as a string."
+  @spec encode_error(non_neg_integer(), term()) :: binary()
+  def encode_error(correlation_id, reason) do
+    encode_response(correlation_id, @error, put_str(to_string(reason)))
+  end
 
   # ---- frame ----
 
@@ -73,6 +87,21 @@ defmodule Malachi.Wire do
 
   # ---- operation payloads (round-trip: encode_*_req/decode_*_req) ----
 
+  def encode_auth_req(username, password), do: <<put_str(username)::binary, put_str(password)::binary>>
+
+  def decode_auth_req(payload) do
+    {username, rest} = take_str(payload)
+    {password, <<>>} = take_str(rest)
+    {username, password}
+  end
+
+  def encode_auth_resp(token), do: put_str(token)
+
+  def decode_auth_resp(payload) do
+    {token, <<>>} = take_str(payload)
+    token
+  end
+
   def encode_create_topic_req(topic, keyspace_bits), do: <<put_str(topic)::binary, keyspace_bits::8>>
 
   def decode_create_topic_req(payload) do
@@ -90,15 +119,17 @@ defmodule Malachi.Wire do
     {topic, records}
   end
 
-  # cursor is an opaque byte string (nil = start); max and wait_ms are the fetch bounds
-  def encode_fetch_req(topic, cursor, max, wait_ms) do
-    <<put_str(topic)::binary, put_str(cursor)::binary, max::32, wait_ms::32>>
+  # cursor is an opaque byte string (nil = start), group is an optional consumer group (nil = none);
+  # max and wait_ms are the fetch bounds. An explicit cursor takes precedence over a group resume.
+  def encode_fetch_req(topic, cursor, group, max, wait_ms) do
+    <<put_str(topic)::binary, put_str(cursor)::binary, put_str(group)::binary, max::32, wait_ms::32>>
   end
 
   def decode_fetch_req(payload) do
     {topic, rest} = take_str(payload)
-    {cursor, <<max::32, wait_ms::32>>} = take_str(rest)
-    {topic, cursor, max, wait_ms}
+    {cursor, rest} = take_str(rest)
+    {group, <<max::32, wait_ms::32>>} = take_str(rest)
+    {topic, cursor, group, max, wait_ms}
   end
 
   def encode_fetch_resp(records, next_cursor) do
