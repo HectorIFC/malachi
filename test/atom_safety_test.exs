@@ -8,99 +8,6 @@ defmodule Malachi.AtomSafetyTest do
   by other parallel tests creating atoms.
   """
 
-  describe "queue creation does not leak atoms" do
-    test "creating multiple queues keeps atom count stable" do
-      # Record baseline atom count
-      baseline = :erlang.system_info(:atom_count)
-
-      # Create many queues with unique names
-      queue_names =
-        for i <- 1..100 do
-          name = "atom_test_queue_#{:rand.uniform(1_000_000)}_#{i}"
-          Malachi.Queue.enqueue(name, "test payload #{i}")
-          name
-        end
-
-      after_creation = :erlang.system_info(:atom_count)
-
-      # The atom count should NOT increase by 3 per queue (consumers, buffer, producers tables)
-      # Previously each queue created 3 atoms. Now with anonymous ETS tables, zero atoms are created.
-      # Allow small tolerance for other system atoms that may be created during the test.
-      atom_increase = after_creation - baseline
-
-      # With anonymous ETS tables, no atoms should be created from queue names.
-      # Previously this would create 300+ atoms (3 ETS tables per queue).
-      # Some incidental atoms may be created by Logger, I18n, etc.
-      # The key metric: increase should be MUCH less than 300.
-      assert atom_increase < 100,
-             "Expected minimal atom increase, got #{atom_increase}. " <>
-               "Possible dynamic atom leak detected. " <>
-               "Baseline: #{baseline}, After: #{after_creation}"
-
-      assert length(queue_names) == 100
-    end
-
-    test "queue names with special characters don't create atoms" do
-      baseline = :erlang.system_info(:atom_count)
-
-      special_names = [
-        "queue-with-dashes",
-        "queue.with.dots",
-        "queue_with_underscores",
-        "UPPERCASE_QUEUE",
-        "MiXeD-CaSe.queue"
-      ]
-
-      for name <- special_names do
-        Malachi.Queue.enqueue(name, "test")
-      end
-
-      after_creation = :erlang.system_info(:atom_count)
-      atom_increase = after_creation - baseline
-
-      assert atom_increase < 50,
-             "Special character queue names created #{atom_increase} atoms"
-    end
-
-    test "very long queue names don't create atoms" do
-      baseline = :erlang.system_info(:atom_count)
-
-      # Max valid queue name length is 255
-      long_name = String.duplicate("a", 200)
-      Malachi.Queue.enqueue(long_name, "test")
-
-      after_creation = :erlang.system_info(:atom_count)
-      atom_increase = after_creation - baseline
-
-      assert atom_increase < 50,
-             "Long queue name created #{atom_increase} atoms"
-    end
-  end
-
-  describe "metrics recording does not create atoms" do
-    test "incrementing metrics uses tuple keys, not atom keys" do
-      baseline = :erlang.system_info(:atom_count)
-
-      queue_names =
-        for i <- 1..50 do
-          name = "metrics_atom_test_#{:rand.uniform(1_000_000)}_#{i}"
-          Malachi.Metrics.increment_enqueued(name)
-          Malachi.Metrics.increment_acked(name)
-          Malachi.Metrics.increment_nacked(name)
-          Malachi.Metrics.increment_processed(name)
-          name
-        end
-
-      after_metrics = :erlang.system_info(:atom_count)
-      atom_increase = after_metrics - baseline
-
-      # Metrics use tuple keys like {:enqueued, "queue_name"} — no atoms from queue names
-      # Previously each metric key was an atom like :"enqueued_queue_name"
-      assert atom_increase < 30,
-             "Metrics recording created #{atom_increase} atoms for #{length(queue_names)} queues"
-    end
-  end
-
   describe "validator errors use compile-time atoms" do
     test "validation errors don't create dynamic atoms" do
       baseline = :erlang.system_info(:atom_count)
@@ -142,35 +49,6 @@ defmodule Malachi.AtomSafetyTest do
 
       assert {:error, :invalid_channel_name_reserved} =
                Malachi.Validator.validate_channel_name("_reserved_channel")
-    end
-  end
-
-  describe "ETS tables are anonymous" do
-    test "queue ETS tables are not named (not accessible by atom)" do
-      queue_name = "anon_ets_test_#{:rand.uniform(1_000_000)}"
-      Malachi.Queue.enqueue(queue_name, "test")
-
-      # Try to find named tables matching the old pattern
-      # These should NOT exist as named tables anymore
-      all_named_tables = :ets.all()
-
-      refute Enum.any?(all_named_tables, fn table ->
-               is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachi_consumers_#{queue_name}")
-             end),
-             "Found named consumers table for #{queue_name} — should be anonymous"
-
-      refute Enum.any?(all_named_tables, fn table ->
-               is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachi_buffer_#{queue_name}")
-             end),
-             "Found named buffer table for #{queue_name} — should be anonymous"
-
-      refute Enum.any?(all_named_tables, fn table ->
-               is_atom(table) and
-                 String.contains?(Atom.to_string(table), "malachi_producers_#{queue_name}")
-             end),
-             "Found named producers table for #{queue_name} — should be anonymous"
     end
   end
 

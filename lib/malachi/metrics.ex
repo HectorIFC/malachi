@@ -305,130 +305,6 @@ defmodule Malachi.Metrics do
     :ok
   end
 
-  @doc "The per-queue metrics map for `queue_name` (counts, rates, and latency)."
-  def get_metrics(queue_name) do
-    enqueued = get_counter({:enqueued, queue_name})
-    processed = get_counter({:processed, queue_name})
-    errors = get_counter({:errors, queue_name})
-    acked = get_counter({:acked, queue_name})
-    nacked = get_counter({:nacked, queue_name})
-    retried = get_counter({:retried, queue_name})
-    dead_lettered = get_counter({:dead_lettered, queue_name})
-    rejected = get_counter({:rejected, queue_name})
-    dropped = get_counter({:dropped, queue_name})
-    total_producers_blocked = get_counter({:total_producers_blocked, queue_name})
-    latency = get_latency_stats({:latency, queue_name})
-
-    pending_ack =
-      if Code.ensure_loaded?(Malachi.AckManager) and Process.whereis(Malachi.AckManager) do
-        Malachi.AckManager.pending_count(queue_name)
-      else
-        0
-      end
-
-    config =
-      if Code.ensure_loaded?(Malachi.QueueConfig) and Process.whereis(Malachi.QueueConfig) do
-        Malachi.QueueConfig.get_config(queue_name)
-      else
-        %{
-          delivery_mode: :at_least_once,
-          max_buffer_size: 10_000,
-          max_message_size_bytes: 1_048_576,
-          overflow_behavior: :drop_newest,
-          backpressure_threshold: 0.8,
-          max_blocked_producers: 1_000
-        }
-      end
-
-    queue_stats = Malachi.Queue.get_stats(queue_name)
-
-    # Calculate buffer utilization
-    buffer_utilization_pct =
-      if config.max_buffer_size > 0 do
-        Float.round(queue_stats.buffered / config.max_buffer_size * 100, 1)
-      else
-        0.0
-      end
-
-    # Get backpressure status
-    backpressure_status =
-      if Code.ensure_loaded?(Malachi.Backpressure) do
-        Malachi.Backpressure.get_pressure_status(queue_name)
-      else
-        :low_pressure
-      end
-
-    # Get current blocked producers count (gauge)
-    blocked_producers_count = get_gauge({:blocked_producers_count, queue_name})
-
-    %{
-      queue: queue_name,
-      delivery_mode: config.delivery_mode,
-      enqueued: enqueued,
-      processed: processed,
-      errors: errors,
-      acked: acked,
-      nacked: nacked,
-      retried: retried,
-      dead_lettered: dead_lettered,
-      rejected: rejected,
-      dropped: dropped,
-      total_producers_blocked: total_producers_blocked,
-      blocked_producers_count: blocked_producers_count,
-      pending_ack: pending_ack,
-      latency_us: latency,
-      buffer_utilization_pct: buffer_utilization_pct,
-      max_buffer_size: config.max_buffer_size,
-      max_message_size_bytes: config.max_message_size_bytes,
-      overflow_behavior: Atom.to_string(config.overflow_behavior),
-      backpressure_status: backpressure_status,
-      backpressure_threshold: config.backpressure_threshold,
-      max_blocked_producers: config.max_blocked_producers,
-      queue_stats: queue_stats
-    }
-  end
-
-  @doc "The per-queue metrics maps for every queue seen so far."
-  def get_all_metrics do
-    queues = get_all_queues()
-
-    Enum.map(queues, fn queue_name ->
-      get_metrics(queue_name)
-    end)
-  end
-
-  @doc "The metrics map for channel `channel_name` (published/delivered/dropped)."
-  def get_channel_metrics(channel_name) do
-    published = get_counter({:channel_published, channel_name})
-    delivered = get_counter({:channel_delivered, channel_name})
-    dropped = get_counter({:channel_dropped, channel_name})
-
-    stats =
-      if Code.ensure_loaded?(Malachi.Channel) do
-        Malachi.Channel.get_stats(channel_name)
-      else
-        %{exists: false, subscribers: 0}
-      end
-
-    %{
-      channel: channel_name,
-      published: published,
-      delivered: delivered,
-      dropped: dropped,
-      subscribers: stats[:subscribers] || 0,
-      exists: stats[:exists] || false
-    }
-  end
-
-  @doc "The metrics maps for every channel seen so far."
-  def get_all_channel_metrics do
-    channels = get_all_channels()
-
-    Enum.map(channels, fn channel_name ->
-      get_channel_metrics(channel_name)
-    end)
-  end
-
   @doc "A snapshot of system-wide metrics (memory, processes, connections, auth) for the dashboard."
   def get_system_metrics do
     memory = :erlang.memory()
@@ -592,55 +468,6 @@ defmodule Malachi.Metrics do
     end
   end
 
-  defp get_gauge(key) do
-    # Gauges are stored as simple key-value pairs (not counters)
-    case :ets.lookup(@metrics_table, key) do
-      [{^key, value}] -> value
-      [] -> 0
-    end
-  end
-
-  defp get_latency_stats({:latency, queue_name}) do
-    count = get_counter({:latency_count, queue_name})
-
-    if count > 0 do
-      sum = get_counter({:latency_sum, queue_name})
-
-      min_val =
-        case :ets.lookup(@metrics_table, {:latency_min, queue_name}) do
-          [{_, val}] -> val
-          [] -> 0
-        end
-
-      max_val =
-        case :ets.lookup(@metrics_table, {:latency_max, queue_name}) do
-          [{_, val}] -> val
-          [] -> 0
-        end
-
-      %{
-        avg: div(sum, count),
-        min: min_val,
-        max: max_val,
-        count: count
-      }
-    else
-      %{avg: 0, min: 0, max: 0, count: 0}
-    end
-  end
-
-  defp get_all_queues do
-    :ets.match(@metrics_table, {{:enqueued, :"$1"}, :_})
-    |> Enum.map(fn [queue] -> queue end)
-    |> Enum.uniq()
-  end
-
-  defp get_all_channels do
-    :ets.match(@metrics_table, {{:channel_published, :"$1"}, :_})
-    |> Enum.map(fn [channel] -> channel end)
-    |> Enum.uniq()
-  end
-
   defp get_active_lockout_count do
     if Code.ensure_loaded?(LockoutManager) and Process.whereis(LockoutManager) do
       try do
@@ -677,13 +504,10 @@ defmodule Malachi.Metrics do
 
   defp take_snapshot do
     timestamp = System.system_time(:second)
-    metrics = get_all_metrics()
-    system = get_system_metrics()
 
     snapshot = %{
       timestamp: timestamp,
-      queues: metrics,
-      system: system
+      system: get_system_metrics()
     }
 
     :ets.insert(:malachi_metrics_history, {timestamp, snapshot})

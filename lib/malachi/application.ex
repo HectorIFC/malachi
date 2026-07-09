@@ -3,12 +3,11 @@ defmodule Malachi.Application do
   Main application supervisor for Malachi.
 
   Coordinates all core services including:
-  - Queue management and partitioning
+  - The NorthGuard log stack (topics/ranges/segments), single-node or replicated over `ra`
   - TCP/TLS server for client connections
   - Metrics collection and monitoring
   - Authentication and authorization
   - Web dashboard
-  - Message acknowledgment tracking
   """
   use Application
   require Logger
@@ -51,14 +50,8 @@ defmodule Malachi.Application do
 
     children =
       [
-        {Registry, keys: :unique, name: Malachi.QueueRegistry, partitions: System.schedulers_online()},
-        {Registry, keys: :unique, name: Malachi.ChannelRegistry},
-        {DynamicSupervisor, name: Malachi.QueueSupervisor, strategy: :one_for_one, max_children: 100_000},
-        {DynamicSupervisor, name: Malachi.ChannelSupervisor, strategy: :one_for_one, max_children: 100_000},
         # Increase max_children for Task.Supervisor to allow large parallel broadcasts
         {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
-        Malachi.PartitionManager,
-        Malachi.QueueConfig,
         Malachi.Metrics,
         # Audit logging (must start early for security event tracking)
         Malachi.AuditLog,
@@ -67,14 +60,13 @@ defmodule Malachi.Application do
         Malachi.MemoryMonitor,
         # Account lockout manager (must start before Auth)
         Malachi.Auth.LockoutManager,
-        # Input validation with ETS cache (must start before Queue/Channel creation)
+        # Input validation with ETS cache (must start before topic creation)
         Malachi.Validator,
         Malachi.RateLimiter,
         Malachi.ConnectionLimiter,
         # User persistence (must start before Auth to load persisted users into ETS)
         Malachi.Auth.UserStore,
         Malachi.Auth,
-        Malachi.AckManager,
         Malachi.ConnectionRegistry
         # NorthGuard log stack (reachable by clients via the log protocol actions). Single-node/
         # in-memory by default; with :log_cluster configured the control plane is replicated over `ra`

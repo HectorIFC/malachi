@@ -595,12 +595,23 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         Desacopla o dashboard dos getters de fila do `Metrics` (pré-requisito de B3b-iii). Testes de
         dashboard (status/rota) verdes (30); credo/dialyzer limpos. `security_xss_test` ficou stale
         (referencia o `escapeHtml`/nomes de fila removidos; ainda passa, é tautológico) — limpeza à parte.
-      - ⏳ **B3b-ii** — deletar os 6 módulos-núcleo (`queue`/`channel`/`consumer`/`ack_manager`/
-        `partition_manager`/`queue_config`) + `benchmark.ex` + `backpressure.ex`, remover as entradas de
-        supervisão (`QueueRegistry`/`ChannelRegistry`/`Queue`/`ChannelSupervisor`/`PartitionManager`/
-        `QueueConfig`/`AckManager`), tirar o uso de `Backpressure` do `metrics.ex`, e deletar/adaptar os
-        testes que referenciam os módulos removidos (puros de fila deletados; mistos de segurança/atom-safety
-        adaptados ao modelo de log ou reduzidos).
+      - ✅ **B3b-ii — deletar o núcleo do modelo de fila.** Removidos os 6 módulos-núcleo
+        (`queue`/`channel`/`consumer`/`ack_manager`/`partition_manager`/`queue_config`) + `benchmark.ex`
+        (superado por `bench/*.exs`) + `backpressure.ex`, e as 7 entradas de supervisão do `application.ex`
+        (`QueueRegistry`/`ChannelRegistry`/`Queue`/`ChannelSupervisor`/`PartitionManager`/`QueueConfig`/
+        `AckManager`). No `metrics.ex`, os **getters** que dependiam desses módulos saíram já aqui (forçado
+        pela compilação: `get_metrics`/`get_all_metrics`/`get_channel_metrics`/`get_all_channel_metrics` +
+        privados órfãos `get_gauge`/`get_latency_stats`/`get_all_queues`/`get_all_channels`; `take_snapshot`
+        agora captura só sistema) — os **contadores** puros de ETS (increment_*/record_latency/reset) ficam
+        para B3b-iii. Testes: deletados os puros de fila (queue/channel/consumer/ack_manager/
+        partition_manager/queue_config/integration/at_most_once/one_to_million/atom_exhaustion/
+        overflow_integration/backpressure + helpers mass_spawn/test_helpers); adaptados os mistos
+        (`application_test`/`malachimq_test` → apontam para o stack de log; `attack_simulation` → removidos
+        os 2 testes de fila, mantidos os de segurança; `atom_safety` → mantidos só Validator+AtomMonitor;
+        `metrics_test` → reduzido a system-metrics+history). Também removida a **duplicata stale**
+        `test/application_test.exs` (colidia com `test/malachi/application_test.exs` no mesmo módulo
+        `Malachi.ApplicationTest` — bug latente exposto pelo compilador paralelo). 783 testes, 0 falhas;
+        credo/dialyzer limpos (−23 arquivos).
       - ⏳ **B3b-iii** — remover do `metrics.ex` os contadores/getters de fila/canal já mortos
         (enqueued/processed/acked/nacked/channel_* + `get_all_metrics`/`get_all_channel_metrics`).
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram

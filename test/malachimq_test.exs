@@ -7,10 +7,9 @@ defmodule MalachiTest do
     end
 
     test "main modules are available" do
-      assert Code.ensure_loaded?(Malachi.Queue)
       assert Code.ensure_loaded?(Malachi.Auth)
-      assert Code.ensure_loaded?(Malachi.AckManager)
-      assert Code.ensure_loaded?(Malachi.PartitionManager)
+      assert Code.ensure_loaded?(Malachi.BrokerServer)
+      assert Code.ensure_loaded?(Malachi.LogApi)
     end
   end
 end

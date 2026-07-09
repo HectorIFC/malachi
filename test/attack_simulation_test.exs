@@ -267,25 +267,6 @@ defmodule Malachi.AttackSimulationTest do
   end
 
   describe "atom bomb attack" do
-    test "creating 1000 queues does not exhaust atom table" do
-      baseline = :erlang.system_info(:atom_count)
-
-      # Attack: create 1000 queues with unique names rapidly
-      for i <- 1..1000 do
-        name = "atom_bomb_#{:rand.uniform(10_000_000)}_#{i}"
-        Malachi.Queue.enqueue(name, "payload_#{i}")
-      end
-
-      after_attack = :erlang.system_info(:atom_count)
-      atom_increase = after_attack - baseline
-
-      # With anonymous ETS tables, atom count should not grow proportionally
-      # Allow small tolerance for incidental atoms (Logger, etc.)
-      assert atom_increase < 100,
-             "Atom bomb attack created #{atom_increase} atoms! " <>
-               "Baseline: #{baseline}, After: #{after_attack}"
-    end
-
     test "malicious queue names with special chars don't create atoms" do
       baseline = :erlang.system_info(:atom_count)
 
@@ -385,32 +366,6 @@ defmodule Malachi.AttackSimulationTest do
       successes = Enum.count(results, &match?({:ok, _}, &1))
       failures = Enum.count(results, &match?({:error, _}, &1))
       assert successes + failures == 100
-    end
-
-    test "concurrent queue creation is safe" do
-      queue_name = SecurityHelper.unique_queue_name("concurrent")
-
-      tasks =
-        for _ <- 1..50 do
-          Task.async(fn ->
-            Malachi.QueueConfig.create_queue(queue_name)
-          end)
-        end
-
-      results = Task.await_many(tasks, 10_000)
-
-      # All should return valid responses
-      assert Enum.all?(results, fn
-               {:ok, _} -> true
-               {:error, _} -> true
-               _ -> false
-             end)
-
-      # At least one should succeed
-      assert Enum.any?(results, &match?({:ok, _}, &1))
-
-      # Cleanup
-      Malachi.QueueConfig.delete_queue(queue_name, force: true)
     end
   end
 end
