@@ -646,6 +646,19 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         um erro e fechando. Teto configurável (`:max_frame_size`, default 16 MiB). Testes: frame gigante
         rejeitado (pós-auth e no handshake) sem bufferizar + servidor sobrevive; boundary (com cap reduzido:
         frame no teto processa, 1 byte acima rejeita). 793 testes, 0 falhas; credo/dialyzer limpos.
+      - ✅ **Remoção do `Malachi.Validator` órfão.** Feito o fix de DoS (o único hardening real que ele fazia
+        agora vive no lugar certo, o boundary do wire), o `Validator` inteiro estava morto — 7 funções com
+        **0 callers vivos**, um GenServer supervisionado com ETS que ninguém usava (o modelo de fila era o
+        único cliente; o caminho binário valida topic name no próprio `Metadata.valid_topic_name?`).
+        Deletados: `validator.ex` + sua entrada de supervisão; as 3 métricas de validação do `Metrics`
+        (`increment_validation_error`/`cache_hit`/`cache_miss`) + a seção `validation` de `get_system_metrics`;
+        e o config morto de runtime.exs (bloco de name/header validation do Validator + o bloco resource/
+        backpressure e `max_dynamic_*`, resquícios do modelo de fila — todas com 0 readers). Testes: deletados
+        os puros de Validator (`validator_test`, `injection_attack_test`, `input_fuzzing_test`); adaptados os
+        mistos (`atom_safety` → só AtomMonitor; `attack_simulation` → removido o teste de nome via Validator;
+        `security_performance_regression` → removidos os benchmarks de Validator, mantidos Auth/RateLimiter/
+        ConnectionLimiter/lockout). Cobertura viva intacta: o caminho binário já é fuzzado pelo
+        `binary_protocol_security_test`. 685 testes, 0 falhas; credo/dialyzer limpos (−4 arquivos).
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

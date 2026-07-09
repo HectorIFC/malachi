@@ -266,32 +266,6 @@ defmodule Malachi.AttackSimulationTest do
     end
   end
 
-  describe "atom bomb attack" do
-    test "malicious queue names with special chars don't create atoms" do
-      baseline = :erlang.system_info(:atom_count)
-
-      malicious_names = [
-        "queue:with:colons",
-        "queue/with/slashes",
-        "queue@with@ats",
-        "queue#with#hashes",
-        "queue$with$dollars",
-        "queue%with%percents"
-      ]
-
-      for name <- malicious_names do
-        # Some may be rejected by validator, that's fine
-        Malachi.Validator.validate_queue_name(name)
-      end
-
-      after_attack = :erlang.system_info(:atom_count)
-      atom_increase = after_attack - baseline
-
-      assert atom_increase < 20,
-             "Special character names created #{atom_increase} atoms"
-    end
-  end
-
   describe "connection exhaustion attack" do
     test "exceeding per-IP limit returns error" do
       ip = SecurityHelper.random_ip_string()

@@ -4,8 +4,8 @@ defmodule Malachi.Metrics do
   periodically-sampled system snapshot and its recent history.
 
   The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free) — rate-limit and
-  connection-limit blocks, validation cache/errors, auth failures and account lockouts, audit events,
-  dashboard-auth outcomes, and TLS handshakes; `get_system_metrics/0` reads the live BEAM snapshot
+  connection-limit blocks, auth failures and account lockouts, audit events, dashboard-auth outcomes, and
+  TLS handshakes; `get_system_metrics/0` reads the live BEAM snapshot
   (memory, processes, io) folded together with those counters, and `get_history/1` returns the recent
   snapshots. A counter is created on first touch, so callers never need to initialize one.
   """
@@ -35,40 +35,6 @@ defmodule Malachi.Metrics do
   """
   def increment_connection_limit_blocked do
     :ets.update_counter(@metrics_table, :connection_limit_blocked, {2, 1}, {:connection_limit_blocked, 0})
-    :ok
-  end
-
-  @doc """
-  Increment validation cache hit counter.
-  """
-  def increment_validation_cache_hit do
-    key = :validation_cache_hit
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Increment validation cache miss counter.
-  """
-  def increment_validation_cache_miss do
-    key = :validation_cache_miss
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Increment validation error counter.
-
-  Category can be:
-  - :invalid_queue_name
-  - :invalid_channel_name
-  - :payload_too_large
-  - :invalid_headers
-  - :other
-  """
-  def increment_validation_error(category) do
-    key = {:validation_error, category}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
@@ -216,17 +182,6 @@ defmodule Malachi.Metrics do
           dashboard_access: get_counter({:audit_event, :dashboard_access}),
           dashboard_login_success: get_counter({:audit_event, :dashboard_login_success}),
           dashboard_auth_failure: get_counter({:audit_event, :dashboard_auth_failure})
-        }
-      },
-      validation: %{
-        cache_hits: get_counter(:validation_cache_hit),
-        cache_misses: get_counter(:validation_cache_miss),
-        errors: %{
-          invalid_queue_name: get_counter({:validation_error, :invalid_queue_name}),
-          invalid_channel_name: get_counter({:validation_error, :invalid_channel_name}),
-          payload_too_large: get_counter({:validation_error, :payload_too_large}),
-          invalid_headers: get_counter({:validation_error, :invalid_headers}),
-          other: get_counter({:validation_error, :other})
         }
       },
       tls: %{

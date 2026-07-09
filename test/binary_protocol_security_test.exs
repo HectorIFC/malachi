@@ -2,7 +2,7 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   # Security surface of the binary Malachi.Wire log protocol over the real TCP server: authentication,
   # permissions, malformed frames, and fuzzing/robustness. Replaces the old JSON queue/channel protocol
   # security suites (removed in B3a) with coverage of the protocol that actually ships (B1b-ii). The
-  # underlying infra (Auth/RateLimiter/Validator/LockoutManager) keeps its own unit tests.
+  # underlying infra (Auth/RateLimiter/LockoutManager) keeps its own unit tests.
   use ExUnit.Case, async: false
 
   alias Malachi.Test.TCPHelper

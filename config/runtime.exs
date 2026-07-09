@@ -328,59 +328,6 @@ config :malachi,
      end)
 
 # ============================================================
-# Input Validation - Fixed limits (not configurable via environment)
-# ============================================================
-# These limits prevent injection attacks, atom table exhaustion,
-# and resource exhaustion. Values are hardcoded for security.
-
-config :malachi,
-  # Queue and channel name validation
-  max_queue_name_length: 255,
-  max_channel_name_length: 255,
-  strict_name_validation: true,
-  allow_reserved_names: false,
-
-  # Payload size limit (10MB)
-  max_payload_size: 10_485_760,
-
-  # Header validation
-  max_header_count: 50,
-  max_header_key_length: 128,
-  max_header_value_length: 1024,
-
-  # Validation log rate limiting (per error type)
-  validation_log_rate_limit_per_min: 10
-
-# ============================================================
-# Resource Management & Backpressure Configuration
-# ============================================================
-# Configures message size limits, buffer limits, overflow behaviors,
-# and backpressure thresholds for queues.
-
-config :malachi,
-  # Message size limits (1MB default)
-  default_max_message_size_bytes: parse_int.(System.get_env("MALACHIMQ_MAX_MESSAGE_SIZE"), 1_048_576),
-
-  # Buffer limits per queue (10,000 messages default)
-  default_max_buffer_size: parse_int.(System.get_env("MALACHIMQ_MAX_BUFFER_SIZE"), 10_000),
-
-  # Overflow behavior: "drop_newest" | "drop_oldest" | "reject" | "block"
-  default_overflow_behavior: System.get_env("MALACHIMQ_OVERFLOW_BEHAVIOR") || "drop_newest",
-
-  # Backpressure threshold (0.8 = 80% buffer utilization)
-  default_backpressure_threshold: parse_float.(System.get_env("MALACHIMQ_BACKPRESSURE_THRESHOLD"), 0.8),
-
-  # Block timeout for :block overflow strategy (5 seconds)
-  default_block_timeout_ms: parse_int.(System.get_env("MALACHIMQ_BLOCK_TIMEOUT_MS"), 5_000),
-
-  # Maximum number of blocked producers per queue (prevents memory leak)
-  default_max_blocked_producers: parse_int.(System.get_env("MALACHIMQ_MAX_BLOCKED_PRODUCERS"), 1_000),
-
-  # Update excess threshold for runtime config changes (50%)
-  # Allows updates when buffer excess is within this threshold
-  update_excess_threshold: parse_float.(System.get_env("MALACHIMQ_UPDATE_EXCESS_THRESHOLD"), 0.5)
-
-# ============================================================
 # Atom & Memory Monitoring Configuration
 # ============================================================
 # Prevents atom table exhaustion and monitors system memory.
@@ -395,11 +342,7 @@ config :malachi,
   # Memory monitoring
   memory_check_interval_ms: parse_int.(System.get_env("MALACHIMQ_MEMORY_CHECK_INTERVAL"), 30_000),
   gc_threshold_mb: parse_int.(System.get_env("MALACHIMQ_GC_THRESHOLD_MB"), 500),
-  auto_gc_enabled: System.get_env("MALACHIMQ_AUTO_GC") != "false",
-
-  # Resource limits (prevent atom exhaustion via dynamic queue/channel creation)
-  max_dynamic_queues: parse_int.(System.get_env("MALACHIMQ_MAX_DYNAMIC_QUEUES"), 10_000),
-  max_dynamic_channels: parse_int.(System.get_env("MALACHIMQ_MAX_DYNAMIC_CHANNELS"), 1_000)
+  auto_gc_enabled: System.get_env("MALACHIMQ_AUTO_GC") != "false"
 
 # ============================================================
 # Production Security Warnings

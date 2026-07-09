@@ -60,8 +60,6 @@ defmodule Malachi.Application do
         Malachi.MemoryMonitor,
         # Account lockout manager (must start before Auth)
         Malachi.Auth.LockoutManager,
-        # Input validation with ETS cache (must start before topic creation)
-        Malachi.Validator,
         Malachi.RateLimiter,
         Malachi.ConnectionLimiter,
         # User persistence (must start before Auth to load persisted users into ETS)
