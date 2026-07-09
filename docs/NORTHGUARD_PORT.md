@@ -580,6 +580,29 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         E2e via TCP (`log_streaming_test`): backlog no subscribe + push num produce de outra conexão; a
         janela limita in-flight até o ack devolver crédito; `subscribe` sem `:consume` recebe erro (não vira
         stream). Dialyzer/credo limpos; 385 testes verdes.
+    - 🚧 **B3b — deletar o modelo de fila legado (sub-fatiado; ordem forçada pelas deps de compilação:
+      callers antes de callees).** O modelo (queues/channels) está **morto no caminho vivo** — nada fora
+      dos próprios módulos + periféricos (metrics/dashboard/backpressure/benchmark/application) chama
+      `Queue`/`Channel`/`Consumer`/etc. Decisão do dashboard: **aparar para sistema-só** (1A), não remover
+      (preserva o servidor HTTP + auth + painel de sistema/TLS, model-agnostic; painel NorthGuard de
+      topics/streams fica para depois).
+      - ✅ **B3b-i — aparar o dashboard.** `dashboard.ex` deixa de renderizar/buscar filas/canais:
+        `serve_metrics`/`stream_metrics` emitem só `%{system: get_system_metrics()}` (sem enriquecimento
+        via `ConnectionRegistry`); removidos os cards HTML de Queues/Channels, o JS de fila/canal
+        (`renderQueues`/`renderChannels`/`renderConnectionList`/`changeQueuePage`/`escapeHtml`/`formatTime`),
+        o CSS morto (queue-card/channel-card/pressure/utilization/connection/pagination) e o alias órfão
+        `ConnectionRegistry`. As rotas (`/`, `/metrics`, `/stream`, `/rate_limits`, auth) ficam intactas.
+        Desacopla o dashboard dos getters de fila do `Metrics` (pré-requisito de B3b-iii). Testes de
+        dashboard (status/rota) verdes (30); credo/dialyzer limpos. `security_xss_test` ficou stale
+        (referencia o `escapeHtml`/nomes de fila removidos; ainda passa, é tautológico) — limpeza à parte.
+      - ⏳ **B3b-ii** — deletar os 6 módulos-núcleo (`queue`/`channel`/`consumer`/`ack_manager`/
+        `partition_manager`/`queue_config`) + `benchmark.ex` + `backpressure.ex`, remover as entradas de
+        supervisão (`QueueRegistry`/`ChannelRegistry`/`Queue`/`ChannelSupervisor`/`PartitionManager`/
+        `QueueConfig`/`AckManager`), tirar o uso de `Backpressure` do `metrics.ex`, e deletar/adaptar os
+        testes que referenciam os módulos removidos (puros de fila deletados; mistos de segurança/atom-safety
+        adaptados ao modelo de log ou reduzidos).
+      - ⏳ **B3b-iii** — remover do `metrics.ex` os contadores/getters de fila/canal já mortos
+        (enqueued/processed/acked/nacked/channel_* + `get_all_metrics`/`get_all_channel_metrics`).
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
