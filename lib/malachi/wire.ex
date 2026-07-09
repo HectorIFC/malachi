@@ -28,12 +28,14 @@ defmodule Malachi.Wire do
   @produce 2
   @fetch 3
   @commit 4
+  @subscribe 5
+  @stream_ack 6
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..4
+  @type api_key :: 0..6
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -42,6 +44,8 @@ defmodule Malachi.Wire do
   def produce_key, do: @produce
   def fetch_key, do: @fetch
   def commit_key, do: @commit
+  def subscribe_key, do: @subscribe
+  def stream_ack_key, do: @stream_ack
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -152,6 +156,34 @@ defmodule Malachi.Wire do
     {group, rest} = take_str(rest)
     {cursor, <<>>} = take_str(rest)
     {topic, group, cursor}
+  end
+
+  # Streaming (B2): subscribe opens a server-push stream for a consumer `group`, bounded by a credit
+  # `window` (max in-flight records) and a per-push `max` batch size. The server then pushes records as
+  # ordinary success responses tagged with the subscribe's correlation id, each carrying an
+  # `encode_fetch_resp/2` payload (records + the next opaque cursor).
+  def encode_subscribe_req(topic, group, window, max) do
+    <<put_str(topic)::binary, put_str(group)::binary, window::32, max::32>>
+  end
+
+  def decode_subscribe_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, <<window::32, max::32>>} = take_str(rest)
+    {topic, group, window, max}
+  end
+
+  # stream_ack durably commits `group`'s position at `cursor` and returns `count` records of window
+  # credit (unblocking further pushes). Fire-and-forget: the server sends no response, the credit shows
+  # up as more pushes.
+  def encode_stream_ack_req(topic, group, cursor, count) do
+    <<put_str(topic)::binary, put_str(group)::binary, put_str(cursor)::binary, count::32>>
+  end
+
+  def decode_stream_ack_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {cursor, <<count::32>>} = take_str(rest)
+    {topic, group, cursor, count}
   end
 
   # ---- wire record (no offset; key/value/headers/timestamp only) ----

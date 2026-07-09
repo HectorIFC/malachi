@@ -108,6 +108,39 @@ defmodule Malachi.LogApi do
     end
   end
 
+  @doc """
+  Opens a streaming subscription: registers the **calling process** as a push subscriber of `topic` for
+  consumer `group`, bounded by a credit `window` (max in-flight records) and a `max` per-push batch. The
+  broker resumes from the group's committed position, pushes an initial backlog, and then pushes new
+  records on produce as `{:log_records, topic, records, positions}` messages to the caller. Returns `:ok`.
+  """
+  @spec subscribe(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer(), pos_integer()) :: :ok
+  def subscribe(server, topic, group, window, max) do
+    BrokerServer.subscribe(server, topic, group, window, max)
+  end
+
+  @doc """
+  Acks `count` streamed records for `group` at `cursor`: durably commits the position (at-least-once) and
+  returns `count` records of window credit, unblocking further pushes. Returns `:ok`, or
+  `{:error, :invalid_cursor}` for a bad token.
+  """
+  @spec stream_ack(GenServer.server(), Metadata.topic_name(), Metadata.group(), cursor(), non_neg_integer()) ::
+          :ok | {:error, term()}
+  def stream_ack(server, topic, group, cursor, count) do
+    case decode_cursor(cursor) do
+      {:ok, positions} -> BrokerServer.stream_ack(server, topic, group, positions, count)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Encodes internal consume `positions` into an opaque cursor. Public because the streaming push path
+  (the connection forwarding `{:log_records, ...}`) must turn the pushed positions into a client cursor,
+  the same token `fetch`/`fetch_group` return.
+  """
+  @spec encode_cursor(map()) :: cursor()
+  def encode_cursor(positions), do: Base.url_encode64(:erlang.term_to_binary(positions))
+
   defp do_fetch(server, topic, positions, max, wait_ms) do
     {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
     {records, encode_cursor(next_positions)}
@@ -144,8 +177,6 @@ defmodule Malachi.LogApi do
   defp headers(_record), do: []
 
   # --- opaque cursor ---
-
-  defp encode_cursor(positions), do: Base.url_encode64(:erlang.term_to_binary(positions))
 
   defp decode_cursor(nil), do: {:ok, %{}}
   defp decode_cursor(:start), do: {:ok, %{}}

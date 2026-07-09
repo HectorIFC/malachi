@@ -12,10 +12,14 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.LogApi
   alias Malachi.Wire
 
-  @doc "Processes one request frame body: decode, dispatch, and send a response frame. Returns `:ok`."
-  @spec process_frame(term(), binary(), map(), atom()) :: :ok
+  @doc """
+  Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. A
+  `subscribe` frame is the exception — it registers a push stream and returns `{:stream, correlation_id}`
+  (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
+  """
+  @spec process_frame(term(), binary(), map(), atom()) :: :ok | {:stream, non_neg_integer()}
   def process_frame(socket, frame_body, session, transport) do
-    frame =
+    result =
       case frame_body do
         # header readable → the correlation id is known, so an error still matches the request
         <<_api_key::16, correlation_id::32, _rest::binary>> ->
@@ -32,8 +36,40 @@ defmodule Malachi.TCPProtocol do
           Wire.encode_error(0, :malformed_request)
       end
 
-    transport.send(socket, frame)
-    :ok
+    case result do
+      {:stream, _sub_corr} = stream ->
+        stream
+
+      frame when is_binary(frame) ->
+        transport.send(socket, frame)
+        :ok
+    end
+  end
+
+  @doc """
+  Processes one client frame while the connection is in streaming mode. The only inbound frame is a
+  `stream_ack` (applied for its window credit + durable commit); any other frame gets an error response
+  and the stream continues. Returns `:ok`. A malformed frame is answered, not fatal — the stream ends
+  only when the socket closes (the broker then drops the subscriber via the process `:DOWN`).
+  """
+  @spec process_stream_frame(term(), binary(), atom()) :: :ok
+  def process_stream_frame(socket, frame_body, transport) do
+    {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
+
+    if api_key == Wire.stream_ack_key() do
+      {topic, group, cursor, count} = Wire.decode_stream_ack_req(payload)
+      # the subscription already gated :consume; the session's permissions are immutable, so an ack
+      # here is necessarily authorized. Fire-and-forget: credit comes back as more pushes.
+      LogApi.stream_ack(Malachi.LogBroker, topic, group, cursor, count)
+      :ok
+    else
+      transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
+      :ok
+    end
+  rescue
+    _malformed ->
+      transport.send(socket, Wire.encode_error(0, :malformed_request))
+      :ok
   end
 
   # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
@@ -43,8 +79,20 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.produce_key() -> produce(correlation_id, payload, session)
       api_key == Wire.fetch_key() -> fetch(correlation_id, payload, session)
       api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
+      api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
       true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
+  end
+
+  # Registers the caller as a push subscriber and signals the acceptor to enter streaming mode. Bounds the
+  # client-supplied window/batch. On a permission failure returns an error frame (the connection stays in
+  # request/response mode).
+  defp subscribe(correlation_id, payload, session) do
+    with_permission(session, :consume, correlation_id, fn ->
+      {topic, group, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
+      :ok = LogApi.subscribe(Malachi.LogBroker, topic, group, stream_window(window_raw), fetch_max(max_raw))
+      {:stream, correlation_id}
+    end)
   end
 
   defp create_topic(correlation_id, payload, session) do
@@ -107,7 +155,9 @@ defmodule Malachi.TCPProtocol do
   end
 
   defp ok_or_error(correlation_id, :ok, ok_payload), do: Wire.encode_ok(correlation_id, ok_payload)
-  defp ok_or_error(correlation_id, {:error, reason}, _ok_payload), do: Wire.encode_error(correlation_id, normalize(reason))
+
+  defp ok_or_error(correlation_id, {:error, reason}, _ok_payload),
+    do: Wire.encode_error(correlation_id, normalize(reason))
 
   # error reasons must be an atom or string on the wire; tuple reasons (e.g. {:unroutable, key}) are inspected.
   defp normalize(reason) when is_atom(reason) or is_binary(reason), do: reason
@@ -119,4 +169,8 @@ defmodule Malachi.TCPProtocol do
 
   defp fetch_wait(wait) when is_integer(wait) and wait > 0, do: min(wait, 30_000)
   defp fetch_wait(_wait), do: 0
+
+  # Bound the streaming credit window (max in-flight records) the client may request.
+  defp stream_window(window) when is_integer(window) and window > 0, do: min(window, 10_000)
+  defp stream_window(_window), do: 100
 end

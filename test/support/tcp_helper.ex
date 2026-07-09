@@ -91,6 +91,41 @@ defmodule Malachi.Test.TCPHelper do
     end
   end
 
+  # ---- streaming (B2) helpers ----
+
+  @doc "Sends a subscribe frame (opens a push stream); no immediate response is expected."
+  def subscribe(socket, topic, group, window, max, correlation_id) do
+    :ok =
+      :gen_tcp.send(
+        socket,
+        Wire.encode_request(Wire.subscribe_key(), correlation_id, Wire.encode_subscribe_req(topic, group, window, max))
+      )
+  end
+
+  @doc """
+  Reads one server push and asserts it carries `correlation_id` (the subscribe's). Returns
+  `{records, next_cursor}` decoded from the fetch-response payload.
+  """
+  def recv_push(socket, correlation_id, opts \\ []) do
+    {:ok, frame_body} = recv_frame(socket, opts)
+    {^correlation_id, error_code, payload} = Wire.decode_response(frame_body)
+    ^error_code = Wire.ok_code()
+    Wire.decode_fetch_resp(payload)
+  end
+
+  @doc "Sends a stream_ack frame (durable commit + window credit); fire-and-forget, no response."
+  def stream_ack(socket, topic, group, cursor, count, correlation_id) do
+    :ok =
+      :gen_tcp.send(
+        socket,
+        Wire.encode_request(
+          Wire.stream_ack_key(),
+          correlation_id,
+          Wire.encode_stream_ack_req(topic, group, cursor, count)
+        )
+      )
+  end
+
   @doc """
   Creates a test socket listener for local testing.
 

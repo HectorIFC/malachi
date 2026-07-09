@@ -564,9 +564,22 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         backlog no subscribe + push no produce; a janela limita in-flight até o ack; o ack commita
         durável; nova subscrição do grupo retoma da posição commitada; subscriber morto é removido via
         `:DOWN`. Dialyzer/credo limpos; broker+log e2e verdes.
-      - ⏳ **B2-b (próximo)** — fiação binária: `api_key` de `subscribe`/`ack` no `Wire`, o
-        `receive_active_loop` reintroduzido no `tcp_acceptor` (full-duplex: recebe acks do cliente E
-        encaminha `{:log_records}` como frames de push), decode do cursor opaco → positions. E2e via TCP.
+      - ✅ **B2-b — fiação binária do streaming.** `Wire` ganha `api_key` `subscribe` (5) e `stream_ack`
+        (6) + codecs (`encode/decode_subscribe_req` = topic/group/window/max; `encode/decode_stream_ack_req`
+        = topic/group/cursor/count); o **push reusa `encode_fetch_resp`** (records + cursor opaco). Decisões
+        (defaults técnicos naturais): **um stream por conexão** (o `subscribe` toma a conexão), **push =
+        response com o `correlation_id` do subscribe** (o cliente associa aquele corr_id ao stream, à la
+        gRPC streaming), **ack fire-and-forget** (sem response — o "resultado" são mais pushes). O
+        `TCPProtocol.process_frame` devolve `{:stream, corr}` no `subscribe` (após gate `:consume` +
+        registro via `LogApi.subscribe`); o `tcp_acceptor` então troca a conexão para **active mode** e
+        entra no `stream_loop` full-duplex: um `receive` trata os `{:log_records, ...}` do broker
+        (encaminhados como frames de push — `LogApi.encode_cursor` positions→cursor, agora público) **e** os
+        frames de ack do cliente (`process_stream_frame/3` → `LogApi.stream_ack`, decode cursor→positions).
+        Sem frame de unsubscribe: a conexão fechada mata o processo → `:DOWN` no `BrokerServer` remove o
+        subscriber (o cleanup do B2-a). Window/batch são limitados server-side (`stream_window`/`fetch_max`).
+        E2e via TCP (`log_streaming_test`): backlog no subscribe + push num produce de outra conexão; a
+        janela limita in-flight até o ack devolver crédito; `subscribe` sem `:consume` recebe erro (não vira
+        stream). Dialyzer/credo limpos; 385 testes verdes.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

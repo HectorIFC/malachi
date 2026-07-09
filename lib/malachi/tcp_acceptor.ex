@@ -13,6 +13,7 @@ defmodule Malachi.TCPAcceptor do
   require Logger
   alias Malachi.Auth.LockoutManager
   alias Malachi.I18n
+  alias Malachi.LogApi
   alias Malachi.TCPProtocol
   alias Malachi.Wire
 
@@ -257,30 +258,35 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Reads request frames and dispatches each; loops until the socket closes or errors. (B2 will add a
-  # streaming subscribe mode on top of this.)
+  # Reads request frames and dispatches each; loops until the socket closes or errors. A `subscribe` frame
+  # switches the connection into `stream_loop/2` (server-push streaming) for the rest of its life.
   defp receive_loop(%{socket: socket, transport: transport, buffer: buffer} = state) do
     recv_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
     case recv_data(socket, transport, 0, recv_timeout) do
       {:ok, data} ->
-        remaining = process_buffered_frames(buffer <> data, state)
-        receive_loop(%{state | buffer: remaining})
+        case process_buffered_frames(buffer <> data, state) do
+          {:more, remaining} -> receive_loop(%{state | buffer: remaining})
+          {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
+        end
 
       {:error, _} ->
         close_socket(socket, transport)
     end
   end
 
-  # Processes each complete frame and returns the trailing partial data (kept in the buffer).
+  # Processes complete frames until the buffer is exhausted (`{:more, trailing}`) or a frame opens a
+  # stream (`{:stream, sub_corr, trailing}`, carrying any frames buffered after the subscribe).
   defp process_buffered_frames(buffer, state) do
     case Wire.decode_frame(buffer) do
       {:ok, frame_body, rest} ->
-        process_authenticated(frame_body, state)
-        process_buffered_frames(rest, state)
+        case process_authenticated(frame_body, state) do
+          :ok -> process_buffered_frames(rest, state)
+          {:stream, sub_corr} -> {:stream, sub_corr, rest}
+        end
 
       :incomplete ->
-        buffer
+        {:more, buffer}
     end
   end
 
@@ -288,6 +294,52 @@ defmodule Malachi.TCPAcceptor do
   defp process_authenticated(frame_body, %{socket: socket, session: session, transport: transport}) do
     TCPProtocol.process_frame(socket, frame_body, session, transport)
   end
+
+  # A subscribed connection becomes a one-stream duplex: switched to active mode so a single `receive`
+  # handles both the broker's `{:log_records, ...}` pushes (forwarded to the client as response frames
+  # tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
+  # alongside the subscribe are drained first. The stream ends when the socket closes; the broker drops
+  # the subscriber via the connection process's `:DOWN`.
+  defp stream_loop(%{buffer: buffer} = state, sub_corr) do
+    {:more, remaining} = handle_stream_buffer(buffer, state)
+    arm_active(state)
+    stream_recv(%{state | buffer: remaining}, sub_corr)
+  end
+
+  defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
+    receive do
+      {:log_records, _topic, records, positions} ->
+        frame = Wire.encode_ok(sub_corr, Wire.encode_fetch_resp(records, LogApi.encode_cursor(positions)))
+        transport.send(socket, frame)
+        stream_recv(state, sub_corr)
+
+      {tag, ^socket, data} when tag in [:tcp, :ssl] ->
+        {:more, remaining} = handle_stream_buffer(buffer <> data, state)
+        arm_active(state)
+        stream_recv(%{state | buffer: remaining}, sub_corr)
+
+      {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
+        close_socket(socket, transport)
+
+      {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
+        close_socket(socket, transport)
+    end
+  end
+
+  # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the
+  # trailing partial data to keep buffered.
+  defp handle_stream_buffer(buffer, %{socket: socket, transport: transport} = state) do
+    case Wire.decode_frame(buffer) do
+      {:ok, frame_body, rest} ->
+        TCPProtocol.process_stream_frame(socket, frame_body, transport)
+        handle_stream_buffer(rest, state)
+
+      :incomplete ->
+        {:more, buffer}
+    end
+  end
+
+  defp arm_active(%{socket: socket, transport: transport}), do: set_socket_opts(socket, transport, active: :once)
 
   defp close_socket(socket, :ssl), do: :ssl.close(socket)
   defp close_socket(socket, :gen_tcp), do: :gen_tcp.close(socket)
