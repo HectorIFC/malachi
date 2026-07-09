@@ -5,6 +5,9 @@ config :malachi,
   dashboard_port: 4041,
   partition_multiplier: 100,
   locale: "en_US",
+  # Largest request frame the binary protocol will accept (bytes). A declared length beyond this is
+  # rejected at the length prefix, before the body is buffered, bounding per-connection memory.
+  max_frame_size: 16_777_216,
   auth_timeout_ms: 10_000,
   session_timeout_ms: 3_600_000,
   session_cleanup_interval_ms: 60_000,

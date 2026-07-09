@@ -70,6 +70,16 @@ defmodule Malachi.Wire do
   def decode_frame(<<len::32, body::binary-size(len), rest::binary>>), do: {:ok, body, rest}
   def decode_frame(_partial), do: :incomplete
 
+  @doc """
+  Like `decode_frame/1` but bounds the frame: as soon as the 4-byte length prefix is readable, a declared
+  length over `max_size` is rejected with `{:error, :frame_too_large}` — **before** the body is buffered —
+  so a hostile length prefix cannot force the server to accumulate unbounded memory.
+  """
+  @spec decode_frame(binary(), non_neg_integer()) ::
+          {:ok, binary(), binary()} | :incomplete | {:error, :frame_too_large}
+  def decode_frame(<<len::32, _::binary>>, max_size) when len > max_size, do: {:error, :frame_too_large}
+  def decode_frame(buffer, _max_size), do: decode_frame(buffer)
+
   # ---- request / response envelope ----
 
   @spec encode_request(api_key(), non_neg_integer(), binary()) :: binary()

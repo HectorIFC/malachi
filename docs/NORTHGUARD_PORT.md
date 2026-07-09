@@ -636,6 +636,16 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         `/topic` (detalhe + 404); functional-check do fluxo on-demand em node (fetch encodado, loading,
         render pós-fetch, escaping). Assim o tradeoff do stream-full sumiu: zero tráfego de segment a não ser
         no topic expandido. 790 testes, 0 falhas; credo/dialyzer limpos.
+      - ✅ **Cap de tamanho de frame no protocolo binário (fix de DoS).** Achado ao investigar o `Validator`
+        órfão: o caminho binário **não tinha teto de frame** — o enforcement de tamanho saiu junto com o
+        modelo de fila no B3b e o binário nunca o replicou. O `tcp_acceptor` acumulava `buffer <> data` até
+        `Wire.decode_frame` casar (`<<len::32, body::binary-size(len)>>`, sem teto), então um cliente podia
+        anunciar `len = 4 GB` e forçar buffer ilimitado. Novo `Wire.decode_frame/2` rejeita
+        `{:error, :frame_too_large}` **assim que os 4 bytes do length-prefix chegam** (antes de bufferizar o
+        corpo); o acceptor aplica em todos os 3 pontos de leitura (auth, request loop, streaming), respondendo
+        um erro e fechando. Teto configurável (`:max_frame_size`, default 16 MiB). Testes: frame gigante
+        rejeitado (pós-auth e no handshake) sem bufferizar + servidor sobrevive; boundary (com cap reduzido:
+        frame no teto processa, 1 byte acima rejeita). 793 testes, 0 falhas; credo/dialyzer limpos.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

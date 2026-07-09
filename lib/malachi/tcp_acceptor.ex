@@ -180,9 +180,16 @@ defmodule Malachi.TCPAcceptor do
 
     case recv_data(socket, transport, 0, recv_timeout) do
       {:ok, data} ->
-        case Wire.decode_frame(buffer <> data) do
-          {:ok, frame_body, rest} -> process_auth_frame(frame_body, %{state | buffer: rest})
-          :incomplete -> authenticate_client(%{state | buffer: buffer <> data})
+        case Wire.decode_frame(buffer <> data, max_frame_size()) do
+          {:ok, frame_body, rest} ->
+            process_auth_frame(frame_body, %{state | buffer: rest})
+
+          :incomplete ->
+            authenticate_client(%{state | buffer: buffer <> data})
+
+          {:error, :frame_too_large} ->
+            send_oversized_error(socket, transport)
+            {:error, :frame_too_large}
         end
 
       {:error, _} ->
@@ -268,6 +275,7 @@ defmodule Malachi.TCPAcceptor do
         case process_buffered_frames(buffer <> data, state) do
           {:more, remaining} -> receive_loop(%{state | buffer: remaining})
           {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
+          {:close, _reason} -> close_oversized(state)
         end
 
       {:error, _} ->
@@ -275,10 +283,11 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Processes complete frames until the buffer is exhausted (`{:more, trailing}`) or a frame opens a
-  # stream (`{:stream, sub_corr, trailing}`, carrying any frames buffered after the subscribe).
+  # Processes complete frames until the buffer is exhausted (`{:more, trailing}`), a frame opens a stream
+  # (`{:stream, sub_corr, trailing}`, carrying any frames buffered after the subscribe), or an oversized
+  # frame is seen (`{:close, reason}`).
   defp process_buffered_frames(buffer, state) do
-    case Wire.decode_frame(buffer) do
+    case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         case process_authenticated(frame_body, state) do
           :ok -> process_buffered_frames(rest, state)
@@ -287,6 +296,9 @@ defmodule Malachi.TCPAcceptor do
 
       :incomplete ->
         {:more, buffer}
+
+      {:error, :frame_too_large} ->
+        {:close, :frame_too_large}
     end
   end
 
@@ -301,9 +313,14 @@ defmodule Malachi.TCPAcceptor do
   # alongside the subscribe are drained first. The stream ends when the socket closes; the broker drops
   # the subscriber via the connection process's `:DOWN`.
   defp stream_loop(%{buffer: buffer} = state, sub_corr) do
-    {:more, remaining} = handle_stream_buffer(buffer, state)
-    arm_active(state)
-    stream_recv(%{state | buffer: remaining}, sub_corr)
+    case handle_stream_buffer(buffer, state) do
+      {:more, remaining} ->
+        arm_active(state)
+        stream_recv(%{state | buffer: remaining}, sub_corr)
+
+      {:close, _reason} ->
+        close_oversized(state)
+    end
   end
 
   defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
@@ -314,9 +331,14 @@ defmodule Malachi.TCPAcceptor do
         stream_recv(state, sub_corr)
 
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->
-        {:more, remaining} = handle_stream_buffer(buffer <> data, state)
-        arm_active(state)
-        stream_recv(%{state | buffer: remaining}, sub_corr)
+        case handle_stream_buffer(buffer <> data, state) do
+          {:more, remaining} ->
+            arm_active(state)
+            stream_recv(%{state | buffer: remaining}, sub_corr)
+
+          {:close, _reason} ->
+            close_oversized(state)
+        end
 
       {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
         close_socket(socket, transport)
@@ -327,16 +349,32 @@ defmodule Malachi.TCPAcceptor do
   end
 
   # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the
-  # trailing partial data to keep buffered.
+  # trailing partial data to keep buffered, or `{:close, reason}` on an oversized frame.
   defp handle_stream_buffer(buffer, %{socket: socket, transport: transport} = state) do
-    case Wire.decode_frame(buffer) do
+    case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         TCPProtocol.process_stream_frame(socket, frame_body, transport)
         handle_stream_buffer(rest, state)
 
       :incomplete ->
         {:more, buffer}
+
+      {:error, :frame_too_large} ->
+        {:close, :frame_too_large}
     end
+  end
+
+  # The largest request frame the server will accept. A declared length beyond this is rejected as soon as
+  # the length prefix arrives, bounding the memory a single connection can force the server to buffer.
+  defp max_frame_size, do: Application.get_env(:malachi, :max_frame_size, 16_777_216)
+
+  # Answers an oversized frame with a single error response (no correlation id is trustworthy on a hostile
+  # frame, so 0), best-effort — the caller then closes the connection.
+  defp send_oversized_error(socket, transport), do: transport.send(socket, Wire.encode_error(0, :frame_too_large))
+
+  defp close_oversized(%{socket: socket, transport: transport}) do
+    send_oversized_error(socket, transport)
+    close_socket(socket, transport)
   end
 
   defp arm_active(%{socket: socket, transport: transport}), do: set_socket_opts(socket, transport, active: :once)
