@@ -1,11 +1,13 @@
 defmodule Malachi.Metrics do
   @moduledoc """
-  Real-time metrics: per-queue and per-channel counters kept in ETS (atomic `update_counter`), plus a
-  periodically-sampled system snapshot.
+  Real-time operational and security metrics kept in ETS (atomic `update_counter`), plus a
+  periodically-sampled system snapshot and its recent history.
 
-  The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free); the `get_*`
-  functions read them back as maps for the dashboard and API. A counter is created on first touch, so
-  callers never need to initialize one.
+  The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free) — rate-limit and
+  connection-limit blocks, validation cache/errors, auth failures and account lockouts, audit events,
+  dashboard-auth outcomes, and TLS handshakes; `get_system_metrics/0` reads the live BEAM snapshot
+  (memory, processes, io) folded together with those counters, and `get_history/1` returns the recent
+  snapshots. A counter is created on first touch, so callers never need to initialize one.
   """
   use GenServer
   require Logger
@@ -17,123 +19,6 @@ defmodule Malachi.Metrics do
   @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
-  end
-
-  @doc "Increments the count of messages enqueued to `queue_name`."
-  def increment_enqueued(queue_name) do
-    key = {:enqueued, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the count of messages processed (delivered) for `queue_name`."
-  def increment_processed(queue_name) do
-    key = {:processed, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the error count for `queue_name`."
-  def increment_errors(queue_name) do
-    key = {:errors, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the acknowledged-message count for `queue_name`."
-  def increment_acked(queue_name) do
-    key = {:acked, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the negatively-acknowledged (nack) count for `queue_name`."
-  def increment_nacked(queue_name) do
-    key = {:nacked, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the retried-message count for `queue_name`."
-  def increment_retried(queue_name) do
-    key = {:retried, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the dead-lettered-message count for `queue_name`."
-  def increment_dead_lettered(queue_name) do
-    key = {:dead_lettered, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Increments the count of messages published to channel `channel_name`."
-  def increment_channel_published(channel_name) do
-    key = {:channel_published, channel_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc "Adds `count` (default 1) to the delivered-message count for channel `channel_name`."
-  def increment_channel_delivered(channel_name, count \\ 1) do
-    key = {:channel_delivered, channel_name}
-    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
-    :ok
-  end
-
-  @doc "Adds `count` (default 1) to the dropped-message count for channel `channel_name`."
-  def increment_channel_dropped(channel_name, count \\ 1) do
-    key = {:channel_dropped, channel_name}
-    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Increment rejected messages counter (buffer full with :reject strategy).
-  """
-  def increment_rejected(queue_name) do
-    key = {:rejected, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Increment dropped messages counter (:drop_oldest or :drop_newest strategy).
-  """
-  def increment_dropped(queue_name) do
-    key = {:dropped, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Set current count of blocked producers (gauge metric).
-  This represents the current number of producers waiting for buffer space.
-  """
-  def set_blocked_producers_count(queue_name, count) do
-    key = {:blocked_producers_count, queue_name}
-    :ets.insert(@metrics_table, {key, count})
-    :ok
-  end
-
-  @doc """
-  Increment total producers blocked counter (cumulative).
-  This is a historical counter of how many producers have been blocked.
-  """
-  def increment_total_producers_blocked(queue_name) do
-    key = {:total_producers_blocked, queue_name}
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
-    :ok
-  end
-
-  @doc """
-  Record buffer utilization percentage for a queue.
-  """
-  def record_buffer_utilization(queue_name, utilization_pct) do
-    key = {:buffer_utilization_pct, queue_name}
-    :ets.insert(@metrics_table, {key, utilization_pct})
-    :ok
   end
 
   @doc """
@@ -277,34 +162,6 @@ defmodule Malachi.Metrics do
     :ok
   end
 
-  @doc "Records a processing `latency_us` (microseconds) sample for `queue_name`, updating its latency aggregates."
-  def record_latency(queue_name, latency_us) do
-    count_key = {:latency_count, queue_name}
-    sum_key = {:latency_sum, queue_name}
-    min_key = {:latency_min, queue_name}
-    max_key = {:latency_max, queue_name}
-
-    # Atomic counter operations
-    :ets.update_counter(@metrics_table, count_key, {2, 1}, {count_key, 0})
-    :ets.update_counter(@metrics_table, sum_key, {2, latency_us}, {sum_key, 0})
-
-    # Min - best effort with insert_new for initial value
-    case :ets.lookup(@metrics_table, min_key) do
-      [] -> :ets.insert_new(@metrics_table, {min_key, latency_us})
-      [{^min_key, current}] when latency_us < current -> :ets.insert(@metrics_table, {min_key, latency_us})
-      _ -> :ok
-    end
-
-    # Max - best effort with insert_new for initial value
-    case :ets.lookup(@metrics_table, max_key) do
-      [] -> :ets.insert_new(@metrics_table, {max_key, latency_us})
-      [{^max_key, current}] when latency_us > current -> :ets.insert(@metrics_table, {max_key, latency_us})
-      _ -> :ok
-    end
-
-    :ok
-  end
-
   @doc "A snapshot of system-wide metrics (memory, processes, connections, auth) for the dashboard."
   def get_system_metrics do
     memory = :erlang.memory()
@@ -409,18 +266,6 @@ defmodule Malachi.Metrics do
     else
       %{}
     end
-  end
-
-  @doc "Clears all counters for `queue_name`."
-  def reset_metrics(queue_name) do
-    :ets.delete(@metrics_table, {:enqueued, queue_name})
-    :ets.delete(@metrics_table, {:processed, queue_name})
-    :ets.delete(@metrics_table, {:errors, queue_name})
-    :ets.delete(@metrics_table, {:latency_count, queue_name})
-    :ets.delete(@metrics_table, {:latency_sum, queue_name})
-    :ets.delete(@metrics_table, {:latency_min, queue_name})
-    :ets.delete(@metrics_table, {:latency_max, queue_name})
-    :ok
   end
 
   @impl true

@@ -612,8 +612,15 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         `test/application_test.exs` (colidia com `test/malachi/application_test.exs` no mesmo módulo
         `Malachi.ApplicationTest` — bug latente exposto pelo compilador paralelo). 783 testes, 0 falhas;
         credo/dialyzer limpos (−23 arquivos).
-      - ⏳ **B3b-iii** — remover do `metrics.ex` os contadores/getters de fila/canal já mortos
-        (enqueued/processed/acked/nacked/channel_* + `get_all_metrics`/`get_all_channel_metrics`).
+      - ✅ **B3b-iii — remover os contadores de fila/canal mortos do `metrics.ex`.** Deleção pura de código
+        morto (a superfície de teste já ficou limpa no B3b-ii): saem `increment_enqueued`/`processed`/
+        `errors`/`acked`/`nacked`/`retried`/`dead_lettered`/`rejected`/`dropped`, `increment_channel_*`,
+        `set_blocked_producers_count`/`increment_total_producers_blocked`/`record_buffer_utilization`,
+        `record_latency` e `reset_metrics`. Sobra o que é operacional/segurança (rate-limit, connection-limit,
+        validation, auth/lockout, audit, dashboard-auth, TLS) + `get_system_metrics` + `get_history`;
+        moduledoc atualizado. 783 testes verdes (1 flake **pré-existente e não relacionado** em
+        `tls_enforcement_test`: o arquivo faz 6 `put_env(:enable_tls)` sem `on_exit` de restauração — passa
+        isolado; fix num commit à parte); credo/dialyzer limpos. **Camada B do cliente concluída.**
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
