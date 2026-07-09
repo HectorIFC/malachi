@@ -322,24 +322,22 @@ defmodule Malachi.Metadata do
   end
 
   @doc """
-  A read-only, JSON-serializable overview of the whole log stack for the ops dashboard: one entry per
-  topic (sorted by name) with summary counts, the topic's ranges (each with its segments), and the
-  consumer groups that have committed a position for the topic. Pure — derives everything from the
-  struct. `range_id`/`segment_id` tuples are flattened to display-friendly fields (the range's `seq`,
-  a segment's `start_offset`) so the result serializes cleanly.
+  A read-only, JSON-serializable **summary** of the whole log stack for the ops dashboard: one entry per
+  topic (sorted by name) with state, keyspace, policy, range/segment counts, total bytes, and the
+  consumer groups that have committed a position. Pure. This is the light payload the dashboard streams
+  every tick; the per-range/segment drill-down is fetched on demand via `topic_detail/2`.
   """
   @spec overview(t()) :: [map()]
   def overview(%__MODULE__{} = state) do
     state.topics
     |> Map.values()
     |> Enum.sort_by(& &1.name)
-    |> Enum.map(&topic_overview(state, &1))
+    |> Enum.map(&topic_summary(state, &1))
   end
 
-  defp topic_overview(state, topic) do
-    ranges = state |> ranges_of_topic(topic.name) |> Enum.sort_by(&elem(&1.id, 1))
-    range_views = Enum.map(ranges, &range_overview(state, &1))
-    segments = Enum.flat_map(range_views, & &1.segments)
+  defp topic_summary(state, topic) do
+    ranges = ranges_of_topic(state, topic.name)
+    segments = Enum.flat_map(ranges, &segments_of_range(state, &1.id))
 
     %{
       name: topic.name,
@@ -351,17 +349,39 @@ defmodule Malachi.Metadata do
       segment_count: length(segments),
       active_segment_count: Enum.count(segments, &(&1.state == :active)),
       total_bytes: segments |> Enum.map(&(&1.byte_size || 0)) |> Enum.sum(),
-      groups: groups_of_topic(state, topic.name),
-      ranges: range_views
+      groups: groups_of_topic(state, topic.name)
     }
   end
 
-  defp range_overview(state, range) do
+  @doc """
+  The JSON-serializable drill-down for a single `name`: its ranges (sorted by seq), each with its
+  segments (sorted by start_offset). `nil` if the topic does not exist. Pure — the on-demand counterpart
+  to `overview/1`, so the per-second stream stays light and segment detail is fetched only when a topic
+  is expanded. `range_id`/`segment_id` tuples are flattened to display fields (`seq`, `start_offset`).
+  """
+  @spec topic_detail(t(), topic_name()) :: map() | nil
+  def topic_detail(%__MODULE__{} = state, name) do
+    case Map.get(state.topics, name) do
+      nil ->
+        nil
+
+      topic ->
+        ranges =
+          state
+          |> ranges_of_topic(name)
+          |> Enum.sort_by(&elem(&1.id, 1))
+          |> Enum.map(&range_detail(state, &1))
+
+        %{name: topic.name, ranges: ranges}
+    end
+  end
+
+  defp range_detail(state, range) do
     segments =
       state
       |> segments_of_range(range.id)
       |> Enum.sort_by(& &1.start_offset)
-      |> Enum.map(&segment_overview/1)
+      |> Enum.map(&segment_detail/1)
 
     %{
       seq: elem(range.id, 1),
@@ -373,7 +393,7 @@ defmodule Malachi.Metadata do
     }
   end
 
-  defp segment_overview(segment) do
+  defp segment_detail(segment) do
     Map.take(segment, [:state, :start_offset, :length, :byte_size, :sealed_at])
   end
 

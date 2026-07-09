@@ -621,18 +621,21 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         moduledoc atualizado. 783 testes verdes (1 flake **pré-existente e não relacionado** em
         `tls_enforcement_test`: o arquivo faz 6 `put_env(:enable_tls)` sem `on_exit` de restauração — passa
         isolado; fix num commit à parte); credo/dialyzer limpos. **Camada B do cliente concluída.**
-      - ✅ **Painel NorthGuard no dashboard.** Devolve, no modelo certo, a visibilidade que o trim do B3b-i
-        tirou: uma nova função **pura** `Metadata.overview/1` (`%Metadata{}` → lista por topic com estado/
-        keyspace/política, contagens de ranges e segments, bytes totais, e os grupos consumidores com posição
-        commitada — reusa `ranges_of_topic`/`segments_of_range`, ids de tupla achatados p/ JSON). O dashboard
-        expõe `topics` em `/metrics` e `/stream` (via `dashboard_metrics/0` DRY, guardado por
-        `Process.whereis(LogBroker)` p/ degradar gracioso) e renderiza um card **Topics** com **drill-down**
-        (topic → ranges → segments), com estado de expansão preservado entre os ticks de 1s. Nomes de topic/
-        grupo são **escapados** (XSS — reintroduz `escapeHtml`; o toggle usa índice, não o nome). Testado:
-        `overview/1` unit (2), e2e via `/metrics` (topic criado no broker aparece com `range_count`/
-        `segment_count` corretos), + syntax/functional-check do JS em node (render + escaping). Tradeoff
-        registrado: o stream manda o overview completo por tick — OK p/ um nó; se a contagem de segments
-        crescer, vira on-demand por endpoint. 786 testes, 0 falhas; credo/dialyzer limpos.
+      - ✅ **Painel NorthGuard no dashboard (com drill-down on-demand).** Devolve, no modelo certo, a
+        visibilidade que o trim do B3b-i tirou, em **dois níveis** para o stream ficar leve. Funções **puras**
+        no `Metadata`: `overview/1` (resumo por topic — estado/keyspace/política, contagens de ranges e
+        segments, bytes totais, grupos consumidores) e `topic_detail/2` (o drill-down de **um** topic — seus
+        ranges, cada um com seus segments; `nil` se o topic não existe). Ambas reusam `ranges_of_topic`/
+        `segments_of_range` e achatam os ids de tupla p/ JSON. O `/metrics` e o `/stream` (1s) mandam só o
+        **resumo** (via `dashboard_metrics/0`); o detalhe é buscado **on-demand** por topic no novo endpoint
+        `GET /topic?name=` (autenticado como o `/metrics`; `serve_json/3` DRY; a query string agora é
+        preservada no roteamento). No front, expandir um topic dispara um `fetch` único (`loadTopicDetail`,
+        cacheado em `topicDetails`, mostra "loading…" até chegar); o cabeçalho-resumo segue vivo pelo stream.
+        Nomes de topic/grupo **escapados** (XSS — `escapeHtml`; toggle por índice; URL via
+        `encodeURIComponent`). Testado: `overview/1`+`topic_detail/2` unit (4); e2e de `/metrics` (resumo) e
+        `/topic` (detalhe + 404); functional-check do fluxo on-demand em node (fetch encodado, loading,
+        render pós-fetch, escaping). Assim o tradeoff do stream-full sumiu: zero tráfego de segment a não ser
+        no topic expandido. 790 testes, 0 falhas; credo/dialyzer limpos.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

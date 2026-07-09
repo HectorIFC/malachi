@@ -283,14 +283,21 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  # Builds "events": root split into two children, two segments (one sealed) on the left child, and a
+  # committed consumer group.
+  defp events_with_segments do
+    {state, root_id} = create_topic(Metadata.new(), "events", 4)
+    {state, {:ok, left_id, _right_id}} = apply!(state, {:split_range, root_id})
+    {state, :ok} = apply!(state, {:register_segment, left_id, "seg-a", [:b1], 0})
+    {state, :ok} = apply!(state, {:register_segment, left_id, "seg-b", [:b1], 100})
+    {state, :ok} = apply!(state, {:seal_segment, "seg-a", 100, 4096, 1_700_000_000_000})
+    {state, :ok} = apply!(state, {:commit_offset, "group-1", "events", %{left_id => {0, 50}}})
+    {state, left_id}
+  end
+
   describe "overview/1" do
-    test "summarizes each topic with its ranges, segments, and consumer groups" do
-      {state, root_id} = create_topic(Metadata.new(), "events", 4)
-      {state, {:ok, left_id, _right_id}} = apply!(state, {:split_range, root_id})
-      {state, :ok} = apply!(state, {:register_segment, left_id, "seg-a", [:b1], 0})
-      {state, :ok} = apply!(state, {:register_segment, left_id, "seg-b", [:b1], 100})
-      {state, :ok} = apply!(state, {:seal_segment, "seg-a", 100, 4096, 1_700_000_000_000})
-      {state, :ok} = apply!(state, {:commit_offset, "group-1", "events", %{left_id => {0, 50}}})
+    test "summarizes each topic with counts, bytes, and consumer groups (no per-range detail)" do
+      {state, _left_id} = events_with_segments()
 
       assert [topic] = Metadata.overview(state)
       assert topic.name == "events"
@@ -305,14 +312,8 @@ defmodule Malachi.MetadataTest do
       assert topic.total_bytes == 4096
       assert topic.groups == ["group-1"]
 
-      # the range that got segments carries them, sorted by start_offset
-      range_with_segs = Enum.find(topic.ranges, &(&1.segments != []))
-      assert range_with_segs.seq == elem(left_id, 1)
-
-      assert [
-               %{start_offset: 0, state: :sealed, byte_size: 4096, sealed_at: 1_700_000_000_000},
-               %{start_offset: 100, state: :active, byte_size: nil}
-             ] = range_with_segs.segments
+      # the summary is light: the per-range/segment drill-down lives in topic_detail/2, not here
+      refute Map.has_key?(topic, :ranges)
     end
 
     test "sorts topics by name and returns [] for empty metadata" do
@@ -321,6 +322,30 @@ defmodule Malachi.MetadataTest do
       {state, _} = create_topic(Metadata.new(), "zeta", 4)
       {state, _} = create_topic(state, "alpha", 4)
       assert ["alpha", "zeta"] == Enum.map(Metadata.overview(state), & &1.name)
+    end
+  end
+
+  describe "topic_detail/2" do
+    test "returns the topic's ranges (by seq), each with its segments (by start_offset)" do
+      {state, left_id} = events_with_segments()
+
+      assert %{name: "events", ranges: ranges} = Metadata.topic_detail(state, "events")
+      # root (#0) + two children, sorted by seq
+      assert Enum.map(ranges, & &1.seq) == Enum.sort(Enum.map(ranges, & &1.seq))
+      assert length(ranges) == 3
+
+      range_with_segs = Enum.find(ranges, &(&1.segments != []))
+      assert range_with_segs.seq == elem(left_id, 1)
+
+      assert [
+               %{start_offset: 0, state: :sealed, byte_size: 4096, sealed_at: 1_700_000_000_000},
+               %{start_offset: 100, state: :active, byte_size: nil}
+             ] = range_with_segs.segments
+    end
+
+    test "returns nil for an unknown topic" do
+      {state, _} = create_topic(Metadata.new(), "events", 4)
+      assert Metadata.topic_detail(state, "nope") == nil
     end
   end
 end

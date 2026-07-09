@@ -89,6 +89,59 @@ defmodule Malachi.DashboardTest do
       end
     end
 
+    test "GET /topic?name= returns the on-demand ranges/segments drill-down" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      topic = "dash_detail_#{System.unique_integer([:positive])}"
+      {:ok, _root} = Malachi.BrokerServer.create_topic(Malachi.LogBroker, topic, 8)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(
+            socket,
+            "GET /topic?name=#{URI.encode_www_form(topic)} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+          )
+
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(response, "HTTP/1.1 200 OK")
+          [_headers, body] = String.split(response, "\r\n\r\n", parts: 2)
+          decoded = Jason.decode!(body)
+
+          assert decoded["name"] == topic
+          # a fresh topic has exactly one active root range with no segments yet
+          assert [range] = decoded["ranges"]
+          assert range["state"] == "active"
+          assert range["segments"] == []
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /topic?name= for an unknown topic returns 404" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(
+            socket,
+            "GET /topic?name=does_not_exist_#{System.unique_integer([:positive])} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+          )
+
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(response, "404") or String.contains?(response, "Not Found")
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
     test "GET /stream returns SSE stream" do
       port = Application.get_env(:malachi, :dashboard_port, 4041)
 

@@ -103,17 +103,23 @@ defmodule Malachi.Dashboard do
   defp handle_route_with_auth(socket, request, headers, client_ip) do
     auth_enabled = Application.get_env(:malachi, :dashboard_auth_enabled, true)
 
+    # Split the query string off the path (e.g. /topic?name=x → path "/topic", query "name=x"), so routes
+    # match on the bare path and a handler can still read its query.
+    {path, query} =
+      case String.split(request.path, "?", parts: 2) do
+        [path, query] -> {path, query}
+        [path] -> {path, ""}
+      end
+
+    request = request |> Map.put(:path, path) |> Map.put(:query, query)
+
     # Public routes that don't require authentication
-    is_public_route =
-      request.path in ["/login", "/logout", "/logo.jpeg"] or request.method == :OPTIONS
+    is_public_route = path in ["/login", "/logout", "/logo.jpeg"] or request.method == :OPTIONS
 
     if not auth_enabled or is_public_route do
       # Authentication disabled or public route - allow all requests
       handle_route(socket, request, headers, client_ip, nil)
     else
-      # Strip query string from path (e.g. /stream?foo=bar → /stream)
-      path = request.path |> String.split("?", parts: 2) |> List.first()
-
       # Authenticate via Cookie (primary, for browser) or Authorization header (fallback, for API)
       auth_result = authenticate_request(headers, client_ip, path)
 
@@ -128,7 +134,7 @@ defmodule Malachi.Dashboard do
             %{path: path, method: request.method}
           )
 
-          handle_route(socket, %{request | path: path}, headers, client_ip, session)
+          handle_route(socket, request, headers, client_ip, session)
 
         {:error, :authentication_required} ->
           # For HTML page routes, redirect to login page instead of returning JSON 401
@@ -246,8 +252,8 @@ defmodule Malachi.Dashboard do
       path in ["/", "/stream"] and require_admin ->
         false
 
-      # Metrics endpoint accessible to any authenticated user
-      path in ["/metrics", "/rate_limits"] ->
+      # Read-only data endpoints accessible to any authenticated user
+      path in ["/metrics", "/rate_limits", "/topic"] ->
         true
 
       # Login endpoint is public
@@ -475,6 +481,9 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :GET, path: "/metrics"}, _headers, _client_ip, _session),
     do: serve_metrics(socket)
 
+  defp handle_route(socket, %{method: :GET, path: "/topic"} = request, _headers, _client_ip, _session),
+    do: serve_topic_detail(socket, request.query)
+
   defp handle_route(socket, %{method: :GET, path: "/stream"}, _headers, _client_ip, _session),
     do: serve_sse(socket)
 
@@ -511,23 +520,46 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
-  # The payload served by both /metrics (one-shot) and /stream (per-tick): the BEAM/security system
-  # snapshot plus a NorthGuard log-stack overview (topics -> ranges -> segments, and consumer groups).
+  # The light payload served by both /metrics (one-shot) and /stream (per-tick): the BEAM/security system
+  # snapshot plus a per-topic log-stack summary (counts/bytes/groups). The per-range/segment drill-down is
+  # NOT here — it is fetched on demand per topic via /topic, so the stream stays small as segments grow.
   defp dashboard_metrics do
     %{system: Metrics.get_system_metrics(), topics: topics_overview()}
   end
 
-  # A read-only overview of the live log stack, or [] when the broker is not running (e.g. a minimal test
+  # A read-only summary of the live log stack, or [] when the broker is not running (e.g. a minimal test
   # boot) so the dashboard degrades gracefully instead of crashing the connection.
   defp topics_overview do
-    case Process.whereis(Malachi.LogBroker) do
-      nil -> []
-      _pid -> Malachi.LogBroker |> BrokerServer.metadata() |> Metadata.overview()
-    end
+    with_metadata([], &Metadata.overview/1)
   end
 
   defp serve_metrics(socket) do
-    json = Jason.encode!(dashboard_metrics())
+    serve_json(socket, "/metrics", dashboard_metrics())
+  end
+
+  # On-demand drill-down for one topic (its ranges and segments), read from `?name=`. 404 for an unknown
+  # or missing topic. Keeps the per-second stream light — segment detail is fetched only on expand.
+  defp serve_topic_detail(socket, query) do
+    name = query |> URI.decode_query() |> Map.get("name")
+    detail = name && with_metadata(nil, &Metadata.topic_detail(&1, name))
+
+    if detail do
+      serve_json(socket, "/topic", detail)
+    else
+      serve_404(socket)
+    end
+  end
+
+  # Runs `fun` against the live broker's metadata, or returns `default` when the broker is not running.
+  defp with_metadata(default, fun) do
+    case Process.whereis(Malachi.LogBroker) do
+      nil -> default
+      _pid -> Malachi.LogBroker |> BrokerServer.metadata() |> fun.()
+    end
+  end
+
+  defp serve_json(socket, route, data) do
+    json = Jason.encode!(data)
 
     response = """
     HTTP/1.1 200 OK\r
@@ -538,10 +570,7 @@ defmodule Malachi.Dashboard do
     #{json}
     """
 
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/metrics")
-
-    :gen_tcp.send(socket, response_with_headers)
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route))
     :gen_tcp.close(socket)
   end
 
@@ -823,16 +852,37 @@ defmodule Malachi.Dashboard do
           return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
         }
 
-        // Drill-down expand state is keyed by topic name and survives the per-second re-render.
+        // Drill-down state, keyed by topic name, survives the per-second summary re-render. The heavy
+        // per-range/segment detail is NOT in the stream — it is fetched once, on expand, into topicDetails.
         const expandedTopics = new Set();
+        const topicDetails = {};
         let lastTopics = [];
 
         function toggleTopic(i) {
           const t = lastTopics[i];
           if (!t) return;
-          if (expandedTopics.has(t.name)) expandedTopics.delete(t.name);
-          else expandedTopics.add(t.name);
-          renderTopics(lastTopics);
+          if (expandedTopics.has(t.name)) {
+            expandedTopics.delete(t.name);
+            delete topicDetails[t.name];
+            renderTopics(lastTopics);
+          } else {
+            expandedTopics.add(t.name);
+            renderTopics(lastTopics); // show the header expanded + a loading row immediately
+            loadTopicDetail(t.name);
+          }
+        }
+
+        // Fetch one topic's ranges/segments on demand; re-render only if it is still expanded when it lands.
+        function loadTopicDetail(name) {
+          fetch('/topic?name=' + encodeURIComponent(name))
+            .then(resp => resp.ok ? resp.json() : null)
+            .then(detail => {
+              if (detail && expandedTopics.has(name)) {
+                topicDetails[name] = detail;
+                renderTopics(lastTopics);
+              }
+            })
+            .catch(() => {});
         }
 
         function renderSegments(segments) {
@@ -863,11 +913,16 @@ defmodule Malachi.Dashboard do
         function renderTopicCard(t, i) {
           const open = expandedTopics.has(t.name);
           const groups = (t.groups || []).map(g => `<span class="group-chip">${escapeHtml(g)}</span>`).join('');
-          const detail = open ? `
+          let detail = '';
+          if (open) {
+            const d = topicDetails[t.name];
+            const body = d ? renderRanges(d.ranges) : '<div class="seg-empty">loading…</div>';
+            detail = `
             <div class="topic-detail">
               ${groups ? '<div style="margin-bottom:6px;">groups: ' + groups + '</div>' : '<div class="seg-empty">no consumer groups</div>'}
-              ${renderRanges(t.ranges)}
-            </div>` : '';
+              ${body}
+            </div>`;
+          }
           return `
             <div class="topic-card">
               <div class="topic-header" onclick="toggleTopic(${i})">
