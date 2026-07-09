@@ -1,7 +1,27 @@
 defmodule Malachi.TLSEnforcementTest do
-  use ExUnit.Case, async: true
+  # These tests mutate global :malachi TLS/HSTS application env, so they must not run concurrently with
+  # other modules (async: false). Each test's mutations are rolled back after it runs by the setup below —
+  # otherwise a test that sets :enable_tls = true leaks into "TLS is disabled by default" under a
+  # different seed order (a flaky, order-dependent failure).
+  use ExUnit.Case, async: false
 
   alias Malachi.Dashboard.SecurityHeaders
+
+  # Every :malachi TLS/HSTS key these tests read or write; snapshotted and restored around each test.
+  @tls_keys [:enable_tls, :require_tls, :hsts_enabled, :hsts_include_subdomains]
+
+  setup do
+    original = Map.new(@tls_keys, fn key -> {key, Application.fetch_env(:malachi, key)} end)
+
+    on_exit(fn ->
+      Enum.each(original, fn
+        {key, {:ok, value}} -> Application.put_env(:malachi, key, value)
+        {key, :error} -> Application.delete_env(:malachi, key)
+      end)
+    end)
+
+    :ok
+  end
 
   describe "TLS enforcement configuration" do
     test "TLS is disabled by default in test environment" do
@@ -54,66 +74,30 @@ defmodule Malachi.TLSEnforcementTest do
 
   describe "HSTS header configuration" do
     test "HSTS header includes includeSubDomains when configured" do
-      original_tls = Application.get_env(:malachi, :enable_tls)
-      original_hsts = Application.get_env(:malachi, :hsts_enabled)
-      original_sub = Application.get_env(:malachi, :hsts_include_subdomains)
+      Application.put_env(:malachi, :enable_tls, true)
+      Application.put_env(:malachi, :hsts_enabled, true)
+      Application.put_env(:malachi, :hsts_include_subdomains, true)
 
-      try do
-        Application.put_env(:malachi, :enable_tls, true)
-        Application.put_env(:malachi, :hsts_enabled, true)
-        Application.put_env(:malachi, :hsts_include_subdomains, true)
-
-        headers = SecurityHeaders.build_hsts_header()
-        assert [{"strict-transport-security", value}] = headers
-        assert String.contains?(value, "includeSubDomains")
-      after
-        Application.put_env(:malachi, :enable_tls, original_tls || false)
-        Application.put_env(:malachi, :hsts_enabled, original_hsts || true)
-
-        if original_sub == nil do
-          Application.delete_env(:malachi, :hsts_include_subdomains)
-        else
-          Application.put_env(:malachi, :hsts_include_subdomains, original_sub)
-        end
-      end
+      headers = SecurityHeaders.build_hsts_header()
+      assert [{"strict-transport-security", value}] = headers
+      assert String.contains?(value, "includeSubDomains")
     end
 
     test "HSTS header excludes includeSubDomains when disabled" do
-      original_tls = Application.get_env(:malachi, :enable_tls)
-      original_hsts = Application.get_env(:malachi, :hsts_enabled)
-      original_sub = Application.get_env(:malachi, :hsts_include_subdomains)
+      Application.put_env(:malachi, :enable_tls, true)
+      Application.put_env(:malachi, :hsts_enabled, true)
+      Application.put_env(:malachi, :hsts_include_subdomains, false)
 
-      try do
-        Application.put_env(:malachi, :enable_tls, true)
-        Application.put_env(:malachi, :hsts_enabled, true)
-        Application.put_env(:malachi, :hsts_include_subdomains, false)
-
-        headers = SecurityHeaders.build_hsts_header()
-        assert [{"strict-transport-security", value}] = headers
-        refute String.contains?(value, "includeSubDomains")
-      after
-        Application.put_env(:malachi, :enable_tls, original_tls || false)
-        Application.put_env(:malachi, :hsts_enabled, original_hsts || true)
-
-        if original_sub == nil do
-          Application.delete_env(:malachi, :hsts_include_subdomains)
-        else
-          Application.put_env(:malachi, :hsts_include_subdomains, original_sub)
-        end
-      end
+      headers = SecurityHeaders.build_hsts_header()
+      assert [{"strict-transport-security", value}] = headers
+      refute String.contains?(value, "includeSubDomains")
     end
 
     test "HSTS header not sent when TLS disabled" do
-      original_tls = Application.get_env(:malachi, :enable_tls)
+      Application.put_env(:malachi, :enable_tls, false)
 
-      try do
-        Application.put_env(:malachi, :enable_tls, false)
-
-        headers = SecurityHeaders.build_hsts_header()
-        assert headers == []
-      after
-        Application.put_env(:malachi, :enable_tls, original_tls || false)
-      end
+      headers = SecurityHeaders.build_hsts_header()
+      assert headers == []
     end
   end
 
