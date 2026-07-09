@@ -12,8 +12,10 @@ defmodule Malachi.Dashboard do
   require Logger
   alias Malachi.AuditLog
   alias Malachi.Auth
+  alias Malachi.BrokerServer
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.I18n
+  alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.RateLimiter
 
@@ -509,9 +511,23 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
+  # The payload served by both /metrics (one-shot) and /stream (per-tick): the BEAM/security system
+  # snapshot plus a NorthGuard log-stack overview (topics -> ranges -> segments, and consumer groups).
+  defp dashboard_metrics do
+    %{system: Metrics.get_system_metrics(), topics: topics_overview()}
+  end
+
+  # A read-only overview of the live log stack, or [] when the broker is not running (e.g. a minimal test
+  # boot) so the dashboard degrades gracefully instead of crashing the connection.
+  defp topics_overview do
+    case Process.whereis(Malachi.LogBroker) do
+      nil -> []
+      _pid -> Malachi.LogBroker |> BrokerServer.metadata() |> Metadata.overview()
+    end
+  end
+
   defp serve_metrics(socket) do
-    metrics = %{system: Metrics.get_system_metrics()}
-    json = Jason.encode!(metrics)
+    json = Jason.encode!(dashboard_metrics())
 
     response = """
     HTTP/1.1 200 OK\r
@@ -548,8 +564,7 @@ defmodule Malachi.Dashboard do
   end
 
   defp stream_metrics(socket) do
-    metrics = %{system: Metrics.get_system_metrics()}
-    json = Jason.encode!(metrics)
+    json = Jason.encode!(dashboard_metrics())
     event = "data: #{json}\n\n"
 
     update_interval = Application.get_env(:malachi, :dashboard_update_interval_ms, 1000)
@@ -714,6 +729,59 @@ defmodule Malachi.Dashboard do
         }
         .metric { display: flex; justify-content: space-between; padding: 8px 0; }
         .metric-value { color: #00ff88; font-family: monospace; }
+        .empty-state { text-align: center; color: #666; padding: 20px; font-style: italic; }
+        .topic-card {
+          background: #0f1428;
+          border: 1px solid #2a3f5f;
+          border-left: 4px solid #00d9ff;
+          border-radius: 6px;
+          margin-bottom: 10px;
+        }
+        .topic-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          padding: 12px 14px;
+          cursor: pointer;
+          user-select: none;
+        }
+        .topic-header:hover { background: #141a33; }
+        .topic-name { color: #00ff88; font-family: monospace; font-weight: bold; }
+        .topic-summary { color: #8a97b1; font-size: 0.85em; font-family: monospace; }
+        .badge {
+          display: inline-block;
+          padding: 2px 8px;
+          border-radius: 10px;
+          font-size: 0.75em;
+          font-weight: bold;
+          text-transform: uppercase;
+        }
+        .badge-active { background: #00ff88; color: #0a0e27; }
+        .badge-sealed { background: #6b7280; color: #f0f0f0; }
+        .topic-detail { padding: 0 14px 12px 14px; }
+        .range-block { margin-top: 10px; border-top: 1px solid #202844; padding-top: 8px; }
+        .range-head { color: #00d9ff; font-family: monospace; font-size: 0.85em; margin-bottom: 4px; }
+        .seg-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr auto;
+          gap: 8px;
+          color: #b8c2d9;
+          font-family: monospace;
+          font-size: 0.8em;
+          padding: 2px 0 2px 14px;
+        }
+        .seg-empty { color: #666; font-size: 0.8em; padding: 2px 0 2px 14px; }
+        .group-chip {
+          display: inline-block;
+          background: #2a3f5f;
+          color: #00ff88;
+          padding: 1px 8px;
+          border-radius: 10px;
+          font-size: 0.75em;
+          font-family: monospace;
+          margin: 2px 4px 0 0;
+        }
       </style>
     </head>
     <body>
@@ -732,13 +800,101 @@ defmodule Malachi.Dashboard do
           <span class="metric-value" id="memory">-</span>
         </div>
       </div>
+      <div class="card">
+        <h2>Topics</h2>
+        <div id="topics">Loading...</div>
+      </div>
       <script>
+        // Topic names are user-controlled, so every value interpolated into HTML is escaped.
+        function escapeHtml(unsafe) {
+          return String(unsafe)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+        }
+
+        function formatBytes(n) {
+          if (!n) return '0 B';
+          const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+          let i = 0, v = n;
+          while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+          return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+        }
+
+        // Drill-down expand state is keyed by topic name and survives the per-second re-render.
+        const expandedTopics = new Set();
+        let lastTopics = [];
+
+        function toggleTopic(i) {
+          const t = lastTopics[i];
+          if (!t) return;
+          if (expandedTopics.has(t.name)) expandedTopics.delete(t.name);
+          else expandedTopics.add(t.name);
+          renderTopics(lastTopics);
+        }
+
+        function renderSegments(segments) {
+          if (!segments || segments.length === 0) return '<div class="seg-empty">no segments</div>';
+          return segments.map(s => `
+            <div class="seg-row">
+              <span>off ${s.start_offset}</span>
+              <span>len ${s.length == null ? '—' : s.length}</span>
+              <span>${formatBytes(s.byte_size)}</span>
+              <span class="badge badge-${escapeHtml(s.state)}">${escapeHtml(s.state)}</span>
+            </div>
+          `).join('');
+        }
+
+        function renderRanges(ranges) {
+          return (ranges || []).map(r => `
+            <div class="range-block">
+              <div class="range-head">
+                range #${r.seq} · keys [${r.key_start}, ${r.key_end}) ·
+                <span class="badge badge-${escapeHtml(r.state)}">${escapeHtml(r.state)}</span> ·
+                ${r.segments.length} seg${r.segments.length === 1 ? '' : 's'}
+              </div>
+              ${renderSegments(r.segments)}
+            </div>
+          `).join('');
+        }
+
+        function renderTopicCard(t, i) {
+          const open = expandedTopics.has(t.name);
+          const groups = (t.groups || []).map(g => `<span class="group-chip">${escapeHtml(g)}</span>`).join('');
+          const detail = open ? `
+            <div class="topic-detail">
+              ${groups ? '<div style="margin-bottom:6px;">groups: ' + groups + '</div>' : '<div class="seg-empty">no consumer groups</div>'}
+              ${renderRanges(t.ranges)}
+            </div>` : '';
+          return `
+            <div class="topic-card">
+              <div class="topic-header" onclick="toggleTopic(${i})">
+                <span class="topic-name">${open ? '▾' : '▸'} ${escapeHtml(t.name)} <span class="badge badge-${escapeHtml(t.state)}">${escapeHtml(t.state)}</span></span>
+                <span class="topic-summary">${t.active_range_count}/${t.range_count} ranges · ${t.active_segment_count}/${t.segment_count} segs · ${formatBytes(t.total_bytes)} · ${(t.groups || []).length} grp</span>
+              </div>
+              ${detail}
+            </div>`;
+        }
+
+        function renderTopics(topics) {
+          lastTopics = topics || [];
+          const el = document.getElementById('topics');
+          if (lastTopics.length === 0) {
+            el.innerHTML = '<div class="empty-state">No topics</div>';
+            return;
+          }
+          el.innerHTML = lastTopics.map(renderTopicCard).join('');
+        }
+
         // Auth is handled via HttpOnly cookies — sent automatically by the browser.
         const source = new EventSource('/stream');
         source.onmessage = (event) => {
           const data = JSON.parse(event.data);
           document.getElementById('processes').textContent = data.system.process_count;
           document.getElementById('memory').textContent = data.system.memory.total_mb.toFixed(2) + ' MB';
+          renderTopics(data.topics);
         };
 
         source.onerror = (error) => {

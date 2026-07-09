@@ -60,6 +60,35 @@ defmodule Malachi.DashboardTest do
       end
     end
 
+    test "GET /metrics includes a NorthGuard topic created on the live broker" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      topic = "dash_topic_#{System.unique_integer([:positive])}"
+      {:ok, _root} = Malachi.BrokerServer.create_topic(Malachi.LogBroker, topic, 8)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(socket, "GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          [_headers, body] = String.split(response, "\r\n\r\n", parts: 2)
+          decoded = Jason.decode!(body)
+
+          assert is_list(decoded["topics"])
+          entry = Enum.find(decoded["topics"], &(&1["name"] == topic))
+          assert entry, "expected #{topic} in the /metrics topics overview"
+          assert entry["state"] == "active"
+          # a fresh topic has one active root range and no segments yet
+          assert entry["range_count"] == 1
+          assert entry["segment_count"] == 0
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
     test "GET /stream returns SSE stream" do
       port = Application.get_env(:malachi, :dashboard_port, 4041)
 

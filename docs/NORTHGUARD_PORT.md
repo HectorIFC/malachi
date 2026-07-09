@@ -621,6 +621,18 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         moduledoc atualizado. 783 testes verdes (1 flake **pré-existente e não relacionado** em
         `tls_enforcement_test`: o arquivo faz 6 `put_env(:enable_tls)` sem `on_exit` de restauração — passa
         isolado; fix num commit à parte); credo/dialyzer limpos. **Camada B do cliente concluída.**
+      - ✅ **Painel NorthGuard no dashboard.** Devolve, no modelo certo, a visibilidade que o trim do B3b-i
+        tirou: uma nova função **pura** `Metadata.overview/1` (`%Metadata{}` → lista por topic com estado/
+        keyspace/política, contagens de ranges e segments, bytes totais, e os grupos consumidores com posição
+        commitada — reusa `ranges_of_topic`/`segments_of_range`, ids de tupla achatados p/ JSON). O dashboard
+        expõe `topics` em `/metrics` e `/stream` (via `dashboard_metrics/0` DRY, guardado por
+        `Process.whereis(LogBroker)` p/ degradar gracioso) e renderiza um card **Topics** com **drill-down**
+        (topic → ranges → segments), com estado de expansão preservado entre os ticks de 1s. Nomes de topic/
+        grupo são **escapados** (XSS — reintroduz `escapeHtml`; o toggle usa índice, não o nome). Testado:
+        `overview/1` unit (2), e2e via `/metrics` (topic criado no broker aparece com `range_count`/
+        `segment_count` corretos), + syntax/functional-check do JS em node (render + escaping). Tradeoff
+        registrado: o stream manda o overview completo por tick — OK p/ um nó; se a contagem de segments
+        crescer, vira on-demand por endpoint. 786 testes, 0 falhas; credo/dialyzer limpos.
   - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

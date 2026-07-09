@@ -282,4 +282,45 @@ defmodule Malachi.MetadataTest do
       assert Metadata.committed_offsets(metadata, "other", "events") == %{{"events", 0} => 1}
     end
   end
+
+  describe "overview/1" do
+    test "summarizes each topic with its ranges, segments, and consumer groups" do
+      {state, root_id} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, left_id, _right_id}} = apply!(state, {:split_range, root_id})
+      {state, :ok} = apply!(state, {:register_segment, left_id, "seg-a", [:b1], 0})
+      {state, :ok} = apply!(state, {:register_segment, left_id, "seg-b", [:b1], 100})
+      {state, :ok} = apply!(state, {:seal_segment, "seg-a", 100, 4096, 1_700_000_000_000})
+      {state, :ok} = apply!(state, {:commit_offset, "group-1", "events", %{left_id => {0, 50}}})
+
+      assert [topic] = Metadata.overview(state)
+      assert topic.name == "events"
+      assert topic.state == :active
+      assert topic.keyspace_size == 16
+      # root range (sealed by the split) + two active children
+      assert topic.range_count == 3
+      assert topic.active_range_count == 2
+      assert topic.segment_count == 2
+      assert topic.active_segment_count == 1
+      # only the sealed segment has a byte_size; the active one contributes 0
+      assert topic.total_bytes == 4096
+      assert topic.groups == ["group-1"]
+
+      # the range that got segments carries them, sorted by start_offset
+      range_with_segs = Enum.find(topic.ranges, &(&1.segments != []))
+      assert range_with_segs.seq == elem(left_id, 1)
+
+      assert [
+               %{start_offset: 0, state: :sealed, byte_size: 4096, sealed_at: 1_700_000_000_000},
+               %{start_offset: 100, state: :active, byte_size: nil}
+             ] = range_with_segs.segments
+    end
+
+    test "sorts topics by name and returns [] for empty metadata" do
+      assert Metadata.overview(Metadata.new()) == []
+
+      {state, _} = create_topic(Metadata.new(), "zeta", 4)
+      {state, _} = create_topic(state, "alpha", 4)
+      assert ["alpha", "zeta"] == Enum.map(Metadata.overview(state), & &1.name)
+    end
+  end
 end
