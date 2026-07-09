@@ -388,7 +388,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   **reconciliação** (heal selados + failover ativos a cada tick). Testado: `plan` puro (promove vivo,
   ignora selado, pula tudo-morto), `apply_heal` atualiza cache+metadata, e **integração**: primário
   de segment ativo morre → promovido → escrita continua no novo primário (ambos os records lidos).
-- 🚧 **1b — autoridade do metadata via `ra` (em fatias).**
+- ✅ **1b — autoridade do metadata via `ra` (em fatias).**
   - ✅ **`Malachi.Cluster.ReplicatedMetadata`** (componente) — pareia um `MetadataServer` (cluster `ra`
     rodando `Metadata.apply`) com um **cache `Metadata` local**: `command/2` vai ao log Raft e, no
     commit, aplica o **mesmo** comando no cache (determinismo → cache == estado replicado), então as
@@ -424,7 +424,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
 ### Fase 3 — Produto: conectar os dois mundos + escala (novo norte)
 Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS.
 
-- 🚧 **B — Conectar TCP/cliente ↔ stack NorthGuard (log API com cursor opaco).** Hoje o `tcp_protocol`
+- ✅ **B — Conectar TCP/cliente ↔ stack NorthGuard (log API com cursor opaco).** Hoje o `tcp_protocol`
   fala filas (`publish`/`subscribe`/`ack`/`channel_*`) sobre `Queue`/`Channel`; o stack NorthGuard fala
   log sobre `BrokerServer`. **Contrato de cliente = jeito NorthGuard, NÃO Kafka:** o cliente usa
   `topic` + **chave** (produce) + **cursor opaco** (consume) — **nunca** vê partition/offset (escondidos
@@ -486,7 +486,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     `BrokerServer` (`consume_ranges`): 1 call coesa em vez de N+1, e é o que o produce re-executa para
     acordar waiters. Testado: `BrokerServer` (acorda no produce, timeout vazio, acorda só o topic
     produzido), `LogApi` (bloqueia até produce; timeout), e2e TCP (wake por produtor concorrente; timeout).
-  - 🚧 **Rearquitetura da camada de cliente (protocolo binário + streaming), guiada por benchmark.** A
+  - ✅ **Rearquitetura da camada de cliente (protocolo binário + streaming), guiada por benchmark.** A
     funcionalidade de log sobre TCP estava completa, mas o **estilo** era JSON+base64 request/response —
     não o "sessionized streaming com windowing" do NorthGuard. Decidido **empiricamente** (`bench/`,
     1M msgs): (a) **protocolo binário** vs JSON+base64 — **-29% bytes on-wire, 8.9x menos CPU no encode,
@@ -580,7 +580,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         E2e via TCP (`log_streaming_test`): backlog no subscribe + push num produce de outra conexão; a
         janela limita in-flight até o ack devolver crédito; `subscribe` sem `:consume` recebe erro (não vira
         stream). Dialyzer/credo limpos; 385 testes verdes.
-    - 🚧 **B3b — deletar o modelo de fila legado (sub-fatiado; ordem forçada pelas deps de compilação:
+    - ✅ **B3b — deletar o modelo de fila legado (sub-fatiado; ordem forçada pelas deps de compilação:
       callers antes de callees).** O modelo (queues/channels) está **morto no caminho vivo** — nada fora
       dos próprios módulos + periféricos (metrics/dashboard/backpressure/benchmark/application) chama
       `Queue`/`Channel`/`Consumer`/etc. Decisão do dashboard: **aparar para sistema-só** (1A), não remover
@@ -659,7 +659,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         `security_performance_regression` → removidos os benchmarks de Validator, mantidos Auth/RateLimiter/
         ConnectionLimiter/lockout). Cobertura viva intacta: o caminho binário já é fuzzado pelo
         `binary_protocol_security_test`. 685 testes, 0 falhas; credo/dialyzer limpos (−4 arquivos).
-  - 🚧 **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
+  - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
     detecta falhas em runtime; `libcluster` fica para depois).
@@ -682,7 +682,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       Fiação testável por funções puras (`Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
       quórum/tolerância já é coberto por `replication_server_test`, e a integração (BrokerServer + 3 brokers
       + rf=3 + ra → produce/consume por quórum ponta a ponta) por `broker_server_ra_test`.
-    - 🚧 **D3 — Membership + healing/failover ao vivo.**
+    - ✅ **D3 — Membership + healing/failover ao vivo.**
       - ✅ **D3a — `MembershipServer` cross-node.** O SWIM identificava cada membro pelo `self_ref`, que
         era o `:name` de registro — os testes eram todos in-process (átomos únicos). Cross-node isso
         colidia: o mesmo átomo `Malachi.LogMembership` resolve para o servidor **local** em cada nó, então
@@ -704,7 +704,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
   - ✅ **Deploy multi-nó/replicado completo** (D1 control plane HA + D2 data plane replicado + D3
     membership/healing/failover ao vivo). Ligado por config estática; `libcluster` (descoberta dinâmica)
     fica como conveniência futura.
-- 🚧 **C — Features NorthGuard restantes.** Decisão: começar por **C1 — retenção (tempo+tamanho)**;
+- ✅ **C — Features NorthGuard restantes.** Decisão: começar por **C1 — retenção (tempo+tamanho)**;
   attributes (C2) e policies (C3) depois. Design aprovado: `sealed_at` explícito no segment (idade),
   retenção por tamanho **por range**, e consumidor num dado expirado **avança para o início disponível**
   (mantém o cursor opaco). Sub-fatias: C1a (primitiva de delete) → C1b (coordenador + política + fiação).
@@ -721,7 +721,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     está aberto, senão limpa arquivos órfãos em disco (pós-restart); **idempotente** (deletar um segment
     desconhecido é `:ok`). Testado: `Log.delete` (diretório some), `ReplicationServer.delete` (dados
     somem → read vira `:eof`; idempotência).
-  - 🚧 **C1b — coordenador + read path + fiação** (incremental).
+  - ✅ **C1b — coordenador + read path + fiação** (incremental).
     - ✅ **C1b-1 — política + `RetentionCoordinator`.** `segment_meta` ganha `byte_size` (via `seal_segment`,
       do `active.bytes` do Broker — determinístico, como `sealed_at`; retenção por tamanho precisa de bytes).
       Módulo **puro** `Malachi.Cluster.Retention`: `expired(metadata, now_ms, policy)` → ids de segments
@@ -748,7 +748,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       (importa single-node também), após o `LogBroker`. Testado: `BrokerServer.delete_segment` (drop do
       selado), e **e2e** (produce → sela → sweep do coordenador → segment some do control plane **e** do
       storage). **C1 (retenção tempo+tamanho) completa.**
-- 🚧 **C2 — Attributes** (k/v opacos que o admin liga a brokers; base de rack/DC-awareness).
+- ✅ **C2 — Attributes** (k/v opacos que o admin liga a brokers; base de rack/DC-awareness).
   **Decisão:** disseminar via **Membership/SWIM** (fiel ao NorthGuard: "membership piggyback host/port/
   attributes"), não no Metadata — o usuário priorizou fidelidade. Incremental: C2a (Membership puro) →
   C2b (server + API + gossip) → C2c (fiação + config).
@@ -773,7 +773,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     valor) e passado como `:attributes`. Ausente → `%{}`. Testado: parse (vazio, pares, trim, entradas
     inválidas, valor com `=`). **C2 (attributes via SWIM) completa** — os brokers disseminam seus attrs por
     gossip, prontos para o placement rack-aware de C3.
-- 🚧 **C3 — Policies** (nome + retenção + constraints sobre attributes → replica sets; fiel ao NorthGuard,
+- ✅ **C3 — Policies** (nome + retenção + constraints sobre attributes → replica sets; fiel ao NorthGuard,
   que unifica tudo em *policies*). Incremental: C3a (Placement puro com spread) → C3b (integração: attrs do
   membership → placement) → C3c (policies por-topic: definição + associação + retenção por-topic).
   - ✅ **C3a — `Placement` puro com spread (rack-aware).** `place/4` ganha a opção `:spread =
@@ -816,7 +816,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       senão o `spread_by` global do broker. Simétrico ao 2b (chave definida vence, `nil` incluso). Só
       `place_opts/effective_spread_by` mudam. Testado: policy liga o spread sobre um global-off; `nil`
       explícito desliga sobre um global-on (== rendezvous puro).
-- 🚧 **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
+- ✅ **D — Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Decisão: **1A** — o cache
   do `Broker` vira um `DSRSM` (espelha o par `Metadata`/`ReplicatedMetadata`), roteando leituras/escritas
   por topic; e **2A** — incremental, núcleo puro primeiro. Infra já pronta: `HashRing`, `DSRSM` (puro),
@@ -851,8 +851,10 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       `snapshot/1` usa `&Function.identity/1` (query linearizável roda no líder, possivelmente remoto).
       Testado (`:multinode`): 2 vnodes sobre 3 nós, mata um membro do vnode dono (o líder se for peer →
       failover; senão um follower), o vnode ainda commita e os metadados (dele e do outro vnode) intactos.
-  - 🚧 **D-c — gestão do control plane por vnode** (retention/healing/failover). **Estado atual:** as
-    *escritas* de metadata já são sharded (D-b), mas a *gestão* segue **centralizada** — um
+  - ✅ **D-c — gestão do control plane por vnode** (retention/healing/failover). **Concluído por 1C-a +
+    1C-b** (coordinators só-no-líder + manager per-vnode-leader; ver as sub-fatias abaixo). O texto a
+    seguir é o **contexto do débito** que motivou 1C — o estado *antes* de 1C. **Estado pré-1C:** as
+    *escritas* de metadata já eram sharded (D-b), mas a *gestão* seguia **centralizada** — um
     `RetentionCoordinator` e um `HealCoordinator` no nó do `BrokerServer` leem `merged_metadata` (a
     **união** de todos os shards) e emitem comandos (`delete_segment`/`set_segment_replicas`) que
     **roteiam de volta** por topic ao vnode dono (via `command_topic/1`). Isso é **correto** sob
