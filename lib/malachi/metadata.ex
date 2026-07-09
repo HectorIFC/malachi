@@ -103,7 +103,12 @@ defmodule Malachi.Metadata do
           ranges: %{range_id() => range_meta()},
           segments: %{segment_id() => segment_meta()},
           committed_offsets: %{group_topic() => offsets()},
-          policies: %{policy_name() => policy()}
+          policies: %{policy_name() => policy()},
+          # Secondary (reverse) indexes kept in lockstep with `ranges`/`segments` so
+          # `ranges_of_topic`/`segments_of_range` can be O(1)+O(k) lookups instead of full scans. Stored
+          # as MapSets (O(1) add/remove, dedup); an entry exists iff the key has ≥1 member.
+          topic_ranges: %{topic_name() => MapSet.t(range_id())},
+          range_segments: %{range_id() => MapSet.t(segment_id())}
         }
 
   @typedoc "A topic's complete metadata, extracted for migration between vnodes."
@@ -127,7 +132,13 @@ defmodule Malachi.Metadata do
           | {:define_policy, policy_name(), policy()}
           | {:set_topic_policy, topic_name(), policy_name() | nil}
 
-  defstruct topics: %{}, ranges: %{}, segments: %{}, committed_offsets: %{}, policies: %{}
+  defstruct topics: %{},
+            ranges: %{},
+            segments: %{},
+            committed_offsets: %{},
+            policies: %{},
+            topic_ranges: %{},
+            range_segments: %{}
 
   @doc "An empty metadata state."
   @spec new() :: t()
@@ -175,7 +186,12 @@ defmodule Malachi.Metadata do
         ranges = Map.drop(state.ranges, doomed_range_ids)
         segments = drop_segments_in(state.segments, doomed_range_ids)
         topics = Map.delete(state.topics, name)
-        {%{state | topics: topics, ranges: ranges, segments: segments}, :ok}
+
+        state =
+          %{state | topics: topics, ranges: ranges, segments: segments}
+          |> index_forget_topic(name, doomed_range_ids)
+
+        {state, :ok}
     end
   end
 
@@ -223,7 +239,8 @@ defmodule Malachi.Metadata do
             sealed_at: nil
           }
 
-          {%{state | segments: Map.put(state.segments, segment_id, segment)}, :ok}
+          state = %{state | segments: Map.put(state.segments, segment_id, segment)}
+          {index_add_segment(state, range_id, segment_id), :ok}
       end
     end
   end
@@ -238,9 +255,15 @@ defmodule Malachi.Metadata do
     # Retention removes an expired segment from the control plane. Only sealed segments are
     # deletable — the active segment is still being written and must never be dropped.
     case Map.fetch(state.segments, segment_id) do
-      :error -> {state, {:error, :no_such_segment}}
-      {:ok, %{state: :active}} -> {state, {:error, :segment_active}}
-      {:ok, _sealed} -> {%{state | segments: Map.delete(state.segments, segment_id)}, :ok}
+      :error ->
+        {state, {:error, :no_such_segment}}
+
+      {:ok, %{state: :active}} ->
+        {state, {:error, :segment_active}}
+
+      {:ok, sealed} ->
+        state = %{state | segments: Map.delete(state.segments, segment_id)}
+        {index_forget_segment(state, sealed.range_id, segment_id), :ok}
     end
   end
 
@@ -437,12 +460,14 @@ defmodule Malachi.Metadata do
         ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
         segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
 
-        remaining = %{
-          state
-          | topics: Map.delete(state.topics, name),
-            ranges: Map.drop(state.ranges, MapSet.to_list(range_ids)),
-            segments: Map.drop(state.segments, Map.keys(segments))
-        }
+        remaining =
+          %{
+            state
+            | topics: Map.delete(state.topics, name),
+              ranges: Map.drop(state.ranges, MapSet.to_list(range_ids)),
+              segments: Map.drop(state.segments, Map.keys(segments))
+          }
+          |> index_forget_topic(name, MapSet.to_list(range_ids))
 
         {remaining, %{topic: topic, ranges: ranges, segments: segments}}
     end
@@ -459,12 +484,15 @@ defmodule Malachi.Metadata do
   """
   @spec insert_topic(t(), topic_export()) :: t()
   def insert_topic(%__MODULE__{} = state, export) do
-    %{
+    state = %{
       state
       | topics: Map.put(state.topics, export.topic.name, export.topic),
         ranges: Map.merge(state.ranges, export.ranges),
         segments: Map.merge(state.segments, export.segments)
     }
+
+    state = Enum.reduce(export.ranges, state, fn {id, range}, s -> index_add_range(s, range.topic, id) end)
+    Enum.reduce(export.segments, state, fn {id, seg}, s -> index_add_segment(s, seg.range_id, id) end)
   end
 
   # --- internals: topic ---
@@ -503,7 +531,7 @@ defmodule Malachi.Metadata do
         ranges: Map.put(state.ranges, root_id, root_range)
     }
 
-    {state, {:ok, root_id}}
+    {index_add_range(state, name, root_id), {:ok, root_id}}
   end
 
   defp seal_ranges_of_topic(ranges, name) do
@@ -519,6 +547,46 @@ defmodule Malachi.Metadata do
   defp drop_segments_in(segments, range_ids) do
     doomed = MapSet.new(range_ids)
     Map.filter(segments, fn {_id, segment} -> not MapSet.member?(doomed, segment.range_id) end)
+  end
+
+  # --- internals: secondary index maintenance ---
+  # Every membership change to `ranges`/`segments` mirrors into the reverse indexes here, so they stay
+  # exactly equal to what a scan would return. An entry is dropped once its set empties, so a missing key
+  # reads as "no members" (matching the scan, which returns []).
+
+  defp index_add_range(state, topic, range_id) do
+    topic_ranges = Map.update(state.topic_ranges, topic, MapSet.new([range_id]), &MapSet.put(&1, range_id))
+    %{state | topic_ranges: topic_ranges}
+  end
+
+  defp index_add_segment(state, range_id, segment_id) do
+    range_segments = Map.update(state.range_segments, range_id, MapSet.new([segment_id]), &MapSet.put(&1, segment_id))
+    %{state | range_segments: range_segments}
+  end
+
+  defp index_forget_segment(state, range_id, segment_id) do
+    %{state | range_segments: drop_from_index(state.range_segments, range_id, segment_id)}
+  end
+
+  # Forgets a whole topic: its `topic_ranges` entry and the `range_segments` entries of all its ranges.
+  defp index_forget_topic(state, topic, range_ids) do
+    %{
+      state
+      | topic_ranges: Map.delete(state.topic_ranges, topic),
+        range_segments: Map.drop(state.range_segments, range_ids)
+    }
+  end
+
+  # Removes `member` from the set at `key`, dropping the key entirely once its set is empty.
+  defp drop_from_index(index, key, member) do
+    case Map.fetch(index, key) do
+      :error ->
+        index
+
+      {:ok, set} ->
+        set = MapSet.delete(set, member)
+        if MapSet.size(set) == 0, do: Map.delete(index, key), else: Map.put(index, key, set)
+    end
   end
 
   # --- internals: range split/merge ---
@@ -537,7 +605,12 @@ defmodule Malachi.Metadata do
       |> Map.put(left_id, left)
       |> Map.put(right_id, right)
 
-    {%{state | ranges: ranges}, {:ok, left_id, right_id}}
+    state =
+      %{state | ranges: ranges}
+      |> index_add_range(range.topic, left_id)
+      |> index_add_range(range.topic, right_id)
+
+    {state, {:ok, left_id, right_id}}
   end
 
   defp do_merge_ranges(state, range_a, range_b) do
@@ -554,7 +627,8 @@ defmodule Malachi.Metadata do
       |> Map.put(range_b.id, %{range_b | state: :sealed})
       |> Map.put(child_id, child)
 
-    {%{state | ranges: ranges}, {:ok, child_id}}
+    state = index_add_range(%{state | ranges: ranges}, range_a.topic, child_id)
+    {state, {:ok, child_id}}
   end
 
   # Allocates `count` fresh range ids `{topic, seq}` from the topic's per-topic counter,

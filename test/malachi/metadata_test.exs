@@ -348,4 +348,42 @@ defmodule Malachi.MetadataTest do
       assert Metadata.topic_detail(state, "nope") == nil
     end
   end
+
+  describe "secondary index under migration (extract/insert)" do
+    test "extract scopes the removal to the topic; insert rebuilds its index entries" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
+      {state, :ok} = apply!(state, {:register_segment, left, "s1", [:b1], 0})
+      {state, _} = create_topic(state, "other", 4)
+
+      assert Map.has_key?(state.topic_ranges, "events")
+      assert Map.has_key?(state.range_segments, left)
+
+      {without, export} = Metadata.extract_topic(state, "events")
+      refute Map.has_key?(without.topic_ranges, "events")
+      refute Map.has_key?(without.range_segments, left)
+      # a different topic's index is untouched by the extraction
+      assert Map.has_key?(without.topic_ranges, "other")
+      assert index_matches_scan?(without)
+
+      reinserted = Metadata.insert_topic(without, export)
+      assert index_matches_scan?(reinserted)
+      assert reinserted.range_segments[left] == MapSet.new(["s1"])
+    end
+  end
+
+  # The maintained index must equal one derived by scanning the source-of-truth maps.
+  defp index_matches_scan?(state) do
+    expected_tr =
+      state.ranges
+      |> Enum.group_by(fn {_id, r} -> r.topic end, fn {id, _r} -> id end)
+      |> Map.new(fn {t, ids} -> {t, MapSet.new(ids)} end)
+
+    expected_rs =
+      state.segments
+      |> Enum.group_by(fn {_id, s} -> s.range_id end, fn {id, _s} -> id end)
+      |> Map.new(fn {r, ids} -> {r, MapSet.new(ids)} end)
+
+    state.topic_ranges == expected_tr and state.range_segments == expected_rs
+  end
 end

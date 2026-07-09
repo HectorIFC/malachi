@@ -181,9 +181,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   `unique_integer`/timestamp dentro do `apply` → seguro p/ replicação). **Resolve a persistência
   de metadados do topic adiada da Fase 0.** Testado inclusive com replay do log (determinismo) e
   com catch-all defensivo (comando desconhecido retorna erro, não derruba a réplica).
-  - ⏳ Futuro: índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
-    `seal_topic`/`delete_topic`/`ranges_of_topic`/`segments_of_range` varrem todos os ranges/
-    segments (O(n)); aceitável por shard, otimizar quando um vnode acumular muito metadado.
+  - 🚧 Índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
+    `ranges_of_topic`/`segments_of_range` varrem **todos** os ranges/segments do vnode (O(n)), e estão no
+    hot path (todo produce roteia por `active_ranges_of_topic`; todo consume lê `segments_of_range`), então
+    o custo cresce com o total de metadado acumulado (retenção guarda selados). Fatiado:
+    - ✅ **V-idx-a — manter + validar o índice.** `Metadata` ganha `topic_ranges`/`range_segments`
+      (MapSets, entrada existe sse tem ≥1 membro), mantidos **dentro do `apply/2` determinístico** (não é
+      cache lateral — replicado igual em todo nó `ra`) em cada mutação de membership: `create_topic`,
+      `split_range`, `merge_ranges`, `register_segment` (+), `delete_segment`, `delete_topic` (−), e a
+      migração `extract_topic`/`insert_topic`; seal/set_replicas/commit/policies não mexem. `DSRSM.merged_metadata`
+      também une o índice (shards disjuntos por topic → `Map.merge` exato). **Nenhum leitor usa ainda** — os
+      scans seguem intactos. Property test: o índice == um índice reconstruído por scan após qualquer
+      sequência de comandos (pega faltante/extra/stale/vazio); a property de determinismo já cobre o índice
+      (compara o state inteiro). 685 testes, 0 falhas; credo/dialyzer limpos.
+    - ⏳ **V-idx-b** — trocar `ranges_of_topic`/`segments_of_range` (e o caminho `DSRSM`) para usar o índice
+      (lookup O(1)+O(k)); **V-idx-c** — medir o ganho.
 - ✅ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; `command/3` e
   queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
   Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode

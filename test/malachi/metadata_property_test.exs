@@ -31,6 +31,29 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  # The reverse indexes (topic_ranges/range_segments) must stay exactly equal to what a scan of the
+  # source-of-truth maps would produce — otherwise a future O(1) lookup over them would lie. Compares the
+  # maintained index against one rebuilt from `ranges`/`segments`, which catches missing, extra, stale,
+  # and lingering-empty entries at once. (V-idx-b then switches the readers to use the index.)
+  property "the secondary indexes equal a scan-derived index after any sequence of operations" do
+    check all(ops <- StreamData.list_of(op(), max_length: 40), max_runs: 200) do
+      state = run(ops)
+
+      expected_topic_ranges =
+        state.ranges
+        |> Enum.group_by(fn {_id, range} -> range.topic end, fn {id, _range} -> id end)
+        |> Map.new(fn {topic, ids} -> {topic, MapSet.new(ids)} end)
+
+      expected_range_segments =
+        state.segments
+        |> Enum.group_by(fn {_id, seg} -> seg.range_id end, fn {id, _seg} -> id end)
+        |> Map.new(fn {range_id, ids} -> {range_id, MapSet.new(ids)} end)
+
+      assert state.topic_ranges == expected_topic_ranges
+      assert state.range_segments == expected_range_segments
+    end
+  end
+
   # --- op generator ---
 
   defp op do
@@ -40,7 +63,9 @@ defmodule Malachi.MetadataPropertyTest do
       StreamData.tuple({StreamData.constant(:delete_topic), StreamData.member_of(@topic_pool)}),
       StreamData.tuple({StreamData.constant(:split), StreamData.positive_integer()}),
       StreamData.tuple({StreamData.constant(:merge), StreamData.positive_integer()}),
-      StreamData.tuple({StreamData.constant(:register), StreamData.positive_integer(), StreamData.positive_integer()})
+      StreamData.tuple({StreamData.constant(:register), StreamData.positive_integer(), StreamData.positive_integer()}),
+      StreamData.tuple({StreamData.constant(:seal_seg), StreamData.positive_integer()}),
+      StreamData.tuple({StreamData.constant(:delete_seg), StreamData.positive_integer()})
     ])
   end
 
@@ -73,7 +98,28 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  defp apply_op(state, {:seal_seg, picker}) do
+    case pick_segment(state, picker, :active) do
+      nil -> state
+      id -> command(state, {:seal_segment, id, 1, 100, 1_700_000_000_000})
+    end
+  end
+
+  defp apply_op(state, {:delete_seg, picker}) do
+    case pick_segment(state, picker, :sealed) do
+      nil -> state
+      id -> command(state, {:delete_segment, id})
+    end
+  end
+
   defp command(state, command), do: state |> Metadata.apply(command) |> elem(0)
+
+  defp pick_segment(state, picker, seg_state) do
+    case for {id, s} <- state.segments, s.state == seg_state, do: id do
+      [] -> nil
+      ids -> Enum.at(Enum.sort(ids), rem(picker, length(ids)))
+    end
+  end
 
   defp pick_active_range(state, picker) do
     case active_range_ids(state) do
