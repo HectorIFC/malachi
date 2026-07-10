@@ -223,7 +223,9 @@ end, nil)
 ### Tracing (OpenTelemetry)
 
 Client operations are traced with OpenTelemetry: `malachi.produce` and `malachi.consume` spans carry
-`malachi.topic`, `malachi.records`, and `malachi.bytes` attributes. Tracing is **off by default** — the
+`malachi.topic`, `malachi.records`, and `malachi.bytes` attributes. A produce is a **distributed trace** —
+its context propagates across processes and nodes into child spans `malachi.broker.produce` and
+`malachi.replication.commit` (the quorum commit on the primary). Tracing is **off by default** — the
 sampler drops every span, so there is no per-operation cost until you opt in. To trace, turn the sampler
 on, add `{:opentelemetry_exporter, "~> 1.8"}`, and point it at your collector:
 

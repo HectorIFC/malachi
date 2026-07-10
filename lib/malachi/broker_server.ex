@@ -17,12 +17,15 @@ defmodule Malachi.BrokerServer do
 
   use GenServer
 
+  require OpenTelemetry.Tracer, as: Tracer
+
   alias Malachi.Broker
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
 
@@ -67,7 +70,11 @@ defmodule Malachi.BrokerServer do
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
           {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}}
           | {:error, term()}
-  def produce(server, topic, records), do: GenServer.call(server, {:produce, topic, records})
+  def produce(server, topic, records) do
+    # Carry the caller's trace context (the LogApi produce span) into the broker process so the
+    # server-side work becomes a child span (cross-process propagation, O5b).
+    GenServer.call(server, {:produce, topic, records, Ctx.get_current()})
+  end
 
   @doc "Reads up to `max_records` committed records from a range, starting at `offset`."
   @spec read(GenServer.server(), Malachi.Metadata.range_id(), non_neg_integer(), pos_integer()) ::
@@ -265,15 +272,26 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:produce, topic, records}, _from, state) do
-    {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
+  def handle_call({:produce, topic, records, ctx}, _from, state) do
+    # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
+    # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
+    token = Ctx.attach(ctx)
 
-    state =
-      %{state | broker: broker}
-      |> wake_waiters(topic, reply)
-      |> wake_subscribers(topic, reply)
+    try do
+      Tracer.with_span "malachi.broker.produce" do
+        {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
+        Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => length(records)})
 
-    {:reply, reply, state}
+        state =
+          %{state | broker: broker}
+          |> wake_waiters(topic, reply)
+          |> wake_subscribers(topic, reply)
+
+        {:reply, reply, state}
+      end
+    after
+      Ctx.detach(token)
+    end
   end
 
   def handle_call({:consume, topic, positions, max_records, wait_ms}, from, state) do

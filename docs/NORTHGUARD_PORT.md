@@ -742,8 +742,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
             operação, raiz). Testado: comportamento intacto + **captura real de span** (test.exs usa `sampler:
             :always_on` + o `simple` processor + `otel_exporter_pid`; assere nome + atributos via record do
             header OTel + `otel_attributes.map`). 702 testes, 0 falhas; credo/dialyzer limpos.
-          - ⏳ **O5b — propagação de contexto cross-process/cross-node** (produce → replicação como span
-            filho, threadando `otel_ctx` pelos GenServers/`:erpc`) — a parte invasiva, fatia própria.
+          - ✅ **O5b — propagação de contexto cross-process/cross-node.** O trace do produce agora atravessa
+            os processos: `BrokerServer.produce` captura o `otel_ctx` do caller (o span `malachi.produce` do
+            `LogApi`) e o passa na mensagem do GenServer; o `handle_call` **anexa** o ctx e embrulha o trabalho
+            num span filho `malachi.broker.produce`. Idem no hop mais fundo: `ReplicationServer.replicate`
+            captura o ctx (agora o span do broker) e o passa (mensagem virou 6-tupla nas 3 clauses); o
+            `handle_call` anexa + span `malachi.replication.commit` — como o ctx é um mapa serializável, isso
+            **linka cross-node** (produce num nó, replicação no primário remoto, mesmo trace). Tracing off por
+            default → `get_current`/`attach`/`detach` são pdict-ops baratas quando não há span. Testado: um
+            produce gera os 3 spans com o **mesmo trace_id** e a cadeia de parent correta
+            (produce → broker.produce → replication.commit). 703 testes, 0 falhas; credo/dialyzer limpos.
+            **Observabilidade (A/B/C) concluída.**
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

@@ -29,10 +29,13 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   use GenServer
 
+  require OpenTelemetry.Tracer, as: Tracer
+
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Log
   alias Malachi.Telemetry
+  alias OpenTelemetry.Ctx
 
   @follow_timeout 5_000
 
@@ -80,9 +83,11 @@ defmodule Malachi.Cluster.ReplicationServer do
           {:ok, non_neg_integer()}
           | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
   def replicate(primary, segment_id, replica_set, base_offset, records) do
+    # Carry the caller's trace context (the broker produce span, possibly on another node) so the quorum
+    # replication becomes a child span — distributed tracing across the produce -> replication hop (O5b).
     GenServer.call(
       primary,
-      {:replicate, segment_id, replica_set, base_offset, records},
+      {:replicate, segment_id, replica_set, base_offset, records, Ctx.get_current()},
       @follow_timeout + 10_000
     )
   catch
@@ -155,19 +160,27 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @impl true
-  def handle_call({:replicate, _segment_id, _replica_set, _base_offset, []}, _from, state) do
+  def handle_call({:replicate, _segment_id, _replica_set, _base_offset, [], _ctx}, _from, state) do
     {:reply, {:error, :empty}, state}
   end
 
-  def handle_call({:replicate, _segment_id, [], _base_offset, _records}, _from, state) do
+  def handle_call({:replicate, _segment_id, [], _base_offset, _records, _ctx}, _from, state) do
     {:reply, {:error, :empty_replica_set}, state}
   end
 
-  def handle_call({:replicate, segment_id, replica_set, base_offset, records}, _from, state) do
-    if hd(replica_set) == state.ref do
-      do_replicate(state, segment_id, replica_set, base_offset, records)
-    else
-      {:reply, {:error, :not_primary}, state}
+  def handle_call({:replicate, segment_id, replica_set, base_offset, records, ctx}, _from, state) do
+    token = Ctx.attach(ctx)
+
+    try do
+      Tracer.with_span "malachi.replication.commit" do
+        if hd(replica_set) == state.ref do
+          do_replicate(state, segment_id, replica_set, base_offset, records)
+        else
+          {:reply, {:error, :not_primary}, state}
+        end
+      end
+    after
+      Ctx.detach(token)
     end
   end
 

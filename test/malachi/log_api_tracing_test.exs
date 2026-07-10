@@ -29,6 +29,17 @@ defmodule Malachi.LogApiTracingTest do
 
   defp attrs(s), do: :otel_attributes.map(span(s, :attributes))
 
+  # Drains every span currently exported to this process.
+  defp drain_spans(acc \\ []) do
+    receive do
+      {:span, s} -> drain_spans([s | acc])
+    after
+      500 -> acc
+    end
+  end
+
+  defp by_name(spans, name), do: Enum.find(spans, &(span(&1, :name) == name))
+
   test "produce creates a malachi.produce span with topic/records/bytes", %{broker: broker} do
     topic = "trace_#{System.unique_integer([:positive])}"
     :ok = LogApi.create_topic(broker, topic)
@@ -38,6 +49,28 @@ defmodule Malachi.LogApiTracingTest do
     assert a["malachi.topic"] == topic
     assert a["malachi.records"] == 2
     assert a["malachi.bytes"] == 4
+  end
+
+  test "produce spans are linked across processes: produce -> broker.produce -> replication.commit", %{broker: broker} do
+    topic = "trace_#{System.unique_integer([:positive])}"
+    :ok = LogApi.create_topic(broker, topic)
+    {:ok, 1} = LogApi.produce(broker, topic, [%{"value" => "x"}])
+
+    spans = drain_spans()
+    produce = by_name(spans, "malachi.produce")
+    broker_span = by_name(spans, "malachi.broker.produce")
+    replication = by_name(spans, "malachi.replication.commit")
+
+    assert produce && broker_span && replication, "expected all three spans"
+
+    # one trace across the three processes (client -> broker -> replication)
+    trace_id = span(produce, :trace_id)
+    assert span(broker_span, :trace_id) == trace_id
+    assert span(replication, :trace_id) == trace_id
+
+    # parent chain: broker.produce is a child of produce; replication.commit is a child of broker.produce
+    assert span(broker_span, :parent_span_id) == span(produce, :span_id)
+    assert span(replication, :parent_span_id) == span(broker_span, :span_id)
   end
 
   test "fetch creates a malachi.consume span with the topic and record count", %{broker: broker} do
