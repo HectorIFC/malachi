@@ -722,8 +722,16 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           replicação que o single-node dispara). Achado no caminho: um **flake pré-existente** no
           `connection_limiter_test` (limite **global** — estado compartilhado entre testes; passa isolado,
           não relacionado ao O3) → registrado p/ fix à parte. 698 testes (credo/dialyzer limpos).
-        - ⏳ **O4** — handler default que dobra alguns eventos no `Metrics` (enriquece o Prometheus);
-          **O5** — OpenTelemetry tracing.
+        - ✅ **O4 — handler default telemetry → Metrics.** `Malachi.Telemetry.MetricsReporter` anexa (idempotente,
+          no `Metrics.init`) aos 4 eventos e dobra cada um em contadores ETS: produce (`records_produced`+
+          `bytes_produced`), consume (`records_consumed`), auth (`{:auth_result, :ok|:error}`), replicação
+          (`{:replication_result, :ok|:no_quorum}`). `get_system_metrics` ganha a seção `operations`, e o
+          Prometheus emite `malachi_records_produced_total`/`bytes_produced_total`/`records_consumed_total`,
+          `malachi_auth_attempts_total{result}` e `malachi_replication_commits_total{result}` — assim o
+          endpoint do O2 ganha throughput/auth/replicação sem cada operador escrever handler (podem anexar os
+          seus ao lado). Testado: reporter e2e (evento → contador via `get_system_metrics`) + o Prometheus com
+          a seção. 700 testes, 0 falhas; credo/dialyzer limpos. **Bloco A+B da observabilidade concluído.**
+        - ⏳ **O5** — OpenTelemetry tracing (bloco C).
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

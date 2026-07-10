@@ -23,7 +23,16 @@ defmodule Malachi.Metrics.PrometheusTest do
         active_lockouts: 1,
         dashboard: %{auth_success: 10, auth_failed: 3, auth_blocked: 0}
       },
-      tls: %{enabled: true, handshakes_success: 9, handshakes_failed: 1}
+      tls: %{enabled: true, handshakes_success: 9, handshakes_failed: 1},
+      operations: %{
+        records_produced: 100,
+        bytes_produced: 4096,
+        records_consumed: 80,
+        auth_ok: 12,
+        auth_error: 3,
+        replication_ok: 50,
+        replication_no_quorum: 1
+      }
     }
   end
 
@@ -49,6 +58,17 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_io_bytes_total{direction="output"} 2000)
     # booleans render as 0/1
     assert out =~ "malachi_tls_enabled 1\n"
+  end
+
+  test "operation counters (O4) are emitted" do
+    out = render([])
+
+    assert out =~ "# TYPE malachi_records_produced_total counter\nmalachi_records_produced_total 100\n"
+    assert out =~ "malachi_bytes_produced_total 4096\n"
+    assert out =~ "malachi_records_consumed_total 80\n"
+    assert out =~ ~s(malachi_auth_attempts_total{result="ok"} 12)
+    assert out =~ ~s(malachi_auth_attempts_total{result="error"} 3)
+    assert out =~ ~s(malachi_replication_commits_total{result="no_quorum"} 1)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

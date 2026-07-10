@@ -187,7 +187,9 @@ readinessProbe: { httpGet: { path: /ready,  port: 4041 } }
 (`Accept: text/plain`), and the JSON dashboard payload otherwise — same path, content-negotiated. Series
 are namespaced `malachi_`: BEAM health (`malachi_process_count`, `malachi_memory_bytes`,
 `malachi_uptime_seconds`, …), security counters (`malachi_rate_limit_blocked_total`,
-`malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), and per-topic gauges
+`malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), operation totals fed by the telemetry
+events (`malachi_records_produced_total`, `malachi_bytes_produced_total`, `malachi_records_consumed_total`,
+`malachi_auth_attempts_total{result}`, `malachi_replication_commits_total{result}`), and per-topic gauges
 (`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`, …).
 
 `/metrics` requires authentication (any user), so a scrape config passes a token:

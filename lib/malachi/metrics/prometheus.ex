@@ -16,6 +16,7 @@ defmodule Malachi.Metrics.Prometheus do
   @spec export(map(), [map()]) :: iodata()
   def export(system, topics) do
     mem = system.memory
+    ops = system.operations
 
     [
       metric("malachi_up", :gauge, "1 while the metrics endpoint is serving", [{[], 1}]),
@@ -64,6 +65,21 @@ defmodule Malachi.Metrics.Prometheus do
         {[outcome: "failed"], system.tls.handshakes_failed}
       ]),
       metric("malachi_tls_enabled", :gauge, "1 if TLS is enabled", [{[], bool(system.tls.enabled)}]),
+      metric("malachi_records_produced_total", :counter, "Records appended across all topics", [
+        {[], ops.records_produced}
+      ]),
+      metric("malachi_bytes_produced_total", :counter, "Value bytes appended across all topics", [
+        {[], ops.bytes_produced}
+      ]),
+      metric("malachi_records_consumed_total", :counter, "Records read across all topics", [{[], ops.records_consumed}]),
+      metric("malachi_auth_attempts_total", :counter, "Authentication attempts by result", [
+        {[result: "ok"], ops.auth_ok},
+        {[result: "error"], ops.auth_error}
+      ]),
+      metric("malachi_replication_commits_total", :counter, "Quorum replications by result", [
+        {[result: "ok"], ops.replication_ok},
+        {[result: "no_quorum"], ops.replication_no_quorum}
+      ]),
       topic_metrics(topics)
     ]
   end

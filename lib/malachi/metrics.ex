@@ -13,6 +13,7 @@ defmodule Malachi.Metrics do
   require Logger
   alias Malachi.Auth.{LockoutManager, SessionManager}
   alias Malachi.I18n
+  alias Malachi.Telemetry.MetricsReporter
 
   @metrics_table :malachi_metrics
 
@@ -35,6 +36,35 @@ defmodule Malachi.Metrics do
   """
   def increment_connection_limit_blocked do
     :ets.update_counter(@metrics_table, :connection_limit_blocked, {2, 1}, {:connection_limit_blocked, 0})
+    :ok
+  end
+
+  # --- operation counters (fed by the telemetry -> metrics reporter, O4) ---
+
+  @doc "Records `count` records and `bytes` value bytes produced (from the produce telemetry event)."
+  def record_produce(count, bytes) do
+    :ets.update_counter(@metrics_table, :records_produced, {2, count}, {:records_produced, 0})
+    :ets.update_counter(@metrics_table, :bytes_produced, {2, bytes}, {:bytes_produced, 0})
+    :ok
+  end
+
+  @doc "Records `count` records consumed (from the consume telemetry event)."
+  def record_consume(count) do
+    :ets.update_counter(@metrics_table, :records_consumed, {2, count}, {:records_consumed, 0})
+    :ok
+  end
+
+  @doc "Records an authentication attempt with `result` (`:ok` / `:error`)."
+  def record_auth(result) do
+    key = {:auth_result, result}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
+  @doc "Records a quorum replication with `result` (`:ok` / `:no_quorum`)."
+  def record_replication(result) do
+    key = {:replication_result, result}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
     :ok
   end
 
@@ -194,6 +224,15 @@ defmodule Malachi.Metrics do
           "tlsv1.2": get_counter({:tls_version, :"tlsv1.2"})
         }
       },
+      operations: %{
+        records_produced: get_counter(:records_produced),
+        bytes_produced: get_counter(:bytes_produced),
+        records_consumed: get_counter(:records_consumed),
+        auth_ok: get_counter({:auth_result, :ok}),
+        auth_error: get_counter({:auth_result, :error}),
+        replication_ok: get_counter({:replication_result, :ok}),
+        replication_no_quorum: get_counter({:replication_result, :no_quorum})
+      },
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()
     }
@@ -239,6 +278,10 @@ defmodule Malachi.Metrics do
       :named_table,
       read_concurrency: true
     ])
+
+    # Fold the telemetry hot-path events into these counters (O4). Attached here so the ETS table exists
+    # first; idempotent, so a Metrics restart re-attaches cleanly.
+    MetricsReporter.attach()
 
     schedule_snapshot()
     schedule_cleanup()
