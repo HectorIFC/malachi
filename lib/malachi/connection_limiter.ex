@@ -103,6 +103,15 @@ defmodule Malachi.ConnectionLimiter do
     GenServer.call(__MODULE__, :list_connections)
   end
 
+  @doc """
+  Clears all tracked connections — the per-IP and global counters and the process monitors. This does not
+  change limiting behavior; it only resets the tracked state, so it is primarily for tests that need a
+  known-clean baseline (the tracker is process-global, shared with the live server and every other test).
+  """
+  def reset do
+    GenServer.call(__MODULE__, :reset)
+  end
+
   # ============================================================
   # GENSERVER CALLBACKS
   # ============================================================
@@ -205,6 +214,23 @@ defmodule Malachi.ConnectionLimiter do
       |> Enum.into(%{})
 
     {:reply, connections, state}
+  end
+
+  @impl true
+  def handle_call(:reset, _from, state) do
+    # Demonitor everything we track (flushing any queued :DOWN so it can't decrement after the reset),
+    # then clear the counters back to a clean, empty baseline.
+    :ets.foldl(
+      fn {_pid, _ip, ref}, _acc -> Process.demonitor(ref, [:flush]) end,
+      :ok,
+      @table_pids
+    )
+
+    :ets.delete_all_objects(@table_pids)
+    :ets.delete_all_objects(@table_ip)
+    :ets.insert(@table_global, {:total, 0})
+
+    {:reply, :ok, state}
   end
 
   @impl true

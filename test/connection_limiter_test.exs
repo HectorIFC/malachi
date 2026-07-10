@@ -7,6 +7,11 @@ defmodule Malachi.ConnectionLimiterTest do
     original_value = Application.get_env(:malachi, :connection_limit_enabled)
     Application.put_env(:malachi, :connection_limit_enabled, true)
 
+    # The tracker is process-global (shared with the live server and other tests, whose killed pids clean
+    # up asynchronously via :DOWN). Reset to a clean baseline so a test's counts are its own — otherwise
+    # leaked connections make the global-limit assertions flaky.
+    ConnectionLimiter.reset()
+
     on_exit(fn ->
       Application.put_env(:malachi, :connection_limit_enabled, original_value)
     end)
