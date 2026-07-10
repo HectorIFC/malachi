@@ -753,6 +753,24 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
             produce gera os 3 spans com o **mesmo trace_id** e a cadeia de parent correta
             (produce → broker.produce → replication.commit). 703 testes, 0 falhas; credo/dialyzer limpos.
             **Observabilidade (A/B/C) concluída.**
+  - ✅ **Cliente de referência (Node.js) reformulado para a nova arquitetura.** Os scripts Node.js antigos
+    falavam o protocolo JSON de fila/canal (removido no B3b); reescritos para o **protocolo binário
+    (`Malachi.Wire`) + modelo de log** (topic/key/cursor opaco). Estrutura: `scripts/lib/wire.js` — port
+    fiel do codec (framing length-prefixed, envelope request/response, `put_str` com flag de presença,
+    records **sem offset**, todos os payloads das 7 operações); `scripts/lib/client.js` — conexão TCP que
+    **multiplexa requests por `correlation_id`** e roteia os frames de **push** (o servidor reusa o corr_id
+    do `subscribe`) para o callback da subscription, não para um request one-shot; `scripts/lib/cli.js` —
+    cores/config-de-env/parse-de-args compartilhados (DRY, os scripts antigos duplicavam). CLIs: `producer.js`
+    (append por chave, `--create`/`--key`/`--continuous`), `consumer.js` (pull dirigido por cursor;
+    `--group` resume + commita server-side; `--follow` long-poll), `subscriber.js` (server-push streaming
+    subscribe+ack com janela de crédito — substitui o `channel-*` pub/sub, que sumiu com o modelo de canal).
+    **Deletados:** `channel-publisher.js`/`channel-subscriber.js`/`channel-demo.sh` (modelo de canal
+    removido) e `i18n.js` (órfão; os novos scripts usam strings inglesas inline). `channel-demo.sh` virou
+    `streaming-demo.sh` (append → stream ao vivo). Validado e2e contra o servidor real: auth →
+    create_topic → produce → fetch-por-cursor (avança/drena) → commit+resume-de-grupo (2ª run consome 0) →
+    streaming push+ack (pré-existentes + ao vivo), e caminhos de erro limpos (`permission_denied`,
+    `invalid_credentials` — sem crash). README com a seção do cliente; `package.json` atualizado (v2, scripts
+    produce/consume/subscribe/demo). **Sem dependências** (só `net` da stdlib).
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

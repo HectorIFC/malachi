@@ -666,9 +666,33 @@ Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: a
 server pushes records up to the credit window; the client acks to durably advance the group's position
 (at-least-once) and return credit, so a slow consumer applies backpressure instead of overflowing.
 
-> A standalone reference client library is planned. Today the wire protocol is fully exercised by
-> `Malachi.Test.TCPHelper` (`test/support/tcp_helper.ex`) — the clearest worked example of the
-> auth → create_topic → produce → fetch/subscribe flow — over the `Malachi.Wire` codec.
+### Reference client (Node.js)
+
+`scripts/` ships a dependency-free Node.js reference client that speaks the protocol above:
+
+- `scripts/lib/wire.js` — the binary codec, a direct port of `Malachi.Wire` (framing, envelope, records).
+- `scripts/lib/client.js` — a connection that multiplexes requests by `correlation_id` and routes push
+  frames to a subscription callback.
+- `scripts/producer.js` / `consumer.js` / `subscriber.js` — CLIs for append, pull, and server-push.
+
+```bash
+# append 100 records to a topic (creating it first)
+node scripts/producer.js orders 100 --create
+
+# pull with a resumable consumer group, long-polling for new records
+node scripts/consumer.js orders --group workers --follow
+
+# server-push streaming (subscribe + credit-windowed acks)
+node scripts/subscriber.js orders --group live
+
+# end-to-end demo (append, then stream while producing)
+bash scripts/streaming-demo.sh
+```
+
+Default credentials: `producer`/`producer123` (produce + create-topic), `consumer`/`consumer123`
+(consume), `app`/`app123` (both). Override with `MALACHI_USER`/`MALACHI_PASS`; point at another server
+with `MALACHI_HOST`/`MALACHI_PORT`. The same flow is exercised in-VM by `Malachi.Test.TCPHelper`
+(`test/support/tcp_helper.ex`).
 
 ## 🛠️ Development
 
