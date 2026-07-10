@@ -205,7 +205,13 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
       não-ordenados, então nenhum caller dependia da ordem — sem regressão. Validado pela suíte inteira
       (broker/DSRSM/produce/consume exercitam os leitores nos caminhos vivos) + as properties. 686 testes,
       0 falhas; credo/dialyzer limpos.
-    - ⏳ **V-idx-c** — medir o ganho (bench com muitos ranges/segments: scan vs índice).
+    - ✅ **V-idx-c — medir o ganho.** `bench/metadata_index_bench.exs` compara índice vs scan (reimplementado
+      inline) no mesmo Metadata, com topics de tamanho fixo (3 ranges, 2 segments cada) e o total crescendo.
+      Resultado: o índice é **plano** (~0,2 µs, O(k)) enquanto o scan cresce **linear** (O(n)) — de ~7,5 µs
+      (300 ranges) a **~7,3 ms** (150k ranges) por chamada de `ranges_of_topic`, e a ~9,9 ms para
+      `segments_of_range` (100k segments). Speedup de ~12× (pequeno) a **~33.000×** (ranges) / **~67.000×**
+      (segments). Como isso era um imposto **por produce/consume**, a 50k topics o scan sozinho custava
+      milissegundos por mensagem; o índice o zera. **Índice secundário (V-idx-a/b/c) completo.**
 - ✅ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; `command/3` e
   queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
   Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode
