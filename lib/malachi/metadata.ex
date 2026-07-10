@@ -140,6 +140,9 @@ defmodule Malachi.Metadata do
             topic_ranges: %{},
             range_segments: %{}
 
+  # Shared empty MapSet returned for an absent index key (no allocation on the miss path).
+  @empty_set MapSet.new()
+
   @doc "An empty metadata state."
   @spec new() :: t()
   def new, do: %__MODULE__{}
@@ -170,7 +173,7 @@ defmodule Malachi.Metadata do
 
       {:ok, topic} ->
         topics = Map.put(state.topics, name, %{topic | state: :sealed})
-        ranges = seal_ranges_of_topic(state.ranges, name)
+        ranges = seal_topic_ranges(state, name)
         {%{state | topics: topics, ranges: ranges}, :ok}
     end
   end
@@ -181,10 +184,11 @@ defmodule Malachi.Metadata do
         {state, {:error, :no_such_topic}}
 
       {:ok, _topic} ->
-        doomed_range_ids = range_ids_of_topic(state.ranges, name)
+        doomed_range_ids = range_ids_of_topic(state, name)
+        doomed_segment_ids = Enum.flat_map(doomed_range_ids, &segment_ids_of_range(state, &1))
 
         ranges = Map.drop(state.ranges, doomed_range_ids)
-        segments = drop_segments_in(state.segments, doomed_range_ids)
+        segments = Map.drop(state.segments, doomed_segment_ids)
         topics = Map.delete(state.topics, name)
 
         state =
@@ -320,10 +324,12 @@ defmodule Malachi.Metadata do
   @spec get_segment(t(), segment_id()) :: segment_meta() | nil
   def get_segment(%__MODULE__{} = state, segment_id), do: Map.get(state.segments, segment_id)
 
-  @doc "All ranges of a topic (any state)."
+  @doc "All ranges of a topic (any state). O(k) via the `topic_ranges` index — see `apply/2`."
   @spec ranges_of_topic(t(), topic_name()) :: [range_meta()]
   def ranges_of_topic(%__MODULE__{} = state, name) do
-    state.ranges |> Map.values() |> Enum.filter(&(&1.topic == name))
+    state.topic_ranges
+    |> Map.get(name, @empty_set)
+    |> Enum.map(&Map.fetch!(state.ranges, &1))
   end
 
   @doc "The active ranges of a topic (the ones that currently tile the keyspace)."
@@ -332,10 +338,12 @@ defmodule Malachi.Metadata do
     state |> ranges_of_topic(name) |> Enum.filter(&(&1.state == :active))
   end
 
-  @doc "All segments of a range."
+  @doc "All segments of a range. O(k) via the `range_segments` index — see `apply/2`."
   @spec segments_of_range(t(), range_id()) :: [segment_meta()]
   def segments_of_range(%__MODULE__{} = state, range_id) do
-    state.segments |> Map.values() |> Enum.filter(&(&1.range_id == range_id))
+    state.range_segments
+    |> Map.get(range_id, @empty_set)
+    |> Enum.map(&Map.fetch!(state.segments, &1))
   end
 
   @doc "A consumer group's committed offsets for a topic, or `%{}` if it has never committed."
@@ -534,20 +542,18 @@ defmodule Malachi.Metadata do
     {index_add_range(state, name, root_id), {:ok, root_id}}
   end
 
-  defp seal_ranges_of_topic(ranges, name) do
-    Map.new(ranges, fn {id, range} ->
-      if range.topic == name, do: {id, %{range | state: :sealed}}, else: {id, range}
-    end)
+  # Seals only the topic's ranges (O(k) via the index), returning the updated `ranges` map.
+  defp seal_topic_ranges(state, name) do
+    state
+    |> range_ids_of_topic(name)
+    |> Enum.reduce(state.ranges, fn id, ranges -> Map.update!(ranges, id, &%{&1 | state: :sealed}) end)
   end
 
-  defp range_ids_of_topic(ranges, name) do
-    for {id, range} <- ranges, range.topic == name, do: id
-  end
+  # The range ids of a topic / the segment ids of a range, straight from the reverse index (O(1)+O(k)).
+  defp range_ids_of_topic(state, name), do: state.topic_ranges |> Map.get(name, @empty_set) |> MapSet.to_list()
 
-  defp drop_segments_in(segments, range_ids) do
-    doomed = MapSet.new(range_ids)
-    Map.filter(segments, fn {_id, segment} -> not MapSet.member?(doomed, segment.range_id) end)
-  end
+  defp segment_ids_of_range(state, range_id),
+    do: state.range_segments |> Map.get(range_id, @empty_set) |> MapSet.to_list()
 
   # --- internals: secondary index maintenance ---
   # Every membership change to `ranges`/`segments` mirrors into the reverse indexes here, so they stay

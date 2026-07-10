@@ -194,8 +194,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
       scans seguem intactos. Property test: o índice == um índice reconstruído por scan após qualquer
       sequência de comandos (pega faltante/extra/stale/vazio); a property de determinismo já cobre o índice
       (compara o state inteiro). 685 testes, 0 falhas; credo/dialyzer limpos.
-    - ⏳ **V-idx-b** — trocar `ranges_of_topic`/`segments_of_range` (e o caminho `DSRSM`) para usar o índice
-      (lookup O(1)+O(k)); **V-idx-c** — medir o ganho.
+    - ✅ **V-idx-b — trocar os leitores para o índice.** `ranges_of_topic`/`segments_of_range` viram lookup
+      `Map.get(index) |> Enum.map(&Map.fetch!(...))` = **O(1)+O(k)** (o `fetch!` é seguro pelo invariante do
+      V-idx-a, e serve de canário se algum dia divergir). Também index-based os scans internos por-topic:
+      `seal_topic` (sela só os ranges do topic) e `delete_topic` (dropa só os ranges/segments do topic) —
+      removidos os helpers de scan `seal_ranges_of_topic`/`range_ids_of_topic`(scan)/`drop_segments_in`. O
+      caminho `DSRSM` usa o índice de graça (delega aos leitores do `Metadata` via `query`; o merge do
+      índice no `merged_metadata` veio no V-idx-a). Pré-condição verificada: nenhum `%Metadata{}` é
+      construído com dados sem índice (todos vêm de `apply`/merge/migração). Os leitores antigos já eram
+      não-ordenados, então nenhum caller dependia da ordem — sem regressão. Validado pela suíte inteira
+      (broker/DSRSM/produce/consume exercitam os leitores nos caminhos vivos) + as properties. 686 testes,
+      0 falhas; credo/dialyzer limpos.
+    - ⏳ **V-idx-c** — medir o ganho (bench com muitos ranges/segments: scan vs índice).
 - ✅ `Malachi.Cluster.DSRSM` — junta tudo: HashRing + um `Metadata` por vnode; `command/3` e
   queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
   Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode
