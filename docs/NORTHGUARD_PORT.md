@@ -220,8 +220,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   e **migra** os topics deslocados (topic + ranges + segments) para ele. Viabilizado por range id
   `{topic, seq}` (globalmente único → sem colisão na migração); helpers `Metadata.extract_topic/2`
   e `insert_topic/2`. Testado: migração sem perda + ranges/segments acompanham o topic.
-  - ⏳ Futuro: sharding de range/segment por range id (cross-vnode), que é o desvio restante
-    do NorthGuard.
+  - ⏸️ **Desvio deliberado (não planejado): sharding de range/segment por range id (cross-vnode).** O
+    NorthGuard sharda o *metadado* por range id; o malachi co-localiza o metadado de um topic num vnode
+    (route por nome). **Decisão de não fazer** (avaliado): (1) os **dados já são shardados cross-node** —
+    cada segment tem réplicas colocadas por HRW em nós distintos, então um topic movimentado já espalha
+    dados por ranges→segments→nós; só a *granularidade de gestão do metadado* difere. (2) O sharding **por
+    topic já espalha a carga de metadado** pelo cluster; o range-sharding só escalaria a taxa de *mutação
+    estrutural* (splits/segments/s) de **um único** topic além de um grupo Raft — barra altíssima (mutações
+    de metadado não são por-record). (3) O custo é reintroduzir **transações cross-Raft** para operações de
+    topic (seal/delete tocam ranges em N vnodes), alocação de range id distribuída, `create`/`split`
+    cross-vnode, e reads **scatter-gather** (desfazendo o índice O(1) do V-idx) — exatamente a complexidade
+    que a co-localização evita. Pior custo/benefício do roadmap; **reavaliar só se surgir um gargalo
+    concreto de metadado de um único topic**.
 
 **Bridge control plane → data plane (1a.5):**
 - ✅ `Malachi.Broker` — compõe o control plane (`Metadata`, fonte da verdade da estrutura) com
