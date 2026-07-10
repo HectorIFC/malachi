@@ -4,7 +4,11 @@
 
 # Malachi
 
-High-performance message system.
+An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture — a CP
+(consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and
+**opaque cursors** — never partitions or offsets — so the broker can split, merge, and restripe its
+storage underneath without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
+self-healing, and rack-aware placement.
 
 [![CI](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml)
 [![Release](https://github.com/HectorIFC/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/release.yml)
@@ -39,6 +43,58 @@ Support us with a monthly donation and help us continue our activities. [[Become
 Watch Malachi in action:
 
 [![Malachi Demo](https://img.youtube.com/vi/hn26zgRoOUI/0.jpg)](https://www.youtube.com/watch?v=hn26zgRoOUI)
+
+## 🧭 The model (a log, not a queue)
+
+A client deals in three things and nothing else:
+
+- **topic** — a named, ordered, replicated log.
+- **key** — on produce, routes each record to a range of the topic's keyspace (ordering is per key).
+- **opaque cursor** — on consume, a position token the client echoes back. It is deliberately opaque:
+  internally it encodes per-range positions, but the client never sees partitions or offsets, so the
+  broker can split/merge/restripe ranges underneath without breaking the client. This is the core
+  difference from Kafka, which leaks partitions and offsets to the client.
+
+Under the hood a topic is a set of dynamic **ranges** (slices of the keyspace that split as they grow),
+each a series of **segments** replicated by quorum across nodes. See
+[docs/NORTHGUARD_PORT.md](docs/NORTHGUARD_PORT.md) for the full architecture.
+
+## ⚡ Getting started (local)
+
+Requires Elixir `~> 1.19` / OTP 26+.
+
+```bash
+git clone https://github.com/HectorIFC/malachi.git
+cd malachi
+mix deps.get
+iex -S mix        # starts the broker: TCP on 4040, dashboard on 4041
+```
+
+The quickest way to see the model is the in-process log API in that `iex` session:
+
+```elixir
+alias Malachi.LogApi
+broker = Malachi.LogBroker
+
+LogApi.create_topic(broker, "events")
+
+# produce by key — no partitions, no offsets exposed
+LogApi.produce(broker, "events", [
+  %{"key" => "user-1", "value" => "hello"},
+  %{"key" => "user-2", "value" => "world"}
+])
+
+# consume from the start: get back records + an opaque cursor to resume from
+{:ok, records, cursor} = LogApi.fetch(broker, "events", :start, 100)
+Enum.map(records, & &1.value)        #=> ["hello", "world"]
+
+# resume by passing the cursor back — nothing new yet
+{:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
+```
+
+Single-node is in-memory by default; set `MALACHIMQ_LOG_CLUSTER` / `MALACHIMQ_LOG_NODES` for a replicated,
+HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#-client-protocol)
+on port 4040.
 
 ## 🚀 Quick Start with Docker
 
@@ -91,8 +147,8 @@ Malachi v0.5.0 includes comprehensive security hardening:
 - **Argon2 Password Hashing** - Industry-standard password hashing replacing SHA-256
 - **Rate Limiting** - Token bucket algorithm for auth, publish, and subscribe operations
 - **Connection Controls** - Per-IP and global connection limits to prevent DoS
-- **Input Validation** - Strict queue/channel name validation, payload size limits, header validation
-- **Backpressure** - Queue buffer limits with configurable overflow strategies
+- **Input Validation** - Topic name allowlist (path-traversal safe), a configurable frame-size cap, and malformed-frame handling at the connection boundary
+- **Streaming Backpressure** - credit-window flow control on push subscriptions (a slow consumer applies backpressure instead of overflowing)
 - **Dashboard Security** - CSP, HSTS, CORS, X-Frame-Options, authentication required by default
 - **Audit Logging** - JSON-formatted security event logging with automatic rotation
 - **Account Lockout** - Progressive lockout after failed authentication attempts
@@ -106,7 +162,7 @@ For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Har
 
 | Port | Description |
 |------|-------------|
-| 4040 | TCP Message Queue |
+| 4040 | TCP log protocol (binary) |
 | 4041 | Web Dashboard |
 
 ## 🔐 Authentication
@@ -159,14 +215,13 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_PROGRESSIVE_LOCKOUT` | true | Enable progressive lockout |
 | `MALACHIMQ_SESSION_IP_BINDING` | true | Bind sessions to source IP |
 | `MALACHIMQ_MIN_PASSWORD_LEN` | 12 | Minimum password length |
-| `MALACHIMQ_MAX_BUFFER_SIZE` | 10000 | Max messages per queue buffer |
-| `MALACHIMQ_OVERFLOW_BEHAVIOR` | drop_newest | Overflow strategy |
-| `MALACHIMQ_BACKPRESSURE_THRESHOLD` | 0.8 | Backpressure trigger threshold |
 | `MALACHIMQ_ATOM_WARNING_THRESHOLD` | 0.7 | Atom table warning at 70% |
 | `MALACHIMQ_ATOM_CRITICAL_THRESHOLD` | 0.9 | Atom table critical at 90% |
 | `MALACHIMQ_GC_THRESHOLD_MB` | 500 | Auto-GC memory threshold (MB) |
-| `MALACHIMQ_MAX_DYNAMIC_QUEUES` | 10000 | Max dynamic queues |
-| `MALACHIMQ_MAX_DYNAMIC_CHANNELS` | 1000 | Max dynamic channels |
+| `MALACHIMQ_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
+| `MALACHIMQ_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
+| `MALACHIMQ_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
+| `MALACHIMQ_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
 | `MALACHIMQ_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
 | `MALACHIMQ_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
 | `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | 1 | Max audit log file size (MB) |
@@ -462,7 +517,7 @@ Malachi.AuditLog.get_stats()
 - [ ] **Keep software updated** (latest Docker image)
 - [ ] **Configure rate limiting** (`MALACHIMQ_RATE_LIMIT_ENABLED=true`)
 - [ ] **Set connection limits** (adjust `MALACHIMQ_MAX_CONN_PER_IP` and `MALACHIMQ_MAX_TOTAL_CONN`)
-- [ ] **Configure backpressure** (set `MALACHIMQ_MAX_BUFFER_SIZE` and `MALACHIMQ_OVERFLOW_BEHAVIOR`)
+- [ ] **Set the frame-size cap** for your workload (`MALACHIMQ_MAX_FRAME_SIZE`, default 16 MiB)
 - [ ] **Enable session IP binding** (`MALACHIMQ_SESSION_IP_BINDING=true`)
 - [ ] **Set memory monitoring** (`MALACHIMQ_GC_THRESHOLD_MB` appropriate for your environment)
 - [ ] **Review atom table thresholds** (adjust `MALACHIMQ_ATOM_WARNING_THRESHOLD`)
@@ -508,215 +563,40 @@ Returns:
 }
 ```
 
-## 📡 Client Example (Node.js)
+## 📡 Client protocol
 
-```javascript
-const net = require('net');
+External clients connect to port 4040 and speak a compact **binary protocol** (`Malachi.Wire`). Every
+message is a length-prefixed frame:
 
-const client = net.createConnection(4040, 'localhost', () => {
-  client.write(JSON.stringify({
-    action: 'auth',
-    username: 'producer',
-    password: 'producer123'
-  }) + '\n');
-});
-
-client.on('data', (data) => {
-  const response = JSON.parse(data.toString().trim());
-  
-  if (response.token) {
-    // Publish to queue
-    client.write(JSON.stringify({
-      action: 'publish',
-      queue_name: 'my-queue',
-      payload: { hello: 'world' },
-      headers: {}
-    }) + '\n');
-    
-    // Or publish to channel (best-effort, no buffering)
-    client.write(JSON.stringify({
-      action: 'channel_publish',
-      channel_name: 'news',
-      payload: { breaking: 'news!' },
-      headers: {}
-    }) + '\n');
-  }
-});
+```
+Frame:     <<len::32, body>>
+Request:   <<api_key::16, correlation_id::32, payload>>
+Response:  <<correlation_id::32, error_code::16, payload>>   # error_code 0 = ok, 1 = error (reason string)
 ```
 
-#### Channel Subscribe
+`correlation_id` lets a client pipeline (match each response to its request). `api_key` selects the
+operation:
 
-```javascript
-// Subscribe to channel
-client.write(JSON.stringify({
-  action: 'channel_subscribe',
-  channel_name: 'news'
-}) + '\n');
+| api_key | operation      | notes                                                          |
+|--------:|----------------|----------------------------------------------------------------|
+| 0       | `auth`         | **required first frame**; `username`/`password` → session token |
+| 1       | `create_topic` | topic name + keyspace bits                                      |
+| 2       | `produce`      | topic + records (routed by key); returns the produced count    |
+| 3       | `fetch`        | topic + opaque cursor (or a consumer group) → records + cursor  |
+| 4       | `commit`       | durably commit a consumer group's position (from a cursor)      |
+| 5       | `subscribe`    | open a server-push stream for a group, bounded by a credit window |
+| 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit |
 
-// Response: {"s":"ok"}
+Records on the wire carry **no offset** — position travels only in the opaque cursor, and permissions
+(`:produce`/`:consume`) are enforced per operation against the authenticated session.
 
-// Receive messages
-client.on('data', (data) => {
-  const msg = JSON.parse(data.toString().trim());
-  
-  if (msg.channel_message) {
-    console.log('Channel message:', msg.channel_message);
-    // {
-    //   payload: {...},
-    //   headers: {...},
-    //   timestamp: 1234567890,
-    //   channel: "news"
-    // }
-  }
-  
-  if (msg.kicked_from_channel) {
-    console.log('Kicked from:', msg.kicked_from_channel);
-  }
-});
-```
+Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the
+server pushes records up to the credit window; the client acks to durably advance the group's position
+(at-least-once) and return credit, so a slow consumer applies backpressure instead of overflowing.
 
-### Using the Node.js Scripts
-
-The `scripts/` directory contains Node.js clients for testing and development.
-
-```bash
-cd scripts
-npm install
-```
-
-#### Producer Script
-
-Send messages to a queue:
-
-```bash
-# Send 10 messages (default)
-node producer.js
-
-# Send 100 messages
-node producer.js 100
-
-# Send messages continuously (1/second)
-node producer.js --continuous
-
-# Send 1000 messages in parallel (fast mode)
-node producer.js 1000 --fast
-
-# Show help
-node producer.js --help
-```
-
-#### Consumer Script
-
-Receive messages from a queue:
-
-```bash
-# Consume from 'test' queue (default)
-node consumer.js
-
-# Consume from a specific queue
-node consumer.js orders
-
-# Verbose mode (show full payload and headers)
-node consumer.js --verbose
-
-# Combine options
-node consumer.js orders --verbose
-
-# Show help
-node consumer.js --help
-```
-
-#### Environment Variables (Scripts)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHIMQ_HOST` | localhost | Server host |
-| `MALACHIMQ_PORT` | 4040 | Server port |
-| `MALACHIMQ_QUEUE` | test | Default queue name |
-| `MALACHIMQ_USER` | producer/consumer | Username |
-| `MALACHIMQ_PASS` | producer123/consumer123 | Password |
-| `MALACHI_LOCALE` | pt_BR | Locale (pt_BR, en_US) |
-
-#### Example: Producer + Consumer
-
-**Terminal 1** - Start the consumer:
-```bash
-node consumer.js --verbose
-```
-
-**Terminal 2** - Send messages:
-```bash
-node producer.js 10
-```
-
-### Channel Pub/Sub
-
-Malachi supports Pub/Sub channels with best-effort delivery. Messages are broadcast to all active subscribers without persistence.
-
-#### Channel Publisher Script
-
-Publish messages to channels:
-
-```bash
-# Publish 10 messages to 'news' channel (default)
-node channel-publisher.js
-
-# Publish to a specific channel
-node channel-publisher.js sports 20
-
-# Publish continuously (1 msg/second)
-node channel-publisher.js alerts --continuous
-
-# Show help
-node channel-publisher.js --help
-```
-
-#### Channel Subscriber Script
-
-Subscribe to channels and receive messages in real-time:
-
-```bash
-# Subscribe to 'news' channel (default)
-node channel-subscriber.js
-
-# Subscribe to a specific channel
-node channel-subscriber.js sports
-
-# Subscribe to multiple channels
-node channel-subscriber.js news sports alerts
-
-# Verbose mode (show full payloads)
-node channel-subscriber.js --verbose
-
-# Show help
-node channel-subscriber.js --help
-```
-
-#### Channel Behavior
-
-- **Best-effort delivery**: Messages are only delivered to active subscribers
-- **No buffering**: Messages are dropped if no subscribers are connected
-- **Broadcast**: All subscribers receive every message
-- **Real-time**: Messages delivered immediately to connected clients
-
-#### Example: Channel Pub/Sub
-
-**Terminal 1** - Start subscriber:
-```bash
-node channel-subscriber.js news
-```
-
-**Terminal 2** - Publish messages:
-```bash
-node channel-publisher.js news 10
-```
-
-**Terminal 3** - Add another subscriber:
-```bash
-node channel-subscriber.js news sports
-```
-
-**Note**: Subscribers only receive messages published *after* they subscribe. Messages published before subscription are lost (no buffering).
+> A standalone reference client library is planned. Today the wire protocol is fully exercised by
+> `Malachi.Test.TCPHelper` (`test/support/tcp_helper.ex`) — the clearest worked example of the
+> auth → create_topic → produce → fetch/subscribe flow — over the `Malachi.Wire` codec.
 
 ## 🛠️ Development
 
@@ -840,10 +720,14 @@ Malachi.Auth.change_password("myuser", "newpass")
 
 ## 🏗️ Architecture
 
-- **ETS Tables**: In-memory storage for maximum performance
-- **GenServer**: OTP processes for reliability
-- **TCP Server**: Custom protocol for low latency
-- **Partitioning**: Automatic load distribution across CPU cores
+Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
+
+- **Control plane** — topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
+- **Data plane** — a `Log` of `segments` per range, replicated by quorum across nodes; placement is HRW/rendezvous and rack-aware.
+- **Membership** — SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
+- **Client** — a compact binary protocol over TCP; topics, keys, and opaque cursors (never partitions or offsets).
+
+See [docs/NORTHGUARD_PORT.md](docs/NORTHGUARD_PORT.md) for the full design and the porting log.
 
 ## 📄 License
 
@@ -909,107 +793,29 @@ Examples:
 **Breaking Changes:**
 - Add `[major]` to title or `BREAKING CHANGE:` in body
 
-## ️📋 Input Validation Rules
+## 📋 Input validation
 
-Malachi enforces strict validation on all user-supplied inputs to prevent injection attacks, resource exhaustion, and protocol violations.
+Malachi validates untrusted input at the connection boundary — a malformed frame is answered with an
+error, never a crash.
 
-### Queue and Channel Names
+**Topic names** — an allowlist that is path-traversal safe (a topic name becomes an on-disk directory
+name): allowed characters `A-Z a-z 0-9 . _ -`, non-empty, and never `.` or `..`. Enforced
+deterministically in the control plane (`Malachi.Metadata`), so it holds identically on every replica.
 
-**Allowed characters**: `a-z`, `A-Z`, `0-9`, `_`, `-`, `.`  
-**Length**: 1-255 characters  
-**Reserved names**: `system`, `admin`, `internal`  
-**Blocked prefixes**: Names starting with `_`
-
-**✅ Valid examples:**
 ```
-orders
-user.events
-app-logs_v2
-api.v1.payments
+valid:    orders   user.events   app-logs_v2   api.v1.payments
+invalid:  "my topic" (space)   api/v1/events (slash)   user:session (colon)   ""   .   ..
 ```
 
-**❌ Invalid examples:**
-```
-my queue          ← spaces not allowed
-api/v1/events     ← slashes not allowed
-user:session      ← colons not allowed
-system            ← reserved name
-_internal         ← underscore prefix blocked
-```
+**Frame size** — the binary protocol rejects a frame whose declared length exceeds `:max_frame_size`
+(application config, default 16 MiB) **at the 4-byte length prefix**, before the body is buffered, so a
+hostile length prefix cannot exhaust memory.
 
-### Message Payloads
+**Records** — a record's value is arbitrary bytes (non-UTF-8 survives the round trip); headers are
+key/value byte-string pairs. Both are bounded by the frame cap, and records carry no client-visible offset.
 
-- **Maximum size**: 10MB (10,485,760 bytes)
-- **Type**: Binary/string data
-- **Not configurable** - fixed limit for security
-
-### Headers
-
-- **Maximum count**: 50 headers per message
-- **Structure**: Single-level map only (no nesting)
-- **Key format**: String, max 128 bytes
-- **Value types**:
-  - ✅ String (max 1024 bytes)
-  - ✅ Number (integer or float)
-  - ✅ Boolean (true/false)
-  - ❌ null/nil
-  - ❌ Arrays/lists
-  - ❌ Nested maps/objects
-
-**✅ Valid headers:**
-```json
-{
-  "priority": 1,
-  "type": "order",
-  "urgent": true,
-  "customer_id": "abc123"
-}
-```
-
-**❌ Invalid headers:**
-```json
-{
-  "optional": null,           ← nil not allowed
-  "tags": ["a", "b"],         ← arrays not allowed
-  "metadata": {"x": 1}        ← nested maps not allowed
-}
-```
-
-### Error Responses
-
-Validation errors return detailed error codes:
-
-```json
-{"s": "err", "reason": "invalid_queue_name_too_long"}
-{"s": "err", "reason": "invalid_queue_name_invalid_characters"}
-{"s": "err", "reason": "invalid_queue_name_reserved"}
-{"s": "err", "reason": "payload_too_large"}
-{"s": "err", "reason": "invalid_headers_too_many"}
-{"s": "err", "reason": "invalid_headers_invalid_type"}
-```
-
-### Performance
-
-- **Cache optimization**: Validated names are cached in ETS
-- **Cache hit latency**: < 1µs
-- **Cache miss latency**: < 10µs
-- **ReDoS protection**: All inputs validated in < 100ms
-- **Throughput impact**: < 2% with warm cache
-
-### Migration from Pre-Validation Versions
-
-If upgrading from a version without validation:
-
-1. **Audit existing queue/channel names**:
-   ```bash
-   curl http://localhost:4041/metrics | jq '.queues[].queue'
-   ```
-
-2. **Rename incompatible queues** using the mapping table in [CHANGELOG.md](CHANGELOG.md#breaking-changes)
-
-3. **Update client code** to validate inputs before sending
-
-4. **Test with validation enabled** in staging environment first
+The underlying security infra — authentication (Argon2), rate limiting, connection limits, account
+lockout, audit logging — is covered above and in [SECURITY.md](SECURITY.md).
 
 ## 🔖 Versioning
 

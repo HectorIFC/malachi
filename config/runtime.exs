@@ -80,6 +80,8 @@ config :malachi,
   auth_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_AUTH_TIMEOUT_MS") || "10000"),
   tcp_recv_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_RECV_TIMEOUT") || "30000"),
   tcp_send_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_SEND_TIMEOUT") || "30000"),
+  # Largest request frame the binary protocol accepts (bytes); rejected at the length prefix.
+  max_frame_size: parse_int.(System.get_env("MALACHIMQ_MAX_FRAME_SIZE"), 16_777_216),
   gc_interval_ms: String.to_integer(System.get_env("MALACHIMQ_GC_INTERVAL_MS") || "10000"),
   enable_tls: enable_tls,
   require_tls: require_tls,
