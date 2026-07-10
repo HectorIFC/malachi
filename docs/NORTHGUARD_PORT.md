@@ -704,8 +704,16 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           de rotear a um nó ainda bootando ou sem broker). Adicionados a `is_public_route` (bypass de auth)
           + `serve_status/4` (código variável). Testado: happy path (dashboard_test) e a **propriedade-chave**
           (dashboard_security: 200 sem token mesmo com auth habilitado). README com exemplo de probes k8s.
-        - ⏳ **O2** — `/metrics` em formato-texto Prometheus (achata `get_system_metrics`); **O3/O4** —
-          eventos `:telemetry` nos hot paths + handler default; **O5** — OpenTelemetry tracing.
+        - ✅ **O2 — endpoint Prometheus.** Módulo **puro** `Malachi.Metrics.Prometheus` (`export(system,
+          topics) → iodata`) renderiza o formato-texto de exposição v0.0.4 a partir do `get_system_metrics`
+          + `Metadata.overview`: health do BEAM (process/memory/uptime/io/atom), contadores de segurança
+          (rate-limit por ação, failed-auth, lockouts, dashboard-auth, TLS handshakes) e gauges por-topic
+          (ranges/segments/bytes/grupos). O `/metrics` do dashboard virou **content-negotiated**: `Accept:
+          text/plain`/`openmetrics` → texto Prometheus, senão o JSON de sempre (preserva dashboard + o teste
+          JSON) — mesma auth (any-user; scraper passa token). Labels escapados (defensivo). Testado: unit do
+          módulo (HELP/TYPE, labels, valores int/float, escaping, sem topics) + e2e (Accept: text/plain →
+          exposição com `malachi_up` e o gauge do topic criado). 695 testes, 0 falhas; credo/dialyzer limpos.
+        - ⏳ **O3/O4** — eventos `:telemetry` nos hot paths + handler default; **O5** — OpenTelemetry tracing.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

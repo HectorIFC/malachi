@@ -17,6 +17,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Metrics
+  alias Malachi.Metrics.Prometheus
   alias Malachi.RateLimiter
 
   @doc "Starts the dashboard HTTP server listening on `port` (registered under the module name)."
@@ -485,8 +486,11 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :GET, path: "/ready"}, _headers, _client_ip, _session),
     do: serve_ready(socket)
 
-  defp handle_route(socket, %{method: :GET, path: "/metrics"}, _headers, _client_ip, _session),
-    do: serve_metrics(socket)
+  # /metrics serves the Prometheus text exposition to a scraper (Accept: text/plain/openmetrics) and the
+  # JSON dashboard payload otherwise — same auth (any authenticated user), one conventional path.
+  defp handle_route(socket, %{method: :GET, path: "/metrics"}, headers, _client_ip, _session) do
+    if prometheus_scrape?(headers), do: serve_prometheus(socket), else: serve_metrics(socket)
+  end
 
   defp handle_route(socket, %{method: :GET, path: "/topic"} = request, _headers, _client_ip, _session),
     do: serve_topic_detail(socket, request.query)
@@ -542,6 +546,30 @@ defmodule Malachi.Dashboard do
 
   defp serve_metrics(socket) do
     serve_json(socket, "/metrics", dashboard_metrics())
+  end
+
+  # True when the caller wants the Prometheus exposition format rather than the JSON dashboard payload.
+  defp prometheus_scrape?(headers) do
+    accept = Map.get(headers, "accept", "")
+    String.contains?(accept, "text/plain") or String.contains?(accept, "openmetrics")
+  end
+
+  defp serve_prometheus(socket) do
+    text =
+      Prometheus.export(Metrics.get_system_metrics(), topics_overview())
+      |> IO.iodata_to_binary()
+
+    response = """
+    HTTP/1.1 200 OK\r
+    Content-Type: #{Prometheus.content_type()}\r
+    Content-Length: #{byte_size(text)}\r
+    Cache-Control: no-cache\r
+    \r
+    #{text}
+    """
+
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/metrics"))
+    :gen_tcp.close(socket)
   end
 
   # On-demand drill-down for one topic (its ranges and segments), read from `?name=`. 404 for an unknown

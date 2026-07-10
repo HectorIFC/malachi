@@ -181,6 +181,25 @@ livenessProbe:  { httpGet: { path: /health, port: 4041 } }
 readinessProbe: { httpGet: { path: /ready,  port: 4041 } }
 ```
 
+### Prometheus metrics
+
+`GET /metrics` serves the **Prometheus text exposition** (v0.0.4) when the scraper asks for it
+(`Accept: text/plain`), and the JSON dashboard payload otherwise — same path, content-negotiated. Series
+are namespaced `malachi_`: BEAM health (`malachi_process_count`, `malachi_memory_bytes`,
+`malachi_uptime_seconds`, …), security counters (`malachi_rate_limit_blocked_total`,
+`malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), and per-topic gauges
+(`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`, …).
+
+`/metrics` requires authentication (any user), so a scrape config passes a token:
+
+```yaml
+scrape_configs:
+  - job_name: malachi
+    scheme: http
+    authorization: { credentials: "<token from POST /login>" }
+    static_configs: [{ targets: ["malachi-host:4041"] }]
+```
+
 ## 🔐 Authentication
 
 Malachi requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.

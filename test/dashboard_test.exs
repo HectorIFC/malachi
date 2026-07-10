@@ -142,6 +142,35 @@ defmodule Malachi.DashboardTest do
       end
     end
 
+    test "GET /metrics with Accept: text/plain returns the Prometheus exposition" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      topic = "prom_#{System.unique_integer([:positive])}"
+      {:ok, _root} = Malachi.BrokerServer.create_topic(Malachi.LogBroker, topic, 8)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(
+            socket,
+            "GET /metrics HTTP/1.1\r\nHost: localhost\r\nAccept: text/plain\r\nConnection: close\r\n\r\n"
+          )
+
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(response, "HTTP/1.1 200 OK")
+          assert String.contains?(response, "text/plain; version=0.0.4")
+          assert String.contains?(response, "# TYPE malachi_up gauge")
+          assert String.contains?(response, "\nmalachi_up 1\n")
+          # the topic we created shows up as a per-topic gauge
+          assert String.contains?(response, ~s(malachi_topic_ranges{topic="#{topic}"} 1))
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
     test "GET /health returns 200 (liveness)" do
       port = Application.get_env(:malachi, :dashboard_port, 4041)
       :timer.sleep(100)
