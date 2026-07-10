@@ -18,6 +18,12 @@ config :malachi,
     {"app", "app123", [:produce, :consume]}
   ]
 
+# OpenTelemetry: tracing is OFF by default — the sampler drops every span, so `Tracer.with_span` on the
+# hot path is a cheap no-op and there is no per-operation cost until an operator opts in. To trace, set
+# the sampler to :always_on (or a ratio), add {:opentelemetry_exporter, "~> 1.8"}, and point
+# traces_exporter at your collector.
+config :opentelemetry, sampler: :always_off, traces_exporter: :none
+
 # Import environment-specific config (test.exs, dev.exs, prod.exs)
 # This allows test.exs to override defaults before runtime.exs loads
 if File.exists?("config/#{config_env()}.exs") do

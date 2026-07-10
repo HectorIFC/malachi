@@ -3,6 +3,10 @@ import Config
 # Silence debug/info logs during tests
 config :logger, level: :warning
 
+# OpenTelemetry: record every span (always_on) via the synchronous simple processor, so a test can attach
+# a pid exporter and assert on ended spans (see the LogApi tracing test). Overrides the always_off default.
+config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_exporter: :none
+
 # Isolate the NorthGuard log broker's on-disk data per test run. The default dir is fixed and would
 # persist between runs; with in-memory (single-node) metadata resetting each run, a topic name reused
 # from a prior run would collide with a leftover segment on disk (Log.ensure_active :already_exists).

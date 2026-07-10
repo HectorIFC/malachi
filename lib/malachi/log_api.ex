@@ -17,6 +17,8 @@ defmodule Malachi.LogApi do
   itself lives in `Malachi.BrokerServer` (one coherent call that can also park long-poll waiters).
   """
 
+  require OpenTelemetry.Tracer, as: Tracer
+
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -59,14 +61,19 @@ defmodule Malachi.LogApi do
   @spec produce_records(GenServer.server(), Metadata.topic_name(), [Record.t()]) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def produce_records(server, topic, records) when is_list(records) do
-    case BrokerServer.produce(server, topic, records) do
-      {:ok, _placements} ->
-        count = length(records)
-        Telemetry.produce(topic, count, value_bytes(records))
-        {:ok, count}
+    Tracer.with_span "malachi.produce" do
+      case BrokerServer.produce(server, topic, records) do
+        {:ok, _placements} ->
+          count = length(records)
+          bytes = value_bytes(records)
+          Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count, "malachi.bytes" => bytes})
+          Telemetry.produce(topic, count, bytes)
+          {:ok, count}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.error" => inspect(reason)})
+          {:error, reason}
+      end
     end
   end
 
@@ -148,9 +155,13 @@ defmodule Malachi.LogApi do
   def encode_cursor(positions), do: Base.url_encode64(:erlang.term_to_binary(positions))
 
   defp do_fetch(server, topic, positions, max, wait_ms) do
-    {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
-    Telemetry.consume(topic, length(records))
-    {records, encode_cursor(next_positions)}
+    Tracer.with_span "malachi.consume" do
+      {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
+      count = length(records)
+      Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count})
+      Telemetry.consume(topic, count)
+      {records, encode_cursor(next_positions)}
+    end
   end
 
   defp value_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + byte_size(record.value) end)

@@ -53,6 +53,10 @@ defmodule Malachi.MixProject do
       {:inet_cidr, "~> 1.0.9"},
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
+      # OpenTelemetry: trace client operations (produce/fetch). Exporter is off by default (traces_exporter
+      # :none) — set it to :otlp with an endpoint to ship spans to a collector.
+      {:opentelemetry_api, "~> 1.4"},
+      {:opentelemetry, "~> 1.5"},
       # Raft (RabbitMQ's) — replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
 

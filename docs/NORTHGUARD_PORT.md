@@ -731,7 +731,19 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           endpoint do O2 ganha throughput/auth/replicação sem cada operador escrever handler (podem anexar os
           seus ao lado). Testado: reporter e2e (evento → contador via `get_system_metrics`) + o Prometheus com
           a seção. 700 testes, 0 falhas; credo/dialyzer limpos. **Bloco A+B da observabilidade concluído.**
-        - ⏳ **O5** — OpenTelemetry tracing (bloco C).
+        - 🚧 **O5 — OpenTelemetry tracing (bloco C; C-lite → C-full).** Tradeoff registrado: OTel é pesado
+          (deps + precisa de collector) e os eventos do O3 já são base; decisão **C-lite primeiro**.
+          - ✅ **O5a — spans nas operações do cliente.** Deps `opentelemetry_api`+`opentelemetry` (API 1.5 +
+            SDK 1.7; sem exporter/grpcbox — footprint enxuto). Tracing **off por default** (`sampler:
+            :always_off` + `traces_exporter: :none`) → o `with_span` no hot path é **no-op**, zero custo por
+            operação até o operador optar (sampler `:always_on` + exporter OTLP). O `LogApi` embrulha
+            `produce_records`/`do_fetch` em `Tracer.with_span` (`malachi.produce`/`malachi.consume`) com
+            atributos `malachi.topic`/`records`/`bytes`. Sem propagação cross-process ainda (span por
+            operação, raiz). Testado: comportamento intacto + **captura real de span** (test.exs usa `sampler:
+            :always_on` + o `simple` processor + `otel_exporter_pid`; assere nome + atributos via record do
+            header OTel + `otel_attributes.map`). 702 testes, 0 falhas; credo/dialyzer limpos.
+          - ⏳ **O5b — propagação de contexto cross-process/cross-node** (produce → replicação como span
+            filho, threadando `otel_ctx` pelos GenServers/`:erpc`) — a parte invasiva, fatia própria.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
