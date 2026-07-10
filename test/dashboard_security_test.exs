@@ -535,5 +535,22 @@ defmodule Malachi.DashboardSecurityTest do
           :ok
       end
     end
+
+    test "GET /health and /ready are public: 200 without a token even when auth is enabled" do
+      for path <- ["/health", "/ready"] do
+        case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+          {:ok, socket} ->
+            :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+            # probes never authenticate, so these must not 401/redirect
+            assert String.contains?(response, "HTTP/1.1 200 OK"), "#{path} should be public"
+            refute String.contains?(response, "401")
+            :gen_tcp.close(socket)
+
+          {:error, _} ->
+            :ok
+        end
+      end
+    end
   end
 end

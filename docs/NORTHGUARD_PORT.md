@@ -697,6 +697,15 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         `security_performance_regression` → removidos os benchmarks de Validator, mantidos Auth/RateLimiter/
         ConnectionLimiter/lockout). Cobertura viva intacta: o caminho binário já é fuzzado pelo
         `binary_protocol_security_test`. 685 testes, 0 falhas; credo/dialyzer limpos (−4 arquivos).
+      - 🚧 **Observabilidade (A: Prometheus+health/ready · B: telemetry · C: OTel — cada fatiado).**
+        - ✅ **O1 — health/readiness.** Endpoints HTTP **sem auth** na porta do dashboard (probes não
+          autenticam): `GET /health` (liveness, sempre 200 `{"status":"ok"}`) e `GET /ready` (readiness:
+          200 `{"status":"ready"}` se o `LogBroker` está vivo, senão 503 `not_ready` — pra um LB/k8s parar
+          de rotear a um nó ainda bootando ou sem broker). Adicionados a `is_public_route` (bypass de auth)
+          + `serve_status/4` (código variável). Testado: happy path (dashboard_test) e a **propriedade-chave**
+          (dashboard_security: 200 sem token mesmo com auth habilitado). README com exemplo de probes k8s.
+        - ⏳ **O2** — `/metrics` em formato-texto Prometheus (achata `get_system_metrics`); **O3/O4** —
+          eventos `:telemetry` nos hot paths + handler default; **O5** — OpenTelemetry tracing.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM

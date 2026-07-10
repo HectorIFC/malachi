@@ -165,6 +165,22 @@ For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Har
 | 4040 | TCP log protocol (binary) |
 | 4041 | Web Dashboard |
 
+## 📈 Observability
+
+Unauthenticated HTTP endpoints on the dashboard port (for load balancers and k8s probes):
+
+| Endpoint | Purpose | Returns |
+|----------|---------|---------|
+| `GET /health` | Liveness | `200 {"status":"ok"}` while the node is up |
+| `GET /ready` | Readiness | `200 {"status":"ready"}` once the log broker is running, else `503 {"status":"not_ready"}` |
+
+Example k8s probes:
+
+```yaml
+livenessProbe:  { httpGet: { path: /health, port: 4041 } }
+readinessProbe: { httpGet: { path: /ready,  port: 4041 } }
+```
+
 ## 🔐 Authentication
 
 Malachi requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.

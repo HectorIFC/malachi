@@ -142,6 +142,43 @@ defmodule Malachi.DashboardTest do
       end
     end
 
+    test "GET /health returns 200 (liveness)" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(socket, "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(response, "HTTP/1.1 200 OK")
+          assert String.contains?(response, "\"status\":\"ok\"")
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /ready returns 200 when the broker is running (readiness)" do
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      :timer.sleep(100)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(socket, "GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert Process.whereis(Malachi.LogBroker) != nil
+          assert String.contains?(response, "HTTP/1.1 200 OK")
+          assert String.contains?(response, "\"status\":\"ready\"")
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
     test "GET /stream returns SSE stream" do
       port = Application.get_env(:malachi, :dashboard_port, 4041)
 

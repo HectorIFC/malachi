@@ -113,8 +113,9 @@ defmodule Malachi.Dashboard do
 
     request = request |> Map.put(:path, path) |> Map.put(:query, query)
 
-    # Public routes that don't require authentication
-    is_public_route = path in ["/login", "/logout", "/logo.jpeg"] or request.method == :OPTIONS
+    # Public routes that don't require authentication (health/readiness probes never send credentials).
+    is_public_route =
+      path in ["/login", "/logout", "/logo.jpeg", "/health", "/ready"] or request.method == :OPTIONS
 
     if not auth_enabled or is_public_route do
       # Authentication disabled or public route - allow all requests
@@ -478,6 +479,12 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :POST, path: "/login"}, headers, client_ip, _session),
     do: handle_login(socket, headers, client_ip)
 
+  defp handle_route(socket, %{method: :GET, path: "/health"}, _headers, _client_ip, _session),
+    do: serve_health(socket)
+
+  defp handle_route(socket, %{method: :GET, path: "/ready"}, _headers, _client_ip, _session),
+    do: serve_ready(socket)
+
   defp handle_route(socket, %{method: :GET, path: "/metrics"}, _headers, _client_ip, _session),
     do: serve_metrics(socket)
 
@@ -566,6 +573,34 @@ defmodule Malachi.Dashboard do
     Content-Type: application/json\r
     Content-Length: #{byte_size(json)}\r
     Cache-Control: no-cache\r
+    \r
+    #{json}
+    """
+
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route))
+    :gen_tcp.close(socket)
+  end
+
+  # Liveness: the HTTP server answered, so the node is up. Always 200 — unauthenticated (probes).
+  defp serve_health(socket), do: serve_status(socket, "/health", 200, "ok")
+
+  # Readiness: 200 once the log broker is running (ready to serve produce/consume), else 503, so a load
+  # balancer / k8s stops routing to a node that is still booting or has lost its broker.
+  defp serve_ready(socket) do
+    if Process.whereis(Malachi.LogBroker),
+      do: serve_status(socket, "/ready", 200, "ready"),
+      else: serve_status(socket, "/ready", 503, "not_ready")
+  end
+
+  defp serve_status(socket, route, code, status) do
+    json = Jason.encode!(%{status: status})
+    reason = if code == 200, do: "OK", else: "Service Unavailable"
+
+    response = """
+    HTTP/1.1 #{code} #{reason}\r
+    Content-Type: application/json\r
+    Content-Length: #{byte_size(json)}\r
+    Cache-Control: no-store\r
     \r
     #{json}
     """
