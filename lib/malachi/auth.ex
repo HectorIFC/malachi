@@ -8,6 +8,7 @@ defmodule Malachi.Auth do
   alias Malachi.Auth.SessionManager
   alias Malachi.Auth.UserStore
   alias Malachi.I18n
+  alias Malachi.Telemetry
 
   @users_table :malachi_users
   @sessions_table :malachi_sessions
@@ -28,6 +29,12 @@ defmodule Malachi.Auth do
   - `client_ip` - Client IP address (tuple) for session binding and audit logging
   """
   def authenticate(username, password, client_ip) do
+    result = do_authenticate(username, password, client_ip)
+    Telemetry.auth(if match?({:ok, _}, result), do: :ok, else: :error)
+    result
+  end
+
+  defp do_authenticate(username, password, client_ip) do
     case :ets.lookup(@users_table, username) do
       [{^username, stored_hash, permissions}] ->
         if verify_password(password, stored_hash) do

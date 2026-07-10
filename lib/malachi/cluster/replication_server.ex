@@ -32,6 +32,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Log
+  alias Malachi.Telemetry
 
   @follow_timeout 5_000
 
@@ -266,6 +267,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     state = put_in(state.trackers[segment_id], tracker)
     reply = if ReplicaTracker.committed?(tracker, last), do: {:ok, last}, else: {:error, :no_quorum}
+    Telemetry.replication_commit(length(records), if(match?({:ok, _}, reply), do: :ok, else: :no_quorum))
     {:reply, reply, state}
   end
 

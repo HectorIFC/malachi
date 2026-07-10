@@ -51,6 +51,8 @@ defmodule Malachi.MixProject do
       {:jason, "~> 1.4.4"},
       {:argon2_elixir, "~> 4.1.3"},
       {:inet_cidr, "~> 1.0.9"},
+      # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
+      {:telemetry, "~> 1.3"},
       # Raft (RabbitMQ's) — replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
 

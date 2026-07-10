@@ -20,6 +20,7 @@ defmodule Malachi.LogApi do
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Telemetry
 
   # Keyspace size 2^8 = 256, leaving room for the topic's range to split as it grows. The client
   # does not choose this (no "partition count" leaks to it).
@@ -59,8 +60,13 @@ defmodule Malachi.LogApi do
           {:ok, non_neg_integer()} | {:error, term()}
   def produce_records(server, topic, records) when is_list(records) do
     case BrokerServer.produce(server, topic, records) do
-      {:ok, _placements} -> {:ok, length(records)}
-      {:error, reason} -> {:error, reason}
+      {:ok, _placements} ->
+        count = length(records)
+        Telemetry.produce(topic, count, value_bytes(records))
+        {:ok, count}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -143,8 +149,11 @@ defmodule Malachi.LogApi do
 
   defp do_fetch(server, topic, positions, max, wait_ms) do
     {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
+    Telemetry.consume(topic, length(records))
     {records, encode_cursor(next_positions)}
   end
+
+  defp value_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + byte_size(record.value) end)
 
   # --- records ---
 

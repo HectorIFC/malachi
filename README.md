@@ -200,6 +200,24 @@ scrape_configs:
     static_configs: [{ targets: ["malachi-host:4041"] }]
 ```
 
+### Telemetry events
+
+Malachi emits `:telemetry` events on its hot paths — attach a handler to feed metrics, logs, or traces
+(see `Malachi.Telemetry`):
+
+| Event | Measurements | Metadata |
+|-------|--------------|----------|
+| `[:malachi, :produce]` | `%{count, bytes}` | `%{topic}` |
+| `[:malachi, :consume]` | `%{count}` | `%{topic}` |
+| `[:malachi, :auth]` | `%{count: 1}` | `%{result: :ok \| :error}` |
+| `[:malachi, :replication, :commit]` | `%{count}` | `%{result: :ok \| :no_quorum}` |
+
+```elixir
+:telemetry.attach("my-handler", [:malachi, :produce], fn _e, m, meta, _ ->
+  IO.inspect({meta.topic, m.count, m.bytes})
+end, nil)
+```
+
 ## 🔐 Authentication
 
 Malachi requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.

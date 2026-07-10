@@ -713,7 +713,17 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           JSON) — mesma auth (any-user; scraper passa token). Labels escapados (defensivo). Testado: unit do
           módulo (HELP/TYPE, labels, valores int/float, escaping, sem topics) + e2e (Accept: text/plain →
           exposição com `malachi_up` e o gauge do topic criado). 695 testes, 0 falhas; credo/dialyzer limpos.
-        - ⏳ **O3/O4** — eventos `:telemetry` nos hot paths + handler default; **O5** — OpenTelemetry tracing.
+        - ✅ **O3 — eventos `:telemetry` nos hot paths.** Dep `:telemetry` + módulo `Malachi.Telemetry`
+          (catálogo + wrappers, DRY) emitindo em: **produce** (`LogApi.produce_records` → `%{count, bytes}`/
+          `%{topic}`), **consume** (`LogApi.do_fetch` → `%{count}`/`%{topic}`), **auth** (`Auth.authenticate/3`
+          refatorado num wrapper fino → `%{count:1}`/`%{result: :ok|:error}`), e **replicação** (`ReplicationServer`
+          no reply do quórum → `%{count}`/`%{result: :ok|:no_quorum}`). Emitir é no-op quando nada está
+          anexado (seguro no hot path). Testado: handler anexado + produce/consume/auth (+ o commit de
+          replicação que o single-node dispara). Achado no caminho: um **flake pré-existente** no
+          `connection_limiter_test` (limite **global** — estado compartilhado entre testes; passa isolado,
+          não relacionado ao O3) → registrado p/ fix à parte. 698 testes (credo/dialyzer limpos).
+        - ⏳ **O4** — handler default que dobra alguns eventos no `Metrics` (enriquece o Prometheus);
+          **O5** — OpenTelemetry tracing.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
