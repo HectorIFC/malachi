@@ -181,7 +181,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   `unique_integer`/timestamp dentro do `apply` → seguro p/ replicação). **Resolve a persistência
   de metadados do topic adiada da Fase 0.** Testado inclusive com replay do log (determinismo) e
   com catch-all defensivo (comando desconhecido retorna erro, não derruba a réplica).
-  - 🚧 Índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
+  - ✅ Índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}` — hoje
     `ranges_of_topic`/`segments_of_range` varrem **todos** os ranges/segments do vnode (O(n)), e estão no
     hot path (todo produce roteia por `active_ranges_of_topic`; todo consume lê `segments_of_range`), então
     o custo cresce com o total de metadado acumulado (retenção guarda selados). Fatiado:
@@ -697,7 +697,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
         `security_performance_regression` → removidos os benchmarks de Validator, mantidos Auth/RateLimiter/
         ConnectionLimiter/lockout). Cobertura viva intacta: o caminho binário já é fuzzado pelo
         `binary_protocol_security_test`. 685 testes, 0 falhas; credo/dialyzer limpos (−4 arquivos).
-      - 🚧 **Observabilidade (A: Prometheus+health/ready · B: telemetry · C: OTel — cada fatiado).**
+      - ✅ **Observabilidade (A: Prometheus+health/ready · B: telemetry · C: OTel — cada fatiado).**
         - ✅ **O1 — health/readiness.** Endpoints HTTP **sem auth** na porta do dashboard (probes não
           autenticam): `GET /health` (liveness, sempre 200 `{"status":"ok"}`) e `GET /ready` (readiness:
           200 `{"status":"ready"}` se o `LogBroker` está vivo, senão 503 `not_ready` — pra um LB/k8s parar
@@ -731,7 +731,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           endpoint do O2 ganha throughput/auth/replicação sem cada operador escrever handler (podem anexar os
           seus ao lado). Testado: reporter e2e (evento → contador via `get_system_metrics`) + o Prometheus com
           a seção. 700 testes, 0 falhas; credo/dialyzer limpos. **Bloco A+B da observabilidade concluído.**
-        - 🚧 **O5 — OpenTelemetry tracing (bloco C; C-lite → C-full).** Tradeoff registrado: OTel é pesado
+        - ✅ **O5 — OpenTelemetry tracing (bloco C; C-lite → C-full).** Tradeoff registrado: OTel é pesado
           (deps + precisa de collector) e os eventos do O3 já são base; decisão **C-lite primeiro**.
           - ✅ **O5a — spans nas operações do cliente.** Deps `opentelemetry_api`+`opentelemetry` (API 1.5 +
             SDK 1.7; sem exporter/grpcbox — footprint enxuto). Tracing **off por default** (`sampler:
@@ -789,6 +789,20 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     0 erros; `--json` e `--warmup` (com reconexão dos clients p/ soltar a subscription) OK. Nota operacional:
     muitas conexões estouram o rate-limit de auth (10/min/IP default) — subir `MALACHIMQ_AUTH_RATE_LIMIT` pra
     testes de escala. README com a seção de load test; `package.json` com o script `loadtest`.
+    - ✅ **Driver open-loop (o 2C).** `--rate <rps>` dispara requests a uma **taxa de chegada fixa**,
+      independente de respostas anteriores, medindo a latência a partir do **tempo agendado** de cada request
+      (não do envio real) — **correção de coordinated omission**: um stall do servidor aparece como latência
+      alta nos requests que empilharam atrás, o que o closed-loop esconderia (o worker parado não emite). O
+      driver `openLoop` reusa as mesmas ops (`scenarioOps` extraído, DRY entre os dois drivers); fetch fica
+      stateless (ctx novo por request → lê do início). Requests espalhados round-robin no pool (o cliente
+      multiplexa por corr_id). Guard de memória: `--max-inflight` (default 100k) — ao atingir, para de
+      empilhar e **flag `saturated`** (servidor não sustenta a taxa). Report ganha modo, alvo vs. atingido,
+      saturação e rótulo CO-corrected (texto + JSON). Não se aplica a `stream` (push; `--rate` ignorado com
+      aviso). Validado e2e: taxa **sustentável** (1200 rps → atingiu 1199, latência estável p50 1.5ms);
+      **sobrecarga** (5000 rps acima da capacidade single-node → latência CO explode, mean 2.6s/p99 5.1s, o
+      sinal que o closed-loop mascara); **guard** (`--max-inflight 200` flagou saturação e parou); closed-loop
+      inalterado. Três correções da revisão anterior seguem (backoff, timer, grupo único). README/help
+      atualizados.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
