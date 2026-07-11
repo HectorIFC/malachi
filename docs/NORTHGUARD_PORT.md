@@ -1180,7 +1180,8 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
 - **`riak_core_claim_binring` V4 → upgrade do `place_vnodes`:** garante réplicas em nós **e** *locations*
   (rack/DC) distintos (`target_n_val`), balanceamento uniforme (k ou k+1 por nó) e rebalanceamento com
   **movimento mínimo** (`update()` antes de `solve()`). Doc bem comentada: `~/riak_core/docs/claim-version4.md`.
-- **Ring versioning + ciclo de claim → re-clustering dinâmico** (add/remove nós; hoje é `add_vnode` manual).
+- **Ring versioning + ciclo de claim → re-clustering dinâmico** (add/remove nós) — **feito** no rebalancing
+  R1→R3 (diff do placement vivo + `apply_plan` sob o lease); o gatilho segue **manual** (ver 8.4).
 - **Ignorar:** gossip do ring, vector clocks (o Raft já dá ordem/consenso), `node_watcher` (o SWIM
   resolve), preflist-sobre-vnodes (desvio intencional — o malachi sharda **metadata por topic**, não
   distribui keys de dados sobre o ring).
@@ -1212,7 +1213,10 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
   cluster). O sharding do malachi paga complexidade (bootstrap / leader / fencing) justamente para
   **escalar além de um quórum** — a motivação da fatia D.
 
-### 8.3 Síntese — como isso informa as próximas fatias
+### 8.3 Síntese — como isso informou as fatias (o histórico de execução)
+
+> Nota: as fatias abaixo (D-c-1d, 1C, place_vnodes, rebalancing) **estão feitas** — este bloco é o
+> histórico. O resumo do que foi adotado × desviado está em **8.4**.
 
 - **D-c-1d (`membership_leader`):** eleição pelo menor nó **vivo** (SWIM) + fencing por nome do `ra` no
   bootstrap; reconcile loop **level-triggered / idempotente** (padrão *controller* do k8s).
@@ -1418,5 +1422,48 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       alternativa `kubernetes` (dinâmica, RBAC em pods) p/ deploys autoescaláveis. README principal aponta.
       (Não testável sem um cluster k8s real — config determinística por construção.)
 
-> A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
-> cada uma for atacada.
+### 8.4 Status de adoção e desvios deliberados (retrospectiva)
+
+As ideias de riak_core e k8s acima **já foram absorvidas** pelas fatias da Fase 1/3. O que foi adotado, e
+o que foi deliberadamente **não** adotado (com o porquê):
+
+**Adotado (com a fatia que o realizou):**
+- **Fencing via consenso** — bootstrap auto-fencido pelo **nome do cluster `ra`** + **Lease sobre `ra`**
+  para o trabalho contínuo do líder (R0): triângulo `duração > renew_deadline > retry_period`, token de
+  fencing versionado (CAS), largar **proativo** (o *OnStoppedLeading* do k8s) e **relógio do líder** (não
+  do cliente — carimbado uma vez e replicado no log, sem clock skew). [k8s Lease + RabbitMQ/`ra`]
+- **Staged → planned → committed** — R1 (`desired_placement`) → R2 (`rebalance_plan`) → R3 (`apply_plan`
+  sob o lease). [riak_core claimant]
+- **Eleição pelo menor nó vivo + fencing** — `membership_leader` / `LeaseHolder`. [ambos]
+- **Reconcile level-triggered / idempotente** — os coordinators (heal/retention/rebalance/lease) reconciliam
+  **desejado × atual**, idempotentes, só-o-líder-age. [k8s controller]
+- **Placement determinístico, rack/DC-aware** — A1 (`spread`) + A2 (`maxSkew` via `place_balanced`) +
+  `min_domains`/hard-soft (fatia de hardening de placement), **sem randomização** (raft-safe: toda réplica
+  computa o mesmo). [k8s PodTopologySpread `topologyKey`/`maxSkew`/`minDomains`/`whenUnsatisfiable` +
+  riak_core binring `target_n_val`]
+- **Movimento mínimo** — o HRW é *min-reshuffle* (remover um broker só move o que ele detinha; survivors
+  mantêm rank); R1/R2 só movem vnodes afetados; o `heal` preserva réplicas vivas. [riak_core]
+- **Add-before-remove** no rebalancing (o quórum nunca cai abaixo no meio da mudança). [riak_core/`ra`]
+
+**Desvios deliberados / não adotado:**
+- **workqueue + expectations** (k8s controller): **não** adotado. Os coordinators são **síncronos, por
+  tick** (level-triggered simples), sem fila com dedupe/rate-limit nem rastreamento de operações em voo com
+  TTL. Justificativa: a cardinalidade do reconcile é baixa (poucos vnodes por tick), o `ra` já **serializa**
+  as mudanças de membership (uma por vez, com retry em `:cluster_change_not_permitted`) e o commit de
+  rebalancing é **manual** — não há a explosão de eventos que motiva workqueue/expectations no k8s.
+  Reavaliar **se** um gatilho automático de rebalancing for adicionado.
+- **sticky preference no `heal`** (k8s): não precisou de código dedicado — o HRW já prefere réplicas
+  sobreviventes **inerentemente** (min-reshuffle). Mesma propriedade, de graça.
+- **`target_n_val` "nós E locations distintos"** (riak_core): coberto por **composição**, não por um
+  parâmetro único — `Placement.place` já devolve brokers **distintos** (nós distintos) e `min_domains`
+  garante **domínios distintos**; juntos ≡ `target_n_val`.
+- **binring V4 (min-movement exato)** (riak_core `update()` antes de `solve()`): usamos HRW (movimento
+  mínimo **estatístico**) + `maxSkew` (A2) para uniformidade — suficiente para o control plane (poucos
+  vnodes); não portamos o algoritmo exato do binring.
+- **etcd único** (k8s): não adotado — é justamente o **gargalo de escala** (~5000 nodes) que o sharding por
+  vnode (fatia D) evita.
+
+**Ainda aberto (por cima do mesmo motor):**
+- **Gatilho automático de rebalancing** — hoje o commit é **manual** (`RebalanceCoordinator.commit/1`);
+  um gatilho por mudança de membership entra por cima do R3 (e aí workqueue/expectations do k8s podem valer).
+- **Re-sharding** — mudar a **contagem** de vnodes (R1/R2 assumem o mesmo conjunto de vnode ids).
