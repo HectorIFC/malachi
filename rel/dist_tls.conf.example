@@ -1,0 +1,28 @@
+%% ssl_dist options file for Malachi inter-node TLS (mutual authentication).
+%%
+%% Copy this file, set the real certificate paths, and point MALACHIMQ_DIST_TLS_OPTFILE at the copy (with
+%% MALACHIMQ_DIST_TLS=true). Each node presents `node.crt` (signed by the shared `ca.crt`) and verifies its
+%% peers against `ca.crt` — so encryption AND authentication, not just the distribution cookie.
+%%
+%% Note: inet_tls_dist verifies the peer certificate chains to the CA; it does not check the hostname, so a
+%% single CA-signed node certificate works for every node in the cluster. Generate a dev CA + node cert with
+%% scripts/generate-dist-certs.sh.
+[
+  {server, [
+    {certfile, "/etc/malachi/dist/node.crt"},
+    {keyfile, "/etc/malachi/dist/node.key"},
+    {cacertfile, "/etc/malachi/dist/ca.crt"},
+    {verify, verify_peer},
+    {fail_if_no_peer_cert, true},
+    {secure_renegotiate, true},
+    {versions, ['tlsv1.3', 'tlsv1.2']}
+  ]},
+  {client, [
+    {certfile, "/etc/malachi/dist/node.crt"},
+    {keyfile, "/etc/malachi/dist/node.key"},
+    {cacertfile, "/etc/malachi/dist/ca.crt"},
+    {verify, verify_peer},
+    {secure_renegotiate, true},
+    {versions, ['tlsv1.3', 'tlsv1.2']}
+  ]}
+].

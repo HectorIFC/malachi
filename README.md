@@ -401,6 +401,29 @@ See [TLS Security Advisory](docs/SECURITY_ADVISORY_TLS.md) for complete document
 - ✅ Mutual TLS (mTLS) support
 - ✅ Backward compatible (TLS is optional)
 
+### Inter-node TLS (Erlang distribution)
+
+The sections above secure the **client** connection (port 4040). In a multi-node cluster the nodes also
+talk to each other over **Erlang distribution** (the `ra` control plane and segment replication) — by
+default that traffic is plaintext, guarded only by the distribution cookie. Set `MALACHIMQ_DIST_TLS=true`
+to run distribution over **mutual TLS** instead: each node presents a CA-signed certificate and verifies
+its peers, so the inter-node traffic is encrypted *and* authenticated.
+
+```sh
+# generate a dev CA + node cert + a ready ssl_dist options file
+bash scripts/generate-dist-certs.sh
+
+# run a release with inter-node TLS (the script prints this line with real paths)
+MALACHIMQ_DIST_TLS=true \
+MALACHIMQ_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
+  bin/malachi start
+```
+
+`MALACHIMQ_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
+client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates the flag into
+`-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster — the handshake rejects it. The
+[Kubernetes example](deploy/kubernetes/) wires this up (the `malachi-dist-tls` Secret + the two env vars).
+
 ## 🔐 Dashboard Security (v0.5.0+)
 
 ### ⚠️ BREAKING CHANGE

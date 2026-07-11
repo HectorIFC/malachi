@@ -1421,6 +1421,20 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       críticos (ordem do env com POD_NAME antes do RELEASE_NODE, refs `$(VAR)`, command colapsado). Doc da
       alternativa `kubernetes` (dinâmica, RBAC em pods) p/ deploys autoescaláveis. README principal aponta.
       (Não testável sem um cluster k8s real — config determinística por construção.)
+    - ✅ **TLS na distribuição Erlang inter-nó (G3).** Fecha um gap de segurança de produção: metadata
+      (`ra`) + replicação de dados trafegavam em **texto puro** entre nós (só o cookie autenticava).
+      Decisão **1A**: **TLS mútuo** (`verify_peer` + `fail_if_no_peer_cert`) — CA compartilhada, cert por nó,
+      cifra **e** autentica. Config de VM/release (não código Elixir): `rel/env.sh.eex` traduz
+      `MALACHIMQ_DIST_TLS=true` em `-proto_dist inet_tls -ssl_dist_optfile $MALACHIMQ_DIST_TLS_OPTFILE`
+      (via `ELIXIR_ERL_OPTIONS`), **fail-fast** se o optfile faltar/for ilegível; default off = texto puro
+      atual intacto. Artefatos: `rel/dist_tls.conf.example` (template do ssl_dist optfile), helper de dev
+      `scripts/generate-dist-certs.sh` (CA + cert de nó com EKU server/clientAuth + emite um optfile pronto),
+      `.gitignore` de `priv/dist_cert/` (nunca commitar chaves). Fiado no exemplo k8s (Secret `malachi-dist-tls`
+      com ca/node cert+key+optfile, volume readOnly em `/etc/malachi/dist`, 2 env). **Validado localmente de
+      fato** (≠ k8s): 2 nós BEAM sobre TLS dist se pingam (`:pong`), e um nó **sem** TLS é **rejeitado** no
+      handshake (`:pang` — prova que a TLS é imposta, não silenciosamente plaintext); os 3 caminhos do
+      `env.sh.eex` (off/on/fail-fast); optfile é term Erlang válido (`:file.consult`); YAML k8s parseia (9
+      docs). Sem mudança de código Elixir; README (seção inter-node TLS) + deploy README.
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

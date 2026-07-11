@@ -55,6 +55,27 @@ stringData:
   consumer-pass: "CHANGE_ME"
   app-pass: "CHANGE_ME"
 ---
+# Inter-node TLS material (mounted at /etc/malachi/dist). REPLACE with your CA + a CA-signed node cert/key;
+# dist_tls.conf is the ssl_dist options file (see rel/dist_tls.conf.example, paths under /etc/malachi/dist).
+# Generate dev material with scripts/generate-dist-certs.sh, then e.g.:
+#   kubectl create secret generic malachi-dist-tls \
+#     --from-file=ca.crt=priv/dist_cert/ca.crt --from-file=node.crt=priv/dist_cert/node.crt \
+#     --from-file=node.key=priv/dist_cert/node.key --from-file=dist_tls.conf=priv/dist_cert/dist_tls.conf
+apiVersion: v1
+kind: Secret
+metadata:
+  name: malachi-dist-tls
+type: Opaque
+stringData:
+  ca.crt: "REPLACE_WITH_CA_CERT_PEM"
+  node.crt: "REPLACE_WITH_NODE_CERT_PEM"
+  node.key: "REPLACE_WITH_NODE_KEY_PEM"
+  dist_tls.conf: |
+    [
+      {server, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}, {fail_if_no_peer_cert, true}]},
+      {client, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}]}
+    ].
+---
 # Headless service: stable per-pod DNS (malachi-0.malachi-headless.<ns>.svc.cluster.local) for Erlang
 # distribution and the ra peer set. publishNotReadyAddresses lets peers resolve each other DURING cluster
 # formation, before any pod is Ready.
@@ -203,6 +224,12 @@ spec:
                   key: release-cookie
             - name: ERL_AFLAGS
               value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+            # --- Inter-node TLS: run Erlang distribution (ra + replication) over mutual TLS instead of
+            #     plaintext. Certs + the options file come from the malachi-dist-tls Secret below. ---
+            - name: MALACHIMQ_DIST_TLS
+              value: "true"
+            - name: MALACHIMQ_DIST_TLS_OPTFILE
+              value: /etc/malachi/dist/dist_tls.conf
             # --- Replicated log control plane over ra; the peer set is the 3 stable pod names ---
             - name: MALACHIMQ_LOG_CLUSTER
               value: malachi
@@ -272,9 +299,16 @@ spec:
               mountPath: /app/data
             - name: shared
               mountPath: /shared
+            - name: dist-tls
+              mountPath: /etc/malachi/dist
+              readOnly: true
       volumes:
         - name: shared
           emptyDir: {}
+        - name: dist-tls
+          secret:
+            secretName: malachi-dist-tls
+            defaultMode: 0400
   volumeClaimTemplates:
     - metadata:
         name: data

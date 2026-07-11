@@ -50,6 +50,20 @@ Segment replicas should span distinct failure domains (zones). Two pieces make t
      --from-literal=app-pass="$(openssl rand -hex 16)"
    ```
 
+   The manifest also runs **inter-node distribution over mutual TLS** (`MALACHIMQ_DIST_TLS`). Provide the CA
+   + a CA-signed node cert/key and the `ssl_dist` options file via the `malachi-dist-tls` Secret — generate
+   dev material with `bash scripts/generate-dist-certs.sh`, then:
+
+   ```sh
+   kubectl create secret generic malachi-dist-tls \
+     --from-file=ca.crt=priv/dist_cert/ca.crt \
+     --from-file=node.crt=priv/dist_cert/node.crt \
+     --from-file=node.key=priv/dist_cert/node.key \
+     --from-file=dist_tls.conf=priv/dist_cert/dist_tls.conf
+   ```
+
+   (Set the options-file paths to `/etc/malachi/dist/…`, the mount point in the pod.)
+
 4. Apply:
 
    ```sh
