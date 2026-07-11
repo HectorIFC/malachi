@@ -59,6 +59,9 @@ defmodule Malachi.MixProject do
       {:opentelemetry, "~> 1.5"},
       # Raft (RabbitMQ's) — replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
+      # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
+      # MALACHIMQ_CLUSTER_STRATEGY (gossip/kubernetes/epmd). Absent => single-node, no distribution.
+      {:libcluster, "~> 3.5"},
 
       # Development and test dependencies - PINNED to patch-level
       # 1.7.19 fixes the Credo.Code.Token sigil-token crash under Elixir 1.20 (1.7.15 crashed on ~r//).

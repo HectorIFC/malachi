@@ -1349,6 +1349,22 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         livre de `ra`/membership. Subido no `rebalance_children` (primeiro, antes do holder). Testado:
         reconcile bootstrapa quando não iniciado + é no-op idempotente num cluster formado (não perturba o
         lease); o reconciler reconcilia no boot e sob demanda.
+    - ✅ **Descoberta dinâmica de nós (libcluster) — connectivity-only.** Fecha a lacuna de operabilidade: a
+      descoberta de peers era **estática** (`MALACHIMQ_LOG_NODES` + `Node.connect` manual / hostnames fixos).
+      Dep `{:libcluster, "~> 3.5"}` + um `Cluster.Supervisor` **opcional** na árvore (só quando
+      `MALACHIMQ_CLUSTER_STRATEGY` está setado; ausente = single-node, sem exigir distribuição — default
+      intacto). Decisão (**1A**): **connectivity-only** — libcluster só descobre+conecta nós (distribuição
+      Erlang); SWIM e o `ra` seguem usando o `log_nodes` para o *member set* inicial, e a mudança de
+      membership do `ra` continua pelo **R3 (rebalancing sob lease)** já feito — não duplica, de forma menos
+      segura, a formação Raft. Estratégias (**2A**): `gossip` (UDP multicast, dev/LAN), `kubernetes`
+      (descobre pods via API; `selector`+`node_basename` obrigatórios), `epmd` (lista estática reusando
+      `log_nodes`). Módulo **puro** `Malachi.Cluster.Topology.build/1` mapeia config→topologies (fail-fast:
+      raise em campo obrigatório faltante), unit-testável sem abrir socket multicast/k8s. Env parseado no
+      `runtime.exs` (`log_nodes` extraído p/ binding, reusado no `epmd`). Testado: `build/1` por estratégia
+      (defaults, campos obrigatórios, nils omitidos, unknown raise) — 12 testes; smoke de boot real (default
+      → sem `ClusterSupervisor` e sem distribuição; `gossip` + `--sname` → `ClusterSupervisor` vivo). Suíte
+      completa 715 testes 0 falhas (boot não regride); credo/dialyzer limpos. README com a seção de node
+      discovery. **Fatia de operabilidade multi-nó fechada.**
 
 > A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
 > cada uma for atacada.

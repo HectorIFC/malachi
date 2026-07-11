@@ -69,6 +69,22 @@ enable_tls =
     _ -> false
   end
 
+# Peer nodes for the log control plane (also the :epmd libcluster host list). Trusted operator input.
+log_nodes =
+  (System.get_env("MALACHIMQ_LOG_NODES") || "")
+  |> String.split(",", trim: true)
+  |> Enum.map(&String.to_atom(String.trim(&1)))
+
+# Node-discovery strategy for libcluster (connectivity-only). Absent => no clustering supervisor.
+cluster_strategy =
+  case System.get_env("MALACHIMQ_CLUSTER_STRATEGY") do
+    s when s in [nil, ""] -> nil
+    "gossip" -> :gossip
+    "kubernetes" -> :kubernetes
+    "epmd" -> :epmd
+    other -> raise "invalid MALACHIMQ_CLUSTER_STRATEGY #{inspect(other)} (expected gossip, kubernetes or epmd)"
+  end
+
 config :malachi,
   config_env: config_env(),
   tcp_port: String.to_integer(System.get_env("MALACHIMQ_TCP_PORT") || "4040"),
@@ -104,10 +120,20 @@ config :malachi,
        cluster when cluster in [nil, ""] -> nil
        cluster -> String.to_atom(cluster)
      end),
-  log_nodes:
-    (System.get_env("MALACHIMQ_LOG_NODES") || "")
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.to_atom(String.trim(&1))),
+  log_nodes: log_nodes,
+  # libcluster node discovery (parsed by Malachi.Cluster.Topology.build/1; connectivity-only). The
+  # strategy-specific keys are read only for the selected strategy. :epmd reuses log_nodes.
+  cluster_topology: %{
+    strategy: cluster_strategy,
+    gossip_port: parse_int.(System.get_env("MALACHIMQ_CLUSTER_GOSSIP_PORT"), 45_892),
+    gossip_secret: System.get_env("MALACHIMQ_CLUSTER_GOSSIP_SECRET"),
+    gossip_multicast_addr: System.get_env("MALACHIMQ_CLUSTER_GOSSIP_MULTICAST_ADDR"),
+    kubernetes_selector: System.get_env("MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR"),
+    kubernetes_node_basename: System.get_env("MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME"),
+    kubernetes_namespace: System.get_env("MALACHIMQ_CLUSTER_KUBERNETES_NAMESPACE"),
+    kubernetes_mode: String.to_atom(System.get_env("MALACHIMQ_CLUSTER_KUBERNETES_MODE") || "hostname"),
+    epmd_hosts: log_nodes
+  },
   # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
   log_replication_factor: String.to_integer(System.get_env("MALACHIMQ_LOG_REPLICATION_FACTOR") || "3"),
   # Control-plane shards. 1 (default) => a single ra cluster holds all metadata. >1 (with a clustered

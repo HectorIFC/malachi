@@ -24,6 +24,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.RebalanceCoordinator
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.I18n
   alias Malachi.Metadata
@@ -49,27 +50,28 @@ defmodule Malachi.Application do
     :erlang.system_flag(:schedulers_online, schedulers_to_use)
 
     children =
-      [
-        # Increase max_children for Task.Supervisor to allow large parallel broadcasts
-        {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
-        Malachi.Metrics,
-        # Audit logging (must start early for security event tracking)
-        Malachi.AuditLog,
-        # Resource monitors (must start after AuditLog for alert logging)
-        Malachi.AtomMonitor,
-        Malachi.MemoryMonitor,
-        # Account lockout manager (must start before Auth)
-        Malachi.Auth.LockoutManager,
-        Malachi.RateLimiter,
-        Malachi.ConnectionLimiter,
-        # User persistence (must start before Auth to load persisted users into ETS)
-        Malachi.Auth.UserStore,
-        Malachi.Auth,
-        Malachi.ConnectionRegistry
-        # NorthGuard log stack (reachable by clients via the log protocol actions). Single-node/
-        # in-memory by default; with :log_cluster configured the control plane is replicated over `ra`
-        # (HA metadata) and the data plane is replicated across nodes (see `log_children/0`).
-      ] ++
+      cluster_children() ++
+        [
+          # Increase max_children for Task.Supervisor to allow large parallel broadcasts
+          {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
+          Malachi.Metrics,
+          # Audit logging (must start early for security event tracking)
+          Malachi.AuditLog,
+          # Resource monitors (must start after AuditLog for alert logging)
+          Malachi.AtomMonitor,
+          Malachi.MemoryMonitor,
+          # Account lockout manager (must start before Auth)
+          Malachi.Auth.LockoutManager,
+          Malachi.RateLimiter,
+          Malachi.ConnectionLimiter,
+          # User persistence (must start before Auth to load persisted users into ETS)
+          Malachi.Auth.UserStore,
+          Malachi.Auth,
+          Malachi.ConnectionRegistry
+          # NorthGuard log stack (reachable by clients via the log protocol actions). Single-node/
+          # in-memory by default; with :log_cluster configured the control plane is replicated over `ra`
+          # (HA metadata) and the data plane is replicated across nodes (see `log_children/0`).
+        ] ++
         log_children() ++
         [
           {Malachi.TCPAcceptorPool, port},
@@ -78,6 +80,18 @@ defmodule Malachi.Application do
 
     opts = [strategy: :one_for_one, name: Malachi.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # libcluster node discovery (connectivity-only): starts a Cluster.Supervisor only when a strategy is
+  # configured (MALACHIMQ_CLUSTER_STRATEGY). Absent => [] (single-node default, no Erlang distribution
+  # required). First in the tree so peers start connecting before the SWIM/ra bootstrap reads its members.
+  defp cluster_children do
+    topology = Application.get_env(:malachi, :cluster_topology, %{strategy: nil})
+
+    case Topology.build(topology) do
+      [] -> []
+      topologies -> [{Cluster.Supervisor, [topologies, [name: Malachi.ClusterSupervisor]]}]
+    end
   end
 
   defp log_data_dir do

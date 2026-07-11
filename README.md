@@ -96,6 +96,21 @@ Single-node is in-memory by default; set `MALACHIMQ_LOG_CLUSTER` / `MALACHIMQ_LO
 HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#-client-protocol)
 on port 4040.
 
+### Node discovery (libcluster)
+
+For a multi-node deploy, set `MALACHIMQ_CLUSTER_STRATEGY` to have [libcluster](https://github.com/bitwalker/libcluster)
+discover and connect peers over Erlang distribution automatically (run each node distributed, e.g.
+`--sname`/`--name`). This is connectivity-only: SWIM and the `ra` control plane still take their initial
+member set from `MALACHIMQ_LOG_NODES`, and membership changes ride on the rebalancing coordinator. Absent
+the variable, nothing changes (single-node, no distribution required).
+
+- `gossip` — UDP multicast, near-zero config (dev/LAN). Tune with `MALACHIMQ_CLUSTER_GOSSIP_PORT`,
+  `MALACHIMQ_CLUSTER_GOSSIP_SECRET`, `MALACHIMQ_CLUSTER_GOSSIP_MULTICAST_ADDR`.
+- `kubernetes` — pod discovery via the Kubernetes API. Requires `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR`
+  and `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME`; optional `MALACHIMQ_CLUSTER_KUBERNETES_NAMESPACE` and
+  `MALACHIMQ_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
+- `epmd` — a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
+
 ## 🚀 Quick Start with Docker
 
 **Multi-Architecture Support**: Works on AMD64 (Intel/AMD) and ARM64 (Apple Silicon, AWS Graviton)
@@ -293,6 +308,9 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
 | `MALACHIMQ_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
 | `MALACHIMQ_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
+| `MALACHIMQ_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
+| `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
+| `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
 | `MALACHIMQ_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
 | `MALACHIMQ_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
 | `MALACHIMQ_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
