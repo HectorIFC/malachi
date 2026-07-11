@@ -1397,6 +1397,26 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         no alvo → vazio; não configurado → vazio) + gauge do Prometheus (emite por-topic, default 0 na
         ausência da chave) — 4. Suíte 731 testes 0 falhas; credo/dialyzer limpos; badge JS validado. README
         com o gauge.
+    - ✅ **Exemplo de deploy Kubernetes (amarra libcluster + placement num deploy real).** `deploy/kubernetes/`
+      — um manifest (`malachi.yaml`, 8 docs) de um **cluster CP de 3 nós** com placement rack (zona) aware,
+      + README explicando o racional. Decisões: **1A** descoberta por **epmd (lista estática de FQDNs)** —
+      um StatefulSet CP/Raft tem identidades **estáveis** (idiomático, e os node names casam com o
+      `RELEASE_NODE` — determinístico, o que importa já que não há cluster real p/ testar); **2A** rack-aware
+      **de verdade** via init container. Peças: **StatefulSet** (identidade/DNS/PV estáveis p/ o `ra`;
+      `podManagementPolicy: Parallel` forma o quórum junto), **headless Service** (`publishNotReadyAddresses`
+      p/ os peers se resolverem durante a formação), **client Service** (4040/4041), **PDB** `minAvailable: 2`
+      (maioria Raft em drains), **ClusterRole** least-privilege (`get nodes`) + SA/binding p/ o init. Node name
+      distribuído via `RELEASE_NODE=malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE)...` +
+      `RELEASE_DISTRIBUTION=name` + `ERL_AFLAGS` fixando a porta de dist; peer set do `ra` = os 3 FQDNs em
+      `MALACHIMQ_LOG_NODES`; `MALACHIMQ_CLUSTER_STRATEGY=epmd` reusa a lista. Rack-awareness:
+      `topologySpreadConstraints` por zona + init container (`kubectl get node`) escreve a zona num emptyDir
+      que o main container dobra em `MALACHIMQ_LOG_ATTRIBUTES=zone=<z>`, com `LOG_SPREAD_BY=zone`/
+      `MIN_DOMAINS=2`/`PLACEMENT_POLICY=soft` (violações viram o gauge do slice anterior; nó sem label →
+      fallback informativo). Probes `/health`+`/ready` (do O1). Sem mudança de código Elixir (node name via
+      `RELEASE_*`; o `vm.args` já usa `inet_res`). Validado: YAML parseia (8 docs) + spot-check dos valores
+      críticos (ordem do env com POD_NAME antes do RELEASE_NODE, refs `$(VAR)`, command colapsado). Doc da
+      alternativa `kubernetes` (dinâmica, RBAC em pods) p/ deploys autoescaláveis. README principal aponta.
+      (Não testável sem um cluster k8s real — config determinística por construção.)
 
 > A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
 > cada uma for atacada.

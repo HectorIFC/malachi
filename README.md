@@ -111,6 +111,10 @@ the variable, nothing changes (single-node, no distribution required).
   `MALACHIMQ_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
 - `epmd` — a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
 
+For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/) ships a worked example: a 3-node
+CP cluster as a StatefulSet with stable Raft identities, zone-aware placement (`min_domains`), and the
+health/readiness probes wired up.
+
 ## 🚀 Quick Start with Docker
 
 **Multi-Architecture Support**: Works on AMD64 (Intel/AMD) and ARM64 (Apple Silicon, AWS Graviton)

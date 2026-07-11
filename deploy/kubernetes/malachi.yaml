@@ -1,0 +1,285 @@
+# Malachi on Kubernetes — a 3-node CP cluster as a StatefulSet, with rack (zone) aware placement.
+#
+# Why a StatefulSet: the control plane is Raft (`ra`), which needs STABLE node identities. A StatefulSet
+# gives each pod a stable name (malachi-0/1/2) and DNS, and a stable PersistentVolume, so a restarted pod
+# rejoins its Raft groups as the same member. Node discovery is the static peer set below (idiomatic for a
+# fixed-size CP cluster); libcluster (epmd strategy) just keeps the peers connected over Erlang
+# distribution. See ./README.md for the rationale and step-by-step deploy.
+#
+# Before applying: set your namespace in the ClusterRoleBinding, replace the Secret values, and point the
+# container image at your build.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: malachi
+  labels:
+    app: malachi
+---
+# The zone-init container reads the pod's node zone label; nodes are cluster-scoped, so this is a
+# ClusterRole (get on nodes only — least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: malachi-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: malachi-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: malachi-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: malachi
+    namespace: default # <-- change to your namespace
+---
+# Erlang distribution cookie + user passwords. REPLACE before applying, or create out-of-band with
+# `kubectl create secret generic malachi-secrets --from-literal=release-cookie=$(openssl rand -hex 32) ...`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: malachi-secrets
+type: Opaque
+stringData:
+  release-cookie: "CHANGE_ME_to_a_long_random_string"
+  # All four seed users must have non-default passwords, or the prod config validator refuses to boot.
+  admin-pass: "CHANGE_ME"
+  producer-pass: "CHANGE_ME"
+  consumer-pass: "CHANGE_ME"
+  app-pass: "CHANGE_ME"
+---
+# Headless service: stable per-pod DNS (malachi-0.malachi-headless.<ns>.svc.cluster.local) for Erlang
+# distribution and the ra peer set. publishNotReadyAddresses lets peers resolve each other DURING cluster
+# formation, before any pod is Ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: malachi-headless
+  labels:
+    app: malachi
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: malachi
+  ports:
+    - name: tcp
+      port: 4040
+    - name: dashboard
+      port: 4041
+    - name: epmd
+      port: 4369
+    - name: dist
+      port: 9100
+---
+# Client-facing service: round-robins the binary log protocol (4040) and the dashboard/metrics (4041)
+# across Ready pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: malachi
+  labels:
+    app: malachi
+spec:
+  selector:
+    app: malachi
+  ports:
+    - name: tcp
+      port: 4040
+      targetPort: 4040
+    - name: dashboard
+      port: 4041
+      targetPort: 4041
+---
+# Keep a Raft majority (2 of 3) during voluntary disruptions (node drains, rollouts).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: malachi
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: malachi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: malachi
+  labels:
+    app: malachi
+spec:
+  serviceName: malachi-headless
+  replicas: 3
+  podManagementPolicy: Parallel # start the 3 pods together so the Raft cluster forms with a quorum
+  selector:
+    matchLabels:
+      app: malachi
+  template:
+    metadata:
+      labels:
+        app: malachi
+    spec:
+      serviceAccountName: malachi
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000 # so the malachi user (uid 1000) can write the mounted PersistentVolume
+        runAsNonRoot: true
+      # Spread the pods across zones so segment replicas can land in distinct failure domains. Pairs with
+      # MALACHIMQ_LOG_SPREAD_BY=zone + MALACHIMQ_LOG_MIN_DOMAINS below. Use DoNotSchedule to hard-require
+      # distinct zones (may leave pods Pending if zones are too few).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: malachi
+      initContainers:
+        # Read this pod's node zone into a shared file, which the main container turns into the broker's
+        # `zone` attribute (rack/DC-aware placement). Best-effort: an unlabelled node leaves it empty and
+        # placement falls back to no-spread (surfaced as domain violations in the metrics).
+        - name: zone-init
+          image: bitnami/kubectl:1.30
+          command:
+            - /bin/sh
+            - -c
+            - kubectl get node "$NODE_NAME" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}' > /shared/zone || true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      containers:
+        - name: malachi
+          image: hectorcardoso/malachi:latest # <-- replace with your image
+          # Fold the injected zone into MALACHIMQ_LOG_ATTRIBUTES, then exec the release.
+          command:
+            - /bin/sh
+            - -c
+            - >
+              Z="$(cat /shared/zone 2>/dev/null)";
+              [ -n "$Z" ] && export MALACHIMQ_LOG_ATTRIBUTES="zone=$Z";
+              exec bin/malachi start
+          ports:
+            - name: tcp
+              containerPort: 4040
+            - name: dashboard
+              containerPort: 4041
+            - name: epmd
+              containerPort: 4369
+            - name: dist
+              containerPort: 9100
+          env:
+            # --- Erlang distribution: stable, DNS-based node names (POD_NAME/POD_NAMESPACE are used by the
+            #     RELEASE_NODE and MALACHIMQ_LOG_NODES below, so they must come first) ---
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RELEASE_DISTRIBUTION
+              value: name
+            - name: RELEASE_NODE
+              value: malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE).svc.cluster.local
+            - name: RELEASE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: malachi-secrets
+                  key: release-cookie
+            - name: ERL_AFLAGS
+              value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+            # --- Replicated log control plane over ra; the peer set is the 3 stable pod names ---
+            - name: MALACHIMQ_LOG_CLUSTER
+              value: malachi
+            - name: MALACHIMQ_LOG_NODES
+              value: malachi@malachi-0.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-1.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-2.malachi-headless.$(POD_NAMESPACE).svc.cluster.local
+            - name: MALACHIMQ_RA_DATA_DIR
+              value: /app/data/ra
+            - name: MALACHIMQ_MNESIA_DIR
+              value: /app/data/mnesia
+            - name: MALACHIMQ_LOG_DATA_DIR
+              value: /app/data/log
+            - name: MALACHIMQ_LOG_REPLICATION_FACTOR
+              value: "3"
+            # --- libcluster keeps the peers connected (epmd strategy reuses MALACHIMQ_LOG_NODES) ---
+            - name: MALACHIMQ_CLUSTER_STRATEGY
+              value: epmd
+            # --- Rack-aware placement + failure-domain guarantee ---
+            - name: MALACHIMQ_LOG_SPREAD_BY
+              value: zone
+            - name: MALACHIMQ_LOG_MIN_DOMAINS
+              value: "2"
+            - name: MALACHIMQ_LOG_PLACEMENT_POLICY
+              value: soft # 'hard' fails a produce that cannot span 2 zones
+            # --- Auth: every seed user needs a non-default password (the prod validator raises otherwise) ---
+            - name: MALACHIMQ_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: malachi-secrets
+                  key: admin-pass
+            - name: MALACHIMQ_PRODUCER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: malachi-secrets
+                  key: producer-pass
+            - name: MALACHIMQ_CONSUMER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: malachi-secrets
+                  key: consumer-pass
+            - name: MALACHIMQ_APP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: malachi-secrets
+                  key: app-pass
+            - name: MALACHIMQ_AUDIT_LOG_OUTPUT
+              value: stdout
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 4041
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4041
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: shared
+              mountPath: /shared
+      volumes:
+        - name: shared
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
