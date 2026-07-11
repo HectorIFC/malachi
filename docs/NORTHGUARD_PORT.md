@@ -1385,6 +1385,18 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       met/unmet, sem-spread, nil-domain) + `domain_violations/4` (5+3); broker hard-fail e2e (produce aborta
       com 2 racks/min_domains 3; soft coloca; hard passa com min_domains 2 — 3); heal rack-aware forwardando
       `:spread` (1). Suíte 727 testes 0 falhas; credo/dialyzer limpos. README com os env vars.
+      - ✅ **Surfacing de `domain_violations` (métrica + painel).** Fecha o loop da metade "reportar" do 1A: o
+        `domain_violations/4` era uma função pura que **nada chamava**, então com política **soft** o operador
+        ficava cego para a degradação de HA. `Broker.domain_violations/1` (puro) computa, do próprio broker
+        (merged metadata + `spread_by` + `broker_attributes` vivos + `min_domains`), as violações **por topic**
+        (`%{topic => count}` via `Enum.frequencies_by(&topic_of_segment/1)`; `%{}` se spread/min_domains não
+        configurados); `BrokerServer.domain_violations/1` expõe via call. O `dashboard` anexa o count a cada
+        topic no `topics_overview` (default 0), o `Prometheus.export` emite o gauge por-topic
+        `malachi_domain_violations` (`Map.get(.., 0)` defensivo), e o painel mostra um badge `⚠ N HA` **só
+        quando > 0** (alto sinal, sem clutter). Testado: `Broker.domain_violations` (soft abaixo do alvo → 1;
+        no alvo → vazio; não configurado → vazio) + gauge do Prometheus (emite por-topic, default 0 na
+        ausência da chave) — 4. Suíte 731 testes 0 falhas; credo/dialyzer limpos; badge JS validado. README
+        com o gauge.
 
 > A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
 > cada uma for atacada.

@@ -205,7 +205,8 @@ are namespaced `malachi_`: BEAM health (`malachi_process_count`, `malachi_memory
 `malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), operation totals fed by the telemetry
 events (`malachi_records_produced_total`, `malachi_bytes_produced_total`, `malachi_records_consumed_total`,
 `malachi_auth_attempts_total{result}`, `malachi_replication_commits_total{result}`), and per-topic gauges
-(`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`, …).
+(`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`,
+`malachi_domain_violations` — segments spanning fewer than `min_domains` failure domains, …).
 
 `/metrics` requires authentication (any user), so a scrape config passes a token:
 

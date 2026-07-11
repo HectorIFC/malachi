@@ -73,7 +73,14 @@ defmodule Malachi.Metrics.PrometheusTest do
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do
     topics = [
-      %{name: "events", range_count: 3, active_range_count: 2, segment_count: 5, total_bytes: 4096, groups: ["g1", "g2"]},
+      %{
+        name: "events",
+        range_count: 3,
+        active_range_count: 2,
+        segment_count: 5,
+        total_bytes: 4096,
+        groups: ["g1", "g2"]
+      },
       %{name: "orders", range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}
     ]
 
@@ -89,12 +96,35 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_topic_consumer_groups{topic="orders"} 0)
   end
 
+  test "domain_violations gauge is emitted per topic, defaulting to 0 when absent" do
+    topics = [
+      %{
+        name: "events",
+        range_count: 1,
+        active_range_count: 1,
+        segment_count: 2,
+        total_bytes: 0,
+        groups: [],
+        domain_violations: 3
+      },
+      %{name: "orders", range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}
+    ]
+
+    out = render(topics)
+
+    assert out =~ "# TYPE malachi_domain_violations gauge\n"
+    assert out =~ ~s(malachi_domain_violations{topic="events"} 3)
+    assert out =~ ~s(malachi_domain_violations{topic="orders"} 0)
+  end
+
   test "no topic series are emitted when there are no topics" do
     refute render([]) =~ "malachi_topic_ranges"
   end
 
   test "label values are escaped (defensive — topic names are normally restricted)" do
-    out = render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
+    out =
+      render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
+
     assert out =~ ~S(malachi_topic_ranges{topic="a\"b\\c"} 1)
   end
 end

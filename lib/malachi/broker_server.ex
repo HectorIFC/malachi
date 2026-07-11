@@ -25,6 +25,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Metadata
   alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
@@ -133,6 +134,12 @@ defmodule Malachi.BrokerServer do
   @doc "The current control-plane metadata (e.g. for a healing coordinator to inspect)."
   @spec metadata(GenServer.server()) :: Malachi.Metadata.t()
   def metadata(server), do: GenServer.call(server, :metadata)
+
+  @doc """
+  The per-topic overview (`Malachi.Metadata.overview/1`) annotated with each topic's failure-domain
+  violation count (`Malachi.Broker.domain_violations/2`), computed from a single merged-metadata view.
+  """
+  def topics_overview(server), do: GenServer.call(server, :topics_overview)
 
   @doc "Applies `:set_segment_replicas` healing commands to the control plane."
   @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok
@@ -346,6 +353,18 @@ defmodule Malachi.BrokerServer do
 
   def handle_call(:metadata, _from, state) do
     {:reply, Broker.metadata(state.broker), state}
+  end
+
+  def handle_call(:topics_overview, _from, state) do
+    metadata = Broker.metadata(state.broker)
+    violations = Broker.domain_violations(state.broker, metadata)
+
+    overview =
+      metadata
+      |> Metadata.overview()
+      |> Enum.map(fn topic -> Map.put(topic, :domain_violations, Map.get(violations, topic.name, 0)) end)
+
+    {:reply, overview, state}
   end
 
   def handle_call({:apply_heal, commands}, _from, state) do

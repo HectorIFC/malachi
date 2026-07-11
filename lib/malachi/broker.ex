@@ -266,6 +266,27 @@ defmodule Malachi.Broker do
   def metadata(%__MODULE__{} = broker), do: DSRSM.merged_metadata(broker.dsrsm)
 
   @doc """
+  Per-topic count of segments whose replica set spans fewer than `min_domains` distinct `spread_by`
+  domains — the failure-domain diversity violations (`Malachi.Cluster.Placement.domain_violations/4`),
+  keyed by topic. Empty when `spread_by` or `min_domains` is unset (nothing to check). This surfaces the
+  HA degradation a `:soft` policy allows (under-diversified placements are kept, not rejected), for
+  metrics/alerting.
+  """
+  @spec domain_violations(t()) :: %{String.t() => non_neg_integer()}
+  def domain_violations(%__MODULE__{} = broker), do: domain_violations(broker, metadata(broker))
+
+  @doc "Like `domain_violations/1` but over an already-computed metadata view (avoids a second merge)."
+  @spec domain_violations(t(), Metadata.t()) :: %{String.t() => non_neg_integer()}
+  def domain_violations(%__MODULE__{spread_by: key, min_domains: min} = broker, %Metadata{} = metadata)
+      when not is_nil(key) and not is_nil(min) do
+    metadata
+    |> Placement.domain_violations(key, broker.broker_attributes, min)
+    |> Enum.frequencies_by(&topic_of_segment/1)
+  end
+
+  def domain_violations(%__MODULE__{}, %Metadata{}), do: %{}
+
+  @doc """
   Durably records a consumer `group`'s committed position (`offsets`, per range) for `topic`,
   through the control plane (Raft-backed when configured). Returns `{broker, reply}`.
   """

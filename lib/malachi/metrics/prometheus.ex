@@ -98,7 +98,13 @@ defmodule Malachi.Metrics.Prometheus do
       ),
       metric("malachi_topic_segments", :gauge, "Segments per topic", samples(topics, & &1.segment_count)),
       metric("malachi_topic_bytes", :gauge, "Stored bytes per topic", samples(topics, & &1.total_bytes)),
-      metric("malachi_topic_consumer_groups", :gauge, "Consumer groups per topic", samples(topics, &length(&1.groups)))
+      metric("malachi_topic_consumer_groups", :gauge, "Consumer groups per topic", samples(topics, &length(&1.groups))),
+      metric(
+        "malachi_domain_violations",
+        :gauge,
+        "Segments spanning fewer than min_domains failure domains, per topic (0 unless configured)",
+        samples(topics, &Map.get(&1, :domain_violations, 0))
+      )
     ]
   end
 

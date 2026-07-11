@@ -114,6 +114,26 @@ defmodule Malachi.BrokerTest do
 
       assert {_broker, {:ok, %{^root_id => {0, 0}}}} = produce(broker, store, "events", [record("v", "k")])
     end
+
+    test "domain_violations reports a soft-policy segment below the target", %{store: store} do
+      {broker, _root} = broker_with_topic("events", 4, hardening_opts(3, :soft))
+      {broker, {:ok, _}} = produce(broker, store, "events", [record("v", "k")])
+
+      # the segment spans only two racks (a, b) but min_domains is 3 → one violation for the topic
+      assert Broker.domain_violations(broker) == %{"events" => 1}
+    end
+
+    test "domain_violations is empty when the segment meets the target", %{store: store} do
+      {broker, _root} = broker_with_topic("events", 4, hardening_opts(2, :soft))
+      {broker, {:ok, _}} = produce(broker, store, "events", [record("v", "k")])
+
+      assert Broker.domain_violations(broker) == %{}
+    end
+
+    test "domain_violations is empty when spread/min_domains are unconfigured" do
+      {broker, _root} = broker_with_topic()
+      assert Broker.domain_violations(broker) == %{}
+    end
   end
 
   describe "split routes records to children (control plane drives data plane)" do

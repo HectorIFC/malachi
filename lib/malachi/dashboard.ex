@@ -538,10 +538,14 @@ defmodule Malachi.Dashboard do
     %{system: Metrics.get_system_metrics(), topics: topics_overview()}
   end
 
-  # A read-only summary of the live log stack, or [] when the broker is not running (e.g. a minimal test
-  # boot) so the dashboard degrades gracefully instead of crashing the connection.
+  # A read-only summary of the live log stack (each topic annotated with its failure-domain violation
+  # count), or [] when the broker is not running (e.g. a minimal test boot) so the dashboard degrades
+  # gracefully instead of crashing the connection.
   defp topics_overview do
-    with_metadata([], &Metadata.overview/1)
+    case Process.whereis(Malachi.LogBroker) do
+      nil -> []
+      _pid -> BrokerServer.topics_overview(Malachi.LogBroker)
+    end
   end
 
   defp serve_metrics(socket) do
@@ -851,6 +855,7 @@ defmodule Malachi.Dashboard do
         }
         .badge-active { background: #00ff88; color: #0a0e27; }
         .badge-sealed { background: #6b7280; color: #f0f0f0; }
+        .badge-warn { background: #f59e0b; color: #0a0e27; }
         .topic-detail { padding: 0 14px 12px 14px; }
         .range-block { margin-top: 10px; border-top: 1px solid #202844; padding-top: 8px; }
         .range-head { color: #00d9ff; font-family: monospace; font-size: 0.85em; margin-bottom: 4px; }
@@ -990,7 +995,7 @@ defmodule Malachi.Dashboard do
             <div class="topic-card">
               <div class="topic-header" onclick="toggleTopic(${i})">
                 <span class="topic-name">${open ? '▾' : '▸'} ${escapeHtml(t.name)} <span class="badge badge-${escapeHtml(t.state)}">${escapeHtml(t.state)}</span></span>
-                <span class="topic-summary">${t.active_range_count}/${t.range_count} ranges · ${t.active_segment_count}/${t.segment_count} segs · ${formatBytes(t.total_bytes)} · ${(t.groups || []).length} grp</span>
+                <span class="topic-summary">${t.active_range_count}/${t.range_count} ranges · ${t.active_segment_count}/${t.segment_count} segs · ${formatBytes(t.total_bytes)} · ${(t.groups || []).length} grp${t.domain_violations > 0 ? ' · <span class="badge badge-warn">⚠ ' + t.domain_violations + ' HA</span>' : ''}</span>
               </div>
               ${detail}
             </div>`;
