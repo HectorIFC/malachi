@@ -694,6 +694,29 @@ Default credentials: `producer`/`producer123` (produce + create-topic), `consume
 with `MALACHI_HOST`/`MALACHI_PORT`. The same flow is exercised in-VM by `Malachi.Test.TCPHelper`
 (`test/support/tcp_helper.ex`).
 
+### Load test
+
+`scripts/loadtest.js` is a closed-loop load generator built on the same client: N connections each run a
+scenario in a tight `op → await` loop, and it reports throughput (ops/s, records/s, MB/s) and latency
+percentiles (p50/p90/p95/p99).
+
+```bash
+# max produce throughput: 20 connections for 10s
+node scripts/loadtest.js --scenario produce --connections 20 --duration 10
+
+# fetch a 50k-record backlog, 200 records/pull
+node scripts/loadtest.js --scenario fetch --prepopulate 50000 --max 200
+
+# server-push streaming throughput
+node scripts/loadtest.js --scenario stream --connections 4 --window 500
+
+# mixed produce+fetch under contention, 512-byte records
+node scripts/loadtest.js --scenario mixed --connections 20 --record-size 512 --json
+```
+
+Latency is measured per round-trip and stored in a bounded reservoir (percentiles stay representative on
+long runs while min/max remain exact). `--help` lists every flag.
+
 ## 🛠️ Development
 
 ### Prerequisites

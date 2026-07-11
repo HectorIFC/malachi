@@ -771,6 +771,24 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     streaming push+ack (pré-existentes + ao vivo), e caminhos de erro limpos (`permission_denied`,
     `invalid_credentials` — sem crash). README com a seção do cliente; `package.json` atualizado (v2, scripts
     produce/consume/subscribe/demo). **Sem dependências** (só `net` da stdlib).
+  - ✅ **Load-test harness (Node.js, closed-loop).** `scripts/loadtest.js` gera carga sobre o cliente de
+    referência (escolhas: 1A Node reusando o cliente · 2C closed-loop agora, estruturado p/ open-loop depois
+    · 3A os quatro cenários). N conexões concorrentes, cada uma num loop `op → await` até o deadline; o driver
+    `closedLoop` é **separado das ops** (`produceOp`/`fetchOp`) pra um driver open-loop reusá-las. Cenários:
+    **produce** (append por chave), **fetch** (drena backlog dirigido por cursor, rebobina no fim), **stream**
+    (server-push subscribe+ack, throughput-only — latência de push não é comparável a round-trip), **mixed**
+    (metade produz, metade lê). Métricas: throughput (ops/s, records/s, MB/s) + latência p50/p90/p95/p99 via
+    **reservoir sampling** (Algoritmo R, cap `--samples`) com min/max/count/sum exatos à parte (o reservoir
+    clipa a cauda). Flags: `--connections/--duration/--batch/--record-size/--keys/--max/--window/--prepopulate/
+    --warmup/--json`; tópico único auto-criado por run; `--prepopulate` semeia backlog p/ fetch/stream/mixed.
+    Três correções achadas na revisão/validação: (1) backoff no erro não-fatal do `closedLoop` (senão
+    busy-spin pegando CPU); (2) `clearTimeout` no `streamDriver` quando `onError` resolve antes; (3) **grupo
+    único por invocação** no stream — o warmup commita (ack) até o fim do backlog, então compartilhar grupo
+    com o run medido o deixava vazio. Validado e2e (single-node local, records pequenos, ilustrativo):
+    produce ~42k rec/s, fetch ~307k rec/s (drain), stream ~26k rec/s (push), mixed ~25k rec/s / 7.5k ops/s —
+    0 erros; `--json` e `--warmup` (com reconexão dos clients p/ soltar a subscription) OK. Nota operacional:
+    muitas conexões estouram o rate-limit de auth (10/min/IP default) — subir `MALACHIMQ_AUTH_RATE_LIMIT` pra
+    testes de escala. README com a seção de load test; `package.json` com o script `loadtest`.
   - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
     testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
     failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
