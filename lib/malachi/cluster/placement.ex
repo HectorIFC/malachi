@@ -46,12 +46,23 @@ defmodule Malachi.Cluster.Placement do
       values` every replica lands in a different value; otherwise it is best-effort round-robin. This
       is deterministic (rendezvous ranking + stable grouping) and is what makes placement rack/DC
       aware. Omitted → the plain top-`rf` ranking.
+    * `:min_domains` - the minimum number of **distinct failure domains** the replica set must span (the
+      distinct `:spread` attribute values it covers; without `:spread`, distinct brokers). Best-effort
+      spread already maximises domain coverage, but with few domains or missing attributes the set can
+      still concentrate; `:min_domains` makes that a checkable guarantee. Absent → no domain requirement.
+    * `:policy` - `:soft` (default) keeps the current best-effort behaviour; `:hard` **rejects** a
+      placement that cannot reach `:min_domains` with `{:error, {:insufficient_domains, covered, required}}`
+      so a caller can fail fast instead of silently placing an under-diversified (not HA) replica set.
 
-  Returns `{:error, :no_brokers}` if there are none, or `{:error, :invalid_replication_factor}`
-  if `replication_factor < 1`.
+  Returns `{:error, :no_brokers}` if there are none, `{:error, :invalid_replication_factor}` if
+  `replication_factor < 1`, or `{:error, {:insufficient_domains, covered, required}}` under `:hard`.
   """
   @spec place(Metadata.segment_id(), [Metadata.broker()], pos_integer(), keyword()) ::
-          {:ok, [Metadata.broker()]} | {:error, :no_brokers | :invalid_replication_factor}
+          {:ok, [Metadata.broker()]}
+          | {:error,
+             :no_brokers
+             | :invalid_replication_factor
+             | {:insufficient_domains, non_neg_integer(), pos_integer()}}
   def place(segment_id, available_brokers, replication_factor, opts \\ [])
 
   def place(_segment_id, _available_brokers, replication_factor, _opts) when replication_factor < 1 do
@@ -61,7 +72,7 @@ defmodule Malachi.Cluster.Placement do
   def place(segment_id, available_brokers, replication_factor, opts) do
     case Enum.uniq(available_brokers) do
       [] -> {:error, :no_brokers}
-      brokers -> {:ok, ranked(segment_id, brokers) |> select(replication_factor, opts)}
+      brokers -> ranked(segment_id, brokers) |> select(replication_factor, opts) |> enforce_min_domains(opts)
     end
   end
 
@@ -144,7 +155,66 @@ defmodule Malachi.Cluster.Placement do
     end)
   end
 
+  @doc """
+  The ids of segments whose replica set spans **fewer than `min_domains`** distinct values of
+  `attribute_key` (per `attributes`) — i.e. segments whose placement does not meet the failure-domain
+  diversity target and so are not HA to that degree. Independent of liveness (it audits the placed set,
+  not whether replicas are up); `under_replicated/3` covers lost replicas. Returns a sorted list, for
+  alerting/observability (`heal/3` re-replicates for durability but stays best-effort about domains, so a
+  cluster that lost a whole domain can converge to a diversity violation this surfaces). Empty when every
+  segment meets the target.
+  """
+  @spec domain_violations(Metadata.t(), term(), %{Metadata.broker() => map()}, pos_integer()) ::
+          [Metadata.segment_id()]
+  def domain_violations(%Metadata{} = metadata, attribute_key, attributes, min_domains) do
+    metadata.segments
+    |> Enum.filter(fn {_id, segment} ->
+      distinct_domains(segment.replica_set, attribute_key, attributes) < min_domains
+    end)
+    |> Enum.map(fn {id, _segment} -> id end)
+    |> Enum.sort()
+  end
+
   # --- internals ---
+
+  # Enforces the :min_domains guarantee: :soft (or no :min_domains) passes the set through; :hard rejects
+  # a set that covers fewer distinct domains than required so the caller fails fast instead of placing a
+  # non-HA replica set.
+  defp enforce_min_domains(replica_set, opts) do
+    # :soft (or no :min_domains) opts out; any other policy enforces the guarantee (crash-proof: no
+    # exhaustive match on the policy value).
+    case {Keyword.get(opts, :min_domains), Keyword.get(opts, :policy, :soft)} do
+      {min, policy} when is_nil(min) or policy == :soft ->
+        {:ok, replica_set}
+
+      {min_domains, _enforce} ->
+        covered = domains_covered(replica_set, opts)
+
+        if covered >= min_domains do
+          {:ok, replica_set}
+        else
+          {:error, {:insufficient_domains, covered, min_domains}}
+        end
+    end
+  end
+
+  # Distinct failure domains a replica set covers: distinct :spread attribute values, or distinct brokers
+  # when there is no :spread. A broker with no attribute value falls in the single `nil` domain, so
+  # unlabelled brokers conservatively do not count as extra domains.
+  defp domains_covered(replica_set, opts) do
+    case Keyword.get(opts, :spread) do
+      {attribute_key, attributes} -> distinct_domains(replica_set, attribute_key, attributes)
+      nil -> replica_set |> Enum.uniq() |> length()
+    end
+  end
+
+  defp distinct_domains(replica_set, attribute_key, attributes) do
+    replica_set |> Enum.map(&domain_of(&1, attribute_key, attributes)) |> Enum.uniq() |> length()
+  end
+
+  defp domain_of(broker, attribute_key, attributes) do
+    attributes |> Map.get(broker, %{}) |> Map.get(attribute_key)
+  end
 
   # Brokers ordered by descending rendezvous score, tie-broken by the broker term for a stable,
   # input-order-independent ranking.

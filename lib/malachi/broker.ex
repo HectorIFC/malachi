@@ -88,6 +88,11 @@ defmodule Malachi.Broker do
             # broker to its attributes (refreshed from membership).
             spread_by: nil,
             broker_attributes: %{},
+            # Failure-domain guarantee: `min_domains` distinct `spread_by` values a segment's replica set
+            # must span; `placement_policy` :hard rejects a segment that cannot reach it (produce fails
+            # fast), :soft (default) places best-effort. nil min_domains = no requirement.
+            min_domains: nil,
+            placement_policy: :soft,
             segments: %{},
             segment_seq: %{},
             offsets: %{}
@@ -122,7 +127,9 @@ defmodule Malachi.Broker do
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes,
        spread_by: Keyword.get(opts, :spread_by),
-       broker_attributes: Keyword.get(opts, :broker_attributes, %{})
+       broker_attributes: Keyword.get(opts, :broker_attributes, %{}),
+       min_domains: Keyword.get(opts, :min_domains),
+       placement_policy: Keyword.get(opts, :placement_policy, :soft)
      }}
   end
 
@@ -481,9 +488,15 @@ defmodule Malachi.Broker do
     seq = Map.get(broker.segment_seq, range_id, 0)
     segment_id = {range_id, seq}
 
-    {:ok, replica_set} =
-      Placement.place(segment_id, broker.brokers, broker.replication_factor, place_opts(broker, range_id))
+    # Under a :hard placement policy, a segment that cannot span :min_domains failure domains is rejected;
+    # surface it so the produce fails fast instead of silently placing a non-HA replica set.
+    case Placement.place(segment_id, broker.brokers, broker.replication_factor, place_opts(broker, range_id)) do
+      {:ok, replica_set} -> register_segment(broker, range_id, segment_id, replica_set, start_offset, seq)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
+  defp register_segment(broker, range_id, segment_id, replica_set, start_offset, seq) do
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
     case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
@@ -569,9 +582,15 @@ defmodule Malachi.Broker do
   # Placement options for a new segment of `range_id`: spread it over the effective attribute using
   # the current broker attributes, else none (plain rendezvous ranking).
   defp place_opts(broker, range_id) do
-    case effective_spread_by(broker, range_id) do
-      nil -> []
-      key -> [spread: {key, broker.broker_attributes}]
+    spread_opts =
+      case effective_spread_by(broker, range_id) do
+        nil -> []
+        key -> [spread: {key, broker.broker_attributes}]
+      end
+
+    case broker.min_domains do
+      nil -> spread_opts
+      min -> spread_opts ++ [min_domains: min, policy: broker.placement_policy]
     end
   end
 

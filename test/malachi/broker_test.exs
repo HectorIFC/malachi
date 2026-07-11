@@ -81,6 +81,41 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "min_domains hard policy (failure-domain hardening)" do
+    # three brokers over only two racks (a, b)
+    @racks %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}
+
+    defp hardening_opts(min_domains, policy) do
+      [
+        brokers: [:a1, :a2, :b1],
+        replication_factor: 3,
+        spread_by: "rack",
+        broker_attributes: @racks,
+        min_domains: min_domains,
+        placement_policy: policy
+      ]
+    end
+
+    test "hard policy fails the produce when the replica set cannot span min_domains", %{store: store} do
+      {broker, _root} = broker_with_topic("events", 4, hardening_opts(3, :hard))
+
+      assert {_broker, {:error, {:insufficient_domains, 2, 3}}} =
+               produce(broker, store, "events", [record("v", "k")])
+    end
+
+    test "soft policy places best-effort despite too few domains", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, hardening_opts(3, :soft))
+
+      assert {_broker, {:ok, %{^root_id => {0, 0}}}} = produce(broker, store, "events", [record("v", "k")])
+    end
+
+    test "hard policy succeeds when enough domains are reachable", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, hardening_opts(2, :hard))
+
+      assert {_broker, {:ok, %{^root_id => {0, 0}}}} = produce(broker, store, "events", [record("v", "k")])
+    end
+  end
+
   describe "split routes records to children (control plane drives data plane)" do
     test "after a split, records route to the correct child range", %{store: store} do
       {broker, root_id} = broker_with_topic()

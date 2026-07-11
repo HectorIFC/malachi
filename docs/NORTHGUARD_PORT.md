@@ -1365,6 +1365,26 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       → sem `ClusterSupervisor` e sem distribuição; `gossip` + `--sname` → `ClusterSupervisor` vivo). Suíte
       completa 715 testes 0 falhas (boot não regride); credo/dialyzer limpos. README com a seção de node
       discovery. **Fatia de operabilidade multi-nó fechada.**
+    - ✅ **Hardening de placement — garantia de domínios de falha (`min_domains`/`policy`).** O `Placement`
+      já fazia spread rack/DC + `max_skew`, mas o `:spread` é **best-effort**: com menos domínios que `rf`,
+      ou atributos faltando, as réplicas concentravam **silenciosamente** — um furo de HA (3 réplicas no
+      mesmo rack sobrevivem a zero falhas de rack). Decisão **1A**: `:hard` **falha rápido na colocação
+      inicial**; heal segue best-effort (durabilidade primeiro) + reporta. **Core (puro)**: `place/4` ganha
+      `:min_domains` (nº mínimo de valores distintos do atributo que o replica set deve cobrir; sem
+      `:spread`, brokers distintos) + `:policy` (`:soft` default = comportamento atual; `:hard` retorna
+      `{:error, {:insufficient_domains, coberto, exigido}}`). Broker sem atributo cai no domínio `nil` único
+      (conservador: não conta como domínio extra). Novo `domain_violations/4` reporta segmentos cujo replica
+      set cobre < `min_domains` domínios (alerta/observabilidade). **Fiação**: broker (`min_domains`/
+      `placement_policy` no struct/open; `place_opts` injeta; `open_segment` trata `{:error, ...}` → produce
+      aborta limpo, `register_segment` extraído), broker_server (threading), application (`data_plane_opts`
+      lê `log_min_domains`/`log_placement_policy`), config (`MALACHIMQ_LOG_MIN_DOMAINS`/
+      `MALACHIMQ_LOG_PLACEMENT_POLICY`). **Fix relacionado (Issue 2)**: o heal era **rack-blind** —
+      `self_healing` chamava `place/3` sem `:spread`; agora `HealCoordinator` resolve o spread por pass (via
+      `heal_spread/0`, atributos vivos) e o `self_healing` forwarda **só `:spread`** (strip de
+      `min_domains`/`policy` — heal nunca hard-falha). Testado: `place/4` min_domains/policy (soft/hard,
+      met/unmet, sem-spread, nil-domain) + `domain_violations/4` (5+3); broker hard-fail e2e (produce aborta
+      com 2 racks/min_domains 3; soft coloca; hard passa com min_domains 2 — 3); heal rack-aware forwardando
+      `:spread` (1). Suíte 727 testes 0 falhas; credo/dialyzer limpos. README com os env vars.
 
 > A ordem de execução das fatias restantes (`place_vnodes` A2 ✅; camada B do cliente) é decidida quando
 > cada uma for atacada.

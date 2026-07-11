@@ -275,8 +275,19 @@ defmodule Malachi.Application do
       metadata_source: metadata_source,
       apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
       replication_factor: replication_factor(),
-      leader?: leader?
+      leader?: leader?,
+      # Keep re-replication rack/DC-aware: a healed replica set spreads over the same attribute as initial
+      # placement (best-effort — heal never fails for durability, so no min_domains here).
+      spread: &heal_spread/0
     ]
+  end
+
+  # The current spread tuple for healing (attribute key + live attributes), or nil when spread is off.
+  defp heal_spread do
+    case Application.get_env(:malachi, :log_spread_by) do
+      nil -> nil
+      key -> {key, broker_attributes()}
+    end
   end
 
   # The leader gate for a cluster coordinator: only the membership leader acts (1C). A single node (no
@@ -726,12 +737,16 @@ defmodule Malachi.Application do
     # :brokers is the static full set (initial placement); :live_brokers narrows new placements to the
     # currently-alive nodes as membership converges/changes (an empty result is ignored by the broker).
     # :spread_by + :broker_attributes make placement rack/DC-aware from the attributes gossiped in C2.
+    # :min_domains + :placement_policy add the hard failure-domain guarantee (:hard fails a produce that
+    # cannot span the required distinct racks/DCs; :soft is best-effort).
     [
       brokers: broker_refs(nodes),
       replication_factor: replication_factor(),
       live_brokers: &live_brokers/0,
       spread_by: Application.get_env(:malachi, :log_spread_by),
-      broker_attributes: &broker_attributes/0
+      broker_attributes: &broker_attributes/0,
+      min_domains: Application.get_env(:malachi, :log_min_domains),
+      placement_policy: Application.get_env(:malachi, :log_placement_policy, :soft)
     ]
   end
 

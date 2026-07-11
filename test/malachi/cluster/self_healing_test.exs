@@ -50,6 +50,21 @@ defmodule Malachi.Cluster.SelfHealingTest do
     assert SelfHealing.heal_sealed(healed, [a, b, d], 3).applied == []
   end
 
+  test "re-replication is rack-aware when :spread is forwarded" do
+    [a1, a2, b1, b2] = [start_broker(), start_broker(), start_broker(), start_broker()]
+    dead = start_broker()
+    attrs = %{a1 => %{"rack" => "a"}, a2 => %{"rack" => "a"}, b1 => %{"rack" => "b"}, b2 => %{"rack" => "b"}}
+
+    # segment on [a1, dead]; dead has left, so it is under-replicated for rf 2
+    {metadata, segment_id} = sealed_segment([a1, dead], a1, ["x", "y"])
+
+    result = SelfHealing.heal_sealed(metadata, [a1, a2, b1, b2], 2, spread: {"rack", attrs})
+
+    assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+    # with spread over two racks and rf 2, the healed set must span both racks (not concentrate in one)
+    assert new_set |> Enum.map(&attrs[&1]["rack"]) |> Enum.sort() == ["a", "b"]
+  end
+
   test "reports a segment whose every replica is dead as failed" do
     [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
     {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y"])

@@ -208,6 +208,62 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
+  describe "place/4 — min_domains + policy (hardening)" do
+    # a1/a2 in rack "a", b1 in rack "b" — only two racks
+    @dattrs %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}
+
+    test "soft (default) places best-effort even when it cannot meet min_domains" do
+      opts = [spread: {"rack", @dattrs}, min_domains: 3]
+      assert {:ok, replicas} = Placement.place("seg", [:a1, :a2, :b1], 3, opts)
+      assert Enum.sort(replicas) == [:a1, :a2, :b1]
+    end
+
+    test "hard passes when the replica set covers enough distinct domains" do
+      opts = [spread: {"rack", @dattrs}, min_domains: 2, policy: :hard]
+      assert {:ok, replicas} = Placement.place("seg", [:a1, :a2, :b1], 2, opts)
+      assert Enum.sort(Enum.map(replicas, &@dattrs[&1]["rack"])) == ["a", "b"]
+    end
+
+    test "hard rejects when too few domains are reachable" do
+      opts = [spread: {"rack", @dattrs}, min_domains: 3, policy: :hard]
+      assert {:error, {:insufficient_domains, 2, 3}} = Placement.place("seg", [:a1, :a2, :b1], 3, opts)
+    end
+
+    test "hard rejects when all replicas lack the attribute (single nil domain)" do
+      opts = [spread: {"rack", %{}}, min_domains: 2, policy: :hard]
+      assert {:error, {:insufficient_domains, 1, 2}} = Placement.place("seg", [:a1, :a2], 2, opts)
+    end
+
+    test "without :spread, distinct brokers are the domains" do
+      assert {:ok, _} = Placement.place("seg", [:a, :b, :c], 3, min_domains: 3, policy: :hard)
+
+      assert {:error, {:insufficient_domains, 2, 3}} =
+               Placement.place("seg", [:a, :b], 3, min_domains: 3, policy: :hard)
+    end
+  end
+
+  describe "domain_violations/4" do
+    @dattrs2 %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}, c1: %{"rack" => "c"}}
+
+    test "flags segments spanning fewer than min_domains distinct domains" do
+      metadata = with_segments([{"diverse", [:a1, :b1, :c1]}, {"concentrated", [:a1, :a2]}], rf: 3)
+
+      assert Placement.domain_violations(metadata, "rack", @dattrs2, 2) == ["concentrated"]
+    end
+
+    test "empty when every segment meets the target" do
+      metadata = with_segments([{"s1", [:a1, :b1]}, {"s2", [:b1, :c1]}], rf: 2)
+
+      assert Placement.domain_violations(metadata, "rack", @dattrs2, 2) == []
+    end
+
+    test "a higher target flags more segments and results are sorted" do
+      metadata = with_segments([{"z", [:a1, :b1]}, {"a", [:a1, :b1, :c1]}], rf: 3)
+
+      assert Placement.domain_violations(metadata, "rack", @dattrs2, 3) == ["z"]
+    end
+  end
+
   describe "place_balanced/4 — global load balancing (A2)" do
     test "empty brokers give each item an empty replica set" do
       assert Placement.place_balanced([:x, :y], [], 2) == [{:x, []}, {:y, []}]

@@ -205,6 +205,8 @@ defmodule Malachi.BrokerServer do
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
     {spread_by, opts} = Keyword.pop(opts, :spread_by)
+    {min_domains, opts} = Keyword.pop(opts, :min_domains)
+    {placement_policy, opts} = Keyword.pop(opts, :placement_policy)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
@@ -227,6 +229,8 @@ defmodule Malachi.BrokerServer do
       [brokers: brokers, replication_factor: replication_factor]
       |> maybe_put(:segment_max_bytes, segment_max_bytes)
       |> maybe_put(:spread_by, spread_by)
+      |> maybe_put(:min_domains, min_domains)
+      |> maybe_put(:placement_policy, placement_policy)
       |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes, bootstrap_orchestrator)
 
     {:ok, broker} = Broker.open(broker_opts)

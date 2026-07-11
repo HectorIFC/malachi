@@ -156,6 +156,15 @@ config :malachi,
   # hold beyond the even share). Set => balanced placement (takes precedence over :log_spread_by, which
   # it does not combine with). Absent => plain HRW / rack-spread.
   log_max_skew: parse_int.(System.get_env("MALACHIMQ_LOG_MAX_SKEW"), nil),
+  # Failure-domain hardening: the minimum distinct :log_spread_by values (racks/DCs) a segment's replica
+  # set must span. With MALACHIMQ_LOG_PLACEMENT_POLICY=hard, a segment that cannot reach it fails the
+  # produce (fail-fast on an under-diversified, non-HA placement); soft (default) places best-effort.
+  log_min_domains: parse_int.(System.get_env("MALACHIMQ_LOG_MIN_DOMAINS"), nil),
+  log_placement_policy:
+    (case System.get_env("MALACHIMQ_LOG_PLACEMENT_POLICY") do
+       "hard" -> :hard
+       _soft_or_absent -> :soft
+     end),
   # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
   # either to expire sealed segments older than an age and/or over a per-range byte budget.
   retention_max_age_ms: parse_int.(System.get_env("MALACHIMQ_RETENTION_MAX_AGE_MS"), nil),

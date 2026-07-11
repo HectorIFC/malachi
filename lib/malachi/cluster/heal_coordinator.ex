@@ -56,7 +56,10 @@ defmodule Malachi.Cluster.HealCoordinator do
       replication_factor: Keyword.fetch!(opts, :replication_factor),
       interval: Keyword.get(opts, :interval, @default_interval),
       leader?: Keyword.get(opts, :leader?, fn -> true end),
-      heal_opts: Keyword.get(opts, :heal_opts, [])
+      heal_opts: Keyword.get(opts, :heal_opts, []),
+      # `(-> {attribute_key, attributes} | nil)`: the current spread for rack/DC-aware re-replication,
+      # resolved per pass so it tracks live membership. Default: no spread.
+      spread: Keyword.get(opts, :spread, fn -> nil end)
     }
 
     schedule(state)
@@ -79,13 +82,18 @@ defmodule Malachi.Cluster.HealCoordinator do
     live = state.live_brokers.()
     metadata = state.metadata_source.()
 
-    healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, state.heal_opts)
+    heal_opts = put_spread(state.heal_opts, state.spread.())
+    healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
     promotions = Failover.plan(metadata, live)
 
     applied = healed.applied ++ promotions
     Enum.each(applied, state.apply_command)
     %{applied: applied, failed: healed.failed}
   end
+
+  # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).
+  defp put_spread(opts, nil), do: opts
+  defp put_spread(opts, spread), do: Keyword.put(opts, :spread, spread)
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 end

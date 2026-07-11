@@ -308,6 +308,9 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
 | `MALACHIMQ_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
 | `MALACHIMQ_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
+| `MALACHIMQ_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`) — rack/DC-aware placement |
+| `MALACHIMQ_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
+| `MALACHIMQ_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
 | `MALACHIMQ_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
