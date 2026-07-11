@@ -319,6 +319,7 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
 | `MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
 | `MALACHIMQ_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
+| `MALACHIMQ_SHUTDOWN_GRACE_MS` | 5000 | Drain window on shutdown after the acceptor quiesces, before closing connections |
 | `MALACHIMQ_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |

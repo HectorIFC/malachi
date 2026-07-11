@@ -814,20 +814,12 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  Called before the application stops.
-  Performs graceful shutdown of all client connections.
+  Called before the application stops (SIGTERM / `bin/malachi stop`). Quiesces the acceptor, drains
+  in-flight for a bounded window, then closes connections — see `Malachi.Shutdown`.
   """
   def prep_stop(_state) do
     Logger.info(I18n.t(:graceful_shutdown))
-
-    try do
-      Malachi.ConnectionRegistry.close_all()
-    rescue
-      ArgumentError -> :ok
-    catch
-      _, _ -> :ok
-    end
-
+    Malachi.Shutdown.graceful()
     :ok
   end
 end

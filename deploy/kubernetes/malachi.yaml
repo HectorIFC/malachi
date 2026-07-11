@@ -149,6 +149,9 @@ spec:
         app: malachi
     spec:
       serviceAccountName: malachi
+      # Give graceful shutdown room: the preStop sleep + the app's drain window (MALACHIMQ_SHUTDOWN_GRACE_MS,
+      # default 5s) + lease release must fit inside this.
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -193,6 +196,12 @@ spec:
               Z="$(cat /shared/zone 2>/dev/null)";
               [ -n "$Z" ] && export MALACHIMQ_LOG_ATTRIBUTES="zone=$Z";
               exec bin/malachi start
+          # Pause before SIGTERM so kube-proxy removes this pod from the Service endpoints first — new
+          # clients stop being routed here before the app starts draining.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
           ports:
             - name: tcp
               containerPort: 4040

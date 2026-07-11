@@ -181,6 +181,9 @@ config :malachi,
   # Automatic rebalancing (sharded control plane only). Off by default — the operator drives the
   # RebalanceCoordinator. When on, the lease holder commits the plan once it stays the same for
   # `stabilization` reconciles (interval apart), so a transient membership flap does not move vnodes.
+  # Graceful-shutdown drain window: after quiescing the acceptor (no new connections), wait this long for
+  # in-flight requests to finish before closing connections. Keep k8s terminationGracePeriodSeconds above it.
+  shutdown_grace_ms: parse_int.(System.get_env("MALACHIMQ_SHUTDOWN_GRACE_MS"), 5_000),
   auto_rebalance: System.get_env("MALACHIMQ_AUTO_REBALANCE") == "true",
   auto_rebalance_interval_ms: parse_int.(System.get_env("MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS"), 30_000),
   auto_rebalance_stabilization: parse_int.(System.get_env("MALACHIMQ_AUTO_REBALANCE_STABILIZATION"), 3),

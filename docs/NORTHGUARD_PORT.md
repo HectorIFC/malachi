@@ -1435,6 +1435,20 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       handshake (`:pang` — prova que a TLS é imposta, não silenciosamente plaintext); os 3 caminhos do
       `env.sh.eex` (off/on/fail-fast); optfile é term Erlang válido (`:file.consult`); YAML k8s parseia (9
       docs). Sem mudança de código Elixir; README (seção inter-node TLS) + deploy README.
+    - ✅ **Shutdown gracioso / rolling-upgrade (G4).** O `prep_stop` antigo **fechava tudo de imediato**
+      (sem quiesce nem janela → in-flight cortado, e race com accepts novos durante o fechamento). Decisão
+      **1A** (janela limitada — o modelo certo para um broker com **streaming**, onde drenar-até-0-conexões
+      nunca converge). Novo `Malachi.Shutdown.graceful/1` orquestra 3 passos: **quiesce** (`terminate_child`
+      do `TCPAcceptorPool` no root supervisor — para de aceitar e **não** reinicia; as conexões, que são
+      `spawn` unlinked registradas no `ConnectionRegistry`, sobrevivem) → **drain** (sleep
+      `shutdown_grace_ms`, default 5s, janela para in-flight terminar) → **close** (`close_all`). O lease já
+      é liberado pelo `LeaseHolder.terminate` na teardown seguinte (failover rápido) e o `ra` persiste em
+      disco (o pod volta e re-join como o mesmo membro). Passos são **seams** → a orquestração
+      (ordem + janela) é unit-testável sem parar o app real. k8s: `terminationGracePeriodSeconds: 40` +
+      `preStop` (`sleep 5` — kube-proxy tira o pod dos endpoints do Service **antes** do SIGTERM, então
+      clientes param de ser roteados antes do drain). Config `MALACHIMQ_SHUTDOWN_GRACE_MS`. Testado:
+      `graceful/1` roda quiesce→sleep(drain_ms)→close **em ordem**; pula o sleep com `drain_ms: 0`;
+      default vem do config — 3. Suíte verde; credo/dialyzer limpos. README (env var) + k8s (grace/preStop).
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
