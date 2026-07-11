@@ -1449,6 +1449,29 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       clientes param de ser roteados antes do drain). Config `MALACHIMQ_SHUTDOWN_GRACE_MS`. Testado:
       `graceful/1` roda quiesce→sleep(drain_ms)→close **em ordem**; pula o sleep com `drain_ms: 0`;
       default vem do config — 3. Suíte verde; credo/dialyzer limpos. README (env var) + k8s (grace/preStop).
+    - 🚧 **Consumer group coordination (G1 — épico, fatiado).** Hoje um grupo é uma **posição única
+      compartilhada** (todos os consumidores leem a mesma posição commitada — sem paralelismo). Alvo
+      NorthGuard/Kafka: cada **range** do topic atribuída a **exatamente um** membro do grupo, consumo
+      paralelo, com rebalance no join/leave. Achado que aterra o design: o `commit_offset` faz `Map.put`
+      (substitui o mapa de offsets do `{group, topic}`) → pra consumo particionado terá de virar **merge
+      por-range** (S2). Fatiamento: **S1** núcleo de assignment (puro) · **S2** commit por-range · **S3**
+      coordinator (membership + heartbeat/session + expõe assignment) · **S4** protocolo wire + cliente ·
+      **S5** integração no servidor (fetch respeita a assignment).
+      - ✅ **S1 — núcleo de assignment (puro).** `Malachi.Consumer.Assignment.assign(range_ids, members)`
+        → `%{member => [range_id]}`, cada range sob **exatamente um** membro, **determinístico** (ranges
+        ordenadas em ordem canônica → um coordinator replicado/failover computa o mesmo em todo nó). Decisão
+        **1A (HRW sticky)**, mas **corrigida por medição empírica** (o memory de medir antes de decidir): a
+        opção dizia "reusa `place_balanced`", porém o property test revelou que ele **não é fortemente
+        sticky** (N pequeno: o rebalance-pro-cap move ranges de sobreviventes — 4 ranges/4 membros, remover
+        1 moveu 2 de 3 sobreviventes), contrariando a prioridade *sticky*. Troquei para **HRW puro**
+        (`Placement.place(range, members, 1)` por range → o membro top-HRW), que dá **min-reshuffle
+        estrito**: um leave move **só** as ranges do que saiu (sobreviventes mantêm **todas**), um join move
+        ranges **só** para o novo membro (existentes só perdem, nunca trocam entre si) — a stickiness que
+        "HRW sticky" promete, com balanço **estatístico** (ótimo com muitas ranges, o caso NorthGuard). Ainda
+        reusa `Placement.place` (o ranking HRW). Testado (property): partição (cada range 1×), determinismo
+        sob shuffle, **sticky-on-leave** (sobreviventes mantêm tudo), **sticky-on-join** (inalterado ou o
+        novo) + edges (sem membros → `%{}`, sem ranges → membros idle, dedup). Suíte 746 testes 0 falhas;
+        credo/dialyzer limpos.
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
