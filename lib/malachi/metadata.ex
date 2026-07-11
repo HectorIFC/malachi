@@ -276,9 +276,13 @@ defmodule Malachi.Metadata do
   end
 
   def apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
-    # A consumer group's durable position. Last commit wins (the client owns its position); no
-    # topic-existence check, so an offset can be committed before/independently of routing.
-    committed = Map.put(state.committed_offsets, {group, topic}, offsets)
+    # A consumer group's durable position, **merged per range** (last commit wins for each range) rather
+    # than replaced: with a partitioned group, each member commits only the ranges it owns, and must not
+    # clobber the positions of ranges owned by other members. No topic-existence check, so an offset can
+    # be committed before/independently of routing.
+    committed =
+      Map.update(state.committed_offsets, {group, topic}, offsets, &Map.merge(&1, offsets))
+
     {%{state | committed_offsets: committed}, :ok}
   end
 

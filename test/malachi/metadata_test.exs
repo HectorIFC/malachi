@@ -281,6 +281,19 @@ defmodule Malachi.MetadataTest do
       assert Metadata.committed_offsets(metadata, "g", "events") == %{{"events", 0} => 9}
       assert Metadata.committed_offsets(metadata, "other", "events") == %{{"events", 0} => 1}
     end
+
+    test "commit_offset merges per range so a member does not clobber other members' ranges" do
+      metadata = Metadata.new()
+
+      # a two-range group position
+      {metadata, :ok} =
+        Metadata.apply(metadata, {:commit_offset, "g", "events", %{{"events", 0} => 5, {"events", 1} => 6}})
+
+      # a member owning only range 1 commits just its range; range 0 (another member's) is preserved
+      {metadata, :ok} = Metadata.apply(metadata, {:commit_offset, "g", "events", %{{"events", 1} => 9}})
+
+      assert Metadata.committed_offsets(metadata, "g", "events") == %{{"events", 0} => 5, {"events", 1} => 9}
+    end
   end
 
   # Builds "events": root split into two children, two segments (one sealed) on the left child, and a

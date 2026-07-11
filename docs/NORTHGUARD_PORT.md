@@ -1472,6 +1472,20 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         sob shuffle, **sticky-on-leave** (sobreviventes mantêm tudo), **sticky-on-join** (inalterado ou o
         novo) + edges (sem membros → `%{}`, sem ranges → membros idle, dedup). Suíte 746 testes 0 falhas;
         credo/dialyzer limpos.
+      - ✅ **S2 — commit por-range (merge).** O `Metadata.apply({:commit_offset, group, topic, offsets})`
+        deixava de fazer `Map.put` (substituía o mapa inteiro de offsets do `{group, topic}`) e passa a
+        **`Map.update` + `Map.merge`** — mescla os offsets recebidos por-range (last-commit-wins por range).
+        Assim um membro de um grupo particionado commita **só as ranges que possui** sem apagar as posições
+        das ranges de outros membros — o pré-requisito que o S1 apontou. Backward-compatible: um consumidor
+        único que commita o mapa completo funciona igual (merge cobre tudo), e os testes existentes (que
+        commitam uma range ou a mesma 2×) passam sem mudança. Caminho único (o `DSRSM` roteia por topic pro
+        `Metadata.apply`; `merged_metadata` une topics disjuntos). Tradeoff registrado: o merge deixa keys
+        **stale** quando uma range faz split/merge (o offset da range antiga persiste) — mas é **bounded**
+        pelo keyspace (máx ~2^keyspace_bits range_ids históricos) e **inócuo** na leitura (o fetch só consome
+        ranges atuais; ranges mortas são ignoradas); um prune (reusando o índice `topic_ranges`) fica como
+        otimização futura, não S2. Testado: novo teste de merge (dois membros, um commita só sua range → a do
+        outro é preservada) + os existentes (last-wins por range). Suíte 747 testes 0 falhas; credo/dialyzer
+        limpos. **Próximo: S3 (coordinator: membership + heartbeat + expõe a assignment do S1).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
