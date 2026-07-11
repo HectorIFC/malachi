@@ -316,6 +316,9 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`) — rack/DC-aware placement |
 | `MALACHIMQ_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
 | `MALACHIMQ_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
+| `MALACHIMQ_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
+| `MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
+| `MALACHIMQ_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
 | `MALACHIMQ_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |

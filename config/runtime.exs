@@ -178,6 +178,12 @@ config :malachi,
   # How often each node reconciles itself into the lease cluster (self-join, so a staggered boot converges
   # to a fully-replicated lease). Idempotent once joined.
   lease_reconcile_interval_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RECONCILE_INTERVAL_MS"), 30_000),
+  # Automatic rebalancing (sharded control plane only). Off by default — the operator drives the
+  # RebalanceCoordinator. When on, the lease holder commits the plan once it stays the same for
+  # `stabilization` reconciles (interval apart), so a transient membership flap does not move vnodes.
+  auto_rebalance: System.get_env("MALACHIMQ_AUTO_REBALANCE") == "true",
+  auto_rebalance_interval_ms: parse_int.(System.get_env("MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS"), 30_000),
+  auto_rebalance_stabilization: parse_int.(System.get_env("MALACHIMQ_AUTO_REBALANCE_STABILIZATION"), 3),
   ra_data_dir: System.get_env("MALACHIMQ_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
 
 # Only set rate limiting and connection limiting configs in non-test environments

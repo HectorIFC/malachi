@@ -13,6 +13,7 @@ defmodule Malachi.Application do
   require Logger
   alias Malachi.Auth.ConfigValidator
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
   alias Malachi.Cluster.LeaseReconciler
@@ -138,7 +139,29 @@ defmodule Malachi.Application do
 
   defp rebalance_children(nodes, vnodes) do
     _ = LeaseServer.start(@log_lease, nodes)
-    [lease_reconciler_child(nodes), lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)]
+
+    [lease_reconciler_child(nodes), lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)] ++
+      auto_rebalancer_children()
+  end
+
+  # Opt-in automatic rebalancing (default off = the operator drives the coordinator). Level-triggered: on
+  # the lease holder, commit the plan once it has been stable for `stabilization` reconciles (absorbs SWIM
+  # flaps). Last in the list, since it drives the coordinator, which must already be up.
+  defp auto_rebalancer_children do
+    if Application.get_env(:malachi, :auto_rebalance, false) do
+      opts = [
+        name: Malachi.LogAutoRebalancer,
+        plan_fun: fn -> RebalanceCoordinator.plan(@log_rebalance_coordinator) end,
+        commit_fun: fn -> RebalanceCoordinator.commit(@log_rebalance_coordinator) end,
+        leader?: fn -> LeaseHolder.leader?(@log_lease_holder) end,
+        interval: Application.get_env(:malachi, :auto_rebalance_interval_ms, 30_000),
+        stabilization: Application.get_env(:malachi, :auto_rebalance_stabilization, 3)
+      ]
+
+      [%{id: Malachi.LogAutoRebalancer, start: {AutoRebalancer, :start_link, [opts]}}]
+    else
+      []
+    end
   end
 
   # Keeps this node joined to the lease cluster (self-join reconcile), so a staggered boot converges to a

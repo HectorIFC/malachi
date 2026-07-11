@@ -1464,6 +1464,18 @@ o que foi deliberadamente **não** adotado (com o porquê):
   vnode (fatia D) evita.
 
 **Ainda aberto (por cima do mesmo motor):**
-- **Gatilho automático de rebalancing** — hoje o commit é **manual** (`RebalanceCoordinator.commit/1`);
-  um gatilho por mudança de membership entra por cima do R3 (e aí workqueue/expectations do k8s podem valer).
+- ✅ **Gatilho automático de rebalancing (feito, opt-in).** `Malachi.Cluster.AutoRebalancer` — **política
+  level-triggered** por cima do mecanismo `RebalanceCoordinator` (que segue manual-by-default). A cada tick
+  (default 30s), **só no holder do lease**: pega o `plan`; se **não-vazio e igual** por `stabilization`
+  ticks consecutivos (default 3 ≈ 90s), chama `commit` (que re-gate o líder). Plan vazio ou que mudou →
+  reseta o contador — assim um **flap do SWIM** (nó brevemente suspeito → volta) **nunca** move vnode. É o
+  padrão que a tabela acima registrou: SWIM faz a *detecção* event-driven; a *decisão* de mover reconcilia
+  e converge (nada de eventos perdidos). Seams (`plan_fun`/`commit_fun`/`leader?`) → testável sem `ra`/lease
+  dirigindo `reconcile_now`. **Opt-in** (`MALACHIMQ_AUTO_REBALANCE`, default off = comportamento manual
+  atual intacto); `interval`/`stabilization` configuráveis; subido no `rebalance_children` só quando
+  sharded + habilitado. Testado: commit após N ticks estáveis; plan que muda reseta a janela; plan vazio
+  nunca commita; não-líder não commita; `stabilization: 1` commita na 1ª observação; perda/reganho de
+  liderança reseta; resultado de falha-parcial repassado ao `on_result` — 7. Suíte 738 testes 0 falhas;
+  credo/dialyzer limpos. README com os env vars. *(workqueue/expectations do k8s seguem **não** adotados —
+  a cardinalidade é baixa, o `ra` serializa a membership e a estabilização já dá o debounce.)*
 - **Re-sharding** — mudar a **contagem** de vnodes (R1/R2 assumem o mesmo conjunto de vnode ids).
