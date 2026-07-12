@@ -294,6 +294,19 @@ defmodule Malachi.MetadataTest do
 
       assert Metadata.committed_offsets(metadata, "g", "events") == %{{"events", 0} => 5, {"events", 1} => 9}
     end
+
+    test "commit_offset prunes the offset of a range that is no longer active (a split parent)" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => 5}})
+      assert Metadata.committed_offsets(state, "g", "events") == %{root => 5}
+
+      # the split seals the root (now inactive); its committed offset is dead — the active children resume
+      # from :start — so the next commit prunes it instead of letting the map grow one dead key per split
+      {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{left => 3}})
+
+      assert Metadata.committed_offsets(state, "g", "events") == %{left => 3}
+    end
   end
 
   # Builds "events": root split into two children, two segments (one sealed) on the left child, and a

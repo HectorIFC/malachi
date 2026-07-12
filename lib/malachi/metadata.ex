@@ -278,11 +278,12 @@ defmodule Malachi.Metadata do
   def apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
     # A consumer group's durable position, **merged per range** (last commit wins for each range) rather
     # than replaced: with a partitioned group, each member commits only the ranges it owns, and must not
-    # clobber the positions of ranges owned by other members. No topic-existence check, so an offset can
-    # be committed before/independently of routing.
-    committed =
-      Map.update(state.committed_offsets, {group, topic}, offsets, &Map.merge(&1, offsets))
-
+    # clobber the positions of ranges owned by other members. Then **prune** offsets of ranges that are no
+    # longer active — a split/merge retires a range whose committed offset can never be consumed again (the
+    # active children resume from `:start`), so without this the map would grow one dead key per split.
+    # Pruning is skipped when the topic is not routed yet (an offset committed before `create_topic`).
+    merged = Map.merge(committed_offsets(state, group, topic), offsets)
+    committed = Map.put(state.committed_offsets, {group, topic}, prune_offsets(state, topic, merged))
     {%{state | committed_offsets: committed}, :ok}
   end
 
@@ -555,6 +556,24 @@ defmodule Malachi.Metadata do
 
   # The range ids of a topic / the segment ids of a range, straight from the reverse index (O(1)+O(k)).
   defp range_ids_of_topic(state, name), do: state.topic_ranges |> Map.get(name, @empty_set) |> MapSet.to_list()
+
+  # Drops committed offsets whose range is no longer active (a retired split/merge parent). Skipped when
+  # the topic has no ranges index yet (committed before routing) so those offsets are kept as-is.
+  defp prune_offsets(state, topic, offsets) do
+    if Map.has_key?(state.topic_ranges, topic) do
+      active = active_range_id_set(state, topic)
+      Map.filter(offsets, fn {range_id, _offset} -> MapSet.member?(active, range_id) end)
+    else
+      offsets
+    end
+  end
+
+  defp active_range_id_set(state, topic) do
+    state
+    |> range_ids_of_topic(topic)
+    |> Enum.filter(fn range_id -> Map.fetch!(state.ranges, range_id).state == :active end)
+    |> MapSet.new()
+  end
 
   defp segment_ids_of_range(state, range_id),
     do: state.range_segments |> Map.get(range_id, @empty_set) |> MapSet.to_list()

@@ -1544,6 +1544,18 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         backward-compat). Suíte 761 testes 0 falhas; credo/dialyzer/format limpos. README (tabela api_key +
         exemplo de membros paralelos). **G1 (consumer group coordination) concluído** (S1–S5); pendências
         anotadas: member-scoping do **streaming** (push) e prune de offsets stale (fatias futuras).
+      - ✅ **Prune de offsets stale (dívida do S2).** O merge por-range do S2 deixava uma key **morta** por
+        split (o offset da range-pai persistia no mapa do grupo). O `apply({:commit_offset, ...})` agora,
+        após o merge, **pruna** os offsets para as ranges **ativas** do topic (`prune_offsets/3` +
+        `active_range_id_set/2`, reusando o índice `topic_ranges` do V-idx + o filtro `state == :active`):
+        uma range retirada por split/merge tem o offset **descartado** — é seguro porque os filhos ativos
+        resumem de `:start` (o consume só lê ranges ativas; a semântica at-least-once de cross-epoch não
+        muda, só some a key morta). **Pulado quando o topic não está roteado** (offset commitado antes do
+        `create_topic` — `topic_ranges` sem a entrada → mantém como está), preservando o comportamento
+        pré-routing dos testes existentes. Bounda o mapa de offsets ao nº de ranges **ativas** (antes crescia
+        ~2^keyspace_bits com splits). Testado: split sela o root → o offset do root é prunado no commit
+        seguinte (fica só o do filho); os testes de merge/pre-routing do S2 seguem verdes (sem topic → sem
+        prune). Suíte 762 testes 0 falhas; credo/dialyzer/format limpos.
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
