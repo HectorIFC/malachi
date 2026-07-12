@@ -78,7 +78,7 @@ defmodule Malachi.BinaryProtocolSecurityTest do
       socket = connect_auth("producer", "producer123")
 
       {code, payload} =
-        TCPHelper.request(socket, Wire.fetch_key(), 1, Wire.encode_fetch_req("t_#{uniq()}", nil, nil, 100, 0))
+        TCPHelper.request(socket, Wire.fetch_key(), 1, Wire.encode_fetch_req("t_#{uniq()}", nil, nil, nil, 100, 0))
 
       assert code == Wire.error_code()
       assert reason(payload) == "permission_denied"

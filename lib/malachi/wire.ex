@@ -30,12 +30,13 @@ defmodule Malachi.Wire do
   @commit 4
   @subscribe 5
   @stream_ack 6
+  @leave_group 7
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..6
+  @type api_key :: 0..7
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -46,6 +47,7 @@ defmodule Malachi.Wire do
   def commit_key, do: @commit
   def subscribe_key, do: @subscribe
   def stream_ack_key, do: @stream_ack
+  def leave_group_key, do: @leave_group
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -133,17 +135,22 @@ defmodule Malachi.Wire do
     {topic, records}
   end
 
-  # cursor is an opaque byte string (nil = start), group is an optional consumer group (nil = none);
-  # max and wait_ms are the fetch bounds. An explicit cursor takes precedence over a group resume.
-  def encode_fetch_req(topic, cursor, group, max, wait_ms) do
-    <<put_str(topic)::binary, put_str(cursor)::binary, put_str(group)::binary, max::32, wait_ms::32>>
+  # cursor is an opaque byte string (nil = start), group is an optional consumer group (nil = none),
+  # member is an optional consumer-group member id (nil = whole-group / single consumer); max and wait_ms
+  # are the fetch bounds. Precedence: a `member` (grouped, server-scoped to its ranges) wins, then an
+  # explicit `cursor` (client-managed paging), then a `group` resume. No range/offset ever crosses the
+  # wire — the response is always records + an opaque cursor.
+  def encode_fetch_req(topic, cursor, group, member, max, wait_ms) do
+    <<put_str(topic)::binary, put_str(cursor)::binary, put_str(group)::binary, put_str(member)::binary, max::32,
+      wait_ms::32>>
   end
 
   def decode_fetch_req(payload) do
     {topic, rest} = take_str(payload)
     {cursor, rest} = take_str(rest)
-    {group, <<max::32, wait_ms::32>>} = take_str(rest)
-    {topic, cursor, group, max, wait_ms}
+    {group, rest} = take_str(rest)
+    {member, <<max::32, wait_ms::32>>} = take_str(rest)
+    {topic, cursor, group, member, max, wait_ms}
   end
 
   def encode_fetch_resp(records, next_cursor) do
@@ -194,6 +201,19 @@ defmodule Malachi.Wire do
     {group, rest} = take_str(rest)
     {cursor, <<count::32>>} = take_str(rest)
     {topic, group, cursor, count}
+  end
+
+  # leave_group removes a member from a consumer group for a fast rebalance on a clean shutdown (otherwise
+  # the coordinator evicts it on session timeout). Fire-and-forget-ish: the server acks with an empty ok.
+  def encode_leave_group_req(topic, group, member) do
+    <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary>>
+  end
+
+  def decode_leave_group_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {member, <<>>} = take_str(rest)
+    {topic, group, member}
   end
 
   # ---- wire record (no offset; key/value/headers/timestamp only) ----

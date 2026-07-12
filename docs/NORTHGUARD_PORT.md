@@ -1525,8 +1525,25 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         Backward-compat: `fetch_group` sem membro = grupo inteiro. Testado: `poll` (registra novo/heartbeat
         conhecido/re-registra evictado — 2); **integração e2e in-VM** (topic com 2 ranges via split, 2 membros
         pré-registrados buscam **disjunto e completo** — cada record por exatamente um membro; backward-compat
-        do fetch_group) — 2. Suíte 759 testes 0 falhas; credo/dialyzer limpos. **Próximo: S5 (wire: member id
-        no fetch + `leave` + cliente Node, mantendo o cursor opaco).**
+        do fetch_group) — 2. Suíte 759 testes 0 falhas; credo/dialyzer limpos.
+      - ✅ **S5 — wire + cliente (opaco). Consumer group coordination completo.** Expõe o consumo
+        particionado do S4 sobre o protocolo binário **sem vazar range_id**. **Wire**: `fetch_req` ganha um
+        **member id** (`put_str`, após o group; nil = grupo inteiro / consumidor único, backward-compat) —
+        precedência member (grupo, escopado) > cursor (paging do cliente) > group (resume); nova op
+        `leave_group` (api_key 7, `topic/group/member`, ack vazio). O `tcp_protocol` despacha `fetch` com
+        member → `LogApi.fetch_member` (retorno = `encode_fetch_resp`, records + **cursor opaco**, idêntico ao
+        fetch normal — zero range_id no wire) e trata `leave_group` → `GroupCoordinator.leave`. **Wiring**: o
+        `GroupCoordinator` sobe na árvore (`Malachi.LogGroupCoordinator`, `ranges_fun` = `active_range_ids` do
+        `LogBroker`). **Cliente Node**: `wire.js`/`client.js` (member no `fetch` + `leaveGroup`), `consumer.js`
+        modo **`--member`** (fetch escopado + commit + `leave` no exit; vários membros do mesmo `--group` com
+        `--member` distintos = consumo paralelo). Achado do dialyzer: o `@type api_key :: 0..6` fazia inferir
+        que o branch `leave_group` (7) era morto → atualizado p/ `0..7`. Testado: wire round-trip (member +
+        leave_group), **e2e via TCP** (member fetch server-scoped + cursor opaco + records sem offset +
+        leave_group ack) + suíte binária existente (backward-compat do fetch sem member); smoke Node real
+        (produce → consumer `--member` consome tudo como membro único + `leave`; consumer sem member =
+        backward-compat). Suíte 761 testes 0 falhas; credo/dialyzer/format limpos. README (tabela api_key +
+        exemplo de membros paralelos). **G1 (consumer group coordination) concluído** (S1–S5); pendências
+        anotadas: member-scoping do **streaming** (push) e prune de offsets stale (fatias futuras).
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

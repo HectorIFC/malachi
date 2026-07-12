@@ -21,6 +21,7 @@ const API = {
   commit: 4,
   subscribe: 5,
   streamAck: 6,
+  leaveGroup: 7,
 };
 
 const OK = 0;
@@ -174,8 +175,14 @@ function decodeFetchResp(payload) {
   return { records, cursor };
 }
 
-function encodeFetchReq(topic, cursor, group, max, waitMs) {
-  return Buffer.concat([putStr(topic), putStr(cursor), putStr(group), u32(max), u32(waitMs)]);
+// member is an optional consumer-group member id (null = whole-group / single consumer); with it set the
+// server scopes the fetch to the member's ranges and returns records + an opaque cursor (no range ids).
+function encodeFetchReq(topic, cursor, group, member, max, waitMs) {
+  return Buffer.concat([putStr(topic), putStr(cursor), putStr(group), putStr(member), u32(max), u32(waitMs)]);
+}
+
+function encodeLeaveGroupReq(topic, group, member) {
+  return Buffer.concat([putStr(topic), putStr(group), putStr(member)]);
 }
 
 function encodeCommitReq(topic, group, cursor) {
@@ -204,6 +211,7 @@ module.exports = {
   encodeProduceReq,
   decodeFetchResp,
   encodeFetchReq,
+  encodeLeaveGroupReq,
   encodeCommitReq,
   encodeSubscribeReq,
   encodeStreamAckReq,

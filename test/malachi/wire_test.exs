@@ -80,12 +80,23 @@ defmodule Malachi.WireTest do
       assert Wire.decode_produce_req(Wire.encode_produce_req("t", records)) == {"t", records}
     end
 
-    test "fetch req round-trip: cursor, group, and :start (both nil)" do
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", <<1, 2, 3>>, nil, 500, 30_000)) ==
-               {"t", <<1, 2, 3>>, nil, 500, 30_000}
+    test "fetch req round-trip: cursor, group, member, and :start (all nil)" do
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", <<1, 2, 3>>, nil, nil, 500, 30_000)) ==
+               {"t", <<1, 2, 3>>, nil, nil, 500, 30_000}
 
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", 100, 0)) == {"t", nil, "grp", 100, 0}
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, nil, 100, 0)) == {"t", nil, nil, 100, 0}
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", nil, 100, 0)) ==
+               {"t", nil, "grp", nil, 100, 0}
+
+      # a group member id rides alongside the group (server scopes the fetch to its ranges)
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", "m1", 100, 0)) ==
+               {"t", nil, "grp", "m1", 100, 0}
+
+      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, nil, nil, 100, 0)) ==
+               {"t", nil, nil, nil, 100, 0}
+    end
+
+    test "leave_group req round-trip" do
+      assert Wire.decode_leave_group_req(Wire.encode_leave_group_req("t", "grp", "m1")) == {"t", "grp", "m1"}
     end
 
     test "auth req/resp round-trip" do

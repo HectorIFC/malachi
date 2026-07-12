@@ -153,11 +153,19 @@ class MalachiClient {
 
   // Pulls one batch. cursor: null/undefined = start; group resumes a committed position when cursor is null.
   // waitMs > 0 long-polls server-side, so the request timeout is extended past it.
-  async fetch(topic, { cursor = null, group = null, max = 100, waitMs = 0 } = {}) {
-    const payload = wire.encodeFetchReq(topic, cursor, group, max, waitMs);
+  // With `member` (a consumer-group member id), the server scopes the fetch to the member's assigned
+  // ranges — the client still only sees records + an opaque cursor. Without it, whole-group / single fetch.
+  async fetch(topic, { cursor = null, group = null, member = null, max = 100, waitMs = 0 } = {}) {
+    const payload = wire.encodeFetchReq(topic, cursor, group, member, max, waitMs);
     const timeout = Math.max(this.timeout, waitMs + this.timeout);
     const body = await this._request(wire.API.fetch, payload, timeout);
     return wire.decodeFetchResp(body); // { records, cursor }
+  }
+
+  // Leaves a consumer group for a fast rebalance on a clean shutdown (else the server evicts on timeout).
+  async leaveGroup(topic, group, member) {
+    await this._request(wire.API.leaveGroup, wire.encodeLeaveGroupReq(topic, group, member));
+    return true;
   }
 
   async commit(topic, group, cursor) {

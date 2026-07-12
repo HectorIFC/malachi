@@ -31,22 +31,35 @@ function printRecord(rec, n) {
   console.log(colors.green(`[${n}]`) + ` key=${key}  ${value}`);
 }
 
-async function run(topic, { group, max, follow }) {
+async function run(topic, { group, member, max, follow }) {
   console.log(colors.cyan('\nMalachi Consumer'));
   console.log(colors.gray(`   host:  ${cfg.host}:${cfg.port}`));
-  console.log(colors.gray(`   topic: ${topic}   group: ${group || '(none)'}   follow: ${!!follow}\n`));
+  console.log(colors.gray(`   topic: ${topic}   group: ${group || '(none)'}   member: ${member || '(none)'}   follow: ${!!follow}\n`));
 
   const client = new MalachiClient({ host: cfg.host, port: cfg.port });
   await client.connect(cfg.username, cfg.password);
   console.log(colors.green(`Connected (authenticated as ${cfg.username})\n`));
 
-  // An explicit cursor takes precedence over a group resume, so only pass a group on the first fetch
-  // (cursor null) and drive by cursor afterwards.
+  // In member mode the server scopes each fetch to this member's assigned ranges and drives the position
+  // (we always pass {group, member} and commit). Otherwise an explicit cursor takes precedence over a
+  // group resume, so we pass the group only on the first fetch and drive by cursor after.
   let cursor = null;
   let total = 0;
   let stop = false;
-  process.on('SIGINT', () => {
+
+  const leave = async () => {
+    if (member) {
+      try {
+        await client.leaveGroup(topic, group, member);
+      } catch (_e) {
+        // best-effort — the coordinator evicts on session timeout anyway
+      }
+    }
+  };
+
+  process.on('SIGINT', async () => {
     stop = true;
+    await leave();
     client.close();
     console.log(colors.cyan(`\nStopped. consumed=${total}\n`));
     process.exit(0);
@@ -54,7 +67,13 @@ async function run(topic, { group, max, follow }) {
 
   while (!stop) {
     const waitMs = follow ? FOLLOW_WAIT_MS : 0;
-    const opts = cursor === null ? { group, max, waitMs } : { cursor, max, waitMs };
+
+    const opts = member
+      ? { group, member, max, waitMs }
+      : cursor === null
+        ? { group, max, waitMs }
+        : { cursor, max, waitMs };
+
     const { records, cursor: next } = await client.fetch(topic, opts);
 
     for (const rec of records) printRecord(rec, ++total);
@@ -66,6 +85,7 @@ async function run(topic, { group, max, follow }) {
     if (records.length === 0 && follow) process.stdout.write(colors.gray('.'));
   }
 
+  await leave();
   client.close();
   console.log(colors.cyan(`\nDone. consumed=${total}\n`));
 }
@@ -79,6 +99,8 @@ ${colors.yellow('Usage')}
 
 ${colors.yellow('Options')}
   --group <g>     Consumer group: resume and commit position server-side
+  --member <m>    Group member id: the server assigns this member a share of the topic's ranges
+                  (run several with the same --group and distinct --member for parallel consumption)
   --follow        Long-poll for new records until Ctrl-C
   --max <n>       Records per fetch (default 100)
   -h, --help      Show this help
@@ -89,14 +111,21 @@ ${colors.yellow('Environment')}
 }
 
 async function main() {
-  const { positional, flags } = parseArgs(process.argv.slice(2), ['group', 'max']);
+  const { positional, flags } = parseArgs(process.argv.slice(2), ['group', 'member', 'max']);
   if (flags.help) return help();
 
   const topic = positional[0] || cfg.topic;
   const max = parseInt(flags.max, 10) || 100;
+  const group = flags.group || null;
+  const member = flags.member || null;
+
+  if (member && !group) {
+    console.error(colors.red('--member requires --group (a member belongs to a consumer group)'));
+    process.exit(1);
+  }
 
   try {
-    await run(topic, { group: flags.group || null, max, follow: !!flags.follow });
+    await run(topic, { group, member, max, follow: !!flags.follow });
   } catch (err) {
     fail(err, cfg);
   }

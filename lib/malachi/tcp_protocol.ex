@@ -9,6 +9,7 @@ defmodule Malachi.TCPProtocol do
   the connection. The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets.
   """
 
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.LogApi
   alias Malachi.Wire
 
@@ -80,6 +81,7 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.fetch_key() -> fetch(correlation_id, payload, session)
       api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
       api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
+      api_key == Wire.leave_group_key() -> leave_group(correlation_id, payload, session)
       true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
@@ -115,16 +117,26 @@ defmodule Malachi.TCPProtocol do
 
   defp fetch(correlation_id, payload, session) do
     with_permission(session, :consume, correlation_id, fn ->
-      {topic, cursor, group, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
+      {topic, cursor, group, member, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
       max = fetch_max(max_raw)
       wait_ms = fetch_wait(wait_raw)
 
       result =
         cond do
+          # a consumer-group member: the server scopes the fetch to the member's assigned ranges and
+          # returns records + an opaque cursor (the client never sees a range id)
+          member != nil and group != nil ->
+            LogApi.fetch_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, max, wait_ms)
+
           # an explicit cursor (client-managed paging) takes precedence over a group resume
-          cursor != nil -> LogApi.fetch(Malachi.LogBroker, topic, cursor, max, wait_ms)
-          group != nil -> LogApi.fetch_group(Malachi.LogBroker, topic, group, max, wait_ms)
-          true -> LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
+          cursor != nil ->
+            LogApi.fetch(Malachi.LogBroker, topic, cursor, max, wait_ms)
+
+          group != nil ->
+            LogApi.fetch_group(Malachi.LogBroker, topic, group, max, wait_ms)
+
+          true ->
+            LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
         end
 
       case result do
@@ -141,6 +153,15 @@ defmodule Malachi.TCPProtocol do
     with_permission(session, :consume, correlation_id, fn ->
       {topic, group, cursor} = Wire.decode_commit_req(payload)
       ok_or_error(correlation_id, LogApi.commit(Malachi.LogBroker, topic, group, cursor), <<>>)
+    end)
+  end
+
+  # Removes a member from its consumer group (fast rebalance on a clean shutdown). Acks with an empty ok.
+  defp leave_group(correlation_id, payload, session) do
+    with_permission(session, :consume, correlation_id, fn ->
+      {topic, group, member} = Wire.decode_leave_group_req(payload)
+      _ = GroupCoordinator.leave(Malachi.LogGroupCoordinator, group, topic, member)
+      Wire.encode_ok(correlation_id, <<>>)
     end)
   end
 

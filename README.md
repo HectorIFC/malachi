@@ -707,13 +707,19 @@ operation:
 | 0       | `auth`         | **required first frame**; `username`/`password` → session token |
 | 1       | `create_topic` | topic name + keyspace bits                                      |
 | 2       | `produce`      | topic + records (routed by key); returns the produced count    |
-| 3       | `fetch`        | topic + opaque cursor (or a consumer group) → records + cursor  |
+| 3       | `fetch`        | topic + opaque cursor / consumer group / **group member** → records + cursor |
 | 4       | `commit`       | durably commit a consumer group's position (from a cursor)      |
 | 5       | `subscribe`    | open a server-push stream for a group, bounded by a credit window |
 | 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit |
+| 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
 Records on the wire carry **no offset** — position travels only in the opaque cursor, and permissions
 (`:produce`/`:consume`) are enforced per operation against the authenticated session.
+
+A `fetch` with a **consumer-group member id** is server-scoped: the coordinator assigns each member of a
+group a share of the topic's ranges, so members consume in **parallel** and disjointly. The client still
+only sees records + an opaque cursor — ranges never cross the wire — and the member stays alive by
+fetching (or explicitly `leave_group`s on shutdown).
 
 Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the
 server pushes records up to the credit window; the client acks to durably advance the group's position
@@ -734,6 +740,10 @@ node scripts/producer.js orders 100 --create
 
 # pull with a resumable consumer group, long-polling for new records
 node scripts/consumer.js orders --group workers --follow
+
+# parallel consumption: several members of one group each get a share of the ranges (opaque, disjoint)
+node scripts/consumer.js orders --group workers --member c1 &
+node scripts/consumer.js orders --group workers --member c2 &
 
 # server-push streaming (subscribe + credit-windowed acks)
 node scripts/subscriber.js orders --group live

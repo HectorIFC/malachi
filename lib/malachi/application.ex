@@ -75,6 +75,11 @@ defmodule Malachi.Application do
         ] ++
         log_children() ++
         [
+          # Consumer-group coordinator: assigns a topic's ranges across group members for parallel,
+          # server-scoped consumption (the client never sees ranges). Its ranges come from the broker.
+          {Malachi.Consumer.GroupCoordinator,
+           name: Malachi.LogGroupCoordinator,
+           ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end},
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
         ]

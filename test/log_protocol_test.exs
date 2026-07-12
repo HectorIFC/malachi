@@ -31,13 +31,17 @@ defmodule Malachi.LogProtocolTest do
 
   defp fetch(socket, topic, opts \\ []) do
     payload =
-      Wire.encode_fetch_req(topic, opts[:cursor], opts[:group], opts[:max] || 100, opts[:wait] || 0)
+      Wire.encode_fetch_req(topic, opts[:cursor], opts[:group], opts[:member], opts[:max] || 100, opts[:wait] || 0)
 
     TCPHelper.request(socket, Wire.fetch_key(), 1, payload)
   end
 
   defp commit(socket, topic, group, cursor) do
     TCPHelper.request(socket, Wire.commit_key(), 1, Wire.encode_commit_req(topic, group, cursor))
+  end
+
+  defp leave_group(socket, topic, group, member) do
+    TCPHelper.request(socket, Wire.leave_group_key(), 1, Wire.encode_leave_group_req(topic, group, member))
   end
 
   # Deterministically wait until the live LogBroker has a parked long-poll waiter.
@@ -97,6 +101,30 @@ defmodule Malachi.LogProtocolTest do
       assert {code, payload} = fetch(socket, topic, cursor: cursor)
       assert ok?(code)
       assert {[], _cursor} = Wire.decode_fetch_resp(payload)
+    end)
+  end
+
+  test "consumer-group member fetch is server-scoped and opaque; leave_group acks" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_member_#{System.unique_integer([:positive])}"
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
+
+      assert {code, <<3::32>>} = produce(socket, topic, [{"k1", "v1"}, {"k2", "v2"}, {"k3", "v3"}])
+      assert ok?(code)
+
+      # fetch as a group member: the sole member owns the topic's ranges, so it gets every record plus an
+      # opaque cursor — no range id ever crosses the wire
+      assert {code, payload} = fetch(socket, topic, group: "g", member: "m1")
+      assert ok?(code)
+      {records, cursor} = Wire.decode_fetch_resp(payload)
+      assert is_binary(cursor)
+      assert records |> Enum.map(& &1.value) |> Enum.sort() == ["v1", "v2", "v3"]
+      assert Enum.all?(records, &(&1.offset == nil))
+
+      # leaving the group acks with an empty ok (fast rebalance on a clean shutdown)
+      assert {code, <<>>} = leave_group(socket, topic, "g", "m1")
+      assert ok?(code)
     end)
   end
 
