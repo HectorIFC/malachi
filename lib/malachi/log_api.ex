@@ -157,6 +157,28 @@ defmodule Malachi.LogApi do
   end
 
   @doc """
+  Like `subscribe/5` but for a consumer-group **member**: registers the member with the `coordinator`,
+  scopes the push stream to its assigned ranges (server-side — the client still only gets records + an
+  opaque cursor), and lets the broker leave the group when the calling process exits. The member stays
+  alive by acking (`stream_ack_member/7`); the coordinator does not run in the broker, so the broker never
+  calls it (deadlock-safe).
+  """
+  @spec subscribe_member(
+          GenServer.server(),
+          GenServer.server(),
+          Metadata.topic_name(),
+          Metadata.group(),
+          term(),
+          pos_integer(),
+          pos_integer()
+        ) ::
+          :ok
+  def subscribe_member(server, coordinator, topic, group, member, window, max) do
+    {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
+    BrokerServer.subscribe(server, topic, group, window, max, member: member, ranges: ranges, coordinator: coordinator)
+  end
+
+  @doc """
   Acks `count` streamed records for `group` at `cursor`: durably commits the position (at-least-once) and
   returns `count` records of window credit, unblocking further pushes. Returns `:ok`, or
   `{:error, :invalid_cursor}` for a bad token.
@@ -167,6 +189,32 @@ defmodule Malachi.LogApi do
     case decode_cursor(cursor) do
       {:ok, positions} -> BrokerServer.stream_ack(server, topic, group, positions, count)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Like `stream_ack/5` but for a group **member**: re-polls the `coordinator` (a heartbeat that also
+  refreshes the member's ranges, so a rebalance is picked up on the next ack) before acking. Returns `:ok`
+  or `{:error, :invalid_cursor}`.
+  """
+  @spec stream_ack_member(
+          GenServer.server(),
+          GenServer.server(),
+          Metadata.topic_name(),
+          Metadata.group(),
+          term(),
+          cursor(),
+          non_neg_integer()
+        ) ::
+          :ok | {:error, term()}
+  def stream_ack_member(server, coordinator, topic, group, member, cursor, count) do
+    case decode_cursor(cursor) do
+      {:ok, positions} ->
+        {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
+        BrokerServer.stream_ack(server, topic, group, positions, count, ranges)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -5,7 +5,9 @@ defmodule Malachi.BrokerServerStreamingTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Log.Record
+  alias Malachi.LogApi
 
   setup do
     dir = Path.join(System.tmp_dir!(), "malachi_stream_#{System.unique_integer([:positive])}")
@@ -112,5 +114,73 @@ defmodule Malachi.BrokerServerStreamingTest do
       System.monotonic_time(:millisecond) > deadline -> flunk("condition not met in time")
       true -> Process.sleep(5) && wait_until(fun, deadline)
     end
+  end
+
+  # --- consumer-group member scoping (streaming) ---
+
+  defp start_coordinator(broker) do
+    {:ok, coord} =
+      GroupCoordinator.start_link(
+        ranges_fun: fn topic -> BrokerServer.active_range_ids(broker, topic) end,
+        tick_ms: 3_600_000
+      )
+
+    on_exit(fn -> if Process.alive?(coord), do: GenServer.stop(coord) end)
+    coord
+  end
+
+  # Spawns a group member whose own process subscribes to the scoped push stream and forwards the values
+  # it receives (over `collect_ms`) back to the test as `{member, values}`.
+  defp member_stream(broker, coord, group, member, test, collect_ms \\ 300) do
+    spawn(fn ->
+      :ok = LogApi.subscribe_member(broker, coord, "t", group, member, 1_000, 1_000)
+      send(test, {member, collect_values([], collect_ms)})
+    end)
+  end
+
+  defp collect_values(acc, timeout) do
+    receive do
+      {:log_records, "t", records, _positions} -> collect_values(acc ++ Enum.map(records, & &1.value), timeout)
+    after
+      timeout -> acc
+    end
+  end
+
+  test "two group members get disjoint, complete push streams", %{broker: broker} do
+    [root] = BrokerServer.active_range_ids(broker, "t")
+    {:ok, _left, _right} = BrokerServer.split_range(broker, root)
+
+    records = for i <- 0..19, do: Record.new("v#{i}", key: "k#{i}")
+    {:ok, _} = BrokerServer.produce(broker, "t", records)
+
+    coord = start_coordinator(broker)
+    # pre-register both so the assignment is a stable two-member split before either subscribes
+    {:ok, _, _} = GroupCoordinator.poll(coord, "g", "t", :m1)
+    {:ok, _, _} = GroupCoordinator.poll(coord, "g", "t", :m2)
+
+    member_stream(broker, coord, "g", :m1, self())
+    member_stream(broker, coord, "g", :m2, self())
+
+    v1 = receive do: ({:m1, v} -> v), after: (2_000 -> flunk("no push for m1"))
+    v2 = receive do: ({:m2, v} -> v), after: (2_000 -> flunk("no push for m2"))
+
+    assert v1 -- v2 == v1
+    assert Enum.sort(v1 ++ v2) == Enum.sort(Enum.map(records, & &1.value))
+  end
+
+  test "a member's subscriber process exiting leaves the group", %{broker: broker} do
+    coord = start_coordinator(broker)
+
+    pid =
+      spawn(fn ->
+        :ok = LogApi.subscribe_member(broker, coord, "t", "g", :m1, 10, 10)
+        Process.sleep(:infinity)
+      end)
+
+    wait_until(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord, "g", "t", :m1)) end)
+
+    Process.exit(pid, :kill)
+    # the broker's :DOWN spawns an async task to leave the group; the member eventually disappears
+    wait_until(fn -> GroupCoordinator.assignment(coord, "g", "t", :m1) == {:error, :unknown_member} end)
   end
 end

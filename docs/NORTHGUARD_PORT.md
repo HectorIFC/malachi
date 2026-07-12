@@ -1556,6 +1556,23 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         ~2^keyspace_bits com splits). Testado: split sela o root → o offset do root é prunado no commit
         seguinte (fica só o do filho); os testes de merge/pre-routing do S2 seguem verdes (sem topic → sem
         prune). Suíte 762 testes 0 falhas; credo/dialyzer/format limpos.
+      - ✅ **Streaming member-scoping — Str-1 (server-side, opaco).** Leva o consumo paralelo por grupo ao
+        push/subscribe (antes whole-group). **Restrição arquitetural** que ditou o design: o
+        `push_subscriber` roda **dentro** do handle_call do broker, mas o `ranges_fun` do coordinator
+        **chama de volta** o broker (`active_range_ids`) → se o broker chamasse o coordinator sincronamente,
+        deadlock (cada GenServer esperando o outro). Regra: **o broker nunca chama o coordinator.** Design:
+        toda coordenação no **`LogApi`** — `subscribe_member/7` faz `poll` (registra + ranges) e passa
+        `member`/`ranges`/`coordinator` ao `BrokerServer.subscribe` (via `group_opts`); o subscriber
+        **armazena** as ranges e o `push_subscriber` escopa o consume com elas (`consume_ranges/5`);
+        `stream_ack_member/7` re-poll (heartbeat + ranges frescas) → o broker **atualiza** as ranges do
+        subscriber no ack (pega rebalance). **Liveness**: o `:DOWN` do broker dispara um **`Task` assíncrono**
+        que chama `coordinator.leave` (async → não bloqueia o broker → sem deadlock) para rebalance rápido na
+        desconexão; membro idle fica vivo por ack periódico do cliente (Str-2). Positions escopadas por
+        `Map.take` no subscribe (como no `fetch_member`); **opaco** (o push segue `{:log_records, records,
+        cursor}` — zero range_id). Testado in-VM: 2 membros pré-registrados recebem push **disjunto e
+        completo** (topic com 2 ranges via split); processo de um membro morrendo → **leave** async → o
+        membro some do coordinator. Suíte 764 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: Str-2
+        (wire: member no subscribe/stream_ack + cliente Node subscriber com member + heartbeat).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

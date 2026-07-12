@@ -25,6 +25,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Metadata
   alias OpenTelemetry.Ctx
 
@@ -179,11 +180,12 @@ defmodule Malachi.BrokerServer do
           Malachi.Metadata.topic_name(),
           Malachi.Metadata.group(),
           pos_integer(),
-          pos_integer()
+          pos_integer(),
+          keyword()
         ) ::
           :ok
-  def subscribe(server, topic, group, window, max) do
-    GenServer.call(server, {:subscribe, topic, group, window, max, self()})
+  def subscribe(server, topic, group, window, max, group_opts \\ []) do
+    GenServer.call(server, {:subscribe, topic, group, window, max, self(), group_opts})
   end
 
   @doc """
@@ -195,11 +197,12 @@ defmodule Malachi.BrokerServer do
           Malachi.Metadata.topic_name(),
           Malachi.Metadata.group(),
           Malachi.Metadata.offsets(),
-          non_neg_integer()
+          non_neg_integer(),
+          [term()] | nil
         ) ::
           :ok
-  def stream_ack(server, topic, group, positions, count) do
-    GenServer.call(server, {:stream_ack, topic, group, positions, count, self()})
+  def stream_ack(server, topic, group, positions, count, ranges \\ nil) do
+    GenServer.call(server, {:stream_ack, topic, group, positions, count, self(), ranges})
   end
 
   @doc "Removes the calling process's streaming subscription to `topic`. Returns `:ok`."
@@ -402,9 +405,12 @@ defmodule Malachi.BrokerServer do
     {:reply, Broker.committed_offsets(state.broker, group, topic), state}
   end
 
-  def handle_call({:subscribe, topic, group, window, max, pid}, _from, state) do
+  def handle_call({:subscribe, topic, group, window, max, pid, group_opts}, _from, state) do
     ref = Process.monitor(pid)
+    ranges = Keyword.get(group_opts, :ranges)
     positions = Broker.committed_offsets(state.broker, group, topic)
+    # scope a member's start positions to its ranges (a whole-group subscriber keeps them all)
+    positions = if ranges, do: Map.take(positions, ranges), else: positions
 
     subscriber =
       push_subscriber(state.broker, %{
@@ -415,22 +421,34 @@ defmodule Malachi.BrokerServer do
         positions: positions,
         window: window,
         in_flight: 0,
-        max: max
+        max: max,
+        # consumer-group member scoping: `member`/`ranges` scope the push to the member's ranges (nil =
+        # whole group); `coordinator` lets the :DOWN handler leave the group on disconnect. The LogApi
+        # layer supplies these (the broker must never call the coordinator itself — deadlock).
+        member: Keyword.get(group_opts, :member),
+        ranges: ranges,
+        coordinator: Keyword.get(group_opts, :coordinator)
       })
 
     subscribers = Map.update(state.subscribers, topic, [subscriber], &[subscriber | &1])
     {:reply, :ok, %{state | subscribers: subscribers}}
   end
 
-  def handle_call({:stream_ack, topic, group, positions, count, pid}, _from, state) do
-    # commit the group's position durably, then return `count` credit to this subscriber and push more
+  def handle_call({:stream_ack, topic, group, positions, count, pid, ranges}, _from, state) do
+    # commit the group's position durably, then return `count` credit to this subscriber and push more.
+    # `ranges` (from the LogApi member poll) refreshes this member's assignment, so a rebalance is picked
+    # up on the ack (nil keeps the current scope — a whole-group or unchanged member subscription).
     {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
 
     subs =
       state.subscribers
       |> Map.get(topic, [])
       |> Enum.map(fn sub ->
-        if sub.pid == pid, do: push_subscriber(broker, %{sub | in_flight: max(sub.in_flight - count, 0)}), else: sub
+        if sub.pid == pid do
+          push_subscriber(broker, %{sub | in_flight: max(sub.in_flight - count, 0), ranges: ranges || sub.ranges})
+        else
+          sub
+        end
       end)
 
     {:reply, :ok, %{state | broker: broker, subscribers: Map.put(state.subscribers, topic, subs)}}
@@ -455,6 +473,16 @@ defmodule Malachi.BrokerServer do
 
   # A streaming subscriber's process died: drop it from every topic it was subscribed to.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    # a departing group member leaves its group for a fast rebalance — done in an unlinked task, since the
+    # coordinator's leave calls back into this broker and a synchronous call from here would deadlock.
+    for {_topic, subs} <- state.subscribers,
+        sub <- subs,
+        sub.ref == ref,
+        sub.member != nil,
+        sub.coordinator != nil do
+      Task.start(fn -> GroupCoordinator.leave(sub.coordinator, sub.group, sub.topic, sub.member) end)
+    end
+
     subscribers =
       Map.new(state.subscribers, fn {topic, subs} -> {topic, Enum.reject(subs, &(&1.ref == ref))} end)
 
@@ -542,7 +570,7 @@ defmodule Malachi.BrokerServer do
   # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
   # (a group member's assignment) consumes only those, intersected with the active set — so a stale
   # assigned range that has since split is skipped, and the client never sees ranges either way.
-  defp consume_ranges(broker, topic, positions, max_records, ranges \\ nil) do
+  defp consume_ranges(broker, topic, positions, max_records, ranges) do
     broker
     |> selected_ranges(topic, ranges)
     |> Enum.reduce({[], positions}, fn range_id, {acc, positions} ->
@@ -607,7 +635,8 @@ defmodule Malachi.BrokerServer do
     if budget <= 0 do
       subscriber
     else
-      case consume_ranges(broker, subscriber.topic, subscriber.positions, budget) do
+      # `subscriber.ranges` scopes the push to a group member's assigned ranges (nil = the whole group).
+      case consume_ranges(broker, subscriber.topic, subscriber.positions, budget, subscriber.ranges) do
         {[], _positions} ->
           subscriber
 
