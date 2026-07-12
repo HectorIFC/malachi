@@ -2,6 +2,7 @@ defmodule Malachi.LogApiTest do
   use ExUnit.Case, async: true
 
   alias Malachi.BrokerServer
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.LogApi
 
   @moduletag :tmp_dir
@@ -185,5 +186,55 @@ defmodule Malachi.LogApiTest do
     # resuming reprocesses the slice via the active children (at-least-once, no loss)
     {:ok, again, _cursor} = LogApi.fetch_group(server, "events", "g", 100)
     assert again |> Enum.map(& &1.value) |> Enum.sort() == Enum.sort(Enum.map(before_split, & &1["value"]))
+  end
+
+  defp start_coordinator(server) do
+    {:ok, coord} =
+      GroupCoordinator.start_link(
+        ranges_fun: fn topic -> BrokerServer.active_range_ids(server, topic) end,
+        tick_ms: 3_600_000
+      )
+
+    on_exit(fn -> if Process.alive?(coord), do: GenServer.stop(coord) end)
+    coord
+  end
+
+  test "fetch_member consumes only the member's ranges: two members split the topic disjointly",
+       %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    # split the root into two ranges so members can own different ones
+    [root] = BrokerServer.active_range_ids(server, "events")
+    {:ok, _left, _right} = BrokerServer.split_range(server, root)
+
+    records = for i <- 0..29, do: %{"key" => "k#{i}", "value" => "v#{i}"}
+    {:ok, 30} = LogApi.produce(server, "events", records)
+
+    coord = start_coordinator(server)
+
+    # register both members first so the assignment is a stable 2-member split before either fetches
+    {:ok, _, _} = GroupCoordinator.poll(coord, "g", "events", :m1)
+    {:ok, _, _} = GroupCoordinator.poll(coord, "g", "events", :m2)
+
+    {:ok, r1, _} = LogApi.fetch_member(server, coord, "events", "g", :m1, 100)
+    {:ok, r2, _} = LogApi.fetch_member(server, coord, "events", "g", :m2, 100)
+    v1 = Enum.map(r1, & &1.value)
+    v2 = Enum.map(r2, & &1.value)
+
+    # disjoint (each record consumed by exactly one member) and complete (together, all records)
+    assert v1 -- v2 == v1
+    assert Enum.sort(v1 ++ v2) == Enum.sort(Enum.map(records, & &1["value"]))
+  end
+
+  test "fetch_group with no member still consumes the whole group (backward compatible)",
+       %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+    records = for i <- 0..9, do: %{"key" => "k#{i}", "value" => "v#{i}"}
+    {:ok, 10} = LogApi.produce(server, "events", records)
+
+    {:ok, all, _} = LogApi.fetch_group(server, "events", "g", 100)
+    assert length(all) == 10
   end
 end

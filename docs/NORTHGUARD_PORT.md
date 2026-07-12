@@ -1502,8 +1502,31 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         re-join). Testado: membro sozinho pega tudo (gen 1); dois membros particionam (disjunto/completo, gen
         avança); leave devolve as ranges; **eviction** por session-timeout + re-join obrigatório; grupo vazio
         dropado; mudança de ranges rebalanceia no reconcile; reconcile idempotente (sem mudança → mesma gen);
-        heartbeat de membro desconhecido rejeitado — 8. credo/dialyzer limpos. **Próximo: S4 (protocolo wire
-        join/heartbeat/leave + cliente) e S5 (fetch respeita a assignment).**
+        heartbeat de membro desconhecido rejeitado — 8. credo/dialyzer limpos.
+      - ⚠️ **Correção de rumo (fidelidade NorthGuard) antes do S4.** Revisão apontou que S1–S3 importaram o
+        **modelo Kafka** (assignment de `range_ids` **visível ao cliente**). Isso **violaria** o princípio
+        central do projeto (doc §B: *"contrato de cliente = jeito NorthGuard, NÃO Kafka: … cursor opaco …
+        nunca vê partition/offset"*). Ranges são o equivalente NorthGuard de partitions → têm de ficar
+        **escondidas**. O maquinário S1–S3 é **server-side e correto** (o coordinator computa a assignment
+        internamente); o `[range_ids]` que ele devolve é **detalhe interno**, não vai ao wire. Plano de S4/S5
+        **reajustado para opaco**: o servidor escopa o fetch à assignment do membro e devolve records +
+        **cursor opaco**; o cliente **nunca** vê range_id. Membership **implícita via fetch** (o fetch é o
+        heartbeat) + `leave` explícito depois.
+      - ✅ **S4 — consumo particionado server-side (opaco, in-VM).** `GroupCoordinator.poll/4` é o entry-point
+        do fetch: registra o membro se novo (rebalance) ou só renova a sessão se conhecido (sem rebalance) e
+        devolve as ranges dele — então o membro fica vivo **buscando**, sem heartbeat separado. O caminho do
+        `consume` ganhou um filtro **`ranges`** (`consume_ranges/5` + `selected_ranges/3`): `nil` = todas as
+        ranges ativas (grupo inteiro / consumidor único, comportamento atual); uma lista = **só** essas,
+        **interseccionadas com as ativas** (uma range atribuída que já fez split é pulada). Threadado por
+        `BrokerServer.consume/6` + o `handle_call({:consume})` (6-tupla) + o waiter do long-poll (guarda
+        `ranges`) — subscriber de streaming inalterado (usa o default `nil`). Novo `LogApi.fetch_member/7`:
+        `poll` no coordinator → as ranges do membro → consume escopado das posições commitadas (S2), retorno
+        = records + **cursor opaco** (o cliente nunca vê range_id; o `commit` avança só as ranges do membro).
+        Backward-compat: `fetch_group` sem membro = grupo inteiro. Testado: `poll` (registra novo/heartbeat
+        conhecido/re-registra evictado — 2); **integração e2e in-VM** (topic com 2 ranges via split, 2 membros
+        pré-registrados buscam **disjunto e completo** — cada record por exatamente um membro; backward-compat
+        do fetch_group) — 2. Suíte 759 testes 0 falhas; credo/dialyzer limpos. **Próximo: S5 (wire: member id
+        no fetch + `leave` + cliente Node, mantendo o cursor opaco).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

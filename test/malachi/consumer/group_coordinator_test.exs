@@ -103,4 +103,29 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
     %{coord: c} = start()
     assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "nope", "t", :m1)
   end
+
+  test "poll registers a new member (rebalance) and only heartbeats a known one (no rebalance)" do
+    %{coord: c} = start(ranges: [:r0, :r1])
+
+    {:ok, g1, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
+    assert Enum.sort(ranges) == [:r0, :r1]
+
+    {:ok, g2, _} = GroupCoordinator.poll(c, "g", "t", :m1)
+    assert g2 == g1
+
+    {:ok, g3, _} = GroupCoordinator.poll(c, "g", "t", :m2)
+    assert g3 > g1
+  end
+
+  test "poll re-registers a member that had been evicted" do
+    %{coord: c, clock: clock} = start(ranges: [:r0], session_ms: 100)
+    GroupCoordinator.poll(c, "g", "t", :m1)
+
+    set_clock(clock, 200)
+    :ok = GroupCoordinator.reconcile_now(c)
+    assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+
+    {:ok, _, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
+    assert Enum.sort(ranges) == [:r0]
+  end
 end

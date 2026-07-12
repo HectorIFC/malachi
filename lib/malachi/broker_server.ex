@@ -95,11 +95,18 @@ defmodule Malachi.BrokerServer do
   topic delivers data or `wait_ms` elapses (then `records` is `[]`). With `wait_ms == 0` it returns
   immediately. `positions`/`next_positions` map each range id to its `Broker.consume_cursor`.
   """
-  @spec consume(GenServer.server(), Malachi.Metadata.topic_name(), map(), pos_integer(), non_neg_integer()) ::
+  @spec consume(
+          GenServer.server(),
+          Malachi.Metadata.topic_name(),
+          map(),
+          pos_integer(),
+          non_neg_integer(),
+          [term()] | nil
+        ) ::
           {[Malachi.Log.Record.t()], map()}
-  def consume(server, topic, positions, max_records, wait_ms) do
+  def consume(server, topic, positions, max_records, wait_ms, ranges \\ nil) do
     # The call may block up to wait_ms server-side; give it headroom over the default 5s call timeout.
-    GenServer.call(server, {:consume, topic, positions, max_records, wait_ms}, wait_ms + 5_000)
+    GenServer.call(server, {:consume, topic, positions, max_records, wait_ms, ranges}, wait_ms + 5_000)
   end
 
   @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/5`)."
@@ -305,14 +312,24 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  def handle_call({:consume, topic, positions, max_records, wait_ms}, from, state) do
-    case consume_ranges(state.broker, topic, positions, max_records) do
+  def handle_call({:consume, topic, positions, max_records, wait_ms, ranges}, from, state) do
+    case consume_ranges(state.broker, topic, positions, max_records, ranges) do
       # Caught up and willing to wait: park the request; a later produce to this topic (or the
-      # timeout) replies. Hold the original positions so the wake re-consumes from the same place.
+      # timeout) replies. Hold the original positions (and range scope) so the wake re-consumes the same.
       {[], _positions} when wait_ms > 0 ->
         ref = make_ref()
         timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
-        waiter = %{ref: ref, timer: timer, from: from, topic: topic, positions: positions, max: max_records}
+
+        waiter = %{
+          ref: ref,
+          timer: timer,
+          from: from,
+          topic: topic,
+          positions: positions,
+          max: max_records,
+          ranges: ranges
+        }
+
         {:noreply, %{state | waiters: [waiter | state.waiters]}}
 
       {records, next_positions} ->
@@ -522,9 +539,12 @@ defmodule Malachi.BrokerServer do
   # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
   # returns {records, next_positions}. This is the read orchestration the LogApi used to do client-side;
   # holding it here lets a single call serve a fetch and lets produce re-run it to wake long-pollers.
-  defp consume_ranges(broker, topic, positions, max_records) do
+  # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
+  # (a group member's assignment) consumes only those, intersected with the active set — so a stale
+  # assigned range that has since split is skipped, and the client never sees ranges either way.
+  defp consume_ranges(broker, topic, positions, max_records, ranges \\ nil) do
     broker
-    |> Broker.active_range_ids(topic)
+    |> selected_ranges(topic, ranges)
     |> Enum.reduce({[], positions}, fn range_id, {acc, positions} ->
       cursor = Map.get(positions, range_id, :start)
 
@@ -533,6 +553,13 @@ defmodule Malachi.BrokerServer do
         {:error, _reason} -> {acc, positions}
       end
     end)
+  end
+
+  defp selected_ranges(broker, topic, nil), do: Broker.active_range_ids(broker, topic)
+
+  defp selected_ranges(broker, topic, ranges) do
+    assigned = MapSet.new(ranges)
+    broker |> Broker.active_range_ids(topic) |> Enum.filter(&MapSet.member?(assigned, &1))
   end
 
   # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
@@ -544,7 +571,7 @@ defmodule Malachi.BrokerServer do
 
     still_waiting =
       Enum.reduce(on_topic, [], fn waiter, keep ->
-        case consume_ranges(state.broker, waiter.topic, waiter.positions, waiter.max) do
+        case consume_ranges(state.broker, waiter.topic, waiter.positions, waiter.max, waiter.ranges) do
           {[], _positions} ->
             [waiter | keep]
 

@@ -43,6 +43,14 @@ defmodule Malachi.Consumer.GroupCoordinator do
   def join(server, group, topic, member), do: GenServer.call(server, {:join, group, topic, member})
 
   @doc """
+  The fetch-path entry point (implicit membership): registers `member` if new (a rebalance) or just
+  refreshes its session if known (no rebalance), and returns its `{:ok, generation, ranges}`. Called on
+  every `fetch`, so a member stays alive by fetching and needs no separate heartbeat.
+  """
+  @spec poll(GenServer.server(), term(), term(), member()) :: {:ok, non_neg_integer(), [term()]}
+  def poll(server, group, topic, member), do: GenServer.call(server, {:poll, group, topic, member})
+
+  @doc """
   Refreshes `member`'s session and returns its current `{:ok, generation, ranges}`, or
   `{:error, :unknown_member}` if it was evicted (the caller must `join/4` again).
   """
@@ -77,12 +85,25 @@ defmodule Malachi.Consumer.GroupCoordinator do
 
   @impl true
   def handle_call({:join, group, topic, member}, _from, state) do
-    key = {group, topic}
-    group_state = Map.get(state.groups, key, %{members: %{}, assignment: %{}, generation: 0})
-    members = Map.put(group_state.members, member, state.clock.())
-    group_state = rebalance(%{group_state | members: members}, topic, state.ranges_fun)
-    state = put_in(state.groups[key], group_state)
+    {state, group_state} = join_member(state, {group, topic}, topic, member)
     {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+  end
+
+  def handle_call({:poll, group, topic, member}, _from, state) do
+    key = {group, topic}
+
+    case Map.get(state.groups, key) do
+      # known member: refresh its session only (no rebalance)
+      %{members: members} = group_state when is_map_key(members, member) ->
+        group_state = %{group_state | members: Map.put(members, member, state.clock.())}
+        state = put_in(state.groups[key], group_state)
+        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+
+      # new (or evicted) member: register it, which rebalances
+      _new ->
+        {state, group_state} = join_member(state, key, topic, member)
+        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+    end
   end
 
   def handle_call({:heartbeat, group, topic, member}, _from, state) do
@@ -146,6 +167,14 @@ defmodule Malachi.Consumer.GroupCoordinator do
       end)
 
     %{state | groups: groups}
+  end
+
+  # Adds `member` to the group (creating it if new) and rebalances; returns the updated state + group.
+  defp join_member(state, key, topic, member) do
+    group_state = Map.get(state.groups, key, %{members: %{}, assignment: %{}, generation: 0})
+    members = Map.put(group_state.members, member, state.clock.())
+    group_state = rebalance(%{group_state | members: members}, topic, state.ranges_fun)
+    {put_in(state.groups[key], group_state), group_state}
   end
 
   # Drop the group when it has no members, else rebalance it and keep it.

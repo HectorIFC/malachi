@@ -20,6 +20,7 @@ defmodule Malachi.LogApi do
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.BrokerServer
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Telemetry
@@ -109,6 +110,29 @@ defmodule Malachi.LogApi do
   end
 
   @doc """
+  Fetches for `member` of consumer `group` on `topic`: consults the `coordinator` for the member's
+  assigned ranges (registering it if new — the fetch is the heartbeat) and consumes **only** those ranges
+  from the group's committed positions. Returns `{:ok, records, next_cursor}`; the opaque cursor covers
+  only the member's slice, so `commit/4` advances just its ranges (the client never sees a range id).
+  Members of the same group thus consume **disjoint** records in parallel.
+  """
+  @spec fetch_member(
+          GenServer.server(),
+          GenServer.server(),
+          Metadata.topic_name(),
+          Metadata.group(),
+          term(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [Record.t()], cursor()}
+  def fetch_member(server, coordinator, topic, group, member, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
+    {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
+    positions = BrokerServer.committed_offsets(server, group, topic)
+    {records, next_cursor} = do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
+    {:ok, records, next_cursor}
+  end
+
+  @doc """
   Durably commits a consumer `group`'s position for `topic` from `cursor` (a token from `fetch`/
   `fetch_group`). Returns `:ok`, or `{:error, :invalid_cursor}` for a bad token.
   """
@@ -154,9 +178,9 @@ defmodule Malachi.LogApi do
   @spec encode_cursor(map()) :: cursor()
   def encode_cursor(positions), do: Base.url_encode64(:erlang.term_to_binary(positions))
 
-  defp do_fetch(server, topic, positions, max, wait_ms) do
+  defp do_fetch(server, topic, positions, max, wait_ms, ranges \\ nil) do
     Tracer.with_span "malachi.consume" do
-      {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms)
+      {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms, ranges)
       count = length(records)
       Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count})
       Telemetry.consume(topic, count)
