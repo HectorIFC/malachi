@@ -1486,6 +1486,24 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         otimização futura, não S2. Testado: novo teste de merge (dois membros, um commita só sua range → a do
         outro é preservada) + os existentes (last-wins por range). Suíte 747 testes 0 falhas; credo/dialyzer
         limpos. **Próximo: S3 (coordinator: membership + heartbeat + expõe a assignment do S1).**
+      - ✅ **S3 — coordinator de grupo (membership + heartbeat + assignment).** `Malachi.Consumer.GroupCoordinator`
+        (GenServer) rastreia os membros por `{group, topic}` e atribui as ranges do topic via S1. API: `join`
+        (adiciona membro → rebalance → devolve `{:ok, generation, ranges}`), `heartbeat` (renova a sessão,
+        devolve a assignment atual + generation, ou `{:error, :unknown_member}` se foi evictado → re-join),
+        `leave`, `assignment` (leitura sem renovar), `reconcile_now` (roda um tick sync — seam de teste).
+        **Eager (decisão 1A)**: qualquer mudança de membership (join/leave/eviction) ou de ranges recomputa a
+        assignment inteira e **bump da `generation`** (epoch à la Kafka) — o membro re-lê no heartbeat e vê a
+        generation nova = reassumir; **level-triggered** (só bumpa se a assignment mudou de fato, então o tick
+        é idempotente). Session-timeout: um membro silencioso por `session_ms` é **evictado** no reconcile
+        (tick periódico), suas ranges reatribuídas; grupo sem membros é **dropado** (sem leak de estado).
+        Só a **lógica** do coordinator, como instância única, com seams (`clock`/`ranges_fun`) → testável sem
+        cluster; o **roteamento no cluster** (qual nó coordena qual grupo — Kafka hasheia group→broker, ou
+        replicar a membership) fica para a fatia de wiring. Estado de membro é **soft** (restart → membros
+        re-join). Testado: membro sozinho pega tudo (gen 1); dois membros particionam (disjunto/completo, gen
+        avança); leave devolve as ranges; **eviction** por session-timeout + re-join obrigatório; grupo vazio
+        dropado; mudança de ranges rebalanceia no reconcile; reconcile idempotente (sem mudança → mesma gen);
+        heartbeat de membro desconhecido rejeitado — 8. credo/dialyzer limpos. **Próximo: S4 (protocolo wire
+        join/heartbeat/leave + cliente) e S5 (fetch respeita a assignment).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
