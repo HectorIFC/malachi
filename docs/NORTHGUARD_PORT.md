@@ -1637,9 +1637,24 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         re-subscreve); heartbeat/fetch **auto-curam** no próximo request (roteamento é por-request). Single-node:
         `owns?` é sempre `:local` → nunca rejeita → inalterado. Testado: guard (poll/join → `:not_owner`; sem
         registro fantasma; owns_fun por-topic — 3) + refresh (ack via coordinator diferente → `:DOWN` leave acerta
-        o novo — 1). Suíte 780 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: A3 (lifecycle do
-        coordinator no líder do vnode via `VnodeCoordinatorManager` + teste `:multinode`: assignment disjunta entre
-        nós via forwarding + reconvergência pós-failover).**
+        o novo — 1). Suíte 780 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: A3 (validação `:multinode`).**
+      - ✅ **A3 — validação `:multinode` do roteamento (A1+A2 contra `ra` real).** Prova a máquina do A1/A2 entre nós
+        BEAM reais (harness `:peer` + `:erpc`, como o `rebalance_multinode_test`): sobe 3 peers, forma o cluster
+        `ra` de um vnode (quorum 2, tolera 1 falha), publica a topologia (`put_topology`) em cada nó, e verifica
+        contra a **liderança `ra` viva**: (1) `owns?`/`resolve` concordam — no líder `owns? == true` e `resolve`
+        devolve o nome local, em cada follower `owns? == false` e `resolve` devolve `{name, líder}`; (2)
+        **forwarding cross-node**: um coordinator no líder recebe dois membros (poll a partir do nó primário via
+        `{name, líder}`) e a assignment é **disjunta e completa**; (3) **guard**: um follower rejeita `poll` com
+        `{:error, :not_owner}`; (4) **failover**: mata o server `ra` do líder (`:ra.stop_server`) → os 2 restantes
+        elegem um novo líder → `owns?`/`resolve` **reconvergem** nele. Detalhes que aterraram o teste (registrados
+        p/ o A4): o `server_id` da topologia aponta um **probe** (follower que nunca morre) para o `:ra.members`
+        resolver o líder mesmo após o failover; o coordinator no peer sobe via `GenServer.start` **unlinked** (o
+        worker do `:erpc` morre e levaria junto um filho linkado); o `ranges_fun` é uma **captura de módulo em
+        `test/support`** (`&Fixtures.ranges/1`) — fun anônima do `_test.exs` não é resolvível no peer (não está no
+        code path / MD5). `@moduletag :multinode` (excluído por default; roda com `--include multinode`). Suíte 780
+        testes 0 falhas (+1 multinode excluído); credo/dialyzer/format limpos. **G1/coordinator: A1+A2+A3 fecham a
+        correção multi-nó dos consumer groups. Próximo: A4 (lifecycle — coordinator por-vnode no líder via
+        `VnodeCoordinatorManager`, re-validado por este teste; + retry do cliente Node no `:not_owner`).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 
