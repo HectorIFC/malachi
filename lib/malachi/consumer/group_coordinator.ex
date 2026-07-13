@@ -30,7 +30,7 @@ defmodule Malachi.Consumer.GroupCoordinator do
   @default_tick_ms 10_000
 
   @type member :: term()
-  @type reply :: {:ok, non_neg_integer(), [term()]} | {:error, :unknown_member}
+  @type reply :: {:ok, non_neg_integer(), [term()]} | {:error, :unknown_member | :not_owner}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -38,16 +38,20 @@ defmodule Malachi.Consumer.GroupCoordinator do
     GenServer.start_link(__MODULE__, opts, gen_server_opts)
   end
 
-  @doc "Joins `member` to `{group, topic}`, triggering a rebalance. Returns `{:ok, generation, ranges}`."
-  @spec join(GenServer.server(), term(), term(), member()) :: {:ok, non_neg_integer(), [term()]}
+  @doc """
+  Joins `member` to `{group, topic}`, triggering a rebalance. Returns `{:ok, generation, ranges}`, or
+  `{:error, :not_owner}` if this node no longer owns the topic's coordination (the caller re-resolves).
+  """
+  @spec join(GenServer.server(), term(), term(), member()) :: reply()
   def join(server, group, topic, member), do: GenServer.call(server, {:join, group, topic, member})
 
   @doc """
   The fetch-path entry point (implicit membership): registers `member` if new (a rebalance) or just
   refreshes its session if known (no rebalance), and returns its `{:ok, generation, ranges}`. Called on
-  every `fetch`, so a member stays alive by fetching and needs no separate heartbeat.
+  every `fetch`, so a member stays alive by fetching and needs no separate heartbeat. Returns
+  `{:error, :not_owner}` if this node no longer owns the topic's coordination (the caller re-resolves).
   """
-  @spec poll(GenServer.server(), term(), term(), member()) :: {:ok, non_neg_integer(), [term()]}
+  @spec poll(GenServer.server(), term(), term(), member()) :: reply()
   def poll(server, group, topic, member), do: GenServer.call(server, {:poll, group, topic, member})
 
   @doc """
@@ -74,6 +78,11 @@ defmodule Malachi.Consumer.GroupCoordinator do
     state = %{
       groups: %{},
       ranges_fun: Keyword.get(opts, :ranges_fun, fn _topic -> [] end),
+      # Whether this node owns a topic's coordination. A member routed here by a stale leadership view
+      # (during a vnode failover) is rejected with `{:error, :not_owner}` so it re-resolves to the new
+      # owner, rather than registering a phantom assignment here. Default `true`: single-instance / single
+      # -node (and tests) always own.
+      owns_fun: Keyword.get(opts, :owns_fun, fn _topic -> true end),
       clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
       session_ms: Keyword.get(opts, :session_ms, @default_session_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms)
@@ -85,24 +94,32 @@ defmodule Malachi.Consumer.GroupCoordinator do
 
   @impl true
   def handle_call({:join, group, topic, member}, _from, state) do
-    {state, group_state} = join_member(state, {group, topic}, topic, member)
-    {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+    if state.owns_fun.(topic) do
+      {state, group_state} = join_member(state, {group, topic}, topic, member)
+      {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+    else
+      {:reply, {:error, :not_owner}, state}
+    end
   end
 
   def handle_call({:poll, group, topic, member}, _from, state) do
-    key = {group, topic}
+    if state.owns_fun.(topic) do
+      key = {group, topic}
 
-    case Map.get(state.groups, key) do
-      # known member: refresh its session only (no rebalance)
-      %{members: members} = group_state when is_map_key(members, member) ->
-        group_state = %{group_state | members: Map.put(members, member, state.clock.())}
-        state = put_in(state.groups[key], group_state)
-        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+      case Map.get(state.groups, key) do
+        # known member: refresh its session only (no rebalance)
+        %{members: members} = group_state when is_map_key(members, member) ->
+          group_state = %{group_state | members: Map.put(members, member, state.clock.())}
+          state = put_in(state.groups[key], group_state)
+          {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
 
-      # new (or evicted) member: register it, which rebalances
-      _new ->
-        {state, group_state} = join_member(state, key, topic, member)
-        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+        # new (or evicted) member: register it, which rebalances
+        _new ->
+          {state, group_state} = join_member(state, key, topic, member)
+          {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
+      end
+    else
+      {:reply, {:error, :not_owner}, state}
     end
   end
 

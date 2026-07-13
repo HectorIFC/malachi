@@ -183,4 +183,29 @@ defmodule Malachi.BrokerServerStreamingTest do
     # the broker's :DOWN spawns an async task to leave the group; the member eventually disappears
     wait_until(fn -> GroupCoordinator.assignment(coord, "g", "t", :m1) == {:error, :unknown_member} end)
   end
+
+  test "a member ack refreshes the subscriber's coordinator so the :DOWN leave targets the current owner",
+       %{broker: broker} do
+    # coord1 = the owner at subscribe time; coord2 = the new owner after a (simulated) leadership change
+    coord1 = start_coordinator(broker)
+    coord2 = start_coordinator(broker)
+    test = self()
+
+    pid =
+      spawn(fn ->
+        :ok = LogApi.subscribe_member(broker, coord1, "t", "g", :m1, 10, 10)
+        # the member re-resolves to coord2 and acks there (a heartbeat) — this must refresh sub.coordinator
+        :ok = LogApi.stream_ack_member(broker, coord2, "t", "g", :m1, nil, 0)
+        send(test, :acked)
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive :acked, 2_000
+    # the ack registered the member on the new owner (coord2)
+    wait_until(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord2, "g", "t", :m1)) end)
+
+    Process.exit(pid, :kill)
+    # the leave must follow the refreshed ref to coord2 (not the stale coord1), so m1 leaves coord2
+    wait_until(fn -> GroupCoordinator.assignment(coord2, "g", "t", :m1) == {:error, :unknown_member} end)
+  end
 end

@@ -9,14 +9,15 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
     {:ok, clock} = Agent.start_link(fn -> 0 end)
     {:ok, ranges} = Agent.start_link(fn -> Keyword.get(opts, :ranges, [:r0, :r1, :r2, :r3]) end)
 
-    coord =
-      start_supervised!(
-        {GroupCoordinator,
-         clock: fn -> Agent.get(clock, & &1) end,
-         ranges_fun: fn _topic -> Agent.get(ranges, & &1) end,
-         session_ms: Keyword.get(opts, :session_ms, 100),
-         tick_ms: 3_600_000}
-      )
+    base = [
+      clock: fn -> Agent.get(clock, & &1) end,
+      ranges_fun: fn _topic -> Agent.get(ranges, & &1) end,
+      session_ms: Keyword.get(opts, :session_ms, 100),
+      tick_ms: 3_600_000
+    ]
+
+    child = if owns = opts[:owns_fun], do: Keyword.put(base, :owns_fun, owns), else: base
+    coord = start_supervised!({GroupCoordinator, child})
 
     %{coord: coord, clock: clock, ranges: ranges}
   end
@@ -127,5 +128,28 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
 
     {:ok, _, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
     assert Enum.sort(ranges) == [:r0]
+  end
+
+  describe "ownership guard (owns_fun)" do
+    test "poll and join are rejected with :not_owner when this node does not own the topic" do
+      %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn _topic -> false end)
+      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "t", :m1)
+      assert {:error, :not_owner} = GroupCoordinator.join(c, "g", "t", :m1)
+    end
+
+    test "a rejected poll registers no member (no phantom assignment)" do
+      %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn _topic -> false end)
+      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "t", :m1)
+      # the group must not exist: a later heartbeat finds no member rather than a stale registration
+      assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+      assert GroupCoordinator.assignment(c, "g", "t", :m1) == {:error, :unknown_member}
+    end
+
+    test "owns_fun is consulted per topic, so a node can own some topics and reject others" do
+      %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn topic -> topic == "mine" end)
+      assert {:ok, 1, ranges} = GroupCoordinator.poll(c, "g", "mine", :m1)
+      assert Enum.sort(ranges) == [:r0, :r1]
+      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "theirs", :m1)
+    end
   end
 end

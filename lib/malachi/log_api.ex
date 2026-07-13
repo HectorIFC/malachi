@@ -124,12 +124,19 @@ defmodule Malachi.LogApi do
           term(),
           pos_integer(),
           non_neg_integer()
-        ) :: {:ok, [Record.t()], cursor()}
+        ) :: {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch_member(server, coordinator, topic, group, member, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
-    {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
-    positions = BrokerServer.committed_offsets(server, group, topic)
-    {records, next_cursor} = do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
-    {:ok, records, next_cursor}
+    case GroupCoordinator.poll(coordinator, group, topic, member) do
+      {:ok, _generation, ranges} ->
+        positions = BrokerServer.committed_offsets(server, group, topic)
+        {records, next_cursor} = do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
+        {:ok, records, next_cursor}
+
+      # this node no longer owns the topic's coordination (stale routing during failover) — the client
+      # re-resolves and retries against the new owner
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -172,10 +179,20 @@ defmodule Malachi.LogApi do
           pos_integer(),
           pos_integer()
         ) ::
-          :ok
+          :ok | {:error, term()}
   def subscribe_member(server, coordinator, topic, group, member, window, max) do
-    {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
-    BrokerServer.subscribe(server, topic, group, window, max, member: member, ranges: ranges, coordinator: coordinator)
+    case GroupCoordinator.poll(coordinator, group, topic, member) do
+      {:ok, _generation, ranges} ->
+        BrokerServer.subscribe(server, topic, group, window, max,
+          member: member,
+          ranges: ranges,
+          coordinator: coordinator
+        )
+
+      # stale routing during a failover: the client re-resolves and re-subscribes against the new owner
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -210,8 +227,16 @@ defmodule Malachi.LogApi do
   def stream_ack_member(server, coordinator, topic, group, member, cursor, count) do
     case decode_cursor(cursor) do
       {:ok, positions} ->
-        {:ok, _generation, ranges} = GroupCoordinator.poll(coordinator, group, topic, member)
-        BrokerServer.stream_ack(server, topic, group, positions, count, ranges)
+        case GroupCoordinator.poll(coordinator, group, topic, member) do
+          # refresh the subscriber's ranges *and* its coordinator ref, so after a leadership change the
+          # :DOWN leave (and later acks) target the current owner, not the one captured at subscribe time
+          {:ok, _generation, ranges} ->
+            BrokerServer.stream_ack(server, topic, group, positions, count, ranges, coordinator)
+
+          # stale routing during a failover: fire-and-forget, the member's next ack re-resolves
+          {:error, _reason} = error ->
+            error
+        end
 
       {:error, reason} ->
         {:error, reason}

@@ -1616,13 +1616,30 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         async do `:DOWN` encaminha ao dono). **Single-node inalterado** (resolve → `:persistent_term` miss →
         nome local). Testado (puro, 9): topologia nil/ring vazio/vnode ausente/líder nil → local; este-nó →
         local; outro-nó → `{:remote}`; `ref/2`; round-trip do `put_topology`/`topology`. Suíte 776 testes 0
-        falhas; credo/dialyzer/format limpos. **Limitação conhecida (escopo A2):** o `sub.coordinator` é o ref
-        resolvido **no subscribe**; se a liderança do vnode trocar **durante** a sessão, os acks seguintes
-        re-resolvem ao novo líder (o `process_stream_frame` chama `coordinator_for` fresco) mas o
-        `sub.coordinator` não é atualizado → o `leave` async do `:DOWN` iria ao líder antigo e o membro vazaria
-        no novo até o **session-timeout** evictá-lo (bounded; single-node não afetado pois resolve é sempre
-        `:local`). A consistência de failover entra no A2. **Próximo: A2 (rodar o coordinator no líder do vnode
-        via o padrão `VnodeCoordinatorManager`; decidir membership soft vs RSM-durável) → A3 (teste `:multinode`).**
+        falhas; credo/dialyzer/format limpos. **Limitação conhecida (resolvida no A2):** o `sub.coordinator` era
+        o ref resolvido **no subscribe** e não era atualizado nos acks → numa troca de liderança o `leave` do
+        `:DOWN` iria ao líder antigo. **Próximo: A2 (consistência de failover) → A3 (teste `:multinode`).**
+      - ✅ **A2 (parte A) — consistência de failover: refresh do coordinator no ack + guard de ownership.**
+        Fecha a limitação do A1 e endurece a janela de failover, com **membership soft** e **coordinator = líder
+        do vnode** — ambos **confirmados pela transcrição do NorthGuard no repo** (`northguard_meetup_transcript.txt`:
+        *"this coordinator is the leader of a given VNode... manages all the metadata owned by VNode"*; o Conductor
+        do Xinfra faz client-management por conexão/heartbeat, só offsets/checkpoints são duráveis). Decisão
+        **A2-A** (foco em correção; o lifecycle "rodar só no líder via `VnodeCoordinatorManager"` entra no A3, junto
+        do teste multinode que o exercita — comportamento observável é idêntico, então B é fidelidade de detalhe
+        interno só testável multi-nó). **Parte 1 — refresh:** `BrokerServer.stream_ack/7` ganha o param
+        `coordinator`; o `handle_call` atualiza `sub.coordinator` (além de `sub.ranges`), então após uma troca de
+        líder o `stream_ack_member` (que já re-resolve o líder fresco no `tcp_protocol`) grava o ref novo e o
+        `leave` async do `:DOWN` acerta o **dono atual**. **Parte 2 — guard:** o `GroupCoordinator` ganha o seam
+        `owns_fun` (default `fn _ -> true end`; no boot, `CoordinatorRouter.owns?/1`); `join`/`poll` rejeitam com
+        `{:error, :not_owner}` **sem** registrar quando o nó não lidera o topic (defende contra roteamento stale na
+        janela de failover — sem assignment fantasma). O `LogApi` (subscribe/fetch/stream_ack member) propaga o
+        `:not_owner` e o `tcp_protocol.subscribe` responde erro em vez de entrar em stream (cliente re-resolve e
+        re-subscreve); heartbeat/fetch **auto-curam** no próximo request (roteamento é por-request). Single-node:
+        `owns?` é sempre `:local` → nunca rejeita → inalterado. Testado: guard (poll/join → `:not_owner`; sem
+        registro fantasma; owns_fun por-topic — 3) + refresh (ack via coordinator diferente → `:DOWN` leave acerta
+        o novo — 1). Suíte 780 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: A3 (lifecycle do
+        coordinator no líder do vnode via `VnodeCoordinatorManager` + teste `:multinode`: assignment disjunta entre
+        nós via forwarding + reconvergência pós-failover).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

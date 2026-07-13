@@ -27,6 +27,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
+  alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.TLSValidator
@@ -77,9 +78,13 @@ defmodule Malachi.Application do
         [
           # Consumer-group coordinator: assigns a topic's ranges across group members for parallel,
           # server-scoped consumption (the client never sees ranges). Its ranges come from the broker.
-          {Malachi.Consumer.GroupCoordinator,
-           name: Malachi.LogGroupCoordinator,
-           ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end},
+          {
+            Malachi.Consumer.GroupCoordinator,
+            # reject work routed here by a stale leadership view (single-node: always owns)
+            name: Malachi.LogGroupCoordinator,
+            ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
+            owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end
+          },
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
         ]

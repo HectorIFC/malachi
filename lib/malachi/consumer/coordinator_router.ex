@@ -64,6 +64,13 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   end
 
   @doc """
+  Whether **this** node owns `topic`'s coordination (it leads the topic's vnode, or there is no sharded
+  topology). The owning coordinator uses this to reject work routed to it by a stale leadership view.
+  """
+  @spec owns?(term()) :: boolean()
+  def owns?(topic), do: location(topic, topology(), node(), &leader_node/1) == :local
+
+  @doc """
   Publishes the static routing topology (the ring + vnode→server-id map) for `resolve/2`. Called once at
   boot when the sharded control plane is established; unset means single-node / in-memory.
   """

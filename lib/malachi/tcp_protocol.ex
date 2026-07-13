@@ -105,13 +105,19 @@ defmodule Malachi.TCPProtocol do
       max = fetch_max(max_raw)
 
       # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
-      if member != nil and group != nil do
-        :ok = LogApi.subscribe_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, window, max)
-      else
-        :ok = LogApi.subscribe(Malachi.LogBroker, topic, group, window, max)
-      end
+      result =
+        if member != nil and group != nil do
+          LogApi.subscribe_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, window, max)
+        else
+          LogApi.subscribe(Malachi.LogBroker, topic, group, window, max)
+        end
 
-      {:stream, correlation_id}
+      # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
+      # mode; the client re-resolves and re-subscribes against the new owner.
+      case result do
+        :ok -> {:stream, correlation_id}
+        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+      end
     end)
   end
 

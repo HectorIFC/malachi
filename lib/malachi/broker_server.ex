@@ -199,11 +199,12 @@ defmodule Malachi.BrokerServer do
           Malachi.Metadata.group(),
           Malachi.Metadata.offsets(),
           non_neg_integer(),
-          [term()] | nil
+          [term()] | nil,
+          GenServer.server() | nil
         ) ::
           :ok
-  def stream_ack(server, topic, group, positions, count, ranges \\ nil) do
-    GenServer.call(server, {:stream_ack, topic, group, positions, count, self(), ranges})
+  def stream_ack(server, topic, group, positions, count, ranges \\ nil, coordinator \\ nil) do
+    GenServer.call(server, {:stream_ack, topic, group, positions, count, self(), ranges, coordinator})
   end
 
   @doc "Removes the calling process's streaming subscription to `topic`. Returns `:ok`."
@@ -435,10 +436,12 @@ defmodule Malachi.BrokerServer do
     {:reply, :ok, %{state | subscribers: subscribers}}
   end
 
-  def handle_call({:stream_ack, topic, group, positions, count, pid, ranges}, _from, state) do
+  def handle_call({:stream_ack, topic, group, positions, count, pid, ranges, coordinator}, _from, state) do
     # commit the group's position durably, then return `count` credit to this subscriber and push more.
     # `ranges` (from the LogApi member poll) refreshes this member's assignment, so a rebalance is picked
     # up on the ack (nil keeps the current scope — a whole-group or unchanged member subscription).
+    # `coordinator` refreshes the member's resolved coordinator ref, so after a vnode leadership change
+    # the :DOWN leave targets the current owner (nil keeps the ref captured at subscribe).
     {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
 
     subs =
@@ -446,7 +449,12 @@ defmodule Malachi.BrokerServer do
       |> Map.get(topic, [])
       |> Enum.map(fn sub ->
         if sub.pid == pid do
-          push_subscriber(broker, %{sub | in_flight: max(sub.in_flight - count, 0), ranges: ranges || sub.ranges})
+          push_subscriber(broker, %{
+            sub
+            | in_flight: max(sub.in_flight - count, 0),
+              ranges: ranges || sub.ranges,
+              coordinator: coordinator || sub.coordinator
+          })
         else
           sub
         end
