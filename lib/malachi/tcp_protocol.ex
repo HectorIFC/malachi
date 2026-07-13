@@ -58,10 +58,16 @@ defmodule Malachi.TCPProtocol do
     {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
 
     if api_key == Wire.stream_ack_key() do
-      {topic, group, cursor, count} = Wire.decode_stream_ack_req(payload)
-      # the subscription already gated :consume; the session's permissions are immutable, so an ack
-      # here is necessarily authorized. Fire-and-forget: credit comes back as more pushes.
-      LogApi.stream_ack(Malachi.LogBroker, topic, group, cursor, count)
+      {topic, group, member, cursor, count} = Wire.decode_stream_ack_req(payload)
+      # the subscription already gated :consume; the session's permissions are immutable, so an ack here
+      # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
+      # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
+      if member != nil and group != nil do
+        LogApi.stream_ack_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, cursor, count)
+      else
+        LogApi.stream_ack(Malachi.LogBroker, topic, group, cursor, count)
+      end
+
       :ok
     else
       transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
@@ -91,8 +97,17 @@ defmodule Malachi.TCPProtocol do
   # request/response mode).
   defp subscribe(correlation_id, payload, session) do
     with_permission(session, :consume, correlation_id, fn ->
-      {topic, group, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
-      :ok = LogApi.subscribe(Malachi.LogBroker, topic, group, stream_window(window_raw), fetch_max(max_raw))
+      {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
+      window = stream_window(window_raw)
+      max = fetch_max(max_raw)
+
+      # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
+      if member != nil and group != nil do
+        :ok = LogApi.subscribe_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, window, max)
+      else
+        :ok = LogApi.subscribe(Malachi.LogBroker, topic, group, window, max)
+      end
+
       {:stream, correlation_id}
     end)
   end

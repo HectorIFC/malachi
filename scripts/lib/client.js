@@ -175,20 +175,24 @@ class MalachiClient {
 
   // Opens a server-push stream. onRecords({ records, cursor }) fires per push; the caller must streamAck
   // to release credit and durably commit. Resolves once the subscription is registered.
-  async subscribe(topic, { group, window = 100, max = 100, onRecords, onError } = {}) {
+  // With `member` (a consumer-group member id) the server scopes the push stream to the member's ranges;
+  // the client still sees only records + an opaque cursor. Without it, a whole-group subscription.
+  async subscribe(topic, { group, member = null, window = 100, max = 100, onRecords, onError } = {}) {
     if (typeof onRecords !== 'function') throw new TypeError('subscribe requires an onRecords callback');
     if (!this.socket || this.closed) throw new MalachiError('not connected');
     const correlationId = this._nextId();
     this.subscriptions.set(correlationId, { onRecords, onError });
-    const payload = wire.encodeSubscribeReq(topic, group, window, max);
+    const payload = wire.encodeSubscribeReq(topic, group, member, window, max);
     this.socket.write(wire.encodeRequest(wire.API.subscribe, correlationId, payload));
     return correlationId;
   }
 
-  // Fire-and-forget: commits `group` at `cursor` and returns `count` records of window credit.
-  streamAck(topic, group, cursor, count) {
+  // Fire-and-forget: commits `group` at `cursor` and returns `count` records of window credit. With
+  // `member` set it also heartbeats the coordinator and refreshes the member's ranges; an ack with a
+  // null cursor and count 0 is a pure heartbeat that closes the idle-member liveness gap.
+  streamAck(topic, group, member, cursor, count) {
     if (!this.socket || this.closed) throw new MalachiError('not connected');
-    const payload = wire.encodeStreamAckReq(topic, group, cursor, count);
+    const payload = wire.encodeStreamAckReq(topic, group, member, cursor, count);
     this.socket.write(wire.encodeRequest(wire.API.streamAck, this._nextId(), payload));
   }
 

@@ -99,6 +99,19 @@ defmodule Malachi.WireTest do
       assert Wire.decode_leave_group_req(Wire.encode_leave_group_req("t", "grp", "m1")) == {"t", "grp", "m1"}
     end
 
+    test "subscribe req round-trip carries an optional member id" do
+      assert Wire.decode_subscribe_req(Wire.encode_subscribe_req("t", "g", "m1", 10, 100)) == {"t", "g", "m1", 10, 100}
+      assert Wire.decode_subscribe_req(Wire.encode_subscribe_req("t", "g", nil, 10, 100)) == {"t", "g", nil, 10, 100}
+    end
+
+    test "stream_ack req round-trip carries an optional member id" do
+      assert Wire.decode_stream_ack_req(Wire.encode_stream_ack_req("t", "g", "m1", <<1, 2>>, 5)) ==
+               {"t", "g", "m1", <<1, 2>>, 5}
+
+      assert Wire.decode_stream_ack_req(Wire.encode_stream_ack_req("t", "g", nil, nil, 0)) ==
+               {"t", "g", nil, nil, 0}
+    end
+
     test "auth req/resp round-trip" do
       assert Wire.decode_auth_req(Wire.encode_auth_req("user", "pass")) == {"user", "pass"}
       assert Wire.decode_auth_resp(Wire.encode_auth_resp("token123")) == "token123"

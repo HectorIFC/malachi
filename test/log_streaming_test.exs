@@ -79,6 +79,41 @@ defmodule Malachi.LogStreamingTest do
     end)
   end
 
+  test "a consumer-group member gets a server-scoped, opaque push stream; a member ack heartbeats" do
+    topic = "stream_member_#{System.unique_integer([:positive])}"
+
+    on_producer(fn prod ->
+      assert {code, _} = create_topic(prod, topic)
+      assert ok?(code)
+      assert {code, <<3::32>>} = produce(prod, topic, ["a", "b", "c"])
+      assert ok?(code)
+    end)
+
+    with_session("app", "app123", fn sub ->
+      corr = 55
+      # subscribe as member "m1" of group "g": the sole member owns every range, so the server pushes
+      # the whole backlog — but only as records + an opaque cursor (no range id ever crosses the wire)
+      TCPHelper.subscribe(sub, topic, "g", "m1", 10, 100, corr)
+
+      {records, cursor} = TCPHelper.recv_push(sub, corr)
+      assert values(records) == ["a", "b", "c"]
+      assert is_binary(cursor)
+      assert Enum.all?(records, &(&1.offset == nil))
+
+      # a member stream_ack (durable commit + heartbeat + range refresh + credit) is accepted; credit
+      # returns so a later produce still pushes to the member
+      TCPHelper.stream_ack(sub, topic, "g", "m1", cursor, 3, corr)
+
+      on_producer(fn prod ->
+        assert {code, <<1::32>>} = produce(prod, topic, ["d"])
+        assert ok?(code)
+      end)
+
+      {records2, _cursor} = TCPHelper.recv_push(sub, corr)
+      assert values(records2) == ["d"]
+    end)
+  end
+
   test "the credit window bounds in-flight records until an ack returns credit" do
     topic = "stream_win_#{System.unique_integer([:positive])}"
 

@@ -189,12 +189,15 @@ function encodeCommitReq(topic, group, cursor) {
   return Buffer.concat([putStr(topic), putStr(group), putStr(cursor)]);
 }
 
-function encodeSubscribeReq(topic, group, window, max) {
-  return Buffer.concat([putStr(topic), putStr(group), u32(window), u32(max)]);
+// member is an optional consumer-group member id (null = whole-group subscription); with it set the
+// server scopes the push stream to the member's ranges (opaque — the push is still records + cursor).
+function encodeSubscribeReq(topic, group, member, window, max) {
+  return Buffer.concat([putStr(topic), putStr(group), putStr(member), u32(window), u32(max)]);
 }
 
-function encodeStreamAckReq(topic, group, cursor, count) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(cursor), u32(count)]);
+// A member stream_ack doubles as a coordinator heartbeat + range refresh (an empty ack = a heartbeat).
+function encodeStreamAckReq(topic, group, member, cursor, count) {
+  return Buffer.concat([putStr(topic), putStr(group), putStr(member), putStr(cursor), u32(count)]);
 }
 
 module.exports = {

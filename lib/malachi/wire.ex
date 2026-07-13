@@ -179,28 +179,32 @@ defmodule Malachi.Wire do
   # `window` (max in-flight records) and a per-push `max` batch size. The server then pushes records as
   # ordinary success responses tagged with the subscribe's correlation id, each carrying an
   # `encode_fetch_resp/2` payload (records + the next opaque cursor).
-  def encode_subscribe_req(topic, group, window, max) do
-    <<put_str(topic)::binary, put_str(group)::binary, window::32, max::32>>
+  # member is an optional consumer-group member id (nil = whole-group subscription); with it set the
+  # server scopes the push stream to the member's ranges (opaque — the push is still records + cursor).
+  def encode_subscribe_req(topic, group, member, window, max) do
+    <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary, window::32, max::32>>
   end
 
   def decode_subscribe_req(payload) do
     {topic, rest} = take_str(payload)
-    {group, <<window::32, max::32>>} = take_str(rest)
-    {topic, group, window, max}
+    {group, rest} = take_str(rest)
+    {member, <<window::32, max::32>>} = take_str(rest)
+    {topic, group, member, window, max}
   end
 
   # stream_ack durably commits `group`'s position at `cursor` and returns `count` records of window
   # credit (unblocking further pushes). Fire-and-forget: the server sends no response, the credit shows
   # up as more pushes.
-  def encode_stream_ack_req(topic, group, cursor, count) do
-    <<put_str(topic)::binary, put_str(group)::binary, put_str(cursor)::binary, count::32>>
+  def encode_stream_ack_req(topic, group, member, cursor, count) do
+    <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary, put_str(cursor)::binary, count::32>>
   end
 
   def decode_stream_ack_req(payload) do
     {topic, rest} = take_str(payload)
     {group, rest} = take_str(rest)
+    {member, rest} = take_str(rest)
     {cursor, <<count::32>>} = take_str(rest)
-    {topic, group, cursor, count}
+    {topic, group, member, cursor, count}
   end
 
   # leave_group removes a member from a consumer group for a fast rebalance on a clean shutdown (otherwise

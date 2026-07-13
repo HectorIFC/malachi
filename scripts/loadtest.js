@@ -227,7 +227,7 @@ async function streamDriver(clients, opts, durationMs, stats) {
               onRecords: ({ records, cursor }) => {
                 if (records.length === 0) return;
                 stats.record(0, records.length, recordBytes(records));
-                client.streamAck(opts.topic, group, cursor, records.length);
+                client.streamAck(opts.topic, group, null, cursor, records.length);
               },
               onError: () => {
                 stats.error();

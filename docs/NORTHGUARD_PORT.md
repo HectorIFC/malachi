@@ -1573,6 +1573,23 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         completo** (topic com 2 ranges via split); processo de um membro morrendo → **leave** async → o
         membro some do coordinator. Suíte 764 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: Str-2
         (wire: member no subscribe/stream_ack + cliente Node subscriber com member + heartbeat).**
+      - ✅ **Streaming member-scoping — Str-2 (wire + cliente Node).** Expõe o Str-1 na borda: o `member`
+        (opcional) entra no **subscribe** e no **stream_ack** do protocolo binário — depois do `group`, como
+        no `fetch` (Str-1): `encode_subscribe_req(topic, group, member, window, max)` e
+        `encode_stream_ack_req(topic, group, member, cursor, count)` (`put_str(member)` = flag de presença;
+        `nil` = subscription whole-group, sem quebrar o caminho antigo). O `TCPProtocol` despacha por
+        presença: `subscribe`/`process_stream_frame` chamam `LogApi.subscribe_member`/`stream_ack_member`
+        quando `member != nil and group != nil`, senão o caminho whole-group — **zero range/offset no fio**
+        (o push segue records + cursor opaco). Cliente Node: `subscriber.js --member <m>` abre um stream
+        escopado, e — fechando o **gap de liveness do membro idle** anotado no Str-1 — um **heartbeat
+        periódico** (`setInterval` a 10s < os 30s de session timeout) emite um **ack vazio** (`cursor` nil,
+        `count` 0) só quando não houve ack real recente (`lastAck`), mantendo a membership viva; o `SIGINT`
+        faz `leaveGroup` (rebalance rápido). `streamAck` ganhou o `member` na assinatura (callers
+        whole-group — `loadtest.js` — passam `null`). Testes: round-trip de wire para subscribe/stream_ack
+        com/sem member; e2e TCP (`log_streaming_test`) — subscribe como membro único recebe o backlog
+        inteiro **opaco** (offset nil), um member ack (commit + heartbeat + credit) é aceito e um produce
+        posterior ainda faz push. Suíte 767 testes 0 falhas; credo/dialyzer/format limpos. **G1 (consumer
+        groups) + streaming member-scoping concluídos.**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

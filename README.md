@@ -709,8 +709,8 @@ operation:
 | 2       | `produce`      | topic + records (routed by key); returns the produced count    |
 | 3       | `fetch`        | topic + opaque cursor / consumer group / **group member** → records + cursor |
 | 4       | `commit`       | durably commit a consumer group's position (from a cursor)      |
-| 5       | `subscribe`    | open a server-push stream for a group, bounded by a credit window |
-| 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit |
+| 5       | `subscribe`    | open a server-push stream for a group (or a **group member**), bounded by a credit window |
+| 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit (a **member** ack also heartbeats) |
 | 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
 Records on the wire carry **no offset** — position travels only in the opaque cursor, and permissions
@@ -724,6 +724,9 @@ fetching (or explicitly `leave_group`s on shutdown).
 Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the
 server pushes records up to the credit window; the client acks to durably advance the group's position
 (at-least-once) and return credit, so a slow consumer applies backpressure instead of overflowing.
+A `subscribe` with a **member id** scopes the push stream to that member's ranges (parallel, disjoint,
+still opaque); the member ack doubles as a coordinator heartbeat, so an idle member sends a periodic
+empty ack to stay alive (and `leave_group`s on shutdown for a fast rebalance).
 
 ### Reference client (Node.js)
 
@@ -747,6 +750,10 @@ node scripts/consumer.js orders --group workers --member c2 &
 
 # server-push streaming (subscribe + credit-windowed acks)
 node scripts/subscriber.js orders --group live
+
+# parallel server-push: several members of one group, each streamed a disjoint share (opaque)
+node scripts/subscriber.js orders --group live --member s1 &
+node scripts/subscriber.js orders --group live --member s2 &
 
 # end-to-end demo (append, then stream while producing)
 bash scripts/streaming-demo.sh
