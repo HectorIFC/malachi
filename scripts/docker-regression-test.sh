@@ -90,7 +90,7 @@ echo ""
 run_test "Dashboard HTTP endpoint" "curl -sf -H 'Authorization: Bearer ${TOKEN}' http://localhost:${DASHBOARD_PORT}/"
 
 # Test 2: Metrics endpoint (with auth)
-run_test "Metrics endpoint returns JSON" "curl -sf -H 'Authorization: Bearer ${TOKEN}' http://localhost:${DASHBOARD_PORT}/metrics | grep -q 'queues'"
+run_test "Metrics endpoint returns JSON" "curl -sf -H 'Authorization: Bearer ${TOKEN}' http://localhost:${DASHBOARD_PORT}/metrics | grep -q 'topics'"
 
 # Test 3: SSE stream endpoint (with auth)
 run_test "SSE stream endpoint available" "timeout 2 curl -sf -H 'Authorization: Bearer ${TOKEN}' http://localhost:${DASHBOARD_PORT}/stream | head -1"
@@ -101,16 +101,14 @@ run_test "TCP server listening" "nc -zv localhost ${TCP_PORT}"
 # Test 5: Container process running
 run_test "Container process health" "docker exec $CONTAINER_NAME bin/malachi pid"
 
-# Test 6: Basic queue operations
-echo -n "Testing: Queue publish/consume workflow... "
+# Test 6: Basic log produce/fetch workflow (produce by key -> fetch by opaque cursor)
+echo -n "Testing: Log produce/fetch workflow... "
 WORKFLOW_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  result = Malachi.Queue.enqueue("regression_test", "test payload", %{"test" => "true"})
-  :timer.sleep(500)
-  metrics = Malachi.Metrics.get_metrics("regression_test")
-  case {result, metrics.enqueued} do
-    {{:ok, _}, count} when count > 0 -> IO.puts("PASS")
-    _ -> IO.puts("FAIL")
-  end
+  topic = "regression_topic"
+  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  {:ok, 1} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "rk", value: "test payload"}])
+  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
+  if "test payload" in Enum.map(records, & &1.value), do: IO.puts("PASS"), else: IO.puts("FAIL")
 ' 2>&1 | grep -E "^PASS$|^FAIL$" | tail -1)
 
 if [ "$WORKFLOW_RESULT" = "PASS" ]; then
@@ -120,69 +118,34 @@ else
     echo -e "${RED}FAIL${NC} (got: $WORKFLOW_RESULT)"
     ((TESTS_FAILED++))
 fi
-# Test 6.5: Channel publish/broadcast workflow
-echo -n "Testing: Channel publish/broadcast workflow... "
-CHANNEL_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  # Spawn multiple subscribers
-  parent = self()
-  subscribers = Enum.map(1..5, fn i ->
-    spawn(fn ->
-      receive do
-        {:channel_message, msg} -> send(parent, {:received, i, msg})
-      after
-        2000 -> send(parent, {:timeout, i})
-      end
-    end)
-  end)
-  
-  # Subscribe all
-  Enum.each(subscribers, fn sub ->
-    Malachi.Channel.subscribe("regression_channel", sub)
-  end)
-  
-  :timer.sleep(200)
-  
-  # Publish message
-  Malachi.Channel.publish("regression_channel", "broadcast_test", %{})
-  
-  # Wait for responses
-  :timer.sleep(500)
-  
-  # Count received messages
-  received = Enum.reduce(1..5, 0, fn _, acc ->
-    receive do
-      {:received, _, _} -> acc + 1
-      {:timeout, _} -> acc
-    after
-      0 -> acc
-    end
-  end)
-  
-  stats = Malachi.Channel.get_stats("regression_channel")
-  
-  if received >= 3 and stats.published >= 1 do
-    IO.puts("PASS")
-  else
-    IO.puts("FAIL")
-  end
+# Test 6.5: Consumer group resume workflow (fetch by group -> commit -> resume empty, at-least-once)
+echo -n "Testing: Consumer group resume workflow... "
+GROUP_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+  topic = "regression_group_topic"
+  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  {:ok, _} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "g", value: "gm"}])
+  {:ok, first, cursor} = Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, "rg", 10)
+  :ok = Malachi.LogApi.commit(Malachi.LogBroker, topic, "rg", cursor)
+  {:ok, second, _cursor} = Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, "rg", 10)
+  # after committing the position the group resumes with nothing left to read
+  if length(first) >= 1 and second == [], do: IO.puts("PASS"), else: IO.puts("FAIL")
 ' 2>&1 | grep -E "^PASS$|^FAIL$" | tail -1)
 
-if [ "$CHANNEL_RESULT" = "PASS" ]; then
+if [ "$GROUP_RESULT" = "PASS" ]; then
     echo -e "${GREEN}PASS${NC}"
     ((TESTS_PASSED++))
 else
-    echo -e "${RED}FAIL${NC} (got: $CHANNEL_RESULT)"
+    echo -e "${RED}FAIL${NC} (got: $GROUP_RESULT)"
     ((TESTS_FAILED++))
 fi
 # Test 7: High-volume throughput
 echo -n "Testing: High-volume message throughput... "
 THROUGHPUT_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  results = Enum.map(1..1000, fn i -> 
-    Malachi.Queue.enqueue("throughput_test", "msg_#{i}", %{})
-  end)
-  :timer.sleep(1000)
-  metrics = Malachi.Metrics.get_metrics("throughput_test")
-  if metrics.enqueued >= 1000, do: IO.puts("PASS"), else: IO.puts("FAIL:#{metrics.enqueued}")
+  topic = "throughput_topic"
+  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  records = for i <- 1..1000, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
+  {:ok, count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, records)
+  if count >= 1000, do: IO.puts("PASS"), else: IO.puts("FAIL:#{count}")
 ' 2>&1 | grep -E "^PASS$|^FAIL:" | tail -1)
 
 if echo "$THROUGHPUT_TEST" | grep -q "^PASS"; then
@@ -197,9 +160,10 @@ fi
 echo -n "Testing: Memory stability under load... "
 INITIAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
 docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  Enum.each(1..5000, fn i ->
-    Malachi.Queue.enqueue("mem_test", "msg_#{i}", %{})
-  end)
+  topic = "mem_topic"
+  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  records = for i <- 1..5000, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
+  {:ok, _count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, records)
   :ok
 ' > /dev/null 2>&1
 sleep 2
@@ -207,26 +171,28 @@ FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" 
 echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
 ((TESTS_PASSED++))
 
-# Test 9: Concurrent queue operations
-echo -n "Testing: Concurrent multi-queue operations... "
+# Test 9: Concurrent multi-topic operations
+echo -n "Testing: Concurrent multi-topic operations... "
 CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  queues = for i <- 1..10, do: "concurrent_queue_#{i}"
-  
-  # Send messages to all queues
-  Enum.each(queues, fn q ->
-    Enum.each(1..100, fn i ->
-      Malachi.Queue.enqueue(q, "msg_#{i}", %{})
+  topics = for i <- 1..10, do: "concurrent_topic_#{i}"
+  Enum.each(topics, fn t -> _ = Malachi.LogApi.create_topic(Malachi.LogBroker, t) end)
+
+  # Produce concurrently to all topics (100 records each)
+  topics
+  |> Enum.map(fn t ->
+    Task.async(fn ->
+      records = for i <- 1..100, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
+      Malachi.LogApi.produce_records(Malachi.LogBroker, t, records)
     end)
   end)
-  
-  :timer.sleep(1000)
-  
-  # Verify all queues have messages
-  all_ok = Enum.all?(queues, fn q ->
-    metrics = Malachi.Metrics.get_metrics(q)
-    metrics.enqueued >= 100
+  |> Task.await_many(20_000)
+
+  # Verify every topic drained at least its 100 records back
+  all_ok = Enum.all?(topics, fn t ->
+    {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, t, :start, 1000)
+    length(records) >= 100
   end)
-  
+
   if all_ok, do: IO.puts("PASS"), else: IO.puts("FAIL")
 ' 2>&1 | grep -E "^PASS$|^FAIL$" | tail -1)
 

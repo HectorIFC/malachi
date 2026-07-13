@@ -104,67 +104,25 @@ else
 fi
 echo ""
 
-# Step 5: Basic functionality test
-echo "Step 5: Testing basic queue functionality..."
+# Step 5: NorthGuard log stack functionality (produce by key -> fetch by opaque cursor)
+echo "Step 5: Testing NorthGuard log stack (produce/fetch)..."
 FUNC_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  result = Malachi.Queue.enqueue("validation_test", "test_msg", %{})
-  :timer.sleep(100)
-  metrics = Malachi.Metrics.get_metrics("validation_test")
-  case {result, metrics.enqueued} do
-    {{:ok, _}, count} when count > 0 -> IO.puts("OK:enqueued=#{count}")
-    _ -> IO.puts("FAIL:result=#{inspect(result)}")
+  topic = "validation_topic"
+  :ok = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  rec = %Malachi.Log.Record{key: "vk", value: "validation_msg"}
+  {:ok, count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [rec])
+  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
+  values = Enum.map(records, & &1.value)
+  case {count, "validation_msg" in values} do
+    {1, true} -> IO.puts("OK:produced=#{count}")
+    other -> IO.puts("FAIL:#{inspect(other)}")
   end
 ' 2>&1 | grep -E "^OK:|^FAIL:" | tail -1)
 
 if echo "$FUNC_TEST" | grep -q "^OK:"; then
-    echo -e "${GREEN}✓ Queue functionality working${NC}"
+    echo -e "${GREEN}✓ Log stack functionality working${NC}"
 else
-    echo -e "${YELLOW}⚠ Could not verify queue functionality (got: $FUNC_TEST)${NC}"
-fi
-echo ""
-
-# Step 5.5: Channel functionality test
-echo "Step 5.5: Testing basic channel functionality..."
-CHANNEL_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
-  # Create a simple subscriber process
-  parent = self()
-  subscriber = spawn(fn ->
-    receive do
-      {:channel_message, msg} -> send(parent, {:received, msg})
-    after
-      1000 -> send(parent, :timeout)
-    end
-  end)
-  
-  # Subscribe to channel
-  :ok = Malachi.Channel.subscribe("validation_channel", subscriber)
-  :timer.sleep(100)
-  
-  # Publish a message
-  :ok = Malachi.Channel.publish("validation_channel", "test_channel_msg", %{"test" => "true"})
-  :timer.sleep(200)
-  
-  # Check if message was received
-  result = receive do
-    {:received, _msg} -> :ok
-    :timeout -> :timeout
-  after
-    500 -> :no_message
-  end
-  
-  # Get channel stats
-  stats = Malachi.Channel.get_stats("validation_channel")
-  
-  case {result, stats.published >= 1} do
-    {:ok, true} -> IO.puts("OK:published=#{stats.published}")
-    _ -> IO.puts("FAIL:result=#{inspect(result)},stats=#{inspect(stats)}")
-  end
-' 2>&1 | grep -E "^OK:|^FAIL:" | tail -1)
-
-if echo "$CHANNEL_TEST" | grep -q "^OK:"; then
-    echo -e "${GREEN}✓ Channel functionality working${NC}"
-else
-    echo -e "${YELLOW}⚠ Could not verify channel functionality (got: $CHANNEL_TEST)${NC}"
+    echo -e "${YELLOW}⚠ Could not verify log stack functionality (got: $FUNC_TEST)${NC}"
 fi
 echo ""
 

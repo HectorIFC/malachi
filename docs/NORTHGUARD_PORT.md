@@ -1449,14 +1449,17 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       clientes param de ser roteados antes do drain). Config `MALACHIMQ_SHUTDOWN_GRACE_MS`. Testado:
       `graceful/1` roda quiesce→sleep(drain_ms)→close **em ordem**; pula o sleep com `drain_ms: 0`;
       default vem do config — 3. Suíte verde; credo/dialyzer limpos. README (env var) + k8s (grace/preStop).
-    - 🚧 **Consumer group coordination (G1 — épico, fatiado).** Hoje um grupo é uma **posição única
-      compartilhada** (todos os consumidores leem a mesma posição commitada — sem paralelismo). Alvo
-      NorthGuard/Kafka: cada **range** do topic atribuída a **exatamente um** membro do grupo, consumo
-      paralelo, com rebalance no join/leave. Achado que aterra o design: o `commit_offset` faz `Map.put`
-      (substitui o mapa de offsets do `{group, topic}`) → pra consumo particionado terá de virar **merge
-      por-range** (S2). Fatiamento: **S1** núcleo de assignment (puro) · **S2** commit por-range · **S3**
-      coordinator (membership + heartbeat/session + expõe assignment) · **S4** protocolo wire + cliente ·
-      **S5** integração no servidor (fetch respeita a assignment).
+    - ✅ **Consumer group coordination (G1 — épico, fatiado; concluído S1–S5 + Str-1/Str-2).** Antes um grupo era
+      uma **posição única compartilhada** (todos os consumidores liam a mesma posição commitada — sem paralelismo).
+      Alvo NorthGuard/Kafka **atingido**: cada **range** do topic atribuída a **exatamente um** membro do grupo,
+      consumo paralelo, com rebalance no join/leave — **tudo server-internal e opaco** (o cliente nunca vê ranges).
+      Achado que aterrou o design: o `commit_offset` fazia `Map.put` (substituía o mapa de offsets do
+      `{group, topic}`) → virou **merge por-range** (S2). Fatiamento: **S1** núcleo de assignment (puro) · **S2**
+      commit por-range · **S3** coordinator (membership + heartbeat/session + expõe assignment) · **S4** integração
+      no servidor (fetch respeita a assignment, opaco) · **S5** protocolo wire + cliente · **Str-1/Str-2**
+      member-scoping do streaming (push server-side + wire/cliente com heartbeat). **Escopo restante (fatia própria,
+      não-G1): o coordinator é hoje um GenServer local único — o roteamento/replicação multi-nó da membership fica
+      para uma fatia de wiring de cluster.**
       - ✅ **S1 — núcleo de assignment (puro).** `Malachi.Consumer.Assignment.assign(range_ids, members)`
         → `%{member => [range_id]}`, cada range sob **exatamente um** membro, **determinístico** (ranges
         ordenadas em ordem canônica → um coordinator replicado/failover computa o mesmo em todo nó). Decisão
