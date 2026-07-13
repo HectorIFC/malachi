@@ -9,9 +9,12 @@ defmodule Malachi.TCPProtocol do
   the connection. The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets.
   """
 
+  alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.LogApi
   alias Malachi.Wire
+
+  @coordinator_name Malachi.LogGroupCoordinator
 
   @doc """
   Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. A
@@ -63,7 +66,7 @@ defmodule Malachi.TCPProtocol do
       # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
       # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
       if member != nil and group != nil do
-        LogApi.stream_ack_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, cursor, count)
+        LogApi.stream_ack_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, cursor, count)
       else
         LogApi.stream_ack(Malachi.LogBroker, topic, group, cursor, count)
       end
@@ -103,7 +106,7 @@ defmodule Malachi.TCPProtocol do
 
       # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
       if member != nil and group != nil do
-        :ok = LogApi.subscribe_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, window, max)
+        :ok = LogApi.subscribe_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, window, max)
       else
         :ok = LogApi.subscribe(Malachi.LogBroker, topic, group, window, max)
       end
@@ -141,7 +144,7 @@ defmodule Malachi.TCPProtocol do
           # a consumer-group member: the server scopes the fetch to the member's assigned ranges and
           # returns records + an opaque cursor (the client never sees a range id)
           member != nil and group != nil ->
-            LogApi.fetch_member(Malachi.LogBroker, Malachi.LogGroupCoordinator, topic, group, member, max, wait_ms)
+            LogApi.fetch_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, max, wait_ms)
 
           # an explicit cursor (client-managed paging) takes precedence over a group resume
           cursor != nil ->
@@ -175,10 +178,14 @@ defmodule Malachi.TCPProtocol do
   defp leave_group(correlation_id, payload, session) do
     with_permission(session, :consume, correlation_id, fn ->
       {topic, group, member} = Wire.decode_leave_group_req(payload)
-      _ = GroupCoordinator.leave(Malachi.LogGroupCoordinator, group, topic, member)
+      _ = GroupCoordinator.leave(coordinator_for(topic), group, topic, member)
       Wire.encode_ok(correlation_id, <<>>)
     end)
   end
+
+  # The consumer-group coordinator for a topic runs on the node owning the topic's vnode; resolve the
+  # ref (the local name, or `{name, owner_node}` to forward) per request. Single-node → the local name.
+  defp coordinator_for(topic), do: CoordinatorRouter.resolve(@coordinator_name, topic)
 
   # Runs `fun` (which returns a response frame) only if the session holds `permission`; otherwise a
   # permission-denied error frame.

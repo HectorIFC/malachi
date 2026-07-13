@@ -1593,6 +1593,36 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         inteiro **opaco** (offset nil), um member ack (commit + heartbeat + credit) é aceito e um produce
         posterior ainda faz push. Suíte 767 testes 0 falhas; credo/dialyzer/format limpos. **G1 (consumer
         groups) + streaming member-scoping concluídos.**
+    - 🚧 **Coordinator cluster wiring (épico — consumer groups corretos multi-nó).** Gap que o G1 deixou
+      explícito: o `GroupCoordinator` é um GenServer **local por nó** (`Malachi.LogGroupCoordinator`), com
+      membership em memória. Num cluster, membros conectados a nós diferentes veem assignments **divergentes**
+      → a invariante "cada range sob exatamente um membro" quebra entre nós. Alvo: rotear a coordenação de um
+      topic a **um** nó dono, como o NorthGuard roteia requests (broker consulta sua visão local da metadata
+      shardada — o `HashRing` sobre vnodes — e encaminha ao vnode dono). Fatiamento: **A1** roteamento +
+      encaminhamento · **A2** coordinator no líder do vnode · **A3** teste multi-nó.
+      - ✅ **A1 — roteamento do coordinator ao nó dono do vnode + encaminhamento.** Novo módulo **puro**
+        `Malachi.Consumer.CoordinatorRouter`: `location(topic, topology, this_node, leader_fn)` roteia
+        `topic → vnode` (via `HashRing`), resolve o **líder** do vnode e decide `:local | {:remote, node}`;
+        `ref/2` vira o ref de `GenServer` (`{name, node}` se remoto). Roteia por **topic** (co-loca a
+        coordenação com o vnode/metadata do topic, onde o `ranges_fun`/`active_range_ids` do coordinator
+        resolve contra o broker local). **Fail-safe para `:local`** em toda lacuna de resolução: sem topologia
+        (single-node/in-memory), ring vazio, vnode ausente do mapa, ou líder não-resolvível — verificado que
+        `:ra.members` num server inexistente **retorna `{:error, :noproc}`** (não levanta), então um vnode
+        momentaneamente indisponível degrada a local em vez de derrubar o request. Topologia estática
+        (ring + vnode→server_id) publicada **1× no boot** do control plane shardado (`with_metadata_authority`)
+        via `:persistent_term` (read lock-free; ausente = single-node → `nil` → local). O `tcp_protocol`
+        resolve o ref do coordinator **por request** (`coordinator_for/1`) nos 4 sites (subscribe/fetch/
+        stream_ack/leave) e o passa ao `LogApi`; o ref resolvido também vira o `sub.coordinator` (o `leave`
+        async do `:DOWN` encaminha ao dono). **Single-node inalterado** (resolve → `:persistent_term` miss →
+        nome local). Testado (puro, 9): topologia nil/ring vazio/vnode ausente/líder nil → local; este-nó →
+        local; outro-nó → `{:remote}`; `ref/2`; round-trip do `put_topology`/`topology`. Suíte 776 testes 0
+        falhas; credo/dialyzer/format limpos. **Limitação conhecida (escopo A2):** o `sub.coordinator` é o ref
+        resolvido **no subscribe**; se a liderança do vnode trocar **durante** a sessão, os acks seguintes
+        re-resolvem ao novo líder (o `process_stream_frame` chama `coordinator_for` fresco) mas o
+        `sub.coordinator` não é atualizado → o `leave` async do `:DOWN` iria ao líder antigo e o membro vazaria
+        no novo até o **session-timeout** evictá-lo (bounded; single-node não afetado pois resolve é sempre
+        `:local`). A consistência de failover entra no A2. **Próximo: A2 (rodar o coordinator no líder do vnode
+        via o padrão `VnodeCoordinatorManager`; decidir membership soft vs RSM-durável) → A3 (teste `:multinode`).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

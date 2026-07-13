@@ -25,6 +25,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Metadata
   alias OpenTelemetry.Ctx
@@ -666,6 +667,10 @@ defmodule Malachi.BrokerServer do
   #   * neither — in-memory metadata (single node).
   defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do
     replicated = build_replicated(vnodes)
+    # Publish the topic→vnode routing so consumer-group coordination is forwarded to the owning node
+    # (the same HashRing the metadata is sharded by). Absent in single-node/in-memory → coordination
+    # stays local.
+    CoordinatorRouter.put_topology(replicated.ring, replicated.vnodes)
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
 
     new_opts =
