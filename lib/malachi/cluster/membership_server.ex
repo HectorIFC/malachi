@@ -119,6 +119,10 @@ defmodule Malachi.Cluster.MembershipServer do
       # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
       # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
       topology: Keyword.get(opts, :topology),
+      # fired with the new topology when this node adopts a **higher version** (a real ring change), so it
+      # applies the new ring locally (e.g. the CoordinatorRouter). Must be fast and not raise (runs inline
+      # in the server). Default: no-op.
+      on_topology: Keyword.get(opts, :on_topology, fn _topology -> :ok end),
       protocol_period: Keyword.get(opts, :protocol_period, @default_protocol_period),
       ack_timeout: ack_timeout,
       indirect_timeout: Keyword.get(opts, :indirect_timeout, ack_timeout),
@@ -150,7 +154,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   def handle_call({:set_topology, topology}, _from, state) do
     # Adopt the higher version (in case gossip already carried a newer one); gossip carries ours onward.
-    {:reply, :ok, %{state | topology: merge_topology(state.topology, topology)}}
+    {:reply, :ok, adopt_topology(state, topology)}
   end
 
   @impl true
@@ -291,13 +295,26 @@ defmodule Malachi.Cluster.MembershipServer do
   # view still merges and the topology is left as-is.
   defp merge_updates(state, {updates, topology}) do
     {view, _effects} = Membership.merge(state.view, updates)
-    %{state | view: view, topology: merge_topology(state.topology, topology)}
+    adopt_topology(%{state | view: view}, topology)
   end
 
   defp merge_updates(state, updates) when is_list(updates) do
     {view, _effects} = Membership.merge(state.view, updates)
     %{state | view: view}
   end
+
+  # Adopt `remote` if it is a newer topology than ours (CRDT last-version-wins), firing `on_topology` on
+  # an actual **advance** (a version increase) so this node applies the new ring locally. A same-or-older
+  # version is a no-op — no adoption, no hook.
+  defp adopt_topology(state, remote) do
+    merged = merge_topology(state.topology, remote)
+    if topology_advanced?(state.topology, merged), do: state.on_topology.(merged)
+    %{state | topology: merged}
+  end
+
+  defp topology_advanced?(nil, %RingTopology{}), do: true
+  defp topology_advanced?(%RingTopology{version: old}, %RingTopology{version: new}), do: new > old
+  defp topology_advanced?(_local, nil), do: false
 
   # Converge two topology observations (last-version-wins), tolerating either side being absent (nil).
   defp merge_topology(nil, remote), do: remote

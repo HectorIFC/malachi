@@ -215,4 +215,47 @@ defmodule Malachi.Cluster.MembershipServerTest do
       assert eventually(fn -> MembershipServer.topology(b) == topology_at(2) end)
     end
   end
+
+  describe "topology adoption hook (on_topology)" do
+    test "fires with the new topology on a version advance, not on a same-or-lower version" do
+      test = self()
+      a = :"mshook_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {MembershipServer, [name: a, peers: [], on_topology: fn t -> send(test, {:adopted, t}) end] ++ @timings},
+        id: a
+      )
+
+      :ok = MembershipServer.set_topology(a, topology_at(1))
+      assert_receive {:adopted, %RingTopology{version: 1}}
+
+      # a higher version advances → fires again
+      :ok = MembershipServer.set_topology(a, topology_at(2))
+      assert_receive {:adopted, %RingTopology{version: 2}}
+
+      # a same-or-lower version is a no-op → the hook does not fire
+      :ok = MembershipServer.set_topology(a, topology_at(1))
+      refute_receive {:adopted, _}, 100
+    end
+
+    test "fires on a node that learns a higher-version topology by gossip" do
+      test = self()
+      suffix = System.unique_integer([:positive])
+      a = :"mshook_a_#{suffix}"
+      b = :"mshook_b_#{suffix}"
+
+      start_node(a, [b])
+
+      start_supervised!(
+        {MembershipServer, [name: b, peers: [a], on_topology: fn t -> send(test, {:b_adopted, t}) end] ++ @timings},
+        id: b
+      )
+
+      assert eventually(fn -> MembershipServer.alive_members(a) == Enum.sort([a, b]) end)
+
+      :ok = MembershipServer.set_topology(a, topology_at(1))
+      # b adopts a's topology through gossip and its hook fires
+      assert_receive {:b_adopted, %RingTopology{version: 1}}, 2_000
+    end
+  end
 end

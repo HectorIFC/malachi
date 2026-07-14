@@ -25,6 +25,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.RebalanceCoordinator
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.Consumer.CoordinatorRouter
@@ -356,10 +357,23 @@ defmodule Malachi.Application do
       name: Malachi.LogMembership,
       self_ref: {Malachi.LogMembership, node()},
       peers: membership_seeds(nodes),
-      attributes: parse_attributes(Application.get_env(:malachi, :log_attributes))
+      attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
+      # adopt a gossiped ring change locally: point consumer-group routing at the new topology
+      on_topology: &adopt_ring_topology/1
     ]
 
     %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
+  end
+
+  # Applies a newly-adopted `RingTopology` (a vnode split's ring change, learned via gossip) to this
+  # node's consumer-group routing: the `CoordinatorRouter` topology is the ring plus one ra server id per
+  # vnode (any member; the router resolves the live leader). Kept light — it runs inline in the membership
+  # server. The metadata routing (`ReplicatedDSRSM`) adoption is driven by the split orchestration itself.
+  defp adopt_ring_topology(%RingTopology{ring: ring, placements: placements}) do
+    # a comprehension (not Map.new) so a vnode with an empty placement is skipped rather than raising —
+    # the hook runs inline in the membership server and must not crash it
+    servers = for {vnode_id, [member_node | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member_node}}
+    CoordinatorRouter.put_topology(ring, servers)
   end
 
   @doc ~S"""

@@ -313,8 +313,23 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         teste que inspecionava o payload cru foi ajustado pro novo shape. Testado in-VM: `set_topology` num nó
         **propaga** por gossip; **maior versão vence** em todos os nós, seja quem setou (last-version-wins); +
         o HA multinode do membership **verde** (gossip real com o novo payload não regride). Suíte 794 testes 0
-        falhas (+2); credo/dialyzer/format limpos. **Próximo: VS-2b-2b (adoção local — quando a versão avança,
-        aplicar o novo ring ao `ReplicatedDSRSM`/`CoordinatorRouter`).**
+        falhas (+2); credo/dialyzer/format limpos.
+        - ✅ **VS-2b-2b — adoção local do ring quando a versão avança.** Fecha a propagação: o `MembershipServer`
+          ganha um seam **`on_topology`** (padrão dos outros seams, ex.: `ranges_fun`) que dispara **só num
+          avanço de versão** (`topology_advanced?`: `nil→qualquer`, ou `new > old`) — não em versão igual/menor —
+          com o novo `RingTopology`, tanto via `set_topology` quanto via gossip. A app fia `on_topology`
+          (`adopt_ring_topology/1`) pra **aplicar o ring novo ao `CoordinatorRouter`**: deriva o `servers`
+          (`%{vnode => {vnode, nó}}`, qualquer membro; o router resolve o líder vivo) das `placements` e chama
+          `put_topology`. O hook roda **inline** no server (deve ser leve e não levantar — a app respeita).
+          **Escopo:** só o roteamento de consumer-group (`CoordinatorRouter`); a adoção do roteamento de
+          **metadado** (`ReplicatedDSRSM`, acoplado ao runtime do broker) é dirigida pela própria orquestração
+          do split (VS-2a), não por gossip. Single-node inalterado (o `MembershipServer` só sobe no modo
+          clusterizado). Testado in-VM: o hook dispara no avanço (v1, depois v2), **não** dispara em versão
+          igual/menor (`refute_receive`), e dispara num nó que aprende versão maior **por gossip**; boot
+          single-node ok; HA multinode do membership verde. Suíte 796 testes 0 falhas (+2); credo/dialyzer/
+          format limpos. **VS-2b (propagação do ring por gossip) concluído. Próximo: VS-2a (orquestração do
+          split sobre `ra`: subir o novo grupo, migrar pelo log via VS-1, e publicar o ring novo via
+          `set_topology`).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
