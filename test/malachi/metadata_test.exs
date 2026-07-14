@@ -398,6 +398,54 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "topic migration carries committed offsets (vnode split)" do
+    test "extract carries the topic's offsets (keyed by group) and leaves a co-located topic's alone" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, other_root} = create_topic(state, "other", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "g1", "events", %{root => 42}})
+      {state, :ok} = apply!(state, {:commit_offset, "g2", "events", %{root => 7}})
+      {state, :ok} = apply!(state, {:commit_offset, "g1", "other", %{other_root => 99}})
+
+      {without, export} = Metadata.extract_topic(state, "events")
+
+      # the export carries events' offsets, re-keyed by group (the topic is implied)
+      assert export.offsets == %{"g1" => %{root => 42}, "g2" => %{root => 7}}
+      # events' offsets are gone from the source; the co-located topic's remain
+      assert Metadata.committed_offsets(without, "g1", "events") == %{}
+      assert Metadata.committed_offsets(without, "g2", "events") == %{}
+      assert Metadata.committed_offsets(without, "g1", "other") == %{other_root => 99}
+    end
+
+    test "a group's committed position survives a full extract/insert migration to a fresh vnode" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "workers", "events", %{root => 500}})
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+      dest = Metadata.insert_topic(Metadata.new(), export)
+
+      assert Metadata.get_topic(dest, "events").name == "events"
+      assert Metadata.committed_offsets(dest, "workers", "events") == %{root => 500}
+    end
+
+    test ":extract_topic / :insert_topic commands relocate a topic (with offsets) through the log" do
+      {source, root} = create_topic(Metadata.new(), "events", 4)
+      {source, :ok} = apply!(source, {:commit_offset, "g", "events", %{root => 3}})
+
+      {source_after, export} = apply!(source, {:extract_topic, "events"})
+      assert Metadata.get_topic(source_after, "events") == nil
+
+      {dest, :ok} = apply!(Metadata.new(), {:insert_topic, export})
+      assert Metadata.get_topic(dest, "events").name == "events"
+      assert Metadata.committed_offsets(dest, "g", "events") == %{root => 3}
+    end
+
+    test ":extract_topic on an absent topic is a no-op returning nil" do
+      {state, reply} = apply!(Metadata.new(), {:extract_topic, "ghost"})
+      assert reply == nil
+      assert state == Metadata.new()
+    end
+  end
+
   # The maintained index must equal one derived by scanning the source-of-truth maps.
   defp index_matches_scan?(state) do
     expected_tr =

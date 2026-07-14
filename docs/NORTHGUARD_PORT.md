@@ -268,7 +268,23 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   Testado: roteamento ao cluster certo, query consistente, **sharding entre 2 clusters Raft reais**
   (cada topic só existe no cluster que o roteia), erro de comando propagado, ring vazio → `:no_vnode`.
   Escopo: **vnodes estáticos** (split-sobre-ra adiado), single-node (multi-node depende de membership).
-  - ⏳ Próximo: split de vnode sobre `ra` (migrar metadado entre grupos Raft); cluster multi-node.
+  - 🚧 **Split de vnode sobre `ra` (épico — migrar metadado entre grupos Raft, o que o NorthGuard faz:**
+    *"break the state in half and basically spawn another raft group"*, transcrição do meetup). A lógica pura
+    single-process já existe (`DSRSM.split_vnode` migra topics deslocados via `extract_topic`/`insert_topic`);
+    falta a orquestração sobre os grupos `ra` reais. Fatiamento: **VS-1** primitivas puras completas + comandos ·
+    **VS-2** orquestração sobre `ra` (subir o novo grupo, dirigir a migração pelo log, mudança de ring,
+    consistência) · **VS-3** teste multinode.
+    - ✅ **VS-1 — migração completa (com offsets) + comandos determinísticos.** Achado que a fatia corrigiu: o
+      `Metadata.extract_topic` carregava topic+ranges+segments mas **não** os **committed offsets** (keyed por
+      `{group, topic}`) → num split, um consumer group **perdia a posição** e reprocessava tudo (at-least-once,
+      sem perda de dado, mas regressão séria). Agora `extract_topic`/`insert_topic` **carregam os offsets** (no
+      export, keyed por group; o topic é implícito) — o binding de policy já viajava no struct do topic. E,
+      pro split ra-backed dirigir a migração pelo **log Raft** de cada vnode, novos comandos determinísticos
+      `:extract_topic` (reply = export) / `:insert_topic` no `Metadata.apply/2` (com catch-all defensivo
+      intacto). Pura, in-VM, zero rede. Testado: extract carrega offsets por-group e deixa co-located intacto;
+      round-trip preserva a posição; os comandos relocam via log; extract de topic ausente = no-op nil; +
+      cobertura no `DSRSM` (split preserva offsets end-to-end). Suíte 786 testes 0 falhas (+5); credo/dialyzer/
+      format limpos. **Próximo: VS-2 (orquestração do split sobre `ra`).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

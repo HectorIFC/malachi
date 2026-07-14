@@ -125,6 +125,20 @@ defmodule Malachi.Cluster.DSRSMTest do
       assert DSRSM.segments_of_range(dsrsm, "orders", left_id) |> length() == 1
     end
 
+    test "a migrated topic carries its consumer groups' committed offsets" do
+      dsrsm = with_vnodes(a: 0)
+      {dsrsm, {:ok, root_id}} = DSRSM.command(dsrsm, "orders", {:create_topic, "orders", 4})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "orders", {:commit_offset, "workers", "orders", %{root_id => 500}})
+
+      token = :erlang.phash2("orders", 16)
+      assert token > 0, "test setup expects a non-zero hash"
+      {:ok, dsrsm} = DSRSM.split_vnode(dsrsm, :b, token)
+
+      # the group's committed position moved with the topic (no reprocessing after a split)
+      assert home_of(dsrsm, "orders") == :b
+      assert DSRSM.committed_offsets(dsrsm, "workers", "orders") == %{root_id => 500}
+    end
+
     test "propagates ring placement errors" do
       dsrsm = with_vnodes(a: 4)
       assert DSRSM.split_vnode(dsrsm, :b, 4) == {:error, :token_taken}

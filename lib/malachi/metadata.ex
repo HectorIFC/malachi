@@ -115,7 +115,8 @@ defmodule Malachi.Metadata do
   @type topic_export :: %{
           topic: topic_meta(),
           ranges: %{range_id() => range_meta()},
-          segments: %{segment_id() => segment_meta()}
+          segments: %{segment_id() => segment_meta()},
+          offsets: %{group() => offsets()}
         }
 
   @type command ::
@@ -131,6 +132,8 @@ defmodule Malachi.Metadata do
           | {:commit_offset, group(), topic_name(), offsets()}
           | {:define_policy, policy_name(), policy()}
           | {:set_topic_policy, topic_name(), policy_name() | nil}
+          | {:extract_topic, topic_name()}
+          | {:insert_topic, topic_export()}
 
   defstruct topics: %{},
             ranges: %{},
@@ -309,6 +312,18 @@ defmodule Malachi.Metadata do
     end
   end
 
+  # Vnode-split migration (driven through each vnode's Raft log): `:extract_topic` removes a topic's full
+  # metadata from the source vnode and returns it as an `export` (the reply), `:insert_topic` restores that
+  # export on the destination vnode. Together they relocate a topic — with its ranges, segments and
+  # committed offsets — from one vnode to another, keeping the move deterministic and replay-safe.
+  def apply(%__MODULE__{} = state, {:extract_topic, name}) do
+    extract_topic(state, name)
+  end
+
+  def apply(%__MODULE__{} = state, {:insert_topic, export}) do
+    {insert_topic(state, export), :ok}
+  end
+
   # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
   # replicated by Raft, a command that raises in `apply` would crash every replica
   # deterministically (and again on replay) — e.g. an older replica seeing a newer
@@ -457,10 +472,11 @@ defmodule Malachi.Metadata do
   # --- migration (vnode split) ---
 
   @doc """
-  Removes a topic and all its ranges/segments from `state`, returning
-  `{state_without_topic, export}` (or `{state, nil}` if the topic is absent). The export
-  can be re-inserted on another vnode with `insert_topic/2` — this is how a vnode split
-  migrates a topic's metadata to a new vnode.
+  Removes a topic and all its ranges/segments — and its consumer groups' committed offsets —
+  from `state`, returning `{state_without_topic, export}` (or `{state, nil}` if the topic is
+  absent). The export can be re-inserted on another vnode with `insert_topic/2` — this is how
+  a vnode split migrates a topic's metadata to a new vnode. Offsets ride along (keyed by group,
+  the topic implied) so a consumer group keeps its committed position across a split.
   """
   @spec extract_topic(t(), topic_name()) :: {t(), topic_export() | nil}
   def extract_topic(%__MODULE__{} = state, name) do
@@ -472,17 +488,19 @@ defmodule Malachi.Metadata do
         range_ids = for {id, range} <- state.ranges, range.topic == name, into: MapSet.new(), do: id
         ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
         segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
+        offsets = for {{group, ^name}, offs} <- state.committed_offsets, into: %{}, do: {group, offs}
 
         remaining =
           %{
             state
             | topics: Map.delete(state.topics, name),
               ranges: Map.drop(state.ranges, MapSet.to_list(range_ids)),
-              segments: Map.drop(state.segments, Map.keys(segments))
+              segments: Map.drop(state.segments, Map.keys(segments)),
+              committed_offsets: Map.reject(state.committed_offsets, fn {{_g, t}, _offs} -> t == name end)
           }
           |> index_forget_topic(name, MapSet.to_list(range_ids))
 
-        {remaining, %{topic: topic, ranges: ranges, segments: segments}}
+        {remaining, %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}}
     end
   end
 
@@ -497,11 +515,17 @@ defmodule Malachi.Metadata do
   """
   @spec insert_topic(t(), topic_export()) :: t()
   def insert_topic(%__MODULE__{} = state, export) do
+    name = export.topic.name
+    # re-key the exported per-group offsets back to {group, topic}; default `%{}` tolerates an older
+    # export (e.g. an :insert_topic command logged before offsets rode along)
+    offsets = for {group, offs} <- Map.get(export, :offsets, %{}), into: %{}, do: {{group, name}, offs}
+
     state = %{
       state
-      | topics: Map.put(state.topics, export.topic.name, export.topic),
+      | topics: Map.put(state.topics, name, export.topic),
         ranges: Map.merge(state.ranges, export.ranges),
-        segments: Map.merge(state.segments, export.segments)
+        segments: Map.merge(state.segments, export.segments),
+        committed_offsets: Map.merge(state.committed_offsets, offsets)
     }
 
     state = Enum.reduce(export.ranges, state, fn {id, range}, s -> index_add_range(s, range.topic, id) end)
