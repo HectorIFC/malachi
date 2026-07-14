@@ -17,9 +17,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   `Malachi.Cluster.MetadataServer`.
 
   Each vnode's cluster can span several nodes (`add_vnode/4`), so a vnode survives losing a member —
-  HA per vnode. Phase 1b scope: **static vnodes** (no vnode split yet — migrating committed metadata
-  between Raft groups is a separate step) and every vnode over the same node set (no per-vnode node
-  placement yet — distributing vnodes across node subsets is a later step).
+  HA per vnode. `split_vnode/4` grows the ring at runtime, migrating the displaced topics' metadata
+  between the source and new Raft groups (the dynamically-sharded part); fencing concurrent writes to a
+  migrating topic (zero-window cutover) is a later step.
   """
 
   alias Malachi.Cluster.DSRSM
@@ -66,6 +66,25 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   def route_vnode(%__MODULE__{} = state, vnode_id, token, server_id) do
     with {:ok, ring} <- HashRing.add_vnode(state.ring, vnode_id, token) do
       {:ok, %{state | ring: ring, vnodes: Map.put(state.vnodes, vnode_id, server_id)}}
+    end
+  end
+
+  @doc """
+  Splits the ring by adding a vnode at `token` (a new ra cluster on `nodes`) and **migrating** every topic
+  that now routes to it out of its current vnode — vnode split over real Raft (the NorthGuard model: spawn
+  a new group and break off that half of the state). **Copy-first** per topic: `insert_topic` into the new
+  vnode, then `extract_topic` from the source, so no single failure loses a topic (a crash after the insert
+  leaves a harmless duplicate the new ring routes past). Returns the grown state on full success; propagates
+  a ring/start error, or `{:error, {:migrate, topic, reason}}` if a topic fails to migrate (a partial split
+  is left for the caller/coordinator to reconcile). Concurrent writes to a migrating topic are not fenced
+  yet — today's caller splits a quiescent vnode.
+  """
+  @spec split_vnode(t(), vnode_id(), HashRing.token(), [node()]) :: {:ok, t()} | {:error, term()}
+  def split_vnode(%__MODULE__{} = state, new_vnode_id, token, nodes \\ [node()]) do
+    with {:ok, new_ring} <- HashRing.add_vnode(state.ring, new_vnode_id, token),
+         {:ok, new_server_id} <- MetadataServer.start(new_vnode_id, nodes),
+         :ok <- migrate_displaced(state.vnodes, new_ring, new_vnode_id, new_server_id) do
+      {:ok, %{state | ring: new_ring, vnodes: Map.put(state.vnodes, new_vnode_id, new_server_id)}}
     end
   end
 
@@ -146,6 +165,43 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     case HashRing.route(state.ring, topic_name) do
       {:error, :empty} -> {:error, :no_vnode}
       {:ok, vnode_id} -> fun.(Map.fetch!(state.vnodes, vnode_id))
+    end
+  end
+
+  # For each existing (source) vnode, migrate its topics that now route to the new vnode under `new_ring`.
+  defp migrate_displaced(source_vnodes, new_ring, new_vnode_id, new_server_id) do
+    Enum.reduce_while(source_vnodes, :ok, fn {_source_id, source_server}, :ok ->
+      case migrate_from(source_server, new_server_id, new_ring, new_vnode_id) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A linearizable snapshot of the source vnode, then migrate (from that snapshot) each of its topics that
+  # now routes to the new vnode. `&Function.identity/1` (not a closure) so the query runs on the leader.
+  defp migrate_from(source_server, new_server, new_ring, new_vnode_id) do
+    with {:ok, metadata} <- MetadataServer.query(source_server, &Function.identity/1) do
+      metadata.topics
+      |> Map.keys()
+      |> Enum.filter(fn name -> HashRing.route(new_ring, name) == {:ok, new_vnode_id} end)
+      |> Enum.reduce_while(:ok, fn name, :ok ->
+        case migrate_topic(source_server, new_server, Metadata.export_topic(metadata, name), name) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  # Copy-first: insert the topic's export into the new vnode's log, then extract it from the source's —
+  # a failure before the extract leaves the source intact (no loss); after it, a harmless duplicate.
+  defp migrate_topic(source_server, new_server, export, name) do
+    with {:ok, _ok} <- MetadataServer.command(new_server, {:insert_topic, export}),
+         {:ok, _export} <- MetadataServer.command(source_server, {:extract_topic, name}) do
+      :ok
+    else
+      error -> {:error, {:migrate, name, error}}
     end
   end
 end

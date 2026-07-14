@@ -444,6 +444,18 @@ defmodule Malachi.MetadataTest do
       assert reply == nil
       assert state == Metadata.new()
     end
+
+    test "export_topic returns the full export read-only (topic present after), nil for an absent topic" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => 9}})
+
+      export = Metadata.export_topic(state, "events")
+      assert export.topic.name == "events"
+      assert export.offsets == %{"g" => %{root => 9}}
+      # read-only: the topic is still there
+      assert Metadata.get_topic(state, "events").name == "events"
+      assert Metadata.export_topic(state, "ghost") == nil
+    end
   end
 
   # The maintained index must equal one derived by scanning the source-of-truth maps.

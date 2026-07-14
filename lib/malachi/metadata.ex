@@ -472,6 +472,27 @@ defmodule Malachi.Metadata do
   # --- migration (vnode split) ---
 
   @doc """
+  A **read-only** snapshot of a topic's full metadata — topic + all its ranges/segments + its consumer
+  groups' committed offsets (keyed by group, the topic implied) — as a `topic_export`, or `nil` if the
+  topic is absent. This is what a **copy-first** vnode split reads and `insert_topic/2`s into the new
+  vnode *before* `extract_topic/2` removes it from the source, so a failed migration never loses a topic.
+  """
+  @spec export_topic(t(), topic_name()) :: topic_export() | nil
+  def export_topic(%__MODULE__{} = state, name) do
+    case Map.fetch(state.topics, name) do
+      :error ->
+        nil
+
+      {:ok, topic} ->
+        range_ids = for {id, range} <- state.ranges, range.topic == name, into: MapSet.new(), do: id
+        ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
+        segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
+        offsets = for {{group, ^name}, offs} <- state.committed_offsets, into: %{}, do: {group, offs}
+        %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
+    end
+  end
+
+  @doc """
   Removes a topic and all its ranges/segments — and its consumer groups' committed offsets —
   from `state`, returning `{state_without_topic, export}` (or `{state, nil}` if the topic is
   absent). The export can be re-inserted on another vnode with `insert_topic/2` — this is how
@@ -480,27 +501,24 @@ defmodule Malachi.Metadata do
   """
   @spec extract_topic(t(), topic_name()) :: {t(), topic_export() | nil}
   def extract_topic(%__MODULE__{} = state, name) do
-    case Map.fetch(state.topics, name) do
-      :error ->
+    case export_topic(state, name) do
+      nil ->
         {state, nil}
 
-      {:ok, topic} ->
-        range_ids = for {id, range} <- state.ranges, range.topic == name, into: MapSet.new(), do: id
-        ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
-        segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
-        offsets = for {{group, ^name}, offs} <- state.committed_offsets, into: %{}, do: {group, offs}
+      export ->
+        range_ids = Map.keys(export.ranges)
 
         remaining =
           %{
             state
             | topics: Map.delete(state.topics, name),
-              ranges: Map.drop(state.ranges, MapSet.to_list(range_ids)),
-              segments: Map.drop(state.segments, Map.keys(segments)),
+              ranges: Map.drop(state.ranges, range_ids),
+              segments: Map.drop(state.segments, Map.keys(export.segments)),
               committed_offsets: Map.reject(state.committed_offsets, fn {{_g, t}, _offs} -> t == name end)
           }
-          |> index_forget_topic(name, MapSet.to_list(range_ids))
+          |> index_forget_topic(name, range_ids)
 
-        {remaining, %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}}
+        {remaining, export}
     end
   end
 

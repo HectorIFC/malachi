@@ -168,4 +168,33 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     assert DSRSM.get_topic(cache, "events").name == "events"
     assert DSRSM.get_topic(cache, "events_via_router").name == "events_via_router"
   end
+
+  test "split_vnode grows the ring and migrates a displaced topic (with its offsets) to the new vnode" do
+    unique = System.unique_integer([:positive])
+    source = :"rd_split_src_#{unique}"
+    dest = :"rd_split_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+
+    # place the new vnode exactly at "orders"'s ring position, so the split displaces "orders" to it
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+    assert token > 0, "test setup expects a non-zero hash position"
+
+    {:ok, split} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
+
+    # "orders" now routes to the new vnode, and its topic + committed offsets survive the migration,
+    # read back from the new vnode's own raft group
+    assert ReplicatedDSRSM.vnode_for(split, "orders") == {:ok, dest}
+    {:ok, dest_meta} = ReplicatedDSRSM.query(split, "orders", &Function.identity/1)
+    assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(dest_meta, "workers", "orders") == %{root => 500}
+
+    # the source vnode no longer holds it (copy-first extract removed it after the insert)
+    {:ok, source_meta} = MetadataServer.query(ReplicatedDSRSM.server_for(split, source), &Function.identity/1)
+    assert Metadata.get_topic(source_meta, "orders") == nil
+  end
 end

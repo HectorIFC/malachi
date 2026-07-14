@@ -327,9 +327,24 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           clusterizado). Testado in-VM: o hook dispara no avanço (v1, depois v2), **não** dispara em versão
           igual/menor (`refute_receive`), e dispara num nó que aprende versão maior **por gossip**; boot
           single-node ok; HA multinode do membership verde. Suíte 796 testes 0 falhas (+2); credo/dialyzer/
-          format limpos. **VS-2b (propagação do ring por gossip) concluído. Próximo: VS-2a (orquestração do
-          split sobre `ra`: subir o novo grupo, migrar pelo log via VS-1, e publicar o ring novo via
-          `set_topology`).**
+          format limpos. **VS-2b (propagação do ring por gossip) concluído.**
+      - ✅ **VS-2a — orquestração do split sobre `ra` (copy-first).** `ReplicatedDSRSM.split_vnode/4`: sobe o
+        grupo `ra` do vnode novo, descobre os topics **deslocados** (os que passam a rotear pro novo sob o ring
+        novo) e os **migra** entre os grupos `ra` — o que o NorthGuard faz (*spawn a new raft group + break off
+        that half of the state*). Decisão **copy-first** (escolhida pra segurança): por topic, `:insert_topic` no
+        novo → `:extract_topic` na origem, então **nenhuma falha isolada perde um topic** (crash pós-insert deixa
+        um duplicado inócuo que o ring novo ignora). Snapshot linearizável da origem (`&Function.identity/1`, não
+        closure, pra rodar no líder) → computa deslocados + exports **localmente** (puro) → aplica os comandos.
+        Suporte pro copy-first: nova `Metadata.export_topic/2` (read-only) e o `extract_topic` **refatorado pra
+        reusá-la** (DRY). Devolve o estado crescido só no sucesso total; falha de migração → `{:error, {:migrate,
+        topic, ...}}` (split parcial fica pra reconciliar). **Escopo:** o mecanismo; **fora:** fencing de escrita
+        concorrente no topic em migração (VS-2c) e a publicação do ring via `set_topology`/fiação no coordenador
+        (integração). Testado `:multinode` (grupos `ra` locais, 3x estável): split de um vnode com topic + offsets
+        → "orders" passa a rotear pro vnode novo, topic **e committed offsets** preservados lidos do grupo `ra`
+        novo, e a origem **não** tem mais o topic (extract copy-first) + unit de `export_topic` (read-only, nil em
+        ausente). Suíte 796 testes 0 falhas (+1 default, +1 multinode); credo/dialyzer/format limpos. **Próximo:
+        integração (publicar o ring pós-split via `set_topology`, dirigido por um coordenador sob lease) e VS-2c
+        (consistência/fencing da janela de cutover).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
