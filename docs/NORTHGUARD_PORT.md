@@ -271,9 +271,14 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   - 🚧 **Split de vnode sobre `ra` (épico — migrar metadado entre grupos Raft, o que o NorthGuard faz:**
     *"break the state in half and basically spawn another raft group"*, transcrição do meetup). A lógica pura
     single-process já existe (`DSRSM.split_vnode` migra topics deslocados via `extract_topic`/`insert_topic`);
-    falta a orquestração sobre os grupos `ra` reais. Fatiamento: **VS-1** primitivas puras completas + comandos ·
-    **VS-2** orquestração sobre `ra` (subir o novo grupo, dirigir a migração pelo log, mudança de ring,
-    consistência) · **VS-3** teste multinode.
+    falta a orquestração sobre os grupos `ra` reais. **Decisão de arquitetura do ring (corrigida por fidelidade):**
+    o ring (topologia) é **estado global mínimo disseminado por gossip (SWIM)** — o que o NorthGuard faz
+    (transcrição: *"we also use this dissemination for spreading some minimal global like cluster metadata"*;
+    *"very minimal global states"*), **não** um cluster `ra` de topologia (mais CP, mas menos fiel). Reusa o
+    gossip de atributos CRDT que o SWIM do malachi já tem. Fatiamento: **VS-1** primitivas puras + comandos ·
+    **VS-2b** ring versionado disseminado (o ring é pré-requisito: sem propagação, um split fica inconsistente
+    entre nós) · **VS-2a** orquestração do split sobre `ra` (subir o novo grupo, migrar pelo log, anexar a
+    versão de ring) · **VS-2c** consistência (janela de cutover) · **VS-3** teste multinode.
     - ✅ **VS-1 — migração completa (com offsets) + comandos determinísticos.** Achado que a fatia corrigiu: o
       `Metadata.extract_topic` carregava topic+ranges+segments mas **não** os **committed offsets** (keyed por
       `{group, topic}`) → num split, um consumer group **perdia a posição** e reprocessava tudo (at-least-once,
@@ -284,7 +289,19 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
       intacto). Pura, in-VM, zero rede. Testado: extract carrega offsets por-group e deixa co-located intacto;
       round-trip preserva a posição; os comandos relocam via log; extract de topic ausente = no-op nil; +
       cobertura no `DSRSM` (split preserva offsets end-to-end). Suíte 786 testes 0 falhas (+5); credo/dialyzer/
-      format limpos. **Próximo: VS-2 (orquestração do split sobre `ra`).**
+      format limpos.
+    - ✅ **VS-2b-1 — ring versionado disseminável (núcleo puro CRDT).** A fundação da propagação: novo
+      `Malachi.Cluster.RingTopology` — a topologia de roteamento (`HashRing` + `%{vnode => [nodes]}`) tagueada
+      com uma `version` monotônica. **Por que gossip e não um cluster `ra`:** o usuário perguntou "B não é mais
+      fiel?" e a transcrição confirmou (linha 537: dissemina metadado global mínimo pelo SWIM; linha 610: estado
+      global mínimo) — eu havia recomendado o cluster `ra` por instinto de CP, **corrigido** por fidelidade.
+      `merge/2` é um **join CRDT**: maior `version` vence (last-version-wins), com tiebreak determinístico por
+      ordem-total da serialização no raro clash de mesma versão (single-writer: só o líder `advance`) → merge
+      **comutativo/associativo/idempotente**, converge em qualquer ordem de gossip. Puro, zero rede. Testado:
+      `new`/`advance` (versão monotônica); merge mantém a maior versão, idempotente, comutativo (incl. no clash),
+      associativo, converge à última versão em qualquer ordem — 6. Suíte 792 testes 0 falhas (+6); credo/dialyzer/
+      format limpos. **Próximo: VS-2b-2 (fiar o `RingTopology` na disseminação do SWIM + adoção local no
+      `ReplicatedDSRSM`/`CoordinatorRouter` quando a versão avança).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
