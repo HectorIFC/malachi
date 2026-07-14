@@ -25,12 +25,18 @@ defmodule Malachi.Cluster.MembershipServer do
   incarnation 0, which an existing `:dead` entry outranks; durable/higher rejoin incarnations are a
   later concern.)
 
-  Scope: direct ping, indirect ping, suspicion, gossip, and a join handshake.
+  The same gossip also **piggybacks the cluster's versioned routing topology** (a
+  `Malachi.Cluster.RingTopology`): every message carries it alongside the view updates, and peers keep the
+  higher version (last-version-wins), so a vnode split's ring change disseminates and converges the same
+  way membership does — NorthGuard's *"minimal global state"* spread over the SWIM dissemination path.
+
+  Scope: direct ping, indirect ping, suspicion, gossip (membership + topology), and a join handshake.
   """
 
   use GenServer
 
   alias Malachi.Cluster.Membership
+  alias Malachi.Cluster.RingTopology
 
   @default_protocol_period 1_000
   @default_ack_timeout 500
@@ -84,6 +90,18 @@ defmodule Malachi.Cluster.MembershipServer do
   @spec attributes(GenServer.server(), Membership.member()) :: Membership.attributes()
   def attributes(server, member), do: GenServer.call(server, {:attributes, member})
 
+  @doc """
+  Sets this node's view of the cluster `topology` (a `Malachi.Cluster.RingTopology`). Gossip disseminates
+  it on the next protocol period and every node converges on the highest version (last-version-wins), so
+  the rebalancing leader publishes a split's new ring here and the cluster adopts it.
+  """
+  @spec set_topology(GenServer.server(), RingTopology.t()) :: :ok
+  def set_topology(server, %RingTopology{} = topology), do: GenServer.call(server, {:set_topology, topology})
+
+  @doc "The current cluster routing topology, or `nil` if none has been set/received yet."
+  @spec topology(GenServer.server()) :: RingTopology.t() | nil
+  def topology(server), do: GenServer.call(server, :topology)
+
   # --- server ---
 
   @impl true
@@ -98,6 +116,9 @@ defmodule Malachi.Cluster.MembershipServer do
     state = %{
       view: Membership.new(self_ref, membership_opts),
       self: self_ref,
+      # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
+      # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
+      topology: Keyword.get(opts, :topology),
       protocol_period: Keyword.get(opts, :protocol_period, @default_protocol_period),
       ack_timeout: ack_timeout,
       indirect_timeout: Keyword.get(opts, :indirect_timeout, ack_timeout),
@@ -125,10 +146,17 @@ defmodule Malachi.Cluster.MembershipServer do
     {:reply, :ok, %{state | view: view}}
   end
 
+  def handle_call(:topology, _from, state), do: {:reply, state.topology, state}
+
+  def handle_call({:set_topology, topology}, _from, state) do
+    # Adopt the higher version (in case gossip already carried a newer one); gossip carries ours onward.
+    {:reply, :ok, %{state | topology: merge_topology(state.topology, topology)}}
+  end
+
   @impl true
   def handle_cast({:ping, from, updates}, state) do
     state = merge_updates(state, updates)
-    cast(from, {:ack, state.self, Membership.updates(state.view)})
+    cast(from, {:ack, state.self, gossip_payload(state)})
     {:noreply, state}
   end
 
@@ -140,21 +168,21 @@ defmodule Malachi.Cluster.MembershipServer do
   # A peer asks us to probe `target` on behalf of `requester` (indirect ping).
   def handle_cast({:ping_req, target, requester, updates}, state) do
     state = merge_updates(state, updates)
-    cast(target, {:ping_relay, state.self, requester, Membership.updates(state.view)})
+    cast(target, {:ping_relay, state.self, requester, gossip_payload(state)})
     {:noreply, state}
   end
 
   # We are the target of a relayed probe; ack back to the relay so it can forward to the requester.
   def handle_cast({:ping_relay, relay, requester, updates}, state) do
     state = merge_updates(state, updates)
-    cast(relay, {:ack_relay, state.self, requester, Membership.updates(state.view)})
+    cast(relay, {:ack_relay, state.self, requester, gossip_payload(state)})
     {:noreply, state}
   end
 
   # The relay heard back from the target; forward an ack to the requester as if from the target.
   def handle_cast({:ack_relay, target, requester, updates}, state) do
     state = merge_updates(state, updates)
-    cast(requester, {:ack, target, Membership.updates(state.view)})
+    cast(requester, {:ack, target, gossip_payload(state)})
     {:noreply, state}
   end
 
@@ -164,7 +192,7 @@ defmodule Malachi.Cluster.MembershipServer do
     state = merge_updates(state, updates)
     {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0, %{}})
     state = %{state | view: view}
-    cast(joiner, {:join_ok, state.self, Membership.updates(state.view)})
+    cast(joiner, {:join_ok, state.self, gossip_payload(state)})
     {:noreply, state}
   end
 
@@ -221,7 +249,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
       peers ->
         target = Enum.random(peers)
-        cast(target, {:ping, state.self, Membership.updates(state.view)})
+        cast(target, {:ping, state.self, gossip_payload(state)})
         Process.send_after(self(), {:ack_timeout, target}, state.ack_timeout)
         %{state | awaiting: MapSet.put(state.awaiting, target)}
     end
@@ -235,7 +263,7 @@ defmodule Malachi.Cluster.MembershipServer do
       |> Enum.take_random(state.indirect_fanout)
 
     Enum.each(relays, fn relay ->
-      cast(relay, {:ping_req, target, state.self, Membership.updates(state.view)})
+      cast(relay, {:ping_req, target, state.self, gossip_payload(state)})
     end)
 
     # Even with no relays available, schedule the timeout so an unreachable target is still suspected.
@@ -255,15 +283,31 @@ defmodule Malachi.Cluster.MembershipServer do
     end
   end
 
-  defp merge_updates(state, updates) do
+  # Outbound gossip payload piggybacked on every message: our view updates plus our current topology.
+  defp gossip_payload(state), do: {Membership.updates(state.view), state.topology}
+
+  # Ingest a peer's gossip (the value bound in each message handler): merge its view updates and its
+  # topology observation. Tolerates an older peer that gossips a bare updates list (pre-topology) — its
+  # view still merges and the topology is left as-is.
+  defp merge_updates(state, {updates, topology}) do
+    {view, _effects} = Membership.merge(state.view, updates)
+    %{state | view: view, topology: merge_topology(state.topology, topology)}
+  end
+
+  defp merge_updates(state, updates) when is_list(updates) do
     {view, _effects} = Membership.merge(state.view, updates)
     %{state | view: view}
   end
 
+  # Converge two topology observations (last-version-wins), tolerating either side being absent (nil).
+  defp merge_topology(nil, remote), do: remote
+  defp merge_topology(local, nil), do: local
+  defp merge_topology(local, remote), do: RingTopology.merge(local, remote)
+
   # Best-effort join: ask each seed (the initially known peers) for its view of the cluster.
   defp send_joins(state) do
     Enum.each(alive_peers(state), fn seed ->
-      cast(seed, {:join, state.self, Membership.updates(state.view)})
+      cast(seed, {:join, state.self, gossip_payload(state)})
     end)
   end
 

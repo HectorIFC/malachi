@@ -1,11 +1,19 @@
 defmodule Malachi.Cluster.MembershipServerTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.RingTopology
 
   # Tight timings so the detector converges quickly in tests.
   @timings [protocol_period: 15, ack_timeout: 15, suspicion_timeout: 90]
+
+  # A minimal one-vnode topology at a specific version (content is fixed, so equal versions are `==`).
+  defp topology_at(version) do
+    {:ok, ring} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+    %RingTopology{version: version, ring: ring, placements: %{v0: [node()]}}
+  end
 
   defp start_node(name, peers) do
     start_supervised!({MembershipServer, [name: name, peers: peers] ++ @timings}, id: name)
@@ -95,7 +103,8 @@ defmodule Malachi.Cluster.MembershipServerTest do
     # join as if we were a new node
     GenServer.cast(seed, {:join, self(), []})
 
-    assert_receive {:"$gen_cast", {:join_ok, ^seed, updates}}, 1_000
+    # the reply piggybacks the seed's gossip payload: {view updates, topology}
+    assert_receive {:"$gen_cast", {:join_ok, ^seed, {updates, _topology}}}, 1_000
     # the seed shares its cluster view (itself and the member it knew)
     members = for {member, _status, _inc, _attrs} <- updates, do: member
     assert seed in members and other in members
@@ -165,6 +174,45 @@ defmodule Malachi.Cluster.MembershipServerTest do
       # b learns a's attributes through gossip (and a knows its own immediately)
       assert MembershipServer.attributes(a, a) == %{rack: "x"}
       assert eventually(fn -> MembershipServer.attributes(b, a) == %{rack: "x"} end)
+    end
+  end
+
+  describe "topology dissemination" do
+    test "set_topology on one node propagates to peers by gossip" do
+      suffix = System.unique_integer([:positive])
+      a = :"mstopo_a_#{suffix}"
+      b = :"mstopo_b_#{suffix}"
+
+      start_node(a, [b])
+      start_node(b, [a])
+      assert eventually(fn -> MembershipServer.alive_members(b) == Enum.sort([a, b]) end)
+
+      # a fresh cluster carries no topology
+      assert MembershipServer.topology(a) == nil
+      assert MembershipServer.topology(b) == nil
+
+      topo = topology_at(1)
+      :ok = MembershipServer.set_topology(a, topo)
+
+      assert MembershipServer.topology(a) == topo
+      assert eventually(fn -> MembershipServer.topology(b) == topo end)
+    end
+
+    test "the highest version wins on every node, whoever set it (last-version-wins)" do
+      suffix = System.unique_integer([:positive])
+      a = :"mstopo_a_#{suffix}"
+      b = :"mstopo_b_#{suffix}"
+
+      start_node(a, [b])
+      start_node(b, [a])
+      assert eventually(fn -> MembershipServer.alive_members(b) == Enum.sort([a, b]) end)
+
+      :ok = MembershipServer.set_topology(a, topology_at(1))
+      :ok = MembershipServer.set_topology(b, topology_at(2))
+
+      # both converge on version 2 (b's), regardless of the order gossip carried them
+      assert eventually(fn -> MembershipServer.topology(a) == topology_at(2) end)
+      assert eventually(fn -> MembershipServer.topology(b) == topology_at(2) end)
     end
   end
 end

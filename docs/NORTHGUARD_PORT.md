@@ -300,8 +300,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
       **comutativo/associativo/idempotente**, converge em qualquer ordem de gossip. Puro, zero rede. Testado:
       `new`/`advance` (versão monotônica); merge mantém a maior versão, idempotente, comutativo (incl. no clash),
       associativo, converge à última versão em qualquer ordem — 6. Suíte 792 testes 0 falhas (+6); credo/dialyzer/
-      format limpos. **Próximo: VS-2b-2 (fiar o `RingTopology` na disseminação do SWIM + adoção local no
-      `ReplicatedDSRSM`/`CoordinatorRouter` quando a versão avança).**
+      format limpos.
+      - ✅ **VS-2b-2a — disseminação do `RingTopology` pela gossip do SWIM.** O `MembershipServer` passa a
+        **carregar a topologia junto** de cada mensagem de gossip (o mesmo caminho de disseminação que o
+        NorthGuard usa pro estado global mínimo). Design de **churn mínimo**: um `gossip_payload/1` (view +
+        topologia) substitui o builder de payload em todos os 8 sends, e o `merge_updates` passa a aceitar o
+        payload `{updates, topology}` — com **cláusula defensiva** pra um peer que mande só a lista (novo-
+        recebe-antigo, ex.: injeção de teste / gossip pré-topologia), e `merge_topology/2` nil-tolerante que
+        faz o join CRDT do VS-2b-1. **Limitação anotada:** um nó **antigo** recebendo o payload novo quebraria,
+        então um rolling upgrade completo do protocolo SWIM não é objetivo agora (deploy homogêneo). Nova API
+        `set_topology/2` (adota a maior versão localmente; gossip leva adiante) / `topology/1`. Um handler de
+        teste que inspecionava o payload cru foi ajustado pro novo shape. Testado in-VM: `set_topology` num nó
+        **propaga** por gossip; **maior versão vence** em todos os nós, seja quem setou (last-version-wins); +
+        o HA multinode do membership **verde** (gossip real com o novo payload não regride). Suíte 794 testes 0
+        falhas (+2); credo/dialyzer/format limpos. **Próximo: VS-2b-2b (adoção local — quando a versão avança,
+        aplicar o novo ring ao `ReplicatedDSRSM`/`CoordinatorRouter`).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
