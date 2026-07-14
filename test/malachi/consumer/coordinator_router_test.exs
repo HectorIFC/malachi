@@ -62,4 +62,12 @@ defmodule Malachi.Consumer.CoordinatorRouterTest do
       assert %{ring: ^ring, servers: %{v1: {:meta_v1, _}}} = Router.topology()
     end
   end
+
+  describe "coordinator_name/2" do
+    test "derives a stable per-vnode name from the base name and vnode id" do
+      assert Router.coordinator_name(@name, :cluster_vn_3) == :"Elixir.Malachi.LogGroupCoordinator.cluster_vn_3"
+      # routing and the boot wiring must agree, so the derivation is a pure function of its inputs
+      assert Router.coordinator_name(@name, :cluster_vn_3) == Router.coordinator_name(@name, :cluster_vn_3)
+    end
+  end
 end

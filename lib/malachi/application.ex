@@ -28,6 +28,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.Consumer.CoordinatorRouter
+  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.TLSValidator
@@ -76,15 +77,8 @@ defmodule Malachi.Application do
         ] ++
         log_children() ++
         [
-          # Consumer-group coordinator: assigns a topic's ranges across group members for parallel,
-          # server-scoped consumption (the client never sees ranges). Its ranges come from the broker.
-          {
-            Malachi.Consumer.GroupCoordinator,
-            # reject work routed here by a stale leadership view (single-node: always owns)
-            name: Malachi.LogGroupCoordinator,
-            ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
-            owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end
-          },
+          # The consumer-group coordinator is wired inside `log_children/0`: node-wide when non-sharded,
+          # or one per led vnode (on the leader) when the control plane is sharded.
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
         ]
@@ -269,11 +263,21 @@ defmodule Malachi.Application do
   # cluster): the node-wide coordinators of 1C-a — heal whenever clustered, retention when a policy is set.
   defp coordinator_children(cluster, nil) do
     heal = if cluster, do: [healer_child()], else: []
-    heal ++ retention_children(cluster)
+    [group_coordinator_child()] ++ heal ++ retention_children(cluster)
   end
 
   defp coordinator_children(_cluster, vnodes) do
     [vnode_coordinator_tree_spec(vnodes)]
+  end
+
+  # The node-wide consumer-group coordinator (non-sharded control plane): assigns a topic's ranges across
+  # group members for parallel, server-scoped consumption (the client never sees ranges). `owns_fun` is a
+  # no-op guard here (single-node always owns); the sharded case runs one coordinator per led vnode instead.
+  defp group_coordinator_child do
+    {GroupCoordinator,
+     name: Malachi.LogGroupCoordinator,
+     ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
+     owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end}
   end
 
   defp retention_children(cluster) do
@@ -458,10 +462,10 @@ defmodule Malachi.Application do
 
   # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
   # restarted without the manager losing its handle), returning that supervisor's pid — the handle the
-  # manager stops the vnode by. Heal always; retention only when a policy is configured.
+  # manager stops the vnode by. Heal + the group coordinator always; retention only when a policy is set.
   defp start_vnode_coordinators(vnode_id) do
     children =
-      [heal_vnode_child(vnode_id)] ++
+      [heal_vnode_child(vnode_id), group_coordinator_vnode_child(vnode_id)] ++
         if retention_configured?(), do: [retention_vnode_child(vnode_id)], else: []
 
     spec = %{
@@ -491,6 +495,19 @@ defmodule Malachi.Application do
   defp heal_vnode_child(vnode_id) do
     opts = heal_opts(vnode_metadata_source(vnode_id), vnode_leader_gate(vnode_id))
     %{id: Malachi.LogHealer, start: {HealCoordinator, :start_link, [opts]}}
+  end
+
+  # A single vnode's group coordinator (the NorthGuard model: coordinator = the vnode leader). Registered
+  # under a per-vnode name so `CoordinatorRouter.resolve/2` on any node can forward to it; the manager runs
+  # it only while this node leads the vnode, and `owns_fun` rejects work during a brief leadership flap.
+  defp group_coordinator_vnode_child(vnode_id) do
+    opts = [
+      name: CoordinatorRouter.coordinator_name(Malachi.LogGroupCoordinator, vnode_id),
+      ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
+      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end
+    ]
+
+    %{id: Malachi.LogGroupCoordinator, start: {GroupCoordinator, :start_link, [opts]}}
   end
 
   # The per-vnode leader gate: true only while this node leads the vnode's ra group.

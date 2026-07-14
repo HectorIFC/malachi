@@ -1655,6 +1655,24 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         testes 0 falhas (+1 multinode excluído); credo/dialyzer/format limpos. **G1/coordinator: A1+A2+A3 fecham a
         correção multi-nó dos consumer groups. Próximo: A4 (lifecycle — coordinator por-vnode no líder via
         `VnodeCoordinatorManager`, re-validado por este teste; + retry do cliente Node no `:not_owner`).**
+      - ✅ **A4 — coordinator por-vnode no líder (lifecycle, o modelo NorthGuard "coordinator = líder do vnode").**
+        Antes (A1–A3) **todo nó** rodava um `GroupCoordinator` único e o roteamento mandava o cliente ao dono;
+        agora, no control plane **shardado**, cada vnode roda o **seu** coordinator **no líder**, gerido pelo
+        `VnodeCoordinatorManager` que já sobe heal/retention por-vnode — start/stop no gate de liderança
+        (`MetadataServer.leader?`). Ganhos sobre A1–A3: fidelidade, **isolamento de crash** (um vnode não derruba
+        os outros) e **handoff de failover mais limpo** (o manager para no líder velho e sobe fresco no novo).
+        **Naming**: o coordinator por-vnode registra sob `CoordinatorRouter.coordinator_name(base, vnode_id)`
+        (`Module.concat`, nome local por-vnode — não `:global`, consistente com o roteamento explícito de
+        metadata do sistema); o `resolve/2` passa a **derivar** esse nome do vnode roteado (single-node sem
+        topologia → nome base). Refactor: `route/2` extraído (DRY entre `location`/`resolve`); o
+        `Malachi.LogGroupCoordinator` único vira **condicional** (só non-sharded, em `coordinator_children`);
+        `group_coordinator_vnode_child/1` entra no `start_vnode_coordinators/1` (id no supervisor por-vnode,
+        `owns_fun` como defesa na janela de flap). O `tcp_protocol` é inalterado (segue passando o nome base ao
+        `resolve`). **Single-node inalterado** (boot smoke: coordinator base registrado, `resolve` sem topologia
+        → base). O teste `:multinode` do A3 foi **re-validado** com os nomes por-vnode (`coordinator_name`).
+        Testado: `coordinator_name/2` puro; multinode 2x verde; boot single-node. Suíte 781 testes 0 falhas
+        (+1 `coordinator_name`); credo/dialyzer/format limpos. **Próximo: A5 (retry do cliente Node no
+        `:not_owner` — resiliência de cliente na janela de failover).**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

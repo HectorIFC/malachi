@@ -77,10 +77,10 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     ]
   end
 
-  # Start an unlinked, named coordinator on `node` (GenServer.start, not start_link — the erpc worker that
-  # runs it exits, and an unlinked child survives that).
-  defp start_coordinator_on(node) do
-    {:ok, _} = :erpc.call(node, GenServer, :start, [GroupCoordinator, coordinator_opts(), [name: @coord]])
+  # Start an unlinked coordinator registered under `name` on `node` (GenServer.start, not start_link — the
+  # erpc worker that runs it exits, and an unlinked child survives that).
+  defp start_coordinator_on(node, name) do
+    {:ok, _} = :erpc.call(node, GenServer, :start, [GroupCoordinator, coordinator_opts(), [name: name]])
   end
 
   test "coordinator routing tracks the live Raft leader across nodes, and reconverges after failover" do
@@ -108,21 +108,24 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     servers = %{vnode => {vnode, probe}}
     for n <- nodes, do: :ok = :erpc.call(n, CoordinatorRouter, :put_topology, [ring, servers])
 
-    # owns?/resolve agree on the leader: the leader owns "t" (resolve → the bare local name), each
+    # the topic's vnode owns a per-vnode coordinator on its leader; routing resolves to that name
+    coord_name = CoordinatorRouter.coordinator_name(@coord, vnode)
+
+    # owns?/resolve agree on the leader: the leader owns "t" (resolve → the bare per-vnode name), each
     # follower does not (resolve → forward to the leader)
     assert :erpc.call(leader, CoordinatorRouter, :owns?, ["t"]) == true
-    assert :erpc.call(leader, CoordinatorRouter, :resolve, [@coord, "t"]) == @coord
+    assert :erpc.call(leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
 
     for f <- followers do
       assert :erpc.call(f, CoordinatorRouter, :owns?, ["t"]) == false
-      assert :erpc.call(f, CoordinatorRouter, :resolve, [@coord, "t"]) == {@coord, leader}
+      assert :erpc.call(f, CoordinatorRouter, :resolve, [@coord, "t"]) == {coord_name, leader}
     end
 
     # a coordinator on the leader; two members forwarded there (from this primary node) partition the
     # ranges disjointly — the cross-node forwarding + single-authority invariant, end to end
-    start_coordinator_on(leader)
+    start_coordinator_on(leader, coord_name)
 
-    ref = {@coord, leader}
+    ref = {coord_name, leader}
     {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m1)
     {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m2)
     {:ok, _, r1} = GroupCoordinator.poll(ref, "g", "t", :m1)
@@ -132,8 +135,8 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
 
     # a follower must not accept coordination for "t" (defense against stale routing): the guard rejects
     guard_follower = hd(followers)
-    start_coordinator_on(guard_follower)
-    assert GroupCoordinator.poll({@coord, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
+    start_coordinator_on(guard_follower, coord_name)
+    assert GroupCoordinator.poll({coord_name, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
 
     # failover: the leader dies; the remaining two elect a new leader, and routing reconverges on it
     :ok = :erpc.call(leader, :ra, :stop_server, [:default, {vnode, leader}])
@@ -148,7 +151,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
 
     assert new_leader != leader
     assert :erpc.call(new_leader, CoordinatorRouter, :owns?, ["t"]) == true
-    # resolve on the new leader now returns :local (the bare name) — members reconverge here
-    assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == @coord
+    # resolve on the new leader now returns the bare per-vnode name (local) — members reconverge here
+    assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
   end
 end

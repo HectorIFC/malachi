@@ -33,11 +33,8 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   vnode's server id to the node currently leading it (or `nil` if unknown).
   """
   @spec location(term(), topology() | nil, node(), (term() -> node() | nil)) :: location()
-  def location(_topic, nil, _this_node, _leader_fn), do: :local
-
-  def location(topic, %{ring: ring, servers: servers}, this_node, leader_fn) do
-    with {:ok, vnode_id} <- HashRing.route(ring, topic),
-         {:ok, server_id} <- Map.fetch(servers, vnode_id),
+  def location(topic, topology, this_node, leader_fn) do
+    with {:ok, _vnode_id, server_id} <- route(topic, topology),
          owner when is_atom(owner) and not is_nil(owner) <- leader_fn.(server_id) do
       if owner == this_node, do: :local, else: {:remote, owner}
     else
@@ -50,17 +47,31 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   def ref(:local, name), do: name
   def ref({:remote, remote_node}, name), do: {name, remote_node}
 
+  @doc """
+  The per-vnode coordinator name derived from a `base_name` and a `vnode_id`. In the sharded control plane
+  each led vnode runs its own `GroupCoordinator` (one per vnode, on the leader — the NorthGuard model), so
+  routing and the boot wiring must agree on this name.
+  """
+  @spec coordinator_name(atom(), term()) :: atom()
+  def coordinator_name(base_name, vnode_id), do: Module.concat(base_name, to_string(vnode_id))
+
   # -- runtime resolution (impure: reads persistent_term + live Raft leadership) --
 
   @doc """
-  Resolves the coordinator ref for `topic`: the local `name` in single-node / when this node owns the
-  topic, or `{name, owner_node}` to forward to the node leading the owning vnode.
+  Resolves the coordinator ref for `topic`. Single-node / in-memory (no topology): the bare `base_name`.
+  Sharded: the topic's vnode owns a **per-vnode** coordinator on its leader — `coordinator_name/2` locally
+  when this node leads it, or `{coordinator_name/2, owner_node}` to forward. Falls back to `base_name` when
+  the owning vnode or its leader can't be resolved (a transient failover state; the caller re-resolves).
   """
   @spec resolve(atom(), term()) :: GenServer.server()
-  def resolve(name, topic) do
-    topic
-    |> location(topology(), node(), &leader_node/1)
-    |> ref(name)
+  def resolve(base_name, topic) do
+    with {:ok, vnode_id, server_id} <- route(topic, topology()),
+         owner when is_atom(owner) and not is_nil(owner) <- leader_node(server_id) do
+      name = coordinator_name(base_name, vnode_id)
+      if owner == node(), do: name, else: {name, owner}
+    else
+      _unresolved -> base_name
+    end
   end
 
   @doc """
@@ -69,6 +80,20 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   """
   @spec owns?(term()) :: boolean()
   def owns?(topic), do: location(topic, topology(), node(), &leader_node/1) == :local
+
+  # Routes a topic to its owning vnode and that vnode's ra server id, or `:error` when there is no
+  # topology, the ring can't route, or the vnode is unknown to the server map.
+  @spec route(term(), topology() | nil) :: {:ok, term(), term()} | :error
+  defp route(_topic, nil), do: :error
+
+  defp route(topic, %{ring: ring, servers: servers}) do
+    with {:ok, vnode_id} <- HashRing.route(ring, topic),
+         {:ok, server_id} <- Map.fetch(servers, vnode_id) do
+      {:ok, vnode_id, server_id}
+    else
+      _unroutable -> :error
+    end
+  end
 
   @doc """
   Publishes the static routing topology (the ring + vnode→server-id map) for `resolve/2`. Called once at
