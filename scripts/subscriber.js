@@ -23,11 +23,12 @@
  * Default credentials: consumer / consumer123 (consume permission).
  */
 
-const { MalachiClient } = require('./lib/client');
+const { MalachiClient, isNotOwner } = require('./lib/client');
 const { colors, config, parseArgs, fail } = require('./lib/cli');
 
 const cfg = config({ username: 'consumer', password: 'consumer123' });
 const DEFAULT_HEARTBEAT_MS = 10_000; // < the coordinator's 30s session timeout (safe margin)
+const NOT_OWNER_RETRY_MS = 200; // back-off before re-subscribing during a coordinator failover
 
 async function run(topic, { group, member, window, max, heartbeatMs }) {
   console.log(colors.cyan('\nMalachi Subscriber (streaming)'));
@@ -58,26 +59,41 @@ async function run(topic, { group, member, window, max, heartbeatMs }) {
     if (heartbeat.unref) heartbeat.unref();
   }
 
-  await client.subscribe(topic, {
-    group,
-    member,
-    window,
-    max,
-    onRecords: ({ records, cursor }) => {
-      for (const rec of records) {
-        const key = rec.key === null ? colors.gray('(no key)') : rec.key;
-        console.log(colors.green(`[${++total}]`) + ` key=${key}  ${rec.value.toString('utf8')}`);
-      }
-      // Release the credit we just consumed and durably commit the group's position.
-      if (records.length > 0) ack(cursor, records.length);
-    },
-    onError: (err) => {
-      console.error(colors.red(`\nStream error: ${err.message}`));
-      if (heartbeat) clearInterval(heartbeat);
-      client.close();
-      process.exit(1);
-    },
-  });
+  const fatal = (err) => {
+    console.error(colors.red(`\nStream error: ${err.message}`));
+    if (heartbeat) clearInterval(heartbeat);
+    client.close();
+    process.exit(1);
+  };
+
+  const startStream = () =>
+    client.subscribe(topic, {
+      group,
+      member,
+      window,
+      max,
+      onRecords: ({ records, cursor }) => {
+        for (const rec of records) {
+          const key = rec.key === null ? colors.gray('(no key)') : rec.key;
+          console.log(colors.green(`[${++total}]`) + ` key=${key}  ${rec.value.toString('utf8')}`);
+        }
+        // Release the credit we just consumed and durably commit the group's position.
+        if (records.length > 0) ack(cursor, records.length);
+      },
+      onError: (err) => {
+        // a member subscription that landed on a coordinator mid-failover was dropped: re-subscribe
+        // against the new owner (the server re-resolves) rather than giving up
+        if (member && isNotOwner(err)) {
+          process.stdout.write(colors.gray('~'));
+          setTimeout(() => startStream().catch(fatal), NOT_OWNER_RETRY_MS);
+          return;
+        }
+
+        fatal(err);
+      },
+    });
+
+  await startStream();
 
   process.on('SIGINT', async () => {
     if (heartbeat) clearInterval(heartbeat);

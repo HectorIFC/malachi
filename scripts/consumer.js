@@ -19,11 +19,12 @@
  * Default credentials: consumer / consumer123 (consume permission).
  */
 
-const { MalachiClient } = require('./lib/client');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { MalachiClient, isNotOwner } = require('./lib/client');
+const { colors, config, parseArgs, fail, sleep } = require('./lib/cli');
 
 const cfg = config({ username: 'consumer', password: 'consumer123' });
 const FOLLOW_WAIT_MS = 5000; // server-side long-poll window while following
+const NOT_OWNER_RETRY_MS = 200; // back-off before retrying a member fetch during a coordinator failover
 
 function printRecord(rec, n) {
   const value = rec.value.toString('utf8');
@@ -74,7 +75,20 @@ async function run(topic, { group, member, max, follow }) {
         ? { group, max, waitMs }
         : { cursor, max, waitMs };
 
-    const { records, cursor: next } = await client.fetch(topic, opts);
+    let records, next;
+
+    try {
+      ({ records, cursor: next } = await client.fetch(topic, opts));
+    } catch (err) {
+      // a member fetch routed to a coordinator mid-failover: back off and retry (the server re-resolves)
+      if (isNotOwner(err)) {
+        process.stdout.write(colors.gray('~'));
+        await sleep(NOT_OWNER_RETRY_MS);
+        continue;
+      }
+
+      throw err;
+    }
 
     for (const rec of records) printRecord(rec, ++total);
     cursor = next;

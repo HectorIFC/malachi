@@ -52,4 +52,9 @@ function fail(err, cfg) {
   process.exit(1);
 }
 
-module.exports = { colors, config, parseArgs, fail };
+// Resolves after `ms` — used by the member CLIs to back off before retrying a transient :not_owner.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+module.exports = { colors, config, parseArgs, fail, sleep };

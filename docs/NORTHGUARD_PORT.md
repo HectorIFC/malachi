@@ -1673,6 +1673,18 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         Testado: `coordinator_name/2` puro; multinode 2x verde; boot single-node. Suíte 781 testes 0 falhas
         (+1 `coordinator_name`); credo/dialyzer/format limpos. **Próximo: A5 (retry do cliente Node no
         `:not_owner` — resiliência de cliente na janela de failover).**
+      - ✅ **A5 — resiliência do cliente Node no `:not_owner` (janela de failover).** Fecha o item de cliente do
+        A4: quando um request de membro é encaminhado a um coordinator que acabou de perder a liderança do vnode,
+        o servidor responde `:not_owner` (guard do A2); é **transitório** (o servidor re-resolve o líder atual no
+        próximo request), então o cliente deve **retry** em vez de falhar. Node-only (nenhum Elixir): `client.js`
+        exporta `isNotOwner(err)` (um `MalachiError` com mensagem `"not_owner"`); `cli.js` ganha `sleep/1`.
+        `consumer.js` (fetch por membro) faz **try/catch** no fetch — em `:not_owner`, back-off de 200ms e
+        `continue` (retenta; imprime `~`). `subscriber.js` (subscribe por membro) reestrutura o subscribe num
+        `startStream()` e, no `onError`, se `:not_owner`, **re-subscreve** após 200ms (em vez de sair) contra o
+        novo dono. O `stream_ack` (heartbeat) já era fire-and-forget e auto-cura no próximo ack — sem mudança.
+        Validado: `node --check` nos scripts + sanity de `isNotOwner` (não-owner, outra razão, erro não-Malachi).
+        Sem harness de teste JS (padrão das fatias de cliente Node anteriores). **A1–A5 fecham o épico de
+        coordinator cluster wiring: consumer groups corretos e resilientes multi-nó, fiéis ao NorthGuard.**
 
 ### 8.4 Status de adoção e desvios deliberados (retrospectiva)
 

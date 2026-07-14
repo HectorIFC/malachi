@@ -28,6 +28,13 @@ class MalachiError extends Error {
   }
 }
 
+// The server answers :not_owner when a member request is routed to a coordinator that no longer leads the
+// topic's vnode (a transient failover window). It is retryable — the server re-resolves the current leader
+// on the next attempt — so the member CLIs back off and retry rather than failing.
+function isNotOwner(err) {
+  return err instanceof MalachiError && err.message === 'not_owner';
+}
+
 class MalachiClient {
   constructor(options = {}) {
     this.host = options.host || process.env.MALACHI_HOST || DEFAULT_HOST;
@@ -206,4 +213,4 @@ class MalachiClient {
   }
 }
 
-module.exports = { MalachiClient, MalachiError };
+module.exports = { MalachiClient, MalachiError, isNotOwner };

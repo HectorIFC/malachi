@@ -726,7 +726,10 @@ server pushes records up to the credit window; the client acks to durably advanc
 (at-least-once) and return credit, so a slow consumer applies backpressure instead of overflowing.
 A `subscribe` with a **member id** scopes the push stream to that member's ranges (parallel, disjoint,
 still opaque); the member ack doubles as a coordinator heartbeat, so an idle member sends a periodic
-empty ack to stay alive (and `leave_group`s on shutdown for a fast rebalance).
+empty ack to stay alive (and `leave_group`s on shutdown for a fast rebalance). A member's coordination
+is owned by one node (the leader of the topic's vnode); during a leadership failover a member request may
+briefly get `not_owner`, which is transient — the reference client backs off and retries (the server
+re-resolves the new leader).
 
 ### Reference client (Node.js)
 
