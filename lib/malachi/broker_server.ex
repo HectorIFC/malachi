@@ -21,10 +21,12 @@ defmodule Malachi.BrokerServer do
 
   alias Malachi.Broker
   alias Malachi.Cluster.DSRSM
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Metadata
@@ -736,6 +738,29 @@ defmodule Malachi.BrokerServer do
       server_id = ReplicatedDSRSM.server_for(replicated, vnode_id)
       DSRSM.update_vnode(dsrsm, topic, &ReplicatedMetadata.apply_command(server_id, &1, command))
     end
+  end
+
+  @doc """
+  Rebuilds a sharded broker's metadata routing for a new ring `topology` (a vnode split adopted via
+  gossip): the local read cache takes the new ring — existing vnodes keep their cached `Metadata`, a
+  newly-added vnode starts **empty** until the next refresh from `ra` — and the write path is re-routed
+  over the topology's `%{vnode_id => nodes}` placements (server id = `{vnode_id, a_member}`). Pure: the
+  metadata catch-up for a new/changed vnode is the separate refresh side effect. Returns the new broker.
+  """
+  @spec adopt_topology(Broker.t(), RingTopology.t()) :: Broker.t()
+  def adopt_topology(%Broker{} = broker, %RingTopology{ring: ring, placements: placements}) do
+    metadata_by_vnode =
+      Map.new(HashRing.vnode_ids(ring), fn vnode_id ->
+        {vnode_id, Map.get(broker.dsrsm.vnodes, vnode_id, Metadata.new())}
+      end)
+
+    servers = for {vnode_id, [member | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member}}
+
+    %{
+      broker
+      | dsrsm: DSRSM.seed(ring, metadata_by_vnode),
+        command_fun: sharded_command_fun(%ReplicatedDSRSM{ring: ring, vnodes: servers})
+    }
   end
 
   # A command function over a single-vnode DSRSM whose lone vnode is an authoritative ra cluster:

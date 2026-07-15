@@ -367,8 +367,19 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         não é pego (create não é fencido); o caller quiesce. Testado (`:multinode`, 2x estável): o split feliz
         segue verde (fence aplicado→levantado), e — novo — o topic migrado é **gravável no vnode novo** (o fence
         não vazou pro destino; um topic fencido responderia `{:error, :migrating}`). Suíte 802 testes 0 falhas;
-        credo/dialyzer/format limpos. **Próximo: reconciliação de split parcial + retry do cliente no `:migrating`,
-        e a integração (publicar o ring pós-split via `set_topology`, dirigido por um coordenador sob lease).**
+        credo/dialyzer/format limpos.
+      - ✅ **Int-1a — `BrokerServer.adopt_topology/2` (adoção pura do roteamento de metadado).** O desafio da
+        integração: o roteamento de metadado do broker (o cache `dsrsm` com o ring + o `command_fun` sobre o
+        `replicated`) é **capturado no boot** com o ring fixo, então um split runtime não é adotado. `adopt_topology`
+        é a **função pura** (sub-fatia pure-first) que, dado o `Broker` + uma `RingTopology`, reconstrói o
+        roteamento: o cache adota o **ring novo** (vnodes existentes mantêm o `Metadata` cacheado, um vnode novo
+        começa **vazio** até o próximo refresh do `ra`) e o `command_fun` é reconstruído sobre o `%{vnode => server_id}`
+        derivado das `placements` (skip de placement vazio, como o `adopt_ring_topology`). Pura: o catch-up do
+        metadado do vnode novo é o side effect separado (refresh). Testado in-VM: adota o ring novo (v0+v1), v0
+        mantém o topic cacheado, v1 vazio, `command_fun` reconstruído (arity 3). Suíte 803 testes 0 falhas (+1);
+        credo/dialyzer/format limpos. **Próximo: Int-1b (o `BrokerServer` chama `adopt_topology` no hook
+        `on_topology`, async), Int-2 (fiar broker+router à adoção por gossip) e Int-3 (coordenador de split sob
+        lease: `split_vnode` + `set_topology`).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

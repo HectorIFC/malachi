@@ -1,7 +1,11 @@
 defmodule Malachi.BrokerServerTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Broker
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.DSRSM
+  alias Malachi.Cluster.HashRing
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
 
@@ -196,6 +200,32 @@ defmodule Malachi.BrokerServerTest do
     case BrokerServer.stream_history(server, range_id, cursor, 3) do
       {:ok, records, :done} -> [records | accumulated] |> Enum.reverse() |> List.flatten()
       {:ok, records, next_cursor} -> drain_history(server, range_id, next_cursor, [records | accumulated])
+    end
+  end
+
+  describe "adopt_topology/2 (pure metadata-routing adoption)" do
+    test "grows the routing to the new ring, keeps existing vnode metadata, starts a new vnode empty" do
+      # a sharded broker cache with one vnode v0 holding a topic
+      {:ok, ring0} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+      {meta0, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "orders", 4})
+
+      {:ok, broker} =
+        Broker.open(dsrsm: DSRSM.seed(ring0, %{v0: meta0}), command_fun: fn dsrsm, _t, _c -> {dsrsm, :ok} end)
+
+      # adopt a topology that adds v1
+      {:ok, ring1} = HashRing.add_vnode(ring0, :v1, div(Integer.pow(2, 32), 2))
+      topology = %RingTopology{version: 1, ring: ring1, placements: %{v0: [node()], v1: [node()]}}
+
+      adopted = BrokerServer.adopt_topology(broker, topology)
+
+      # the cache adopted the new ring, with both vnodes
+      assert adopted.dsrsm.ring == ring1
+      assert adopted.dsrsm |> DSRSM.vnode_ids() |> Enum.sort() == [:v0, :v1]
+      # v0 keeps its cached metadata; v1 starts empty until the next refresh from ra
+      assert Metadata.get_topic(adopted.dsrsm.vnodes[:v0], "orders").name == "orders"
+      assert adopted.dsrsm.vnodes[:v1] == Metadata.new()
+      # the write router was rebuilt (over the new server map)
+      assert is_function(adopted.command_fun, 3)
     end
   end
 end
