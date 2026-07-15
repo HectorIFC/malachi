@@ -57,4 +57,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-module.exports = { colors, config, parseArgs, fail, sleep };
+// Runs `fn`, retrying while it rejects with a **retryable** error (a transient cluster change — a topic
+// mid-migration answering :migrating, or a coordinator failover), backing off `ms` between attempts and
+// calling `onRetry` each time. Non-retryable errors propagate. The server clears the transient once the
+// change settles, so a bounded back-off (not a tight loop) is enough; NorthGuard likewise "moves the
+// producers over" to the new location rather than failing them.
+async function withRetry(fn, retryable, ms = 200, onRetry = () => {}) {
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!retryable(err)) throw err;
+      onRetry();
+      await sleep(ms);
+    }
+  }
+}
+
+module.exports = { colors, config, parseArgs, fail, sleep, withRetry };

@@ -19,8 +19,8 @@
  * Default credentials: consumer / consumer123 (consume permission).
  */
 
-const { MalachiClient, isNotOwner } = require('./lib/client');
-const { colors, config, parseArgs, fail, sleep } = require('./lib/cli');
+const { MalachiClient, isNotOwner, isMigrating } = require('./lib/client');
+const { colors, config, parseArgs, fail, sleep, withRetry } = require('./lib/cli');
 
 const cfg = config({ username: 'consumer', password: 'consumer123' });
 const FOLLOW_WAIT_MS = 5000; // server-side long-poll window while following
@@ -93,7 +93,12 @@ async function run(topic, { group, member, max, follow }) {
     for (const rec of records) printRecord(rec, ++total);
     cursor = next;
 
-    if (group && records.length > 0) await client.commit(topic, group, cursor);
+    // retry the commit if the topic is mid-migration (a vnode split); it must land before advancing
+    if (group && records.length > 0) {
+      await withRetry(() => client.commit(topic, group, cursor), isMigrating, NOT_OWNER_RETRY_MS, () =>
+        process.stdout.write(colors.gray('~')),
+      );
+    }
 
     if (records.length === 0 && !follow) break;
     if (records.length === 0 && follow) process.stdout.write(colors.gray('.'));

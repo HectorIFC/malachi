@@ -403,8 +403,20 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         recusa; o líder splita → a topologia da membership **avança pra v1** com o vnode novo publicado, **e** a
         migração aconteceu sobre `ra` ("orders" passa a rotear/viver no cluster do vnode novo). Suíte 805 testes 0
         falhas (+1 multinode); credo/dialyzer/format limpos. **Split de vnode sobre `ra` (VS + Int) — o que o
-        NorthGuard faz — funcionando de ponta a ponta. Próximo (endurecimento): reconciliação de split parcial,
-        retry do cliente no `:migrating`/`:not_owner`, e a fiação do `VnodeSplit` sob o lease real na árvore.**
+        NorthGuard faz — funcionando de ponta a ponta.**
+      - ✅ **Endurecimento C — retry do cliente Node no `:migrating`.** Fecha a resiliência do cliente no split,
+        o análogo do retry do `:not_owner` (A5) e do que o NorthGuard faz numa mudança (transcrição: *"seal it,
+        make a new one, move the producers over"* — selar, criar o novo e **mover os produtores**). O `:migrating`
+        surge em escritas de **metadado** num topic em migração — **produce** (ao rolar segmento) e **commit**
+        (offset). Node-only: `isMigrating(err)` no `client.js` (um `MalachiError` de mensagem `"migrating"`) e um
+        helper **compartilhado** `withRetry(fn, retryable, ms, onRetry)` no `cli.js` (retenta com back-off
+        enquanto o erro é transiente; não-retryable propaga). `producer.js` (produce batch) e `consumer.js` (o
+        commit antes de avançar o cursor) passam por `withRetry(..., isMigrating, ...)` — imprimem `~` e re-tentam
+        contra a localização nova quando o split termina. Validado: `node --check` nos scripts + sanity de
+        `isMigrating` e `withRetry` (retenta-então-ok; propaga não-retryable). Sem harness de teste JS (padrão das
+        fatias de cliente Node). **Resiliência de cliente ao ciclo de vida do split (`:migrating` + `:not_owner`)
+        fechada. Endurecimento restante: reconciliação de split parcial (VS-2c-2) e a fiação do `VnodeSplit` sob
+        o lease real na árvore.**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

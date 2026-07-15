@@ -35,6 +35,13 @@ function isNotOwner(err) {
   return err instanceof MalachiError && err.message === 'not_owner';
 }
 
+// The server answers :migrating on a metadata write (produce that rolls a segment, or a commit) to a topic
+// whose vnode is being split away — the topic is fenced during the copy. It is transient (the fence lifts
+// once the split completes and the ring moves), so the CLIs back off and retry against the new location.
+function isMigrating(err) {
+  return err instanceof MalachiError && err.message === 'migrating';
+}
+
 class MalachiClient {
   constructor(options = {}) {
     this.host = options.host || process.env.MALACHI_HOST || DEFAULT_HOST;
@@ -213,4 +220,4 @@ class MalachiClient {
   }
 }
 
-module.exports = { MalachiClient, MalachiError, isNotOwner };
+module.exports = { MalachiClient, MalachiError, isNotOwner, isMigrating };

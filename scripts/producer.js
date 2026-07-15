@@ -17,8 +17,8 @@
  * Default credentials: producer / producer123 (produce permission; also allows create-topic).
  */
 
-const { MalachiClient } = require('./lib/client');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { MalachiClient, isMigrating } = require('./lib/client');
+const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
 
 const cfg = config({ username: 'producer', password: 'producer123' });
 
@@ -53,7 +53,10 @@ async function produceBatch(topic, count, key, create) {
 
   const start = Date.now();
   const records = Array.from({ length: count }, (_, i) => record(i + 1, key));
-  const appended = await client.produce(topic, records);
+  // retry if the topic is mid-migration (a vnode split): back off and produce to the new location
+  const appended = await withRetry(() => client.produce(topic, records), isMigrating, 200, () =>
+    process.stdout.write(colors.gray('~')),
+  );
   const duration = Date.now() - start;
 
   client.close();
