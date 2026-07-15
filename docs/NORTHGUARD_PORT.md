@@ -430,6 +430,23 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         testes 0 falhas (+2); credo/dialyzer/format limpos. **Split de vnode agora é dirigido no runtime sob o
         lease. Endurecimento restante: reconciliação de split parcial (VS-2c-2 — o coordenador retomar/completar
         um split incompleto no failover, o "carrying it out até o fim" do NorthGuard).**
+      - ✅ **Endurecimento B1 — `split_vnode` faz rollback numa falha de migração.** Antes, uma migração que
+        falhava no meio deixava um estado parcial (um topic já no vnode novo + fences de pé), tudo pra
+        reconciliação futura. Agora o `migrate_displaced` é **tudo-ou-nada**: se qualquer origem falha, ele
+        **reverte** — move de volta pro dono do ring **velho** cada topic que chegou ao vnode novo (`move_topic`
+        na direção inversa: `insert` na origem → `extract` do novo, o mesmo copy-first) e **destrava** qualquer
+        fence deixado numa origem (varre `meta.migrating` de cada uma, `:end_migration`). O rollback é **derivado
+        do estado** (sem rastrear passo-a-passo): lê o metadado do vnode novo e reroteia cada topic pelo ring
+        velho — idempotente; um passo de rollback que falha é engolido (fica pra recuperação manual/coordenador),
+        mas o caso comum nunca **orfana** um topic nem **prende** um fence. Unificação DRY: o `migrate_topic` de
+        ida virou `move_topic(from, to, export, name)`, reusado nos dois sentidos. A iteração das origens agora é
+        **ordenada por id** (`Enum.sort`) — split reproduzível → estado de falha parcial previsível. Testado
+        (`:multinode`): (1) o split que falha em subir o vnode novo não toca a origem (falha **antes** de fenciar);
+        (2) — o novo — um split que falha **no meio** (2ª origem com o cluster `ra` caído, após a 1ª já ter migrado
+        "orders") **reverte**: "orders" volta pra origem com offsets intactos, sem fence preso (gravável de novo,
+        não `{:error, :migrating}`), e o vnode novo fica **vazio** (nada orfanado). Suíte 807 testes 0 falhas (+1
+        multinode); credo/dialyzer/format limpos. **Endurecimento restante: B2 — reconciliação por saga/intent
+        pra crash do coordenador *no meio* do split (VS-2c-2, o "carrying it out até o fim" do NorthGuard).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

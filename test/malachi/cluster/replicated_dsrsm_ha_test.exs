@@ -201,4 +201,61 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     # extract and never applied to the destination (a fenced topic would answer {:error, :migrating})
     assert :ok = commit(split, "orders", {:commit_offset, "readers", "orders", %{root => 700}})
   end
+
+  test "a split that fails to start the new vnode leaves the source untouched (no fence applied)" do
+    unique = System.unique_integer([:positive])
+    source = :"rd_nostart_src_#{unique}"
+    dest = :"rd_nostart_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+
+    # the new vnode's ra cluster can't form on an unreachable node, so split_vnode fails *before* it fences
+    # or migrates anything — the source is never mutated
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+    assert {:error, _reason} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [:"nonexistent@127.0.0.1"])
+
+    assert ReplicatedDSRSM.vnode_for(replicated, "orders") == {:ok, source}
+    {:ok, meta} = ReplicatedDSRSM.query(replicated, "orders", &Function.identity/1)
+    assert Metadata.committed_offsets(meta, "workers", "orders") == %{root => 500}
+    assert meta.migrating == %{}
+    assert commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
+  end
+
+  test "a split that fails mid-migration rolls back: the migrated topic is restored to its source, un-fenced" do
+    unique = System.unique_integer([:positive])
+    # ids chosen so the healthy source sorts *before* the down one: migrate_displaced walks sources in id
+    # order, migrating "orders" to the new vnode from `source`, then fails on `down` -> triggers rollback
+    source = :"rd_rb_a_src_#{unique}"
+    down = :"rd_rb_z_down_#{unique}"
+    dest = :"rd_rb_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+
+    # inject a second source vnode whose ra cluster is down (server on an unreachable node). It is not in
+    # the ring — it exists only to make the migration fail *after* `source` has already handed "orders" off
+    # to the new vnode, so the rollback's move-back path (new -> source) actually runs.
+    broken = %{replicated | vnodes: Map.put(replicated.vnodes, down, {down, :"nonexistent@127.0.0.1"})}
+
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+    assert {:error, _reason} = ReplicatedDSRSM.split_vnode(broken, dest, token, [node()])
+
+    # rollback moved "orders" back to its source (old ring unchanged), offsets intact, no stuck fence, and
+    # it is writable again (a fenced topic would answer {:error, :migrating}, which commit/3 would surface)
+    assert ReplicatedDSRSM.vnode_for(replicated, "orders") == {:ok, source}
+    {:ok, meta} = ReplicatedDSRSM.query(replicated, "orders", &Function.identity/1)
+    assert Metadata.get_topic(meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(meta, "workers", "orders") == %{root => 500}
+    assert meta.migrating == %{}
+    assert commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
+
+    # and the new vnode was emptied by the move-back — nothing orphaned there
+    {:ok, dest_meta} = MetadataServer.query({dest, node()}, &Function.identity/1)
+    assert Metadata.get_topic(dest_meta, "orders") == nil
+  end
 end

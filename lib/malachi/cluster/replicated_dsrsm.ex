@@ -85,7 +85,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   def split_vnode(%__MODULE__{} = state, new_vnode_id, token, nodes \\ [node()]) do
     with {:ok, new_ring} <- HashRing.add_vnode(state.ring, new_vnode_id, token),
          {:ok, new_server_id} <- MetadataServer.start(new_vnode_id, nodes),
-         :ok <- migrate_displaced(state.vnodes, new_ring, new_vnode_id, new_server_id) do
+         :ok <- migrate_displaced(state, new_ring, new_vnode_id, new_server_id) do
       {:ok, %{state | ring: new_ring, vnodes: Map.put(state.vnodes, new_vnode_id, new_server_id)}}
     end
   end
@@ -170,14 +170,29 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end
   end
 
-  # For each existing (source) vnode, migrate its topics that now route to the new vnode under `new_ring`.
-  defp migrate_displaced(source_vnodes, new_ring, new_vnode_id, new_server_id) do
-    Enum.reduce_while(source_vnodes, :ok, fn {_source_id, source_server}, :ok ->
-      case migrate_from(source_server, new_server_id, new_ring, new_vnode_id) do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
+  # For each source vnode, migrate its topics that now route to the new vnode under `new_ring`.
+  # **All-or-nothing:** on any failure it best-effort **rolls back** (moves anything that reached the new
+  # vnode back to its old-ring owner and lifts any fence left on a source), so a failed split leaves no
+  # orphaned topic and no stuck fence.
+  defp migrate_displaced(state, new_ring, new_vnode_id, new_server_id) do
+    # Walk the source vnodes in a deterministic (id-sorted) order so a split — and, if it fails partway,
+    # the state a rollback has to undo — is reproducible rather than dependent on map iteration order.
+    result =
+      Enum.reduce_while(Enum.sort(state.vnodes), :ok, fn {_source_id, source_server}, :ok ->
+        case migrate_from(source_server, new_server_id, new_ring, new_vnode_id) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        roll_back(state, new_server_id)
+        error
+    end
   end
 
   # Find the source's topics that now route to the new vnode, **fence** them (seal-first, so no write can
@@ -211,21 +226,60 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   defp migrate_topics(source_server, new_server, snapshot, names) do
     Enum.reduce_while(names, :ok, fn name, :ok ->
-      case migrate_topic(source_server, new_server, Metadata.export_topic(snapshot, name), name) do
+      case move_topic(source_server, new_server, Metadata.export_topic(snapshot, name), name) do
         :ok -> {:cont, :ok}
         error -> {:halt, error}
       end
     end)
   end
 
-  # Copy-first: insert the topic's export into the new vnode's log, then extract it from the source's —
-  # a failure before the extract leaves the source intact (no loss); after it, a harmless duplicate.
-  defp migrate_topic(source_server, new_server, export, name) do
-    with {:ok, _ok} <- MetadataServer.command(new_server, {:insert_topic, export}),
-         {:ok, _export} <- MetadataServer.command(source_server, {:extract_topic, name}) do
+  # Move a topic between vnodes, copy-first: insert its `export` into `to_server`'s log, then extract it
+  # from `from_server`'s — a failure before the extract leaves the source intact (no loss); after it, a
+  # harmless duplicate. Used to migrate (source→new) and to roll a failed split back (new→source).
+  defp move_topic(from_server, to_server, export, name) do
+    with {:ok, _ok} <- MetadataServer.command(to_server, {:insert_topic, export}),
+         {:ok, _export} <- MetadataServer.command(from_server, {:extract_topic, name}) do
       :ok
     else
       error -> {:error, {:migrate, name, error}}
     end
+  end
+
+  # Best-effort rollback of a failed split, **derived from the current state** (no per-step tracking): move
+  # every topic that reached the new vnode back to the source it owns under the (unchanged) ring, then lift
+  # any migration fence left on a source. Idempotent; a failed rollback step is swallowed (left for
+  # manual/coordinator recovery) — the point is that a mid-split failure never orphans a topic or sticks a
+  # fence in the common case.
+  defp roll_back(state, new_server_id) do
+    case MetadataServer.query(new_server_id, &Function.identity/1) do
+      {:ok, new_meta} ->
+        Enum.each(Map.keys(new_meta.topics), fn name ->
+          case HashRing.route(state.ring, name) do
+            {:ok, source_vnode} ->
+              _ =
+                move_topic(
+                  new_server_id,
+                  Map.fetch!(state.vnodes, source_vnode),
+                  Metadata.export_topic(new_meta, name),
+                  name
+                )
+
+            _unrouted ->
+              :ok
+          end
+        end)
+
+      _unreachable ->
+        :ok
+    end
+
+    for {_vnode_id, source_server} <- state.vnodes do
+      case MetadataServer.query(source_server, &Function.identity/1) do
+        {:ok, meta} -> Enum.each(Map.keys(meta.migrating), &MetadataServer.command(source_server, {:end_migration, &1}))
+        _unreachable -> :ok
+      end
+    end
+
+    :ok
   end
 end
