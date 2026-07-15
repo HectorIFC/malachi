@@ -342,9 +342,23 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         (integração). Testado `:multinode` (grupos `ra` locais, 3x estável): split de um vnode com topic + offsets
         → "orders" passa a rotear pro vnode novo, topic **e committed offsets** preservados lidos do grupo `ra`
         novo, e a origem **não** tem mais o topic (extract copy-first) + unit de `export_topic` (read-only, nil em
-        ausente). Suíte 796 testes 0 falhas (+1 default, +1 multinode); credo/dialyzer/format limpos. **Próximo:
-        integração (publicar o ring pós-split via `set_topology`, dirigido por um coordenador sob lease) e VS-2c
-        (consistência/fencing da janela de cutover).**
+        ausente). Suíte 796 testes 0 falhas (+1 default, +1 multinode); credo/dialyzer/format limpos.
+      - ✅ **VS-2c-1a — fence de migração (núcleo, seal-first).** O problema que fecha: durante a migração, uma
+        escrita concorrente no topic (roteada pra origem, ring ainda velho) **depois** do snapshot seria perdida
+        (o extract remove o estado atual, mas o insert usou o snapshot). Fix fiel ao NorthGuard (transcrição:
+        *"we first seal R1 to create R2 and R3"* — selar dá as garantias de ordem): **fencer** o topic. Novo
+        estado `migrating` (um set `%{name => true}` — map, não `MapSet`, pra evitar o atrito de tipo opaco do
+        dialyzer com campo de struct) + comandos `:begin_migration`/`:end_migration`. O `apply/2` público virou um
+        **guard central**: renomeei as 15 clauses pra `do_apply/2` e a `apply/2` agora, antes de despachar,
+        resolve o **topic-alvo** do comando (`command_topic/2` — direto pra topic-scoped, via `range`/`segment →
+        topic` pros de range/segment) e **rejeita `{:error, :migrating}`** se ele está fencido. Comandos de leitura
+        e os de migração (create/define_policy/begin/end/extract/insert) **nunca** são fencidos. O `extract_topic`
+        limpa o fence (o topic sumiu). Pura, determinística. Testado: `begin_migration` rejeita mutantes (incl. um
+        comando de range que resolve pro topic) deixando o estado intacto; leituras e extract/insert passam;
+        `end_migration` levanta; fence num topic não afeta co-located; begin em topic ausente erra — 5. Suíte 802
+        testes 0 falhas (+5); credo/dialyzer/format limpos. **Próximo: VS-2c-1b (o `split_vnode` fencia a origem
+        antes do snapshot), depois reconciliação de split parcial + retry do cliente no `:migrating`, e a
+        integração (publicar o ring pós-split via `set_topology` sob lease).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

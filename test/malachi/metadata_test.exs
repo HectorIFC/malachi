@@ -458,6 +458,53 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "migration fence (begin/end_migration)" do
+    test "begin_migration rejects mutating commands on the fenced topic with :migrating" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+
+      # a topic-scoped mutation is fenced, and the state is left unchanged
+      assert {^state, {:error, :migrating}} = Metadata.apply(state, {:commit_offset, "g", "events", %{root => 5}})
+      # a range/segment command resolves to its topic and is fenced too
+      assert {^state, {:error, :migrating}} = Metadata.apply(state, {:split_range, root})
+    end
+
+    test "reads and the migration commands themselves are never fenced" do
+      {state, _root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+
+      # a query is a plain function, unaffected
+      assert Metadata.get_topic(state, "events").name == "events"
+      # extract passes through and clears the fence (and the topic); its export re-inserts elsewhere
+      {without, export} = apply!(state, {:extract_topic, "events"})
+      assert export.topic.name == "events"
+      assert Metadata.get_topic(without, "events") == nil
+      {_dest, :ok} = apply!(Metadata.new(), {:insert_topic, export})
+    end
+
+    test "end_migration lifts the fence" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+      assert {_s, {:error, :migrating}} = Metadata.apply(state, {:commit_offset, "g", "events", %{root => 5}})
+
+      {state, :ok} = apply!(state, {:end_migration, "events"})
+      assert {_s, :ok} = Metadata.apply(state, {:commit_offset, "g", "events", %{root => 5}})
+    end
+
+    test "a fence on one topic does not fence a co-located topic" do
+      {state, _root} = create_topic(Metadata.new(), "events", 4)
+      {state, other_root} = create_topic(state, "other", 4)
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+
+      assert {_s, :ok} = Metadata.apply(state, {:commit_offset, "g", "other", %{other_root => 1}})
+    end
+
+    test "begin_migration on an absent topic errors and leaves the state unchanged" do
+      assert {state, {:error, :no_such_topic}} = Metadata.apply(Metadata.new(), {:begin_migration, "ghost"})
+      assert state == Metadata.new()
+    end
+  end
+
   # The maintained index must equal one derived by scanning the source-of-truth maps.
   defp index_matches_scan?(state) do
     expected_tr =

@@ -108,7 +108,11 @@ defmodule Malachi.Metadata do
           # `ranges_of_topic`/`segments_of_range` can be O(1)+O(k) lookups instead of full scans. Stored
           # as MapSets (O(1) add/remove, dedup); an entry exists iff the key has ≥1 member.
           topic_ranges: %{topic_name() => MapSet.t(range_id())},
-          range_segments: %{range_id() => MapSet.t(segment_id())}
+          range_segments: %{range_id() => MapSet.t(segment_id())},
+          # Topics currently **fenced for migration** (a vnode split copying them to another vnode) — a set
+          # kept as a `%{name => true}` map: every mutating command targeting one is rejected with
+          # `{:error, :migrating}`, so the split's snapshot is not raced. Cleared on extract/`:end_migration`.
+          migrating: %{topic_name() => true}
         }
 
   @typedoc "A topic's complete metadata, extracted for migration between vnodes."
@@ -134,6 +138,8 @@ defmodule Malachi.Metadata do
           | {:set_topic_policy, topic_name(), policy_name() | nil}
           | {:extract_topic, topic_name()}
           | {:insert_topic, topic_export()}
+          | {:begin_migration, topic_name()}
+          | {:end_migration, topic_name()}
 
   defstruct topics: %{},
             ranges: %{},
@@ -141,7 +147,8 @@ defmodule Malachi.Metadata do
             committed_offsets: %{},
             policies: %{},
             topic_ranges: %{},
-            range_segments: %{}
+            range_segments: %{},
+            migrating: %{}
 
   # Shared empty MapSet returned for an absent index key (no allocation on the miss path).
   @empty_set MapSet.new()
@@ -161,7 +168,48 @@ defmodule Malachi.Metadata do
   segments safe when it migrates to another vnode (see `insert_topic/2`).
   """
   @spec apply(t(), command()) :: {t(), term()}
-  def apply(%__MODULE__{} = state, {:create_topic, name, keyspace_bits}) do
+  def apply(%__MODULE__{} = state, command) do
+    # migration fence (seal-first, à la NorthGuard's range split): a mutating command targeting a topic
+    # that is being migrated to another vnode is rejected, so the split's snapshot is never raced.
+    case command_topic(state, command) do
+      topic when is_binary(topic) ->
+        if Map.has_key?(state.migrating, topic), do: {state, {:error, :migrating}}, else: do_apply(state, command)
+
+      nil ->
+        do_apply(state, command)
+    end
+  end
+
+  # The topic a mutating command would change, or `nil` when the command is not topic-scoped or is a
+  # migration/read command that must never be fenced (create_topic, define_policy, begin/end_migration,
+  # extract/insert_topic). Range/segment commands resolve to their owning topic via the state.
+  defp command_topic(_state, {:seal_topic, name}), do: name
+  defp command_topic(_state, {:delete_topic, name}), do: name
+  defp command_topic(_state, {:set_topic_policy, name, _policy}), do: name
+  defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
+  defp command_topic(state, {:split_range, range_id}), do: range_topic(state, range_id)
+  defp command_topic(state, {:merge_ranges, range_id_a, _range_id_b}), do: range_topic(state, range_id_a)
+  defp command_topic(state, {:register_segment, range_id, _seg, _replicas, _off}), do: range_topic(state, range_id)
+  defp command_topic(state, {:seal_segment, segment_id, _len, _bytes, _at}), do: segment_topic(state, segment_id)
+  defp command_topic(state, {:delete_segment, segment_id}), do: segment_topic(state, segment_id)
+  defp command_topic(state, {:set_segment_replicas, segment_id, _replicas}), do: segment_topic(state, segment_id)
+  defp command_topic(_state, _unfenced), do: nil
+
+  defp range_topic(state, range_id) do
+    case Map.fetch(state.ranges, range_id) do
+      {:ok, range} -> range.topic
+      :error -> nil
+    end
+  end
+
+  defp segment_topic(state, segment_id) do
+    case Map.fetch(state.segments, segment_id) do
+      {:ok, segment} -> range_topic(state, segment.range_id)
+      :error -> nil
+    end
+  end
+
+  defp do_apply(%__MODULE__{} = state, {:create_topic, name, keyspace_bits}) do
     cond do
       not valid_topic_name?(name) -> {state, {:error, :invalid_topic_name}}
       Map.has_key?(state.topics, name) -> {state, {:error, :already_exists}}
@@ -169,7 +217,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:seal_topic, name}) do
+  defp do_apply(%__MODULE__{} = state, {:seal_topic, name}) do
     case Map.fetch(state.topics, name) do
       :error ->
         {state, {:error, :no_such_topic}}
@@ -181,7 +229,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:delete_topic, name}) do
+  defp do_apply(%__MODULE__{} = state, {:delete_topic, name}) do
     case Map.fetch(state.topics, name) do
       :error ->
         {state, {:error, :no_such_topic}}
@@ -202,7 +250,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:split_range, range_id}) do
+  defp do_apply(%__MODULE__{} = state, {:split_range, range_id}) do
     case fetch_active_range(state, range_id) do
       {:error, _reason} = error ->
         {state, error}
@@ -216,7 +264,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:merge_ranges, range_id_a, range_id_b}) do
+  defp do_apply(%__MODULE__{} = state, {:merge_ranges, range_id_a, range_id_b}) do
     with {:ok, range_a} <- fetch_active_range(state, range_id_a),
          {:ok, range_b} <- fetch_active_range(state, range_id_b),
          :ok <- check_mergeable(range_a, range_b) do
@@ -226,7 +274,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
+  defp do_apply(%__MODULE__{} = state, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
     if Map.has_key?(state.segments, segment_id) do
       {state, {:error, :segment_exists}}
     else
@@ -252,13 +300,13 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
+  defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
     update_segment(state, segment_id, fn segment ->
       %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
     end)
   end
 
-  def apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
+  defp do_apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
     # Retention removes an expired segment from the control plane. Only sealed segments are
     # deletable — the active segment is still being written and must never be dropped.
     case Map.fetch(state.segments, segment_id) do
@@ -274,11 +322,11 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:set_segment_replicas, segment_id, replica_set}) do
+  defp do_apply(%__MODULE__{} = state, {:set_segment_replicas, segment_id, replica_set}) do
     update_segment(state, segment_id, fn segment -> %{segment | replica_set: replica_set} end)
   end
 
-  def apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
+  defp do_apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
     # A consumer group's durable position, **merged per range** (last commit wins for each range) rather
     # than replaced: with a partitioned group, each member commits only the ranges it owns, and must not
     # clobber the positions of ranges owned by other members. Then **prune** offsets of ranges that are no
@@ -290,7 +338,7 @@ defmodule Malachi.Metadata do
     {%{state | committed_offsets: committed}, :ok}
   end
 
-  def apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
+  defp do_apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
     if is_binary(name) and name != "" and is_map(policy) do
       {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
     else
@@ -298,7 +346,7 @@ defmodule Malachi.Metadata do
     end
   end
 
-  def apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
+  defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
     cond do
       not Map.has_key?(state.topics, topic) ->
         {state, {:error, :no_such_topic}}
@@ -316,19 +364,33 @@ defmodule Malachi.Metadata do
   # metadata from the source vnode and returns it as an `export` (the reply), `:insert_topic` restores that
   # export on the destination vnode. Together they relocate a topic — with its ranges, segments and
   # committed offsets — from one vnode to another, keeping the move deterministic and replay-safe.
-  def apply(%__MODULE__{} = state, {:extract_topic, name}) do
+  defp do_apply(%__MODULE__{} = state, {:extract_topic, name}) do
     extract_topic(state, name)
   end
 
-  def apply(%__MODULE__{} = state, {:insert_topic, export}) do
+  defp do_apply(%__MODULE__{} = state, {:insert_topic, export}) do
     {insert_topic(state, export), :ok}
+  end
+
+  # Fence a topic for migration (a vnode split copying it away): further mutating commands on it are
+  # rejected until `:end_migration` or `:extract_topic`. Idempotent; errors on an absent topic.
+  defp do_apply(%__MODULE__{} = state, {:begin_migration, name}) do
+    if Map.has_key?(state.topics, name) do
+      {%{state | migrating: Map.put(state.migrating, name, true)}, :ok}
+    else
+      {state, {:error, :no_such_topic}}
+    end
+  end
+
+  defp do_apply(%__MODULE__{} = state, {:end_migration, name}) do
+    {%{state | migrating: Map.delete(state.migrating, name)}, :ok}
   end
 
   # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
   # replicated by Raft, a command that raises in `apply` would crash every replica
   # deterministically (and again on replay) — e.g. an older replica seeing a newer
   # command during a rolling upgrade. Keep the replica alive and surface the problem.
-  def apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
+  defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
 
   # --- queries ---
 
@@ -514,7 +576,9 @@ defmodule Malachi.Metadata do
             | topics: Map.delete(state.topics, name),
               ranges: Map.drop(state.ranges, range_ids),
               segments: Map.drop(state.segments, Map.keys(export.segments)),
-              committed_offsets: Map.reject(state.committed_offsets, fn {{_g, t}, _offs} -> t == name end)
+              committed_offsets: Map.reject(state.committed_offsets, fn {{_g, t}, _offs} -> t == name end),
+              # the topic is gone, so drop any migration fence it held
+              migrating: Map.delete(state.migrating, name)
           }
           |> index_forget_topic(name, range_ids)
 
