@@ -14,6 +14,7 @@ defmodule Malachi.Application do
   alias Malachi.Auth.ConfigValidator
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
   alias Malachi.Cluster.LeaseReconciler
@@ -117,19 +118,22 @@ defmodule Malachi.Application do
         configured -> configured
       end
 
+    # The sharded vnode placement (or nil): the metadata's initial ring, also seeded into the membership
+    # gossip as the version-0 `RingTopology` so a later split advances from it and every node converges.
+    vnodes = vnode_placement(cluster, nodes)
+
     log_stack =
       if cluster do
         start_ra!()
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
         # precede the broker that references it.
-        [membership_child(nodes), replication_child(), log_broker_child(cluster, nodes)]
+        [membership_child(nodes, vnodes), replication_child(), log_broker_child(cluster, nodes)]
       else
         [log_broker_child(nil, nodes)]
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
     # the sharded control plane also gets the lease + manual rebalancing coordinator (R3-b-iii).
-    vnodes = vnode_placement(cluster, nodes)
     log_stack ++ coordinator_children(cluster, vnodes) ++ rebalance_children(nodes, vnodes)
   end
 
@@ -352,17 +356,33 @@ defmodule Malachi.Application do
 
   defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
-  defp membership_child(nodes) do
-    opts = [
-      name: Malachi.LogMembership,
-      self_ref: {Malachi.LogMembership, node()},
-      peers: membership_seeds(nodes),
-      attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
-      # adopt a gossiped ring change locally: point consumer-group routing at the new topology
-      on_topology: &adopt_ring_topology/1
-    ]
+  defp membership_child(nodes, vnodes) do
+    opts =
+      [
+        name: Malachi.LogMembership,
+        self_ref: {Malachi.LogMembership, node()},
+        peers: membership_seeds(nodes),
+        attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
+        # adopt a gossiped ring change locally: point consumer-group routing at the new topology
+        on_topology: &adopt_ring_topology/1
+      ] ++ initial_topology_opt(vnodes)
 
     %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
+  end
+
+  # Seed the membership with the version-0 routing topology (the boot ring) when sharded, so gossip carries
+  # it and a split advances from it. A single vnode (or unclustered) has nothing to route — no topology.
+  defp initial_topology_opt(nil), do: []
+
+  defp initial_topology_opt(vnodes) do
+    ring =
+      Enum.reduce(vnodes, HashRing.new(), fn {vnode_id, token, _nodes}, ring ->
+        {:ok, ring} = HashRing.add_vnode(ring, vnode_id, token)
+        ring
+      end)
+
+    placements = Map.new(vnodes, fn {vnode_id, _token, nodes} -> {vnode_id, nodes} end)
+    [topology: RingTopology.new(ring, placements)]
   end
 
   # Applies a newly-adopted `RingTopology` (a vnode split's ring change, learned via gossip) to this

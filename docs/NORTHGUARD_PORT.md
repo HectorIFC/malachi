@@ -390,8 +390,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         `RingTopology.servers/1` (usada no broker e no router). Testado in-VM: o `handle_cast` adota o ring novo no
         cache **e** aponta o `bootstrap.replicated`/refresh pro ring novo (reconcile não reverte); `servers/1` pura
         (skip de placement vazio). Suíte 805 testes 0 falhas (+2); credo/dialyzer/format limpos. **Int-1 (broker
-        adota em runtime) concluído. Próximo: Int-3 (coordenador de split sob lease: `split_vnode` +
-        `set_topology` → tudo propaga e adota por gossip) + um teste `:multinode` de split de ponta a ponta.**
+        adota em runtime) concluído.**
+      - ✅ **Int-3 — coordenador de split de ponta a ponta (sob lease) + baseline no boot.** **Int-3a:** o boot
+        (modo shardado) agora **semeia a topologia versão-0** na membership (`membership_child` passa o
+        `:topology` construído das `vnode_placement`), pra a gossip carregar o ring e um split **avançar** dele;
+        single-node/1-vnode não tem o que rotear → sem topologia. **Int-3b:** novo `Malachi.Cluster.VnodeSplit.split/5`
+        — só o **líder do lease** age (`leader?` seam; senão `{:error, :not_leader}`): lê a `RingTopology` atual da
+        membership, reconstrói o `ReplicatedDSRSM`, chama `split_vnode` (migração fencida copy-first sobre `ra`,
+        VS-2a/2c), **avança** a versão e **publica** via `set_topology`. A partir daí a gossip dissemina (VS-2b) e
+        todo nó adota o ring novo pro roteamento de metadado (broker, Int-1) e de consumer-group (router,
+        VS-2b-2b). Junta todas as fatias VS/Int num split real. Testado `:multinode` (2x estável): um não-líder
+        recusa; o líder splita → a topologia da membership **avança pra v1** com o vnode novo publicado, **e** a
+        migração aconteceu sobre `ra` ("orders" passa a rotear/viver no cluster do vnode novo). Suíte 805 testes 0
+        falhas (+1 multinode); credo/dialyzer/format limpos. **Split de vnode sobre `ra` (VS + Int) — o que o
+        NorthGuard faz — funcionando de ponta a ponta. Próximo (endurecimento): reconciliação de split parcial,
+        retry do cliente no `:migrating`/`:not_owner`, e a fiação do `VnodeSplit` sob o lease real na árvore.**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
