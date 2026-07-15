@@ -196,5 +196,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     # the source vnode no longer holds it (copy-first extract removed it after the insert)
     {:ok, source_meta} = MetadataServer.query(ReplicatedDSRSM.server_for(split, source), &Function.identity/1)
     assert Metadata.get_topic(source_meta, "orders") == nil
+
+    # the migrated topic is writable on the new vnode: the migration fence was lifted by the copy-first
+    # extract and never applied to the destination (a fenced topic would answer {:error, :migrating})
+    assert :ok = commit(split, "orders", {:commit_offset, "readers", "orders", %{root => 700}})
   end
 end

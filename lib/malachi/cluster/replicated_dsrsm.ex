@@ -72,12 +72,14 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Splits the ring by adding a vnode at `token` (a new ra cluster on `nodes`) and **migrating** every topic
   that now routes to it out of its current vnode — vnode split over real Raft (the NorthGuard model: spawn
-  a new group and break off that half of the state). **Copy-first** per topic: `insert_topic` into the new
-  vnode, then `extract_topic` from the source, so no single failure loses a topic (a crash after the insert
-  leaves a harmless duplicate the new ring routes past). Returns the grown state on full success; propagates
-  a ring/start error, or `{:error, {:migrate, topic, reason}}` if a topic fails to migrate (a partial split
-  is left for the caller/coordinator to reconcile). Concurrent writes to a migrating topic are not fenced
-  yet — today's caller splits a quiescent vnode.
+  a new group and break off that half of the state). Each displaced topic is **fenced** on the source first
+  (`:begin_migration`, so a concurrent write is rejected and cannot race the copy — seal-first), then
+  **copy-first**: `insert_topic` into the new vnode, then `extract_topic` from the source (which lifts the
+  fence), so no single failure loses a topic (a crash after the insert leaves a harmless duplicate the new
+  ring routes past). Returns the grown state on full success; propagates a ring/start error, or
+  `{:error, {:fence | :migrate, topic, reason}}` on failure — a partial split leaves its remaining fences up
+  (writes to those topics stay blocked) for the caller/coordinator to reconcile. A topic *created* mid-split
+  that routes to the new vnode is not caught here (create is not fenced); today's caller quiesces the split.
   """
   @spec split_vnode(t(), vnode_id(), HashRing.token(), [node()]) :: {:ok, t()} | {:error, term()}
   def split_vnode(%__MODULE__{} = state, new_vnode_id, token, nodes \\ [node()]) do
@@ -178,20 +180,42 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end)
   end
 
-  # A linearizable snapshot of the source vnode, then migrate (from that snapshot) each of its topics that
-  # now routes to the new vnode. `&Function.identity/1` (not a closure) so the query runs on the leader.
+  # Find the source's topics that now route to the new vnode, **fence** them (seal-first, so no write can
+  # race the copy), then re-snapshot the now-stable source and migrate each from that snapshot. The re-read
+  # after fencing captures any write that landed before the fence. `&Function.identity/1` (not a closure)
+  # so the query runs on the leader.
   defp migrate_from(source_server, new_server, new_ring, new_vnode_id) do
     with {:ok, metadata} <- MetadataServer.query(source_server, &Function.identity/1) do
-      metadata.topics
-      |> Map.keys()
-      |> Enum.filter(fn name -> HashRing.route(new_ring, name) == {:ok, new_vnode_id} end)
-      |> Enum.reduce_while(:ok, fn name, :ok ->
-        case migrate_topic(source_server, new_server, Metadata.export_topic(metadata, name), name) do
-          :ok -> {:cont, :ok}
-          error -> {:halt, error}
-        end
-      end)
+      displaced =
+        for name <- Map.keys(metadata.topics),
+            HashRing.route(new_ring, name) == {:ok, new_vnode_id},
+            do: name
+
+      with :ok <- fence_topics(source_server, displaced),
+           {:ok, snapshot} <- MetadataServer.query(source_server, &Function.identity/1) do
+        migrate_topics(source_server, new_server, snapshot, displaced)
+      end
     end
+  end
+
+  # Fence each displaced topic on the source so concurrent writes to it are rejected during the copy. A
+  # failed migration leaves the remaining fences up (writes stay blocked) for the coordinator to reconcile.
+  defp fence_topics(source_server, names) do
+    Enum.reduce_while(names, :ok, fn name, :ok ->
+      case MetadataServer.command(source_server, {:begin_migration, name}) do
+        {:ok, :ok} -> {:cont, :ok}
+        other -> {:halt, {:error, {:fence, name, other}}}
+      end
+    end)
+  end
+
+  defp migrate_topics(source_server, new_server, snapshot, names) do
+    Enum.reduce_while(names, :ok, fn name, :ok ->
+      case migrate_topic(source_server, new_server, Metadata.export_topic(snapshot, name), name) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   # Copy-first: insert the topic's export into the new vnode's log, then extract it from the source's —

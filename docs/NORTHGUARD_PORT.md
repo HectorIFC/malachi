@@ -356,9 +356,19 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         limpa o fence (o topic sumiu). Pura, determinística. Testado: `begin_migration` rejeita mutantes (incl. um
         comando de range que resolve pro topic) deixando o estado intacto; leituras e extract/insert passam;
         `end_migration` levanta; fence num topic não afeta co-located; begin em topic ausente erra — 5. Suíte 802
-        testes 0 falhas (+5); credo/dialyzer/format limpos. **Próximo: VS-2c-1b (o `split_vnode` fencia a origem
-        antes do snapshot), depois reconciliação de split parcial + retry do cliente no `:migrating`, e a
-        integração (publicar o ring pós-split via `set_topology` sob lease).**
+        testes 0 falhas (+5); credo/dialyzer/format limpos.
+      - ✅ **VS-2c-1b — o `split_vnode` fencia a origem antes do snapshot.** Usa o fence do VS-2c-1a na
+        orquestração: o `migrate_from` agora (1) lê a origem pra achar os deslocados, (2) **`:begin_migration`
+        em cada um** (`fence_topics`), (3) **re-lê** a origem já estável (o re-read captura qualquer escrita que
+        pegou a janela antes do fence), (4) migra copy-first do snapshot fencido — o `:extract_topic` **levanta**
+        o fence (o topic sumiu). Assim, nenhuma escrita concorrente corre a cópia: fecha o gap que o VS-2a
+        documentava. Numa falha parcial, os fences restantes **ficam de pé** (escritas bloqueadas nesses topics)
+        pra reconciliação — fail-safe. Ressalva anotada: um topic **criado** durante o split que roteie pro novo
+        não é pego (create não é fencido); o caller quiesce. Testado (`:multinode`, 2x estável): o split feliz
+        segue verde (fence aplicado→levantado), e — novo — o topic migrado é **gravável no vnode novo** (o fence
+        não vazou pro destino; um topic fencido responderia `{:error, :migrating}`). Suíte 802 testes 0 falhas;
+        credo/dialyzer/format limpos. **Próximo: reconciliação de split parcial + retry do cliente no `:migrating`,
+        e a integração (publicar o ring pós-split via `set_topology`, dirigido por um coordenador sob lease).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
