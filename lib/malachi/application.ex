@@ -369,11 +369,12 @@ defmodule Malachi.Application do
   # node's consumer-group routing: the `CoordinatorRouter` topology is the ring plus one ra server id per
   # vnode (any member; the router resolves the live leader). Kept light — it runs inline in the membership
   # server. The metadata routing (`ReplicatedDSRSM`) adoption is driven by the split orchestration itself.
-  defp adopt_ring_topology(%RingTopology{ring: ring, placements: placements}) do
-    # a comprehension (not Map.new) so a vnode with an empty placement is skipped rather than raising —
-    # the hook runs inline in the membership server and must not crash it
-    servers = for {vnode_id, [member_node | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member_node}}
-    CoordinatorRouter.put_topology(ring, servers)
+  defp adopt_ring_topology(%RingTopology{ring: ring} = topology) do
+    # consumer-group routing adopts the new ring inline (persistent_term, fast)
+    CoordinatorRouter.put_topology(ring, RingTopology.servers(topology))
+    # the broker adopts the same ring change for metadata routing, async (a cast) so this inline hook stays
+    # fast and never blocks the membership server; a no-op if the broker is not running (single-node).
+    GenServer.cast(Malachi.LogBroker, {:adopt_topology, topology})
   end
 
   @doc ~S"""

@@ -470,6 +470,19 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
+  # (cache ring + write router) and the refresh source, so the periodic reconcile re-seeds against the new
+  # topology instead of reverting to the boot ring. Fired async (a cast), so it never blocks membership.
+  def handle_cast({:adopt_topology, %RingTopology{} = topology}, state) do
+    replicated = replicated_of(topology)
+    broker = adopt_topology(state.broker, topology)
+    metadata_refresh = fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end
+    bootstrap = if state.bootstrap, do: %{state.bootstrap | replicated: replicated}, else: state.bootstrap
+
+    {:noreply, %{state | broker: broker, metadata_refresh: metadata_refresh, bootstrap: bootstrap}}
+  end
+
+  @impl true
   def handle_info({:longpoll_timeout, ref}, state) do
     case Enum.split_with(state.waiters, &(&1.ref == ref)) do
       {[waiter], rest} ->
@@ -748,19 +761,22 @@ defmodule Malachi.BrokerServer do
   metadata catch-up for a new/changed vnode is the separate refresh side effect. Returns the new broker.
   """
   @spec adopt_topology(Broker.t(), RingTopology.t()) :: Broker.t()
-  def adopt_topology(%Broker{} = broker, %RingTopology{ring: ring, placements: placements}) do
+  def adopt_topology(%Broker{} = broker, %RingTopology{ring: ring} = topology) do
     metadata_by_vnode =
       Map.new(HashRing.vnode_ids(ring), fn vnode_id ->
         {vnode_id, Map.get(broker.dsrsm.vnodes, vnode_id, Metadata.new())}
       end)
 
-    servers = for {vnode_id, [member | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member}}
-
     %{
       broker
       | dsrsm: DSRSM.seed(ring, metadata_by_vnode),
-        command_fun: sharded_command_fun(%ReplicatedDSRSM{ring: ring, vnodes: servers})
+        command_fun: sharded_command_fun(replicated_of(topology))
     }
+  end
+
+  # The ReplicatedDSRSM (routing view) for a topology: its ring plus the vnode→server map.
+  defp replicated_of(%RingTopology{ring: ring} = topology) do
+    %ReplicatedDSRSM{ring: ring, vnodes: RingTopology.servers(topology)}
   end
 
   # A command function over a single-vnode DSRSM whose lone vnode is an authoritative ra cluster:

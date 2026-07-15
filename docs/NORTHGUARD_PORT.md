@@ -377,9 +377,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         derivado das `placements` (skip de placement vazio, como o `adopt_ring_topology`). Pura: o catch-up do
         metadado do vnode novo é o side effect separado (refresh). Testado in-VM: adota o ring novo (v0+v1), v0
         mantém o topic cacheado, v1 vazio, `command_fun` reconstruído (arity 3). Suíte 803 testes 0 falhas (+1);
-        credo/dialyzer/format limpos. **Próximo: Int-1b (o `BrokerServer` chama `adopt_topology` no hook
-        `on_topology`, async), Int-2 (fiar broker+router à adoção por gossip) e Int-3 (coordenador de split sob
-        lease: `split_vnode` + `set_topology`).**
+        credo/dialyzer/format limpos.
+      - ✅ **Int-1b — o `BrokerServer` adota a topologia por gossip (async).** Fecha a adoção runtime do
+        roteamento de metadado: um `handle_cast({:adopt_topology, topology})` reconstrói o roteamento
+        (`adopt_topology/2` do Int-1a) **e** — a parte que faltava pra correção — o `metadata_refresh` e o
+        `bootstrap.replicated` sobre o `replicated` novo, senão o `reconcile_metadata` periódico (que faz
+        `snapshot(replicated_velho)` + `put_cache`, substituindo o cache inteiro, ring incluso) **reverteria** o
+        ring adotado. O hook `on_topology` (VS-2b-2b, `adopt_ring_topology`) agora, além de atualizar o
+        `CoordinatorRouter` inline, faz **`GenServer.cast`** ao `Malachi.LogBroker` — **async** (não bloqueia o
+        membership server, que roda o hook inline) e **no-op se o broker não existe** (`cast` a nome ausente é
+        `:ok`, verificado; single-node não roda o broker shardado). DRY: a derivação de `servers` virou
+        `RingTopology.servers/1` (usada no broker e no router). Testado in-VM: o `handle_cast` adota o ring novo no
+        cache **e** aponta o `bootstrap.replicated`/refresh pro ring novo (reconcile não reverte); `servers/1` pura
+        (skip de placement vazio). Suíte 805 testes 0 falhas (+2); credo/dialyzer/format limpos. **Int-1 (broker
+        adota em runtime) concluído. Próximo: Int-3 (coordenador de split sob lease: `split_vnode` +
+        `set_topology` → tudo propaga e adota por gossip) + um teste `:multinode` de split de ponta a ponta.**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

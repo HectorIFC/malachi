@@ -31,6 +31,16 @@ defmodule Malachi.Cluster.RingTopology do
   end
 
   @doc """
+  The `%{vnode_id => server_id}` routing map derived from the placements: each vnode's server id is
+  `{vnode_id, a_member}` (any member of its placement — ra resolves the live leader). A vnode with an
+  empty placement is skipped (it has no cluster to route to). Used to point routing at the topology.
+  """
+  @spec servers(t()) :: %{term() => {term(), node()}}
+  def servers(%__MODULE__{placements: placements}) do
+    for {vnode_id, [member | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member}}
+  end
+
+  @doc """
   A new topology at `version + 1` with `ring`/`placements` — the single-writer bump the rebalancing leader
   applies for a split (or any ring change). The monotonic version is what makes `merge/2` converge.
   """

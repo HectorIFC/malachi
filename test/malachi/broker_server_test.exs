@@ -5,6 +5,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
+  alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -226,6 +227,36 @@ defmodule Malachi.BrokerServerTest do
       assert adopted.dsrsm.vnodes[:v1] == Metadata.new()
       # the write router was rebuilt (over the new server map)
       assert is_function(adopted.command_fun, 3)
+    end
+
+    test "handle_cast adopt_topology rebuilds routing and the refresh source, so a reconcile won't revert" do
+      {:ok, ring0} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+
+      {:ok, broker} =
+        Broker.open(dsrsm: DSRSM.seed(ring0, %{v0: Metadata.new()}), command_fun: fn d, _t, _c -> {d, :ok} end)
+
+      state = %{
+        broker: broker,
+        metadata_refresh: fn -> :stale end,
+        bootstrap: %{
+          orchestrator?: true,
+          vnodes: [],
+          replicated: %ReplicatedDSRSM{ring: ring0, vnodes: %{v0: {:v0, node()}}}
+        }
+      }
+
+      {:ok, ring1} = HashRing.add_vnode(ring0, :v1, div(Integer.pow(2, 32), 2))
+      topology = %RingTopology{version: 1, ring: ring1, placements: %{v0: [node()], v1: [node()]}}
+
+      {:noreply, adopted} = BrokerServer.handle_cast({:adopt_topology, topology}, state)
+
+      # metadata routing adopted the new ring
+      assert adopted.broker.dsrsm.ring == ring1
+      # the refresh source (bootstrap.replicated, which the rebuilt metadata_refresh snapshots) targets the
+      # new ring — so the periodic reconcile re-seeds against it instead of reverting to the boot ring
+      assert adopted.bootstrap.replicated.ring == ring1
+      assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}, v1: {:v1, node()}}
+      assert is_function(adopted.metadata_refresh, 0)
     end
   end
 end

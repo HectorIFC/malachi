@@ -15,6 +15,11 @@ defmodule Malachi.Cluster.RingTopologyTest do
     %Topo{version: version, ring: ring(vnodes), placements: placements}
   end
 
+  test "servers/1 derives {vnode => {vnode, member}} from placements, skipping an empty placement" do
+    topo = %Topo{version: 0, ring: ring(v0: 0), placements: %{v0: [:a@h, :b@h], v1: []}}
+    assert Topo.servers(topo) == %{v0: {:v0, :a@h}}
+  end
+
   test "new/2 starts at version 0; advance/3 bumps the version monotonically" do
     t0 = Topo.new(ring(v0: 0), %{v0: [:a]})
     assert t0.version == 0
