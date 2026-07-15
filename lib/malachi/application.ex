@@ -27,6 +27,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Cluster.SplitCoordinator
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.Consumer.CoordinatorRouter
@@ -149,8 +150,24 @@ defmodule Malachi.Application do
   defp rebalance_children(nodes, vnodes) do
     _ = LeaseServer.start(@log_lease, nodes)
 
-    [lease_reconciler_child(nodes), lease_holder_child(), rebalance_coordinator_child(nodes, vnodes)] ++
-      auto_rebalancer_children()
+    [
+      lease_reconciler_child(nodes),
+      lease_holder_child(),
+      rebalance_coordinator_child(nodes, vnodes),
+      split_coordinator_child()
+    ] ++ auto_rebalancer_children()
+  end
+
+  # The vnode-split coordinator (operator-driven, lease-gated): only the lease holder splits, one at a time.
+  # Reads/publishes the ring topology through the membership; gossip then propagates the new ring cluster-wide.
+  defp split_coordinator_child do
+    opts = [
+      name: Malachi.LogSplitCoordinator,
+      membership: Malachi.LogMembership,
+      leader?: fn -> LeaseHolder.leader?(@log_lease_holder) end
+    ]
+
+    %{id: Malachi.LogSplitCoordinator, start: {SplitCoordinator, :start_link, [opts]}}
   end
 
   # Opt-in automatic rebalancing (default off = the operator drives the coordinator). Level-triggered: on

@@ -415,8 +415,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         contra a localização nova quando o split termina. Validado: `node --check` nos scripts + sanity de
         `isMigrating` e `withRetry` (retenta-então-ok; propaga não-retryable). Sem harness de teste JS (padrão das
         fatias de cliente Node). **Resiliência de cliente ao ciclo de vida do split (`:migrating` + `:not_owner`)
-        fechada. Endurecimento restante: reconciliação de split parcial (VS-2c-2) e a fiação do `VnodeSplit` sob
-        o lease real na árvore.**
+        fechada.**
+      - ✅ **Endurecimento A — `SplitCoordinator` (dirige o split sob o lease).** Fecha a lacuna de o
+        `VnodeSplit` ser só uma função: novo `Malachi.Cluster.SplitCoordinator` (GenServer) **serializa** splits
+        (um por vez — um split muta o ring, dois correriam) e é fiado na árvore sob a `rebalance_children`
+        (control plane shardado). É o modelo NorthGuard *"the coordinator is responsible for carrying it out"*: só
+        o **dono do lease** age (seam `leader?` = `LeaseHolder.leader?`, como o `RebalanceCoordinator`), lê/publica
+        a topologia via a membership (`Malachi.LogMembership`), e `split/4` delega ao `VnodeSplit.split/5`
+        (migração fencida sobre `ra` → avança versão → `set_topology` → gossip propaga → todo nó adota). **Operator
+        -driven** (nada splita sozinho; um operador ou política futura chama `split/4`), como o
+        `RebalanceCoordinator`. Seams mantêm testável sem lease/ra. Single-node/não-shardado não sobe o
+        coordinator. Testado in-VM (seams injetados): recusa `{:error, :not_leader}` se não é líder; como líder,
+        delega ao `VnodeSplit` (sem topologia baseline → `{:error, :no_topology}`). Boot single-node ok. Suíte 807
+        testes 0 falhas (+2); credo/dialyzer/format limpos. **Split de vnode agora é dirigido no runtime sob o
+        lease. Endurecimento restante: reconciliação de split parcial (VS-2c-2 — o coordenador retomar/completar
+        um split incompleto no failover, o "carrying it out até o fim" do NorthGuard).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
