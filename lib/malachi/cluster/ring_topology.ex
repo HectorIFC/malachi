@@ -15,16 +15,36 @@ defmodule Malachi.Cluster.RingTopology do
   associative and idempotent, and every node reaches the same topology regardless of gossip order. Only
   the rebalancing leader `advance/3`s the version (one writer), so a same-version clash should not arise
   in normal operation; the tiebreak just keeps the math total.
+
+  The topology also carries an optional **pending-split intent** (`begin_split/4`): the durable record of a
+  split that is migrating but not yet complete. It rides the same gossip, so if the coordinator driving a
+  split crashes, whichever node takes over the lease reads the intent and reconciles the interrupted split
+  (see `t:pending/0`). `advance/3` (complete) and `clear_pending/1` (abort) both clear it.
   """
 
   alias Malachi.Cluster.HashRing
 
   @type placements :: %{term() => [node()]}
-  @type t :: %__MODULE__{version: non_neg_integer(), ring: HashRing.t() | nil, placements: placements()}
 
-  defstruct version: 0, ring: nil, placements: %{}
+  @typedoc """
+  A **split in flight**: the durable intent recorded before a split migrates, so a coordinator that takes
+  over the lease after the previous one crashed mid-split can reconcile it (`nil` when none is pending).
+  Carries what a reconciler needs to identify and undo the split — the new vnode, its ring `token`, and its
+  placement `nodes` (the old ring/placements are the topology's own, since a pending split has *not* yet
+  advanced the ring).
+  """
+  @type pending :: %{new_vnode: HashRing.vnode_id(), token: HashRing.token(), nodes: [node()]} | nil
 
-  @doc "The initial (version 0) topology for `ring` and its vnode `placements`."
+  @type t :: %__MODULE__{
+          version: non_neg_integer(),
+          ring: HashRing.t() | nil,
+          placements: placements(),
+          pending: pending()
+        }
+
+  defstruct version: 0, ring: nil, placements: %{}, pending: nil
+
+  @doc "The initial (version 0) topology for `ring` and its vnode `placements`; no split pending."
   @spec new(HashRing.t(), placements()) :: t()
   def new(%HashRing{} = ring, placements) when is_map(placements) do
     %__MODULE__{version: 0, ring: ring, placements: placements}
@@ -42,11 +62,34 @@ defmodule Malachi.Cluster.RingTopology do
 
   @doc """
   A new topology at `version + 1` with `ring`/`placements` — the single-writer bump the rebalancing leader
-  applies for a split (or any ring change). The monotonic version is what makes `merge/2` converge.
+  applies to **complete** a split (or any ring change). The monotonic version is what makes `merge/2`
+  converge. Completing a ring change also **clears** any pending-split intent: the split it recorded is now
+  reflected in the ring, so there is nothing left to reconcile.
   """
   @spec advance(t(), HashRing.t(), placements()) :: t()
   def advance(%__MODULE__{version: version}, %HashRing{} = ring, placements) when is_map(placements) do
-    %__MODULE__{version: version + 1, ring: ring, placements: placements}
+    %__MODULE__{version: version + 1, ring: ring, placements: placements, pending: nil}
+  end
+
+  @doc """
+  Records a **pending split** at `version + 1` **without changing the ring**: the intent that a split of
+  `new_vnode_id` at `token` onto `nodes` is now in flight. Written (and gossiped) *before* the migration so
+  a coordinator that takes over the lease mid-split can find and reconcile it. The ring still routes by the
+  pre-split placement until `advance/3` completes the split (or `clear_pending/1` aborts it).
+  """
+  @spec begin_split(t(), HashRing.vnode_id(), HashRing.token(), [node()]) :: t()
+  def begin_split(%__MODULE__{} = topology, new_vnode_id, token, nodes) when is_list(nodes) do
+    %{topology | version: topology.version + 1, pending: %{new_vnode: new_vnode_id, token: token, nodes: nodes}}
+  end
+
+  @doc """
+  Drops a pending-split intent at `version + 1`, **keeping the ring unchanged** — how an **aborted** split
+  is published (the reconciler rolled the migration back, so the ring stays as it was and the intent is
+  gone). Contrast `advance/3`, which clears the intent by moving the ring *forward* to the completed split.
+  """
+  @spec clear_pending(t()) :: t()
+  def clear_pending(%__MODULE__{} = topology) do
+    %{topology | version: topology.version + 1, pending: nil}
   end
 
   @doc """

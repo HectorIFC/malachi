@@ -30,6 +30,55 @@ defmodule Malachi.Cluster.RingTopologyTest do
     assert t1.placements == %{v0: [:a], v1: [:b]}
   end
 
+  describe "pending-split intent" do
+    test "new/2 and advance/3 leave no split pending" do
+      t0 = Topo.new(ring(v0: 0), %{v0: [:a]})
+      assert t0.pending == nil
+
+      t1 = Topo.advance(t0, ring(v0: 0, v1: 100), %{v0: [:a], v1: [:b]})
+      assert t1.pending == nil
+    end
+
+    test "begin_split/4 records the intent at the next version without moving the ring" do
+      t0 = Topo.new(ring(v0: 0), %{v0: [:a]})
+      t1 = Topo.begin_split(t0, :v1, 100, [:a, :b])
+
+      assert t1.version == 1
+      assert t1.pending == %{new_vnode: :v1, token: 100, nodes: [:a, :b]}
+      # the ring still routes by the pre-split placement — only v0 exists until the split completes
+      assert t1.ring == t0.ring
+      assert t1.placements == t0.placements
+    end
+
+    test "advance/3 completes a pending split: ring moves forward and the intent clears" do
+      pending = Topo.begin_split(Topo.new(ring(v0: 0), %{v0: [:a]}), :v1, 100, [:a])
+      done = Topo.advance(pending, ring(v0: 0, v1: 100), %{v0: [:a], v1: [:a]})
+
+      assert done.version == 2
+      assert done.pending == nil
+      assert done.ring |> HashRing.vnode_ids() |> Enum.sort() == [:v0, :v1]
+    end
+
+    test "clear_pending/1 aborts a pending split: intent clears but the ring is untouched" do
+      pending = Topo.begin_split(Topo.new(ring(v0: 0), %{v0: [:a]}), :v1, 100, [:a])
+      aborted = Topo.clear_pending(pending)
+
+      assert aborted.version == 2
+      assert aborted.pending == nil
+      assert aborted.ring == pending.ring
+      assert aborted.placements == pending.placements
+    end
+
+    test "the intent rides gossip: merge/2 carries the pending of the higher version" do
+      base = Topo.new(ring(v0: 0), %{v0: [:a]})
+      pending = Topo.begin_split(base, :v1, 100, [:a])
+
+      # a node that only saw the older (v0, no-pending) topology converges onto the pending one
+      assert Topo.merge(base, pending) == pending
+      assert Topo.merge(pending, base) == pending
+    end
+  end
+
   describe "merge/2 (CRDT join)" do
     test "keeps the higher version, regardless of argument order" do
       a = topo(1, [v0: 0], %{v0: [:a]})

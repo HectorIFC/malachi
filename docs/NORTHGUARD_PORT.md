@@ -447,6 +447,33 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         não `{:error, :migrating}`), e o vnode novo fica **vazio** (nada orfanado). Suíte 807 testes 0 falhas (+1
         multinode); credo/dialyzer/format limpos. **Endurecimento restante: B2 — reconciliação por saga/intent
         pra crash do coordenador *no meio* do split (VS-2c-2, o "carrying it out até o fim" do NorthGuard).**
+      - 🚧 **Endurecimento B2 — reconciliação de split interrompido pelo crash do coordenador** (estratégia
+        **1A: intenção durável + abort**, escolhida). O B1 cobre falhas *lógicas* dentro de uma chamada de
+        `split_vnode`; **não** cobre o coordenador (processo/nó) **morrer no meio** — aí o rollback em-processo
+        do B1 nunca roda e o estado durável (nos logs `ra`) fica pela metade: (sub-caso 1) copiou tudo mas não
+        publicou a topologia → o anel ainda roteia pra origem esvaziada, **perda aparente**; (sub-caso 2) migrou
+        parte → fences presos, escritas bloqueadas pra sempre. O NorthGuard resolve porque o split é dirigido
+        pelo **coordenador do vnode** (líder de um grupo raft): a intenção vive no log raft e o **novo líder
+        retoma** ("carrying it out"). No malachi o split é dirigido pelo **lease global**, então precisamos de
+        uma **intenção durável** + um **reconcile no failover**. Decisão (1A): reconciliar por **abort** (reverter
+        via o `roll_back` do B1) em vez de completar-adiante — mais simples/seguro, o operador re-emite; o abort
+        do sub-caso 1 traz os móveis de volta (nada some). Promovível a *complete-forward* (1B) depois sobre a
+        mesma base.
+        - ✅ **B2-1 — a intenção durável na `RingTopology` (núcleo puro).** Novo campo `pending`
+          (`%{new_vnode, token, nodes}` | `nil`) que carrega o que um reconciliador precisa pra identificar e
+          desfazer o split (o ring/placements *velhos* são os da própria topologia, pois um split pendente ainda
+          **não** avançou o ring). Transições: `begin_split/4` grava a intenção em `version + 1` **sem mexer no
+          ring** (o gossip dissemina *antes* de migrar, pra o failover em qualquer nó achar); `advance/3`
+          (completar) move o ring adiante **e limpa** a intenção; novo `clear_pending/1` (abortar) limpa a
+          intenção **mantendo** o ring. A intenção viaja no mesmo gossip/CRDT (`merge/2` carrega o `pending` da
+          versão maior — sem mudança na lógica de merge). Testado: `new`/`advance` não deixam pendência;
+          `begin_split` grava a intenção sem mover o ring; `advance` completa (ring adiante + intenção limpa);
+          `clear_pending` aborta (intenção limpa + ring intacto); a intenção converge via `merge`. Suíte 812
+          testes 0 falhas (+5); credo/dialyzer/format limpos.
+        - ⏳ **B2-2** — `VnodeSplit` grava (`begin_split`) a intenção antes de migrar e a limpa
+          (`advance`/`clear_pending`) ao completar/abortar.
+        - ⏳ **B2-3** — reconcile no `on_acquired` do `LeaseHolder`: lê a topologia, e se há `pending`, reverte o
+          split interrompido (reusa o `roll_back` do B1 + deleta o cluster do vnode órfão) e publica o abort.
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
