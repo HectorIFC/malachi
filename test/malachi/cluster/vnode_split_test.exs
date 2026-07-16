@@ -65,16 +65,41 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     # the leader splits end to end
     assert :ok = VnodeSplit.split(membership, dest, token, [node()], fn -> true end)
 
-    # the topology advanced to version 1 with the new vnode, published back to the membership
-    topo1 = MembershipServer.topology(membership)
-    assert topo1.version == 1
-    assert topo1.ring |> HashRing.vnode_ids() |> Enum.sort() == Enum.sort([source, dest])
-    assert topo1.placements[dest] == [node()]
+    # the topology bumped twice — begin_split (v1, intent recorded) then advance (v2, split complete) — and
+    # the completed topology has the new vnode with the intent cleared, published back to the membership
+    topo = MembershipServer.topology(membership)
+    assert topo.version == 2
+    assert topo.pending == nil
+    assert topo.ring |> HashRing.vnode_ids() |> Enum.sort() == Enum.sort([source, dest])
+    assert topo.placements[dest] == [node()]
 
     # and the migration happened over ra: "orders" now lives in the new vnode's cluster
-    grown = %ReplicatedDSRSM{ring: topo1.ring, vnodes: RingTopology.servers(topo1)}
+    grown = %ReplicatedDSRSM{ring: topo.ring, vnodes: RingTopology.servers(topo)}
     assert ReplicatedDSRSM.vnode_for(grown, "orders") == {:ok, dest}
     {:ok, dest_meta} = ReplicatedDSRSM.query(grown, "orders", &Function.identity/1)
     assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+  end
+
+  test "a logical split failure clears the intent and leaves the ring unchanged" do
+    unique = System.unique_integer([:positive])
+    source = :"vsplit_fail_src_#{unique}"
+    dest = :"vsplit_fail_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, _root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+
+    membership = start_membership(RingTopology.new(replicated.ring, %{source => [node()]}))
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # the new vnode's ra cluster can't form on an unreachable node -> split_vnode fails; do_split records the
+    # intent (v1) then, seeing the failure, clears it (v2). No crash happened, so nothing is left pending.
+    assert {:error, _reason} = VnodeSplit.split(membership, dest, token, [:"nonexistent@127.0.0.1"], fn -> true end)
+
+    topo = MembershipServer.topology(membership)
+    assert topo.version == 2
+    assert topo.pending == nil
+    # the ring is untouched — the split never took effect, only the source exists
+    assert HashRing.vnode_ids(topo.ring) == [source]
   end
 end

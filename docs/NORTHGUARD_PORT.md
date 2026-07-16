@@ -470,8 +470,17 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           `begin_split` grava a intenção sem mover o ring; `advance` completa (ring adiante + intenção limpa);
           `clear_pending` aborta (intenção limpa + ring intacto); a intenção converge via `merge`. Suíte 812
           testes 0 falhas (+5); credo/dialyzer/format limpos.
-        - ⏳ **B2-2** — `VnodeSplit` grava (`begin_split`) a intenção antes de migrar e a limpa
-          (`advance`/`clear_pending`) ao completar/abortar.
+        - ✅ **B2-2 — o `VnodeSplit` grava/limpa a intenção em volta da migração.** O `do_split` agora, antes de
+          migrar, **publica** a intenção (`begin_split` → `set_topology`, gossipada com o ring *velho* — v+1)
+          pra o failover achá-la; ao **completar**, `advance` (a partir do `pending`, não do `current`, senão
+          colidiria a versão) move o ring adiante **e limpa** a intenção (v+2); numa **falha lógica**, o
+          `split_vnode` já reverteu em-processo (B1), então só `clear_pending` (v+2, ring intacto) descarta a
+          intenção agora obsoleta e devolve o erro — assim nenhum reconciliador de failover age sobre um split
+          já desfeito. Só um **crash** antes do clear deixa a intenção pendente (é o que o B2-3 reconcilia). Um
+          split feliz agora bumpa **duas** versões (begin+advance). Testado (`:multinode`): o split feliz sobe a
+          topologia pra **v2** com o vnode novo e `pending == nil`; uma falha lógica (novo vnode num nó
+          inalcançável) devolve `{:error, _}`, sobe pra **v2** com `pending == nil` e o ring **inalterado** (só a
+          origem). Suíte 812 testes 0 falhas (+1 multinode); credo/dialyzer/format limpos.
         - ⏳ **B2-3** — reconcile no `on_acquired` do `LeaseHolder`: lê a topologia, e se há `pending`, reverte o
           split interrompido (reusa o `roll_back` do B1 + deleta o cluster do vnode órfão) e publica o abort.
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
