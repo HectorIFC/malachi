@@ -503,6 +503,30 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           Suíte 815 testes 0 falhas (+5, sendo +2 multinode); credo/dialyzer/format limpos. **B2 completo — split
           resiliente a crash do coordenador (abort + retry). Promoção futura opcional: 1B (complete-forward, o
           "carrying it out até o fim" literal) e/ou 3C (varredura periódica).**
+      - 🚧 **Endurecimento 1B — reconcile por *complete-forward* (o "carrying it out" literal do NorthGuard)**
+        (política **1B-fwd** escolhida). Promove o reconcile do B2-3 de *abortar* pra *completar-adiante*: em vez
+        de reverter um split interrompido e o operador re-emitir, o novo coordenador **retoma a migração de onde
+        parou e a completa** (publica o ring novo) — exatamente o que o NorthGuard faz (o novo líder do grupo raft
+        relê o log e leva a operação até o fim). Descoberta ao investigar: a migração **já é idempotente por
+        construção** (o `migrate_from` calcula os deslocados dos tópicos *atuais* da origem → já-migrado é pulado;
+        `begin_migration` idempotente se presente; `extract` de ausente é no-op; `insert` sobrescreve via
+        `Map.merge` + índices `MapSet`), então retomar "só termina o que falta". Os únicos atritos: (1) o
+        `MetadataServer.start` erra se o cluster do vnode novo já existe; (2) o `split_vnode` reverte numa falha
+        (B1) — na retomada queremos **manter pendente e re-tentar**, não reverter. Política 1B-fwd: sempre
+        completa-adiante; se não der agora (inalcançável), mantém a intenção pendente pra retry; `abort_split`
+        (B2-3) vira **API de abort manual** do operador. Sub-fatiado:
+        - ✅ **1B-1 — a fundação idempotente.** Novo `MetadataServer.ensure_started/2`: sobe o cluster do vnode
+          como o `start/2`, mas **idempotente** — se já está rodando (alcançável via `:ra.members`) devolve o
+          `server_id` sem reiniciar; senão sobe. Fecha o atrito (1) — resume não falha num cluster já formado; erra
+          só se o cluster nem roda nem sobe (placement inalcançável → o caller re-tenta). Confirmada e travada por
+          teste a idempotência do `insert_topic` (re-inserir o mesmo export é no-op: `Map.merge` sobrescreve,
+          índices `MapSet.put` de-dup) — a invariante que torna o resume seguro. Testado: `ensure_started` forma um
+          cluster fresco e depois **reusa** o rodando sem reiniciar (estado preservado); `insert_topic` idempotente
+          (puro). Suíte 817 testes 0 falhas (+2); credo/dialyzer/format limpos.
+        - ⏳ **1B-2** — `ReplicatedDSRSM.complete_split` (retomada idempotente, **sem** rollback): refatorar a
+          migração pra compartilhar o loop interno entre `split_vnode` (com rollback, B1) e `complete_split` (sem).
+        - ⏳ **1B-3** — fiar o `VnodeSplit.reconcile` pra completar-adiante (usar `complete_split`); `abort_split`
+          fica como abort manual.
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

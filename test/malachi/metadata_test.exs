@@ -396,6 +396,22 @@ defmodule Malachi.MetadataTest do
       assert index_matches_scan?(reinserted)
       assert reinserted.range_segments[left] == MapSet.new(["s1"])
     end
+
+    test "insert_topic is idempotent — re-inserting the same export (a resumed migration) changes nothing" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
+      {state, :ok} = apply!(state, {:register_segment, left, "s1", [:b1], 0})
+      {state, :ok} = apply!(state, {:commit_offset, "workers", "events", %{left => 500}})
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+
+      # a resumed (complete-forward) split may re-drive an already-migrated topic: the second insert of the
+      # same export must be a no-op (Map.merge overwrites, MapSet indexes de-dup) so resume is safe.
+      once = Metadata.insert_topic(Metadata.new(), export)
+      twice = Metadata.insert_topic(once, export)
+      assert twice == once
+      assert index_matches_scan?(twice)
+    end
   end
 
   describe "topic migration carries committed offsets (vnode split)" do

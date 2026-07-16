@@ -68,4 +68,19 @@ defmodule Malachi.Cluster.MetadataServerTest do
   test "leader?/1 is false for an unformed / unreachable cluster (never assume leadership)" do
     refute MetadataServer.leader?({:"no_such_vnode_#{System.unique_integer([:positive])}", node()})
   end
+
+  test "ensure_started/2 starts a fresh cluster, then reuses a running one without restarting" do
+    name = :"vnode_ensure_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(name) end)
+
+    # first call forms the cluster
+    assert {:ok, server_id} = MetadataServer.ensure_started(name)
+    assert {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+
+    # second call finds it already running: same server id, no restart, state preserved (resume-safe)
+    assert MetadataServer.ensure_started(name) == {:ok, server_id}
+    assert {:ok, %{name: "events"}} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "events"))
+    # a restart would have wiped the elected leader / in-flight state; the topic is still there
+    assert {:ok, {:error, :already_exists}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+  end
 end

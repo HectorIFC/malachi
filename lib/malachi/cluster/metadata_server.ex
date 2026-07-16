@@ -36,6 +36,23 @@ defmodule Malachi.Cluster.MetadataServer do
     end
   end
 
+  @doc """
+  Like `start/2`, but **idempotent**: if the cluster is already running (reachable via `:ra.members`),
+  returns its `server_id` without restarting; otherwise starts it. This is what *resuming* a split needs —
+  a coordinator that crashed after starting the new vnode's cluster must be able to re-drive the split
+  without `start/2` failing on an already-formed cluster. Returns `{:error, reason}` only when the cluster
+  is neither running nor startable (e.g. its placement nodes are unreachable), so the caller can retry.
+  """
+  @spec ensure_started(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
+  def ensure_started(cluster_name, nodes \\ [node()]) do
+    server_id = {cluster_name, member_node(nodes)}
+
+    case :ra.members(server_id) do
+      {:ok, _members, _leader} -> {:ok, server_id}
+      _not_running -> start(cluster_name, nodes)
+    end
+  end
+
   # A node that actually hosts a replica, to address the cluster through: the local node when it is a
   # member (no network hop for reads), otherwise the first placement node.
   defp member_node(nodes) do
