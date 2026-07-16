@@ -210,6 +210,9 @@ defmodule Malachi.Application do
       name: @log_lease_holder,
       renew: fn -> renew_lease(lease_server, duration) end,
       release: fn fence -> LeaseServer.release(lease_server, node(), fence) end,
+      # on becoming leader, reconcile any split a previously-crashed coordinator left in flight (B2). Async
+      # cast (never blocks the election loop); a no-op if the split coordinator is absent or nothing pends.
+      on_acquired: fn _fence -> SplitCoordinator.reconcile(Malachi.LogSplitCoordinator) end,
       retry_period_ms: Application.get_env(:malachi, :lease_retry_period_ms, 2_000),
       renew_deadline_ms: Application.get_env(:malachi, :lease_renew_deadline_ms, 10_000)
     ]

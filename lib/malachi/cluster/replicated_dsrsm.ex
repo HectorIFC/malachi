@@ -91,6 +91,36 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   @doc """
+  Aborts a split that a crashed coordinator left in flight, rolling it back to the pre-split state: moves
+  every topic that reached the new vnode back to its owner under `state`'s (unchanged) ring and lifts any
+  migration fence left on a source — the same derived, best-effort rollback an in-call failure runs (B1).
+  `state` is the pre-split topology (a pending split never advanced the ring); `new_server_id` addresses the
+  new vnode's (possibly unreachable) cluster.
+
+  Returns `:ok` only when the rollback is **complete** — the new vnode is confirmed **empty** (every topic
+  moved back), so its orphan ra cluster is **deleted** (letting a later retry recreate it). Returns
+  `{:error, :incomplete}` when the new vnode still holds topics or is unreachable: the cluster is **left
+  intact** (deleting it would lose those topics) for the caller to retry — the new vnode's data is safe
+  there, just not yet moved back. Idempotent: safe to re-run.
+  """
+  @spec abort_split(t(), vnode_id(), MetadataServer.server_id()) :: :ok | {:error, :incomplete}
+  def abort_split(%__MODULE__{} = state, new_vnode_id, new_server_id) do
+    roll_back(state, new_server_id)
+
+    # delete the orphan new vnode only once it is confirmed empty — deleting one that still holds topics
+    # (a move-back that failed, or an unreachable vnode) would lose them. Query with a named stdlib capture
+    # (loadable on a possibly-remote leader) and test emptiness locally.
+    case MetadataServer.query(new_server_id, &Function.identity/1) do
+      {:ok, meta} when map_size(meta.topics) == 0 ->
+        MetadataServer.delete(new_vnode_id)
+        :ok
+
+      _still_populated_or_unreachable ->
+        {:error, :incomplete}
+    end
+  end
+
+  @doc """
   Routes a `Malachi.Metadata` command to the vnode owning `topic_name` and submits it through
   that vnode's Raft log. Returns the machine reply (e.g. `{:ok, root_id}` or
   `{:error, :already_exists}`), `{:error, :no_vnode}` if the ring is empty, or

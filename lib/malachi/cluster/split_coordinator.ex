@@ -32,13 +32,33 @@ defmodule Malachi.Cluster.SplitCoordinator do
     GenServer.call(server, {:split, new_vnode_id, token, nodes}, :infinity)
   end
 
+  @doc """
+  Reconciles a split left in flight by a coordinator that crashed mid-way (`VnodeSplit.reconcile/2`). Fired
+  on lease acquisition (`LeaseHolder` `on_acquired`) and on this coordinator's own restart (`init`), so an
+  interrupted split is cleaned up whether the whole node failed over or just this process restarted. A cast
+  — it serializes with splits (same process) but never blocks the caller — and a no-op unless this node
+  leads and a split is actually pending.
+  """
+  @spec reconcile(GenServer.server()) :: :ok
+  def reconcile(server), do: GenServer.cast(server, :reconcile)
+
   @impl true
   def init(opts) do
-    {:ok, %{membership: Keyword.fetch!(opts, :membership), leader?: Keyword.fetch!(opts, :leader?)}}
+    state = %{membership: Keyword.fetch!(opts, :membership), leader?: Keyword.fetch!(opts, :leader?)}
+    # a coordinator (re)starting may be resuming after a crash mid-split: reconcile any interrupted split.
+    # A cast (not inline) so init does not block on ra; guarded by leader?, so it is a no-op unless we lead.
+    reconcile(self())
+    {:ok, state}
   end
 
   @impl true
   def handle_call({:split, new_vnode_id, token, nodes}, _from, state) do
     {:reply, VnodeSplit.split(state.membership, new_vnode_id, token, nodes, state.leader?), state}
+  end
+
+  @impl true
+  def handle_cast(:reconcile, state) do
+    VnodeSplit.reconcile(state.membership, state.leader?)
+    {:noreply, state}
   end
 end

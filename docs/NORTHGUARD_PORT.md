@@ -447,7 +447,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
         não `{:error, :migrating}`), e o vnode novo fica **vazio** (nada orfanado). Suíte 807 testes 0 falhas (+1
         multinode); credo/dialyzer/format limpos. **Endurecimento restante: B2 — reconciliação por saga/intent
         pra crash do coordenador *no meio* do split (VS-2c-2, o "carrying it out até o fim" do NorthGuard).**
-      - 🚧 **Endurecimento B2 — reconciliação de split interrompido pelo crash do coordenador** (estratégia
+      - ✅ **Endurecimento B2 — reconciliação de split interrompido pelo crash do coordenador** (estratégia
         **1A: intenção durável + abort**, escolhida). O B1 cobre falhas *lógicas* dentro de uma chamada de
         `split_vnode`; **não** cobre o coordenador (processo/nó) **morrer no meio** — aí o rollback em-processo
         do B1 nunca roda e o estado durável (nos logs `ra`) fica pela metade: (sub-caso 1) copiou tudo mas não
@@ -481,8 +481,28 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           topologia pra **v2** com o vnode novo e `pending == nil`; uma falha lógica (novo vnode num nó
           inalcançável) devolve `{:error, _}`, sobe pra **v2** com `pending == nil` e o ring **inalterado** (só a
           origem). Suíte 812 testes 0 falhas (+1 multinode); credo/dialyzer/format limpos.
-        - ⏳ **B2-3** — reconcile no `on_acquired` do `LeaseHolder`: lê a topologia, e se há `pending`, reverte o
-          split interrompido (reusa o `roll_back` do B1 + deleta o cluster do vnode órfão) e publica o abort.
+        - ✅ **B2-3 — o reconcile no failover (gatilho 3A: `on_acquired` + `init`).** Fecha o 1A. Novo
+          `ReplicatedDSRSM.abort_split/3` (público) reusa o `roll_back` do B1 (move os tópicos migrados de volta
+          + destrava fences) e então **deleta o cluster órfão do vnode novo — mas só se confirmado vazio**:
+          deletar um vnode que ainda tem tópicos (um move-back que falhou, ou inalcançável) os perderia, então
+          nesse caso o cluster fica **intacto** e retorna `{:error, :incomplete}` (o dado está a salvo lá). Novo
+          `VnodeSplit.reconcile/2` (leader-gated): lê a topologia, e se há `pending`, monta o `ReplicatedDSRSM` do
+          ring *velho* (um split pendente não avançou o ring), aborta e — **só no `:ok`** (rollback completo) —
+          publica o `clear_pending`; num `:incomplete` **mantém a intenção pendente** pra um retry futuro (nunca
+          abandona dado encalhado). O `SplitCoordinator` ganha `reconcile/1` (cast, **serializa** com splits no mesmo
+          processo) disparado em **dois** pontos — no `on_acquired` do `LeaseHolder` (failover entre nós) **e** no
+          próprio `init` (restart do GenServer com o mesmo líder) — ambos protegidos por `leader?`. É o análogo do
+          NorthGuard (transcrição 500-508: coordenador = líder do grupo raft, *"responsible for carrying it out"*;
+          a recuperação é nativa do raft — novo líder relê o log —, sem poll periódico): o **eixo do gatilho** (3A)
+          é fiel; no **eixo estratégia** o NorthGuard completa-adiante (1B) e nós abortamos (1A) por simplicidade.
+          Fiado na `application.ex` (`on_acquired` → `SplitCoordinator.reconcile`). Testado: reconcile aborta um
+          split cujo coordenador "morreu" no meio (migração feita, intenção `pending`) — o tópico volta pra origem
+          com offsets, un-fenced/gravável, o cluster órfão é deletado, e o abort sobe (v2, `pending` limpo, ring
+          intacto); com o vnode novo **inalcançável** a intenção fica pendente (v1, não limpa) pra retry, sem perda;
+          no-op sem `pending`; recusa se não-líder; o coordinator sobrevive ao reconcile no `init`+cast.
+          Suíte 815 testes 0 falhas (+5, sendo +2 multinode); credo/dialyzer/format limpos. **B2 completo — split
+          resiliente a crash do coordenador (abort + retry). Promoção futura opcional: 1B (complete-forward, o
+          "carrying it out até o fim" literal) e/ou 3C (varredura periódica).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

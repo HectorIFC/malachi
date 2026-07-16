@@ -102,4 +102,71 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     # the ring is untouched — the split never took effect, only the source exists
     assert HashRing.vnode_ids(topo.ring) == [source]
   end
+
+  test "reconcile aborts a split whose coordinator crashed mid-way (intent pending): topic restored, orphan removed" do
+    unique = System.unique_integer([:positive])
+    source = :"vsplit_rec_src_#{unique}"
+    dest = :"vsplit_rec_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # simulate a crash mid-split: the migration ran (so "orders" physically lives on dest and dest's cluster
+    # is up), but the coordinator died before advancing the topology — so the membership still carries the
+    # *pending intent* over the *old* ring (begin_split, v1), exactly the interrupted state B2-2 leaves.
+    {:ok, _grown} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
+    base = RingTopology.new(replicated.ring, %{source => [node()]})
+    membership = start_membership(RingTopology.begin_split(base, dest, token, [node()]))
+
+    # a non-leader does not reconcile; the leader rolls the interrupted split back
+    assert VnodeSplit.reconcile(membership, fn -> false end) == {:error, :not_leader}
+    assert :ok = VnodeSplit.reconcile(membership, fn -> true end)
+
+    # the abort was published: version bumped (v2), intent cleared, ring unchanged (still only the source)
+    topo = MembershipServer.topology(membership)
+    assert topo.version == 2
+    assert topo.pending == nil
+    assert HashRing.vnode_ids(topo.ring) == [source]
+
+    # "orders" is back on the source with its offsets, un-fenced (writable again)
+    restored = %ReplicatedDSRSM{ring: topo.ring, vnodes: RingTopology.servers(topo)}
+    assert ReplicatedDSRSM.vnode_for(restored, "orders") == {:ok, source}
+    {:ok, meta} = ReplicatedDSRSM.query(restored, "orders", &Function.identity/1)
+    assert Metadata.get_topic(meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(meta, "workers", "orders") == %{root => 500}
+    assert meta.migrating == %{}
+    assert commit(restored, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
+
+    # the orphan new vnode's ra cluster was deleted, so a retry can recreate it
+    assert {:error, _reason} = MetadataServer.query({dest, node()}, &Function.identity/1)
+  end
+
+  test "reconcile keeps the intent pending when the new vnode is unreachable (retry later, no data loss)" do
+    unique = System.unique_integer([:positive])
+    source = :"vsplit_unreach_src_#{unique}"
+    on_exit(fn -> MetadataServer.delete(source) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, _root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # a pending intent whose new vnode lives on an unreachable node: the rollback cannot confirm the new
+    # vnode is empty, so abort_split reports :incomplete and reconcile must NOT clear the intent
+    base = RingTopology.new(replicated.ring, %{source => [node()]})
+    pending = RingTopology.begin_split(base, :"vsplit_unreach_dst_#{unique}", token, [:"nonexistent@127.0.0.1"])
+    membership = start_membership(pending)
+
+    assert :ok = VnodeSplit.reconcile(membership, fn -> true end)
+
+    # the intent is still pending (v1, unchanged) for a later reconcile; the source is untouched
+    topo = MembershipServer.topology(membership)
+    assert topo.version == 1
+    assert topo.pending == pending.pending
+    {:ok, meta} = ReplicatedDSRSM.query(replicated, "orders", &Function.identity/1)
+    assert Metadata.get_topic(meta, "orders").name == "orders"
+    assert meta.migrating == %{}
+  end
 end
