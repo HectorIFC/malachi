@@ -503,7 +503,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           Suíte 815 testes 0 falhas (+5, sendo +2 multinode); credo/dialyzer/format limpos. **B2 completo — split
           resiliente a crash do coordenador (abort + retry). Promoção futura opcional: 1B (complete-forward, o
           "carrying it out até o fim" literal) e/ou 3C (varredura periódica).**
-      - 🚧 **Endurecimento 1B — reconcile por *complete-forward* (o "carrying it out" literal do NorthGuard)**
+      - ✅ **Endurecimento 1B — reconcile por *complete-forward* (o "carrying it out" literal do NorthGuard)**
         (política **1B-fwd** escolhida). Promove o reconcile do B2-3 de *abortar* pra *completar-adiante*: em vez
         de reverter um split interrompido e o operador re-emitir, o novo coordenador **retoma a migração de onde
         parou e a completa** (publica o ring novo) — exatamente o que o NorthGuard faz (o novo líder do grupo raft
@@ -535,8 +535,21 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           `split_vnode`, cluster do dest de pé) termina idempotente — nada some, sem duplicata na origem, e um
           terceiro drive devolve exatamente o mesmo estado (igualdade estrutural). Suíte 817 testes 0 falhas (+2
           multinode); credo/dialyzer/format limpos.
-        - ⏳ **1B-3** — fiar o `VnodeSplit.reconcile` pra completar-adiante (usar `complete_split`); `abort_split`
-          fica como abort manual.
+        - ✅ **1B-3 — o `VnodeSplit.reconcile` agora completa-adiante.** Trocado o `abort_split` pelo
+          `complete_split` no reconcile: ao achar uma intenção `pending` (agora lendo também o `token`), retoma o
+          split e — no `{:ok, grown}` — publica a topologia **completa** (`advance`, que avança o ring e limpa a
+          intenção), como um split normal faria; numa falha (vnode inalcançável → `complete_split` nem sobe o
+          cluster) **mantém pendente** pra retry, sem desfazer progresso. É o *"carrying it out to the end"* do
+          NorthGuard: o coordenador que assume **leva o split até o fim** em vez de desfazê-lo. O `abort_split`
+          (B2-3) fica como **escape hatch manual** do operador (inverso do reconcile), agora com teste direto.
+          Testes atualizados: o reconcile de um split interrompido agora **completa** (o tópico fica no vnode
+          novo, a topologia avança pra v2 com o vnode novo, offsets intactos, gravável) em vez de reverter; o caso
+          do vnode novo inalcançável segue mantendo a intenção pendente (agora porque não dá pra completar); e um
+          teste novo cobre o `abort_split` direto (reverte o migrado pra origem + deleta o órfão). Suíte 817 testes
+          0 falhas (+1 multinode); credo/dialyzer/format limpos. **1B completo — reconcile de split interrompido
+          agora completa-adiante (o modelo fiel do NorthGuard); abort permanece como ferramenta manual. Endurecimento
+          de split (A/B/C/1A/1B) fechado; resta o 3C opcional (varredura periódica, mais operabilidade-k8s que
+          NorthGuard).**
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas
   de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
   Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/

@@ -308,4 +308,30 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     assert Metadata.get_topic(source_meta, "orders") == nil
     assert {:ok, ^grown2} = ReplicatedDSRSM.complete_split(replicated, dest, token, [node()])
   end
+
+  test "abort_split rolls a migrated split back to its source and removes the orphan (manual abort)" do
+    unique = System.unique_integer([:positive])
+    source = :"rd_ab_src_#{unique}"
+    dest = :"rd_ab_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # a completed migration (the interrupted-split state): "orders" lives on dest, dest's cluster is up
+    {:ok, _grown} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
+
+    # abort_split is the operator escape hatch (the inverse of reconcile's complete-forward): roll the
+    # migrated split back over the old, pre-split ring
+    assert :ok = ReplicatedDSRSM.abort_split(replicated, dest, {dest, node()})
+
+    # "orders" is back on the source with offsets, and the orphan dest cluster is gone (retry can recreate)
+    assert ReplicatedDSRSM.vnode_for(replicated, "orders") == {:ok, source}
+    {:ok, meta} = ReplicatedDSRSM.query(replicated, "orders", &Function.identity/1)
+    assert Metadata.get_topic(meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(meta, "workers", "orders") == %{root => 500}
+    assert {:error, _reason} = MetadataServer.query({dest, node()}, &Function.identity/1)
+  end
 end

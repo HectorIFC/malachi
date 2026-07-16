@@ -42,28 +42,31 @@ defmodule Malachi.Cluster.VnodeSplit do
 
   @doc """
   Reconciles an **interrupted** split on lease takeover (or coordinator restart): if the topology carries a
-  pending-split intent — a split whose coordinator crashed after recording it but before completing — roll
-  it back (`ReplicatedDSRSM.abort_split/3`: move any migrated topic back to its source, lift fences, delete
-  the orphan new vnode) and publish the abort (`clear_pending`). If the rollback cannot complete because a
-  vnode is unreachable, the intent is **kept pending** (the new vnode's data is intact there) so a later
-  takeover/restart retries — it is never cleared away. A no-op when nothing is pending. Only the lease
-  leader acts (`{:error, :not_leader}` otherwise). Idempotent: safe to run repeatedly.
+  pending-split intent — a split whose coordinator crashed after recording it but before completing —
+  **completes it forward** (`ReplicatedDSRSM.complete_split/4`: resume the migration idempotently from
+  wherever it stopped) and publish the finished topology (`advance`, which moves the ring forward and clears
+  the intent). This is NorthGuard's *"carrying it out to the end"*: the coordinator that takes over drives
+  the split to completion rather than undoing it. If it cannot complete now (a vnode is unreachable), the
+  intent is **kept pending** so a later takeover/restart retries — the partial state is left intact, never
+  cleared, so no progress is lost (an explicit abort is `ReplicatedDSRSM.abort_split/3`). A no-op when
+  nothing is pending. Only the lease leader acts (`{:error, :not_leader}` otherwise). Idempotent.
   """
   @spec reconcile(GenServer.server(), (-> boolean())) :: :ok | {:error, :not_leader}
   def reconcile(membership, leader? \\ fn -> true end) do
     if leader?.() do
       case MembershipServer.topology(membership) do
-        %RingTopology{pending: %{new_vnode: new_vnode, nodes: [member | _]}} = topology ->
+        %RingTopology{pending: %{new_vnode: new_vnode, token: token, nodes: [_ | _] = nodes}} = topology ->
           state = %ReplicatedDSRSM{ring: topology.ring, vnodes: RingTopology.servers(topology)}
 
-          case ReplicatedDSRSM.abort_split(state, new_vnode, {new_vnode, member}) do
-            :ok ->
-              # fully rolled back — publish the abort so routing and the intent both settle
-              MembershipServer.set_topology(membership, RingTopology.clear_pending(topology))
+          case ReplicatedDSRSM.complete_split(state, new_vnode, token, nodes) do
+            {:ok, grown} ->
+              # the split finished — publish the completed ring + placement (advance clears the intent)
+              placements = Map.put(topology.placements, new_vnode, nodes)
+              MembershipServer.set_topology(membership, RingTopology.advance(topology, grown.ring, placements))
 
-            {:error, :incomplete} ->
-              # a vnode was unreachable, so the rollback could not complete; keep the intent pending (the new
-              # vnode's data is intact there) so a later takeover/restart retries — do not clear it away
+            {:error, _reason} ->
+              # a vnode was unreachable, so the split could not complete now; keep the intent pending (the
+              # partial state is intact) so a later takeover/restart retries — do not clear it away
               :ok
           end
 

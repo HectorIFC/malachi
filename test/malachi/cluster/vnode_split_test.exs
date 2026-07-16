@@ -103,7 +103,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     assert HashRing.vnode_ids(topo.ring) == [source]
   end
 
-  test "reconcile aborts a split whose coordinator crashed mid-way (intent pending): topic restored, orphan removed" do
+  test "reconcile completes a split whose coordinator crashed mid-way (intent pending): topic on the new vnode" do
     unique = System.unique_integer([:positive])
     source = :"vsplit_rec_src_#{unique}"
     dest = :"vsplit_rec_dst_#{unique}"
@@ -121,27 +121,28 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     base = RingTopology.new(replicated.ring, %{source => [node()]})
     membership = start_membership(RingTopology.begin_split(base, dest, token, [node()]))
 
-    # a non-leader does not reconcile; the leader rolls the interrupted split back
+    # a non-leader does not reconcile; the leader drives the interrupted split *forward* to completion
     assert VnodeSplit.reconcile(membership, fn -> false end) == {:error, :not_leader}
     assert :ok = VnodeSplit.reconcile(membership, fn -> true end)
 
-    # the abort was published: version bumped (v2), intent cleared, ring unchanged (still only the source)
+    # the completed topology was published: version advanced (v2), intent cleared, ring grown with the new vnode
     topo = MembershipServer.topology(membership)
     assert topo.version == 2
     assert topo.pending == nil
-    assert HashRing.vnode_ids(topo.ring) == [source]
+    assert topo.ring |> HashRing.vnode_ids() |> Enum.sort() == Enum.sort([source, dest])
+    assert topo.placements[dest] == [node()]
 
-    # "orders" is back on the source with its offsets, un-fenced (writable again)
-    restored = %ReplicatedDSRSM{ring: topo.ring, vnodes: RingTopology.servers(topo)}
-    assert ReplicatedDSRSM.vnode_for(restored, "orders") == {:ok, source}
-    {:ok, meta} = ReplicatedDSRSM.query(restored, "orders", &Function.identity/1)
-    assert Metadata.get_topic(meta, "orders").name == "orders"
-    assert Metadata.committed_offsets(meta, "workers", "orders") == %{root => 500}
-    assert meta.migrating == %{}
-    assert commit(restored, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
+    # "orders" now lives on the new vnode with its offsets, writable (the split finished, not rolled back)
+    grown = %ReplicatedDSRSM{ring: topo.ring, vnodes: RingTopology.servers(topo)}
+    assert ReplicatedDSRSM.vnode_for(grown, "orders") == {:ok, dest}
+    {:ok, dest_meta} = ReplicatedDSRSM.query(grown, "orders", &Function.identity/1)
+    assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(dest_meta, "workers", "orders") == %{root => 500}
+    assert commit(grown, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
 
-    # the orphan new vnode's ra cluster was deleted, so a retry can recreate it
-    assert {:error, _reason} = MetadataServer.query({dest, node()}, &Function.identity/1)
+    # the source no longer holds it (it was migrated forward, not restored)
+    {:ok, src_meta} = MetadataServer.query({source, node()}, &Function.identity/1)
+    assert Metadata.get_topic(src_meta, "orders") == nil
   end
 
   test "reconcile keeps the intent pending when the new vnode is unreachable (retry later, no data loss)" do
@@ -153,8 +154,8 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     {:ok, _root} = commit(replicated, "orders", {:create_topic, "orders", 4})
     token = :erlang.phash2("orders", Integer.pow(2, 32))
 
-    # a pending intent whose new vnode lives on an unreachable node: the rollback cannot confirm the new
-    # vnode is empty, so abort_split reports :incomplete and reconcile must NOT clear the intent
+    # a pending intent whose new vnode lives on an unreachable node: complete_split cannot start that vnode's
+    # cluster, so it fails before migrating anything and reconcile must NOT clear the intent (retry later)
     base = RingTopology.new(replicated.ring, %{source => [node()]})
     pending = RingTopology.begin_split(base, :"vsplit_unreach_dst_#{unique}", token, [:"nonexistent@127.0.0.1"])
     membership = start_membership(pending)
