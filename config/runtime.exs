@@ -281,13 +281,21 @@ config :malachi,
 default_users_env = System.get_env("MALACHIMQ_DEFAULT_USERS")
 disable_default_users = System.get_env("MALACHIMQ_DISABLE_DEFAULT_USERS") == "true"
 
+# Per-user passwords from individual env vars (work in any environment, including prod).
+admin_pass = System.get_env("MALACHIMQ_ADMIN_PASS")
+producer_pass = System.get_env("MALACHIMQ_PRODUCER_PASS")
+consumer_pass = System.get_env("MALACHIMQ_CONSUMER_PASS")
+app_pass = System.get_env("MALACHIMQ_APP_PASS")
+explicit_passwords? = admin_pass != nil and producer_pass != nil and consumer_pass != nil and app_pass != nil
+
 default_users =
-  if disable_default_users do
-    # No default users - manage via API
-    []
-  else
-    if default_users_env do
-      # Custom user list via env var
+  cond do
+    disable_default_users ->
+      # No default users - manage via API
+      []
+
+    default_users_env ->
+      # Custom user list via env var: "user:pass:perm,perm;user2:..."
       default_users_env
       |> String.split(";")
       |> Enum.map(fn user_str ->
@@ -295,51 +303,47 @@ default_users =
         permissions = perms |> String.split(",") |> Enum.map(&String.to_atom/1)
         {username, password, permissions}
       end)
-    else
-      # Standard user list - passwords from individual env vars
-      admin_pass = System.get_env("MALACHIMQ_ADMIN_PASS")
-      producer_pass = System.get_env("MALACHIMQ_PRODUCER_PASS")
-      consumer_pass = System.get_env("MALACHIMQ_CONSUMER_PASS")
-      app_pass = System.get_env("MALACHIMQ_APP_PASS")
 
-      # In production, REQUIRE explicit passwords
-      if actual_env == :prod do
-        unless admin_pass && producer_pass && consumer_pass && app_pass do
-          raise """
-
-          ═══════════════════════════════════════════════════════════════
-          SECURITY ERROR: Production deployment requires explicit passwords
-          ═══════════════════════════════════════════════════════════════
-
-          Default passwords have been removed for security.
-          You MUST configure strong passwords via environment variables:
-
-            export MALACHIMQ_ADMIN_PASS="$(openssl rand -base64 32)"
-            export MALACHIMQ_PRODUCER_PASS="$(openssl rand -base64 32)"
-            export MALACHIMQ_CONSUMER_PASS="$(openssl rand -base64 32)"
-            export MALACHIMQ_APP_PASS="$(openssl rand -base64 32)"
-
-          Alternative: Disable default users and manage via API:
-
-            export MALACHIMQ_DISABLE_DEFAULT_USERS=true
-
-          Generate secure passwords:
-
-            openssl rand -base64 32
-
-          ═══════════════════════════════════════════════════════════════
-          """
-        end
-      end
-
-      # Build user list (use provided passwords or dev defaults)
+    explicit_passwords? ->
+      # Standard users seeded from explicitly provided passwords (no hard-coded fallback)
       [
-        {"admin", admin_pass || "admin123", [:admin]},
-        {"producer", producer_pass || "producer123", [:produce]},
-        {"consumer", consumer_pass || "consumer123", [:consume]},
-        {"app", app_pass || "app123", [:produce, :consume]}
+        {"admin", admin_pass, [:admin]},
+        {"producer", producer_pass, [:produce]},
+        {"consumer", consumer_pass, [:consume]},
+        {"app", app_pass, [:produce, :consume]}
       ]
-    end
+
+    actual_env == :prod ->
+      # Production has no default credentials — passwords must be configured explicitly.
+      raise """
+
+      ═══════════════════════════════════════════════════════════════
+      SECURITY ERROR: Production deployment requires explicit passwords
+      ═══════════════════════════════════════════════════════════════
+
+      No default passwords are shipped. You MUST configure strong passwords via environment variables:
+
+        export MALACHIMQ_ADMIN_PASS="$(openssl rand -base64 32)"
+        export MALACHIMQ_PRODUCER_PASS="$(openssl rand -base64 32)"
+        export MALACHIMQ_CONSUMER_PASS="$(openssl rand -base64 32)"
+        export MALACHIMQ_APP_PASS="$(openssl rand -base64 32)"
+
+      Alternative: disable default users and manage them via the API:
+
+        export MALACHIMQ_DISABLE_DEFAULT_USERS=true
+
+      ═══════════════════════════════════════════════════════════════
+      """
+
+    actual_env in [:dev, :test] ->
+      # Keep the environment-specific convenience credentials from config/dev.exs or config/test.exs. These
+      # live only in per-env config (never in the base/prod path). Override with MALACHIMQ_DEFAULT_USERS or
+      # the per-user *_PASS env vars above.
+      Application.get_env(:malachi, :default_users, [])
+
+    true ->
+      # Any other environment: no weak fallback — configure users explicitly (see the :prod message above).
+      []
   end
 
 config :malachi,

@@ -268,13 +268,9 @@ defmodule Malachi.Auth do
   end
 
   defp seed_default_users do
-    default_users =
-      Application.get_env(:malachi, :default_users, [
-        {"admin", "admin123", [:admin]},
-        {"producer", "producer123", [:produce]},
-        {"consumer", "consumer123", [:consume]},
-        {"app", "app123", [:produce, :consume]}
-      ])
+    # Users to seed come entirely from config (config/dev.exs, config/test.exs, or env via
+    # config/runtime.exs). No hard-coded fallback — an empty list seeds nothing.
+    default_users = Application.get_env(:malachi, :default_users, [])
 
     seeded =
       Enum.reduce(default_users, 0, fn {username, password, permissions}, count ->

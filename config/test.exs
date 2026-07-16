@@ -11,7 +11,15 @@ config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_expo
 # persist between runs; with in-memory (single-node) metadata resetting each run, a topic name reused
 # from a prior run would collide with a leftover segment on disk (Log.ensure_active :already_exists).
 config :malachi,
-  log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.system_time(:nanosecond)}")
+  log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.system_time(:nanosecond)}"),
+  # Deterministic credentials the test suite authenticates with. Test-only — never shipped to prod (the base
+  # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.
+  default_users: [
+    {"admin", "admin123", [:admin]},
+    {"producer", "producer123", [:produce]},
+    {"consumer", "consumer123", [:consume]},
+    {"app", "app123", [:produce, :consume]}
+  ]
 
 # Test-specific tuning for large-scale channel tests
 config :malachi,

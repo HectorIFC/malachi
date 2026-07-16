@@ -167,9 +167,14 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
 
 ## 5. Roadmap faseado recomendado
 
-1. **Fase 1 — Segurança (P1).** Eliminar credenciais hardcoded: admin aleatório no 1º boot (log 1x),
-   defaults fracos só em `:dev`/`:test`, `require_strong_passwords` ligado por padrão. *Menor esforço, maior
-   valor imediato; independente das demais.*
+1. **Fase 1 — Segurança (P1). ✅ Feito (decisão 1A).** Removidas as credenciais fracas versionadas dos três
+   pontos (`config/config.exs`, os fallbacks `|| "admin123"` do `config/runtime.exs`, o fallback do
+   `seed_default_users` em `lib/malachi/auth.ex`). O config base semeia `[]`; os defaults de conveniência
+   ficam só em `config/dev.exs` e `config/test.exs` (nunca no caminho de prod); prod **exige senha explícita**
+   via env (`*_PASS` ou `MALACHIMQ_DEFAULT_USERS`) ou dá `raise`. Escolhido **1A (exigir senha explícita)** em
+   vez do generate-random do ADR original porque, sem o P2 (replicação), um admin gerado **por-nó divergiria
+   no cluster** — o generate-random vira follow-up **depois** do P2 (aí o password gerado pode ser replicado).
+   `require_strong_passwords` deixado como está (ortogonal; ligá-lo por padrão pode quebrar deploy existente).
 2. **Fase 2 — Replicação no `ra` (P2) + persistência de sessão/lockout (P6).** Fecha o gap "quebra no
    cluster". *Fundação para P3-P5.*
 3. **Fase 3 — Gestão em runtime (P3).** CLI + admin API/wire-op para CRUD e rotação.
