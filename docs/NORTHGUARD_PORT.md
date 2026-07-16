@@ -523,8 +523,18 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
           índices `MapSet.put` de-dup) — a invariante que torna o resume seguro. Testado: `ensure_started` forma um
           cluster fresco e depois **reusa** o rodando sem reiniciar (estado preservado); `insert_topic` idempotente
           (puro). Suíte 817 testes 0 falhas (+2); credo/dialyzer/format limpos.
-        - ⏳ **1B-2** — `ReplicatedDSRSM.complete_split` (retomada idempotente, **sem** rollback): refatorar a
-          migração pra compartilhar o loop interno entre `split_vnode` (com rollback, B1) e `complete_split` (sem).
+        - ✅ **1B-2 — `ReplicatedDSRSM.complete_split` (retomada idempotente, sem rollback).** Refatorado: o loop
+          de migração virou `do_migrate/4` (percorre as origens em ordem, sem rollback), compartilhado por
+          `migrate_displaced` (fresh split = `do_migrate` **+ rollback** na falha, B1) e pelo novo
+          `complete_split/4`. O `complete_split` espelha o `split_vnode` mas (1) usa `ensure_started/2` (reusa o
+          cluster do vnode novo se já subiu) e (2) **não reverte** numa falha — devolve o erro **deixando o estado
+          parcial no lugar** pro próximo resume terminar (keep-trying; uma queda transiente não desfaz o
+          progresso). Idempotente por construção (o `migrate_from` pula o já-migrado; `insert`/`begin_migration`
+          são no-ops). Testado (`:multinode`): `complete_split` do zero migra o deslocado (mesmo resultado do
+          `split_vnode`, com offsets, gravável); e **retomando** um split já migrado (dirigido antes por
+          `split_vnode`, cluster do dest de pé) termina idempotente — nada some, sem duplicata na origem, e um
+          terceiro drive devolve exatamente o mesmo estado (igualdade estrutural). Suíte 817 testes 0 falhas (+2
+          multinode); credo/dialyzer/format limpos.
         - ⏳ **1B-3** — fiar o `VnodeSplit.reconcile` pra completar-adiante (usar `complete_split`); `abort_split`
           fica como abort manual.
 - ✅ **`Malachi.Cluster.Placement`** — política **pura** de placement + self-healing de réplicas

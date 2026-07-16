@@ -91,6 +91,25 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   @doc """
+  Resumes and **completes** a split whose coordinator crashed mid-way — the complete-forward counterpart of
+  `abort_split/3` (the NorthGuard "carrying it out to the end"). Re-drives the same migration as
+  `split_vnode/4`, but idempotently and **without rolling back** on failure: `ensure_started/2` reuses the
+  new vnode's cluster if it is already up (a crash may have started it), and the migration re-drives only
+  what is left — a topic already moved off its source is skipped, and re-fencing / re-inserting are no-ops
+  (see `Malachi.Metadata.insert_topic/2`). `state` is the pre-split topology (a pending split never advanced
+  the ring). On success returns the grown state; on failure returns the error **leaving the partial state in
+  place** for the next resume to finish (keep-trying, so a transient outage does not undo progress).
+  """
+  @spec complete_split(t(), vnode_id(), HashRing.token(), [node()]) :: {:ok, t()} | {:error, term()}
+  def complete_split(%__MODULE__{} = state, new_vnode_id, token, nodes \\ [node()]) do
+    with {:ok, new_ring} <- HashRing.add_vnode(state.ring, new_vnode_id, token),
+         {:ok, new_server_id} <- MetadataServer.ensure_started(new_vnode_id, nodes),
+         :ok <- do_migrate(state, new_ring, new_vnode_id, new_server_id) do
+      {:ok, %{state | ring: new_ring, vnodes: Map.put(state.vnodes, new_vnode_id, new_server_id)}}
+    end
+  end
+
+  @doc """
   Aborts a split that a crashed coordinator left in flight, rolling it back to the pre-split state: moves
   every topic that reached the new vnode back to its owner under `state`'s (unchanged) ring and lifts any
   migration fence left on a source — the same derived, best-effort rollback an in-call failure runs (B1).
@@ -200,22 +219,25 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end
   end
 
-  # For each source vnode, migrate its topics that now route to the new vnode under `new_ring`.
-  # **All-or-nothing:** on any failure it best-effort **rolls back** (moves anything that reached the new
-  # vnode back to its old-ring owner and lifts any fence left on a source), so a failed split leaves no
-  # orphaned topic and no stuck fence.
-  defp migrate_displaced(state, new_ring, new_vnode_id, new_server_id) do
-    # Walk the source vnodes in a deterministic (id-sorted) order so a split — and, if it fails partway,
-    # the state a rollback has to undo — is reproducible rather than dependent on map iteration order.
-    result =
-      Enum.reduce_while(Enum.sort(state.vnodes), :ok, fn {_source_id, source_server}, :ok ->
-        case migrate_from(source_server, new_server_id, new_ring, new_vnode_id) do
-          :ok -> {:cont, :ok}
-          error -> {:halt, error}
-        end
-      end)
+  # The migration loop shared by a fresh split (`migrate_displaced`, which rolls back on failure) and a
+  # resumed one (`complete_split`, which does not). For each source vnode, migrate its topics that now route
+  # to the new vnode under `new_ring`; halt on the first failure. Walks the sources in a deterministic
+  # (id-sorted) order so a split — and any partial state a failure leaves — is reproducible rather than
+  # dependent on map iteration order.
+  defp do_migrate(state, new_ring, new_vnode_id, new_server_id) do
+    Enum.reduce_while(Enum.sort(state.vnodes), :ok, fn {_source_id, source_server}, :ok ->
+      case migrate_from(source_server, new_server_id, new_ring, new_vnode_id) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
 
-    case result do
+  # `do_migrate` for a **fresh** split: **all-or-nothing** — on any failure it best-effort **rolls back**
+  # (moves anything that reached the new vnode back to its old-ring owner and lifts any fence left on a
+  # source), so a failed split leaves no orphaned topic and no stuck fence.
+  defp migrate_displaced(state, new_ring, new_vnode_id, new_server_id) do
+    case do_migrate(state, new_ring, new_vnode_id, new_server_id) do
       :ok ->
         :ok
 

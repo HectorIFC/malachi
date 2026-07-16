@@ -258,4 +258,54 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     {:ok, dest_meta} = MetadataServer.query({dest, node()}, &Function.identity/1)
     assert Metadata.get_topic(dest_meta, "orders") == nil
   end
+
+  test "complete_split runs a split from scratch (via ensure_started), migrating the displaced topic" do
+    unique = System.unique_integer([:positive])
+    source = :"rd_cs_src_#{unique}"
+    dest = :"rd_cs_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    {:ok, grown} = ReplicatedDSRSM.complete_split(replicated, dest, token, [node()])
+
+    # same outcome as a fresh split_vnode: "orders" now lives on the new vnode, with its offsets, writable
+    assert ReplicatedDSRSM.vnode_for(grown, "orders") == {:ok, dest}
+    {:ok, dest_meta} = ReplicatedDSRSM.query(grown, "orders", &Function.identity/1)
+    assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(dest_meta, "workers", "orders") == %{root => 500}
+    assert :ok = commit(grown, "orders", {:commit_offset, "readers", "orders", %{root => 700}})
+  end
+
+  test "complete_split resumes an already-migrated split idempotently (no error, no duplicate)" do
+    unique = System.unique_integer([:positive])
+    source = :"rd_cs2_src_#{unique}"
+    dest = :"rd_cs2_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+    :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # drive the split once (migration done, dest cluster up) — like a crash *after* the migration but before
+    # advancing the topology, the interrupted state complete_split resumes from the pre-split view
+    {:ok, _grown1} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
+
+    # resuming from the pre-split state finishes idempotently: ensure_started reuses the running dest, and
+    # the migration finds nothing left to move ("orders" already off the source), just grows the ring
+    {:ok, grown2} = ReplicatedDSRSM.complete_split(replicated, dest, token, [node()])
+    assert ReplicatedDSRSM.vnode_for(grown2, "orders") == {:ok, dest}
+    {:ok, dest_meta} = ReplicatedDSRSM.query(grown2, "orders", &Function.identity/1)
+    assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+    assert Metadata.committed_offsets(dest_meta, "workers", "orders") == %{root => 500}
+
+    # the source did not regain a duplicate, and a third drive is still a clean no-op
+    {:ok, source_meta} = MetadataServer.query(ReplicatedDSRSM.server_for(grown2, source), &Function.identity/1)
+    assert Metadata.get_topic(source_meta, "orders") == nil
+    assert {:ok, ^grown2} = ReplicatedDSRSM.complete_split(replicated, dest, token, [node()])
+  end
 end
