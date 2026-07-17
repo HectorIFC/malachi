@@ -175,8 +175,17 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    vez do generate-random do ADR original porque, sem o P2 (replicação), um admin gerado **por-nó divergiria
    no cluster** — o generate-random vira follow-up **depois** do P2 (aí o password gerado pode ser replicado).
    `require_strong_passwords` deixado como está (ortogonal; ligá-lo por padrão pode quebrar deploy existente).
-2. **Fase 2 — Replicação no `ra` (P2) + persistência de sessão/lockout (P6).** Fecha o gap "quebra no
-   cluster". *Fundação para P3-P5.*
+2. **Fase 2 — Replicação no `ra` (P2) + persistência de sessão/lockout (P6). 🚧 Em andamento (decisão 1A).**
+   Move os usuários do Mnesia node-local para um **cluster `ra` dedicado** (`UserMachine` sobre a máquina pura
+   `UserRegistry`), espelhando o par `Lease`/`LeaseMachine`: escritas por consenso, leituras do replica local
+   (o replica é o cache — sem sync de ETS entre nós). Greenfield (dropa o Mnesia). Confirmado escalável ao
+   nível NorthGuard: usuários são metadado global small-data/rare-write/local-read — um único grupo Raft é o
+   home certo (KRaft/Redpanda), o eixo que escala (throughput/nós) é o data plane já shardado; escala de
+   identidade extrema fica pro P4 (IdP externo). Sub-fatiado: **P2-1 ✅** (`Malachi.Auth.UserRegistry` puro:
+   `put_user`/`delete_user`/`update_password`/`import_users` + queries, timestamps do `meta.system_time`,
+   catch-all defensivo; 11 testes) → **P2-2 ⏳** (`UserMachine` + `UserServer`: cluster `ra`, multinode) →
+   **P2-3 ⏳** (religar o `UserStore` como fachada sobre o `ra` + fiação na app + dropar o Mnesia). *Fundação
+   para P3-P5.*
 3. **Fase 3 — Gestão em runtime (P3).** CLI + admin API/wire-op para CRUD e rotação.
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
