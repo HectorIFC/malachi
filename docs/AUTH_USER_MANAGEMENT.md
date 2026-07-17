@@ -183,9 +183,11 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    home certo (KRaft/Redpanda), o eixo que escala (throughput/nós) é o data plane já shardado; escala de
    identidade extrema fica pro P4 (IdP externo). Sub-fatiado: **P2-1 ✅** (`Malachi.Auth.UserRegistry` puro:
    `put_user`/`delete_user`/`update_password`/`import_users` + queries, timestamps do `meta.system_time`,
-   catch-all defensivo; 11 testes) → **P2-2 ⏳** (`UserMachine` + `UserServer`: cluster `ra`, multinode) →
-   **P2-3 ⏳** (religar o `UserStore` como fachada sobre o `ra` + fiação na app + dropar o Mnesia). *Fundação
-   para P3-P5.*
+   catch-all defensivo; 11 testes) → **P2-2 ✅** (`UserMachine` ra_machine alimentando o `meta.system_time` +
+   `UserServer` start/reconcile/comandos com **leituras via `:ra.local_query`** no replica local; testado que
+   um usuário escrito num nó é legível no replica local de **outro** nó — o que o Mnesia não fazia — e que o
+   store commita após perder um membro (HA)) → **P2-3 ⏳** (religar o `UserStore` como fachada sobre o `ra` +
+   fiação na app + dropar o Mnesia). *Fundação para P3-P5.*
 3. **Fase 3 — Gestão em runtime (P3).** CLI + admin API/wire-op para CRUD e rotação.
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
