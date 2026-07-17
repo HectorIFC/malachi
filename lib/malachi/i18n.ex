@@ -458,38 +458,10 @@ defmodule Malachi.I18n do
       "en_US" =>
         "✅ MemoryMonitor started (interval: %{interval_ms}ms, GC threshold: %{gc_threshold_mb}MB, auto-GC: %{auto_gc})"
     },
-    # UserStore (Mnesia persistence) translations
-    user_store_started: %{
-      "pt_BR" => "✅ UserStore iniciado com persistência Mnesia",
-      "en_US" => "✅ UserStore started with Mnesia persistence"
-    },
-    user_store_mnesia_initialized: %{
-      "pt_BR" => "💾 Tabela Mnesia inicializada (modo: %{storage})",
-      "en_US" => "💾 Mnesia table initialized (mode: %{storage})"
-    },
-    user_store_loaded_from_mnesia: %{
-      "pt_BR" => "👥 %{count} usuários carregados do Mnesia para cache ETS",
-      "en_US" => "👥 %{count} users loaded from Mnesia into ETS cache"
-    },
+    # UserStore translations
     user_store_persist_error: %{
-      "pt_BR" => "❌ Erro de persistência Mnesia: %{reason}",
-      "en_US" => "❌ Mnesia persistence error: %{reason}"
-    },
-    user_store_export_success: %{
-      "pt_BR" => "📤 %{count} usuários exportados com sucesso",
-      "en_US" => "📤 %{count} users exported successfully"
-    },
-    user_store_import_success: %{
-      "pt_BR" => "📥 Importação concluída: %{imported} importados, %{skipped} ignorados",
-      "en_US" => "📥 Import complete: %{imported} imported, %{skipped} skipped"
-    },
-    user_store_disc_copies_fallback: %{
-      "pt_BR" =>
-        "⚠️ Mnesia: disc_copies indisponível em %{node} (nó sem nome). " <>
-          "Usando ram_copies. Use --sname para disc_copies.",
-      "en_US" =>
-        "⚠️ Mnesia: disc_copies unavailable on %{node} (unnamed node). " <>
-          "Falling back to ram_copies. Use --sname for disc_copies."
+      "pt_BR" => "❌ Erro de persistência do user store: %{reason}",
+      "en_US" => "❌ User store persistence error: %{reason}"
     }
   }
 

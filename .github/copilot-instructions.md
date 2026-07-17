@@ -29,7 +29,7 @@ Malachi.Supervisor (one_for_one)
 ├── Validator
 ├── RateLimiter
 ├── ConnectionLimiter
-├── Auth.UserStore (Mnesia persistence)
+├── Auth user store (ra-replicated cluster: UserServer/UserMachine)
 ├── Auth
 ├── AckManager
 ├── ConnectionRegistry
@@ -57,7 +57,7 @@ Malachi.Supervisor (one_for_one)
 
 #### Security & Authentication
 - **`auth.ex`** - User authentication with Argon2 hashing; delegates persistence to `UserStore`
-- **`auth/user_store.ex`** - Mnesia-backed user persistence with ETS cache; handles CRUD and recovery
+- **`auth/user_store.ex`** - Facade over the ra-replicated user cluster (`UserServer`/`UserMachine`/`UserRegistry`); writes go through the Raft log, reads from the local replica
 - **`auth/session_manager.ex`** - Session lifecycle: token generation, IP binding, user-agent binding, expiration, cleanup
 - **`auth/lockout_manager.ex`** - Account lockout after failed attempts; progressive lockout with configurable duration
 - **`auth/config_validator.ex`** - Validates auth config at startup; prevents insecure production deployments

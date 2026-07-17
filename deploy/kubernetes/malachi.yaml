@@ -246,8 +246,6 @@ spec:
               value: malachi@malachi-0.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-1.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-2.malachi-headless.$(POD_NAMESPACE).svc.cluster.local
             - name: MALACHIMQ_RA_DATA_DIR
               value: /app/data/ra
-            - name: MALACHIMQ_MNESIA_DIR
-              value: /app/data/mnesia
             - name: MALACHIMQ_LOG_DATA_DIR
               value: /app/data/log
             - name: MALACHIMQ_LOG_REPLICATION_FACTOR

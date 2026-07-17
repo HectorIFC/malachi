@@ -111,7 +111,6 @@ config :malachi,
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
   channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),
   shard_count: String.to_integer(System.get_env("MALACHIMQ_SHARD_COUNT") || "1000"),
-  mnesia_dir: System.get_env("MALACHIMQ_MNESIA_DIR") || "./data/mnesia",
   # NorthGuard log control plane. Absent MALACHIMQ_LOG_CLUSTER => single-node in-memory metadata
   # (the default). Set it (with the peer node names) for a replicated, HA control plane over `ra`.
   # Node/cluster names come from a trusted operator (deploy config), so String.to_atom is fine here.

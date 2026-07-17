@@ -12,9 +12,6 @@ config :malachi,
   # json | csv | console
   benchmark_output_format: "json",
 
-  # Mnesia schema directory for benchmarks (keeps artifacts under benchmark/, out of project root)
-  mnesia_dir: "benchmark/mnesia_data",
-
   # Disable excessive logging for cleaner benchmark output
   logger_level: :warning,
 

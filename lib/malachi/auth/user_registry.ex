@@ -112,7 +112,7 @@ defmodule Malachi.Auth.UserRegistry do
 
   @doc """
   Every user as a JSON-serializable map (no hashes): `%{username, permissions (as strings), created_at,
-  updated_at}` — the export shape the old Mnesia store produced.
+  updated_at}` — the export shape consumed by `import_users`.
   """
   @spec export_users(t()) :: [
           %{username: username(), permissions: [String.t()], created_at: integer(), updated_at: integer()}

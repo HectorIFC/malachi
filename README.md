@@ -259,7 +259,7 @@ config :opentelemetry_exporter,
 
 ## 🔐 Authentication
 
-Malachi requires authentication for all producers and consumers. Users and permissions are **persisted to disk** via Mnesia, surviving server restarts.
+Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node and survives restarts.
 
 
 ### Default Users
@@ -284,7 +284,6 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | `MALACHIMQ_PRODUCER_PASS` | producer123 | Producer password |
 | `MALACHIMQ_CONSUMER_PASS` | consumer123 | Consumer password |
 | `MALACHIMQ_APP_PASS` | app123 | App password |
-| `MALACHIMQ_MNESIA_DIR` | ./data/mnesia | User persistence directory |
 | `MALACHIMQ_SESSION_TIMEOUT_MS` | 3600000 | Session timeout (1h) |
 | `MALACHIMQ_ENABLE_TLS` | false | Enable TLS encryption |
 | `MALACHIMQ_TLS_CERTFILE` | - | TLS certificate file path |

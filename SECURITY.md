@@ -121,7 +121,7 @@ export MALACHIMQ_GC_THRESHOLD_MB=500
 
 - **Single-Node Only:** No built-in cluster authentication (use network-level security)
 - **Volatile Messages:** Messages are stored in memory ETS tables and do not survive restarts.
-- **Persistent Users:** User credentials are stored in Mnesia on disk. Ensure `MALACHIMQ_MNESIA_DIR` is secured with restricted file permissions (e.g., `chmod 700`).
+- **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHIMQ_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
 - **No Message-Level Encryption:** Implement application-level encryption if needed
 
 ## Security Advisories
