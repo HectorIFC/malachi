@@ -40,7 +40,7 @@ defmodule Malachi.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :runtime_tools, :crypto, :ssl, :mnesia],
+      extra_applications: [:logger, :runtime_tools, :crypto, :ssl],
       mod: {Malachi.Application, []}
     ]
   end

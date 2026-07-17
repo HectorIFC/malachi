@@ -186,8 +186,15 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    catch-all defensivo; 11 testes) → **P2-2 ✅** (`UserMachine` ra_machine alimentando o `meta.system_time` +
    `UserServer` start/reconcile/comandos com **leituras via `:ra.local_query`** no replica local; testado que
    um usuário escrito num nó é legível no replica local de **outro** nó — o que o Mnesia não fazia — e que o
-   store commita após perder um membro (HA)) → **P2-3 ⏳** (religar o `UserStore` como fachada sobre o `ra` +
-   fiação na app + dropar o Mnesia). *Fundação para P3-P5.*
+   store commita após perder um membro (HA)) → **P2-3 ✅** (`UserStore` religado como fachada **stateless** sobre
+   o `UserServer`, preservando a API pública — `Auth`/testes agnósticos ao backend; `Auth` lê via
+   `UserStore.get_user` (→ `:ra.local_query`) em vez do ETS, **removido**; o app sobe `ra` **sempre**
+   (single-node incluso) e forma o cluster `LogUsers` antes do `Auth`, que semeia os defaults por consenso
+   (idempotente, com retry pra janela de quórum multi-node); **Mnesia dropado** do `extra_applications`.
+   Fricção de teste resolvida: o app é dono do `ra`, então os testes de cluster não chamam mais `:ra.start_in`
+   — que **reinicia** o `ra` e mataria o `LogUsers` — e a distribuição sobe no `test_helper` com nome de nó
+   estável). **P2 completo — usuários replicados no cluster.** *Resta P6 (persistir sessões/lockouts), adiado.*
+   *Fundação para P3-P5.*
 3. **Fase 3 — Gestão em runtime (P3).** CLI + admin API/wire-op para CRUD e rotação.
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.

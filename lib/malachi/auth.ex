@@ -10,7 +10,6 @@ defmodule Malachi.Auth do
   alias Malachi.I18n
   alias Malachi.Telemetry
 
-  @users_table :malachi_users
   @sessions_table :malachi_sessions
 
   @doc "Starts the auth server, which owns the in-memory user and session ETS tables."
@@ -35,8 +34,8 @@ defmodule Malachi.Auth do
   end
 
   defp do_authenticate(username, password, client_ip) do
-    case :ets.lookup(@users_table, username) do
-      [{^username, stored_hash, permissions}] ->
+    case UserStore.get_user(username) do
+      {:ok, {^username, stored_hash, permissions}} ->
         if verify_password(password, stored_hash) do
           # Create session with IP binding via SessionManager
           {:ok, token} =
@@ -75,8 +74,8 @@ defmodule Malachi.Auth do
           {:error, :invalid_credentials}
         end
 
-      [] ->
-        # Timing attack prevention: still hash to match timing
+      {:error, _reason} ->
+        # Unknown user (or store unreachable) — deny. Timing attack prevention: still hash to match timing.
         Argon2.no_user_verify()
 
         Logger.warning(I18n.t(:auth_user_not_found, username: username))
@@ -164,26 +163,18 @@ defmodule Malachi.Auth do
   @doc """
   Lists all users (without passwords).
   """
-  def list_users do
-    :ets.foldl(
-      fn {username, _hash, permissions}, acc ->
-        [%{username: username, permissions: permissions} | acc]
-      end,
-      [],
-      @users_table
-    )
-  end
+  def list_users, do: UserStore.list_users()
 
   @doc """
   Whether the subject has `permission` (or is `:admin`). Accepts either a `username` — looked up in
   the user table, where an unknown user has no permissions — or a permission list directly.
   """
   def has_permission?(username, permission) when is_binary(username) do
-    case :ets.lookup(@users_table, username) do
-      [{^username, _hash, permissions}] ->
+    case UserStore.get_user(username) do
+      {:ok, {^username, _hash, permissions}} ->
         :admin in permissions or permission in permissions
 
-      [] ->
+      {:error, _reason} ->
         false
     end
   end
@@ -194,13 +185,6 @@ defmodule Malachi.Auth do
 
   @impl true
   def init(:ok) do
-    :ets.new(@users_table, [
-      :set,
-      :public,
-      :named_table,
-      read_concurrency: true
-    ])
-
     :ets.new(@sessions_table, [
       :set,
       :public,
@@ -209,10 +193,8 @@ defmodule Malachi.Auth do
       write_concurrency: true
     ])
 
-    # Load persisted users from Mnesia into ETS (best-effort at boot; the result is ignored)
-    _ = UserStore.load_into_ets()
-
-    # Seed default users from config into Mnesia (only if they don't exist yet)
+    # Seed default users from config into the replicated user store (idempotent — skips existing). The
+    # ra user cluster is started by Malachi.Application before this child, so writes have a leader.
     seed_default_users()
 
     Logger.info(I18n.t(:auth_started))
@@ -272,11 +254,15 @@ defmodule Malachi.Auth do
     # config/runtime.exs). No hard-coded fallback — an empty list seeds nothing.
     default_users = Application.get_env(:malachi, :default_users, [])
 
+    # A shared deadline across all users: at cold boot a multi-node cluster may not have elected a leader
+    # yet, so a transport error is transient (single-node forms instantly and never waits).
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
     seeded =
       Enum.reduce(default_users, 0, fn {username, password, permissions}, count ->
         hash = hash_password(password)
 
-        case UserStore.insert_user(username, hash, permissions) do
+        case seed_insert(username, hash, permissions, deadline) do
           :ok ->
             count + 1
 
@@ -291,6 +277,23 @@ defmodule Malachi.Auth do
 
     if seeded > 0 do
       Logger.info(I18n.t(:default_users_loaded, count: seeded))
+    end
+  end
+
+  # Inserts a seed user, retrying a transient transport error until `deadline` (the cluster reaching quorum).
+  # `:ok` and `{:error, :user_exists}` are terminal.
+  defp seed_insert(username, hash, permissions, deadline) do
+    case UserStore.insert_user(username, hash, permissions) do
+      {:error, reason} = err when reason != :user_exists ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(100)
+          seed_insert(username, hash, permissions, deadline)
+        else
+          err
+        end
+
+      reply ->
+        reply
     end
   end
 

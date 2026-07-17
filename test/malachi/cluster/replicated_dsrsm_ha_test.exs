@@ -22,7 +22,6 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
 
     {:ok, _} = Application.ensure_all_started(:ra)
     # the local node is itself a cluster member here, so ra must run locally too
-    _ = :ra.start_in(~c"#{System.tmp_dir!()}/malachi_ra_rdsrsm_local_#{System.unique_integer([:positive])}")
     :ok
   end
 

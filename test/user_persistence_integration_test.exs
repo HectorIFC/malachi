@@ -2,67 +2,31 @@ defmodule Malachi.Auth.UserPersistenceIntegrationTest do
   @moduledoc """
   Integration tests for user persistence across Auth and UserStore.
   Tests that users survive GenServer restarts and that the full
-  Auth → UserStore → Mnesia → ETS pipeline works correctly.
+  Auth → UserStore → replicated ra store pipeline works correctly.
   """
   use ExUnit.Case, async: false
 
   alias Malachi.Auth
   alias Malachi.Auth.UserStore
 
-  @users_table :malachi_users
+  @prefixes ["persist_", "restart_", "integ_", "import_", "pwd_"]
 
   setup do
     on_exit(fn ->
-      for prefix <- ["persist_", "restart_", "integ_", "import_", "pwd_"] do
-        :mnesia.transaction(fn ->
-          :mnesia.foldl(
-            fn {_table, username, _hash, _perms, _created, _updated}, acc ->
-              if String.starts_with?(username, prefix), do: [username | acc], else: acc
-            end,
-            [],
-            UserStore.table_name()
-          )
-        end)
-        |> case do
-          {:atomic, usernames} ->
-            Enum.each(usernames, fn username ->
-              :mnesia.transaction(fn -> :mnesia.delete({UserStore.table_name(), username}) end)
-              :ets.delete(@users_table, username)
-            end)
-
-          _ ->
-            :ok
-        end
+      # Clean up test-created users (by prefix). The seeded default users are never prefixed, so they
+      # persist in the replicated store for the other tests.
+      for %{username: username} <- UserStore.list_users(),
+          Enum.any?(@prefixes, &String.starts_with?(username, &1)) do
+        UserStore.delete_user(username)
       end
-
-      # Re-seed default users to ensure clean state for other tests
-      default_users = [
-        {"admin", "admin123", [:admin]},
-        {"producer", "producer123", [:produce]},
-        {"consumer", "consumer123", [:consume]},
-        {"app", "app123", [:produce, :consume]}
-      ]
-
-      Enum.each(default_users, fn {username, password, permissions} ->
-        hash = Argon2.hash_pwd_salt(password)
-        now = System.system_time(:second)
-
-        :mnesia.transaction(fn ->
-          :mnesia.write({UserStore.table_name(), username, hash, permissions, now, now})
-        end)
-
-        :ets.insert(@users_table, {username, hash, permissions})
-      end)
     end)
 
     :ok
   end
 
   describe "user persistence via Auth API" do
-    test "add_user persists to Mnesia" do
+    test "add_user persists to the store" do
       assert :ok = Auth.add_user("persist_user1", "StrongPass123!", [:produce])
-
-      # Verify in Mnesia directly
       assert {:ok, {"persist_user1", _hash, [:produce]}} = UserStore.get_user("persist_user1")
     end
 
@@ -71,15 +35,14 @@ defmodule Malachi.Auth.UserPersistenceIntegrationTest do
       assert {:error, :user_exists} = Auth.add_user("persist_dup", "OtherPass456!", [:consume])
     end
 
-    test "remove_user removes from Mnesia and ETS" do
+    test "remove_user removes the user from the store" do
       Auth.add_user("persist_del", "StrongPass123!", [:produce])
       assert :ok = Auth.remove_user("persist_del")
 
       assert {:error, :user_not_found} = UserStore.get_user("persist_del")
-      assert [] = :ets.lookup(@users_table, "persist_del")
     end
 
-    test "change_password updates in Mnesia and allows auth with new password" do
+    test "change_password updates the store and allows auth with the new password" do
       Auth.add_user("pwd_user", "OldPass123456!", [:produce])
       assert :ok = Auth.change_password("pwd_user", "NewPass123456!")
 

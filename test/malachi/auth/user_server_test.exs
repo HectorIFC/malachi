@@ -5,10 +5,6 @@ defmodule Malachi.Auth.UserServerTest do
   alias Malachi.Auth.UserServer
 
   setup_all do
-    data_dir = Path.join(System.tmp_dir!(), "malachi_ra_users_#{System.unique_integer([:positive])}")
-    File.rm_rf!(data_dir)
-    _ = :ra.start_in(String.to_charlist(data_dir))
-    on_exit(fn -> File.rm_rf!(data_dir) end)
     :ok
   end
 

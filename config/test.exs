@@ -12,6 +12,8 @@ config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_expo
 # from a prior run would collide with a leftover segment on disk (Log.ensure_active :already_exists).
 config :malachi,
   log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.system_time(:nanosecond)}"),
+  # The app now starts ra unconditionally (the replicated user store); isolate its on-disk data per run.
+  ra_data_dir: Path.join(System.tmp_dir!(), "malachi_ra_test_#{System.system_time(:nanosecond)}"),
   # Deterministic credentials the test suite authenticates with. Test-only — never shipped to prod (the base
   # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.
   default_users: [
@@ -53,7 +55,4 @@ config :malachi,
   subscribe_rate_window_ms: 1_000,
   # Very high connection limit for testing
   max_connections_per_ip: 10_000,
-  max_total_connections: 100_000,
-  # Mnesia: use RAM-only mode in tests for speed and isolation
-  mnesia_ram_only: true,
-  mnesia_dir: nil
+  max_total_connections: 100_000

@@ -23,7 +23,6 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     end
 
     {:ok, _} = Application.ensure_all_started(:ra)
-    _ = :ra.start_in(~c"#{System.tmp_dir!()}/malachi_ra_vsplit_#{System.unique_integer([:positive])}")
     :ok
   end
 

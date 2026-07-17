@@ -12,6 +12,7 @@ defmodule Malachi.Application do
   use Application
   require Logger
   alias Malachi.Auth.ConfigValidator
+  alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.HashRing
@@ -36,6 +37,9 @@ defmodule Malachi.Application do
   alias Malachi.Metadata
   alias Malachi.TLSValidator
 
+  # The replicated user store's dedicated ra cluster name (see `user_store_children/1`).
+  @log_users Malachi.LogUsers
+
   def start(_type, _args) do
     # Validate authentication configuration before starting
     # This prevents insecure deployments in production
@@ -55,6 +59,12 @@ defmodule Malachi.Application do
 
     :erlang.system_flag(:schedulers_online, schedulers_to_use)
 
+    # `ra` backs the replicated user store (and, when clustered, the log control plane), so start it before
+    # any child that forms an ra cluster — always, including single-node (a 1-member cluster is cheap).
+    start_ra!()
+
+    # Replicated user store: forms the ra user cluster (so Auth can seed into it) + a reconciler for
+    # staggered boot. Must precede Auth (which seeds default users on init).
     children =
       cluster_children() ++
         [
@@ -69,9 +79,10 @@ defmodule Malachi.Application do
           # Account lockout manager (must start before Auth)
           Malachi.Auth.LockoutManager,
           Malachi.RateLimiter,
-          Malachi.ConnectionLimiter,
-          # User persistence (must start before Auth to load persisted users into ETS)
-          Malachi.Auth.UserStore,
+          Malachi.ConnectionLimiter
+        ] ++
+        user_store_children(configured_nodes()) ++
+        [
           Malachi.Auth,
           Malachi.ConnectionRegistry
           # NorthGuard log stack (reachable by clients via the log protocol actions). Single-node/
@@ -106,18 +117,43 @@ defmodule Malachi.Application do
     Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
   end
 
+  # The cluster's node set (the same list the log stack uses): the configured `:log_nodes`, or the local
+  # node when single-node. The replicated user store spans exactly these nodes.
+  defp configured_nodes do
+    case Application.get_env(:malachi, :log_nodes, []) do
+      [] -> [node()]
+      configured -> configured
+    end
+  end
+
+  # The replicated user store: forms the ra user cluster across `nodes` (so `Malachi.Auth` can seed into it).
+  # Runs in every mode — single-node forms a cheap 1-member cluster. When clustered (more than one node), it
+  # also supervises a reconciler that self-joins this node on a staggered boot (reusing the generic
+  # `LeaseReconciler`); single-node needs no self-join, so it is omitted there.
+  defp user_store_children(nodes) do
+    _ = UserServer.start(@log_users, nodes)
+
+    if length(nodes) > 1 do
+      [
+        %{
+          id: Malachi.LogUserReconciler,
+          start:
+            {LeaseReconciler, :start_link,
+             [[name: Malachi.LogUserReconciler, reconcile: fn -> UserServer.reconcile(@log_users, nodes) end]]}
+        }
+      ]
+    else
+      []
+    end
+  end
+
   # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which
   # owns a local ReplicationServer. Clustered: start `ra`, plus a named ReplicationServer (this node's
   # data-plane broker) and the BrokerServer wired to every node's ReplicationServer with a replication
   # factor. The ReplicationServer must precede the BrokerServer (the latter references it).
   defp log_children do
     cluster = Application.get_env(:malachi, :log_cluster)
-
-    nodes =
-      case Application.get_env(:malachi, :log_nodes, []) do
-        [] -> [node()]
-        configured -> configured
-      end
+    nodes = configured_nodes()
 
     # The sharded vnode placement (or nil): the metadata's initial ring, also seeded into the membership
     # gossip as the version-0 `RingTopology` so a later split advances from it and every node converges.
@@ -125,7 +161,7 @@ defmodule Malachi.Application do
 
     log_stack =
       if cluster do
-        start_ra!()
+        # `ra` is already started in `start/2` (the user store needs it unconditionally).
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
         # precede the broker that references it.
         [membership_child(nodes, vnodes), replication_child(), log_broker_child(cluster, nodes)]

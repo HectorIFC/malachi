@@ -52,8 +52,16 @@ defmodule Malachi.Auth.UserServer do
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    _ = start(cluster_name, nodes)
-    ensure_local_server(cluster_name, nodes)
+    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # formed cluster, which ra logs as an error. Only a node that has not yet joined tries to form/join.
+    case :ra.members({cluster_name, node()}) do
+      {:ok, _members, _leader} ->
+        :ok
+
+      _not_running ->
+        _ = start(cluster_name, nodes)
+        ensure_local_server(cluster_name, nodes)
+    end
   end
 
   # Best-effort: starts the local user server so it (re)joins the cluster. Any error (already started, or the

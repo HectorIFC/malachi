@@ -1,12 +1,10 @@
 defmodule Malachi.Auth.UserStoreTest do
   @moduledoc """
-  Unit tests for Malachi.Auth.UserStore (Mnesia persistence layer).
+  Unit tests for Malachi.Auth.UserStore (the facade over the ra-replicated user store).
   """
   use ExUnit.Case, async: false
 
   alias Malachi.Auth.UserStore
-
-  @users_table :malachi_users
 
   @test_prefixes [
     "test_",
@@ -29,29 +27,10 @@ defmodule Malachi.Auth.UserStoreTest do
 
   setup do
     on_exit(fn ->
-      # Only clean up test-created users, preserve default users
-      :mnesia.transaction(fn ->
-        :mnesia.foldl(
-          fn {_table, username, _hash, _perms, _created, _updated}, acc ->
-            if Enum.any?(@test_prefixes, &String.starts_with?(username, &1)) do
-              [username | acc]
-            else
-              acc
-            end
-          end,
-          [],
-          UserStore.table_name()
-        )
-      end)
-      |> case do
-        {:atomic, usernames} ->
-          Enum.each(usernames, fn username ->
-            :mnesia.transaction(fn -> :mnesia.delete({UserStore.table_name(), username}) end)
-            :ets.delete(@users_table, username)
-          end)
-
-        _ ->
-          :ok
+      # Only clean up test-created users (by prefix), preserving the seeded default users.
+      for %{username: username} <- UserStore.list_users(),
+          Enum.any?(@test_prefixes, &String.starts_with?(username, &1)) do
+        UserStore.delete_user(username)
       end
     end)
 
@@ -59,14 +38,9 @@ defmodule Malachi.Auth.UserStoreTest do
   end
 
   describe "insert_user/3" do
-    test "inserts a new user into Mnesia and ETS" do
+    test "inserts a new user" do
       assert :ok = UserStore.insert_user("test_user", "hashed_pass", [:produce])
-
-      # Verify Mnesia
       assert {:ok, {"test_user", "hashed_pass", [:produce]}} = UserStore.get_user("test_user")
-
-      # Verify ETS cache
-      assert [{"test_user", "hashed_pass", [:produce]}] = :ets.lookup(@users_table, "test_user")
     end
 
     test "returns error for duplicate username" do
@@ -84,12 +58,11 @@ defmodule Malachi.Auth.UserStoreTest do
   end
 
   describe "delete_user/1" do
-    test "removes user from Mnesia and ETS" do
+    test "removes a user" do
       UserStore.insert_user("del_user", "hash", [:produce])
       assert :ok = UserStore.delete_user("del_user")
 
       assert {:error, :user_not_found} = UserStore.get_user("del_user")
-      assert [] = :ets.lookup(@users_table, "del_user")
     end
 
     test "is idempotent — deleting non-existent user returns :ok" do
@@ -98,12 +71,11 @@ defmodule Malachi.Auth.UserStoreTest do
   end
 
   describe "update_password/2" do
-    test "updates password hash in Mnesia and ETS" do
+    test "updates the password hash" do
       UserStore.insert_user("pwd_user", "old_hash", [:consume])
       assert :ok = UserStore.update_password("pwd_user", "new_hash")
 
       assert {:ok, {"pwd_user", "new_hash", [:consume]}} = UserStore.get_user("pwd_user")
-      assert [{"pwd_user", "new_hash", [:consume]}] = :ets.lookup(@users_table, "pwd_user")
     end
 
     test "returns error for non-existent user" do
@@ -205,20 +177,6 @@ defmodule Malachi.Auth.UserStoreTest do
       ]
 
       assert {:ok, %{imported: 1, skipped: 1}} = UserStore.import_users(import_data)
-    end
-  end
-
-  describe "load_into_ets/0" do
-    test "syncs Mnesia data to ETS cache" do
-      UserStore.insert_user("sync_user", "hash", [:produce])
-
-      # Clear ETS manually
-      :ets.delete(@users_table, "sync_user")
-      assert [] = :ets.lookup(@users_table, "sync_user")
-
-      # Reload from Mnesia
-      assert :ok = UserStore.load_into_ets()
-      assert [{"sync_user", "hash", [:produce]}] = :ets.lookup(@users_table, "sync_user")
     end
   end
 

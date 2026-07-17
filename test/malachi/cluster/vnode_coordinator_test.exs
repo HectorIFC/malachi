@@ -11,10 +11,6 @@ defmodule Malachi.Cluster.VnodeCoordinatorTest do
   @range {"t", 0}
 
   setup_all do
-    data_dir = Path.join(System.tmp_dir!(), "malachi_ra_#{System.unique_integer([:positive])}")
-    File.rm_rf!(data_dir)
-    _ = :ra.start_in(String.to_charlist(data_dir))
-    on_exit(fn -> File.rm_rf!(data_dir) end)
     :ok
   end
 
