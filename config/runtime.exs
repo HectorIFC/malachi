@@ -285,68 +285,52 @@ admin_pass = System.get_env("MALACHIMQ_ADMIN_PASS")
 producer_pass = System.get_env("MALACHIMQ_PRODUCER_PASS")
 consumer_pass = System.get_env("MALACHIMQ_CONSUMER_PASS")
 app_pass = System.get_env("MALACHIMQ_APP_PASS")
-explicit_passwords? = admin_pass != nil and producer_pass != nil and consumer_pass != nil and app_pass != nil
+# The standard users whose password is set explicitly (a nil password is skipped). Producer/consumer/app
+# are optional; the admin is *generated* (see `generate_admin` below) when it has no explicit password.
+explicit_standard_users =
+  [
+    {"admin", admin_pass, [:admin]},
+    {"producer", producer_pass, [:produce]},
+    {"consumer", consumer_pass, [:consume]},
+    {"app", app_pass, [:produce, :consume]}
+  ]
+  |> Enum.filter(fn {_name, pass, _perms} -> pass != nil end)
 
-default_users =
+{default_users, generate_admin} =
   cond do
     disable_default_users ->
-      # No default users - manage via API
-      []
+      # No default users — manage via the API.
+      {[], false}
 
     default_users_env ->
       # Custom user list via env var: "user:pass:perm,perm;user2:..."
-      default_users_env
-      |> String.split(";")
-      |> Enum.map(fn user_str ->
-        [username, password, perms] = String.split(user_str, ":")
-        permissions = perms |> String.split(",") |> Enum.map(&String.to_atom/1)
-        {username, password, permissions}
-      end)
+      users =
+        default_users_env
+        |> String.split(";")
+        |> Enum.map(fn user_str ->
+          [username, password, perms] = String.split(user_str, ":")
+          permissions = perms |> String.split(",") |> Enum.map(&String.to_atom/1)
+          {username, password, permissions}
+        end)
 
-    explicit_passwords? ->
-      # Standard users seeded from explicitly provided passwords (no hard-coded fallback)
-      [
-        {"admin", admin_pass, [:admin]},
-        {"producer", producer_pass, [:produce]},
-        {"consumer", consumer_pass, [:consume]},
-        {"app", app_pass, [:produce, :consume]}
-      ]
-
-    actual_env == :prod ->
-      # Production has no default credentials — passwords must be configured explicitly.
-      raise """
-
-      ═══════════════════════════════════════════════════════════════
-      SECURITY ERROR: Production deployment requires explicit passwords
-      ═══════════════════════════════════════════════════════════════
-
-      No default passwords are shipped. You MUST configure strong passwords via environment variables:
-
-        export MALACHIMQ_ADMIN_PASS="$(openssl rand -base64 32)"
-        export MALACHIMQ_PRODUCER_PASS="$(openssl rand -base64 32)"
-        export MALACHIMQ_CONSUMER_PASS="$(openssl rand -base64 32)"
-        export MALACHIMQ_APP_PASS="$(openssl rand -base64 32)"
-
-      Alternative: disable default users and manage them via the API:
-
-        export MALACHIMQ_DISABLE_DEFAULT_USERS=true
-
-      ═══════════════════════════════════════════════════════════════
-      """
+      {users, false}
 
     actual_env in [:dev, :test] ->
-      # Keep the environment-specific convenience credentials from config/dev.exs or config/test.exs. These
-      # live only in per-env config (never in the base/prod path). Override with MALACHIMQ_DEFAULT_USERS or
-      # the per-user *_PASS env vars above.
-      Application.get_env(:malachi, :default_users, [])
+      # Keep the environment-specific convenience credentials from config/dev.exs or config/test.exs (never
+      # in the base/prod path). Override with MALACHIMQ_DEFAULT_USERS or the per-user *_PASS env vars.
+      {Application.get_env(:malachi, :default_users, []), false}
 
     true ->
-      # Any other environment: no weak fallback — configure users explicitly (see the :prod message above).
-      []
+      # Any other environment (production included): seed the standard users whose password is set, and
+      # generate a random admin on first boot when none is configured — Malachi.Auth logs it once, and the
+      # replicated store dedups so exactly one node's password wins. No weak fallback and no hard failure;
+      # MALACHIMQ_DISABLE_DEFAULT_USERS opts out of default users entirely.
+      {explicit_standard_users, admin_pass == nil}
   end
 
 config :malachi,
   default_users: default_users,
+  generate_admin: generate_admin,
   disable_default_users: disable_default_users,
 
   # Account lockout configuration

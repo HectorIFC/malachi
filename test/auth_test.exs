@@ -1,6 +1,8 @@
 defmodule Malachi.AuthTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Auth.UserStore
+
   setup do
     on_exit(fn ->
       # Remove any dynamically created test users (keep only default users)
@@ -233,6 +235,43 @@ defmodule Malachi.AuthTest do
     test "cleans up expired sessions automatically" do
       # Skip this timing-sensitive test
       :ok
+    end
+  end
+
+  describe "generate_admin_if_absent/1" do
+    import ExUnit.CaptureLog
+
+    # a unique admin username per test so the shared default "admin" is never touched
+    setup do
+      username = "gen_admin_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Application.put_env(:malachi, :generate_admin, false) end)
+      {:ok, username: username}
+    end
+
+    test "generates a random admin on first boot, logs it once, and it authenticates", %{username: username} do
+      Application.put_env(:malachi, :generate_admin, true)
+
+      log = capture_log(fn -> assert :ok = Malachi.Auth.generate_admin_if_absent(username) end)
+      assert log =~ "password:"
+      [_, password] = Regex.run(~r/password:\s*(\S+)/, log)
+
+      # the generated password authenticates the new admin
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, password, {0, 0, 0, 0})
+      assert Malachi.Auth.has_permission?(username, :admin)
+
+      # calling again is a no-op: the admin now exists, so nothing new is generated or logged
+      log2 = capture_log(fn -> assert :ok = Malachi.Auth.generate_admin_if_absent(username) end)
+      refute log2 =~ "password:"
+      # the original generated password still works (it was not overwritten)
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, password, {0, 0, 0, 0})
+    end
+
+    test "does nothing when generation is disabled", %{username: username} do
+      Application.put_env(:malachi, :generate_admin, false)
+
+      log = capture_log(fn -> assert :ok = Malachi.Auth.generate_admin_if_absent(username) end)
+      refute log =~ "password:"
+      assert {:error, :user_not_found} = UserStore.get_user(username)
     end
   end
 end

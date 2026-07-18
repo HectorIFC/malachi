@@ -171,10 +171,16 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    pontos (`config/config.exs`, os fallbacks `|| "admin123"` do `config/runtime.exs`, o fallback do
    `seed_default_users` em `lib/malachi/auth.ex`). O config base semeia `[]`; os defaults de conveniência
    ficam só em `config/dev.exs` e `config/test.exs` (nunca no caminho de prod); prod **exige senha explícita**
-   via env (`*_PASS` ou `MALACHIMQ_DEFAULT_USERS`) ou dá `raise`. Escolhido **1A (exigir senha explícita)** em
-   vez do generate-random do ADR original porque, sem o P2 (replicação), um admin gerado **por-nó divergiria
-   no cluster** — o generate-random vira follow-up **depois** do P2 (aí o password gerado pode ser replicado).
-   `require_strong_passwords` deixado como está (ortogonal; ligá-lo por padrão pode quebrar deploy existente).
+   via env (`*_PASS` ou `MALACHIMQ_DEFAULT_USERS`). A Fase 1 escolheu **1A (exigir senha explícita, `raise`)**
+   como interino porque, sem o P2 (replicação), um admin gerado divergiria por-nó.
+   `require_strong_passwords` deixado como está (ortogonal).
+   **✅ Promovido para generate-random depois do P2 (decisão 1A+2A):** o `raise` foi **substituído** por gerar
+   um **admin aleatório** no 1º boot e logá-lo **uma vez** (padrão Redpanda/ES). Cluster-safe: cada nó gera e
+   chama `put_user` por consenso, o `:user_exists` do `ra` deduplica → exatamente **um** password vence e é
+   logado. Só o admin é gerado (escopo 2A); producer/consumer/app são semeados só se configurados. Flag
+   `:generate_admin` (setada no `runtime.exs` quando não há `MALACHIMQ_ADMIN_PASS`); `Auth.generate_admin_if_absent/1`
+   gera+semeia+loga; `ConfigValidator` ciente da flag. `MALACHIMQ_DISABLE_DEFAULT_USERS` é o opt-out.
+   *Tradeoff:* a senha aparece no log (o operador deve protegê-lo / rotacionar) — padrão da indústria.
 2. **Fase 2 — Replicação no `ra` (P2) + persistência de sessão/lockout (P6). 🚧 Em andamento (decisão 1A).**
    Move os usuários do Mnesia node-local para um **cluster `ra` dedicado** (`UserMachine` sobre a máquina pura
    `UserRegistry`), espelhando o par `Lease`/`LeaseMachine`: escritas por consenso, leituras do replica local

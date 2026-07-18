@@ -262,7 +262,9 @@ config :opentelemetry_exporter,
 Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node and survives restarts.
 
 
-### Default Users
+### Default Users (development)
+
+In **dev/test** these convenience users are seeded:
 
 | Username | Password | Permissions |
 |----------|----------|-------------|
@@ -271,7 +273,11 @@ Malachi requires authentication for all producers and consumers. Users and permi
 | consumer | consumer123 | Consume only |
 | app | app123 | Produce & Consume |
 
-> ⚠️ **Important**: Change default passwords in production!
+> ⚠️ These weak defaults exist **only** in dev/test and are never shipped to production.
+
+### First boot in production
+
+No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN_PASS`, Malachi **generates a random admin password and logs it once** — save it from the logs (it cannot be recovered). Provide your own with `MALACHIMQ_ADMIN_PASS` (and `MALACHIMQ_PRODUCER_PASS` / `MALACHIMQ_CONSUMER_PASS` / `MALACHIMQ_APP_PASS` for the other service accounts), or set `MALACHIMQ_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
 
 ### Environment Variables
 

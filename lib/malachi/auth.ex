@@ -197,6 +197,9 @@ defmodule Malachi.Auth do
     # ra user cluster is started by Malachi.Application before this child, so writes have a leader.
     seed_default_users()
 
+    # When configured (no explicit admin password), generate a random admin on first boot and log it once.
+    generate_admin_if_absent()
+
     Logger.info(I18n.t(:auth_started))
     {:ok, %{}}
   end
@@ -278,6 +281,39 @@ defmodule Malachi.Auth do
     if seeded > 0 do
       Logger.info(I18n.t(:default_users_loaded, count: seeded))
     end
+  end
+
+  @doc """
+  Generates a random password for `username` (an admin) and seeds it — but only when generation is enabled
+  (`:generate_admin` config, set when no admin password is configured) and no such user exists yet. The
+  password is **logged once**; the replicated store dedups, so on a multi-node boot exactly one node's seed
+  succeeds and announces its password (the others get `:user_exists` and discard theirs). A no-op when
+  generation is disabled or the admin already exists. Called at boot after `seed_default_users/0`.
+  """
+  @spec generate_admin_if_absent(String.t()) :: :ok
+  def generate_admin_if_absent(username \\ "admin") do
+    if Application.get_env(:malachi, :generate_admin, false) do
+      password = generate_password()
+      deadline = System.monotonic_time(:millisecond) + 5_000
+
+      case seed_insert(username, hash_password(password), [:admin], deadline) do
+        :ok -> announce_generated_admin(username, password)
+        # already seeded (an explicit config or another node) or unreachable — no password to announce
+        _other -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  # A strong, URL-safe random password (192 bits of entropy).
+  defp generate_password do
+    24 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+  end
+
+  defp announce_generated_admin(username, password) do
+    Logger.warning(I18n.t(:admin_password_generated, username: username, password: password))
+    :ok
   end
 
   # Inserts a seed user, retrying a transient transport error until `deadline` (the cluster reaching quorum).

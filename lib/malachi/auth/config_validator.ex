@@ -136,10 +136,12 @@ defmodule Malachi.Auth.ConfigValidator do
   defp validate_admin_exists! do
     users = Application.get_env(:malachi, :default_users, [])
     disabled = Application.get_env(:malachi, :disable_default_users, false)
+    generate_admin = Application.get_env(:malachi, :generate_admin, false)
 
     has_admin = Enum.any?(users, fn {_user, _pass, perms} -> :admin in perms end)
 
-    unless has_admin or disabled do
+    # `generate_admin` means Malachi.Auth will create a random admin at boot, so no admin in config is fine.
+    unless has_admin or disabled or generate_admin do
       Logger.warning(I18n.t(:warning_no_admin))
     end
   end
@@ -189,9 +191,10 @@ defmodule Malachi.Auth.ConfigValidator do
 
   defp validate_admin_exists_warn do
     users = Application.get_env(:malachi, :default_users, [])
+    generate_admin = Application.get_env(:malachi, :generate_admin, false)
     has_admin = Enum.any?(users, fn {_user, _pass, perms} -> :admin in perms end)
 
-    unless has_admin do
+    unless has_admin or generate_admin do
       Logger.warning(I18n.t(:warning_no_admin_dev))
     end
   end
