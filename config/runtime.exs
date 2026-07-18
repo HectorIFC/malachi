@@ -43,6 +43,17 @@ parse_tls_versions = fn val, default ->
   end
 end
 
+# mTLS-identity auth policy (P4): which certificate field names the malachi username. "cn" (default), or
+# "san:uri" / "san:dns" / "san:email" to use the first Subject Alternative Name of that kind.
+parse_mtls_policy = fn val ->
+  case val && String.downcase(val) do
+    "san:uri" -> {:san, :uri}
+    "san:dns" -> {:san, :dns}
+    "san:email" -> {:san, :email}
+    _cn_or_absent -> :cn
+  end
+end
+
 # TLS enforcement: required by default in production
 # Can be overridden with MALACHIMQ_CONFIG_ENV for testing/CI environments
 actual_env =
@@ -107,6 +118,10 @@ config :malachi,
   tls_versions: parse_tls_versions.(System.get_env("MALACHIMQ_TLS_VERSIONS"), [:"tlsv1.3", :"tlsv1.2"]),
   tls_verify: System.get_env("MALACHIMQ_TLS_VERIFY") || "verify_none",
   tls_fail_if_no_peer_cert: System.get_env("MALACHIMQ_TLS_FAIL_IF_NO_PEER_CERT") == "true",
+  # mTLS-identity auth (P4): opt-in, and only honored when the listener verifies peer certs (verify_peer),
+  # so an unverified/forged certificate can never authenticate. The policy maps a cert field to a username.
+  mtls_auth: System.get_env("MALACHIMQ_MTLS_AUTH") == "true",
+  mtls_identity_policy: parse_mtls_policy.(System.get_env("MALACHIMQ_MTLS_POLICY")),
   default_delivery_mode: System.get_env("MALACHIMQ_DEFAULT_DELIVERY_MODE") || "at_least_once",
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
   channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),

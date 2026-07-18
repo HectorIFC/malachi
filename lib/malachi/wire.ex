@@ -36,12 +36,14 @@ defmodule Malachi.Wire do
   @delete_user 9
   @change_password 10
   @list_users 11
+  # mTLS-identity auth (P4): empty payload; the server authenticates from the verified peer certificate.
+  @mtls_auth 12
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..11
+  @type api_key :: 0..12
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -57,6 +59,7 @@ defmodule Malachi.Wire do
   def delete_user_key, do: @delete_user
   def change_password_key, do: @change_password
   def list_users_key, do: @list_users
+  def mtls_auth_key, do: @mtls_auth
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -119,6 +122,10 @@ defmodule Malachi.Wire do
     {password, <<>>} = take_str(rest)
     {username, password}
   end
+
+  # An mTLS-auth request carries no payload — the server derives the identity from the verified peer
+  # certificate. The response reuses the auth response (a session token).
+  def encode_mtls_auth_req, do: <<>>
 
   def encode_auth_resp(token), do: put_str(token)
 

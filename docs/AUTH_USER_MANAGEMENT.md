@@ -110,7 +110,7 @@ replicado** (KRaft/controller Raft); RabbitMQ usa Mnesia **replicado**. **NorthG
 **Recomendação: (a), depois de P2.** **Concorrentes:** `rabbitmqctl`+HTTP API (RabbitMQ), CLI+Admin API
 (Kafka), REST admin (Pulsar), `nsc` (NATS). **NorthGuard:** silente.
 
-### P4 — Auth externa ausente (table-stakes de vendabilidade)
+### P4 — Auth externa ausente (table-stakes de vendabilidade) 🚧 Em andamento (contrato + mTLS-identidade feitos)
 **Problema:** só username/password interno; nenhum IdP externo; mTLS verifica mas não autentica.
 
 - **(a) Definir plug points** — mapear identidade de **mTLS→usuário** e interfaces plugáveis para **OIDC/JWT**
@@ -123,6 +123,17 @@ replicado** (KRaft/controller Raft); RabbitMQ usa Mnesia **replicado**. **NorthG
 plugáveis (Kafka SASL/OAuth/Kerberos; Pulsar JWT/OAuth2/TLS; RabbitMQ LDAP/OAuth2; NATS JWT descentralizado).
 **NorthGuard:** delega à plataforma da LinkedIn (mTLS de serviço + authz central) — um produto OSS não pode
 assumir essa plataforma, por isso precisa dos plug points.
+
+**Implementado (decisão 1A: mTLS-identidade primeiro; 2A: CN→user; 3A: frame `mtls_auth` explícito).** O
+contrato `Malachi.Auth.AuthProvider` (`authenticate(credentials, context) → {:ok, %{username, permissions}}`)
+separa **autenticação plugável** de **autorização interna** (perms do `UserStore` replicado). Providers:
+`PasswordProvider` (envolve o `Auth.verify_credentials/2` sem-sessão) e `MtlsProvider` (mapeia o cert via
+`CertIdentity` — CN ou SAN, política configurável — e busca perms no store). No wire, um api_key `mtls_auth`
+(payload vazio) faz o acceptor resolver a identidade do **peercert** e mintar a sessão como no path de senha.
+**Gate de segurança:** o `mtls_auth` só é honrado com opt-in (`MALACHIMQ_MTLS_AUTH`) **e** `verify_peer` ligado
+— sob `verify_none` um cert forjado nunca autentica; falhas de mapeamento colapsam para `:invalid_credentials`
+(não vazam quais identidades existem); sem lockout (não há senha pra brute-force), mas com rate-limit por IP.
+**Falta (próximas fatias, adiadas):** providers OIDC/JWT e LDAP sobre o mesmo contrato.
 
 ### P5 — AutZ grosso / sem multi-tenancy
 **Problema:** RBAC global de 3 permissões; sem ACL por-tópico nem isolamento por tenant.
@@ -242,7 +253,14 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    RPC como *seam* (testável): 9 testes (parsing/dispatch/erros + integração real via seam local); validado
    end-to-end contra um nó nomeado vivo (create/list/passwd/delete). É o análogo do `bin/malachi rpc` de release.
    `:mix` adicionado ao PLT do dialyzer. **Fase 3 completa — 3 superfícies (wire+CLI, REST, mix task).**
-4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
+4. **Fase 4 — Auth externa plugável (P4). 🚧 Contrato + mTLS-identidade feitos (decisão 1A/2A/3A).**
+   Sub-fatiado: **P4-1** (behaviour `AuthProvider` + `CertIdentity` puro — extração CN/SAN do DER X.509, com
+   política `:cn | {:san, kind}`; 11 testes com certs reais) → **P4-2** (`PasswordProvider` + `MtlsProvider`
+   sobre o contrato; extraído `Auth.verify_credentials/2` sem-sessão, DRY; providers com seams, testados sem
+   app/TLS; mTLS mapeia cert→user e busca perms no store, fail-closed em registro divergente) → **P4-3** (wire
+   `mtls_auth` + handshake no acceptor: resolve o peercert e minta a sessão como no path de senha, **gateado
+   em opt-in + `verify_peer`** pra um cert forjado nunca autenticar; config `MALACHIMQ_MTLS_AUTH` /
+   `MALACHIMQ_MTLS_POLICY`; gate testado sobre TCP plano). *Falta OIDC/JWT e LDAP como próximos providers.*
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 
 Cada fase é uma decisão própria (opções + recomendação) quando for implementada, seguindo a cadência do

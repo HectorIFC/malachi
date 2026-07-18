@@ -12,6 +12,8 @@ defmodule Malachi.TCPAcceptor do
   use GenServer
   require Logger
   alias Malachi.Auth.LockoutManager
+  alias Malachi.Auth.MtlsProvider
+  alias Malachi.Auth.SessionManager
   alias Malachi.I18n
   alias Malachi.LogApi
   alias Malachi.TCPProtocol
@@ -197,16 +199,22 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # The first frame must be an auth request; any other api_key or a malformed frame is rejected.
+  # The first frame must be an auth request — password (`auth`) or mTLS-identity (`mtls_auth`); any other
+  # api_key or a malformed frame is rejected.
   defp process_auth_frame(frame_body, %{socket: socket, transport: transport} = state) do
     {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
 
-    if api_key == Wire.auth_key() do
-      {username, password} = Wire.decode_auth_req(payload)
-      validate_and_authenticate(username, password, correlation_id, state)
-    else
-      transport.send(socket, Wire.encode_error(correlation_id, :auth_required))
-      {:error, :auth_required}
+    cond do
+      api_key == Wire.auth_key() ->
+        {username, password} = Wire.decode_auth_req(payload)
+        validate_and_authenticate(username, password, correlation_id, state)
+
+      api_key == Wire.mtls_auth_key() ->
+        authenticate_mtls(correlation_id, state)
+
+      true ->
+        transport.send(socket, Wire.encode_error(correlation_id, :auth_required))
+        {:error, :auth_required}
     end
   rescue
     _malformed ->
@@ -229,10 +237,7 @@ defmodule Malachi.TCPAcceptor do
 
       :not_locked ->
         # STEP 2: Check rate limit (network-level control)
-        auth_limit = Application.get_env(:malachi, :auth_rate_limit, 10)
-        auth_window_ms = Application.get_env(:malachi, :auth_rate_window_ms, 60_000)
-
-        case Malachi.RateLimiter.check_limit(client_ip, :auth, %{limit: auth_limit, window_ms: auth_window_ms}) do
+        case check_auth_rate_limit(client_ip) do
           :ok ->
             # STEP 3: Perform authentication
             case Malachi.Auth.authenticate(username, password, client_ip) do
@@ -246,8 +251,7 @@ defmodule Malachi.TCPAcceptor do
                 {:error, :invalid_credentials}
             end
 
-          {:error, :rate_limit_exceeded, _retry_after_ms} ->
-            Malachi.Metrics.increment_rate_limit_blocked(:auth)
+          {:error, :rate_limit_exceeded} ->
             transport.send(socket, Wire.encode_error(correlation_id, :rate_limit_exceeded))
             {:error, :rate_limit_exceeded}
         end
@@ -264,6 +268,80 @@ defmodule Malachi.TCPAcceptor do
         {:error, :invalid_token}
     end
   end
+
+  # mTLS-identity auth (P4): authenticate the client from the certificate it presented at the TLS handshake
+  # instead of a password. Gated so an unverified certificate can never authenticate (see `ensure_mtls_allowed/0`).
+  # On success the session is minted exactly like the password path (SessionManager.create_session). Failed
+  # attempts are not fed to the lockout manager (there is no password to brute-force); the rate limit still
+  # applies for DoS protection.
+  defp authenticate_mtls(correlation_id, %{socket: socket, transport: transport, client_ip: client_ip} = state) do
+    with :ok <- ensure_mtls_allowed(),
+         :ok <- check_auth_rate_limit(client_ip),
+         {:ok, der} <- peer_certificate(transport, socket),
+         {:ok, %{username: username, permissions: permissions}} <-
+           MtlsProvider.authenticate(der, %{policy: mtls_identity_policy()}) do
+      {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
+      Logger.info(I18n.t(:auth_success, username: username))
+      Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "mtls_authenticate", :success, %{})
+      validate_token_and_respond(token, correlation_id, state, client_ip)
+    else
+      {:error, reason} ->
+        Malachi.AuditLog.log_event(:auth_failure, %{ip: client_ip}, "mtls_authenticate", :failure, %{reason: reason})
+        transport.send(socket, Wire.encode_error(correlation_id, mtls_client_error(reason)))
+        {:error, reason}
+    end
+  end
+
+  # Applies the per-IP auth rate limit (network-level control), shared by the password and mTLS handshakes.
+  defp check_auth_rate_limit(client_ip) do
+    auth_limit = Application.get_env(:malachi, :auth_rate_limit, 10)
+    auth_window_ms = Application.get_env(:malachi, :auth_rate_window_ms, 60_000)
+
+    case Malachi.RateLimiter.check_limit(client_ip, :auth, %{limit: auth_limit, window_ms: auth_window_ms}) do
+      :ok ->
+        :ok
+
+      {:error, :rate_limit_exceeded, _retry_after_ms} ->
+        Malachi.Metrics.increment_rate_limit_blocked(:auth)
+        {:error, :rate_limit_exceeded}
+    end
+  end
+
+  # mTLS auth is honored only when explicitly enabled AND the listener verifies peer certs — under
+  # verify_none a client could present a forged certificate, so it must never authenticate.
+  defp ensure_mtls_allowed do
+    cond do
+      not Application.get_env(:malachi, :mtls_auth, false) -> {:error, :mtls_auth_disabled}
+      not tls_verify_peer?() -> {:error, :mtls_auth_unavailable}
+      true -> :ok
+    end
+  end
+
+  defp tls_verify_peer? do
+    Application.get_env(:malachi, :tls_verify, "verify_none") in ["verify_peer", :verify_peer]
+  end
+
+  defp mtls_identity_policy do
+    Application.get_env(:malachi, :mtls_identity_policy, :cn)
+  end
+
+  # The DER peer certificate, or an error. Only a TLS transport can carry one.
+  defp peer_certificate(:ssl, socket) do
+    case :ssl.peercert(socket) do
+      {:ok, der} -> {:ok, der}
+      {:error, _reason} -> {:error, :no_peer_certificate}
+    end
+  end
+
+  defp peer_certificate(_transport, _socket), do: {:error, :no_peer_certificate}
+
+  # An identity-mapping failure collapses to :invalid_credentials so we never reveal which certificate
+  # identities are provisioned; config/protocol errors (feature off, no cert, rate limit) are surfaced as-is.
+  defp mtls_client_error(reason) when reason in [:malformed_certificate, :no_identity, :unknown_identity] do
+    :invalid_credentials
+  end
+
+  defp mtls_client_error(reason), do: reason
 
   # Reads request frames and dispatches each; loops until the socket closes or errors. A `subscribe` frame
   # switches the connection into `stream_loop/2` (server-push streaming) for the rest of its life.
