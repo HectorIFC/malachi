@@ -401,13 +401,9 @@ defmodule Malachi.I18n do
       "pt_BR" => "🔓 Conta desbloqueada: '%{username}' (IP: %{ip})",
       "en_US" => "🔓 Account unlocked: '%{username}' (IP: %{ip})"
     },
-    lockout_cleanup_expired: %{
-      "pt_BR" => "%{count} bloqueios expirados removidos",
-      "en_US" => "Cleaned up %{count} expired lockouts"
-    },
-    lockout_cleanup_attempts: %{
-      "pt_BR" => "%{count} tentativas antigas removidas",
-      "en_US" => "Cleaned up %{count} old failed attempts"
+    lockout_store_unavailable: %{
+      "pt_BR" => "Store de bloqueios indisponível em %{operation}: %{reason}",
+      "en_US" => "Lockout store unavailable on %{operation}: %{reason}"
     },
     # Session manager translations
     invalid_cidr_range: %{

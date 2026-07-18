@@ -12,6 +12,7 @@ defmodule Malachi.Application do
   use Application
   require Logger
   alias Malachi.Auth.ConfigValidator
+  alias Malachi.Auth.LockoutServer
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
@@ -39,6 +40,8 @@ defmodule Malachi.Application do
 
   # The replicated user store's dedicated ra cluster name (see `user_store_children/1`).
   @log_users Malachi.LogUsers
+  # The replicated account-lockout store's dedicated ra cluster name (see `lockout_store_children/1`).
+  @log_lockouts Malachi.LogLockouts
 
   def start(_type, _args) do
     # Validate authentication configuration before starting
@@ -76,11 +79,10 @@ defmodule Malachi.Application do
           # Resource monitors (must start after AuditLog for alert logging)
           Malachi.AtomMonitor,
           Malachi.MemoryMonitor,
-          # Account lockout manager (must start before Auth)
-          Malachi.Auth.LockoutManager,
           Malachi.RateLimiter,
           Malachi.ConnectionLimiter
         ] ++
+        lockout_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
         [
           Malachi.Auth,
@@ -145,6 +147,36 @@ defmodule Malachi.Application do
     else
       []
     end
+  end
+
+  # The replicated account-lockout store (P6): forms the ra lockout cluster across `nodes` and supervises the
+  # `LockoutManager` facade (which owns the cleanup timer). When clustered it also supervises a reconciler that
+  # self-joins this node on a staggered boot (reusing the generic `LeaseReconciler`); single-node needs no
+  # self-join. Mirrors `user_store_children/1`. The cluster is formed here (imperatively) before the facade
+  # starts, so its first read/write addresses a live member. Must precede Auth (the auth path uses lockouts).
+  defp lockout_store_children(nodes) do
+    _ = LockoutServer.start(@log_lockouts, nodes)
+
+    reconciler =
+      if length(nodes) > 1 do
+        [
+          %{
+            id: Malachi.LogLockoutReconciler,
+            start:
+              {LeaseReconciler, :start_link,
+               [
+                 [
+                   name: Malachi.LogLockoutReconciler,
+                   reconcile: fn -> LockoutServer.reconcile(@log_lockouts, nodes) end
+                 ]
+               ]}
+          }
+        ]
+      else
+        []
+      end
+
+    reconciler ++ [Malachi.Auth.LockoutManager]
   end
 
   # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which

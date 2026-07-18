@@ -135,7 +135,7 @@ assumir essa plataforma, por isso precisa dos plug points.
 **Recomendação: (a), faseado depois de P2-P4.** **Concorrentes:** ACLs por-recurso (Kafka/Redpanda),
 vhosts (RabbitMQ), tenant→namespace→topic (Pulsar), accounts (NATS). **NorthGuard:** silente.
 
-### P6 — Sessões e lockouts voláteis
+### P6 — Sessões e lockouts voláteis ✅ (lockouts feitos; sessões mantidas node-local por decisão)
 **Problema:** ETS puro → perdidos no restart, não cruzam nós (`lockout_manager.ex:18-20`).
 
 - **(a) Persistir/replicar** (junto de P2, no mesmo mecanismo). *Esforço*: médio. *Ganho*: lockout e sessão
@@ -143,7 +143,14 @@ vhosts (RabbitMQ), tenant→namespace→topic (Pulsar), accounts (NATS). **North
 - **(b) Só persistir local.** *Esforço*: baixo. *Limite*: não cobre o cluster.
 - **(c) Manter volátil.** Aceitável a curto prazo; lockout reinicia no restart (janela de brute-force).
 
-**Recomendação: (a), encaixado em P2 — secundário.**
+**Recomendação: (a).** **Implementado (decisão 1A: só lockouts → `ra`).** Os lockouts foram movidos para um
+cluster `ra` dedicado (`Malachi.LogLockouts`), espelhando o padrão de P2: núcleo puro determinístico
+`LockoutRegistry` + `LockoutMachine` (alimentando `meta.system_time`) + `LockoutServer`, com a fachada
+`LockoutManager` reescrita sobre ele (API pública inalterada). Brute-force agora é protegido **cluster-wide**
+(tentativas espalhadas por nós contam contra um único limite) e **sobrevive a restart**. As **sessões**
+permanecem em ETS **de propósito**: têm expiração deslizante (escrita a cada validação = alta rotatividade,
+mau encaixe no `ra`), a conexão do wire cai no restart de qualquer forma (re-login é barato) e o benefício
+cross-node só afetaria o dashboard de baixo tráfego. Documentado como intencionalmente node-local/efêmero.
 
 ---
 
@@ -181,7 +188,7 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    `:generate_admin` (setada no `runtime.exs` quando não há `MALACHIMQ_ADMIN_PASS`); `Auth.generate_admin_if_absent/1`
    gera+semeia+loga; `ConfigValidator` ciente da flag. `MALACHIMQ_DISABLE_DEFAULT_USERS` é o opt-out.
    *Tradeoff:* a senha aparece no log (o operador deve protegê-lo / rotacionar) — padrão da indústria.
-2. **Fase 2 — Replicação no `ra` (P2) + persistência de sessão/lockout (P6). 🚧 Em andamento (decisão 1A).**
+2. **Fase 2 — Replicação no `ra` (P2) + persistência de lockout (P6). ✅ Feito (decisão 1A).**
    Move os usuários do Mnesia node-local para um **cluster `ra` dedicado** (`UserMachine` sobre a máquina pura
    `UserRegistry`), espelhando o par `Lease`/`LeaseMachine`: escritas por consenso, leituras do replica local
    (o replica é o cache — sem sync de ETS entre nós). Greenfield (dropa o Mnesia). Confirmado escalável ao
@@ -199,8 +206,17 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    (idempotente, com retry pra janela de quórum multi-node); **Mnesia dropado** do `extra_applications`.
    Fricção de teste resolvida: o app é dono do `ra`, então os testes de cluster não chamam mais `:ra.start_in`
    — que **reinicia** o `ra` e mataria o `LogUsers` — e a distribuição sobe no `test_helper` com nome de nó
-   estável). **P2 completo — usuários replicados no cluster.** *Resta P6 (persistir sessões/lockouts), adiado.*
-   *Fundação para P3-P5.*
+   estável). **P2 completo — usuários replicados no cluster.** *Fundação para P3-P5.*
+   **P6 ✅ (decisão 1A: só lockouts → `ra`)** — sub-fatiado espelhando P2: **P6-1** (`LockoutRegistry` puro:
+   `failed_attempt`/`successful_auth`/`unlock_user`/`unlock_key`/`cleanup` + queries, escalonamento
+   progressivo idêntico ao legado, config **dentro do comando** e tempo via `now` → determinístico; 20 testes)
+   → **P6-2** (`LockoutMachine` alimentando `meta.system_time` + `LockoutServer` com escritas por consenso e
+   leituras via `:ra.local_query` usando o relógio local pra expiração; 7 testes de cluster real) → **P6-3**
+   (fachada `LockoutManager` reescrita sobre o cluster `LogLockouts`, **API pública inalterada** — efeitos
+   colaterais metrics/log/audit guiados pelo reply da máquina, cleanup timer no GenServer; fiado no
+   `application.ex` como `lockout_store_children/1`). Brute-force agora **cluster-wide** e **durável a restart**.
+   As **sessões** ficam em ETS de propósito (expiração deslizante = alta rotatividade, conexão cai no restart,
+   cross-node só serviria o dashboard) — documentado como node-local/efêmero.
 3. **Fase 3 — Gestão em runtime (P3). ✅ Feito (as 3 superfícies).** As três compartilham as
    mesmas `Auth.*` (que já vão pro `ra`). **P3-1 ✅ — ops de wire admin-gated:** novos `api_key`s no protocolo
    binário (`create_user`=8, `delete_user`=9, `change_password`=10, `list_users`=11), handlers no

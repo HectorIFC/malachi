@@ -1,35 +1,51 @@
 defmodule Malachi.Auth.LockoutManager do
   @moduledoc """
-  Manages account lockouts after failed authentication attempts.
+  Account-lockout facade over the **replicated** lockout store (`Malachi.Auth.LockoutServer`, a dedicated
+  `ra` cluster). Applies progressive lockout after repeated failed logins, keyed by `{username, ip}`.
 
-  Implements progressive lockout with increasing duration to prevent brute-force
-  attacks. Tracking by username + IP combination for granular locking.
+  Replaces the old node-local ETS store (P6): lockouts now replicate across the cluster, so brute-force
+  protection is **cluster-wide** (an attacker cannot spread attempts across nodes to dodge the limit) and
+  **survives a restart** (a restart cannot reset a lockout). The pure lockout logic lives in
+  `Malachi.Auth.LockoutRegistry`; this module reads the lockout config, routes reads to the local replica
+  and writes through the Raft log, and performs the observable side effects (metrics, logging, audit) for a
+  newly applied or cleared lockout.
 
   ## Progressive Lockout
 
-  - 1st lockout attempt (5 failures): 5 minutes
-  - 2nd lockout attempt (10 failures): 15 minutes
-  - 3rd lockout attempt (15 failures): 45 minutes
-  - 4th lockout attempt (20 failures): 2 hours
-  - 5th+ lockout attempt (25+ failures): 6 hours (maximum)
+  - 1st lockout (5 failures): 5 minutes
+  - 2nd lockout (10 failures): 15 minutes
+  - 3rd lockout (15 failures): 45 minutes
+  - 4th lockout (20 failures): 2 hours
+  - 5th+ lockout (25+ failures): 6 hours (maximum)
 
-  ## Storage
+  ## Process role and blocking
 
-  Uses volatile ETS - lockouts are lost on server restart.
-  Definitive persistence will be implemented in future task.
+  Reads (`locked?`/`get_failed_attempts`/`list_locked_accounts`) are direct local queries — no consensus,
+  no GenServer round-trip. The hot-path **writes** (`record_failed_attempt`/`record_successful_auth`) run in
+  a **background task** on `Malachi.TaskSupervisor`, so the auth path never blocks on a consensus round-trip
+  or an ra leader election, and no single process funnels every write; `ra` serializes the concurrent writes
+  itself, and the rate/connection limiters bound the task volume. `unlock_account` is a synchronous admin
+  action (the operator wants the result). The GenServer owns only the periodic **cleanup** timer.
+  `Malachi.Application` forms the ra lockout cluster before this process starts.
   """
   use GenServer
   require Logger
+  alias Malachi.Auth.LockoutServer
   alias Malachi.I18n
 
-  @table_attempts :malachi_failed_attempts
-  @table_lockouts :malachi_locked_accounts
-  # 1 minute
+  # The dedicated ra cluster's name (formed in Malachi.Application). Reads/writes address the local member.
+  @cluster Malachi.LogLockouts
+  # Drop failed-attempt counters idle for longer than this on each cleanup (mirrors the legacy 1h window).
+  @attempt_ttl_ms 3_600_000
   @cleanup_interval_ms 60_000
+
+  @typedoc "An IP as the acceptor supplies it (tuple) or already formatted (string)."
+  @type ip :: :inet.ip_address() | String.t()
 
   ## Client API
 
-  @doc "Starts the lockout manager, which tracks failed-login attempts and account lockouts."
+  @doc "Starts the lockout manager, which owns the periodic cleanup timer for the replicated store."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -37,326 +53,221 @@ defmodule Malachi.Auth.LockoutManager do
   @doc """
   Checks if an account is locked.
 
-  ## Returns
-
-  - `:not_locked` - Account is not locked
-  - `{:locked, time_remaining_ms}` - Account locked, remaining time in ms
-
-  ## Examples
-
-      iex> LockoutManager.locked?("user", {192, 168, 1, 1})
-      :not_locked
-      
-      iex> LockoutManager.locked?("attacker", {10, 0, 0, 1})
-      {:locked, 285000}
+  Returns `:not_locked`, or `{:locked, time_remaining_ms}` when the account is locked. A direct read of the
+  local replica (no consensus round-trip).
   """
+  @spec locked?(String.t(), ip()) :: :not_locked | {:locked, non_neg_integer()}
   def locked?(username, ip) do
-    key = {username, format_ip(ip)}
-    now = System.system_time(:millisecond)
+    case LockoutServer.locked?(server_id(), key(username, ip), now()) do
+      {:ok, status} ->
+        status
 
-    case :ets.lookup(@table_lockouts, key) do
-      [{^key, locked_until, _count}] when locked_until > now ->
-        {:locked, locked_until - now}
-
-      _ ->
+      {:error, reason} ->
+        # Fail open: a transient store hiccup must not lock out legitimate users — the rate limiter is the
+        # backstop. Logged so an operator sees the enforcement gap.
+        Logger.warning(I18n.t(:lockout_store_unavailable, operation: "locked?", reason: inspect(reason)))
         :not_locked
     end
   end
 
   @doc """
-  Records a failed authentication attempt.
+  Records a failed authentication attempt, applying a lockout once the limit is reached.
 
-  Increments the attempt counter and applies lockout if limit is reached.
+  Non-blocking: the consensus write runs in a background task (see the module doc), so the auth path is
+  never coupled to ra latency. Returns `:ok` immediately.
   """
+  @spec record_failed_attempt(String.t(), ip()) :: :ok
   def record_failed_attempt(username, ip) do
-    GenServer.cast(__MODULE__, {:failed_attempt, username, ip})
+    background(fn -> do_failed_attempt(username, ip) end)
   end
 
   @doc """
-  Records a successful authentication.
+  Records a successful authentication, clearing failed attempts and any lockout for the username + IP.
 
-  Clears failed attempts and lockouts for the username + IP.
+  Non-blocking (background task). Skips the write entirely on the common case (a clean login with no prior
+  failures to reset). Returns `:ok` immediately.
   """
+  @spec record_successful_auth(String.t(), ip()) :: :ok
   def record_successful_auth(username, ip) do
-    GenServer.cast(__MODULE__, {:successful_auth, username, ip})
+    background(fn -> do_successful_auth(username, ip) end)
   end
 
   @doc """
   Unlocks an account manually (administrative action).
 
-  ## Parameters
-
-  - `username` - Username
-  - `ip` - Specific IP or `:all` to unlock all IPs
+  `ip` is a specific IP or `:all` to unlock every IP for the user. Synchronous — returns `:ok` (single IP)
+  or `{:ok, cleared_count}` (`:all`) once the change is committed, or `{:error, reason}` if the store is
+  unreachable.
   """
-  def unlock_account(username, ip \\ :all) do
-    GenServer.call(__MODULE__, {:unlock, username, ip})
-  end
+  @spec unlock_account(String.t(), ip() | :all) :: :ok | {:ok, non_neg_integer()} | {:error, term()}
+  def unlock_account(username, ip \\ :all)
+  def unlock_account(username, :all), do: unlock_all(username)
+  def unlock_account(username, ip), do: unlock_one(username, ip)
 
-  @doc """
-  Returns the number of failed attempts for a username + IP.
-  """
+  @doc "Returns the number of failed attempts for a username + IP."
+  @spec get_failed_attempts(String.t(), ip()) :: non_neg_integer()
   def get_failed_attempts(username, ip) do
-    key = {username, format_ip(ip)}
-
-    case :ets.lookup(@table_attempts, key) do
-      [{^key, count, _first, _last}] -> count
-      [] -> 0
+    case LockoutServer.failed_attempts(server_id(), key(username, ip)) do
+      {:ok, count} -> count
+      {:error, _reason} -> 0
     end
   end
 
-  @doc """
-  Lists all currently locked accounts.
-
-  ## Returns
-
-  List of maps with lockout information:
-  ```elixir
-  [
-    %{username: "user", ip: "192.168.1.1", locked_until: 1234567890, attempt_count: 5},
-    ...
-  ]
-  ```
-  """
+  @doc "Lists all currently locked accounts as info maps (`username`, `ip`, `locked_until`, ...)."
+  @spec list_locked_accounts() :: [map()]
   def list_locked_accounts do
-    now = System.system_time(:millisecond)
-
-    @table_lockouts
-    |> :ets.tab2list()
-    |> Enum.filter(fn {{_username, _ip}, locked_until, _count} ->
-      locked_until > now
-    end)
-    |> Enum.map(fn {{username, ip}, locked_until, count} ->
-      %{
-        username: username,
-        ip: ip,
-        locked_until: locked_until,
-        time_remaining_ms: locked_until - now,
-        attempt_count: count
-      }
-    end)
+    case LockoutServer.list_locked(server_id(), now()) do
+      {:ok, locked} -> locked
+      {:error, _reason} -> []
+    end
   end
 
-  ## GenServer Callbacks
+  ## GenServer Callbacks (cleanup timer only)
 
   @impl true
   def init(_opts) do
-    attempts_table =
-      :ets.new(@table_attempts, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
-
-    lockouts_table =
-      :ets.new(@table_lockouts, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
-
     schedule_cleanup()
-
-    Logger.info(Malachi.I18n.t(:lockout_manager_started))
-
-    {:ok, %{attempts: attempts_table, lockouts: lockouts_table}}
-  end
-
-  @impl true
-  def handle_cast({:failed_attempt, username, ip}, state) do
-    key = {username, format_ip(ip)}
-    now = System.system_time(:millisecond)
-    max_attempts = Application.get_env(:malachi, :max_auth_attempts, 5)
-
-    count =
-      case :ets.lookup(state.attempts, key) do
-        [{^key, current_count, first_time, _last_time}] ->
-          :ets.insert(state.attempts, {key, current_count + 1, first_time, now})
-          current_count + 1
-
-        [] ->
-          :ets.insert(state.attempts, {key, 1, now, now})
-          1
-      end
-
-    # Increments global metric
-    Malachi.Metrics.increment_failed_auth_attempt()
-
-    if count >= max_attempts do
-      apply_lockout(username, ip, count, state)
-    end
-
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast({:successful_auth, username, ip}, state) do
-    key = {username, format_ip(ip)}
-    :ets.delete(state.attempts, key)
-    :ets.delete(state.lockouts, key)
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_call({:unlock, username, :all}, _from, state) do
-    # Unlocks all IPs for this user
-    deleted_attempts =
-      :ets.select_delete(state.attempts, [
-        {{{username, :"$1"}, :_, :_, :_}, [], [true]}
-      ])
-
-    deleted_lockouts =
-      :ets.select_delete(state.lockouts, [
-        {{{username, :"$1"}, :_, :_}, [], [true]}
-      ])
-
-    Logger.info(I18n.t(:account_unlocked_all_ips, username: username),
-      username: username,
-      attempts_cleared: deleted_attempts,
-      lockouts_cleared: deleted_lockouts
-    )
-
-    # Audit log
-    Malachi.AuditLog.log_event(
-      :account_unlocked,
-      %{username: username},
-      "unlock_all_ips",
-      :success,
-      %{cleared_ips: deleted_lockouts}
-    )
-
-    {:reply, {:ok, deleted_lockouts}, state}
-  end
-
-  @impl true
-  def handle_call({:unlock, username, ip}, _from, state) do
-    key = {username, format_ip(ip)}
-    :ets.delete(state.attempts, key)
-    :ets.delete(state.lockouts, key)
-
-    Logger.info(I18n.t(:account_unlocked, username: username, ip: format_ip(ip)),
-      username: username,
-      ip: format_ip(ip)
-    )
-
-    # Audit log
-    Malachi.AuditLog.log_event(
-      :account_unlocked,
-      %{username: username, ip: ip},
-      "unlock_account",
-      :success,
-      %{}
-    )
-
-    {:reply, :ok, state}
+    Logger.info(I18n.t(:lockout_manager_started))
+    {:ok, %{}}
   end
 
   @impl true
   def handle_info(:cleanup, state) do
-    cleanup_expired_lockouts(state)
-    cleanup_old_attempts(state)
+    # Compaction only — expiry is evaluated lazily on read, so a failed cleanup is harmless (retried next tick).
+    _ = LockoutServer.cleanup(server_id(), @attempt_ttl_ms)
     schedule_cleanup()
     {:noreply, state}
   end
 
+  ## Writes (run in a background task via `record_*`)
+
+  defp do_failed_attempt(username, ip) do
+    Malachi.Metrics.increment_failed_auth_attempt()
+
+    case LockoutServer.record_failed_attempt(server_id(), key(username, ip), config()) do
+      {:ok, %{locked: nil}} ->
+        :ok
+
+      {:ok, %{count: count, locked: %{duration_ms: duration, locked_until: locked_until}}} ->
+        on_locked(username, ip, count, duration, locked_until)
+
+      {:error, reason} ->
+        Logger.warning(I18n.t(:lockout_store_unavailable, operation: "record_failed_attempt", reason: inspect(reason)))
+    end
+  end
+
+  defp do_successful_auth(username, ip) do
+    key = key(username, ip)
+
+    # Skip the consensus write on the common case (a clean login with nothing to reset). The guard read is a
+    # fast local query; only a user with prior failed attempts pays for the clearing write.
+    case LockoutServer.failed_attempts(server_id(), key) do
+      {:ok, count} when count > 0 -> clear_attempts(key)
+      _none_or_unreadable -> :ok
+    end
+  end
+
+  defp clear_attempts(key) do
+    case LockoutServer.record_successful_auth(server_id(), key) do
+      {:ok, :ok} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(I18n.t(:lockout_store_unavailable, operation: "record_successful_auth", reason: inspect(reason)))
+    end
+  end
+
+  defp unlock_all(username) do
+    case LockoutServer.unlock_user(server_id(), username) do
+      {:ok, {:ok, cleared}} ->
+        Logger.info(I18n.t(:account_unlocked_all_ips, username: username),
+          username: username,
+          lockouts_cleared: cleared
+        )
+
+        Malachi.AuditLog.log_event(
+          :account_unlocked,
+          %{username: username},
+          "unlock_all_ips",
+          :success,
+          %{cleared_ips: cleared}
+        )
+
+        {:ok, cleared}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp unlock_one(username, ip) do
+    case LockoutServer.unlock_key(server_id(), key(username, ip)) do
+      {:ok, :ok} ->
+        Logger.info(I18n.t(:account_unlocked, username: username, ip: format_ip(ip)),
+          username: username,
+          ip: format_ip(ip)
+        )
+
+        Malachi.AuditLog.log_event(
+          :account_unlocked,
+          %{username: username, ip: ip},
+          "unlock_account",
+          :success,
+          %{}
+        )
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   ## Private Functions
 
-  defp apply_lockout(username, ip, attempt_count, state) do
-    key = {username, format_ip(ip)}
-    lockout_duration = calculate_lockout_duration(attempt_count)
-    now = System.system_time(:millisecond)
-    locked_until = now + lockout_duration
+  # Fire-and-forget on the shared task supervisor: keeps the caller (the auth path) non-blocking while the
+  # consensus write happens off to the side. Returns `:ok` immediately.
+  defp background(fun) do
+    _ = Task.Supervisor.start_child(Malachi.TaskSupervisor, fun)
+    :ok
+  end
 
-    :ets.insert(state.lockouts, {key, locked_until, attempt_count})
-
-    # Increments metric
+  # Metrics + structured log + audit for a lockout the just-recorded attempt (re)applied. Runs once, on the
+  # node that handled the attempt (driven by the machine reply), so the deterministic apply/3 stays pure.
+  defp on_locked(username, ip, attempt_count, duration, locked_until) do
     Malachi.Metrics.increment_account_lockout()
 
-    Logger.warning(I18n.t(:account_locked, username: username, time_remaining_ms: lockout_duration),
+    Logger.warning(I18n.t(:account_locked, username: username, time_remaining_ms: duration),
       username: username,
       ip: format_ip(ip),
       attempts: attempt_count,
-      duration_ms: lockout_duration,
+      duration_ms: duration,
       locked_until: locked_until
     )
 
-    # Audit log
     Malachi.AuditLog.log_event(
       :auth_lockout,
       %{username: username, ip: ip},
       "account_locked",
       :automatic,
-      %{
-        attempt_count: attempt_count,
-        lockout_duration_ms: lockout_duration,
-        locked_until: locked_until
-      }
+      %{attempt_count: attempt_count, lockout_duration_ms: duration, locked_until: locked_until}
     )
   end
 
-  defp calculate_lockout_duration(attempt_count) do
-    base_duration = Application.get_env(:malachi, :lockout_duration_ms, 300_000)
-    progressive = Application.get_env(:malachi, :progressive_lockout, true)
-    max_attempts = Application.get_env(:malachi, :max_auth_attempts, 5)
-
-    if progressive do
-      # Calculates how many times the account was locked
-      # 5 attempts = 1st lockout, 10 = 2nd lockout, 15 = 3rd, etc.
-      lockout_number = div(attempt_count, max_attempts)
-
-      # Exponential base 3: 5min → 15min → 45min → 135min → ...
-      # But limited: 5min → 15min → 45min → 2h → 6h (maximum)
-      case lockout_number do
-        # 5 minutes
-        1 -> base_duration
-        # 15 minutes
-        2 -> base_duration * 3
-        # 45 minutes
-        3 -> base_duration * 9
-        # 2 hours (120 min)
-        4 -> base_duration * 24
-        # 6 hours (360 min) - maximum
-        _ -> base_duration * 72
-      end
-    else
-      base_duration
-    end
+  # The lockout config, read once per write and carried inside the command so every replica applies the
+  # identical decision (the machine itself reads no config — that would be non-deterministic).
+  defp config do
+    %{
+      max_attempts: Application.get_env(:malachi, :max_auth_attempts, 5),
+      base_duration_ms: Application.get_env(:malachi, :lockout_duration_ms, 300_000),
+      progressive: Application.get_env(:malachi, :progressive_lockout, true)
+    }
   end
 
-  defp cleanup_expired_lockouts(state) do
-    now = System.system_time(:millisecond)
-
-    deleted =
-      :ets.select_delete(state.lockouts, [
-        {{{:_, :_}, :"$1", :_}, [{:<, :"$1", now}], [true]}
-      ])
-
-    if deleted > 0 do
-      Logger.debug(I18n.t(:lockout_cleanup_expired, count: deleted))
-    end
-  end
-
-  defp cleanup_old_attempts(state) do
-    # Remove attempts older than 1 hour
-    cutoff = System.system_time(:millisecond) - 3_600_000
-
-    deleted =
-      :ets.select_delete(state.attempts, [
-        {{{:_, :_}, :_, :_, :"$1"}, [{:<, :"$1", cutoff}], [true]}
-      ])
-
-    if deleted > 0 do
-      Logger.debug(I18n.t(:lockout_cleanup_attempts, count: deleted))
-    end
-  end
-
-  defp schedule_cleanup do
-    Process.send_after(self(), :cleanup, @cleanup_interval_ms)
-  end
+  defp server_id, do: {@cluster, node()}
+  defp key(username, ip), do: {username, format_ip(ip)}
+  defp now, do: System.system_time(:millisecond)
+  defp schedule_cleanup, do: Process.send_after(self(), :cleanup, @cleanup_interval_ms)
 
   defp format_ip(ip) when is_tuple(ip) do
     case tuple_size(ip) do
