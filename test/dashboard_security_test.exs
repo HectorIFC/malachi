@@ -1,6 +1,7 @@
 defmodule Malachi.DashboardSecurityTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Auth.UserStore
   alias Malachi.Test.DashboardHelper
 
   # These tests require dashboard authentication and rate limiting enabled in config/test.exs
@@ -551,6 +552,109 @@ defmodule Malachi.DashboardSecurityTest do
             :ok
         end
       end
+    end
+  end
+
+  describe "user management (P3-3)" do
+    test "admin lists users (with permissions, no hashes)", %{admin_token: token} do
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :GET, "/users", token)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      {:ok, body} = json_body(response)
+      usernames = Enum.map(body["users"], & &1["username"])
+      assert "dashboard_admin" in usernames
+      # the response carries permissions but never a password/hash field
+      refute Enum.any?(body["users"], &Map.has_key?(&1, "password"))
+    end
+
+    test "admin creates a user that can then authenticate", %{admin_token: token} do
+      username = "dashuser_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      body = Jason.encode!(%{username: username, password: "Dash-Pass-123", permissions: ["consume"]})
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :POST, "/users", token, body: body)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 201
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, "Dash-Pass-123", {127, 0, 0, 1})
+    end
+
+    test "admin rotates a password: the new one works, the old does not", %{admin_token: token} do
+      username = "dashpw_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Old-Pass-111", [:consume])
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      body = Jason.encode!(%{password: "New-Pass-222"})
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :PUT, "/users/#{username}/password", token, body: body)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, "New-Pass-222", {127, 0, 0, 1})
+      assert {:error, _reason} = Malachi.Auth.authenticate(username, "Old-Pass-111", {127, 0, 0, 1})
+    end
+
+    test "admin deletes a user", %{admin_token: token} do
+      username = "dashdel_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(username, "Del-Pass-1", [:consume])
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :DELETE, "/users/#{username}", token)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      assert {:error, :user_not_found} = UserStore.get_user(username)
+    end
+
+    test "creating a duplicate is a 409; an unknown permission is a 400", %{admin_token: token} do
+      username = "dashdup_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "p", [:consume])
+
+      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      dup = Jason.encode!(%{username: username, password: "p2", permissions: ["consume"]})
+      {:ok, r1} = DashboardHelper.authenticated_request(s1, :POST, "/users", token, body: dup)
+      :gen_tcp.close(s1)
+      assert status_code(r1) == 409
+
+      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      bad = Jason.encode!(%{username: "dashbad_x", password: "p", permissions: ["superuser"]})
+      {:ok, r2} = DashboardHelper.authenticated_request(s2, :POST, "/users", token, body: bad)
+      :gen_tcp.close(s2)
+      assert status_code(r2) == 400
+      assert {:error, :user_not_found} = UserStore.get_user("dashbad_x")
+    end
+
+    test "a non-admin is forbidden and an unauthenticated request is unauthorized", %{producer_token: token} do
+      # non-admin token -> 403
+      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, r1} = DashboardHelper.authenticated_request(s1, :GET, "/users", token)
+      :gen_tcp.close(s1)
+      assert status_code(r1) == 403
+
+      # no token -> 401
+      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, r2} = DashboardHelper.request(s2, :GET, "/users")
+      :gen_tcp.close(s2)
+      assert status_code(r2) == 401
+    end
+  end
+
+  # Extracts the numeric status from an HTTP response, and its JSON body.
+  defp status_code(response) do
+    case Regex.run(~r"HTTP/1\.1 (\d{3})", response) do
+      [_, code] -> String.to_integer(code)
+      _ -> 0
+    end
+  end
+
+  defp json_body(response) do
+    case String.split(response, "\r\n\r\n", parts: 2) do
+      [_headers, body] -> body |> String.trim() |> Jason.decode()
+      _ -> :error
     end
   end
 end

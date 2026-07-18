@@ -385,23 +385,7 @@ defmodule Malachi.Dashboard do
   end
 
   defp handle_login(socket, headers, client_ip) do
-    content_length = Map.get(headers, "content-length", "0") |> String.to_integer()
-
-    # Read request body
-    body =
-      if content_length > 0 do
-        :inet.setopts(socket, packet: :raw)
-
-        case :gen_tcp.recv(socket, content_length, 5000) do
-          {:ok, data} -> data
-          _ -> ""
-        end
-      else
-        ""
-      end
-
-    # Parse JSON body
-    case Jason.decode(body) do
+    case read_json_body(socket, headers) do
       {:ok, %{"username" => username, "password" => password}} ->
         # Rate limit check
         rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
@@ -471,6 +455,96 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
+  # --- admin user management (P3): REST CRUD over the replicated user store. The auth stage already gated
+  # these to the :admin permission (has_required_permission?), so the handlers run only for admins. Passwords
+  # arrive in the JSON body in the clear, so run the dashboard over TLS in production. ---
+
+  defp handle_list_users(socket) do
+    users =
+      Enum.map(Auth.list_users(), fn %{username: u, permissions: perms} ->
+        %{"username" => u, "permissions" => Enum.map(perms, &to_string/1)}
+      end)
+
+    send_json(socket, "200 OK", %{"s" => "ok", "users" => users})
+  end
+
+  defp handle_create_user(socket, headers) do
+    case read_json_body(socket, headers) do
+      {:ok, %{"username" => username, "password" => password} = body} ->
+        case Auth.parse_permissions(Map.get(body, "permissions", ["produce", "consume"])) do
+          {:ok, permissions} -> respond_user_result(socket, Auth.add_user(username, password, permissions), "201 Created")
+          :error -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_permissions"})
+        end
+
+      _malformed ->
+        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    end
+  end
+
+  # PUT /users/:username/password — rotate a user's password.
+  defp handle_user_password(socket, rest, headers) do
+    case String.split(rest, "/") do
+      [username, "password"] when username != "" -> handle_change_password(socket, username, headers)
+      _other -> serve_404(socket)
+    end
+  end
+
+  defp handle_change_password(socket, username, headers) do
+    case read_json_body(socket, headers) do
+      {:ok, %{"password" => password}} -> respond_user_result(socket, Auth.change_password(username, password), "200 OK")
+      _malformed -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    end
+  end
+
+  defp handle_delete_user(socket, username), do: respond_user_result(socket, Auth.remove_user(username), "200 OK")
+
+  defp respond_user_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
+
+  defp respond_user_result(socket, {:error, reason}, _ok_status) do
+    status =
+      case reason do
+        :user_exists -> "409 Conflict"
+        :user_not_found -> "404 Not Found"
+        _other -> "400 Bad Request"
+      end
+
+    send_json(socket, status, %{"s" => "err", "reason" => to_string(reason)})
+  end
+
+  # Reads the request body (bounded by Content-Length) and JSON-decodes it: `{:ok, map}` or `{:error, _}`.
+  defp read_json_body(socket, headers) do
+    content_length = Map.get(headers, "content-length", "0") |> String.to_integer()
+
+    body =
+      if content_length > 0 do
+        :inet.setopts(socket, packet: :raw)
+
+        case :gen_tcp.recv(socket, content_length, 5000) do
+          {:ok, data} -> data
+          _ -> ""
+        end
+      else
+        ""
+      end
+
+    Jason.decode(body)
+  end
+
+  defp send_json(socket, status, body_map) do
+    body = Jason.encode!(body_map)
+
+    response = """
+    HTTP/1.1 #{status}\r
+    Content-Type: application/json\r
+    Content-Length: #{byte_size(body)}\r
+    \r
+    #{body}
+    """
+
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/users"))
+    :gen_tcp.close(socket)
+  end
+
   defp handle_route(socket, %{method: :GET, path: "/"}, _headers, _client_ip, _session),
     do: serve_html(socket)
 
@@ -509,6 +583,19 @@ defmodule Malachi.Dashboard do
 
   defp handle_route(socket, %{method: :OPTIONS}, headers, _client_ip, _session),
     do: serve_cors_preflight(socket, headers)
+
+  # Admin user management (P3): gated to :admin by the auth stage above.
+  defp handle_route(socket, %{method: :GET, path: "/users"}, _headers, _client_ip, _session),
+    do: handle_list_users(socket)
+
+  defp handle_route(socket, %{method: :POST, path: "/users"}, headers, _client_ip, _session),
+    do: handle_create_user(socket, headers)
+
+  defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, _session),
+    do: handle_user_password(socket, rest, headers)
+
+  defp handle_route(socket, %{method: :DELETE, path: "/users/" <> username}, _headers, _client_ip, _session),
+    do: handle_delete_user(socket, username)
 
   defp handle_route(socket, _, _headers, _client_ip, _session), do: serve_404(socket)
 

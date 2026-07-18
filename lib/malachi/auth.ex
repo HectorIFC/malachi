@@ -183,6 +183,26 @@ defmodule Malachi.Auth do
     :admin in permissions or permission in permissions
   end
 
+  @doc """
+  Parses a list of permission **strings** into the allowed permission atoms, or `:error` if any is unknown
+  (or the input is not a list). The allowed permissions are `:admin`, `:produce`, `:consume`. Mapping
+  explicitly (rather than `String.to_atom/1`) keeps an untrusted client from exhausting the atom table.
+  """
+  @spec parse_permissions([String.t()]) :: {:ok, [atom()]} | :error
+  def parse_permissions(strings) when is_list(strings) do
+    mapped =
+      Enum.map(strings, fn
+        "admin" -> :admin
+        "produce" -> :produce
+        "consume" -> :consume
+        _other -> :invalid
+      end)
+
+    if :invalid in mapped, do: :error, else: {:ok, mapped}
+  end
+
+  def parse_permissions(_not_a_list), do: :error
+
   @impl true
   def init(:ok) do
     :ets.new(@sessions_table, [

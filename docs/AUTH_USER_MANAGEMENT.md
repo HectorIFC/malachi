@@ -213,7 +213,14 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    `listUsers` no `MalachiClient` (+ codecs no `scripts/lib/wire.js`) e um CLI `scripts/user.js`
    (`list`/`create`/`passwd`/`delete`, default admin/admin123). Validado **end-to-end contra o servidor real**
    (boot em dev → list/create/passwd/delete via CLI, não-admin negado, help) — sem harness de teste JS (padrão
-   das fatias de cliente Node). → **P3-3 ⏳** (API REST admin no dashboard) → **P3-4 ⏳** (mix task + RPC).
+   das fatias de cliente Node). → **P3-3 ✅ — API REST admin no dashboard:** endpoints `GET /users`,
+   `POST /users`, `PUT /users/:username/password`, `DELETE /users/:username` (JSON, Bearer/cookie token),
+   admin-gated automaticamente pelo `has_required_permission?` (admin → tudo, não-admin → deny). Status codes
+   REST (201/409/404/400; 403 não-admin; 401 sem token). DRY: o `parse_permissions` foi extraído para
+   `Auth.parse_permissions/1` (público, robusto a input não-lista) e reusado no `tcp_protocol` e no dashboard;
+   `read_json_body` extraído (o `handle_login` passou a usá-lo). Testado no `dashboard_security_test` (auth on):
+   list/create+auth/passwd/delete, duplicata 409, permissão inválida 400, não-admin 403, sem token 401.
+   → **P3-4 ⏳** (mix task + RPC).
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 

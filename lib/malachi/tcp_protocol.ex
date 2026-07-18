@@ -200,7 +200,7 @@ defmodule Malachi.TCPProtocol do
     with_permission(session, :admin, correlation_id, fn ->
       {username, password, perm_strings} = Wire.decode_create_user_req(payload)
 
-      case parse_permissions(perm_strings) do
+      case Malachi.Auth.parse_permissions(perm_strings) do
         {:ok, permissions} -> ok_or_error(correlation_id, Malachi.Auth.add_user(username, password, permissions), <<>>)
         :error -> Wire.encode_error(correlation_id, :invalid_permissions)
       end
@@ -225,19 +225,6 @@ defmodule Malachi.TCPProtocol do
     with_permission(session, :admin, correlation_id, fn ->
       Wire.encode_ok(correlation_id, Wire.encode_list_users_resp(Malachi.Auth.list_users()))
     end)
-  end
-
-  # Maps wire permission strings to the allowed permission atoms; any unknown string fails the whole set.
-  defp parse_permissions(strings) do
-    mapped =
-      Enum.map(strings, fn
-        "admin" -> :admin
-        "produce" -> :produce
-        "consume" -> :consume
-        _other -> :invalid
-      end)
-
-    if :invalid in mapped, do: :error, else: {:ok, mapped}
   end
 
   # The consumer-group coordinator for a topic runs on the node owning the topic's vnode; resolve the
