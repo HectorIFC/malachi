@@ -16,7 +16,10 @@ defmodule Malachi.MixProject do
       package: package(),
       source_url: @source_url,
       test_coverage: [tool: ExCoveralls, threshold: 85],
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      # `:mix` is a build-time app, so it is not in the default PLT; the `Mix.Tasks.*` admin task references
+      # Mix.Task/Mix.shell/Mix.raise, which dialyzer would otherwise flag as unknown functions.
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 

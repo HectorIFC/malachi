@@ -201,7 +201,7 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    — que **reinicia** o `ra` e mataria o `LogUsers` — e a distribuição sobe no `test_helper` com nome de nó
    estável). **P2 completo — usuários replicados no cluster.** *Resta P6 (persistir sessões/lockouts), adiado.*
    *Fundação para P3-P5.*
-3. **Fase 3 — Gestão em runtime (P3). 🚧 Em andamento (as 3 superfícies, fatiadas).** As três compartilham as
+3. **Fase 3 — Gestão em runtime (P3). ✅ Feito (as 3 superfícies).** As três compartilham as
    mesmas `Auth.*` (que já vão pro `ra`). **P3-1 ✅ — ops de wire admin-gated:** novos `api_key`s no protocolo
    binário (`create_user`=8, `delete_user`=9, `change_password`=10, `list_users`=11), handlers no
    `tcp_protocol` embrulhados em `with_permission(session, :admin, ...)` chamando `Auth.add_user`/`remove_user`/
@@ -220,7 +220,12 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    `Auth.parse_permissions/1` (público, robusto a input não-lista) e reusado no `tcp_protocol` e no dashboard;
    `read_json_body` extraído (o `handle_login` passou a usá-lo). Testado no `dashboard_security_test` (auth on):
    list/create+auth/passwd/delete, duplicata 409, permissão inválida 400, não-admin 403, sem token 401.
-   → **P3-4 ⏳** (mix task + RPC).
+   → **P3-4 ✅ — mix task + RPC (operador na máquina):** `mix malachi.user list|create|passwd|delete` conecta a
+   um nó **nomeado** em execução via distribuição Erlang (RPC pra `Auth.*`), reusando `Auth.parse_permissions`
+   local; `--node`/`--cookie`/`--perms` (defaults `$MALACHI_NODE`/`$RELEASE_COOKIE`). Core `execute/3` com o
+   RPC como *seam* (testável): 9 testes (parsing/dispatch/erros + integração real via seam local); validado
+   end-to-end contra um nó nomeado vivo (create/list/passwd/delete). É o análogo do `bin/malachi rpc` de release.
+   `:mix` adicionado ao PLT do dialyzer. **Fase 3 completa — 3 superfícies (wire+CLI, REST, mix task).**
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 
