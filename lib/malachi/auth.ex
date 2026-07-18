@@ -34,63 +34,70 @@ defmodule Malachi.Auth do
   end
 
   defp do_authenticate(username, password, client_ip) do
-    case UserStore.get_user(username) do
-      {:ok, {^username, stored_hash, permissions}} ->
-        if verify_password(password, stored_hash) do
-          # Create session with IP binding via SessionManager
-          {:ok, token} =
-            SessionManager.create_session(
-              username,
-              permissions,
-              client_ip,
-              # user_agent not implemented
-              ""
-            )
+    case verify_credentials(username, password) do
+      {:ok, permissions} ->
+        # user_agent not implemented
+        {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
 
-          Logger.info(I18n.t(:auth_success, username: username))
+        Logger.info(I18n.t(:auth_success, username: username))
+        Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "authenticate", :success, %{})
 
-          # Log audit event
-          Malachi.AuditLog.log_event(
-            :auth_success,
-            %{username: username, ip: client_ip},
-            "authenticate",
-            :success,
-            %{}
-          )
+        {:ok, token}
 
-          {:ok, token}
-        else
-          Logger.warning(I18n.t(:auth_failed, username: username))
-
-          # Log audit event
-          Malachi.AuditLog.log_event(
-            :auth_failure,
-            %{username: username, ip: client_ip},
-            "authenticate",
-            :failure,
-            %{reason: :invalid_password}
-          )
-
-          {:error, :invalid_credentials}
-        end
-
-      {:error, _reason} ->
-        # Unknown user (or store unreachable) — deny. Timing attack prevention: still hash to match timing.
-        Argon2.no_user_verify()
-
-        Logger.warning(I18n.t(:auth_user_not_found, username: username))
-
-        # Log audit event
-        Malachi.AuditLog.log_event(
-          :auth_failure,
-          %{username: username, ip: client_ip},
-          "authenticate",
-          :failure,
-          %{reason: :user_not_found}
-        )
-
+      {:error, reason} ->
+        # A wrong password and an unknown user are both reported to the client as :invalid_credentials (never
+        # revealing which); the specific reason is preserved only in the audit trail.
+        log_auth_failure(username, client_ip, reason)
         {:error, :invalid_credentials}
     end
+  end
+
+  @doc """
+  Verifies a username/password against the user store **without** creating a session — the session-less core
+  of authentication, used by `Malachi.Auth.PasswordProvider` (P4). Returns `{:ok, permissions}` or
+  `{:error, :invalid_password | :user_not_found}`.
+
+  Runs a dummy hash (`Argon2.no_user_verify/0`) for an unknown user so the response time does not reveal
+  whether the username exists (timing-attack mitigation). The caller mints the session and maps both error
+  reasons to a single client-facing `:invalid_credentials`.
+  """
+  @spec verify_credentials(String.t(), String.t()) ::
+          {:ok, [atom()]} | {:error, :invalid_password | :user_not_found}
+  def verify_credentials(username, password) do
+    case UserStore.get_user(username) do
+      {:ok, {^username, stored_hash, permissions}} ->
+        if verify_password(password, stored_hash), do: {:ok, permissions}, else: {:error, :invalid_password}
+
+      {:error, _reason} ->
+        Argon2.no_user_verify()
+        {:error, :user_not_found}
+    end
+  end
+
+  # Structured log + audit for a failed login; the reason distinguishes a wrong password from an unknown user
+  # for the audit trail only (the client always sees :invalid_credentials).
+  defp log_auth_failure(username, client_ip, :invalid_password) do
+    Logger.warning(I18n.t(:auth_failed, username: username))
+
+    Malachi.AuditLog.log_event(
+      :auth_failure,
+      %{username: username, ip: client_ip},
+      "authenticate",
+      :failure,
+      %{reason: :invalid_password}
+    )
+  end
+
+  defp log_auth_failure(username, client_ip, :user_not_found) do
+    Logger.warning(I18n.t(:auth_user_not_found, username: username))
+
+    Malachi.AuditLog.log_event(
+      :auth_failure,
+      %{username: username, ip: client_ip},
+      "authenticate",
+      :failure,
+      %{reason: :user_not_found}
+    )
   end
 
   @doc """

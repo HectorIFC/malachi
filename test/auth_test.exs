@@ -21,6 +21,18 @@ defmodule Malachi.AuthTest do
     :ok
   end
 
+  describe "verify_credentials/2" do
+    test "returns the permissions for valid credentials without creating a session" do
+      assert {:ok, permissions} = Malachi.Auth.verify_credentials("admin", "admin123")
+      assert :admin in permissions
+    end
+
+    test "distinguishes a wrong password from an unknown user (for the audit trail)" do
+      assert {:error, :invalid_password} = Malachi.Auth.verify_credentials("admin", "wrongpass")
+      assert {:error, :user_not_found} = Malachi.Auth.verify_credentials("nonexistent", "pass")
+    end
+  end
+
   describe "authenticate/2" do
     test "authenticates with valid credentials" do
       assert {:ok, token} = Malachi.Auth.authenticate("admin", "admin123")
