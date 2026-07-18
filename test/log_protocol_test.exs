@@ -44,6 +44,30 @@ defmodule Malachi.LogProtocolTest do
     TCPHelper.request(socket, Wire.leave_group_key(), 1, Wire.encode_leave_group_req(topic, group, member))
   end
 
+  defp create_user(socket, username, password, permissions) do
+    TCPHelper.request(socket, Wire.create_user_key(), 1, Wire.encode_create_user_req(username, password, permissions))
+  end
+
+  defp delete_user(socket, username) do
+    TCPHelper.request(socket, Wire.delete_user_key(), 1, Wire.encode_delete_user_req(username))
+  end
+
+  defp change_password(socket, username, new_password) do
+    TCPHelper.request(socket, Wire.change_password_key(), 1, Wire.encode_change_password_req(username, new_password))
+  end
+
+  defp list_users(socket) do
+    TCPHelper.request(socket, Wire.list_users_key(), 1, <<>>)
+  end
+
+  # Attempts an authentication and returns `{:ok, token}` / `{:error, reason}` (closing the socket).
+  defp try_auth(username, password) do
+    {:ok, socket} = TCPHelper.connect(port: @port)
+    result = TCPHelper.authenticate_wire(socket, username, password)
+    :gen_tcp.close(socket)
+    result
+  end
+
   # Deterministically wait until the live LogBroker has a parked long-poll waiter.
   defp wait_for_park(deadline \\ nil) do
     deadline = deadline || System.monotonic_time(:millisecond) + 3_000
@@ -249,5 +273,72 @@ defmodule Malachi.LogProtocolTest do
       refute ok?(code)
       assert reason(payload) == "permission_denied"
     end)
+  end
+
+  describe "admin user management (P3)" do
+    test "admin creates a user over the wire; the user then authenticates and is listed; delete revokes it" do
+      username = "wireuser_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      with_session("admin", "admin123", fn socket ->
+        assert {code, _} = create_user(socket, username, "Wire-Pass-123", ["produce", "consume"])
+        assert ok?(code)
+
+        # the new user shows up in list_users with its permissions (no hashes on the wire)
+        assert {code, payload} = list_users(socket)
+        assert ok?(code)
+        users = Wire.decode_list_users_resp(payload)
+        entry = Enum.find(users, &(&1.username == username))
+        assert entry
+        assert Enum.sort(entry.permissions) == ["consume", "produce"]
+      end)
+
+      # the user is real and cluster-replicated: it can authenticate and use its :produce permission
+      with_session(username, "Wire-Pass-123", fn socket ->
+        assert {code, _} = create_topic(socket, "t_#{System.unique_integer([:positive])}")
+        assert ok?(code)
+      end)
+
+      # admin deletes it; it can no longer authenticate
+      with_session("admin", "admin123", fn socket ->
+        assert {code, _} = delete_user(socket, username)
+        assert ok?(code)
+      end)
+
+      assert {:error, _reason} = try_auth(username, "Wire-Pass-123")
+    end
+
+    test "admin changes a user's password; the new password authenticates and the old does not" do
+      username = "wirepw_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      with_session("admin", "admin123", fn socket ->
+        assert {code, _} = create_user(socket, username, "Old-Pass-123", ["consume"])
+        assert ok?(code)
+        assert {code, _} = change_password(socket, username, "New-Pass-456")
+        assert ok?(code)
+      end)
+
+      assert {:ok, _token} = try_auth(username, "New-Pass-456")
+      assert {:error, _reason} = try_auth(username, "Old-Pass-123")
+    end
+
+    test "a non-admin cannot manage users, and invalid permissions are rejected" do
+      # producer (no :admin) is denied
+      with_session("producer", "producer123", fn socket ->
+        assert {code, payload} = create_user(socket, "nope_#{System.unique_integer([:positive])}", "p", ["consume"])
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+
+      # admin, but an unknown permission string is rejected without creating the user
+      with_session("admin", "admin123", fn socket ->
+        username = "wirebad_#{System.unique_integer([:positive])}"
+        assert {code, payload} = create_user(socket, username, "p", ["superuser"])
+        refute ok?(code)
+        assert reason(payload) == "invalid_permissions"
+        assert {:error, _reason} = try_auth(username, "p")
+      end)
+    end
   end
 end

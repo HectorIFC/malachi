@@ -31,12 +31,17 @@ defmodule Malachi.Wire do
   @subscribe 5
   @stream_ack 6
   @leave_group 7
+  # admin user management (require the :admin permission, see Malachi.TCPProtocol)
+  @create_user 8
+  @delete_user 9
+  @change_password 10
+  @list_users 11
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..7
+  @type api_key :: 0..11
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -48,6 +53,10 @@ defmodule Malachi.Wire do
   def subscribe_key, do: @subscribe
   def stream_ack_key, do: @stream_ack
   def leave_group_key, do: @leave_group
+  def create_user_key, do: @create_user
+  def delete_user_key, do: @delete_user
+  def change_password_key, do: @change_password
+  def list_users_key, do: @list_users
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -220,6 +229,51 @@ defmodule Malachi.Wire do
     {topic, group, member}
   end
 
+  # ---- admin user management (permissions are byte strings on the wire: "admin"/"produce"/"consume") ----
+
+  def encode_create_user_req(username, password, permissions) do
+    <<put_str(username)::binary, put_str(password)::binary, put_perms(permissions)::binary>>
+  end
+
+  def decode_create_user_req(payload) do
+    {username, rest} = take_str(payload)
+    {password, rest} = take_str(rest)
+    {permissions, <<>>} = take_perms(rest)
+    {username, password, permissions}
+  end
+
+  def encode_delete_user_req(username), do: put_str(username)
+
+  def decode_delete_user_req(payload) do
+    {username, <<>>} = take_str(payload)
+    username
+  end
+
+  def encode_change_password_req(username, new_password) do
+    <<put_str(username)::binary, put_str(new_password)::binary>>
+  end
+
+  def decode_change_password_req(payload) do
+    {username, rest} = take_str(payload)
+    {new_password, <<>>} = take_str(rest)
+    {username, new_password}
+  end
+
+  # list_users request has an empty payload; the response carries `[{username, [permission_string]}]`.
+  def encode_list_users_resp(users) do
+    body =
+      for %{username: u, permissions: perms} <- users, into: <<>> do
+        <<put_str(u)::binary, put_perms(perms)::binary>>
+      end
+
+    <<length(users)::32, body::binary>>
+  end
+
+  def decode_list_users_resp(<<count::32, rest::binary>>) do
+    {users, <<>>} = take_users(rest, count, [])
+    users
+  end
+
   # ---- wire record (no offset; key/value/headers/timestamp only) ----
 
   @doc "Encodes a record for the wire (no offset — the client never sees one)."
@@ -243,6 +297,29 @@ defmodule Malachi.Wire do
 
   defp take_str(<<0::8, rest::binary>>), do: {nil, rest}
   defp take_str(<<1::8, len::32, s::binary-size(len), rest::binary>>), do: {s, rest}
+
+  # permission list: <<count::32, put_str(perm)*>>. Encoding accepts atoms or strings (each -> byte string);
+  # decoding yields strings, which the handler maps back to the allowed permission atoms.
+  defp put_perms(perms) do
+    body = for p <- perms, into: <<>>, do: put_str(to_string(p))
+    <<length(perms)::32, body::binary>>
+  end
+
+  defp take_perms(<<count::32, rest::binary>>), do: take_perms(rest, count, [])
+  defp take_perms(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_perms(rest, n, acc) do
+    {perm, rest} = take_str(rest)
+    take_perms(rest, n - 1, [perm | acc])
+  end
+
+  defp take_users(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_users(rest, n, acc) do
+    {username, rest} = take_str(rest)
+    {perms, rest} = take_perms(rest)
+    take_users(rest, n - 1, [%{username: username, permissions: perms} | acc])
+  end
 
   defp encode_records(records), do: records |> Enum.map(&encode_record/1) |> IO.iodata_to_binary()
 

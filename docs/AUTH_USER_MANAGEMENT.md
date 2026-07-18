@@ -201,7 +201,16 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    — que **reinicia** o `ra` e mataria o `LogUsers` — e a distribuição sobe no `test_helper` com nome de nó
    estável). **P2 completo — usuários replicados no cluster.** *Resta P6 (persistir sessões/lockouts), adiado.*
    *Fundação para P3-P5.*
-3. **Fase 3 — Gestão em runtime (P3).** CLI + admin API/wire-op para CRUD e rotação.
+3. **Fase 3 — Gestão em runtime (P3). 🚧 Em andamento (as 3 superfícies, fatiadas).** As três compartilham as
+   mesmas `Auth.*` (que já vão pro `ra`). **P3-1 ✅ — ops de wire admin-gated:** novos `api_key`s no protocolo
+   binário (`create_user`=8, `delete_user`=9, `change_password`=10, `list_users`=11), handlers no
+   `tcp_protocol` embrulhados em `with_permission(session, :admin, ...)` chamando `Auth.add_user`/`remove_user`/
+   `change_password`/`list_users`; codecs no `Wire` (permissões como strings, mapeadas de volta pros átomos
+   permitidos com validação → `:invalid_permissions`); senhas cruzam a rede em claro (como o handshake) → TLS
+   em prod. Modelo Kafka AdminClient. Testado end-to-end (`log_protocol_test`): admin cria um usuário que
+   autentica + usa a permissão + é listado, delete revoga; troca de senha; não-admin negado; permissão inválida
+   rejeitada. → **P3-2 ⏳** (CLI Node sobre as ops) → **P3-3 ⏳** (API REST admin no dashboard) → **P3-4 ⏳**
+   (mix task + RPC).
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 

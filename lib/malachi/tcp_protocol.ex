@@ -91,6 +91,10 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
       api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
       api_key == Wire.leave_group_key() -> leave_group(correlation_id, payload, session)
+      api_key == Wire.create_user_key() -> create_user(correlation_id, payload, session)
+      api_key == Wire.delete_user_key() -> delete_user(correlation_id, payload, session)
+      api_key == Wire.change_password_key() -> change_password(correlation_id, payload, session)
+      api_key == Wire.list_users_key() -> list_users(correlation_id, payload, session)
       true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
@@ -187,6 +191,53 @@ defmodule Malachi.TCPProtocol do
       _ = GroupCoordinator.leave(coordinator_for(topic), group, topic, member)
       Wire.encode_ok(correlation_id, <<>>)
     end)
+  end
+
+  # --- admin user management: CRUD over the replicated user store, gated by the :admin permission. Passwords
+  # cross the wire in the clear (as with the auth handshake), so run these over TLS in production. ---
+
+  defp create_user(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {username, password, perm_strings} = Wire.decode_create_user_req(payload)
+
+      case parse_permissions(perm_strings) do
+        {:ok, permissions} -> ok_or_error(correlation_id, Malachi.Auth.add_user(username, password, permissions), <<>>)
+        :error -> Wire.encode_error(correlation_id, :invalid_permissions)
+      end
+    end)
+  end
+
+  defp delete_user(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      username = Wire.decode_delete_user_req(payload)
+      ok_or_error(correlation_id, Malachi.Auth.remove_user(username), <<>>)
+    end)
+  end
+
+  defp change_password(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {username, new_password} = Wire.decode_change_password_req(payload)
+      ok_or_error(correlation_id, Malachi.Auth.change_password(username, new_password), <<>>)
+    end)
+  end
+
+  defp list_users(correlation_id, _payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      Wire.encode_ok(correlation_id, Wire.encode_list_users_resp(Malachi.Auth.list_users()))
+    end)
+  end
+
+  # Maps wire permission strings to the allowed permission atoms; any unknown string fails the whole set.
+  defp parse_permissions(strings) do
+    mapped =
+      Enum.map(strings, fn
+        "admin" -> :admin
+        "produce" -> :produce
+        "consume" -> :consume
+        _other -> :invalid
+      end)
+
+    if :invalid in mapped, do: :error, else: {:ok, mapped}
   end
 
   # The consumer-group coordinator for a topic runs on the node owning the topic's vnode; resolve the
