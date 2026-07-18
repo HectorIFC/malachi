@@ -209,8 +209,11 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    permitidos com validação → `:invalid_permissions`); senhas cruzam a rede em claro (como o handshake) → TLS
    em prod. Modelo Kafka AdminClient. Testado end-to-end (`log_protocol_test`): admin cria um usuário que
    autentica + usa a permissão + é listado, delete revoga; troca de senha; não-admin negado; permissão inválida
-   rejeitada. → **P3-2 ⏳** (CLI Node sobre as ops) → **P3-3 ⏳** (API REST admin no dashboard) → **P3-4 ⏳**
-   (mix task + RPC).
+   rejeitada. → **P3-2 ✅ — CLI Node sobre as ops:** métodos `createUser`/`deleteUser`/`changePassword`/
+   `listUsers` no `MalachiClient` (+ codecs no `scripts/lib/wire.js`) e um CLI `scripts/user.js`
+   (`list`/`create`/`passwd`/`delete`, default admin/admin123). Validado **end-to-end contra o servidor real**
+   (boot em dev → list/create/passwd/delete via CLI, não-admin negado, help) — sem harness de teste JS (padrão
+   das fatias de cliente Node). → **P3-3 ⏳** (API REST admin no dashboard) → **P3-4 ⏳** (mix task + RPC).
 4. **Fase 4 — Auth externa plugável (P4).** Contrato de provider + mTLS-identidade como 1º provider.
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 

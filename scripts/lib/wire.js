@@ -22,6 +22,11 @@ const API = {
   subscribe: 5,
   streamAck: 6,
   leaveGroup: 7,
+  // admin user management (require the admin permission)
+  createUser: 8,
+  deleteUser: 9,
+  changePassword: 10,
+  listUsers: 11,
 };
 
 const OK = 0;
@@ -200,6 +205,41 @@ function encodeStreamAckReq(topic, group, member, cursor, count) {
   return Buffer.concat([putStr(topic), putStr(group), putStr(member), putStr(cursor), u32(count)]);
 }
 
+// ---- admin user management (permissions are byte strings: "admin"/"produce"/"consume") ----
+
+// permission list: <count::u32, putStr(perm)*>. `perms` is an array of strings.
+function putPerms(perms) {
+  const body = Buffer.concat(perms.map((p) => putStr(String(p))));
+  return Buffer.concat([u32(perms.length), body]);
+}
+
+function encodeCreateUserReq(username, password, permissions) {
+  return Buffer.concat([putStr(username), putStr(password), putPerms(permissions)]);
+}
+
+function encodeDeleteUserReq(username) {
+  return putStr(username);
+}
+
+function encodeChangePasswordReq(username, newPassword) {
+  return Buffer.concat([putStr(username), putStr(newPassword)]);
+}
+
+// list_users response: <count::u32, (putStr(username), <count::u32, putStr(perm)*>)*> — no hashes.
+function decodeListUsersResp(payload) {
+  const r = new Reader(payload);
+  const count = r.u32();
+  const users = [];
+  for (let i = 0; i < count; i++) {
+    const username = r.str();
+    const permCount = r.u32();
+    const permissions = [];
+    for (let j = 0; j < permCount; j++) permissions.push(r.str());
+    users.push({ username, permissions });
+  }
+  return users;
+}
+
 module.exports = {
   API,
   OK,
@@ -218,4 +258,8 @@ module.exports = {
   encodeCommitReq,
   encodeSubscribeReq,
   encodeStreamAckReq,
+  encodeCreateUserReq,
+  encodeDeleteUserReq,
+  encodeChangePasswordReq,
+  decodeListUsersResp,
 };

@@ -210,6 +210,30 @@ class MalachiClient {
     this.socket.write(wire.encodeRequest(wire.API.streamAck, this._nextId(), payload));
   }
 
+  // --- admin user management (require the admin permission; the server routes to the replicated store) ---
+
+  // permissions: an array like ['produce', 'consume'] (allowed: 'admin', 'produce', 'consume').
+  async createUser(username, password, permissions) {
+    await this._request(wire.API.createUser, wire.encodeCreateUserReq(username, password, permissions));
+    return true;
+  }
+
+  async deleteUser(username) {
+    await this._request(wire.API.deleteUser, wire.encodeDeleteUserReq(username));
+    return true;
+  }
+
+  async changePassword(username, newPassword) {
+    await this._request(wire.API.changePassword, wire.encodeChangePasswordReq(username, newPassword));
+    return true;
+  }
+
+  // Resolves with `[{ username, permissions: [...] }]` — no password hashes ever leave the server.
+  async listUsers() {
+    const body = await this._request(wire.API.listUsers, Buffer.alloc(0));
+    return wire.decodeListUsersResp(body);
+  }
+
   close() {
     this.closed = true;
     if (this.socket) {
