@@ -49,8 +49,18 @@ defmodule Malachi.Cluster.LeaseServer do
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    _ = start(cluster_name, nodes)
-    ensure_local_server(cluster_name, nodes)
+    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # formed cluster, which ra logs as a (harmless but noisy) "failed to form" error and needlessly churns
+    # the shared ra system. Only a node that has not yet joined tries to form/join. Mirrors
+    # `UserServer.reconcile/2` and `LockoutServer.reconcile/2`.
+    case :ra.members({cluster_name, node()}) do
+      {:ok, _members, _leader} ->
+        :ok
+
+      _not_running ->
+        _ = start(cluster_name, nodes)
+        ensure_local_server(cluster_name, nodes)
+    end
   end
 
   # Best-effort: starts the local lease server so it (re)joins the cluster. Any error (already started, or
