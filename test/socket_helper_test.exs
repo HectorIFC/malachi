@@ -107,6 +107,7 @@ defmodule Malachi.SocketHelperTest do
     end
 
     test "SSL recv function exists" do
+      Code.ensure_loaded!(Malachi.SocketHelper)
       assert function_exported?(Malachi.SocketHelper, :socket_recv, 4)
     end
   end
