@@ -21,6 +21,7 @@ defmodule Malachi.Auth.MtlsProvider do
 
   @behaviour Malachi.Auth.AuthProvider
 
+  alias Malachi.Auth.AuthProvider
   alias Malachi.Auth.CertIdentity
   alias Malachi.Auth.UserStore
 
@@ -36,7 +37,7 @@ defmodule Malachi.Auth.MtlsProvider do
     lookup = Map.get(context, :lookup, &UserStore.get_user/1)
 
     case resolve_identity(der_cert, policy) do
-      {:ok, username} -> resolve_permissions(username, lookup)
+      {:ok, username} -> AuthProvider.resolve_permissions(username, lookup)
       {:error, _reason} = error -> error
     end
   end
@@ -50,18 +51,6 @@ defmodule Malachi.Auth.MtlsProvider do
       {:ok, username} -> {:ok, username}
       {:error, :malformed_certificate} = error -> error
       {:error, _no_common_name_or_matching_san} -> {:error, :no_identity}
-    end
-  end
-
-  defp resolve_permissions(username, lookup) do
-    case lookup.(username) do
-      # Pin the returned record to the requested identity: use the looked-up permissions only when they
-      # belong to this username. A mismatch cannot happen with UserStore.get_user/1 (it returns the record
-      # for the asked username), but pinning fails closed if a seam ever returns another user's record.
-      {:ok, {^username, _hash, permissions}} -> {:ok, %{username: username, permissions: permissions}}
-      {:ok, _mismatched_record} -> {:error, :unknown_identity}
-      {:error, :user_not_found} -> {:error, :unknown_identity}
-      {:error, reason} -> {:error, reason}
     end
   end
 end
