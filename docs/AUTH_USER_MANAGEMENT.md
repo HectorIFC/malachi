@@ -143,7 +143,7 @@ falhando fechado se chave/issuer/audience faltarem. Bearer token deve trafegar s
 `resolve_permissions` (fail-closed) é compartilhado com o mTLS.
 **Falta (próxima fatia, adiada):** provider **LDAP** sobre o mesmo contrato; e opcionalmente **JWKS** (2B) no OIDC.
 
-### P5 — AutZ grosso / sem multi-tenancy
+### P5 — AutZ grosso / sem multi-tenancy 🚧 Em andamento (ACL por-tópico feito; falta gestão remota + tenants)
 **Problema:** RBAC global de 3 permissões; sem ACL por-tópico nem isolamento por tenant.
 
 - **(a) ACL por-recurso (tópico/grupo) + tenants/vhosts.** *Esforço*: alto. *Risco*: médio-alto (toca o
@@ -153,6 +153,18 @@ falhando fechado se chave/issuer/audience faltarem. Bearer token deve trafegar s
 
 **Recomendação: (a), faseado depois de P2-P4.** **Concorrentes:** ACLs por-recurso (Kafka/Redpanda),
 vhosts (RabbitMQ), tenant→namespace→topic (Pulsar), accounts (NATS). **NorthGuard:** silente.
+
+**Implementado — 1ª fatia: ACL por-tópico (decisão 5-1A; 2A literal+prefixo; 3A allow-only/deny-by-default).**
+Grants `{username, :produce|:consume, {:literal,t}|{:prefix,p}}` num cluster `ra` dedicado (`Malachi.LogAcls`),
+espelhando usuários/lockouts: `AclRegistry` puro + `AclMachine`/`AclServer` + fachada `AclStore`. O
+enforcement acontece no mesmo `with_permission` do boundary (agora `with_topic_permission`, que passa o
+tópico) via `Authorization.allow?` — **admin → global-perm (não-estrito) → ACL** (o ACL é consultado por um
+*thunk lazy*, então o hot path só paga a leitura quando precisa). **Backward-compat:** default (não-estrito)
+mantém a perm global como wildcard → habilitar ACL **não quebra** nada; `MALACHIMQ_ACL_STRICT=true` liga o
+modo estrito (deny-by-default, só admin+ACL liberam). Reads fail-closed (store indisponível → nega). Gestão
+in-process via `Auth.grant_acl`/`revoke_acl`/`list_acls`; deletar usuário revoga seus grants.
+**Falta:** superfície de gestão remota (wire/dashboard/CLI, como o P3) e a hierarquia de **tenants/namespaces**
+(5-1B, isolamento real) — ambas adiadas.
 
 ### P6 — Sessões e lockouts voláteis ✅ (lockouts feitos; sessões mantidas node-local por decisão)
 **Problema:** ETS puro → perdidos no restart, não cruzam nós (`lockout_manager.ex:18-20`).
@@ -274,7 +286,13 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    `AuthProvider.resolve_permissions/2` compartilhado com o mTLS, DRY) → **OIDC-3** (wire `token_auth` +
    handshake gateado em opt-in; `MALACHIMQ_OIDC_*`; e2e sobre TCP plano — token válido→sessão, forjado/expirado/
    não-provisionado→`invalid_credentials`). *Falta o provider LDAP, e opcionalmente JWKS (2B) no OIDC.*
-5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
+5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5). 🚧 ACL por-tópico feito (decisão 5-1A/2A/3A).**
+   Sub-fatiado: **P5-1** (`AclRegistry` puro — grants literal/prefixo + matching; `Authorization.allow?` com
+   thunk lazy: admin/global-não-estrito/ACL; 21 testes) → **P5-2** (`AclMachine`/`AclServer` — cluster `ra`
+   `LogAcls`, como usuários/lockouts) → **P5-3** (fachada `AclStore` + `Auth.grant_acl`/`revoke_acl`/`list_acls`
+   + hook de revoke no delete de usuário; enforcement no `with_topic_permission` do boundary; `MALACHIMQ_ACL_STRICT`;
+   e2e sobre a wire — não-estrito não quebra, estrito nega sem grant, grant/prefixo liberam, admin bypassa).
+   *Falta gestão remota (wire/dashboard/CLI, P5-4) e a hierarquia tenant/namespace (5-1B).*
 
 Cada fase é uma decisão própria (opções + recomendação) quando for implementada, seguindo a cadência do
 `CLAUDE.md`.

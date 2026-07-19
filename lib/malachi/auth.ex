@@ -5,6 +5,8 @@ defmodule Malachi.Auth do
   """
   use GenServer
   require Logger
+  alias Malachi.Auth.AclRegistry
+  alias Malachi.Auth.AclStore
   alias Malachi.Auth.SessionManager
   alias Malachi.Auth.UserStore
   alias Malachi.I18n
@@ -172,6 +174,35 @@ defmodule Malachi.Auth do
   """
   def list_users, do: UserStore.list_users()
 
+  @acl_operations [:produce, :consume]
+
+  @doc """
+  Grants `username` a per-topic ACL: `operation` (`:produce`/`:consume`) on `pattern` (an exact topic, or a
+  `*`-suffixed prefix like `\"orders.*\"`). Returns `:ok`, or `{:error, :invalid_acl}` for a bad operation/pattern.
+  """
+  @spec grant_acl(String.t(), atom(), String.t()) :: :ok | {:error, term()}
+  def grant_acl(username, operation, pattern) when operation in @acl_operations and is_binary(pattern) do
+    AclStore.grant(username, operation, AclRegistry.parse_resource(pattern))
+  end
+
+  def grant_acl(_username, _operation, _pattern), do: {:error, :invalid_acl}
+
+  @doc "Revokes a per-topic ACL grant (idempotent). Returns `:ok` or `{:error, reason}`."
+  @spec revoke_acl(String.t(), atom(), String.t()) :: :ok | {:error, term()}
+  def revoke_acl(username, operation, pattern) when operation in @acl_operations and is_binary(pattern) do
+    AclStore.revoke(username, operation, AclRegistry.parse_resource(pattern))
+  end
+
+  def revoke_acl(_username, _operation, _pattern), do: {:error, :invalid_acl}
+
+  @doc "Lists `username`'s ACL grants as `%{operation, resource}` maps (resource rendered as its pattern string)."
+  @spec list_acls(String.t()) :: [%{operation: atom(), resource: String.t()}]
+  def list_acls(username) do
+    Enum.map(AclStore.list_grants(username), fn {operation, resource} ->
+      %{operation: operation, resource: AclRegistry.render_resource(resource)}
+    end)
+  end
+
   @doc """
   Whether the subject has `permission` (or is `:admin`). Accepts either a `username` — looked up in
   the user table, where an unknown user has no permissions — or a permission list directly.
@@ -254,6 +285,9 @@ defmodule Malachi.Auth do
       :ok ->
         # Revoke all sessions for this user via SessionManager
         SessionManager.revoke_all_sessions(username)
+        # Drop the user's per-topic ACL grants too, so a deleted username leaves no dangling authorization
+        # (best-effort: a store hiccup leaves grants that only matter if the username is later recreated).
+        _ = AclStore.revoke_user(username)
         Logger.info(I18n.t(:user_removed, username: username))
         {:reply, :ok, state}
 

@@ -13,17 +13,24 @@ defmodule Malachi.Auth.Authorization do
        3 are the only paths: global permissions are ignored and access is **deny-by-default** — only an
        explicit ACL (or admin) allows the operation.
 
-  Pure and total; the caller supplies `acl_grant?` (from `Malachi.Auth.AclRegistry.authorized?/4`) and the
-  `strict?` flag (from config), so this module has no dependencies and is exhaustively testable.
+  The ACL grant is supplied as a **thunk** (`acl_grant_fun`), evaluated only in the third rule — so the
+  produce/consume hot path pays for an ACL lookup only when the decision actually needs it (strict mode, or a
+  user without the global permission), never when admin or a global permission already settles it. Pure and
+  total; `strict?` comes from config, so this module has no dependencies and is exhaustively testable.
   """
 
-  @doc "Whether `operation` is allowed given the session `permissions`, the ACL match `acl_grant?`, and `strict?`."
-  @spec allow?([atom()], atom(), boolean(), boolean()) :: boolean()
-  def allow?(permissions, operation, acl_grant?, strict?) when is_list(permissions) and is_boolean(acl_grant?) do
+  @doc """
+  Whether `operation` is allowed given the session `permissions` and `strict?`. `acl_grant_fun` is a
+  zero-arity function returning whether a matching per-topic ACL grant exists; it is called only when the
+  decision falls through to the ACL (so the caller can skip an ACL store query otherwise).
+  """
+  @spec allow?([atom()], atom(), boolean(), (-> boolean())) :: boolean()
+  def allow?(permissions, operation, strict?, acl_grant_fun)
+      when is_list(permissions) and is_boolean(strict?) and is_function(acl_grant_fun, 0) do
     cond do
       :admin in permissions -> true
       not strict? and operation in permissions -> true
-      true -> acl_grant?
+      true -> acl_grant_fun.()
     end
   end
 end

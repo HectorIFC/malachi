@@ -142,6 +142,10 @@ config :malachi,
   oidc_audience: System.get_env("MALACHIMQ_OIDC_AUDIENCE"),
   oidc_algorithm: System.get_env("MALACHIMQ_OIDC_ALGORITHM") || "RS256",
   oidc_identity_claim: System.get_env("MALACHIMQ_OIDC_IDENTITY_CLAIM") || "sub",
+  # Per-topic ACL enforcement (P5). Default (false) is backward-compatible: a global produce/consume
+  # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
+  # permissions and denies by default — a produce/consume needs an explicit ACL grant (or :admin).
+  acl_strict: System.get_env("MALACHIMQ_ACL_STRICT") == "true",
   default_delivery_mode: System.get_env("MALACHIMQ_DEFAULT_DELIVERY_MODE") || "at_least_once",
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
   channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),

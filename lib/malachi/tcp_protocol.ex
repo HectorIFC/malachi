@@ -9,6 +9,8 @@ defmodule Malachi.TCPProtocol do
   the connection. The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets.
   """
 
+  alias Malachi.Auth.AclStore
+  alias Malachi.Auth.Authorization
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.LogApi
@@ -103,8 +105,9 @@ defmodule Malachi.TCPProtocol do
   # client-supplied window/batch. On a permission failure returns an error frame (the connection stays in
   # request/response mode).
   defp subscribe(correlation_id, payload, session) do
-    with_permission(session, :consume, correlation_id, fn ->
-      {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
+    {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
+
+    with_topic_permission(session, :consume, topic, correlation_id, fn ->
       window = stream_window(window_raw)
       max = fetch_max(max_raw)
 
@@ -126,16 +129,17 @@ defmodule Malachi.TCPProtocol do
   end
 
   defp create_topic(correlation_id, payload, session) do
-    with_permission(session, :produce, correlation_id, fn ->
-      {topic, _keyspace_bits} = Wire.decode_create_topic_req(payload)
+    {topic, _keyspace_bits} = Wire.decode_create_topic_req(payload)
+
+    with_topic_permission(session, :produce, topic, correlation_id, fn ->
       ok_or_error(correlation_id, LogApi.create_topic(Malachi.LogBroker, topic), <<>>)
     end)
   end
 
   defp produce(correlation_id, payload, session) do
-    with_permission(session, :produce, correlation_id, fn ->
-      {topic, records} = Wire.decode_produce_req(payload)
+    {topic, records} = Wire.decode_produce_req(payload)
 
+    with_topic_permission(session, :produce, topic, correlation_id, fn ->
       case LogApi.produce_records(Malachi.LogBroker, topic, records) do
         {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
         {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
@@ -144,8 +148,9 @@ defmodule Malachi.TCPProtocol do
   end
 
   defp fetch(correlation_id, payload, session) do
-    with_permission(session, :consume, correlation_id, fn ->
-      {topic, cursor, group, member, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
+    {topic, cursor, group, member, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
+
+    with_topic_permission(session, :consume, topic, correlation_id, fn ->
       max = fetch_max(max_raw)
       wait_ms = fetch_wait(wait_raw)
 
@@ -178,16 +183,18 @@ defmodule Malachi.TCPProtocol do
   end
 
   defp commit(correlation_id, payload, session) do
-    with_permission(session, :consume, correlation_id, fn ->
-      {topic, group, cursor} = Wire.decode_commit_req(payload)
+    {topic, group, cursor} = Wire.decode_commit_req(payload)
+
+    with_topic_permission(session, :consume, topic, correlation_id, fn ->
       ok_or_error(correlation_id, LogApi.commit(Malachi.LogBroker, topic, group, cursor), <<>>)
     end)
   end
 
   # Removes a member from its consumer group (fast rebalance on a clean shutdown). Acks with an empty ok.
   defp leave_group(correlation_id, payload, session) do
-    with_permission(session, :consume, correlation_id, fn ->
-      {topic, group, member} = Wire.decode_leave_group_req(payload)
+    {topic, group, member} = Wire.decode_leave_group_req(payload)
+
+    with_topic_permission(session, :consume, topic, correlation_id, fn ->
       _ = GroupCoordinator.leave(coordinator_for(topic), group, topic, member)
       Wire.encode_ok(correlation_id, <<>>)
     end)
@@ -239,6 +246,21 @@ defmodule Malachi.TCPProtocol do
     else
       Wire.encode_error(correlation_id, :permission_denied)
     end
+  end
+
+  # Like `with_permission` but for a resource `operation` (`:produce`/`:consume`) on a specific `topic`:
+  # composes the coarse RBAC with the per-topic ACL (`Malachi.Auth.Authorization`). The ACL store is queried
+  # only when the coarse permission does not already settle it (the thunk), keeping the produce/consume hot
+  # path free of an ACL lookup for the common non-strict case. A denial returns a permission-denied frame.
+  defp with_topic_permission(session, operation, topic, correlation_id, fun) do
+    strict? = Application.get_env(:malachi, :acl_strict, false)
+
+    allowed? =
+      Authorization.allow?(session.permissions, operation, strict?, fn ->
+        AclStore.authorized?(session.username, operation, topic)
+      end)
+
+    if allowed?, do: fun.(), else: Wire.encode_error(correlation_id, :permission_denied)
   end
 
   defp ok_or_error(correlation_id, :ok, ok_payload), do: Wire.encode_ok(correlation_id, ok_payload)

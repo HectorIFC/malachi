@@ -11,6 +11,7 @@ defmodule Malachi.Application do
   """
   use Application
   require Logger
+  alias Malachi.Auth.AclServer
   alias Malachi.Auth.ConfigValidator
   alias Malachi.Auth.LockoutServer
   alias Malachi.Auth.UserServer
@@ -42,6 +43,8 @@ defmodule Malachi.Application do
   @log_users Malachi.LogUsers
   # The replicated account-lockout store's dedicated ra cluster name (see `lockout_store_children/1`).
   @log_lockouts Malachi.LogLockouts
+  # The replicated per-topic ACL store's dedicated ra cluster name (see `acl_store_children/1`).
+  @log_acls Malachi.LogAcls
 
   def start(_type, _args) do
     # Validate authentication configuration before starting
@@ -83,6 +86,7 @@ defmodule Malachi.Application do
           Malachi.ConnectionLimiter
         ] ++
         lockout_store_children(configured_nodes()) ++
+        acl_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
         [
           Malachi.Auth,
@@ -177,6 +181,27 @@ defmodule Malachi.Application do
       end
 
     reconciler ++ [Malachi.Auth.LockoutManager]
+  end
+
+  # The replicated per-topic ACL store (P5): forms the ra ACL cluster across `nodes` (so grants replicate
+  # cluster-wide and every node enforces the same ACLs). When clustered it also supervises a reconciler that
+  # self-joins this node on a staggered boot. Mirrors `user_store_children/1`. Must precede Auth (whose
+  # remove_user revokes a user's grants) and the acceptor (which authorizes produce/consume against it).
+  defp acl_store_children(nodes) do
+    _ = AclServer.start(@log_acls, nodes)
+
+    if length(nodes) > 1 do
+      [
+        %{
+          id: Malachi.LogAclReconciler,
+          start:
+            {LeaseReconciler, :start_link,
+             [[name: Malachi.LogAclReconciler, reconcile: fn -> AclServer.reconcile(@log_acls, nodes) end]]}
+        }
+      ]
+    else
+      []
+    end
   end
 
   # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which
