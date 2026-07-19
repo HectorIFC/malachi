@@ -24,24 +24,26 @@ defmodule Mix.Tasks.Malachi.User do
   """
   use Mix.Task
 
+  alias Malachi.CLI.Rpc
+
   @switches [node: :string, cookie: :string, perms: :string]
-  @rpc_timeout 5_000
 
   @impl Mix.Task
   def run(argv) do
     {opts, args, _invalid} = OptionParser.parse(argv, strict: @switches)
+    node = Rpc.target_node(opts)
 
-    node = target_node(opts)
-    connect!(node, opts[:cookie])
-
-    case execute(args, opts, rpc(node)) do
-      {:ok, message} ->
-        Mix.shell().info(message)
-
-      {:error, message} ->
-        Mix.shell().error(message)
-        exit({:shutdown, 1})
+    case Rpc.connect(node, opts[:cookie]) do
+      :ok -> report(execute(args, opts, Rpc.rpc(node)))
+      {:error, message} -> Mix.raise(message)
     end
+  end
+
+  defp report({:ok, message}), do: Mix.shell().info(message)
+
+  defp report({:error, message}) do
+    Mix.shell().error(message)
+    exit({:shutdown, 1})
   end
 
   @doc """
@@ -101,7 +103,7 @@ defmodule Mix.Tasks.Malachi.User do
     end)
   end
 
-  defp rpc_error(reason), do: "rpc failed: #{inspect(reason)}"
+  defp rpc_error(reason), do: Rpc.rpc_error(reason)
 
   defp usage do
     """
@@ -113,47 +115,5 @@ defmodule Mix.Tasks.Malachi.User do
 
     connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
     """
-  end
-
-  # --- connection (distribution) ---
-
-  defp target_node(opts) do
-    (opts[:node] || System.get_env("MALACHI_NODE") || "malachi@127.0.0.1")
-    |> String.to_atom()
-  end
-
-  # Brings this task's VM up as a distributed node and connects to `node`, or aborts with a hint.
-  defp connect!(node, cookie) do
-    unless Node.alive?() do
-      {:ok, _} = Node.start(:"malachi_cli_#{System.unique_integer([:positive])}@127.0.0.1", name_domain: :longnames)
-    end
-
-    cookie_value = cookie || System.get_env("RELEASE_COOKIE")
-    if cookie_value, do: Node.set_cookie(node, String.to_atom(cookie_value))
-
-    unless connect_with_retry(node, 20) do
-      Mix.raise("could not connect to #{node} (check --node/--cookie and that the node is running and named)")
-    end
-  end
-
-  # Distribution may not be ready the instant a node boots, so retry a few times (2s total) before aborting.
-  defp connect_with_retry(_node, 0), do: false
-
-  defp connect_with_retry(node, attempts) do
-    if Node.connect(node) == true do
-      true
-    else
-      Process.sleep(100)
-      connect_with_retry(node, attempts - 1)
-    end
-  end
-
-  defp rpc(node) do
-    fn module, fun, args ->
-      case :rpc.call(node, module, fun, args, @rpc_timeout) do
-        {:badrpc, reason} -> {:error, reason}
-        value -> {:ok, value}
-      end
-    end
   end
 end

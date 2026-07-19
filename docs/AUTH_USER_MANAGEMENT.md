@@ -163,8 +163,10 @@ tópico) via `Authorization.allow?` — **admin → global-perm (não-estrito) �
 mantém a perm global como wildcard → habilitar ACL **não quebra** nada; `MALACHIMQ_ACL_STRICT=true` liga o
 modo estrito (deny-by-default, só admin+ACL liberam). Reads fail-closed (store indisponível → nega). Gestão
 in-process via `Auth.grant_acl`/`revoke_acl`/`list_acls`; deletar usuário revoga seus grants.
-**Falta:** superfície de gestão remota (wire/dashboard/CLI, como o P3) e a hierarquia de **tenants/namespaces**
-(5-1B, isolamento real) — ambas adiadas.
+**Gestão remota nas 4 superfícies (P5-4, como o P3):** wire ops admin-gated (`api_key`s 14/15/16), REST no
+dashboard (`/users/:u/acls`), CLI Node (`scripts/acl.js`) e mix task (`mix malachi.acl` via RPC — o
+boilerplate de conexão foi extraído para `Malachi.CLI.Rpc`, compartilhado com `mix malachi.user`).
+**Falta:** a hierarquia de **tenants/namespaces** (5-1B, isolamento real) — adiada.
 
 ### P6 — Sessões e lockouts voláteis ✅ (lockouts feitos; sessões mantidas node-local por decisão)
 **Problema:** ETS puro → perdidos no restart, não cruzam nós (`lockout_manager.ex:18-20`).
@@ -292,7 +294,9 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    `LogAcls`, como usuários/lockouts) → **P5-3** (fachada `AclStore` + `Auth.grant_acl`/`revoke_acl`/`list_acls`
    + hook de revoke no delete de usuário; enforcement no `with_topic_permission` do boundary; `MALACHIMQ_ACL_STRICT`;
    e2e sobre a wire — não-estrito não quebra, estrito nega sem grant, grant/prefixo liberam, admin bypassa).
-   *Falta gestão remota (wire/dashboard/CLI, P5-4) e a hierarquia tenant/namespace (5-1B).*
+   **P5-4 ✅** — gestão remota nas 4 superfícies (wire ops `api_key`s 14/15/16, REST `/users/:u/acls`,
+   `scripts/acl.js`, `mix malachi.acl`; RPC extraído para `Malachi.CLI.Rpc`, compartilhado com o user task).
+   *Falta só a hierarquia tenant/namespace (5-1B).*
 
 Cada fase é uma decisão própria (opções + recomendação) quando for implementada, seguindo a cadência do
 `CLAUDE.md`.
