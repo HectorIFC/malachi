@@ -43,6 +43,17 @@ parse_tls_versions = fn val, default ->
   end
 end
 
+# Reads a file's contents (e.g. the OIDC public-key PEM) from a path, or nil when the path is unset or the
+# file cannot be read. A missing/unreadable key leaves :oidc_public_key nil, and OidcConfig fails closed.
+read_file = fn
+  nil -> nil
+  path ->
+    case File.read(path) do
+      {:ok, contents} -> contents
+      {:error, _reason} -> nil
+    end
+end
+
 # mTLS-identity auth policy (P4): which certificate field names the malachi username. "cn" (default), or
 # "san:uri" / "san:dns" / "san:email" to use the first Subject Alternative Name of that kind.
 parse_mtls_policy = fn val ->
@@ -122,6 +133,15 @@ config :malachi,
   # so an unverified/forged certificate can never authenticate. The policy maps a cert field to a username.
   mtls_auth: System.get_env("MALACHIMQ_MTLS_AUTH") == "true",
   mtls_identity_policy: parse_mtls_policy.(System.get_env("MALACHIMQ_MTLS_POLICY")),
+  # OIDC/JWT auth (P4): opt-in. The server validates a signed JWT against the IdP's public key (PEM read from
+  # MALACHIMQ_OIDC_PUBLIC_KEY_FILE) and the expected issuer/audience, mapping an identity claim to a user.
+  # Bearer tokens should travel over TLS; OidcConfig fails closed if the key/issuer/audience are unset.
+  oidc_auth: System.get_env("MALACHIMQ_OIDC_AUTH") == "true",
+  oidc_public_key: read_file.(System.get_env("MALACHIMQ_OIDC_PUBLIC_KEY_FILE")),
+  oidc_issuer: System.get_env("MALACHIMQ_OIDC_ISSUER"),
+  oidc_audience: System.get_env("MALACHIMQ_OIDC_AUDIENCE"),
+  oidc_algorithm: System.get_env("MALACHIMQ_OIDC_ALGORITHM") || "RS256",
+  oidc_identity_claim: System.get_env("MALACHIMQ_OIDC_IDENTITY_CLAIM") || "sub",
   default_delivery_mode: System.get_env("MALACHIMQ_DEFAULT_DELIVERY_MODE") || "at_least_once",
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
   channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),
@@ -241,7 +261,7 @@ config :malachi,
        # Auth enabled by default in ALL environments for security
        nil -> true
      end),
-  # Dashboard configuration  
+  # Dashboard configuration
   dashboard_require_admin_for_html:
     (case System.get_env("MALACHIMQ_DASHBOARD_REQUIRE_ADMIN") do
        "false" -> false
@@ -353,7 +373,7 @@ config :malachi,
   lockout_duration_ms: parse_int.(System.get_env("MALACHIMQ_LOCKOUT_DURATION_MS"), 300_000),
   progressive_lockout: System.get_env("MALACHIMQ_PROGRESSIVE_LOCKOUT") != "false",
 
-  # Session security configuration  
+  # Session security configuration
   session_timeout_seconds: parse_int.(System.get_env("MALACHIMQ_SESSION_TIMEOUT_SEC"), 3600),
   session_ip_binding: System.get_env("MALACHIMQ_SESSION_IP_BINDING") != "false",
   session_ua_binding: System.get_env("MALACHIMQ_SESSION_UA_BINDING") == "true",

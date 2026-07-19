@@ -38,12 +38,14 @@ defmodule Malachi.Wire do
   @list_users 11
   # mTLS-identity auth (P4): empty payload; the server authenticates from the verified peer certificate.
   @mtls_auth 12
+  # OIDC/JWT auth (P4): payload is a signed JWT; the server validates it and maps a claim to a user.
+  @token_auth 13
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..12
+  @type api_key :: 0..13
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -60,6 +62,7 @@ defmodule Malachi.Wire do
   def change_password_key, do: @change_password
   def list_users_key, do: @list_users
   def mtls_auth_key, do: @mtls_auth
+  def token_auth_key, do: @token_auth
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -126,6 +129,14 @@ defmodule Malachi.Wire do
   # An mTLS-auth request carries no payload — the server derives the identity from the verified peer
   # certificate. The response reuses the auth response (a session token).
   def encode_mtls_auth_req, do: <<>>
+
+  # A token-auth request carries the signed JWT as its payload; the response reuses the auth response.
+  def encode_token_auth_req(jwt), do: put_str(jwt)
+
+  def decode_token_auth_req(payload) do
+    {jwt, <<>>} = take_str(payload)
+    jwt
+  end
 
   def encode_auth_resp(token), do: put_str(token)
 

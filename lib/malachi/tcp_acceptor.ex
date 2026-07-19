@@ -11,8 +11,10 @@ defmodule Malachi.TCPAcceptor do
   """
   use GenServer
   require Logger
+  alias Malachi.Auth.JwtProvider
   alias Malachi.Auth.LockoutManager
   alias Malachi.Auth.MtlsProvider
+  alias Malachi.Auth.OidcConfig
   alias Malachi.Auth.SessionManager
   alias Malachi.I18n
   alias Malachi.LogApi
@@ -212,6 +214,9 @@ defmodule Malachi.TCPAcceptor do
       api_key == Wire.mtls_auth_key() ->
         authenticate_mtls(correlation_id, state)
 
+      api_key == Wire.token_auth_key() ->
+        authenticate_token(Wire.decode_token_auth_req(payload), correlation_id, state)
+
       true ->
         transport.send(socket, Wire.encode_error(correlation_id, :auth_required))
         {:error, :auth_required}
@@ -342,6 +347,37 @@ defmodule Malachi.TCPAcceptor do
   end
 
   defp mtls_client_error(reason), do: reason
+
+  # OIDC/JWT auth (P4): authenticate the client from a signed JWT (bearer token) instead of a password. The
+  # token is self-contained (signed by the IdP), so it needs no TLS peer cert — but operators should run TLS
+  # to keep the bearer token confidential in transit (documented). Gated behind an opt-in flag; on success the
+  # session is minted exactly like the password path. No lockout (nothing to brute-force); the rate limit
+  # still applies. `OidcConfig.load/0` fails closed when the deployment is not fully configured.
+  defp authenticate_token(jwt, correlation_id, %{socket: socket, transport: transport, client_ip: client_ip} = state) do
+    with :ok <- ensure_oidc_allowed(),
+         :ok <- check_auth_rate_limit(client_ip),
+         {:ok, config} <- OidcConfig.load(),
+         {:ok, %{username: username, permissions: permissions}} <- JwtProvider.authenticate(jwt, config) do
+      {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
+      Logger.info(I18n.t(:auth_success, username: username))
+      Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "token_authenticate", :success, %{})
+      validate_token_and_respond(token, correlation_id, state, client_ip)
+    else
+      {:error, reason} ->
+        Malachi.AuditLog.log_event(:auth_failure, %{ip: client_ip}, "token_authenticate", :failure, %{reason: reason})
+        transport.send(socket, Wire.encode_error(correlation_id, oidc_client_error(reason)))
+        {:error, reason}
+    end
+  end
+
+  defp ensure_oidc_allowed do
+    if Application.get_env(:malachi, :oidc_auth, false), do: :ok, else: {:error, :oidc_auth_disabled}
+  end
+
+  # A token-validation or identity-mapping failure collapses to :invalid_credentials so we never reveal why a
+  # token was rejected or which identities exist; config/protocol errors (feature off, misconfigured) surface.
+  defp oidc_client_error(reason) when reason in [:oidc_auth_disabled, :oidc_misconfigured], do: reason
+  defp oidc_client_error(_validation_or_identity_error), do: :invalid_credentials
 
   # Reads request frames and dispatches each; loops until the socket closes or errors. A `subscribe` frame
   # switches the connection into `stream_loop/2` (server-push streaming) for the rest of its life.

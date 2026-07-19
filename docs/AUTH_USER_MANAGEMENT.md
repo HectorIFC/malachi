@@ -110,7 +110,7 @@ replicado** (KRaft/controller Raft); RabbitMQ usa Mnesia **replicado**. **NorthG
 **Recomendação: (a), depois de P2.** **Concorrentes:** `rabbitmqctl`+HTTP API (RabbitMQ), CLI+Admin API
 (Kafka), REST admin (Pulsar), `nsc` (NATS). **NorthGuard:** silente.
 
-### P4 — Auth externa ausente (table-stakes de vendabilidade) 🚧 Em andamento (contrato + mTLS-identidade feitos)
+### P4 — Auth externa ausente (table-stakes de vendabilidade) 🚧 Em andamento (contrato + mTLS + OIDC feitos; falta LDAP)
 **Problema:** só username/password interno; nenhum IdP externo; mTLS verifica mas não autentica.
 
 - **(a) Definir plug points** — mapear identidade de **mTLS→usuário** e interfaces plugáveis para **OIDC/JWT**
@@ -133,7 +133,15 @@ separa **autenticação plugável** de **autorização interna** (perms do `User
 **Gate de segurança:** o `mtls_auth` só é honrado com opt-in (`MALACHIMQ_MTLS_AUTH`) **e** `verify_peer` ligado
 — sob `verify_none` um cert forjado nunca autentica; falhas de mapeamento colapsam para `:invalid_credentials`
 (não vazam quais identidades existem); sem lockout (não há senha pra brute-force), mas com rate-limit por IP.
-**Falta (próximas fatias, adiadas):** providers OIDC/JWT e LDAP sobre o mesmo contrato.
+**Também implementado (2º provider — OIDC/JWT; decisão 1A joken/jose, 2A chave estática, 3A perms do
+`UserStore`).** Um cliente apresenta um **JWT assinado** por um IdP externo num frame `token_auth`; o
+`JwtProvider` valida (assinatura + `iss`/`aud`/`exp` via `JwtValidator`, sobre `joken`/`jose`) e mapeia uma
+claim (`sub` por padrão) → usuário, buscando perms no store — igual a Kafka/Pulsar (o token identifica, o
+store autoriza). **Segurança:** algoritmo fixado pelo signer configurado (não pelo header do token) → `alg:none`
+e confusão HS256↔RS256 rejeitados; `exp` obrigatório; opt-in (`MALACHIMQ_OIDC_AUTH`) com `OidcConfig`
+falhando fechado se chave/issuer/audience faltarem. Bearer token deve trafegar sobre TLS (documentado). O
+`resolve_permissions` (fail-closed) é compartilhado com o mTLS.
+**Falta (próxima fatia, adiada):** provider **LDAP** sobre o mesmo contrato; e opcionalmente **JWKS** (2B) no OIDC.
 
 ### P5 — AutZ grosso / sem multi-tenancy
 **Problema:** RBAC global de 3 permissões; sem ACL por-tópico nem isolamento por tenant.
@@ -253,14 +261,19 @@ usuários por-serviço — um produto OSS não pode assumir isso, então oferece
    RPC como *seam* (testável): 9 testes (parsing/dispatch/erros + integração real via seam local); validado
    end-to-end contra um nó nomeado vivo (create/list/passwd/delete). É o análogo do `bin/malachi rpc` de release.
    `:mix` adicionado ao PLT do dialyzer. **Fase 3 completa — 3 superfícies (wire+CLI, REST, mix task).**
-4. **Fase 4 — Auth externa plugável (P4). 🚧 Contrato + mTLS-identidade feitos (decisão 1A/2A/3A).**
-   Sub-fatiado: **P4-1** (behaviour `AuthProvider` + `CertIdentity` puro — extração CN/SAN do DER X.509, com
+4. **Fase 4 — Auth externa plugável (P4). 🚧 Contrato + mTLS + OIDC feitos (decisão 1A/2A/3A). Falta LDAP.**
+   Sub-fatiado (mTLS): **P4-1** (behaviour `AuthProvider` + `CertIdentity` puro — extração CN/SAN do DER X.509,
    política `:cn | {:san, kind}`; 11 testes com certs reais) → **P4-2** (`PasswordProvider` + `MtlsProvider`
    sobre o contrato; extraído `Auth.verify_credentials/2` sem-sessão, DRY; providers com seams, testados sem
    app/TLS; mTLS mapeia cert→user e busca perms no store, fail-closed em registro divergente) → **P4-3** (wire
    `mtls_auth` + handshake no acceptor: resolve o peercert e minta a sessão como no path de senha, **gateado
-   em opt-in + `verify_peer`** pra um cert forjado nunca autenticar; config `MALACHIMQ_MTLS_AUTH` /
-   `MALACHIMQ_MTLS_POLICY`; gate testado sobre TCP plano). *Falta OIDC/JWT e LDAP como próximos providers.*
+   em opt-in + `verify_peer`** pra um cert forjado nunca autenticar; `MALACHIMQ_MTLS_AUTH`/`MALACHIMQ_MTLS_POLICY`).
+   Sub-fatiado (OIDC): **OIDC-1** (`JwtValidator` puro sobre `joken`/`jose` — assinatura + iss/aud/exp; alg
+   fixado pelo signer → `alg:none`/confusão HS256 rejeitados; `exp` obrigatório; 12 testes, chaves geradas em
+   runtime) → **OIDC-2** (`JwtProvider` + `OidcConfig` que monta o signer do PEM e falha fechado; extraído
+   `AuthProvider.resolve_permissions/2` compartilhado com o mTLS, DRY) → **OIDC-3** (wire `token_auth` +
+   handshake gateado em opt-in; `MALACHIMQ_OIDC_*`; e2e sobre TCP plano — token válido→sessão, forjado/expirado/
+   não-provisionado→`invalid_credentials`). *Falta o provider LDAP, e opcionalmente JWKS (2B) no OIDC.*
 5. **Fase 5 — Multi-tenancy / ACL por-recurso (P5).** O maior; habilita venda multi-tenant.
 
 Cada fase é uma decisão própria (opções + recomendação) quando for implementada, seguindo a cadência do
