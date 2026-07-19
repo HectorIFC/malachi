@@ -241,6 +241,16 @@ defmodule Malachi.Auth do
 
   def parse_permissions(_not_a_list), do: :error
 
+  @doc """
+  Parses an ACL operation **string** into `:produce`/`:consume`, or `:error`. Mapping explicitly (rather than
+  `String.to_atom/1`) keeps an untrusted client from exhausting the atom table. Shared by the ACL management
+  surfaces (wire ops, dashboard).
+  """
+  @spec parse_acl_operation(String.t()) :: {:ok, :produce | :consume} | :error
+  def parse_acl_operation("produce"), do: {:ok, :produce}
+  def parse_acl_operation("consume"), do: {:ok, :consume}
+  def parse_acl_operation(_other), do: :error
+
   @impl true
   def init(:ok) do
     :ets.new(@sessions_table, [

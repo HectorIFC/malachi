@@ -40,12 +40,16 @@ defmodule Malachi.Wire do
   @mtls_auth 12
   # OIDC/JWT auth (P4): payload is a signed JWT; the server validates it and maps a claim to a user.
   @token_auth 13
+  # admin per-topic ACL management (P5): grant/revoke a {username, operation, pattern}, list a user's ACLs.
+  @grant_acl 14
+  @revoke_acl 15
+  @list_acls 16
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..13
+  @type api_key :: 0..16
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -63,6 +67,9 @@ defmodule Malachi.Wire do
   def list_users_key, do: @list_users
   def mtls_auth_key, do: @mtls_auth
   def token_auth_key, do: @token_auth
+  def grant_acl_key, do: @grant_acl
+  def revoke_acl_key, do: @revoke_acl
+  def list_acls_key, do: @list_acls
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -292,6 +299,42 @@ defmodule Malachi.Wire do
     users
   end
 
+  # ---- admin per-topic ACL management (P5). operation is a byte string ("produce"/"consume"); resource is a
+  # pattern ("orders.eu" literal, or "orders.*" prefix). grant and revoke share the request shape. ----
+
+  def encode_acl_req(username, operation, pattern) do
+    <<put_str(username)::binary, put_str(to_string(operation))::binary, put_str(pattern)::binary>>
+  end
+
+  def decode_acl_req(payload) do
+    {username, rest} = take_str(payload)
+    {operation, rest} = take_str(rest)
+    {pattern, <<>>} = take_str(rest)
+    {username, operation, pattern}
+  end
+
+  def encode_list_acls_req(username), do: put_str(username)
+
+  def decode_list_acls_req(payload) do
+    {username, <<>>} = take_str(payload)
+    username
+  end
+
+  # list_acls response carries `[%{operation, resource}]` (both byte strings).
+  def encode_list_acls_resp(acls) do
+    body =
+      for %{operation: operation, resource: resource} <- acls, into: <<>> do
+        <<put_str(to_string(operation))::binary, put_str(resource)::binary>>
+      end
+
+    <<length(acls)::32, body::binary>>
+  end
+
+  def decode_list_acls_resp(<<count::32, rest::binary>>) do
+    {acls, <<>>} = take_acls(rest, count, [])
+    acls
+  end
+
   # ---- wire record (no offset; key/value/headers/timestamp only) ----
 
   @doc "Encodes a record for the wire (no offset — the client never sees one)."
@@ -337,6 +380,14 @@ defmodule Malachi.Wire do
     {username, rest} = take_str(rest)
     {perms, rest} = take_perms(rest)
     take_users(rest, n - 1, [%{username: username, permissions: perms} | acc])
+  end
+
+  defp take_acls(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_acls(rest, n, acc) do
+    {operation, rest} = take_str(rest)
+    {resource, rest} = take_str(rest)
+    take_acls(rest, n - 1, [%{operation: operation, resource: resource} | acc])
   end
 
   defp encode_records(records), do: records |> Enum.map(&encode_record/1) |> IO.iodata_to_binary()

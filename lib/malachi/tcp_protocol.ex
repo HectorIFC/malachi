@@ -93,10 +93,21 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
       api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
       api_key == Wire.leave_group_key() -> leave_group(correlation_id, payload, session)
+      # admin management ops (user + ACL CRUD) live in their own dispatch to keep each cond small
+      true -> dispatch_admin(api_key, correlation_id, payload, session)
+    end
+  end
+
+  # Admin management operations (user and per-topic ACL CRUD), each gated by the :admin permission inside.
+  defp dispatch_admin(api_key, correlation_id, payload, session) do
+    cond do
       api_key == Wire.create_user_key() -> create_user(correlation_id, payload, session)
       api_key == Wire.delete_user_key() -> delete_user(correlation_id, payload, session)
       api_key == Wire.change_password_key() -> change_password(correlation_id, payload, session)
       api_key == Wire.list_users_key() -> list_users(correlation_id, payload, session)
+      api_key == Wire.grant_acl_key() -> grant_acl(correlation_id, payload, session)
+      api_key == Wire.revoke_acl_key() -> revoke_acl(correlation_id, payload, session)
+      api_key == Wire.list_acls_key() -> list_acls(correlation_id, payload, session)
       true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
@@ -232,6 +243,37 @@ defmodule Malachi.TCPProtocol do
     with_permission(session, :admin, correlation_id, fn ->
       Wire.encode_ok(correlation_id, Wire.encode_list_users_resp(Malachi.Auth.list_users()))
     end)
+  end
+
+  # --- admin per-topic ACL management: grant/revoke/list ACLs, gated by the :admin permission. ---
+
+  defp grant_acl(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {username, operation, pattern} = Wire.decode_acl_req(payload)
+      apply_acl(correlation_id, operation, &Malachi.Auth.grant_acl(username, &1, pattern))
+    end)
+  end
+
+  defp revoke_acl(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {username, operation, pattern} = Wire.decode_acl_req(payload)
+      apply_acl(correlation_id, operation, &Malachi.Auth.revoke_acl(username, &1, pattern))
+    end)
+  end
+
+  defp list_acls(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      username = Wire.decode_list_acls_req(payload)
+      Wire.encode_ok(correlation_id, Wire.encode_list_acls_resp(Malachi.Auth.list_acls(username)))
+    end)
+  end
+
+  # Parses the wire operation string and runs `fun` with the operation atom, or answers :invalid_operation.
+  defp apply_acl(correlation_id, operation, fun) do
+    case Malachi.Auth.parse_acl_operation(operation) do
+      {:ok, op} -> ok_or_error(correlation_id, fun.(op), <<>>)
+      :error -> Wire.encode_error(correlation_id, :invalid_operation)
+    end
   end
 
   # The consumer-group coordinator for a topic runs on the node owning the topic's vnode; resolve the

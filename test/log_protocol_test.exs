@@ -341,4 +341,53 @@ defmodule Malachi.LogProtocolTest do
       end)
     end
   end
+
+  describe "admin per-topic ACL management (P5)" do
+    test "admin grants an ACL over the wire; it is listed; revoke removes it" do
+      username = "aclwire_#{System.unique_integer([:positive])}"
+      Malachi.Auth.add_user(username, "Acl-Pass-1", [:produce])
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      with_session("admin", "admin123", fn socket ->
+        assert {code, _} = grant_acl(socket, username, "produce", "orders.*")
+        assert ok?(code)
+
+        assert {code, payload} = list_acls(socket, username)
+        assert ok?(code)
+        assert Wire.decode_list_acls_resp(payload) == [%{operation: "produce", resource: "orders.*"}]
+
+        assert {code, _} = revoke_acl(socket, username, "produce", "orders.*")
+        assert ok?(code)
+
+        assert {_code, payload} = list_acls(socket, username)
+        assert Wire.decode_list_acls_resp(payload) == []
+      end)
+    end
+
+    test "a non-admin cannot manage ACLs, and an invalid operation is rejected" do
+      with_session("producer", "producer123", fn socket ->
+        assert {code, payload} = grant_acl(socket, "x", "produce", "t.*")
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+
+      with_session("admin", "admin123", fn socket ->
+        assert {code, payload} = grant_acl(socket, "x", "superuser", "t.*")
+        refute ok?(code)
+        assert reason(payload) == "invalid_operation"
+      end)
+    end
+  end
+
+  defp grant_acl(socket, username, operation, pattern) do
+    TCPHelper.request(socket, Wire.grant_acl_key(), 1, Wire.encode_acl_req(username, operation, pattern))
+  end
+
+  defp revoke_acl(socket, username, operation, pattern) do
+    TCPHelper.request(socket, Wire.revoke_acl_key(), 1, Wire.encode_acl_req(username, operation, pattern))
+  end
+
+  defp list_acls(socket, username) do
+    TCPHelper.request(socket, Wire.list_acls_key(), 1, Wire.encode_list_acls_req(username))
+  end
 end
