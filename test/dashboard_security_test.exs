@@ -643,6 +643,52 @@ defmodule Malachi.DashboardSecurityTest do
     end
   end
 
+  describe "per-topic ACL management (P5-4b)" do
+    setup do
+      username = "dashacl_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(username, "Acl-Pass-1", [:produce])
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      {:ok, acl_user: username}
+    end
+
+    defp acl_req(method, path, token, body \\ nil) do
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      opts = if body, do: [body: Jason.encode!(body)], else: []
+      {:ok, response} = DashboardHelper.authenticated_request(socket, method, path, token, opts)
+      :gen_tcp.close(socket)
+      response
+    end
+
+    test "admin grants an ACL, lists it, then revokes it", %{admin_token: token, acl_user: user} do
+      grant = acl_req(:POST, "/users/#{user}/acls", token, %{operation: "produce", pattern: "orders.*"})
+      assert status_code(grant) == 201
+
+      list = acl_req(:GET, "/users/#{user}/acls", token)
+      assert status_code(list) == 200
+      {:ok, body} = json_body(list)
+      assert body["acls"] == [%{"operation" => "produce", "resource" => "orders.*"}]
+
+      revoke = acl_req(:DELETE, "/users/#{user}/acls", token, %{operation: "produce", pattern: "orders.*"})
+      assert status_code(revoke) == 200
+
+      after_list = acl_req(:GET, "/users/#{user}/acls", token)
+      {:ok, after_body} = json_body(after_list)
+      assert after_body["acls"] == []
+    end
+
+    test "an invalid operation is a 400", %{admin_token: token, acl_user: user} do
+      response = acl_req(:POST, "/users/#{user}/acls", token, %{operation: "superuser", pattern: "t.*"})
+      assert status_code(response) == 400
+      {:ok, body} = json_body(response)
+      assert body["reason"] == "invalid_operation"
+    end
+
+    test "a non-admin is forbidden (403)", %{producer_token: token, acl_user: user} do
+      response = acl_req(:GET, "/users/#{user}/acls", token)
+      assert status_code(response) == 403
+    end
+  end
+
   # Extracts the numeric status from an HTTP response, and its JSON body.
   defp status_code(response) do
     case Regex.run(~r"HTTP/1\.1 (\d{3})", response) do

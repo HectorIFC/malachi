@@ -498,6 +498,58 @@ defmodule Malachi.Dashboard do
 
   defp handle_delete_user(socket, username), do: respond_user_result(socket, Auth.remove_user(username), "200 OK")
 
+  # --- per-topic ACL management (P5): /users/:username/acls, admin-gated by has_required_permission?. ---
+
+  # Routes a /users/<rest> request: `acl_fun.(username)` when `rest` is `"<username>/acls"`, else `fallback`.
+  defp route_acl(_socket, rest, acl_fun, fallback) do
+    case acl_username(rest) do
+      {:ok, username} -> acl_fun.(username)
+      :error -> fallback.()
+    end
+  end
+
+  defp acl_username(rest) do
+    case String.split(rest, "/") do
+      [username, "acls"] when username != "" -> {:ok, username}
+      _other -> :error
+    end
+  end
+
+  defp handle_list_acls(socket, username) do
+    acls =
+      Enum.map(Auth.list_acls(username), fn %{operation: operation, resource: resource} ->
+        %{"operation" => to_string(operation), "resource" => resource}
+      end)
+
+    send_json(socket, "200 OK", %{"s" => "ok", "acls" => acls})
+  end
+
+  defp handle_grant_acl(socket, username, headers) do
+    with_acl_body(socket, headers, fn operation, pattern ->
+      respond_user_result(socket, Auth.grant_acl(username, operation, pattern), "201 Created")
+    end)
+  end
+
+  defp handle_revoke_acl(socket, username, headers) do
+    with_acl_body(socket, headers, fn operation, pattern ->
+      respond_user_result(socket, Auth.revoke_acl(username, operation, pattern), "200 OK")
+    end)
+  end
+
+  # Reads `{operation, pattern}` from the JSON body, parsing the operation string; runs `fun` or answers 400.
+  defp with_acl_body(socket, headers, fun) do
+    case read_json_body(socket, headers) do
+      {:ok, %{"operation" => operation, "pattern" => pattern}} when is_binary(pattern) ->
+        case Auth.parse_acl_operation(operation) do
+          {:ok, op} -> fun.(op, pattern)
+          :error -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_operation"})
+        end
+
+      _malformed ->
+        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    end
+  end
+
   defp respond_user_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
 
   defp respond_user_result(socket, {:error, reason}, _ok_status) do
@@ -594,8 +646,16 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, _session),
     do: handle_user_password(socket, rest, headers)
 
-  defp handle_route(socket, %{method: :DELETE, path: "/users/" <> username}, _headers, _client_ip, _session),
-    do: handle_delete_user(socket, username)
+  # Per-topic ACL management (P5): /users/:username/acls — GET lists, POST grants, DELETE revokes. A DELETE
+  # on a bare /users/:username (no /acls suffix) falls back to deleting the user.
+  defp handle_route(socket, %{method: :GET, path: "/users/" <> rest}, _headers, _client_ip, _session),
+    do: route_acl(socket, rest, &handle_list_acls(socket, &1), fn -> serve_404(socket) end)
+
+  defp handle_route(socket, %{method: :POST, path: "/users/" <> rest}, headers, _client_ip, _session),
+    do: route_acl(socket, rest, &handle_grant_acl(socket, &1, headers), fn -> serve_404(socket) end)
+
+  defp handle_route(socket, %{method: :DELETE, path: "/users/" <> rest}, headers, _client_ip, _session),
+    do: route_acl(socket, rest, &handle_revoke_acl(socket, &1, headers), fn -> handle_delete_user(socket, rest) end)
 
   defp handle_route(socket, _, _headers, _client_ip, _session), do: serve_404(socket)
 
