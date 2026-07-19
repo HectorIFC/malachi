@@ -131,6 +131,17 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 
 ## 4. Roadmap faseado
 
+> **STATUS DA AUDITORIA (2026-07-19).** O core do port está funcionalmente **completo**: Fase 0 (modelo de
+> log durável) ✅, Fase 1 (distribuição: DS-RSM sobre `ra`, membership SWIM, replicação por quórum) ✅, e a
+> Fase 3/escala (control plane **shardado** por vnodes, **split de vnode sobre `ra`** end-to-end, **heal**
+> re-replicação, **failover de primário**, **consumer groups multi-nó** A1–A5, lease/rebalancing incl.
+> auto-rebalancer opt-in) ✅. **Auth/segurança** (Fases P1–P6 + mTLS/OIDC + ACL por-tópico) ✅, **pausado por
+> maturidade** (2026-07-19). Os marcadores 🚧/⏳ antigos nas linhas do split/heal/failover/coordinator foram
+> **corrigidos nesta auditoria** — estavam stale. **Genuinamente aberto:** (1) **re-sharding** (mudar a
+> *contagem* de vnodes — R1/R2 assumem o mesmo conjunto de ids; ver §8.4 fim), (2) **Fase 2 — eficiência
+> nativa** (NIF Rust/RocksDB, **condicional a profiling**, ver §"Fase 2"). LDAP e multi-tenancy tenant/namespace
+> (5-1B) foram **recusados** por decisão (ver `AUTH_USER_MANAGEMENT.md`).
+
 ### Fase 0 — Persistência e modelo de log (Elixir puro)
 - ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
   (file-per-segment, batching, fsync-antes-do-ack, índice esparso, sealing, crash recovery,
@@ -268,10 +279,11 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   Testado: roteamento ao cluster certo, query consistente, **sharding entre 2 clusters Raft reais**
   (cada topic só existe no cluster que o roteia), erro de comando propagado, ring vazio → `:no_vnode`.
   Escopo: **vnodes estáticos** (split-sobre-ra adiado), single-node (multi-node depende de membership).
-  - 🚧 **Split de vnode sobre `ra` (épico — migrar metadado entre grupos Raft, o que o NorthGuard faz:**
+  - ✅ **Split de vnode sobre `ra` (épico CONCLUÍDO — migrar metadado entre grupos Raft, o que o NorthGuard faz:**
     *"break the state in half and basically spawn another raft group"*, transcrição do meetup). A lógica pura
-    single-process já existe (`DSRSM.split_vnode` migra topics deslocados via `extract_topic`/`insert_topic`);
-    falta a orquestração sobre os grupos `ra` reais. **Decisão de arquitetura do ring (corrigida por fidelidade):**
+    single-process (`DSRSM.split_vnode` migra topics deslocados via `extract_topic`/`insert_topic`) e a
+    **orquestração sobre os grupos `ra` reais foi construída de ponta a ponta** (VS/Int/Endurecimento A-C/1B
+    abaixo — split real funcionando, ver `VnodeSplit`/`SplitCoordinator`). **Decisão de arquitetura do ring (corrigida por fidelidade):**
     o ring (topologia) é **estado global mínimo disseminado por gossip (SWIM)** — o que o NorthGuard faz
     (transcrição: *"we also use this dissemination for spreading some minimal global like cluster metadata"*;
     *"very minimal global states"*), **não** um cluster `ra` de topologia (mais CP, mas menos fiel). Reusa o
@@ -569,8 +581,11 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   persiste entre selas → id nunca reusado). API de `produce`/`read` inalterada (segments são
   bookkeeping aditivo). Testado: registro no 1º produce, replica set via HRW, rollover por bytes
   (1 record/segment e overshoot soft), sela em split/merge, validação de policy.
-  - ⏳ Próximo: fiar `heal` (re-replicação) num gatilho de mudança de membership; rollover por
-    tempo/contagem além de bytes.
+  - ✅ **`heal` (re-replicação) fiado.** `Malachi.Cluster.SelfHealing.heal_sealed/4` (backfill de selados
+    sub-replicados via `Catchup`) + gatilho reativo no write-path pro segment ativo (`reactive_healing_test`),
+    aplicados pelo `HealCoordinator` (reconcile level-triggered contra o live set do membership SWIM), fiado
+    no `application.ex` (`healer_child` node-wide + `heal_vnode_child` por-vnode). *Menor: rollover de segment
+    por tempo/contagem além de bytes (refinamento).*
 - ✅ **`Malachi.Cluster.ReplicaTracker`** — núcleo **puro** de commit por quórum da replicação de
   **um segment** (a lógica determinística do mecanismo, sem processos/rede). `replica_set` ordenado
   (1º = primário); `ack/3` registra o offset durável de cada réplica (monotônico, ignora regressão);
@@ -644,7 +659,11 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   no quórum até sincronizar). Zero código de gatilho novo. Limitação conhecida: sob escrita sustentada
   muito rápida pode não alcançar (sem throttling — refinamento futuro). Testado in-process: réplica
   nova num segment ativo backfilla do começo e passa a seguir ao vivo.
-  - ⏳ Próximo: failover de primário; multi-node (membership/SWIM).
+  - ✅ **Failover de primário fiado.** `Malachi.Cluster.Failover.plan/2` (promove uma réplica viva à cabeça
+    do `replica_set` quando o primário de um segment **ativo** morre — dado já está nela, sem mover bytes),
+    aplicado pelo `HealCoordinator` junto do heal, contra o live set multi-nó do membership SWIM. Testado
+    (`failover_test`, `replicated_dsrsm_ha_test`). *(A camada pura já anotava "failover depois" no
+    `ReplicaTracker`/`ReplicationServer` — feito.)*
 - ✅ **`Malachi.Cluster.Membership` (máquina de estado SWIM pura)** — a view determinística de
   membership: `alive`/`suspect`/`dead` por membro + **incarnation**, sem processos/timers/rede. A
   regra única é um *join* na ordem lexicográfica `{incarnation, rank}` (`alive < suspect < dead`),
@@ -1874,7 +1893,8 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
         inteiro **opaco** (offset nil), um member ack (commit + heartbeat + credit) é aceito e um produce
         posterior ainda faz push. Suíte 767 testes 0 falhas; credo/dialyzer/format limpos. **G1 (consumer
         groups) + streaming member-scoping concluídos.**
-    - 🚧 **Coordinator cluster wiring (épico — consumer groups corretos multi-nó).** Gap que o G1 deixou
+    - ✅ **Coordinator cluster wiring (épico CONCLUÍDO — consumer groups corretos multi-nó; A1–A5 fecham, ver
+      abaixo).** Gap que o G1 deixou
       explícito: o `GroupCoordinator` é um GenServer **local por nó** (`Malachi.LogGroupCoordinator`), com
       membership em memória. Num cluster, membros conectados a nós diferentes veem assignments **divergentes**
       → a invariante "cada range sob exatamente um membro" quebra entre nós. Alvo: rotear a coordenação de um
