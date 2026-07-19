@@ -234,6 +234,23 @@ class MalachiClient {
     return wire.decodeListUsersResp(body);
   }
 
+  // per-topic ACL management. operation: 'produce' | 'consume'; pattern: a topic or a *-suffixed prefix.
+  async grantAcl(username, operation, pattern) {
+    await this._request(wire.API.grantAcl, wire.encodeAclReq(username, operation, pattern));
+    return true;
+  }
+
+  async revokeAcl(username, operation, pattern) {
+    await this._request(wire.API.revokeAcl, wire.encodeAclReq(username, operation, pattern));
+    return true;
+  }
+
+  // Resolves with `[{ operation, resource }]` for the user.
+  async listAcls(username) {
+    const body = await this._request(wire.API.listAcls, wire.encodeListAclsReq(username));
+    return wire.decodeListAclsResp(body);
+  }
+
   close() {
     this.closed = true;
     if (this.socket) {

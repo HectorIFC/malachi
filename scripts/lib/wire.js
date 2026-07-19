@@ -27,6 +27,10 @@ const API = {
   deleteUser: 9,
   changePassword: 10,
   listUsers: 11,
+  // admin per-topic ACL management (require the admin permission)
+  grantAcl: 14,
+  revokeAcl: 15,
+  listAcls: 16,
 };
 
 const OK = 0;
@@ -240,6 +244,29 @@ function decodeListUsersResp(payload) {
   return users;
 }
 
+// admin per-topic ACL management. operation is "produce"/"consume"; pattern is a topic or a *-suffixed prefix.
+// grant and revoke share the request shape.
+function encodeAclReq(username, operation, pattern) {
+  return Buffer.concat([putStr(username), putStr(operation), putStr(pattern)]);
+}
+
+function encodeListAclsReq(username) {
+  return putStr(username);
+}
+
+// list_acls response: <count::u32, (putStr(operation), putStr(resource))*>.
+function decodeListAclsResp(payload) {
+  const r = new Reader(payload);
+  const count = r.u32();
+  const acls = [];
+  for (let i = 0; i < count; i++) {
+    const operation = r.str();
+    const resource = r.str();
+    acls.push({ operation, resource });
+  }
+  return acls;
+}
+
 module.exports = {
   API,
   OK,
@@ -262,4 +289,7 @@ module.exports = {
   encodeDeleteUserReq,
   encodeChangePasswordReq,
   decodeListUsersResp,
+  encodeAclReq,
+  encodeListAclsReq,
+  decodeListAclsResp,
 };

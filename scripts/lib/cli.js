@@ -45,10 +45,13 @@ function parseArgs(argv, valueFlags = []) {
   return { positional, flags };
 }
 
-// Prints a connection error hint and exits non-zero — the common failure the CLIs hit.
+// Prints the error and exits non-zero. The "is the server up?" hint only helps for a connection failure —
+// a Node network/system error carries an `err.code` (ECONNREFUSED, ETIMEDOUT, ...); an error the server sent
+// back (a MalachiError like permission_denied / invalid_operation) has none, meaning the server is reachable,
+// so the hint is suppressed there.
 function fail(err, cfg) {
   console.error(colors.red(`\nError: ${err.message}`));
-  if (cfg) console.error(colors.gray(`   Is the server running at ${cfg.host}:${cfg.port}?`));
+  if (cfg && err.code) console.error(colors.gray(`   Is the server running at ${cfg.host}:${cfg.port}?`));
   process.exit(1);
 }
 
