@@ -280,109 +280,120 @@ contract, so `ra` plugs in without rework.
   (it always lives in the vnode that routes to it, even after a vnode split) and **determinism**
   (the same sequence yields the same state).
 
-**Fase 1b, Replicação e membership:**
-- ✅ **`ra` integrado** (Raft real): `Malachi.Cluster.MetadataMachine` é uma `:ra_machine` cujo
-  `apply/3` **delega ao `Metadata.apply/2`**: a lógica de negócio não muda, só ganha replicação.
-  `Malachi.Cluster.MetadataServer` é o wrapper fino (start de cluster single-node, `command` via
-  log Raft, `query` linearizável, restart). Um cluster ra = um vnode; liderança = coordinator.
-  Testado: comandos replicados, query consistente, erro de comando propagado, **estado sobrevive
-  a restart** (log durável). Determinismo do `Metadata` (property tests) é o que torna isso seguro.
-- ✅ **`Malachi.Cluster.ReplicatedDSRSM`**. O DS-RSM sobre Raft: HashRing + **um cluster `ra` por
-  vnode**. `command`/`query` roteiam por nome do topic ao cluster do vnode dono (sharding +
-  replicação por shard). Contraparte de produção do `DSRSM` puro (que os property tests exercitam).
-  Testado: roteamento ao cluster certo, query consistente, **sharding entre 2 clusters Raft reais**
-  (cada topic só existe no cluster que o roteia), erro de comando propagado, ring vazio → `:no_vnode`.
-  Escopo: **vnodes estáticos** (split-sobre-ra adiado), single-node (multi-node depende de membership).
-  - ✅ **Split de vnode sobre `ra` (épico CONCLUÍDO. Migrar metadado entre grupos Raft, o que o NorthGuard faz:**
-    *"break the state in half and basically spawn another raft group"*, transcrição do meetup). A lógica pura
-    single-process (`DSRSM.split_vnode` migra topics deslocados via `extract_topic`/`insert_topic`) e a
-    **orquestração sobre os grupos `ra` reais foi construída de ponta a ponta** (VS/Int/Endurecimento A-C/1B
-    abaixo: split real funcionando, ver `VnodeSplit`/`SplitCoordinator`). **Decisão de arquitetura do ring (corrigida por fidelidade):**
-    o ring (topologia) é **estado global mínimo disseminado por gossip (SWIM)**: o que o NorthGuard faz
-    (transcrição: *"we also use this dissemination for spreading some minimal global like cluster metadata"*;
-    *"very minimal global states"*), **não** um cluster `ra` de topologia (mais CP, mas menos fiel). Reusa o
-    gossip de atributos CRDT que o SWIM do malachi já tem. Fatiamento: **VS-1** primitivas puras + comandos ·
-    **VS-2b** ring versionado disseminado (o ring é pré-requisito: sem propagação, um split fica inconsistente
-    entre nós) · **VS-2a** orquestração do split sobre `ra` (subir o novo grupo, migrar pelo log, anexar a
-    versão de ring) · **VS-2c** consistência (janela de cutover) · **VS-3** teste multinode.
-    - ✅ **VS-1: migração completa (com offsets) + comandos determinísticos.** Achado que a fatia corrigiu: o
-      `Metadata.extract_topic` carregava topic+ranges+segments mas **não** os **committed offsets** (keyed por
-      `{group, topic}`) → num split, um consumer group **perdia a posição** e reprocessava tudo (at-least-once,
-      sem perda de dado, mas regressão séria). Agora `extract_topic`/`insert_topic` **carregam os offsets** (no
-      export, keyed por group; o topic é implícito): o binding de policy já viajava no struct do topic. E,
-      pro split ra-backed dirigir a migração pelo **log Raft** de cada vnode, novos comandos determinísticos
-      `:extract_topic` (reply = export) / `:insert_topic` no `Metadata.apply/2` (com catch-all defensivo
-      intacto). Pura, in-VM, zero rede. Testado: extract carrega offsets por-group e deixa co-located intacto;
-      round-trip preserva a posição; os comandos relocam via log; extract de topic ausente = no-op nil; +
-      cobertura no `DSRSM` (split preserva offsets end-to-end). Suíte 786 testes 0 falhas (+5); credo/dialyzer/
-      format limpos.
-    - ✅ **VS-2b-1: ring versionado disseminável (núcleo puro CRDT).** A fundação da propagação: novo
-      `Malachi.Cluster.RingTopology`: a topologia de roteamento (`HashRing` + `%{vnode => [nodes]}`) tagueada
-      com uma `version` monotônica. **Por que gossip e não um cluster `ra`:** o usuário perguntou "B não é mais
-      fiel?" e a transcrição confirmou (linha 537: dissemina metadado global mínimo pelo SWIM; linha 610: estado
-      global mínimo): eu havia recomendado o cluster `ra` por instinto de CP, **corrigido** por fidelidade.
-      `merge/2` é um **join CRDT**: maior `version` vence (last-version-wins), com tiebreak determinístico por
-      ordem-total da serialização no raro clash de mesma versão (single-writer: só o líder `advance`) → merge
-      **comutativo/associativo/idempotente**, converge em qualquer ordem de gossip. Puro, zero rede. Testado:
-      `new`/`advance` (versão monotônica); merge mantém a maior versão, idempotente, comutativo (incl. no clash),
-      associativo, converge à última versão em qualquer ordem: 6. Suíte 792 testes 0 falhas (+6); credo/dialyzer/
-      format limpos.
-      - ✅ **VS-2b-2a: disseminação do `RingTopology` pela gossip do SWIM.** O `MembershipServer` passa a
-        **carregar a topologia junto** de cada mensagem de gossip (o mesmo caminho de disseminação que o
-        NorthGuard usa pro estado global mínimo). Design de **churn mínimo**: um `gossip_payload/1` (view +
-        topologia) substitui o builder de payload em todos os 8 sends, e o `merge_updates` passa a aceitar o
-        payload `{updates, topology}`: com **cláusula defensiva** pra um peer que mande só a lista (novo-
-        recebe-antigo, ex.: injeção de teste / gossip pré-topologia), e `merge_topology/2` nil-tolerante que
-        faz o join CRDT do VS-2b-1. **Limitação anotada:** um nó **antigo** recebendo o payload novo quebraria,
-        então um rolling upgrade completo do protocolo SWIM não é objetivo agora (deploy homogêneo). Nova API
-        `set_topology/2` (adota a maior versão localmente; gossip leva adiante) / `topology/1`. Um handler de
-        teste que inspecionava o payload cru foi ajustado pro novo shape. Testado in-VM: `set_topology` num nó
-        **propaga** por gossip; **maior versão vence** em todos os nós, seja quem setou (last-version-wins); +
-        o HA multinode do membership **verde** (gossip real com o novo payload não regride). Suíte 794 testes 0
-        falhas (+2); credo/dialyzer/format limpos.
-        - ✅ **VS-2b-2b. Adoção local do ring quando a versão avança.** Fecha a propagação: o `MembershipServer`
-          ganha um seam **`on_topology`** (padrão dos outros seams, ex.: `ranges_fun`) que dispara **só num
-          avanço de versão** (`topology_advanced?`: `nil→qualquer`, ou `new > old`), não em versão igual/menor:
-          com o novo `RingTopology`, tanto via `set_topology` quanto via gossip. A app fia `on_topology`
-          (`adopt_ring_topology/1`) pra **aplicar o ring novo ao `CoordinatorRouter`**: deriva o `servers`
-          (`%{vnode => {vnode, nó}}`, qualquer membro; o router resolve o líder vivo) das `placements` e chama
-          `put_topology`. O hook roda **inline** no server (deve ser leve e não levantar: a app respeita).
-          **Escopo:** só o roteamento de consumer-group (`CoordinatorRouter`); a adoção do roteamento de
-          **metadado** (`ReplicatedDSRSM`, acoplado ao runtime do broker) é dirigida pela própria orquestração
-          do split (VS-2a), não por gossip. Single-node inalterado (o `MembershipServer` só sobe no modo
-          clusterizado). Testado in-VM: o hook dispara no avanço (v1, depois v2), **não** dispara em versão
-          igual/menor (`refute_receive`), e dispara num nó que aprende versão maior **por gossip**; boot
-          single-node ok; HA multinode do membership verde. Suíte 796 testes 0 falhas (+2); credo/dialyzer/
-          format limpos. **VS-2b (propagação do ring por gossip) concluído.**
-      - ✅ **VS-2a: orquestração do split sobre `ra` (copy-first).** `ReplicatedDSRSM.split_vnode/4`: sobe o
-        grupo `ra` do vnode novo, descobre os topics **deslocados** (os que passam a rotear pro novo sob o ring
-        novo) e os **migra** entre os grupos `ra`: o que o NorthGuard faz (*spawn a new raft group + break off
-        that half of the state*). Decisão **copy-first** (escolhida pra segurança): por topic, `:insert_topic` no
-        novo → `:extract_topic` na origem, então **nenhuma falha isolada perde um topic** (crash pós-insert deixa
-        um duplicado inócuo que o ring novo ignora). Snapshot linearizável da origem (`&Function.identity/1`, não
-        closure, pra rodar no líder) → computa deslocados + exports **localmente** (puro) → aplica os comandos.
-        Suporte pro copy-first: nova `Metadata.export_topic/2` (read-only) e o `extract_topic` **refatorado pra
-        reusá-la** (DRY). Devolve o estado crescido só no sucesso total; falha de migração → `{:error, {:migrate,
-        topic, ...}}` (split parcial fica pra reconciliar). **Escopo:** o mecanismo; **fora:** fencing de escrita
-        concorrente no topic em migração (VS-2c) e a publicação do ring via `set_topology`/fiação no coordenador
-        (integração). Testado `:multinode` (grupos `ra` locais, 3x estável): split de um vnode com topic + offsets
-        → "orders" passa a rotear pro vnode novo, topic **e committed offsets** preservados lidos do grupo `ra`
-        novo, e a origem **não** tem mais o topic (extract copy-first) + unit de `export_topic` (read-only, nil em
-        ausente). Suíte 796 testes 0 falhas (+1 default, +1 multinode); credo/dialyzer/format limpos.
-      - ✅ **VS-2c-1a. Fence de migração (núcleo, seal-first).** O problema que fecha: durante a migração, uma
-        escrita concorrente no topic (roteada pra origem, ring ainda velho) **depois** do snapshot seria perdida
-        (o extract remove o estado atual, mas o insert usou o snapshot). Fix fiel ao NorthGuard (transcrição:
-        *"we first seal R1 to create R2 and R3"*. Selar dá as garantias de ordem): **fencer** o topic. Novo
-        estado `migrating` (um set `%{name => true}`: map, não `MapSet`, pra evitar o atrito de tipo opaco do
-        dialyzer com campo de struct) + comandos `:begin_migration`/`:end_migration`. O `apply/2` público virou um
-        **guard central**: renomeei as 15 clauses pra `do_apply/2` e a `apply/2` agora, antes de despachar,
-        resolve o **topic-alvo** do comando (`command_topic/2`, direto pra topic-scoped, via `range`/`segment →
-        topic` pros de range/segment) e **rejeita `{:error, :migrating}`** se ele está fencido. Comandos de leitura
-        e os de migração (create/define_policy/begin/end/extract/insert) **nunca** são fencidos. O `extract_topic`
-        limpa o fence (o topic sumiu). Pura, determinística. Testado: `begin_migration` rejeita mutantes (incl. um
-        comando de range que resolve pro topic) deixando o estado intacto; leituras e extract/insert passam;
-        `end_migration` levanta; fence num topic não afeta co-located; begin em topic ausente erra, 5. Suíte 802
-        testes 0 falhas (+5); credo/dialyzer/format limpos.
+**Phase 1b, replication and membership:**
+- ✅ **`ra` integrated** (real Raft): `Malachi.Cluster.MetadataMachine` is a `:ra_machine` whose
+  `apply/3` **delegates to `Metadata.apply/2`**, so the business logic does not change, it only gains
+  replication. `Malachi.Cluster.MetadataServer` is the thin wrapper (starting a single-node cluster,
+  `command` through the Raft log, a linearizable `query`, restart). One ra cluster equals one vnode;
+  leadership equals the coordinator. Tested: commands replicated, query consistent, a command error
+  propagated, and **state surviving a restart** (a durable log). `Metadata`'s determinism (the property
+  tests) is what makes that safe.
+- ✅ **`Malachi.Cluster.ReplicatedDSRSM`**. The DS-RSM over Raft: a HashRing plus **one `ra` cluster per
+  vnode**. `command`/`query` route by topic name to the owning vnode's cluster (sharding plus
+  per-shard replication). The production counterpart of the pure `DSRSM` the property tests exercise.
+  Tested: routing to the right cluster, consistent query, **sharding across 2 real Raft clusters**
+  (each topic exists only in the cluster that routes to it), a command error propagated, and an empty
+  ring yielding `:no_vnode`. Scope: **static vnodes** (split-over-ra deferred), single-node (multi-node
+  depends on membership).
+  - ✅ **Vnode split over `ra` (epic COMPLETE. Migrating metadata between Raft groups, which is what
+    NorthGuard does:** *"break the state in half and basically spawn another raft group"*, from the meetup
+    transcript). The pure single-process logic (`DSRSM.split_vnode` migrates displaced topics through
+    `extract_topic`/`insert_topic`) and the **orchestration over the real `ra` groups were both built end to
+    end** (VS/Int/Hardening A-C/1B below: a real split working, see `VnodeSplit`/`SplitCoordinator`).
+    **Ring architecture decision (corrected for fidelity):** the ring (topology) is **minimal global state
+    disseminated by gossip (SWIM)**, which is what NorthGuard does (transcript: *"we also use this
+    dissemination for spreading some minimal global like cluster metadata"*; *"very minimal global states"*),
+    **not** a topology `ra` cluster (more CP, but less faithful). It reuses the CRDT attribute gossip
+    malachi's SWIM already has. Slicing: **VS-1** pure primitives plus commands · **VS-2b** a versioned,
+    disseminated ring (the ring is a prerequisite: without propagation a split is inconsistent between
+    nodes) · **VS-2a** split orchestration over `ra` (bring the new group up, migrate through the log,
+    attach the ring version) · **VS-2c** consistency (the cutover window) · **VS-3** a multinode test.
+    - ✅ **VS-1: complete migration (with offsets) plus deterministic commands.** A finding this slice
+      fixed: `Metadata.extract_topic` carried topic, ranges and segments but **not** the **committed
+      offsets** (keyed by `{group, topic}`), so on a split a consumer group **lost its position** and
+      reprocessed everything (at-least-once, no data loss, but a serious regression). Now
+      `extract_topic`/`insert_topic` **carry the offsets** (in the export they are keyed by group, since the
+      topic is implicit); the policy binding already travelled in the topic struct. And, so the ra-backed
+      split can drive the migration through each vnode's **Raft log**, new deterministic commands
+      `:extract_topic` (whose reply is the export) and `:insert_topic` in `Metadata.apply/2` (with the
+      defensive catch-all intact). Pure, in-VM, zero network. Tested: extract carries per-group offsets and
+      leaves co-located ones intact; the round trip preserves the position; the commands relocate through the
+      log; extracting an absent topic is a nil no-op; plus coverage in `DSRSM` (a split preserves offsets end
+      to end). Suite at 786 tests, 0 failures (+5); credo, dialyzer and format clean.
+    - ✅ **VS-2b-1: a versioned, disseminable ring (a pure CRDT core).** The foundation of propagation: a new
+      `Malachi.Cluster.RingTopology`, the routing topology (`HashRing` + `%{vnode => [nodes]}`) tagged with a
+      monotonic `version`. **Why gossip rather than an `ra` cluster:** the user asked "isn't B more faithful?"
+      and the transcript confirmed it (line 537: it disseminates minimal global metadata over SWIM; line 610:
+      minimal global state). I had recommended the `ra` cluster out of CP instinct, and was **corrected** on
+      fidelity. `merge/2` is a **CRDT join**: the higher `version` wins (last-version-wins), with a
+      deterministic tiebreak by total order of the serialization in the rare same-version clash (it is
+      single-writer: only the leader calls `advance`), so the merge is
+      **commutative, associative and idempotent** and converges in any gossip order. Pure, zero network.
+      Tested: `new`/`advance` (monotonic version); merge keeps the higher version, is idempotent, commutative
+      (including in a clash), associative, and converges to the last version in any order: 6 tests. Suite at
+      792 tests, 0 failures (+6); credo, dialyzer and format clean.
+      - ✅ **VS-2b-2a: disseminating the `RingTopology` over SWIM gossip.** `MembershipServer` now **carries
+        the topology along** with every gossip message (the same dissemination path NorthGuard uses for
+        minimal global state). A **minimal-churn** design: one `gossip_payload/1` (view + topology) replaces
+        the payload builder in all 8 sends, and `merge_updates` now accepts the `{updates, topology}` payload,
+        with a **defensive clause** for a peer that sends only the list (new-receives-old, for example test
+        injection or pre-topology gossip), plus a nil-tolerant `merge_topology/2` doing VS-2b-1's CRDT join.
+        **A recorded limitation:** an **old** node receiving the new payload would break, so a full rolling
+        upgrade of the SWIM protocol is not a goal right now (homogeneous deploy). New API: `set_topology/2`
+        (adopting the higher version locally, with gossip carrying it onward) and `topology/1`. A test handler
+        that inspected the raw payload was adjusted to the new shape. Tested in-VM: `set_topology` on one node
+        **propagates** by gossip; the **higher version wins** on every node regardless of who set it
+        (last-version-wins); and the membership multinode HA test stays **green** (real gossip with the new
+        payload does not regress). Suite at 794 tests, 0 failures (+2); credo, dialyzer and format clean.
+        - ✅ **VS-2b-2b. Adopting the ring locally when the version advances.** This closes propagation:
+          `MembershipServer` gains an **`on_topology`** seam (the same pattern as the other seams, such as
+          `ranges_fun`) that fires **only on a version advance** (`topology_advanced?`: `nil→anything`, or
+          `new > old`), not on an equal or lower version, carrying the new `RingTopology`, whether it arrived
+          through `set_topology` or through gossip. The app wires `on_topology` (`adopt_ring_topology/1`) to
+          **apply the new ring to `CoordinatorRouter`**: it derives `servers` (`%{vnode => {vnode, node}}`,
+          any member, since the router resolves the live leader) from the `placements` and calls
+          `put_topology`. The hook runs **inline** in the server (so it must be light and must not raise, and
+          the app respects that). **Scope:** consumer-group routing only (`CoordinatorRouter`); adopting
+          **metadata** routing (`ReplicatedDSRSM`, coupled to the broker runtime) is driven by the split
+          orchestration itself (VS-2a), not by gossip. Single-node is unaffected (`MembershipServer` only
+          starts in clustered mode). Tested in-VM: the hook fires on an advance (v1, then v2), does **not**
+          fire on an equal or lower version (`refute_receive`), and fires on a node that learns a higher
+          version **through gossip**; single-node boot fine; membership multinode HA green. Suite at 796
+          tests, 0 failures (+2); credo, dialyzer and format clean. **VS-2b (ring propagation by gossip) is
+          complete.**
+      - ✅ **VS-2a: split orchestration over `ra` (copy-first).** `ReplicatedDSRSM.split_vnode/4` brings the new
+        vnode's `ra` group up, works out the **displaced** topics (those that now route to the new one under the
+        new ring) and **migrates** them between the `ra` groups, which is what NorthGuard does (*spawn a new raft
+        group + break off that half of the state*). A **copy-first** decision (chosen for safety): per topic,
+        `:insert_topic` on the new one, then `:extract_topic` on the source, so **no single failure loses a
+        topic** (a crash after the insert leaves a harmless duplicate the new ring ignores). A linearizable
+        snapshot of the source (`&Function.identity/1`, not a closure, so it runs on the leader) → compute the
+        displaced set and the exports **locally** (pure) → apply the commands. Supporting copy-first: a new
+        read-only `Metadata.export_topic/2`, with `extract_topic` **refactored to reuse it** (DRY). It returns
+        the grown state only on total success; a migration failure yields `{:error, {:migrate, topic, ...}}`
+        (a partial split is left to reconcile). **Scope:** the mechanism. **Out of scope:** fencing concurrent
+        writes to a migrating topic (VS-2c) and publishing the ring through `set_topology`, plus the coordinator
+        wiring (integration). Tested under `:multinode` (local `ra` groups, stable 3x): splitting a vnode with a
+        topic and offsets, "orders" starts routing to the new vnode, the topic **and its committed offsets** are
+        preserved and read back from the new `ra` group, and the source **no longer** has the topic (copy-first
+        extract), plus a unit test for `export_topic` (read-only, nil when absent). Suite at 796 tests, 0
+        failures (+1 default, +1 multinode); credo, dialyzer and format clean.
+      - ✅ **VS-2c-1a. The migration fence (core, seal-first).** The problem it closes: during a migration, a
+        concurrent write to the topic (routed to the source, since the ring is still the old one) **after** the
+        snapshot would be lost (the extract removes the current state, but the insert used the snapshot). The
+        fix is faithful to NorthGuard (transcript: *"we first seal R1 to create R2 and R3"*, since sealing is
+        what gives the ordering guarantees): **fence** the topic. New `migrating` state (a set `%{name => true}`:
+        a map rather than a `MapSet`, to avoid dialyzer's opaque-type friction with a struct field) plus
+        `:begin_migration`/`:end_migration` commands. The public `apply/2` became a **central guard**: the 15
+        clauses were renamed to `do_apply/2`, and `apply/2` now resolves the command's **target topic** before
+        dispatching (`command_topic/2`, directly for topic-scoped commands, and through `range`/`segment →
+        topic` for range and segment ones) and **rejects with `{:error, :migrating}`** when it is fenced. Read
+        commands and the migration commands themselves (create/define_policy/begin/end/extract/insert) are
+        **never** fenced. `extract_topic` clears the fence (the topic is gone). Pure, deterministic. Tested:
+        `begin_migration` rejects mutating commands (including a range command that resolves to the topic)
+        leaving the state intact; reads and extract/insert pass through; `end_migration` lifts it; fencing one
+        topic does not affect a co-located one; begin on an absent topic errors: 5 tests. Suite at 802 tests, 0
+        failures (+5); credo, dialyzer and format clean.
       - ✅ **VS-2c-1b: o `split_vnode` fencia a origem antes do snapshot.** Usa o fence do VS-2c-1a na
         orquestração: o `migrate_from` agora (1) lê a origem pra achar os deslocados, (2) **`:begin_migration`
         em cada um** (`fence_topics`), (3) **re-lê** a origem já estável (o re-read captura qualquer escrita que
