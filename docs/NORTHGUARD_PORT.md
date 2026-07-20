@@ -137,10 +137,16 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 > re-replicação, **failover de primário**, **consumer groups multi-nó** A1–A5, lease/rebalancing incl.
 > auto-rebalancer opt-in) ✅. **Auth/segurança** (Fases P1–P6 + mTLS/OIDC + ACL por-tópico) ✅, **pausado por
 > maturidade** (2026-07-19). Os marcadores 🚧/⏳ antigos nas linhas do split/heal/failover/coordinator foram
-> **corrigidos nesta auditoria**. Estavam stale. **Genuinamente aberto:** (1) **re-sharding** (mudar a
-> *contagem* de vnodes: R1/R2 assumem o mesmo conjunto de ids; ver §8.4 fim), (2) **Fase 2 - eficiência
-> nativa** (NIF Rust/RocksDB, **condicional a profiling**, ver §"Fase 2"). LDAP e multi-tenancy tenant/namespace
-> (5-1B) foram **recusados** por decisão (ver `AUTH_USER_MANAGEMENT.md`).
+> **corrigidos nesta auditoria**. Estavam stale. LDAP e multi-tenancy tenant/namespace (5-1B) foram
+> **recusados** por decisão (ver `AUTH_USER_MANAGEMENT.md`).
+>
+> **Atualização (2026-07-20).** O **re-sharding (grow)** saiu de aberto: RS-1/RS-2/RS-3 entregues
+> (`ReshardPlan`, `ReshardCoordinator`, fiação + `mix malachi.reshard --to N`), ver §8.4 fim. A seção 7,
+> que listava quatro "questões em aberto", virou **registro de decisão**: as quatro já estavam
+> implementadas. **Genuinamente aberto agora:** (1) **ring durável** (o reshard e o split não sobrevivem
+> a restart de cluster inteiro, ⏳ anotado em §8.4), (2) **merge/shrink** de vnodes (fora de escopo
+> registrado), (3) **Fase 2, eficiência nativa** (NIF Rust/RocksDB, **condicional a profiling**), (4) a
+> **trilha de documentação** (§9).
 
 ### Fase 0: Persistência e modelo de log (Elixir puro)
 - ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
@@ -1443,13 +1449,40 @@ Substitutos:
 
 ---
 
-## 7. Questões em aberto
+## 7. Decisões de arquitetura (as quatro questões que abriram o port)
 
-1. Replicação na Fase 1: implementar do zero sobre `ra`/streams, ou apostar mais no `ra`?
-2. Índice esparso na Fase 0: arquivo `.idx` próprio vs. ETS persistido vs. DETS?
-3. Compatibilidade de protocolo: manter o protocolo TCP atual do malachi ou desenhar o
-   sessionizado do NorthGuard desde a Fase 0?
-4. Formato de offset: opaco (estilo Xinfra) desde já, ou `long` simples no início?
+Esta seção nasceu como "questões em aberto". As quatro foram **decididas e implementadas**; ficam aqui
+com a resposta e o motivo, que é o que ainda tem valor. Cada uma aponta pro código que a materializa.
+
+1. **Replicação: sobre `ra` ou do zero?** → **As duas, em planos separados.** O **control plane**
+   (metadado) roda sobre `ra`: cada vnode é um cluster Raft, com a máquina em
+   `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). O **data plane** (records nos segments)
+   **não** passa pelo `ra`: é replicação por quórum própria em `Malachi.Cluster.ReplicationServer`, que
+   embarca do primário pros followers e só reconhece a escrita depois que um quórum deu `fsync`,
+   tolerando até ⌊(N-1)/2⌋ followers lentos ou inalcançáveis (`{:error, :no_quorum}` fora disso). O
+   motivo da divisão: metadado é pequeno, precisa de linearizabilidade e muda pouco, o que é exatamente
+   o ponto forte do Raft; records são volume alto e sequencial, onde passar cada batch por um log de
+   consenso pagaria uma segunda escrita durável sem ganhar nada, já que o próprio segment **é** o log.
+
+2. **Índice esparso: `.idx` próprio, ETS persistido ou DETS?** → **Arquivo `.idx` próprio.** Um sidecar
+   por segment (`Malachi.Log.Segment.index_path/1` devolve `<id>.idx`), carregado em memória num
+   `:array` ordenado por offset para busca floor em O(log n), com uma entrada a cada
+   `@default_index_interval` (4096) bytes. ETS persistido e DETS foram descartados: ambos acoplariam o
+   formato em disco a estruturas do BEAM, e o objetivo do port é um formato de segment que uma
+   implementação nativa (Fase 2) possa reabrir sem falar BEAM.
+
+3. **Protocolo: manter o do malachi ou sessionizar como o NorthGuard?** → **Mantido e estendido.**
+   Continua `<<len::32, body>>` com `<<api_key::16, correlation_id::32, payload>>`, onde o
+   `correlation_id` já dá pipelining (casar resposta com request), que era o ganho concreto que a
+   sessionização traria. Estendido pra 17 api_keys, cobrindo o log, consumer groups, auth (senha, mTLS,
+   token) e ACLs. Ver `Malachi.Wire`.
+
+4. **Offset: opaco ou `long` simples?** → **Cursor opaco desde o início**, estilo Xinfra. O cliente
+   nunca vê offset: os records na wire não carregam nenhum, a posição viaja no cursor
+   (`Malachi.LogApi`, `@type cursor :: String.t()`). Isso é o que permite re-shardar e splitar range sem
+   quebrar cliente, já que a posição não é mais um número que ele possa ter interpretado. Como o cursor
+   volta de um cliente não confiável, `decode_cursor/1` desserializa com `binary_to_term(_, [:safe])` e
+   ainda valida o formato, então um cursor forjado não vira átomo novo nem termo arbitrário.
 
 ---
 
@@ -2063,3 +2096,35 @@ o que foi deliberadamente **não** adotado (com o porquê):
   - **Fora de escopo (registrado):** **merge/diminuir** vnodes (drenar pro sucessor + `remove_vnode` +
     deletar o grupo `ra`: genuinamente novo) e **retoken-to-even** (geometria exata de `sharded_vnodes/2`,
     exigiria primitiva de mover-token migrando todo vnode).
+
+---
+
+## 9. Documentação e tutoriais (GitHub Pages)
+
+O port tem cobertura de `@moduledoc` densa, mas nada disso era **publicado**: o `ex_doc` estava no
+projeto sem configuração, e o `mix docs` do CI descartava a saída. A trilha abaixo transforma isso num
+site em `hectorifc.github.io/malachi`, com referência de API e guias.
+
+- ✅ **DOC-1: configurar o ExDoc + `LICENSE`.** Bloco `docs:` no `mix.exs` (`main: "introduction"`,
+  `formatters: ["html"]` só, o epub dobrava o build do CI), `extras` com 16 documentos agrupados por
+  `groups_for_extras`, e `groups_for_modules` organizando os ~93 módulos em 8 grupos. Criado o `LICENSE`
+  (MIT), que o `package/0` declarava desde sempre sem o arquivo existir.
+- ✅ **DOC-2a: os três primeiros guias.** `introduction`, `getting-started` e `log-model` em
+  `docs/guides/`. A `introduction` foi **reescrita**, não herdada da landing page `docs/index.html`:
+  aquela página afirma "Message Queue", "ETS tables" e "SHA256 password hashing", e as três são falsas
+  (é um log, o storage é segment durável + `ra`, e o hashing é **Argon2**).
+- ✅ **DOC-3: publicar.** `.github/workflows/pages.yml`, build em push pra `main` + `workflow_dispatch`,
+  com o mesmo portão `--warnings-as-errors` do CI (referência quebrada falha o build em vez de publicar
+  link morto). Permissões **por job**: o build só lê a árvore, e só o deploy carrega as credenciais do
+  Pages, já que o build roda código de terceiros (`mix deps.get`). `cancel-in-progress: false` porque
+  cancelar um run no meio do upload deixaria o site meio publicado.
+- ⬜ **DOC-2b/2c: os guias que faltam.** Produzir e consumir; streaming com backpressure; autenticação
+  (senha, mTLS, OIDC); ACLs por-tópico; clustering, sharding e re-sharding; operação (dashboard,
+  métricas, TLS).
+- ⬜ **Remover a `docs/index.html`.** Depois que a fonte do Pages virar "GitHub Actions" ela deixa de ser
+  servida, mas continua no repositório com as três afirmações falsas acima. O conteúdo útil já migrou
+  pro guia `introduction`.
+
+> **Ação de operador, não commit:** trocar a fonte do Pages pra "GitHub Actions" em Settings → Pages. E o
+> `workflow_dispatch` só aparece na UI quando o arquivo está na branch default, então a ordem que
+> funciona é merge na `main` primeiro, troca do Settings depois.
