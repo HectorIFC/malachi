@@ -394,53 +394,58 @@ contract, so `ra` plugs in without rework.
         leaving the state intact; reads and extract/insert pass through; `end_migration` lifts it; fencing one
         topic does not affect a co-located one; begin on an absent topic errors: 5 tests. Suite at 802 tests, 0
         failures (+5); credo, dialyzer and format clean.
-      - ✅ **VS-2c-1b: o `split_vnode` fencia a origem antes do snapshot.** Usa o fence do VS-2c-1a na
-        orquestração: o `migrate_from` agora (1) lê a origem pra achar os deslocados, (2) **`:begin_migration`
-        em cada um** (`fence_topics`), (3) **re-lê** a origem já estável (o re-read captura qualquer escrita que
-        pegou a janela antes do fence), (4) migra copy-first do snapshot fencido. O `:extract_topic` **levanta**
-        o fence (o topic sumiu). Assim, nenhuma escrita concorrente corre a cópia: fecha o gap que o VS-2a
-        documentava. Numa falha parcial, os fences restantes **ficam de pé** (escritas bloqueadas nesses topics)
-        pra reconciliação. Fail-safe. Ressalva anotada: um topic **criado** durante o split que roteie pro novo
-        não é pego (create não é fencido); o caller quiesce. Testado (`:multinode`, 2x estável): o split feliz
-        segue verde (fence aplicado→levantado), e, novo, o topic migrado é **gravável no vnode novo** (o fence
-        não vazou pro destino; um topic fencido responderia `{:error, :migrating}`). Suíte 802 testes 0 falhas;
-        credo/dialyzer/format limpos.
-      - ✅ **Int-1a: `BrokerServer.adopt_topology/2` (adoção pura do roteamento de metadado).** O desafio da
-        integração: o roteamento de metadado do broker (o cache `dsrsm` com o ring + o `command_fun` sobre o
-        `replicated`) é **capturado no boot** com o ring fixo, então um split runtime não é adotado. `adopt_topology`
-        é a **função pura** (sub-fatia pure-first) que, dado o `Broker` + uma `RingTopology`, reconstrói o
-        roteamento: o cache adota o **ring novo** (vnodes existentes mantêm o `Metadata` cacheado, um vnode novo
-        começa **vazio** até o próximo refresh do `ra`) e o `command_fun` é reconstruído sobre o `%{vnode => server_id}`
-        derivado das `placements` (skip de placement vazio, como o `adopt_ring_topology`). Pura: o catch-up do
-        metadado do vnode novo é o side effect separado (refresh). Testado in-VM: adota o ring novo (v0+v1), v0
-        mantém o topic cacheado, v1 vazio, `command_fun` reconstruído (arity 3). Suíte 803 testes 0 falhas (+1);
-        credo/dialyzer/format limpos.
-      - ✅ **Int-1b: o `BrokerServer` adota a topologia por gossip (async).** Fecha a adoção runtime do
-        roteamento de metadado: um `handle_cast({:adopt_topology, topology})` reconstrói o roteamento
-        (`adopt_topology/2` do Int-1a) **e**: a parte que faltava pra correção - o `metadata_refresh` e o
-        `bootstrap.replicated` sobre o `replicated` novo, senão o `reconcile_metadata` periódico (que faz
-        `snapshot(replicated_velho)` + `put_cache`, substituindo o cache inteiro, ring incluso) **reverteria** o
-        ring adotado. O hook `on_topology` (VS-2b-2b, `adopt_ring_topology`) agora, além de atualizar o
-        `CoordinatorRouter` inline, faz **`GenServer.cast`** ao `Malachi.LogBroker`, **async** (não bloqueia o
-        membership server, que roda o hook inline) e **no-op se o broker não existe** (`cast` a nome ausente é
-        `:ok`, verificado; single-node não roda o broker shardado). DRY: a derivação de `servers` virou
-        `RingTopology.servers/1` (usada no broker e no router). Testado in-VM: o `handle_cast` adota o ring novo no
-        cache **e** aponta o `bootstrap.replicated`/refresh pro ring novo (reconcile não reverte); `servers/1` pura
-        (skip de placement vazio). Suíte 805 testes 0 falhas (+2); credo/dialyzer/format limpos. **Int-1 (broker
-        adota em runtime) concluído.**
-      - ✅ **Int-3: coordenador de split de ponta a ponta (sob lease) + baseline no boot.** **Int-3a:** o boot
-        (modo shardado) agora **semeia a topologia versão-0** na membership (`membership_child` passa o
-        `:topology` construído das `vnode_placement`), pra a gossip carregar o ring e um split **avançar** dele;
-        single-node/1-vnode não tem o que rotear → sem topologia. **Int-3b:** novo `Malachi.Cluster.VnodeSplit.split/5`.
-        Só o **líder do lease** age (`leader?` seam; senão `{:error, :not_leader}`): lê a `RingTopology` atual da
-        membership, reconstrói o `ReplicatedDSRSM`, chama `split_vnode` (migração fencida copy-first sobre `ra`,
-        VS-2a/2c), **avança** a versão e **publica** via `set_topology`. A partir daí a gossip dissemina (VS-2b) e
-        todo nó adota o ring novo pro roteamento de metadado (broker, Int-1) e de consumer-group (router,
-        VS-2b-2b). Junta todas as fatias VS/Int num split real. Testado `:multinode` (2x estável): um não-líder
-        recusa; o líder splita → a topologia da membership **avança pra v1** com o vnode novo publicado, **e** a
-        migração aconteceu sobre `ra` ("orders" passa a rotear/viver no cluster do vnode novo). Suíte 805 testes 0
-        falhas (+1 multinode); credo/dialyzer/format limpos. **Split de vnode sobre `ra` (VS + Int): o que o
-        NorthGuard faz, funcionando de ponta a ponta.**
+      - ✅ **VS-2c-1b: `split_vnode` fences the source before the snapshot.** It uses VS-2c-1a's fence in the
+        orchestration: `migrate_from` now (1) reads the source to find the displaced topics, (2) issues
+        **`:begin_migration` on each** (`fence_topics`), (3) **re-reads** the now-stable source (the re-read
+        catches any write that slipped into the window before the fence), and (4) migrates copy-first from the
+        fenced snapshot. `:extract_topic` **lifts** the fence (the topic is gone). So no concurrent write can
+        race the copy, which closes the gap VS-2a documented. On a partial failure the remaining fences **stay
+        up** (writes to those topics blocked) for reconciliation. Fail-safe. A recorded caveat: a topic
+        **created** during the split that routes to the new vnode is not caught (create is not fenced); the
+        caller quiesces. Tested (`:multinode`, stable 2x): the happy split stays green (fence applied, then
+        lifted), and, new here, the migrated topic is **writable on the new vnode** (the fence did not leak to
+        the destination; a fenced topic would answer `{:error, :migrating}`). Suite at 802 tests, 0 failures;
+        credo, dialyzer and format clean.
+      - ✅ **Int-1a: `BrokerServer.adopt_topology/2` (pure adoption of metadata routing).** The integration
+        challenge: the broker's metadata routing (the `dsrsm` cache holding the ring, plus the `command_fun`
+        over `replicated`) is **captured at boot** with a fixed ring, so a runtime split is never adopted.
+        `adopt_topology` is the **pure function** (the pure-first sub-slice) that, given the `Broker` plus a
+        `RingTopology`, rebuilds the routing: the cache adopts the **new ring** (existing vnodes keep their
+        cached `Metadata`, a new vnode starts **empty** until the next `ra` refresh) and `command_fun` is
+        rebuilt over the `%{vnode => server_id}` derived from the `placements` (skipping an empty placement, as
+        `adopt_ring_topology` does). Pure: catching the new vnode's metadata up is the separate side effect
+        (refresh). Tested in-VM: it adopts the new ring (v0+v1), v0 keeps the cached topic, v1 is empty, and
+        `command_fun` is rebuilt (arity 3). Suite at 803 tests, 0 failures (+1); credo, dialyzer and format
+        clean.
+      - ✅ **Int-1b: `BrokerServer` adopts the topology through gossip (async).** This closes runtime adoption
+        of metadata routing: a `handle_cast({:adopt_topology, topology})` rebuilds the routing (Int-1a's
+        `adopt_topology/2`) **and**, the part that was missing for correctness, points `metadata_refresh` and
+        `bootstrap.replicated` at the new `replicated`. Otherwise the periodic `reconcile_metadata` (which does
+        `snapshot(old_replicated)` plus `put_cache`, replacing the whole cache, ring included) would **revert**
+        the adopted ring. The `on_topology` hook (VS-2b-2b, `adopt_ring_topology`) now, besides updating
+        `CoordinatorRouter` inline, issues a **`GenServer.cast`** to `Malachi.LogBroker`: **async** (so it does
+        not block the membership server, which runs the hook inline) and a **no-op when the broker does not
+        exist** (a `cast` to an absent name is `:ok`, verified; single-node does not run the sharded broker).
+        DRY: deriving `servers` became `RingTopology.servers/1` (used by both the broker and the router). Tested
+        in-VM: the `handle_cast` adopts the new ring in the cache **and** points `bootstrap.replicated` and the
+        refresh at the new ring (reconcile does not revert it); `servers/1` is pure (skipping an empty
+        placement). Suite at 805 tests, 0 failures (+2); credo, dialyzer and format clean. **Int-1 (the broker
+        adopts at runtime) is complete.**
+      - ✅ **Int-3: an end-to-end split coordinator (under the lease) plus a boot baseline.** **Int-3a:** boot
+        (in sharded mode) now **seeds a version-0 topology** into membership (`membership_child` passes the
+        `:topology` built from the `vnode_placement`), so gossip carries the ring and a split can **advance**
+        from it; single-node or 1-vnode has nothing to route, so it gets no topology. **Int-3b:** a new
+        `Malachi.Cluster.VnodeSplit.split/5`. Only the **lease holder** acts (the `leader?` seam; otherwise
+        `{:error, :not_leader}`): it reads the current `RingTopology` from membership, rebuilds the
+        `ReplicatedDSRSM`, calls `split_vnode` (the fenced copy-first migration over `ra`, VS-2a/2c),
+        **advances** the version and **publishes** it through `set_topology`. From there gossip disseminates it
+        (VS-2b) and every node adopts the new ring for metadata routing (the broker, Int-1) and consumer-group
+        routing (the router, VS-2b-2b). It ties every VS and Int slice into a real split. Tested under
+        `:multinode` (stable 2x): a non-leader refuses; the leader splits, and membership's topology
+        **advances to v1** with the new vnode published, **and** the migration happened over `ra` ("orders"
+        starts routing to and living in the new vnode's cluster). Suite at 805 tests, 0 failures (+1
+        multinode); credo, dialyzer and format clean. **Vnode split over `ra` (VS + Int): what NorthGuard does,
+        working end to end.**
       - ✅ **Endurecimento C. Retry do cliente Node no `:migrating`.** Fecha a resiliência do cliente no split,
         o análogo do retry do `:not_owner` (A5) e do que o NorthGuard faz numa mudança (transcrição: *"seal it,
         make a new one, move the producers over"*. Selar, criar o novo e **mover os produtores**). O `:migrating`
