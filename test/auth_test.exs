@@ -1,6 +1,7 @@
 defmodule Malachi.AuthTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Auth.SessionManager
   alias Malachi.Auth.UserStore
 
   setup do
@@ -243,10 +244,55 @@ defmodule Malachi.AuthTest do
     end
   end
 
+  # There is no periodic sweeper: expired sessions are reaped lazily, by the first `validate_session/3`
+  # that touches them. These tests drive that path deterministically, without sleeping, by setting the
+  # timeout negative so the session is born already expired (`expires_at = now + timeout < now`).
   describe "session cleanup" do
-    test "cleans up expired sessions automatically" do
-      # Skip this timing-sensitive test
-      :ok
+    setup do
+      prior = Application.get_env(:malachi, :session_timeout_seconds)
+
+      on_exit(fn ->
+        case prior do
+          nil -> Application.delete_env(:malachi, :session_timeout_seconds)
+          value -> Application.put_env(:malachi, :session_timeout_seconds, value)
+        end
+      end)
+
+      # TEST-NET-3, outside every trusted-proxy range, so IP binding stays enforced
+      {:ok, ip: {203, 0, 113, 7}}
+    end
+
+    test "an expired session is rejected and its row is physically removed", %{ip: ip} do
+      Application.put_env(:malachi, :session_timeout_seconds, -1)
+      {:ok, token} = SessionManager.create_session("cleanup_expired", [:produce], ip)
+
+      # it really was stored, so the deletion below cannot pass for the wrong reason
+      assert [{^token, _data}] = :ets.lookup(:malachi_sessions, token)
+
+      assert {:error, :session_expired} = SessionManager.validate_session(token, ip)
+
+      # reaped, not merely reported: the row is gone, and a second read can no longer tell this token
+      # apart from one that never existed
+      assert [] = :ets.lookup(:malachi_sessions, token)
+      assert {:error, :invalid_session} = SessionManager.validate_session(token, ip)
+    end
+
+    test "a session inside its timeout validates and is kept", %{ip: ip} do
+      Application.put_env(:malachi, :session_timeout_seconds, 3600)
+      {:ok, token} = SessionManager.create_session("cleanup_live", [:produce], ip)
+
+      assert {:ok, %{username: "cleanup_live", permissions: [:produce]}} = SessionManager.validate_session(token, ip)
+      assert [{^token, _data}] = :ets.lookup(:malachi_sessions, token)
+    end
+
+    test "expiry is checked before IP binding, so a stale token from another IP reports expiry", %{ip: ip} do
+      Application.put_env(:malachi, :session_timeout_seconds, -1)
+      {:ok, token} = SessionManager.create_session("cleanup_other_ip", [:produce], ip)
+
+      # the expiry branch runs first, so this is :session_expired rather than :session_hijack_attempt,
+      # and the row is reaped even though the caller failed the binding check
+      assert {:error, :session_expired} = SessionManager.validate_session(token, {198, 51, 100, 9})
+      assert [] = :ets.lookup(:malachi_sessions, token)
     end
   end
 

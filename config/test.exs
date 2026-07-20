@@ -3,6 +3,17 @@ import Config
 # Silence debug/info logs during tests
 config :logger, level: :warning
 
+# Argon2 is deliberately slow and memory-hungry, which is the point in production but pure drag in tests:
+# at the library defaults (t_cost 3, m_cost 16 = 64 MiB, parallelism 4) a single verify costs ~42 ms, and
+# the 100 concurrent verifies in test/attack_simulation_test.exs peak at 6.4 GiB and take ~4.2 s, close
+# enough to that test's 10 s budget that suite load pushed it over roughly one run in three.
+#
+# The cost is a deployment parameter, not application logic: verifying a correct password succeeds and an
+# incorrect one fails identically at any cost, and every timing assertion in the suite is an upper bound,
+# so cheaper hashing can only help. Measured here: 100 concurrent verifies 4249 ms -> 34 ms, whole suite
+# ~55 s -> ~38 s. Test-only, production keeps the library defaults (this file is never loaded there).
+config :argon2_elixir, t_cost: 1, m_cost: 8, parallelism: 1
+
 # OpenTelemetry: record every span (always_on) via the synchronous simple processor, so a test can attach
 # a pid exporter and assert on ended spans (see the LogApi tracing test). Overrides the always_off default.
 config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_exporter: :none
