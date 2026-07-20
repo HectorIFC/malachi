@@ -617,54 +617,58 @@ contract, so `ra` plugs in without rework.
   parameter. It pins down the contract the future membership will serve. Property tests: the replica
   set's size and distinctness, determinism independent of ordering, **retention under broker removal
   (min-reshuffle)**, and **`heal` reaching a fixpoint in one pass**.
-- ✅ **Ciclo de vida do segment no `Broker`**: o data plane agora *cria* segments. A cada range
-  ativo o `Broker` mantém um segment aberto (span lógico de offsets sobre o `Log` único do range,
-  A1): no 1º produce registra o segment escolhendo o `replica_set` via `Placement.place` sobre
-  `:brokers`/`:replication_factor` (defaults `[node()]`/`1`); contabiliza os bytes apendados
-  (`Malachi.Log.Record.encoded_size/1`, casado byte-a-byte com `encode/1`) e **sela + rola** ao cruzar
-  `:segment_max_bytes` (threshold *soft*, checado no limite do batch). `split`/`merge` selam o
-  segment ativo do range afetado. `segment_id = {range_id, seq}` (globalmente único; seq por-range
-  persiste entre selas → id nunca reusado). API de `produce`/`read` inalterada (segments são
-  bookkeeping aditivo). Testado: registro no 1º produce, replica set via HRW, rollover por bytes
-  (1 record/segment e overshoot soft), sela em split/merge, validação de policy.
-  - ✅ **`heal` (re-replicação) fiado.** `Malachi.Cluster.SelfHealing.heal_sealed/4` (backfill de selados
-    sub-replicados via `Catchup`) + gatilho reativo no write-path pro segment ativo (`reactive_healing_test`),
-    aplicados pelo `HealCoordinator` (reconcile level-triggered contra o live set do membership SWIM), fiado
-    no `application.ex` (`healer_child` node-wide + `heal_vnode_child` por-vnode). *Menor: rollover de segment
-    por tempo/contagem além de bytes (refinamento).*
-- ✅ **`Malachi.Cluster.ReplicaTracker`**: núcleo **puro** de commit por quórum da replicação de
-  **um segment** (a lógica determinística do mecanismo, sem processos/rede). `replica_set` ordenado
-  (1º = primário); `ack/3` registra o offset durável de cada réplica (monotônico, ignora regressão);
-  `commit_offset/1` = maior offset presente em **maioria** (⌊N/2⌋+1) das réplicas, ou `:none`;
-  `committed?/2`. Tolera ⌊(N-1)/2⌋ falhas sem esperar a réplica mais lenta. Contraparte (para *dados*
-  de segment) do `Metadata` determinístico (para *metadata*). Property tests: commit = maior offset
-  em quórum, **monotonicidade do commit**, `committed?` sse quórum o tem. Escopo: replica set fixo
-  (failover de primário/mudança de set depois).
-- ✅ **`Malachi.Cluster.ReplicationServer`**. O **transporte** da replicação: um `GenServer` por
-  broker que envia o stream do segment ativo do **primário** aos **seguidores** e dá ack quando um
-  **quórum** armazenou de forma durável. Broker = referência do processo (nome local nos testes;
-  `{nome, node}` entre nós: `GenServer.call` aceita ambos, então o mesmo caminho roda in-process e
-  multi-node). `replicate/4` no primário apenda+fsync local, faz fan-out concorrente aos seguidores,
-  alimenta o `ReplicaTracker` e retorna `{:ok, last}` quando o quórum tem o batch (tolera ⌊(N-1)/2⌋
-  seguidores lentos/caídos) ou `{:error, :no_quorum}`. Primário e seguidores fazem `fsync` antes de
-  contar para o quórum → "committed" = durável na maioria. Cada segment abre seu `Log` em
-  `base_offset = start_offset` (carregado no `replicate/5`), então os offsets dos segments de um
-  range são **contíguos** (não reiniciam em 0 por segment). Testado in-process: replica a todos +
-  commit, tolerância a 1 seguidor caído, `:no_quorum` sem maioria, single-replica, offsets contíguos
-  entre batches, **base não-zero** (`:out_of_range` abaixo da base), `:not_primary`, batch vazio,
-  replica set vazio (sem crash), set duplicado (sem deadlock). Escopo: caminho feliz do segment ativo.
-- ✅ **`ReplicationServer` fiado no `Broker`/`BrokerServer` (A2+A3)**: o `Broker` virou
-  **roteador puro** (control plane): perdeu `logs`/`directory`, mantém só `Metadata` + ciclo de
-  vida do segment + contador de offset por range. O storage é 100% do `ReplicationServer`. A
-  ligação usa **funções de efeito injetadas**: `produce` recebe `replicate_fun`, `read`/
-  `stream_history` recebem `read_fun`: toda a orquestração (rota, offset→segment, commit, paginação
-  e filtro do cross-epoch) fica num só módulo, testado com **fakes in-memory**
-  (`Malachi.Test.FakeSegmentStore`). O `BrokerServer` injeta `&ReplicationServer.replicate/5` e
-  `&ReplicationServer.read/4`, inicia um `ReplicationServer` local (ref = pid) e abre o `Broker` com
-  `brokers: [esse_ref]`. Como a escrita é fsync-por-quórum no retorno, o **flush por tempo (10ms)
-  saiu** e `sync/1` virou no-op. `produce` retorna `{broker, {:ok, placements} | {:error, reason}}`
-  (commit por grupo; valor imutável dá transação grátis). Sem duplicação de storage. Suíte completa
-  verde (831 testes).
+- ✅ **Segment lifecycle in `Broker`**: the data plane now *creates* segments. For each active range the
+  `Broker` keeps one segment open (a logical span of offsets over the range's single `Log`, A1): on the
+  first produce it registers the segment, choosing the `replica_set` through `Placement.place` over
+  `:brokers`/`:replication_factor` (defaulting to `[node()]`/`1`); it accounts for the appended bytes
+  (`Malachi.Log.Record.encoded_size/1`, matched byte for byte against `encode/1`) and **seals and rolls**
+  on crossing `:segment_max_bytes` (a *soft* threshold, checked at the batch boundary). `split` and
+  `merge` seal the affected range's active segment. `segment_id = {range_id, seq}` (globally unique; the
+  per-range seq persists across seals, so an id is never reused). The `produce`/`read` API is unchanged
+  (segments are additive bookkeeping). Tested: registration on the first produce, the replica set through
+  HRW, byte-driven rollover (one record per segment, and soft overshoot), sealing on split and merge, and
+  policy validation.
+  - ✅ **`heal` (re-replication) wired in.** `Malachi.Cluster.SelfHealing.heal_sealed/4` (backfilling
+    under-replicated sealed segments through `Catchup`) plus a reactive trigger on the write path for the
+    active segment (`reactive_healing_test`), both applied by the `HealCoordinator` (a level-triggered
+    reconcile against the SWIM membership's live set), wired into `application.ex` (a node-wide
+    `healer_child` plus a per-vnode `heal_vnode_child`). *Minor: segment rollover by time or count in
+    addition to bytes (a refinement).*
+- ✅ **`Malachi.Cluster.ReplicaTracker`**: the **pure** quorum-commit core for replicating **one
+  segment** (the mechanism's deterministic logic, with no processes or network). An ordered `replica_set`
+  (the first being the primary); `ack/3` records each replica's durable offset (monotonic, ignoring
+  regression); `commit_offset/1` is the highest offset present on a **majority** (⌊N/2⌋+1) of the
+  replicas, or `:none`; plus `committed?/2`. It tolerates ⌊(N-1)/2⌋ failures without waiting for the
+  slowest replica. The counterpart (for segment *data*) of the deterministic `Metadata` (for
+  *metadata*). Property tests: the commit is the highest offset held by a quorum, **commit
+  monotonicity**, and `committed?` iff a quorum has it. Scope: a fixed replica set (primary failover and
+  set changes come later).
+- ✅ **`Malachi.Cluster.ReplicationServer`**. Replication's **transport**: one `GenServer` per broker
+  that ships the active segment's stream from the **primary** to the **followers** and acks once a
+  **quorum** has stored it durably. A broker is a process reference (a local name in the tests;
+  `{name, node}` across nodes, since `GenServer.call` accepts both, so the same path runs in-process and
+  multi-node). On the primary, `replicate/4` appends and fsyncs locally, fans out concurrently to the
+  followers, feeds the `ReplicaTracker` and returns `{:ok, last}` once the quorum has the batch
+  (tolerating ⌊(N-1)/2⌋ slow or downed followers), or `{:error, :no_quorum}`. Primary and followers both
+  `fsync` before counting toward the quorum, so "committed" means durable on a majority. Each segment
+  opens its `Log` at `base_offset = start_offset` (passed in `replicate/5`), so the offsets of a range's
+  segments are **contiguous** (they do not restart at 0 per segment). Tested in-process: replicating to
+  all plus the commit, tolerating 1 downed follower, `:no_quorum` without a majority, single-replica,
+  contiguous offsets across batches, a **non-zero base** (`:out_of_range` below the base),
+  `:not_primary`, an empty batch, an empty replica set (no crash) and a duplicated set (no deadlock).
+  Scope: the active segment's happy path.
+- ✅ **`ReplicationServer` wired into `Broker`/`BrokerServer` (A2+A3)**: `Broker` became a **pure
+  router** (control plane), losing `logs` and `directory` and keeping only `Metadata` plus the segment
+  lifecycle plus a per-range offset counter. Storage is 100% `ReplicationServer`'s. The connection uses
+  **injected effect functions**: `produce` takes a `replicate_fun`, and `read`/`stream_history` take a
+  `read_fun`, so the whole orchestration (routing, offset→segment, commit, pagination and the
+  cross-epoch filter) lives in one module, tested with **in-memory fakes**
+  (`Malachi.Test.FakeSegmentStore`). `BrokerServer` injects `&ReplicationServer.replicate/5` and
+  `&ReplicationServer.read/4`, starts a local `ReplicationServer` (its ref being the pid) and opens the
+  `Broker` with `brokers: [that_ref]`. Since a write is fsync-by-quorum by the time it returns, the
+  **10ms time-based flush is gone** and `sync/1` became a no-op. `produce` returns
+  `{broker, {:ok, placements} | {:error, reason}}` (a per-group commit; an immutable value makes the
+  transaction free). No duplicated storage. Full suite green (831 tests).
 - ✅ **`Malachi.Cluster.Catchup` (primitiva de catch-up/backfill)**, copia os records de um
   segment de uma réplica **fonte** para uma **alvo** no intervalo `[from, to)`. Serve aos dois
   casos: seguidor atrasado fechando o gap do segment ativo, e réplica nova (do `Placement.heal`)
