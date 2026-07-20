@@ -716,100 +716,106 @@ contract, so `ra` plugs in without rework.
     bytes move), applied by the `HealCoordinator` alongside the heal, against the SWIM membership's
     multi-node live set. Tested (`failover_test`, `replicated_dsrsm_ha_test`). *(The pure layer already
     noted "failover later" in `ReplicaTracker`/`ReplicationServer`; done.)*
-- ✅ **`Malachi.Cluster.Membership` (máquina de estado SWIM pura)**: a view determinística de
-  membership: `alive`/`suspect`/`dead` por membro + **incarnation**, sem processos/timers/rede. A
-  regra única é um *join* na ordem lexicográfica `{incarnation, rank}` (`alive < suspect < dead`),
-  que dá a **precedência SWIM** (incarnation maior vence; empate → suspect>alive, dead>ambos; igual
-  → idempotente) e garante **convergência** do merge de gossip em qualquer ordem (CRDT-like).
-  Exceção: update sobre **self** suspeito/morto é **refutado** subindo a própria incarnation e
-  re-anunciando alive (efeito `{:refute, …}` para disseminar). `apply_update/2`, `merge/2`,
-  `suspect/2`, `confirm/2`, `alive_members/1`. Property tests: **convergência independente de ordem**
-  e **monotonicidade de incarnation**; + unidades de precedência e self-refute.
-- ✅ **`Malachi.Cluster.MembershipServer` (servidor SWIM: detector + gossip)**, `GenServer` por
-  broker que roda a `Membership` ao vivo. A cada *protocol period* faz **ping** num peer vivo
-  aleatório; sem **ack** no `ack_timeout` → `suspect`; sem refute no `suspicion_timeout` → `dead`.
-  Cada ping/ack faz **piggyback** da view (lista de updates) → anti-entropy → as views **convergem**;
-  um nó falsamente suspeito descobre pelo ack ao seu próprio ping e refuta (sobe incarnation). Refs
-  location-transparent (testável in-process; multi-node sem mudança); envios fire-and-forget (peer
-  morto = sem ack = detecção). Peers semente via `:peers`; timers configuráveis. Testado in-process:
-  **gossip espalha** conhecimento parcial até todos conhecerem todos, **nó parado é detectado e vira
-  `dead`** no cluster, e **refute** de suspeita falsa sobre si.
-- ✅ **Ping indireto**: quando o ack direto não chega, o nó pede a `indirect_fanout` peers (default 3)
-  que **pinguem o alvo por ele** (`ping_req` → relay proba o alvo → relaia o ack ao requester); só
-  suspeita se nem o direto nem o indireto responderem no `indirect_timeout`. Reduz falsos positivos sob
-  perda transitória da rota direta. Testado: a **cadeia de relay** entrega o ack do alvo ao requester
-  (determinístico); o teste de nó morto agora exercita o caminho completo (direto→indireto→suspect→dead).
-- ✅ **Join formal**. Ao iniciar, o nó manda `{:join}` a cada seed (`:peers`); o seed **registra o
-  joiner vivo** e responde com sua **view completa**, então o joiner conhece o cluster de uma vez (em
-  vez de só convergir por gossip). Best-effort (gossip é a rede de segurança). Testado: handshake
-  (seed responde `join_ok` com a view e passa a conhecer o joiner) e **nó novo aprende o cluster
-  inteiro via um único seed**. Ressalva: rejoin-após-morte (reinício com incarnation 0 < `dead@n`)
-  fica para depois. **SWIM fechado:** ping direto+indireto + suspicion + gossip + join.
-- ✅ **`Malachi.Cluster.HealCoordinator` (self-healing reativo)**, `GenServer` periódico que fecha
-  o loop **broker morre → detectado → curado**: a cada intervalo roda `SelfHealing.heal_sealed` com
-  o conjunto **vivo** e aplica os comandos. Desacoplado por **seams injetados** (`live_brokers`,
-  `metadata_source`, `apply_command`, `rf`, `interval`), testável in-process e fiável depois ao
-  `MembershipServer` (live) e ao control plane (apply) sem mudança. `heal_now/1` roda uma passada
-  síncrona (testes/trigger manual). Testado in-process: cura sob réplica perdida (backfill +
-  comando aplicado + loop fecha), `:no_live_source`, e **cura automática no timer**.
-- ✅ **Fiação fina 1a: membership → self-healing reativo (controle único + N data-brokers)** - o
-  loop reativo agora roda ponta a ponta na topologia **1 nó de controle + N data-brokers**: o
-  `BrokerServer` aceita `:brokers` externos (refs de `ReplicationServer`) e é a autoridade do
-  metadata; ganhou `metadata/1` e `apply_heal/2` (que aplica `set_segment_replicas` via novo
-  `Broker.apply_heal/2`). O `HealCoordinator` é fiado com `metadata_source`/`apply` ← `BrokerServer`
-  e `live_brokers` ← **bridge** `MembershipServer.alive_members |> mapa(member-id → broker-ref)`.
-  Testado: **data-broker morre → membership detecta → segments selados re-replicados** ao conjunto
-  vivo (sem sub-replicação restante, dados conferidos nas novas réplicas), e a bridge derruba a
-  broker-ref do nó morto.
-- ✅ **Placement dinâmico**: o `BrokerServer` agora **refresca** periodicamente os brokers de
-  placement do `Broker` a partir de `:live_brokers` (`Broker.set_brokers/2`), então um **novo segment
-  nasce no conjunto vivo** em vez de nos configurados (fallback: mantém o último não-vazio; sem custo
-  no hot path). Completa a simetria do reativo (cura **e** criação reagem ao vivo). Robustez junto:
-  `ReplicationServer.replicate/5` agora **não derruba** o chamador se o primário estiver morto
-  (retorna `{:error, :unreachable}` → `produce` propaga erro), e um `produce` falho **descarta** o
-  segment recém-aberto (rollback grátis via valor imutável, sem segment fantasma; o retry re-placeia
-  nos vivos). Testado: após um data-broker morrer e sair do conjunto vivo, um segment recém-produzido
-  **exclui o morto** do `replica_set`.
-- ✅ **Failover de primário**, `Malachi.Cluster.Failover.plan/2` (puro): para cada segment **ativo**
-  cujo primário (`hd(replica_set)`) está morto, emite `set_segment_replicas` **reordenado** com uma
-  réplica viva no topo (a morta fica como seguidor que não dá ack; o `heal` a troca após o seal:
-  sem mover dado). O `Broker.apply_heal` foi generalizado para atualizar também o **cache do segment
-  ativo** (um só caminho de apply serve heal e failover), e o `HealCoordinator` virou um loop de
-  **reconciliação** (heal selados + failover ativos a cada tick). Testado: `plan` puro (promove vivo,
-  ignora selado, pula tudo-morto), `apply_heal` atualiza cache+metadata, e **integração**: primário
-  de segment ativo morre → promovido → escrita continua no novo primário (ambos os records lidos).
-- ✅ **1b: autoridade do metadata via `ra` (em fatias).**
-  - ✅ **`Malachi.Cluster.ReplicatedMetadata`** (componente), pareia um `MetadataServer` (cluster `ra`
-    rodando `Metadata.apply`) com um **cache `Metadata` local**: `command/2` vai ao log Raft e, no
-    commit, aplica o **mesmo** comando no cache (determinismo → cache == estado replicado), então as
-    leituras são locais (sem round-trip Raft no hot path) com **read-your-writes**. `metadata/1` (leitura),
-    `refresh/1` (re-lê o estado replicado p/ multi-writer/recovery), `start/1`, `delete/1`. Testado:
-    comando commitado atualiza o cache, comando rejeitado deixa o cache intacto + erro da máquina,
-    cache == estado replicado (refresh no-op p/ escritor único). Cluster `ra` single-node (durabilidade;
-    HA multi-nó depois).
-  - ✅ **`BrokerServer` fiado no metadata via `ra`**: o `Broker` ganhou um **`command_fun` injetado**
-    `(metadata, command) -> {metadata, reply}` (default `&Metadata.apply/2` → comportamento in-memory
-    intacto); **todas** as mutações (`create_topic`/`split`/`merge`/`register`/`seal`/
-    `set_segment_replicas`) passam por ele, leituras seguem no `broker.metadata` (cache). Com a opção
-    `:metadata_cluster`, o `BrokerServer` inicia um `MetadataServer`, **semeia** o cache do estado
-    replicado, e injeta `command_fun = ReplicatedMetadata.apply_command(server_id, …)`, comando Raft +
-    apply no cache **threadado pelo `broker.metadata`** (um produce pode abrir+selar segment com
-    read-your-writes intra-operação). Testado (ra): mutações (topic + segment) ficam no **estado
-    replicado** (query direto no `ra`) e o cache == replicado; comando rejeitado propaga o erro da
-    máquina. Default (sem `:metadata_cluster`) segue in-memory.
-  - ✅ **Hardening do crash-path do `register`**, `open_segment` agora retorna `{:ok, broker}` |
-    `{:error, reason}`; uma falha do `register_segment` (ex.: timeout do `ra`) é propagada pelo
-    `ensure_segment` → `produce` como `{:error, reason}` (rollback do open, sem segment fantasma),
-    em vez de derrubar o `BrokerServer`. Testado: `command_fun` que falha o register → produce
-    `{:error, :ra_down}`, nenhum segment registrado, offset não avançado.
-  - ✅ **Cluster `ra` multi-nó (HA do control plane, último SPOF eliminado)** - `MetadataServer.start/2`
-    forma o cluster `ra` em **vários nós** (`server_ids` entre nós); `BrokerServer` aceita
-    `:metadata_nodes`. Com ≥3 membros o metadata é replicado e **sobrevive à queda de um nó de
-    controle** (um seguidor é eleito líder). Testado de verdade (`test/.../metadata_ha_test.exs`, tag
-    `:multinode`, opt-in via `mix test --include multinode`): 3 nós BEAM reais via `:peer`, comando
-    replicado a todos, **kill abrupto do nó-líder**, e um comando seguinte ainda comita (novo líder) com
-    o metadata anterior intacto: flake-checado 5×. (Excluído do `mix test` padrão por exigir
-    epmd/distribuição.) **1b concluído.**
+- ✅ **`Malachi.Cluster.Membership` (the pure SWIM state machine)**: the deterministic membership view,
+  `alive`/`suspect`/`dead` per member plus an **incarnation**, with no processes, timers or network. The
+  single rule is a *join* on the lexicographic order `{incarnation, rank}` (`alive < suspect < dead`),
+  which gives **SWIM precedence** (a higher incarnation wins; on a tie, suspect beats alive and dead
+  beats both; equal is idempotent) and guarantees the gossip merge **converges** in any order
+  (CRDT-like). The exception: an update about **self** as suspect or dead is **refuted** by raising our
+  own incarnation and re-announcing alive (a `{:refute, …}` effect to disseminate). `apply_update/2`,
+  `merge/2`, `suspect/2`, `confirm/2`, `alive_members/1`. Property tests: **order-independent
+  convergence** and **incarnation monotonicity**, plus unit tests for precedence and self-refute.
+- ✅ **`Malachi.Cluster.MembershipServer` (the SWIM server: detector plus gossip)**, one `GenServer` per
+  broker running `Membership` live. Each *protocol period* it **pings** a random live peer; no **ack**
+  within `ack_timeout` means `suspect`; no refute within `suspicion_timeout` means `dead`. Every
+  ping and ack **piggybacks** the view (a list of updates), giving anti-entropy, so the views
+  **converge**; a falsely suspected node finds out through the ack to its own ping and refutes (raising
+  its incarnation). Refs are location-transparent (testable in-process, multi-node without changes);
+  sends are fire-and-forget (a dead peer means no ack, which is the detection). Seed peers come from
+  `:peers`; the timers are configurable. Tested in-process: **gossip spreads** partial knowledge until
+  everyone knows everyone, a **stopped node is detected and becomes `dead`** across the cluster, and a
+  false suspicion about self is **refuted**.
+- ✅ **Indirect ping**: when the direct ack does not arrive, the node asks `indirect_fanout` peers
+  (default 3) to **ping the target on its behalf** (`ping_req` → the relay probes the target → it relays
+  the ack back to the requester); it only suspects when neither the direct nor the indirect path answers
+  within `indirect_timeout`. This cuts false positives under transient loss of the direct route. Tested:
+  the **relay chain** delivers the target's ack to the requester (deterministically), and the dead-node
+  test now exercises the full path (direct→indirect→suspect→dead).
+- ✅ **A formal join**. On start, a node sends `{:join}` to each seed (`:peers`); the seed **registers
+  the joiner as alive** and replies with its **complete view**, so the joiner learns the cluster at once
+  rather than only converging through gossip. Best-effort (gossip is the safety net). Tested: the
+  handshake (the seed replies `join_ok` with its view and comes to know the joiner) and a **new node
+  learning the whole cluster through a single seed**. A caveat: rejoin-after-death (restarting with
+  incarnation 0 < `dead@n`) is left for later. **SWIM is closed:** direct and indirect ping, suspicion,
+  gossip and join.
+- ✅ **`Malachi.Cluster.HealCoordinator` (reactive self-healing)**, a periodic `GenServer` that closes
+  the loop **broker dies → detected → healed**: each interval it runs `SelfHealing.heal_sealed` against
+  the **live** set and applies the commands. Decoupled through **injected seams** (`live_brokers`,
+  `metadata_source`, `apply_command`, `rf`, `interval`), so it is testable in-process and can later be
+  wired to `MembershipServer` (live) and to the control plane (apply) without changes. `heal_now/1` runs
+  one synchronous pass (for tests or a manual trigger). Tested in-process: healing after a lost replica
+  (backfill plus the command applied plus the loop closing), `:no_live_source`, and **automatic healing
+  on the timer**.
+- ✅ **Fine wiring 1a: membership → reactive self-healing (a single control node plus N data brokers).**
+  The reactive loop now runs end to end on the **1 control node + N data brokers** topology:
+  `BrokerServer` accepts external `:brokers` (refs to `ReplicationServer`) and is the metadata
+  authority; it gained `metadata/1` and `apply_heal/2` (which applies `set_segment_replicas` through a
+  new `Broker.apply_heal/2`). `HealCoordinator` is wired with `metadata_source`/`apply` ←
+  `BrokerServer` and `live_brokers` ← a **bridge**,
+  `MembershipServer.alive_members |> map(member-id → broker-ref)`. Tested: **a data broker dies →
+  membership detects it → sealed segments are re-replicated** onto the live set (no under-replication
+  left, and the data verified on the new replicas), and the bridge drops the dead node's broker ref.
+- ✅ **Dynamic placement**: `BrokerServer` now periodically **refreshes** `Broker`'s placement brokers
+  from `:live_brokers` (`Broker.set_brokers/2`), so a **new segment is born on the live set** rather
+  than on the configured one (with a fallback that keeps the last non-empty set, and no cost on the hot
+  path). It completes the reactive symmetry (both healing **and** creation react to what is live).
+  Robustness alongside it: `ReplicationServer.replicate/5` no longer **takes down** the caller when the
+  primary is dead (it returns `{:error, :unreachable}` and `produce` propagates the error), and a failed
+  `produce` **discards** the newly opened segment (a free rollback through the immutable value, so there
+  is no phantom segment; the retry re-places onto live brokers). Tested: after a data broker dies and
+  leaves the live set, a freshly produced segment **excludes the dead one** from the `replica_set`.
+- ✅ **Primary failover**, `Malachi.Cluster.Failover.plan/2` (pure): for every **active** segment whose
+  primary (`hd(replica_set)`) is dead, it emits a **reordered** `set_segment_replicas` with a live
+  replica at the head (the dead one stays as a follower that never acks; `heal` swaps it out after the
+  seal, so no data moves). `Broker.apply_heal` was generalized to update the **active segment's cache**
+  as well (one apply path serves both heal and failover), and `HealCoordinator` became a
+  **reconciliation** loop (healing sealed segments plus failing over active ones on each tick). Tested:
+  a pure `plan` (promoting a live replica, ignoring sealed segments, skipping an all-dead set),
+  `apply_heal` updating both cache and metadata, and **integration**: an active segment's primary dies →
+  a replica is promoted → writes continue on the new primary (both records read back).
+- ✅ **1b: metadata authority through `ra` (in slices).**
+  - ✅ **`Malachi.Cluster.ReplicatedMetadata`** (the component) pairs a `MetadataServer` (an `ra` cluster
+    running `Metadata.apply`) with a **local `Metadata` cache**: `command/2` goes to the Raft log and, on
+    commit, applies the **same** command to the cache (determinism means the cache equals the replicated
+    state), so reads are local (no Raft round trip on the hot path) with **read-your-writes**.
+    `metadata/1` (a read), `refresh/1` (re-reading the replicated state, for multi-writer or recovery),
+    `start/1`, `delete/1`. Tested: a committed command updates the cache, a rejected command leaves the
+    cache intact and returns the machine's error, and the cache equals the replicated state (refresh is a
+    no-op for a single writer). A single-node `ra` cluster (durability; multi-node HA comes later).
+  - ✅ **`BrokerServer` wired to metadata through `ra`**: `Broker` gained an **injected `command_fun`**
+    `(metadata, command) -> {metadata, reply}` (defaulting to `&Metadata.apply/2`, so in-memory behaviour
+    is untouched); **every** mutation (`create_topic`/`split`/`merge`/`register`/`seal`/
+    `set_segment_replicas`) goes through it, while reads stay on `broker.metadata` (the cache). With the
+    `:metadata_cluster` option, `BrokerServer` starts a `MetadataServer`, **seeds** the cache from the
+    replicated state, and injects `command_fun = ReplicatedMetadata.apply_command(server_id, …)`: a Raft
+    command plus a cache apply **threaded through `broker.metadata`** (so one produce can open and seal a
+    segment with read-your-writes within the operation). Tested (over ra): mutations (topic plus segment)
+    land in the **replicated state** (queried directly on `ra`) and the cache equals it; a rejected
+    command propagates the machine's error. The default (without `:metadata_cluster`) stays in-memory.
+  - ✅ **Hardening `register`'s crash path**: `open_segment` now returns `{:ok, broker}` or
+    `{:error, reason}`; a `register_segment` failure (an `ra` timeout, say) is propagated through
+    `ensure_segment` to `produce` as `{:error, reason}` (rolling back the open, so there is no phantom
+    segment) instead of taking `BrokerServer` down. Tested: a `command_fun` that fails the register makes
+    produce return `{:error, :ra_down}`, with no segment registered and the offset not advanced.
+  - ✅ **A multi-node `ra` cluster (control-plane HA, the last SPOF eliminated).**
+    `MetadataServer.start/2` forms the `ra` cluster across **several nodes** (`server_ids` spanning
+    nodes); `BrokerServer` accepts `:metadata_nodes`. With 3 or more members the metadata is replicated
+    and **survives losing a control node** (a follower is elected leader). Genuinely tested
+    (`test/.../metadata_ha_test.exs`, tagged `:multinode`, opt-in through
+    `mix test --include multinode`): 3 real BEAM nodes through `:peer`, a command replicated to all, an
+    **abrupt kill of the leader node**, and a following command still committing (under a new leader)
+    with the previous metadata intact; flake-checked 5x. (Excluded from the default `mix test` because it
+    needs epmd and distribution.) **1b complete.**
 
 ### Fase 3. Produto: conectar os dois mundos + escala (novo norte)
 Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS.
