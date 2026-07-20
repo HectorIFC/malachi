@@ -1,6 +1,6 @@
 defmodule Malachi.Cluster.Lease do
   @moduledoc """
-  The pure state of a **lease** — a fenced, expiring lock that elects a single holder for the
+  The pure state of a **lease**: a fenced, expiring lock that elects a single holder for the
   non-idempotent work of rebalancing (R3). It is the deterministic core replicated by `LeaseMachine`
   over a dedicated `ra` cluster (exactly as `Malachi.Metadata` sits behind `MetadataMachine`), so every
   replica reaches the same lease state from the same command log.
@@ -8,13 +8,13 @@ defmodule Malachi.Cluster.Lease do
   A candidate `acquire_or_renew`s the lease; it is granted when the lease is **free**, **already held by
   that candidate** (a renewal), or **expired** (`now >= renew_at + duration_ms`). The candidate identity
   must be a **non-nil** term (`nil` is the free-lease sentinel); in practice it is the node. Time is supplied by the
-  caller — `LeaseMachine` passes the ra leader's `system_time` — and never read inside `apply/3`: reading
+  caller: `LeaseMachine` passes the ra leader's `system_time` - and never read inside `apply/3`: reading
   a wall clock there would be non-deterministic and break Raft. So a single clock (the lease cluster's
   current leader) decides expiry, avoiding the cross-node clock skew a client-supplied time would carry.
 
   `fence` is a monotonic **fencing token**: it advances only when the holder changes (a renewal keeps
   it). A holder carries its token into the work it fences; if the token has since advanced, a stale
-  ex-holder's writes can be rejected — the guard against two simultaneous holders.
+  ex-holder's writes can be rejected: the guard against two simultaneous holders.
   """
 
   defstruct holder: nil, fence: 0, renew_at: nil, duration_ms: nil

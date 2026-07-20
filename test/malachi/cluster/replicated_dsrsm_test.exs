@@ -1,5 +1,5 @@
 defmodule Malachi.Cluster.ReplicatedDSRSMTest do
-  # async: false — ra is global/stateful.
+  # async: false, ra is global/stateful.
   use ExUnit.Case, async: false
 
   alias Malachi.Cluster.DSRSM

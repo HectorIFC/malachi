@@ -14,7 +14,7 @@ defmodule Malachi.Cluster.ReshardCoordinatorTest do
   end
 
   # Starts a coordinator over a ring held in an Agent. The `split` seam records the call and (unless
-  # `split_result` says otherwise) applies the split to the held ring — simulating what a real split does.
+  # `split_result` says otherwise) applies the split to the held ring, simulating what a real split does.
   defp start_coordinator(opts) do
     test = self()
     ring_agent = Keyword.get_lazy(opts, :ring_agent, fn -> start_ring_agent(even_ring(4)) end)

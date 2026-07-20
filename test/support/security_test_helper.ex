@@ -1,7 +1,7 @@
 defmodule Malachi.Test.SecurityHelper do
   @moduledoc """
   Shared helpers for the security test suite: random data generation, performance measurement, and
-  common attack payloads (fuzzing the pure infra — validators, limiters — not the socket protocol).
+  common attack payloads (fuzzing the pure infra: validators, limiters - not the socket protocol).
   """
 
   @doc "Generate a random IPv4 tuple for testing."

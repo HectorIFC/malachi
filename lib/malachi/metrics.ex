@@ -3,7 +3,7 @@ defmodule Malachi.Metrics do
   Real-time operational and security metrics kept in ETS (atomic `update_counter`), plus a
   periodically-sampled system snapshot and its recent history.
 
-  The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free) — rate-limit and
+  The `increment_*`/`record_*` functions bump counters on the hot path (fast, lock-free), rate-limit and
   connection-limit blocks, auth failures and account lockouts, audit events, dashboard-auth outcomes, and
   TLS handshakes; `get_system_metrics/0` reads the live BEAM snapshot
   (memory, processes, io) folded together with those counters, and `get_history/1` returns the recent

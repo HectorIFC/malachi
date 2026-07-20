@@ -153,7 +153,7 @@ services:
 ```
 
 Notes:
-- Increasing `+P` only raises the process limit — ensure the host has sufficient RAM.
+- Increasing `+P` only raises the process limit, ensure the host has sufficient RAM.
 - These defaults are safe for test and development; tune conservatively for production.
 
 ---

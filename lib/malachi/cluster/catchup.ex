@@ -7,7 +7,7 @@ defmodule Malachi.Cluster.Catchup do
     * a freshly placed replica (from `Malachi.Cluster.Placement.heal/3`) **backfilling** an entire
       sealed segment so it can carry its share of the replica set.
 
-  It runs as **external orchestration** — in the caller's process, issuing ordinary
+  It runs as **external orchestration**, in the caller's process, issuing ordinary
   `Malachi.Cluster.ReplicationServer` calls to both servers (`read/4` on the source, `follow/4`
   on the target). Nothing runs inside a server's call while that server is being waited on, so it
   cannot deadlock the primary↔follower path the way an in-line pull would.
@@ -16,7 +16,7 @@ defmodule Malachi.Cluster.Catchup do
   target holds none of it yet), so the appended records line up; `Malachi.Cluster.ReplicationServer.end_offset/2`
   gives that for an existing replica. The source must hold the records being copied; if it is
   itself behind and runs out before `to_offset`, the copy stops at what the source has and returns
-  the offset reached — the caller can check it against the target and pick another source.
+  the offset reached: the caller can check it against the target and pick another source.
   """
 
   alias Malachi.Cluster.ReplicationServer
@@ -25,8 +25,8 @@ defmodule Malachi.Cluster.Catchup do
 
   @doc """
   Copies `segment_id` from `source` to `target` over `[from_offset, to_offset)`. Returns
-  `{:ok, reached_offset}` — the target's new end, which equals `to_offset` on full catch-up or
-  less if the source ran out first — or `{:error, {:source | :target, reason}}`.
+  `{:ok, reached_offset}`: the target's new end, which equals `to_offset` on full catch-up or
+  less if the source ran out first, or `{:error, {:source | :target, reason}}`.
 
   ## Options
     * `:batch_size` - records copied per round trip (default 1000).

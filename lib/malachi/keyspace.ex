@@ -6,8 +6,8 @@ defmodule Malachi.Keyspace do
   Both the data plane (`Malachi.Broker`, which routes record keys to keyspace slices) and
   the control plane (`Malachi.Cluster.HashRing`/DS-RSM, which routes metadata keys to
   vnodes) hash keys the same way and share the same `1..32` bound (because
-  `:erlang.phash2/2` supports a range up to `2^32`). Centralizing it here keeps that rule —
-  and the buddy split/merge math — in one place.
+  `:erlang.phash2/2` supports a range up to `2^32`). Centralizing it here keeps that rule:
+  and the buddy split/merge math, in one place.
   """
 
   import Bitwise
@@ -61,7 +61,7 @@ defmodule Malachi.Keyspace do
   def split_point(block_start, block_end), do: block_start + div(block_end - block_start, 2)
 
   @doc """
-  Whether two equal-size, power-of-two-aligned blocks are buddies — the two halves of a
+  Whether two equal-size, power-of-two-aligned blocks are buddies: the two halves of a
   common parent block (the buddy-allocator rule `start XOR size`).
   """
   @spec buddies?(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::

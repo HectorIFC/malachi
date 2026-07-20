@@ -6,13 +6,13 @@ defmodule Malachi.Auth.LockoutServer do
   not ra's lifecycle.
 
   **Writes** (`record_failed_attempt`/`record_successful_auth`/`unlock_user`/`unlock_key`/`cleanup`) go
-  through the log — replicated by consensus, so brute-force protection is **cluster-wide** (attempts spread
+  through the log: replicated by consensus, so brute-force protection is **cluster-wide** (attempts spread
   across nodes still count against one limit) and **survives a restart**. `record_failed_attempt` returns the
   machine reply `%{count, locked}` so the caller can drive metrics/logging/audit for a newly applied lockout.
 
   **Reads** (`locked?`/`failed_attempts`/`list_locked`) use `:ra.local_query` against the **local** replica:
   fast (no consensus round-trip) and adequate for the auth hot path, which checks the lock once per attempt.
-  Expiry is evaluated against a caller-supplied `now` (the local node's clock) — seconds of clock skew are
+  Expiry is evaluated against a caller-supplied `now` (the local node's clock), seconds of clock skew are
   irrelevant to minutes-long lockouts, and reads are eventually consistent (a just-written lockout propagates
   within replication lag), which is acceptable for brute-force defense.
   """
@@ -50,7 +50,7 @@ defmodule Malachi.Auth.LockoutServer do
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
     # formed cluster, which ra logs as an error. Only a node that has not yet joined tries to form/join.
     case :ra.members({cluster_name, node()}) do
       {:ok, _members, _leader} ->
@@ -63,7 +63,7 @@ defmodule Malachi.Auth.LockoutServer do
   end
 
   # Best-effort: starts the local lockout server so it (re)joins the cluster. Any error (already started, or
-  # the cluster not yet formed) is ignored — reconcile is idempotent and the caller retries.
+  # the cluster not yet formed) is ignored: reconcile is idempotent and the caller retries.
   defp ensure_local_server(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, LockoutMachine, %{}}

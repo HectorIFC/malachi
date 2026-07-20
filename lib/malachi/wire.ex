@@ -1,6 +1,6 @@
 defmodule Malachi.Wire do
   @moduledoc """
-  The binary wire protocol for the NorthGuard log client (B1) — a length-prefixed, request/response
+  The binary wire protocol for the NorthGuard log client (B1): a length-prefixed, request/response
   framing that replaces the JSON+base64 line protocol (measured ~29% fewer bytes and 9-17x less
   serialization CPU in `bench/protocol_bench.exs`).
 
@@ -9,15 +9,15 @@ defmodule Malachi.Wire do
       Response:  <<correlation_id::32, error_code::16, payload::binary>>
 
   `correlation_id` lets a client pipeline (match each response to its request). Records on the wire carry
-  **no offset** — the client never sees one; the opaque cursor carries position — so this is a distinct
+  **no offset**: the client never sees one; the opaque cursor carries position - so this is a distinct
   encoding from `Malachi.Log.Record.encode/1` (the on-disk frame, which includes the offset). Keys and cursors are
-  length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure — this module
+  length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure, this module
   only encodes/decodes binaries; the socket wiring is B1b.
 
   `decode_frame/1` is tolerant (returns `:incomplete` for a partial frame), but the payload decoders
   (`decode_request/1`, `decode_produce_req/1`, …) assume a **well-formed** body and raise on a malformed
   one. A frame body comes from an untrusted client, so B1b must decode inside a `try` and answer an error
-  (or close) on a raise — keeping the malformed-input handling at the connection boundary, not in the codec.
+  (or close) on a raise: keeping the malformed-input handling at the connection boundary, not in the codec.
   """
 
   alias Malachi.Log.Record
@@ -96,7 +96,7 @@ defmodule Malachi.Wire do
 
   @doc """
   Like `decode_frame/1` but bounds the frame: as soon as the 4-byte length prefix is readable, a declared
-  length over `max_size` is rejected with `{:error, :frame_too_large}` — **before** the body is buffered —
+  length over `max_size` is rejected with `{:error, :frame_too_large}`, **before** the body is buffered:
   so a hostile length prefix cannot force the server to accumulate unbounded memory.
   """
   @spec decode_frame(binary(), non_neg_integer()) ::
@@ -133,7 +133,7 @@ defmodule Malachi.Wire do
     {username, password}
   end
 
-  # An mTLS-auth request carries no payload — the server derives the identity from the verified peer
+  # An mTLS-auth request carries no payload: the server derives the identity from the verified peer
   # certificate. The response reuses the auth response (a session token).
   def encode_mtls_auth_req, do: <<>>
 
@@ -173,7 +173,7 @@ defmodule Malachi.Wire do
   # member is an optional consumer-group member id (nil = whole-group / single consumer); max and wait_ms
   # are the fetch bounds. Precedence: a `member` (grouped, server-scoped to its ranges) wins, then an
   # explicit `cursor` (client-managed paging), then a `group` resume. No range/offset ever crosses the
-  # wire — the response is always records + an opaque cursor.
+  # wire: the response is always records + an opaque cursor.
   def encode_fetch_req(topic, cursor, group, member, max, wait_ms) do
     <<put_str(topic)::binary, put_str(cursor)::binary, put_str(group)::binary, put_str(member)::binary, max::32,
       wait_ms::32>>
@@ -214,7 +214,7 @@ defmodule Malachi.Wire do
   # ordinary success responses tagged with the subscribe's correlation id, each carrying an
   # `encode_fetch_resp/2` payload (records + the next opaque cursor).
   # member is an optional consumer-group member id (nil = whole-group subscription); with it set the
-  # server scopes the push stream to the member's ranges (opaque — the push is still records + cursor).
+  # server scopes the push stream to the member's ranges (opaque: the push is still records + cursor).
   def encode_subscribe_req(topic, group, member, window, max) do
     <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary, window::32, max::32>>
   end
@@ -337,7 +337,7 @@ defmodule Malachi.Wire do
 
   # ---- wire record (no offset; key/value/headers/timestamp only) ----
 
-  @doc "Encodes a record for the wire (no offset — the client never sees one)."
+  @doc "Encodes a record for the wire (no offset: the client never sees one)."
   @spec encode_record(Record.t()) :: binary()
   def encode_record(%Record{key: key, value: value, timestamp: ts, headers: headers}) do
     <<put_str(key)::binary, byte_size(value)::32, value::binary, ts::64, encode_headers(headers)::binary>>

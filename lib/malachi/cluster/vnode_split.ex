@@ -3,9 +3,9 @@ defmodule Malachi.Cluster.VnodeSplit do
   Runs a vnode split end to end, under the lease. Only the lease leader acts (one writer of the ring
   version). It reads the cluster's current `Malachi.Cluster.RingTopology` from the membership, **records the
   split intent** (`begin_split`, gossiped before any migration so a coordinator that takes over the lease
-  mid-split can reconcile it — B2), splits the ring over real Raft — starting the new vnode's cluster and
+  mid-split can reconcile it: B2), splits the ring over real Raft - starting the new vnode's cluster and
   migrating the displaced topics' metadata, fenced and copy-first
-  (`Malachi.Cluster.ReplicatedDSRSM.split_vnode/4`) — then **advances** the topology (which moves the ring
+  (`Malachi.Cluster.ReplicatedDSRSM.split_vnode/4`), then **advances** the topology (which moves the ring
   forward and clears the intent) and **publishes** it back to the membership (`set_topology`). On a logical
   migration failure, `split_vnode` has already rolled back in-process (B1), so it just clears the now-stale
   intent (`clear_pending`) and returns the error. From there gossip disseminates the topology and every node
@@ -42,12 +42,12 @@ defmodule Malachi.Cluster.VnodeSplit do
 
   @doc """
   Reconciles an **interrupted** split on lease takeover (or coordinator restart): if the topology carries a
-  pending-split intent — a split whose coordinator crashed after recording it but before completing —
+  pending-split intent: a split whose coordinator crashed after recording it but before completing:
   **completes it forward** (`ReplicatedDSRSM.complete_split/4`: resume the migration idempotently from
   wherever it stopped) and publish the finished topology (`advance`, which moves the ring forward and clears
   the intent). This is NorthGuard's *"carrying it out to the end"*: the coordinator that takes over drives
   the split to completion rather than undoing it. If it cannot complete now (a vnode is unreachable), the
-  intent is **kept pending** so a later takeover/restart retries — the partial state is left intact, never
+  intent is **kept pending** so a later takeover/restart retries: the partial state is left intact, never
   cleared, so no progress is lost (an explicit abort is `ReplicatedDSRSM.abort_split/3`). A no-op when
   nothing is pending. Only the lease leader acts (`{:error, :not_leader}` otherwise). Idempotent.
   """
@@ -60,13 +60,13 @@ defmodule Malachi.Cluster.VnodeSplit do
 
           case ReplicatedDSRSM.complete_split(state, new_vnode, token, nodes) do
             {:ok, grown} ->
-              # the split finished — publish the completed ring + placement (advance clears the intent)
+              # the split finished: publish the completed ring + placement (advance clears the intent)
               placements = Map.put(topology.placements, new_vnode, nodes)
               MembershipServer.set_topology(membership, RingTopology.advance(topology, grown.ring, placements))
 
             {:error, _reason} ->
               # a vnode was unreachable, so the split could not complete now; keep the intent pending (the
-              # partial state is intact) so a later takeover/restart retries — do not clear it away
+              # partial state is intact) so a later takeover/restart retries, do not clear it away
               :ok
           end
 
@@ -85,7 +85,7 @@ defmodule Malachi.Cluster.VnodeSplit do
 
     # Record the split intent (gossiped) *before* migrating: if this coordinator crashes mid-split, the node
     # that takes over the lease finds the pending intent and reconciles the interrupted split (B2-3). The
-    # ring is unchanged at this point — routing still uses the pre-split placement until the split completes.
+    # ring is unchanged at this point: routing still uses the pre-split placement until the split completes.
     pending = RingTopology.begin_split(current, new_vnode_id, token, nodes)
     MembershipServer.set_topology(membership, pending)
 

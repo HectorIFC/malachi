@@ -2,10 +2,10 @@
 'use strict';
 
 /**
- * Malachi Producer — appends records to a topic over the binary log protocol.
+ * Malachi Producer: appends records to a topic over the binary log protocol.
  *
  * Records are addressed by an optional key (the server routes the key to a range); position is never
- * chosen by the client. This replaces the old queue "publish" — there is no queue, only an append log.
+ * chosen by the client. This replaces the old queue "publish": there is no queue, only an append log.
  *
  * Usage:
  *   node producer.js [topic] [count]        # append <count> records (default 10) to <topic>
@@ -96,7 +96,7 @@ async function produceContinuous(topic, key, create) {
 
 function help() {
   console.log(`
-${colors.cyan('Malachi Producer')} — append records to a topic
+${colors.cyan('Malachi Producer')}, append records to a topic
 
 ${colors.yellow('Usage')}
   node producer.js [topic] [count] [options]

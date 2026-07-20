@@ -29,14 +29,14 @@ class MalachiError extends Error {
 }
 
 // The server answers :not_owner when a member request is routed to a coordinator that no longer leads the
-// topic's vnode (a transient failover window). It is retryable — the server re-resolves the current leader
-// on the next attempt — so the member CLIs back off and retry rather than failing.
+// topic's vnode (a transient failover window). It is retryable: the server re-resolves the current leader
+// on the next attempt, so the member CLIs back off and retry rather than failing.
 function isNotOwner(err) {
   return err instanceof MalachiError && err.message === 'not_owner';
 }
 
 // The server answers :migrating on a metadata write (produce that rolls a segment, or a commit) to a topic
-// whose vnode is being split away — the topic is fenced during the copy. It is transient (the fence lifts
+// whose vnode is being split away: the topic is fenced during the copy. It is transient (the fence lifts
 // once the split completes and the ring moves), so the CLIs back off and retry against the new location.
 function isMigrating(err) {
   return err instanceof MalachiError && err.message === 'migrating';
@@ -107,7 +107,7 @@ class MalachiClient {
         sub.onRecords(wire.decodeFetchResp(payload));
       } else {
         // subscribe was rejected (e.g. permission denied): the server never enters push mode for this
-        // corr_id, so no more frames arrive — drop the subscription and surface the reason.
+        // corr_id, so no more frames arrive: drop the subscription and surface the reason.
         this.subscriptions.delete(correlationId);
         if (sub.onError) sub.onError(new MalachiError(wire.decodeString(payload)));
       }
@@ -115,7 +115,7 @@ class MalachiClient {
     }
 
     const waiter = this.pending.get(correlationId);
-    if (!waiter) return; // late/duplicate frame for a settled request — ignore
+    if (!waiter) return; // late/duplicate frame for a settled request, ignore
     this.pending.delete(correlationId);
     clearTimeout(waiter.timer);
     if (errorCode === wire.OK) {
@@ -168,7 +168,7 @@ class MalachiClient {
   // Pulls one batch. cursor: null/undefined = start; group resumes a committed position when cursor is null.
   // waitMs > 0 long-polls server-side, so the request timeout is extended past it.
   // With `member` (a consumer-group member id), the server scopes the fetch to the member's assigned
-  // ranges — the client still only sees records + an opaque cursor. Without it, whole-group / single fetch.
+  // ranges: the client still only sees records + an opaque cursor. Without it, whole-group / single fetch.
   async fetch(topic, { cursor = null, group = null, member = null, max = 100, waitMs = 0 } = {}) {
     const payload = wire.encodeFetchReq(topic, cursor, group, member, max, waitMs);
     const timeout = Math.max(this.timeout, waitMs + this.timeout);
@@ -228,7 +228,7 @@ class MalachiClient {
     return true;
   }
 
-  // Resolves with `[{ username, permissions: [...] }]` — no password hashes ever leave the server.
+  // Resolves with `[{ username, permissions: [...] }]`: no password hashes ever leave the server.
   async listUsers() {
     const body = await this._request(wire.API.listUsers, Buffer.alloc(0));
     return wire.decodeListUsersResp(body);

@@ -84,12 +84,12 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     {:ok, _members, {^victim_vnode, leader_node}} = :ra.members(ReplicatedDSRSM.server_for(replicated, victim_vnode))
 
     # kill one member of that vnode: its leader if the leader is a peer (exercising failover), else a
-    # peer follower. Never the local node — it is running the test. Quorum (2/3) is kept either way.
+    # peer follower. Never the local node: it is running the test. Quorum (2/3) is kept either way.
     casualty = if leader_node in peer_nodes, do: leader_node, else: hd(peer_nodes)
     :ok = try_stop(Map.fetch!(peer_by_node, casualty))
 
     # the owning vnode still commits (its cluster kept quorum / re-elected), and its earlier metadata
-    # is intact — while a topic on the other vnode is unaffected too
+    # is intact, while a topic on the other vnode is unaffected too
     assert {:ok, _root} = commit(replicated, victim_topic, {:create_topic, "#{victim_topic}_after", 4})
     {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
     assert DSRSM.get_topic(cache, victim_topic).name == victim_topic
@@ -155,7 +155,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     {:ok, orchestrator} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), vnode, 0, placement)
     assert {:ok, _root} = commit(orchestrator, "events", {:create_topic, "events", 4})
 
-    # non-orchestrator: only routes to a placement member (route_vnode) — it never calls start
+    # non-orchestrator: only routes to a placement member (route_vnode): it never calls start
     {:ok, router} = ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(), vnode, 0, {vnode, hd(placement)})
 
     # the router reaches the same remote cluster: it reads the orchestrator's write and commits its own
@@ -212,7 +212,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
 
     # the new vnode's ra cluster can't form on an unreachable node, so split_vnode fails *before* it fences
-    # or migrates anything — the source is never mutated
+    # or migrates anything: the source is never mutated
     token = :erlang.phash2("orders", Integer.pow(2, 32))
     assert {:error, _reason} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [:"nonexistent@127.0.0.1"])
 
@@ -237,7 +237,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
 
     # inject a second source vnode whose ra cluster is down (server on an unreachable node). It is not in
-    # the ring — it exists only to make the migration fail *after* `source` has already handed "orders" off
+    # the ring: it exists only to make the migration fail *after* `source` has already handed "orders" off
     # to the new vnode, so the rollback's move-back path (new -> source) actually runs.
     broken = %{replicated | vnodes: Map.put(replicated.vnodes, down, {down, :"nonexistent@127.0.0.1"})}
 
@@ -253,7 +253,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     assert meta.migrating == %{}
     assert commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 900}}) == :ok
 
-    # and the new vnode was emptied by the move-back — nothing orphaned there
+    # and the new vnode was emptied by the move-back, nothing orphaned there
     {:ok, dest_meta} = MetadataServer.query({dest, node()}, &Function.identity/1)
     assert Metadata.get_topic(dest_meta, "orders") == nil
   end
@@ -290,7 +290,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     :ok = commit(replicated, "orders", {:commit_offset, "workers", "orders", %{root => 500}})
     token = :erlang.phash2("orders", Integer.pow(2, 32))
 
-    # drive the split once (migration done, dest cluster up) — like a crash *after* the migration but before
+    # drive the split once (migration done, dest cluster up): like a crash *after* the migration but before
     # advancing the topology, the interrupted state complete_split resumes from the pre-split view
     {:ok, _grown1} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
 

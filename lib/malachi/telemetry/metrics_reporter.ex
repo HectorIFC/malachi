@@ -17,7 +17,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :replication, :commit]
   ]
 
-  @doc "Attaches the reporter (idempotent — a previous attachment is replaced)."
+  @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
   @spec attach() :: :ok
   def attach do
     # Detach first so a Metrics restart re-attaches cleanly instead of hitting :already_exists.

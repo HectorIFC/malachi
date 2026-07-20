@@ -67,7 +67,7 @@ defmodule Malachi.Application do
     :erlang.system_flag(:schedulers_online, schedulers_to_use)
 
     # `ra` backs the replicated user store (and, when clustered, the log control plane), so start it before
-    # any child that forms an ra cluster — always, including single-node (a 1-member cluster is cheap).
+    # any child that forms an ra cluster: always, including single-node (a 1-member cluster is cheap).
     start_ra!()
 
     # Replicated user store: forms the ra user cluster (so Auth can seed into it) + a reconciler for
@@ -134,7 +134,7 @@ defmodule Malachi.Application do
   end
 
   # The replicated user store: forms the ra user cluster across `nodes` (so `Malachi.Auth` can seed into it).
-  # Runs in every mode — single-node forms a cheap 1-member cluster. When clustered (more than one node), it
+  # Runs in every mode: single-node forms a cheap 1-member cluster. When clustered (more than one node), it
   # also supervises a reconciler that self-joins this node on a staggered boot (reusing the generic
   # `LeaseReconciler`); single-node needs no self-join, so it is omitted there.
   defp user_store_children(nodes) do
@@ -237,7 +237,7 @@ defmodule Malachi.Application do
   @log_rebalance_coordinator Malachi.LogRebalanceCoordinator
 
   # The dynamic-rebalancing stack, only for a sharded control plane: bootstrap the dedicated lease ra
-  # cluster (auto-fenced — every node calls, one forms), run the lease holder (election), and the manual
+  # cluster (auto-fenced: every node calls, one forms), run the lease holder (election), and the manual
   # plan/commit coordinator. Nothing moves automatically; an operator drives `RebalanceCoordinator`.
   defp rebalance_children(_nodes, nil), do: []
 
@@ -387,7 +387,7 @@ defmodule Malachi.Application do
 
   @doc """
   Tries each node in `nodes` as an entry point, returning the first `{:ok, members}` from `members_fun`
-  (`node -> {:ok, members} | :error`), or `{:error, :unreachable}` if none answers — how the rebalancing
+  (`node -> {:ok, members} | :error`), or `{:error, :unreachable}` if none answers, how the rebalancing
   coordinator finds a live member of a vnode it may not host locally. Pure given `members_fun`.
   """
   @spec try_members([node()], (node() -> {:ok, [node()]} | :error)) ::
@@ -416,7 +416,7 @@ defmodule Malachi.Application do
 
   # The retention/heal coordinators. Sharded control plane (1C-b-ii): a DynamicSupervisor plus a manager
   # that runs one coordinator pair per vnode this node leads. Otherwise (single-node, or a single-vnode
-  # cluster): the node-wide coordinators of 1C-a — heal whenever clustered, retention when a policy is set.
+  # cluster): the node-wide coordinators of 1C-a: heal whenever clustered, retention when a policy is set.
   defp coordinator_children(cluster, nil) do
     heal = if cluster, do: [healer_child()], else: []
     [group_coordinator_child()] ++ heal ++ retention_children(cluster)
@@ -470,7 +470,7 @@ defmodule Malachi.Application do
       replication_factor: replication_factor(),
       leader?: leader?,
       # Keep re-replication rack/DC-aware: a healed replica set spreads over the same attribute as initial
-      # placement (best-effort — heal never fails for durability, so no min_domains here).
+      # placement (best-effort: heal never fails for durability, so no min_domains here).
       spread: &heal_spread/0
     ]
   end
@@ -522,7 +522,7 @@ defmodule Malachi.Application do
   end
 
   # Seed the membership with the version-0 routing topology (the boot ring) when sharded, so gossip carries
-  # it and a split advances from it. A single vnode (or unclustered) has nothing to route — no topology.
+  # it and a split advances from it. A single vnode (or unclustered) has nothing to route, no topology.
   defp initial_topology_opt(nil), do: []
 
   defp initial_topology_opt(vnodes) do
@@ -538,7 +538,7 @@ defmodule Malachi.Application do
 
   # Applies a newly-adopted `RingTopology` (a vnode split's ring change, learned via gossip) to this
   # node's consumer-group routing: the `CoordinatorRouter` topology is the ring plus one ra server id per
-  # vnode (any member; the router resolves the live leader). Kept light — it runs inline in the membership
+  # vnode (any member; the router resolves the live leader). Kept light: it runs inline in the membership
   # server. The metadata routing (`ReplicatedDSRSM`) adoption is driven by the split orchestration itself.
   defp adopt_ring_topology(%RingTopology{ring: ring} = topology) do
     # consumer-group routing adopts the new ring inline (persistent_term, fast)
@@ -557,7 +557,7 @@ defmodule Malachi.Application do
 
   @doc ~S"""
   Parses a `"node1=rack_a,node2=rack_b"` cluster topology string into `%{node => value}` (node atom →
-  attribute string, e.g. rack/zone) — the static per-node placement attribute used by `place_vnodes/4`
+  attribute string, e.g. rack/zone): the static per-node placement attribute used by `place_vnodes/4`
   for rack-aware vnode placement (A1). `nil`/`""` => `%{}`. Entries without exactly one `=` are ignored;
   node and value are trimmed. Node names come from a trusted operator (deploy config), so
   `String.to_atom` is fine here. Being static config identical on every node keeps placement deterministic.
@@ -647,7 +647,7 @@ defmodule Malachi.Application do
   end
 
   # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
-  # restarted without the manager losing its handle), returning that supervisor's pid — the handle the
+  # restarted without the manager losing its handle), returning that supervisor's pid: the handle the
   # manager stops the vnode by. Heal + the group coordinator always; retention only when a policy is set.
   defp start_vnode_coordinators(vnode_id) do
     children =
@@ -772,7 +772,7 @@ defmodule Malachi.Application do
   @doc """
   The bootstrap-orchestrator policy used at runtime (D-c-1d): a `(-> boolean())` true only on the
   lowest-sorted **live** member (per SWIM membership on `membership_server`), so the role **fails over**
-  when the current leader dies — unlike `static_seed/1`, which is fixed to the lowest configured node.
+  when the current leader dies: unlike `static_seed/1`, which is fixed to the lowest configured node.
   Conservative: if membership is unavailable it returns false (never risking two orchestrators); a
   transient double-leader is still fenced by the ra cluster name at bootstrap.
   """
@@ -799,7 +799,7 @@ defmodule Malachi.Application do
   @doc """
   The metadata options passed to `Malachi.BrokerServer` for the given control-plane `cluster` and
   `nodes`: none (single-node in-memory) when `cluster` is `nil`, otherwise the `ra`-backed cluster.
-  Pure — the `ra` runtime is started separately (see `log_children/0`).
+  Pure: the `ra` runtime is started separately (see `log_children/0`).
   """
   @spec metadata_cluster_opts(atom() | nil, [node()]) :: keyword()
   def metadata_cluster_opts(nil, _nodes), do: []
@@ -823,10 +823,10 @@ defmodule Malachi.Application do
   `{vnode_id, token, nodes}`. The effective replica count is `min(replication_factor, length(nodes))`.
 
   `place_opts` selects the placement policy: `[spread: {attribute_key, node_attributes}]` keeps a vnode's
-  replicas in **distinct racks/zones** (A1, topology-aware — losing a whole rack does not take a majority
+  replicas in **distinct racks/zones** (A1, topology-aware: losing a whole rack does not take a majority
   of a vnode's replicas); `[max_skew: n]` instead balances the **whole set's** load across nodes (A2,
   `Placement.place_balanced/4`, a global decision), so no node is overloaded. The two are mutually
-  exclusive (standalone A2). Pure and deterministic — every node computes the same placement.
+  exclusive (standalone A2). Pure and deterministic: every node computes the same placement.
   Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
   """
   @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer(), keyword()) ::
@@ -849,13 +849,13 @@ defmodule Malachi.Application do
   @doc """
   The **desired** vnode placement for a given set of (live) `nodes`: the `count` logical vnodes of
   control plane `base` (`sharded_vnodes/2`, node-independent) placed over `nodes` by rendezvous hashing
-  (`place_vnodes/4`). Deterministic and, crucially for rebalancing, **minimal-movement** — because the
+  (`place_vnodes/4`). Deterministic and, crucially for rebalancing, **minimal-movement**, because the
   vnode ids/tokens are fixed and HRW is stable, adding or removing a node re-places only the vnodes that
   must move (a vnode changes only if it adopts a joined node, or held a left one), leaving the rest put.
 
   This is the target that the rebalancing plan (R2) diffs the *current* placement against: recomputing
   it over the live membership (vs the static `:log_nodes`) is how the ring follows nodes joining/leaving.
-  `place_opts` is forwarded for rack/zone spread (A1). Pure — the caller supplies `nodes` (e.g. the live
+  `place_opts` is forwarded for rack/zone spread (A1). Pure: the caller supplies `nodes` (e.g. the live
   members), so a coordinated recompute stays deterministic across the cluster.
   """
   @spec desired_placement(atom(), pos_integer(), [node()], pos_integer(), keyword()) ::
@@ -866,7 +866,7 @@ defmodule Malachi.Application do
 
   @doc """
   The **rebalancing plan** (R2): the per-vnode membership changes to move from the `current` placement to
-  the `desired` one (from `desired_placement/5`), *staged* — it computes what to change without applying
+  the `desired` one (from `desired_placement/5`), *staged*: it computes what to change without applying
   anything. For each vnode whose node set differs it yields `%{vnode_id:, add:, remove:}`, where `add`
   are the nodes to join that vnode's ra cluster and `remove` the ones to drop; vnodes that already match
   are omitted (so an empty plan means "nothing to do"). R3 executes each change **add-before-remove**, so
@@ -874,7 +874,7 @@ defmodule Malachi.Application do
   and `remove` are equal-sized).
 
   Assumes `current` and `desired` cover the **same vnode ids** (rebalancing follows membership; changing
-  the vnode count is re-sharding, out of scope). Deterministic — the plan follows `desired`'s order. Pure.
+  the vnode count is re-sharding, out of scope). Deterministic: the plan follows `desired`'s order. Pure.
   """
   @spec rebalance_plan([{atom(), non_neg_integer(), [node()]}], [{atom(), non_neg_integer(), [node()]}]) ::
           [%{vnode_id: atom(), add: [node()], remove: [node()]}]
@@ -892,7 +892,7 @@ defmodule Malachi.Application do
   @doc """
   The **current** placement read from the vnodes' live ra memberships: for each `{vnode_id, token}` in
   `vnode_configs`, `members_of.(vnode_id)` returns `{:ok, nodes}` (its current member nodes) or
-  `{:error, _}`. A vnode whose membership cannot be read is **omitted** — conservative: we never plan a
+  `{:error, _}`. A vnode whose membership cannot be read is **omitted**, conservative: we never plan a
   change for a vnode we cannot currently see. Returns `[{vnode_id, token, nodes}]`. Pure given the seam.
   """
   @spec readable_placement([{atom(), non_neg_integer()}], (atom() -> {:ok, [node()]} | {:error, term()})) ::
@@ -904,8 +904,8 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  The rebalancing plan for the **live** cluster (R3-b-i): diffs the current placement — read from the
-  vnodes' ra memberships via `members_of` (`readable_placement/2`) — against the placement **desired**
+  The rebalancing plan for the **live** cluster (R3-b-i): diffs the current placement, read from the
+  vnodes' ra memberships via `members_of` (`readable_placement/2`), against the placement **desired**
   over `alive_nodes` (the live members), for the **readable** vnodes only, so an unreachable vnode is
   neither planned for nor recomputed. `rf`/`place_opts` are the replication factor and spread options.
   Reads the world through the `members_of` seam (real: `:ra.members`); pure otherwise. The result feeds
@@ -930,8 +930,8 @@ defmodule Malachi.Application do
   (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
   (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local
   server id (defaults to `MetadataServer.leader?/1`). This is where 1C-b runs each vnode's
-  retention/healing coordinators, so every vnode is managed by exactly one node — the one leading its
-  Raft group — distributing the control-plane work the NorthGuard-faithful way (vs 1C-a's single
+  retention/healing coordinators, so every vnode is managed by exactly one node: the one leading its
+  Raft group: distributing the control-plane work the NorthGuard-faithful way (vs 1C-a's single
   membership leader). Pure given `leader?`; deterministic given the current leadership.
   """
   @spec leading_vnodes([{atom(), non_neg_integer(), [node()]}], node(), (MetadataServer.server_id() ->
@@ -944,7 +944,7 @@ defmodule Malachi.Application do
 
   @doc """
   A `metadata_source` bound to a single vnode: reads this node's view of the vnode's replicated
-  `Metadata` via a consistent query to its ra cluster (`{vnode_id, node()}`). Tolerant — an unreachable
+  `Metadata` via a consistent query to its ra cluster (`{vnode_id, node()}`). Tolerant, an unreachable
   or not-yet-formed vnode yields empty `Metadata` (no work) instead of crashing the coordinator. Used by
   1C-b so each vnode's retention/heal coordinator sees only that vnode's shard, versus 1C-a's global
   merge routed through the single membership leader.
@@ -990,7 +990,7 @@ defmodule Malachi.Application do
   @spec broker_refs([node()]) :: [{module(), node()}]
   def broker_refs(nodes), do: for(n <- nodes, do: {Malachi.LogReplication, n})
 
-  @doc "The membership seeds this node joins with — the other nodes' membership servers (not self)."
+  @doc "The membership seeds this node joins with: the other nodes' membership servers (not self)."
   @spec membership_seeds([node()]) :: [{module(), node()}]
   def membership_seeds(nodes), do: for(n <- nodes, n != node(), do: {Malachi.LogMembership, n})
 
@@ -1028,7 +1028,7 @@ defmodule Malachi.Application do
 
   @doc """
   Called before the application stops (SIGTERM / `bin/malachi stop`). Quiesces the acceptor, drains
-  in-flight for a bounded window, then closes connections — see `Malachi.Shutdown`.
+  in-flight for a bounded window, then closes connections, see `Malachi.Shutdown`.
   """
   def prep_stop(_state) do
     Logger.info(I18n.t(:graceful_shutdown))

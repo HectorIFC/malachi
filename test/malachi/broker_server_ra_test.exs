@@ -1,5 +1,5 @@
 defmodule Malachi.BrokerServerRaTest do
-  # async: false — ra is global/stateful (one data dir, on-disk Raft logs).
+  # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
   alias Malachi.BrokerServer
@@ -75,7 +75,7 @@ defmodule Malachi.BrokerServerRaTest do
     for name <- names, do: assert({:ok, _root} = BrokerServer.create_topic(control, name, 4))
 
     # each topic is retrievable through the broker's cache, and its metadata was committed to exactly
-    # the ra cluster its name routes to (queried directly) — and to no other vnode
+    # the ra cluster its name routes to (queried directly), and to no other vnode
     home = fn name ->
       Enum.filter(vnodes, fn {vnode, _token, _nodes} ->
         match?(%{name: ^name}, elem(MetadataServer.query({vnode, node()}, &Metadata.get_topic(&1, name)), 1))

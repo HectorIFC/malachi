@@ -8,19 +8,19 @@ discovery, and the failure-domain placement guarantee.
 
 Malachi's control plane is **Raft** (`ra`), which needs **stable node identities**. That drives the shape:
 
-- **StatefulSet**, not Deployment — each pod gets a stable name (`malachi-0/1/2`), stable DNS, and a stable
+- **StatefulSet**, not Deployment: each pod gets a stable name (`malachi-0/1/2`), stable DNS, and a stable
   `PersistentVolume`, so a restarted pod rejoins its Raft groups as the *same* member.
-- **Headless Service** (`malachi-headless`, `clusterIP: None`) — publishes per-pod DNS
+- **Headless Service** (`malachi-headless`, `clusterIP: None`), publishes per-pod DNS
   (`malachi-0.malachi-headless.<ns>.svc.cluster.local`) for Erlang distribution and the `ra` peer set.
   `publishNotReadyAddresses: true` lets peers resolve each other *during* cluster formation, before Ready.
-- **Static peer set** (`MALACHIMQ_LOG_NODES` = the three pod DNS names) — idiomatic for a fixed-size CP
+- **Static peer set** (`MALACHIMQ_LOG_NODES` = the three pod DNS names), idiomatic for a fixed-size CP
   cluster (this is how RabbitMQ and friends do it), and the node names match `RELEASE_NODE` exactly.
-- **libcluster, `epmd` strategy** — connectivity only: it keeps the (already-known) peers connected over
+- **libcluster, `epmd` strategy**. Connectivity only: it keeps the (already-known) peers connected over
   Erlang distribution. It reuses `MALACHIMQ_LOG_NODES`, so no extra config and no Kubernetes-API RBAC.
-  (The `kubernetes` strategy is available for dynamic, autoscaling deployments — see the note below.)
-- **`podManagementPolicy: Parallel`** — the three pods start together so the Raft cluster forms with a
+  (The `kubernetes` strategy is available for dynamic, autoscaling deployments, see the note below.)
+- **`podManagementPolicy: Parallel`**: the three pods start together so the Raft cluster forms with a
   quorum instead of waiting pod-by-pod.
-- **PodDisruptionBudget `minAvailable: 2`** — keeps a Raft majority through drains and rollouts.
+- **PodDisruptionBudget `minAvailable: 2`**: keeps a Raft majority through drains and rollouts.
 
 ### Rack-aware placement
 
@@ -51,7 +51,7 @@ Segment replicas should span distinct failure domains (zones). Two pieces make t
    ```
 
    The manifest also runs **inter-node distribution over mutual TLS** (`MALACHIMQ_DIST_TLS`). Provide the CA
-   + a CA-signed node cert/key and the `ssl_dist` options file via the `malachi-dist-tls` Secret — generate
+   + a CA-signed node cert/key and the `ssl_dist` options file via the `malachi-dist-tls` Secret, generate
    dev material with `bash scripts/generate-dist-certs.sh`, then:
 
    ```sh
@@ -87,7 +87,7 @@ MALACHI_PORT=4040 node ../../scripts/producer.js orders 100 --create
 ```
 
 If nodes are unlabelled (no `topology.kubernetes.io/zone`), the zone is empty, placement falls back to
-no-spread, and `malachi_domain_violations` reports the segments that cannot meet `min_domains` — the
+no-spread, and `malachi_domain_violations` reports the segments that cannot meet `min_domains`, the
 degradation is surfaced, not hidden.
 
 ## Dynamic discovery (alternative)
@@ -105,5 +105,5 @@ For an autoscaling, non-fixed deployment you can swap the `epmd` strategy for Ku
 
 This needs a `get/list/watch` on `pods` in the RBAC, and the discovered node names must match
 `RELEASE_NODE` (with a StatefulSet + headless service and `mode: hostname` they do). The `ra` peer set
-still comes from `MALACHIMQ_LOG_NODES`, since Raft membership is explicit — dynamic *membership* changes
+still comes from `MALACHIMQ_LOG_NODES`, since Raft membership is explicit, dynamic *membership* changes
 ride on the rebalancing coordinator, not on discovery.

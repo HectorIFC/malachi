@@ -2,12 +2,12 @@
 'use strict';
 
 /**
- * Malachi load-test harness — a load generator over the binary log protocol, in two modes.
+ * Malachi load-test harness: a load generator over the binary log protocol, in two modes.
  *
  * Closed-loop (default): N connections each run a scenario in a tight `op -> await` loop, saturating the
  * server, to find the ceiling and the latency at saturation. Open-loop (`--rate <rps>`): requests are
  * fired at a fixed arrival rate regardless of prior completions, and latency is measured from each
- * request's *scheduled* time — correcting coordinated omission, so a stall shows up as high latency on the
+ * request's *scheduled* time: correcting coordinated omission, so a stall shows up as high latency on the
  * requests that queued behind it. Both reuse the same ops and report throughput (ops/s, records/s, MB/s)
  * plus latency percentiles. This is the external, end-to-end view (real TCP + serialization + auth),
  * reusing the reference client in ./lib.
@@ -153,7 +153,7 @@ async function closedLoop(clients, makeOpFor, deadline, stats) {
 }
 
 // Open-loop: fire requests at a fixed arrival rate (opts.rate) regardless of prior completions, and
-// measure latency from each request's *scheduled* time — not its actual send — so a server stall shows up
+// measure latency from each request's *scheduled* time: not its actual send - so a server stall shows up
 // as high latency on the requests that piled up behind it (coordinated-omission correction). Requests are
 // spread round-robin over the connection pool, which multiplexes them by correlation id. When in-flight
 // hits opts.maxInflight the server can't sustain the rate, so we stop piling on and flag saturation.
@@ -328,7 +328,7 @@ function report(scenario, opts, elapsedMs, stats) {
   console.log('');
 
   if (!streaming) {
-    console.log(colors.bold('Latency (ms)') + (openLoopMode ? colors.gray(' — coordinated-omission-corrected') : ''));
+    console.log(colors.bold('Latency (ms)') + (openLoopMode ? colors.gray(', coordinated-omission-corrected') : ''));
     console.log(
       `   min ${round(stats.min)}  mean ${round(stats.mean())}  p50 ${round(p[50])}  ` +
         `p90 ${round(p[90])}  p95 ${round(p[95])}  p99 ${round(p[99])}  max ${round(stats.max)}` +
@@ -347,7 +347,7 @@ function round(n) {
 
 function help() {
   console.log(`
-${colors.cyan('Malachi load test')} — closed-loop (default) or open-loop (--rate) load generator
+${colors.cyan('Malachi load test')}: closed-loop (default) or open-loop (--rate) load generator
 
 ${colors.yellow('Usage')}
   node loadtest.js --scenario <produce|fetch|stream|mixed> [options]

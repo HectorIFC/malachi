@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.RetentionCoordinator do
   @moduledoc """
   Periodically expires sealed segments that exceed the retention policy, using the pure
-  `Malachi.Cluster.Retention` decision and executing it through injected seams — so it is testable
+  `Malachi.Cluster.Retention` decision and executing it through injected seams, so it is testable
   in-process and wired to the real broker/replication later without change:
 
     * `:metadata_source` - `(-> Malachi.Metadata.t())`, the current control-plane metadata;

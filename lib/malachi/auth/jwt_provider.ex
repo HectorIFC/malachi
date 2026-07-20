@@ -1,15 +1,15 @@
 defmodule Malachi.Auth.JwtProvider do
   @moduledoc """
-  The OIDC/JWT authentication provider (P4, decision 1A/2A/3A) — a `Malachi.Auth.AuthProvider`.
+  The OIDC/JWT authentication provider (P4, decision 1A/2A/3A), a `Malachi.Auth.AuthProvider`.
 
   Authenticates a client by a **signed JWT** issued by an external IdP: it verifies the token
-  (`Malachi.Auth.JwtValidator` — signature + `iss`/`aud`/`exp`), reads the identity from a configured claim,
-  and looks that username up in the replicated user store for its permissions (decision 3A — the token
+  (`Malachi.Auth.JwtValidator`: signature + `iss`/`aud`/`exp`), reads the identity from a configured claim,
+  and looks that username up in the replicated user store for its permissions (decision 3A, the token
   authenticates, the internal record authorizes, like Kafka/Pulsar). No shared secret crosses the wire; the
   server trusts the IdP's signature.
 
   `credentials` is the compact JWT string. `context` carries the validation config
-  (`:signer`, `:issuer`, `:audience`, `:identity_claim` — typically from `Malachi.Auth.OidcConfig`) and,
+  (`:signer`, `:issuer`, `:audience`, `:identity_claim`, typically from `Malachi.Auth.OidcConfig`) and,
   optionally, a `:lookup` seam (default `Malachi.Auth.UserStore.get_user/1`).
   """
 
@@ -38,7 +38,7 @@ defmodule Malachi.Auth.JwtProvider do
 
   def authenticate(_no_token, _context), do: {:error, :invalid_token}
 
-  # Validate the token, then pull the identity claim — collapsing an absent identity claim into :no_identity
+  # Validate the token, then pull the identity claim. Collapsing an absent identity claim into :no_identity
   # while letting validation errors (bad signature, expired, wrong iss/aud) pass through as themselves.
   defp resolve_identity(token, context, identity_claim) do
     with {:ok, claims} <- JwtValidator.validate(token, config(context)),

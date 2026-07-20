@@ -1,11 +1,11 @@
 defmodule Malachi.Auth.PasswordProvider do
   @moduledoc """
-  The username/password authentication provider — the built-in `Malachi.Auth.AuthProvider`.
+  The username/password authentication provider: the built-in `Malachi.Auth.AuthProvider`.
 
   Wraps the session-less credential check (`Malachi.Auth.verify_credentials/2`) so the password mechanism
   fits the same contract as the external providers (mTLS today; OIDC/LDAP later): it resolves credentials to
   an identity (`%{username, permissions}`) and lets the boundary mint the session. It does **not** log or
-  audit — that stays with the boundary, which maps the specific error to a client-facing `:invalid_credentials`.
+  audit: that stays with the boundary, which maps the specific error to a client-facing `:invalid_credentials`.
   """
 
   @behaviour Malachi.Auth.AuthProvider

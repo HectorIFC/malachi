@@ -1,5 +1,5 @@
 defmodule Malachi.Auth.OidcConfigTest do
-  # async: false — reads/mutates global app env (:oidc_*).
+  # async: false, reads/mutates global app env (:oidc_*).
   use ExUnit.Case, async: false
 
   alias Malachi.Auth.JwtValidator

@@ -30,7 +30,7 @@ broker = Malachi.LogBroker
 
 LogApi.create_topic(broker, "events")
 
-# produce by key — no partitions, no offsets exposed
+# produce by key: no partitions, no offsets exposed
 LogApi.produce(broker, "events", [
   %{"key" => "user-1", "value" => "hello"},
   %{"key" => "user-2", "value" => "world"}
@@ -40,7 +40,7 @@ LogApi.produce(broker, "events", [
 {:ok, records, cursor} = LogApi.fetch(broker, "events", :start, 100)
 Enum.map(records, & &1.value)        #=> ["hello", "world"]
 
-# resume by passing the cursor back — nothing new yet
+# resume by passing the cursor back, nothing new yet
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
@@ -80,10 +80,10 @@ Each client authenticates first. In development the seeded users are `producer` 
 ## The dashboard
 
 Open <http://localhost:4041> for the built-in dashboard (metrics, topics, live stream). It requires an
-authenticated admin session — see the dashboard section of the README for the credentials it expects.
+authenticated admin session: see the dashboard section of the README for the credentials it expects.
 
 ## Next steps
 
-- [The log model](log-model.md) — why cursors are opaque and what a *range* is.
-- `Malachi.Wire` — the binary protocol, if you are writing a client.
-- The *Observability* section of the [README](../../README.md) — Prometheus metrics, telemetry, tracing.
+- [The log model](log-model.md): why cursors are opaque and what a *range* is.
+- `Malachi.Wire`: the binary protocol, if you are writing a client.
+- The *Observability* section of the [README](../../README.md), Prometheus metrics, telemetry, tracing.

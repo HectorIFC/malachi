@@ -38,7 +38,7 @@ defmodule Malachi.LogApiTest do
     {:ok, 2} = LogApi.produce(server, "events", [%{"value" => "a"}, %{"value" => "b"}])
 
     {:ok, _records, cursor} = LogApi.fetch(server, "events", :start, 100)
-    # opaque token — not an integer offset the client interprets
+    # opaque token: not an integer offset the client interprets
     refute is_integer(cursor)
     assert is_binary(cursor)
   end
@@ -149,7 +149,7 @@ defmodule Malachi.LogApiTest do
     server = start_broker(directory)
     :ok = LogApi.create_topic(server, "events")
 
-    # produced before the split — these live in the parent's segments, which leave the active set
+    # produced before the split: these live in the parent's segments, which leave the active set
     before_split = for index <- 0..19, do: %{"key" => "k#{index}", "value" => "v#{index}"}
     {:ok, 20} = LogApi.produce(server, "events", before_split)
 

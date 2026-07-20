@@ -1,7 +1,7 @@
 defmodule Malachi.Consumer.CoordinatorRouter do
   @moduledoc """
-  Routes a topic's consumer-group coordination to a single owning node, so every member of a group —
-  connected to any broker — reaches the **same** `GroupCoordinator`. The invariant "each range under
+  Routes a topic's consumer-group coordination to a single owning node, so every member of a group:
+  connected to any broker: reaches the **same** `GroupCoordinator`. The invariant "each range under
   exactly one member" needs one coordination authority per topic; with a local coordinator per node,
   members on different nodes would see divergent assignments.
 
@@ -26,7 +26,7 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   # -- pure core (topology + leadership passed in; fully unit-testable without a cluster) --
 
   @doc """
-  Decides where a topic's coordination lives. Returns `:local` when this node owns the topic's vnode —
+  Decides where a topic's coordination lives. Returns `:local` when this node owns the topic's vnode:
   and, **fail-safe**, whenever there is no topology, the ring can't route, the vnode is unknown, or its
   leader can't be resolved (a resolution gap degrades to the local coordinator rather than dropping the
   request). Returns `{:remote, node}` when another node leads the owning vnode. `leader_fn` maps a
@@ -49,7 +49,7 @@ defmodule Malachi.Consumer.CoordinatorRouter do
 
   @doc """
   The per-vnode coordinator name derived from a `base_name` and a `vnode_id`. In the sharded control plane
-  each led vnode runs its own `GroupCoordinator` (one per vnode, on the leader — the NorthGuard model), so
+  each led vnode runs its own `GroupCoordinator` (one per vnode, on the leader: the NorthGuard model), so
   routing and the boot wiring must agree on this name.
   """
   @spec coordinator_name(atom(), term()) :: atom()
@@ -59,7 +59,7 @@ defmodule Malachi.Consumer.CoordinatorRouter do
 
   @doc """
   Resolves the coordinator ref for `topic`. Single-node / in-memory (no topology): the bare `base_name`.
-  Sharded: the topic's vnode owns a **per-vnode** coordinator on its leader — `coordinator_name/2` locally
+  Sharded: the topic's vnode owns a **per-vnode** coordinator on its leader, `coordinator_name/2` locally
   when this node leads it, or `{coordinator_name/2, owner_node}` to forward. Falls back to `base_name` when
   the owning vnode or its leader can't be resolved (a transient failover state; the caller re-resolves).
   """

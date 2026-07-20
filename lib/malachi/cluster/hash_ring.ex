@@ -1,6 +1,6 @@
 defmodule Malachi.Cluster.HashRing do
   @moduledoc """
-  A consistent-hashing ring that maps metadata keys to the vnode that owns them — the
+  A consistent-hashing ring that maps metadata keys to the vnode that owns them, the
   foundation of NorthGuard's DS-RSM (Dynamically-Sharded Replicated State Machine).
 
   Each vnode sits at a `token` (a position) on a ring `[0, ring_size)`. A key is hashed

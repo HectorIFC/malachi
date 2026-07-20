@@ -26,7 +26,7 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
     assert SplitCoordinator.split(coord, :v1, 100, [node()]) == {:error, :not_leader}
   end
 
-  test "as the lease holder, delegates to VnodeSplit — no baseline topology yields :no_topology" do
+  test "as the lease holder, delegates to VnodeSplit. No baseline topology yields :no_topology" do
     coord = start_coordinator(fn -> true end, start_membership())
     assert SplitCoordinator.split(coord, :v1, 100, [node()]) == {:error, :no_topology}
   end

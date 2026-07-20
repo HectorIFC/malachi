@@ -5,7 +5,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   **quorum** has durably stored it.
 
   A broker is identified by this server's process reference (a registered name locally, or a
-  `{name, node}` tuple across nodes — `GenServer.call/3` accepts both, so the same code path runs
+  `{name, node}` tuple across nodes: `GenServer.call/3` accepts both, so the same code path runs
   in-process for tests and over distributed Erlang in production). A segment's `replica_set` (from
   `Malachi.Cluster.Placement`) is a list of those references; the first is the primary.
 
@@ -14,12 +14,12 @@ defmodule Malachi.Cluster.ReplicationServer do
   offset. A segment's log opens at the segment's `base_offset` (its first range-relative offset),
   so the offsets of a range's segments are contiguous rather than restarting at zero per segment.
   The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers) has the
-  batch — tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers — or `{:error, :no_quorum}`
+  batch. Tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers - or `{:error, :no_quorum}`
   otherwise. Both the primary and the followers `fsync` before counting toward the quorum, so
   "committed" means "durable on a majority".
 
   Scope: the active segment's happy path with quorum tolerance, plus **automatic catch-up** of a
-  follower that is behind — when the primary's fan-out reaches a follower whose end is below the
+  follower that is behind: when the primary's fan-out reaches a follower whose end is below the
   batch's offset, the follower kicks off a background pull from the primary (`Malachi.Cluster.Catchup`)
   and rejoins the quorum on a later batch. This covers both a follower that missed some batches and
   a **brand-new replica** that joins an active segment: it opens at the segment's `base`, sees the
@@ -84,7 +84,7 @@ defmodule Malachi.Cluster.ReplicationServer do
           | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
   def replicate(primary, segment_id, replica_set, base_offset, records) do
     # Carry the caller's trace context (the broker produce span, possibly on another node) so the quorum
-    # replication becomes a child span — distributed tracing across the produce -> replication hop (O5b).
+    # replication becomes a child span: distributed tracing across the produce -> replication hop (O5b).
     GenServer.call(
       primary,
       {:replicate, segment_id, replica_set, base_offset, records, Ctx.get_current()},
@@ -104,7 +104,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @doc """
   Deletes `segment_id`'s stored data from this server (used by retention once the control plane has
-  dropped the segment). Idempotent — deleting an unknown or already-removed segment is `:ok`, and it
+  dropped the segment). Idempotent. Deleting an unknown or already-removed segment is `:ok`, and it
   also clears any on-disk files left after a restart when the log was not reopened.
   """
   @spec delete(term(), term()) :: :ok
@@ -118,7 +118,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @doc """
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
-  is the offset the batch must start at — it must equal this server's current end for the segment
+  is the offset the batch must start at: it must equal this server's current end for the segment
   (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
   or `{:error, :out_of_sync}` if this server is behind. Used by the primary's fan-out and by
   `Malachi.Cluster.Catchup`.
@@ -258,7 +258,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   @spec do_replicate(state(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:reply, {:ok, non_neg_integer()} | {:error, :no_quorum}, state()}
   defp do_replicate(state, segment_id, replica_set, base_offset, records) do
-    # Distinct replicas, and never the primary itself among the followers — otherwise the server
+    # Distinct replicas, and never the primary itself among the followers, otherwise the server
     # would synchronously call itself (deadlock). The ack math also assumes distinct replicas.
     replica_set = Enum.uniq(replica_set)
     followers = replica_set -- [state.ref]

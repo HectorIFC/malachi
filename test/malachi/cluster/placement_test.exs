@@ -5,7 +5,7 @@ defmodule Malachi.Cluster.PlacementTest do
   alias Malachi.Cluster.Placement
   alias Malachi.Metadata
 
-  describe "place/3 — edge cases" do
+  describe "place/3, edge cases" do
     test "no brokers" do
       assert {:error, :no_brokers} = Placement.place("seg", [], 3)
     end
@@ -32,7 +32,7 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
-  describe "under_replicated/3 and heal/3 — edge cases" do
+  describe "under_replicated/3 and heal/3, edge cases" do
     test "empty broker set heals nothing (target is 0)" do
       metadata = with_segments([{"s1", [:a, :b]}], rf: 3)
       assert Placement.under_replicated(metadata, [], 3) == []
@@ -166,7 +166,7 @@ defmodule Malachi.Cluster.PlacementTest do
   defp live_subset([]), do: constant([])
   defp live_subset(all_brokers), do: member_subset(all_brokers)
 
-  describe "place/4 — spread (rack-aware)" do
+  describe "place/4, spread (rack-aware)" do
     # rack of each broker; brokers a1/a2 share rack "a"
     @attrs %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}, c1: %{"rack" => "c"}}
 
@@ -208,8 +208,8 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
-  describe "place/4 — min_domains + policy (hardening)" do
-    # a1/a2 in rack "a", b1 in rack "b" — only two racks
+  describe "place/4, min_domains + policy (hardening)" do
+    # a1/a2 in rack "a", b1 in rack "b", only two racks
     @dattrs %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}
 
     test "soft (default) places best-effort even when it cannot meet min_domains" do
@@ -264,7 +264,7 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
-  describe "place_balanced/4 — global load balancing (A2)" do
+  describe "place_balanced/4, global load balancing (A2)" do
     test "empty brokers give each item an empty replica set" do
       assert Placement.place_balanced([:x, :y], [], 2) == [{:x, []}, {:y, []}]
     end

@@ -26,7 +26,7 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   # decodes an error response payload (the reason travels as a length-prefixed string)
   defp reason(payload), do: Wire.decode_auth_resp(payload)
 
-  # a valid request on a fresh authenticated connection must still succeed — proof the server survived
+  # a valid request on a fresh authenticated connection must still succeed, proof the server survived
   defp assert_server_alive do
     socket = connect_auth()
     {code, _} = TCPHelper.request(socket, Wire.create_topic_key(), 1, Wire.encode_create_topic_req("surv_#{uniq()}", 8))
@@ -41,7 +41,7 @@ defmodule Malachi.BinaryProtocolSecurityTest do
       :gen_tcp.close(socket)
     end
 
-    test "requires auth as the first frame — a non-auth frame is rejected" do
+    test "requires auth as the first frame: a non-auth frame is rejected" do
       socket = connect()
       # a produce frame before authenticating
       :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.produce_key(), 7, <<>>))

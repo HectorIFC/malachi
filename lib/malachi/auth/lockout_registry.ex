@@ -1,10 +1,10 @@
 defmodule Malachi.Auth.LockoutRegistry do
   @moduledoc """
-  The pure state of **account lockouts** — failed-auth counters and progressive lockouts, keyed by
+  The pure state of **account lockouts**: failed-auth counters and progressive lockouts, keyed by
   `{username, ip}`. It is the deterministic core replicated by `Malachi.Auth.LockoutMachine` over a
   dedicated `ra` cluster (like `Malachi.Auth.UserRegistry`), so brute-force protection is **cluster-wide**
   (an attacker cannot spread attempts across nodes to dodge the limit) and **survives a restart** (a restart
-  cannot reset a lockout) — what the old node-local ETS store could not do.
+  cannot reset a lockout): what the old node-local ETS store could not do.
 
   Progressive lockout after `max_attempts` failures, escalating on each further multiple: base → ×3 → ×9 →
   ×24 → ×72 (capped). Because `apply/3` must be deterministic across replicas, it reads **no** config and
@@ -34,7 +34,7 @@ defmodule Malachi.Auth.LockoutRegistry do
 
   @doc """
   Applies a `command` at time `now` (the ra leader's `system_time`, ms). Returns `{new_state, reply}`.
-  Deterministic given `now` — never reads a clock or config itself.
+  Deterministic given `now`: never reads a clock or config itself.
   """
   @spec apply(t(), command(), integer()) :: {t(), term()}
   def apply(%__MODULE__{} = state, {:failed_attempt, key, config}, now) do
@@ -113,7 +113,7 @@ defmodule Malachi.Auth.LockoutRegistry do
     for {{u, _ip} = k, v} <- map, u != username, into: %{}, do: {k, v}
   end
 
-  # Progressive: the lockout escalates on each multiple of `max_attempts` — base → ×3 → ×9 → ×24 → ×72 (cap).
+  # Progressive: the lockout escalates on each multiple of `max_attempts`: base → ×3 → ×9 → ×24 → ×72 (cap).
   defp lockout_duration(count, %{progressive: true, max_attempts: max, base_duration_ms: base}) do
     case div(count, max) do
       1 -> base

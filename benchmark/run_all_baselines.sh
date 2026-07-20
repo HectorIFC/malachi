@@ -27,7 +27,7 @@ echo "Version: $VERSION"
 echo "Timestamp: $TIMESTAMP"
 echo ""
 
-# Load benchmark config — MIX_ENV=benchmark loads config/benchmark.exs (mnesia_dir, tuning params)
+# Load benchmark config, MIX_ENV=benchmark loads config/benchmark.exs (mnesia_dir, tuning params)
 export MIX_ENV=benchmark
 export MALACHIMQ_LOGGER_LEVEL=warning
 

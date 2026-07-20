@@ -462,14 +462,14 @@ defmodule Malachi.I18n do
     admin_password_generated: %{
       "pt_BR" =>
         "\n════════════════════════════════════════════════════════════════\n" <>
-          "Uma senha de admin aleatória foi gerada no primeiro boot. ANOTE AGORA —\n" <>
+          "Uma senha de admin aleatória foi gerada no primeiro boot. ANOTE AGORA:\n" <>
           "ela é mostrada só uma vez e não pode ser recuperada:\n\n" <>
           "    usuário: %{username}\n    senha:   %{password}\n\n" <>
           "Defina MALACHIMQ_ADMIN_PASS para usar a sua própria e pular a geração.\n" <>
           "════════════════════════════════════════════════════════════════",
       "en_US" =>
         "\n════════════════════════════════════════════════════════════════\n" <>
-          "A random admin password was generated on first boot. SAVE IT NOW —\n" <>
+          "A random admin password was generated on first boot. SAVE IT NOW:\n" <>
           "it is shown only once and cannot be recovered:\n\n" <>
           "    username: %{username}\n    password: %{password}\n\n" <>
           "Set MALACHIMQ_ADMIN_PASS to provide your own and skip generation.\n" <>

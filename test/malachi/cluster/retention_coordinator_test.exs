@@ -54,7 +54,7 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     test_pid = self()
     _server = start(expire_segment: fn segment -> send(test_pid, {:expired, segment.id}) end, interval: 20)
 
-    # no synchronous run_now — the scheduled tick drives it
+    # no synchronous run_now: the scheduled tick drives it
     assert_receive {:expired, "old"}, 1_000
   end
 

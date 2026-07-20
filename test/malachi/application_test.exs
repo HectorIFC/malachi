@@ -89,7 +89,7 @@ defmodule Malachi.ApplicationTest do
 
       placed = App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs})
 
-      # every vnode's 2 replicas span both racks — a whole rack can fail without losing a majority
+      # every vnode's 2 replicas span both racks: a whole rack can fail without losing a majority
       for {_id, _token, chosen} <- placed do
         racks = Enum.map(chosen, fn n -> attrs[n]["rack"] end)
         assert Enum.sort(racks) == ["a", "b"]

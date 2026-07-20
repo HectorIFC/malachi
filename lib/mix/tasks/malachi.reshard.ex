@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
   @shortdoc "Grow the metadata sharding to a target vnode count on a running node"
 
   @moduledoc """
-  Grows the cluster's **metadata sharding** — the number of vnodes (Raft-backed metadata shards) — on a
+  Grows the cluster's **metadata sharding**: the number of vnodes (Raft-backed metadata shards) - on a
   **running** Malachi node, over Erlang distribution (RPC).
 
       mix malachi.reshard --to 16
@@ -13,7 +13,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
   time**, driven only by the node holding the cluster lease.
 
   Growing is **resumable**: if a reshard is interrupted, re-run the same `--to` target and it continues from
-  the current ring — the splits already done are reflected in it. Only **growing** is supported; a target
+  the current ring: the splits already done are reflected in it. Only **growing** is supported; a target
   below the current count is rejected.
 
   > #### Runtime operation {: .warning}
@@ -22,9 +22,9 @@ defmodule Mix.Tasks.Malachi.Reshard do
 
   Options:
 
-    * `--to`     — the target vnode count (required; must exceed the current count)
-    * `--node`   — the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
-    * `--cookie` — the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
+    * `--to`: the target vnode count (required; must exceed the current count)
+    * `--node`: the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
+    * `--cookie`: the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
 
   The target node must be **named** and running a **sharded** control plane (`MALACHIMQ_LOG_VNODES` > 1 with
   a clustered log); otherwise there is no ring to grow.

@@ -1,7 +1,7 @@
 Review this plan thoroughly before making any code changes. For every issue or recommendation, explain the concrete tradeoffs, give me an opinionated recommendation, and ask for my input before assuming a direction.
 
 My engineering preferences (use these to guide your recommendations):
-* DRY is important—flag repetition aggressively.
+* DRY is important: flag repetition aggressively.
 * Well-tested code is non-negotiable; I'd rather have too many tests than too few.
 * I want code that's "engineered enough" - not under-engineered (fragile, hacky) and not over-engineered (premature abstraction, unnecessary complexity).
 * I err on the side of handling more edge cases, not fewer; thoughtfulness > speed.
@@ -18,7 +18,7 @@ Evaluate:
 2. Code quality review
 Evaluate:
 * Code organization and module structure.
-* DRY violations—be aggressive here.
+* DRY violations: be aggressive here.
 * Error handling patterns and missing edge cases (call these out explicitly).
 * Technical debt hotspots.
 * Areas that are over-engineered or under-engineered relative to my preferences.
@@ -27,7 +27,7 @@ Evaluate:
 Evaluate:
 * Test coverage gaps (unit, integration, e2e).
 * Test quality and assertion strength.
-* Missing edge case coverage—be thorough.
+* Missing edge case coverage: be thorough.
 * Untested failure modes and error paths.
 
 4. Performance review

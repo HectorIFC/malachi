@@ -1,7 +1,7 @@
 defmodule Malachi.LogApiTracingTest do
   # Verifies the OpenTelemetry spans on the client operations (O5a): route ended spans to this process via
   # the pid exporter (the test env uses the synchronous simple processor) and assert on their name and
-  # attributes. async: false — it sets a global exporter.
+  # attributes. async: false: it sets a global exporter.
   use ExUnit.Case, async: false
   require Record
 

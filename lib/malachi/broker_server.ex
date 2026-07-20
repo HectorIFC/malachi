@@ -6,7 +6,7 @@ defmodule Malachi.BrokerServer do
   `produce` replicates through it and `read`/`stream_history` read segments from it.
 
   Writes are durable on return: each batch is fsynced on a quorum by the replication server
-  before it commits, so there is no buffering and no time-based flush — `sync/1` is a no-op kept
+  before it commits, so there is no buffering and no time-based flush, `sync/1` is a no-op kept
   for API compatibility.
 
   The `Broker` (and the layers it composes) are pure immutable values; routing all mutations
@@ -428,7 +428,7 @@ defmodule Malachi.BrokerServer do
         max: max,
         # consumer-group member scoping: `member`/`ranges` scope the push to the member's ranges (nil =
         # whole group); `coordinator` lets the :DOWN handler leave the group on disconnect. The LogApi
-        # layer supplies these (the broker must never call the coordinator itself — deadlock).
+        # layer supplies these (the broker must never call the coordinator itself, deadlock).
         member: Keyword.get(group_opts, :member),
         ranges: ranges,
         coordinator: Keyword.get(group_opts, :coordinator)
@@ -441,7 +441,7 @@ defmodule Malachi.BrokerServer do
   def handle_call({:stream_ack, topic, group, positions, count, pid, ranges, coordinator}, _from, state) do
     # commit the group's position durably, then return `count` credit to this subscriber and push more.
     # `ranges` (from the LogApi member poll) refreshes this member's assignment, so a rebalance is picked
-    # up on the ack (nil keeps the current scope — a whole-group or unchanged member subscription).
+    # up on the ack (nil keeps the current scope: a whole-group or unchanged member subscription).
     # `coordinator` refreshes the member's resolved coordinator ref, so after a vnode leadership change
     # the :DOWN leave targets the current owner (nil keeps the ref captured at subscribe).
     {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
@@ -497,7 +497,7 @@ defmodule Malachi.BrokerServer do
 
   # A streaming subscriber's process died: drop it from every topic it was subscribed to.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    # a departing group member leaves its group for a fast rebalance — done in an unlinked task, since the
+    # a departing group member leaves its group for a fast rebalance: done in an unlinked task, since the
     # coordinator's leave calls back into this broker and a synchronous call from here would deadlock.
     for {_topic, subs} <- state.subscribers,
         sub <- subs,
@@ -592,7 +592,7 @@ defmodule Malachi.BrokerServer do
   # returns {records, next_positions}. This is the read orchestration the LogApi used to do client-side;
   # holding it here lets a single call serve a fetch and lets produce re-run it to wake long-pollers.
   # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
-  # (a group member's assignment) consumes only those, intersected with the active set — so a stale
+  # (a group member's assignment) consumes only those, intersected with the active set, so a stale
   # assigned range that has since split is skipped, and the client never sees ranges either way.
   defp consume_ranges(broker, topic, positions, max_records, ranges) do
     broker
@@ -682,12 +682,12 @@ defmodule Malachi.BrokerServer do
   # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh, bootstrap}`
   # where `metadata_refresh` re-seeds the local cache from the ra clusters (`nil` for in-memory) and
   # `bootstrap` drives the leader's reconcile loop (`nil` unless sharded):
-  #   * `:metadata_vnodes` — a sharded control plane: one ra cluster per vnode, each placed on its own
+  #   * `:metadata_vnodes`. A sharded control plane: one ra cluster per vnode, each placed on its own
   #     `nodes`, routed by topic. Every node only *routes* at boot; the reconcile loop bootstraps the
   #     clusters on whichever node is currently the leader. `metadata_vnodes` is `[{vnode_id, token,
   #     nodes}]` (D-c).
-  #   * `:metadata_cluster` — a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
-  #   * neither — in-memory metadata (single node).
+  #   * `:metadata_cluster`: a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
+  #   * neither, in-memory metadata (single node).
   defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do
     replicated = build_replicated(vnodes)
     # Publish the topic→vnode routing so consumer-group coordination is forwarded to the owning node
@@ -755,8 +755,8 @@ defmodule Malachi.BrokerServer do
 
   @doc """
   Rebuilds a sharded broker's metadata routing for a new ring `topology` (a vnode split adopted via
-  gossip): the local read cache takes the new ring — existing vnodes keep their cached `Metadata`, a
-  newly-added vnode starts **empty** until the next refresh from `ra` — and the write path is re-routed
+  gossip): the local read cache takes the new ring: existing vnodes keep their cached `Metadata`, a
+  newly-added vnode starts **empty** until the next refresh from `ra`, and the write path is re-routed
   over the topology's `%{vnode_id => nodes}` placements (server id = `{vnode_id, a_member}`). Pure: the
   metadata catch-up for a new/changed vnode is the separate refresh side effect. Returns the new broker.
   """

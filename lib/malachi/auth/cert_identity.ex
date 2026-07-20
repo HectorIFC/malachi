@@ -1,12 +1,12 @@
 defmodule Malachi.Auth.CertIdentity do
   @moduledoc """
-  Pure extraction of a client **identity string** from a DER-encoded X.509 certificate — the deterministic
+  Pure extraction of a client **identity string** from a DER-encoded X.509 certificate, the deterministic
   core of the mTLS auth provider (P4). Given a peer certificate, it reads the subject Common Name (CN) or a
   Subject Alternative Name (SAN), per a configured policy, yielding the string the mTLS provider maps to a
   malachi user (policy 2A: CN = username, permissions from the replicated user store).
 
   Pure and side-effect free: it parses the certificate the TLS layer already verified (chain/validity are
-  **not** re-checked here — that is the acceptor's `verify_peer`), so it never touches the network or a
+  **not** re-checked here: that is the acceptor's `verify_peer`), so it never touches the network or a
   clock. Malformed input yields `{:error, :malformed_certificate}` rather than raising.
   """
   require Record
@@ -69,7 +69,7 @@ defmodule Malachi.Auth.CertIdentity do
   The identity string named by `policy`: the CN (`:cn`) or a SAN of the given kind (`{:san, kind}`).
 
   For `{:san, kind}` the **first** SAN of that kind is returned, in **certificate order** (the order the CA
-  encoded them) — so a cert bearing several SANs of one kind (e.g. multiple SPIFFE URIs) resolves to a single
+  encoded them), so a cert bearing several SANs of one kind (e.g. multiple SPIFFE URIs) resolves to a single
   deterministic identity. Use a certificate with exactly one SAN of the policy kind when the mapping must be
   unambiguous. Returns `{:ok, identity}`, or `{:error, :no_common_name | :no_matching_san | :malformed_certificate}`.
   """

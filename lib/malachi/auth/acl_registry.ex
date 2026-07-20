@@ -1,12 +1,12 @@
 defmodule Malachi.Auth.AclRegistry do
   @moduledoc """
-  The pure state of **per-topic ACLs** (P5, decision 5-1A/2A/3A) — allow-only grants of an operation on a
+  The pure state of **per-topic ACLs** (P5, decision 5-1A/2A/3A): allow-only grants of an operation on a
   topic resource, keyed by username. The deterministic core replicated by `Malachi.Auth.AclMachine` over a
   dedicated `ra` cluster, mirroring `Malachi.Auth.UserRegistry`.
 
   A grant is `{username, operation, resource}` where `operation` is `:produce` or `:consume` and `resource`
   is `{:literal, topic}` (an exact topic) or `{:prefix, prefix}` (any topic starting with `prefix`, the
-  Kafka prefixed-ACL model). Grants only **allow** — there are no deny rules; absence is denial (enforced in
+  Kafka prefixed-ACL model). Grants only **allow**: there are no deny rules; absence is denial (enforced in
   strict mode by `Malachi.Auth.Authorization`). Pure: no clock, no config.
   """
 

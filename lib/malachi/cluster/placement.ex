@@ -1,24 +1,24 @@
 defmodule Malachi.Cluster.Placement do
   @moduledoc """
-  Pure replica **placement and self-healing** policy for segments — the decision layer of the
+  Pure replica **placement and self-healing** policy for segments: the decision layer of the
   data plane. The segment is NorthGuard's unit of replication: each lives on a *replica set* of
   `replication_factor` brokers. This module decides *which* brokers, and which segments have
   lost replicas and must be re-replicated. It is a pure function of `(metadata, available
-  brokers, replication factor)` — it never touches storage or the network.
+  brokers, replication factor)`: it never touches storage or the network.
 
   Placement uses **rendezvous (HRW) hashing**: for a segment, every available broker is scored
   by `:erlang.phash2({segment_id, broker})`, and the top `replication_factor` brokers win. Two
   properties make this the right fit for a Raft-replicated control plane:
 
-    * **Deterministic** — the same inputs yield the same replica set on every replica, so a
+    * **Deterministic**: the same inputs yield the same replica set on every replica, so a
       placement decision can be derived inside (or fed through) the `Malachi.Metadata` machine
       without diverging across nodes.
-    * **Minimum reshuffle** — removing a broker only moves the segments that broker hosted; the
+    * **Minimum reshuffle**: removing a broker only moves the segments that broker hosted; the
       surviving replicas keep their ranks, so `heal/3` preserves live members and only fills the
       vacated slots.
 
   The policy *decides*; `Malachi.Metadata` *records*. `heal/3` returns a list of
-  `{:set_segment_replicas, ...}` commands to apply through the RSM (and, later, Raft) — it does
+  `{:set_segment_replicas, ...}` commands to apply through the RSM (and, later, Raft), it does
   not mutate anything itself.
 
   Self-healing covers **all** segments, sealed as well as active: a sealed segment is immutable
@@ -77,7 +77,7 @@ defmodule Malachi.Cluster.Placement do
   end
 
   @doc """
-  Places a **whole set** of `items` across `available_brokers` with **best-effort load balancing** (A2 —
+  Places a **whole set** of `items` across `available_brokers` with **best-effort load balancing** (A2:
   global balancing). Each item still ranks brokers by rendezvous hashing, but a broker at capacity is
   skipped in favour of the next-ranked one, so load spreads instead of piling on the highest-ranked few.
   The soft capacity is `ceil(total_replicas / brokers) + max_skew - 1`: with `max_skew` 1 it targets the
@@ -157,7 +157,7 @@ defmodule Malachi.Cluster.Placement do
 
   @doc """
   The ids of segments whose replica set spans **fewer than `min_domains`** distinct values of
-  `attribute_key` (per `attributes`) — i.e. segments whose placement does not meet the failure-domain
+  `attribute_key` (per `attributes`): i.e. segments whose placement does not meet the failure-domain
   diversity target and so are not HA to that degree. Independent of liveness (it audits the placed set,
   not whether replicas are up); `under_replicated/3` covers lost replicas. Returns a sorted list, for
   alerting/observability (`heal/3` re-replicates for durability but stays best-effort about domains, so a

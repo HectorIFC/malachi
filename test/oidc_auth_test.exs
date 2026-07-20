@@ -1,5 +1,5 @@
 defmodule Malachi.OidcAuthTest do
-  # async: false — mutates global app config (oidc_*) and shares the running acceptor.
+  # async: false: mutates global app config (oidc_*) and shares the running acceptor.
   use ExUnit.Case, async: false
 
   alias Malachi.Test.JwtFixtures

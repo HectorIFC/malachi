@@ -1,5 +1,5 @@
 defmodule Malachi.AclEnforcementTest do
-  # async: false — toggles global :acl_strict and shares the running acceptor.
+  # async: false. Toggles global :acl_strict and shares the running acceptor.
   use ExUnit.Case, async: false
 
   alias Malachi.Auth
@@ -44,7 +44,7 @@ defmodule Malachi.AclEnforcementTest do
     if code == Wire.ok_code(), do: :ok, else: {:error, Wire.decode_auth_resp(payload)}
   end
 
-  describe "non-strict (default) — backward compatible" do
+  describe "non-strict (default), backward compatible" do
     test "a global :produce permission still creates any topic without an ACL" do
       Application.put_env(:malachi, :acl_strict, false)
       {_user, socket} = connect_as([:produce, :consume])
@@ -52,7 +52,7 @@ defmodule Malachi.AclEnforcementTest do
     end
   end
 
-  describe "strict mode — deny by default" do
+  describe "strict mode, deny by default" do
     test "a :produce user cannot create a topic without an ACL grant" do
       Application.put_env(:malachi, :acl_strict, true)
       {_user, socket} = connect_as([:produce, :consume])

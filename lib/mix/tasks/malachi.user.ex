@@ -15,9 +15,9 @@ defmodule Mix.Tasks.Malachi.User do
 
   Options:
 
-    * `--node`   — the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
-    * `--cookie` — the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
-    * `--perms`  — comma-separated permissions for `create` (admin|produce|consume; default produce,consume)
+    * `--node`: the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
+    * `--cookie`: the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
+    * `--perms`: comma-separated permissions for `create` (admin|produce|consume; default produce,consume)
 
   The target node must be **named** (a release, or `iex --name ... -S mix`); an unnamed `mix run` node is
   not reachable. Passwords are passed as plain arguments, so prefer this on a trusted host.

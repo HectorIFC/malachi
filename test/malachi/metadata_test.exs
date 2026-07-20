@@ -300,8 +300,8 @@ defmodule Malachi.MetadataTest do
       {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => 5}})
       assert Metadata.committed_offsets(state, "g", "events") == %{root => 5}
 
-      # the split seals the root (now inactive); its committed offset is dead — the active children resume
-      # from :start — so the next commit prunes it instead of letting the map grow one dead key per split
+      # the split seals the root (now inactive); its committed offset is dead: the active children resume
+      # from :start, so the next commit prunes it instead of letting the map grow one dead key per split
       {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
       {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{left => 3}})
 
@@ -397,7 +397,7 @@ defmodule Malachi.MetadataTest do
       assert reinserted.range_segments[left] == MapSet.new(["s1"])
     end
 
-    test "insert_topic is idempotent — re-inserting the same export (a resumed migration) changes nothing" do
+    test "insert_topic is idempotent: re-inserting the same export (a resumed migration) changes nothing" do
       {state, root} = create_topic(Metadata.new(), "events", 4)
       {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
       {state, :ok} = apply!(state, {:register_segment, left, "s1", [:b1], 0})

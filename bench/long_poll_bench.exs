@@ -1,6 +1,6 @@
 # Long-poll mechanism benchmark: (A) waiters inside the BrokerServer vs (B) Registry pub/sub.
 #
-# This is a standalone investigation script — it does NOT touch lib/. It models the two mechanisms
+# This is a standalone investigation script: it does NOT touch lib/. It models the two mechanisms
 # faithfully on top of a single serialized GenServer (the BrokerServer is one process), so the
 # numbers reflect the architectural difference, not a full TCP path. The per-wakeup "re-consume"
 # work (reading one log page) is the SAME in both, so the signal is the notification mechanism.
@@ -8,9 +8,9 @@
 # Run: mix run bench/long_poll_bench.exs
 #
 # Metrics, for W ∈ {1, 10, 100, 1000} consumers waiting on one topic:
-#   * wakeup_total_us   — from the start of a produce until ALL W waiters hold the new data
+#   * wakeup_total_us: from the start of a produce until ALL W waiters hold the new data
 #                         (fair end-to-end fan-out time: notification + re-consume)
-#   * producer_block_us — how long the produce call itself blocks (latency the PRODUCER perceives)
+#   * producer_block_us: how long the produce call itself blocks (latency the PRODUCER perceives)
 
 defmodule LongPollBench do
   # Represents reading one log page on wakeup. Identical cost in A and B; small but non-zero so the

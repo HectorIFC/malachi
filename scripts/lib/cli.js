@@ -45,7 +45,7 @@ function parseArgs(argv, valueFlags = []) {
   return { positional, flags };
 }
 
-// Prints the error and exits non-zero. The "is the server up?" hint only helps for a connection failure —
+// Prints the error and exits non-zero. The "is the server up?" hint only helps for a connection failure:
 // a Node network/system error carries an `err.code` (ECONNREFUSED, ETIMEDOUT, ...); an error the server sent
 // back (a MalachiError like permission_denied / invalid_operation) has none, meaning the server is reachable,
 // so the hint is suppressed there.
@@ -55,12 +55,12 @@ function fail(err, cfg) {
   process.exit(1);
 }
 
-// Resolves after `ms` — used by the member CLIs to back off before retrying a transient :not_owner.
+// Resolves after `ms`. Used by the member CLIs to back off before retrying a transient :not_owner.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Runs `fn`, retrying while it rejects with a **retryable** error (a transient cluster change — a topic
+// Runs `fn`, retrying while it rejects with a **retryable** error (a transient cluster change, a topic
 // mid-migration answering :migrating, or a coordinator failover), backing off `ms` between attempts and
 // calling `onRetry` each time. Non-retryable errors propagate. The server clears the transient once the
 // change settles, so a bounded back-off (not a tight loop) is enough; NorthGuard likewise "moves the

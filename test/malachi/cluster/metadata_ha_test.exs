@@ -78,7 +78,7 @@ defmodule Malachi.Cluster.MetadataHaTest do
     {:ok, _members, {^cluster, leader_node}} = :ra.members({cluster, first_node})
     :ok = try_stop(Map.fetch!(peer_by_node, leader_node))
 
-    # a surviving member still commits — a new leader was elected from the remaining quorum, and the
+    # a surviving member still commits: a new leader was elected from the remaining quorum, and the
     # earlier metadata is intact
     [survivor | _] = nodes -- [leader_node]
     assert {:ok, {:ok, _root2}} = commit(cluster, survivor, {:create_topic, "orders", 4})

@@ -5,7 +5,7 @@ defmodule Malachi.Cluster.Topology do
   Connectivity-only: libcluster discovers and connects peer nodes over Erlang distribution; the SWIM
   membership and the `ra` control plane keep using the configured `:log_nodes` for their initial member
   set, and dynamic `ra` membership rides on the rebalancing coordinator (R3). This module only wires the
-  discovery strategy — it does not touch cluster formation.
+  discovery strategy: it does not touch cluster formation.
 
   Pure: `build/1` maps the config to the keyword list `Cluster.Supervisor` expects, so the strategy wiring
   is unit-testable without opening a multicast or Kubernetes-API socket. Absent `:strategy` => `[]` (no
@@ -13,10 +13,10 @@ defmodule Malachi.Cluster.Topology do
 
   Supported strategies:
 
-    * `:gossip`     — UDP multicast (dev/LAN, near-zero config; `:port` has a default)
-    * `:kubernetes` — pod discovery via the Kubernetes API (`:kubernetes_selector` and
+    * `:gossip`. UDP multicast (dev/LAN, near-zero config; `:port` has a default)
+    * `:kubernetes`. Pod discovery via the Kubernetes API (`:kubernetes_selector` and
                       `:kubernetes_node_basename` are required)
-    * `:epmd`       — a static host list (bridges the existing `:log_nodes`), kept connected by libcluster
+    * `:epmd`. A static host list (bridges the existing `:log_nodes`), kept connected by libcluster
   """
 
   # The single topology name Cluster.Supervisor manages for this app.

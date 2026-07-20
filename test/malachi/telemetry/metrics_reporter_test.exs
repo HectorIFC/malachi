@@ -1,6 +1,6 @@
 defmodule Malachi.Telemetry.MetricsReporterTest do
   # The default reporter is attached at boot (Metrics.init), so emitting a telemetry event folds into the
-  # ETS Metrics counters that get_system_metrics/0 (and the Prometheus endpoint) expose. async: false —
+  # ETS Metrics counters that get_system_metrics/0 (and the Prometheus endpoint) expose. async: false:
   # it reads the shared, process-global metrics counters.
   use ExUnit.Case, async: false
 

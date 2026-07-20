@@ -1,9 +1,9 @@
 defmodule Malachi.Cluster.SplitCoordinator do
   @moduledoc """
-  Drives vnode splits under the lease. A `GenServer` so splits **serialize** (one at a time) — a split
+  Drives vnode splits under the lease. A `GenServer` so splits **serialize** (one at a time), a split
   mutates the ring, and two at once would race. Only the lease holder acts: `split/4` runs
   `Malachi.Cluster.VnodeSplit.split/5`, which reads the current topology, migrates the displaced topics
-  over `ra` (fenced, copy-first), advances the version and publishes it — gossip then disseminates it and
+  over `ra` (fenced, copy-first), advances the version and publishes it, gossip then disseminates it and
   every node adopts the new ring.
 
   Operator-driven, like `Malachi.Cluster.RebalanceCoordinator`: nothing splits automatically; an operator
@@ -35,8 +35,8 @@ defmodule Malachi.Cluster.SplitCoordinator do
   @doc """
   Reconciles a split left in flight by a coordinator that crashed mid-way (`VnodeSplit.reconcile/2`). Fired
   on lease acquisition (`LeaseHolder` `on_acquired`) and on this coordinator's own restart (`init`), so an
-  interrupted split is cleaned up whether the whole node failed over or just this process restarted. A cast
-  — it serializes with splits (same process) but never blocks the caller — and a no-op unless this node
+  interrupted split is cleaned up whether the whole node failed over or just this process restarted. A cast:
+  it serializes with splits (same process) but never blocks the caller - and a no-op unless this node
   leads and a split is actually pending.
   """
   @spec reconcile(GenServer.server()) :: :ok

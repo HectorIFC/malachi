@@ -31,13 +31,13 @@ defmodule Malachi.Cluster.SelfHealing do
 
   @doc """
   Backfills and heals every under-replicated **sealed** segment. Returns `%{applied: commands,
-  failed: [{segment_id, reason}]}` — `applied` are `:set_segment_replicas` commands to apply
+  failed: [{segment_id, reason}]}`, `applied` are `:set_segment_replicas` commands to apply
   through the control plane; `failed` segments could not be backfilled (e.g. `:no_live_source`).
 
   ## Options
     * `:batch_size` - forwarded to `Malachi.Cluster.Catchup.run/6`.
     * `:spread` - `{attribute_key, attributes}` forwarded to `Placement.place/4` so re-replication stays
-      rack/DC-aware. Best-effort only: any `:min_domains`/`:policy` is intentionally *not* forwarded —
+      rack/DC-aware. Best-effort only: any `:min_domains`/`:policy` is intentionally *not* forwarded:
       healing prioritises durability and never fails a re-replication for domain diversity.
   """
   @spec heal_sealed(Metadata.t(), [Metadata.broker()], pos_integer(), keyword()) :: result()
@@ -53,7 +53,7 @@ defmodule Malachi.Cluster.SelfHealing do
   end
 
   defp heal_segment(segment, live_brokers, replication_factor, opts, acc) do
-    # Only :spread is forwarded — heal is durability-first and must never fail on a domain guarantee, so
+    # Only :spread is forwarded: heal is durability-first and must never fail on a domain guarantee, so
     # :min_domains/:policy are deliberately stripped (place then always returns {:ok, _}).
     {:ok, new_set} = Placement.place(segment.id, live_brokers, replication_factor, Keyword.take(opts, [:spread]))
     to_add = new_set -- segment.replica_set

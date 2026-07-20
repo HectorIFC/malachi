@@ -89,7 +89,7 @@ defmodule Malachi.BrokerServerTest do
   end
 
   describe "durability" do
-    test "records are durable on return — no explicit sync needed", %{tmp_dir: directory} do
+    test "records are durable on return. No explicit sync needed", %{tmp_dir: directory} do
       {server, root_id} = with_topic(directory)
 
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0"), record("b", "k1")])
@@ -253,7 +253,7 @@ defmodule Malachi.BrokerServerTest do
       # metadata routing adopted the new ring
       assert adopted.broker.dsrsm.ring == ring1
       # the refresh source (bootstrap.replicated, which the rebuilt metadata_refresh snapshots) targets the
-      # new ring — so the periodic reconcile re-seeds against it instead of reverting to the boot ring
+      # new ring, so the periodic reconcile re-seeds against it instead of reverting to the boot ring
       assert adopted.bootstrap.replicated.ring == ring1
       assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}, v1: {:v1, node()}}
       assert is_function(adopted.metadata_refresh, 0)

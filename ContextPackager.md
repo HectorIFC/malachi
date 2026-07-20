@@ -212,7 +212,7 @@ Agora vem a parte mais importante.
 
 Em vez de mandar código bruto, criamos **camadas de contexto**.
 
-### Layer 1 — Diff
+### Layer 1, Diff
 
 ```
 changed lines
@@ -220,7 +220,7 @@ changed lines
 
 ---
 
-### Layer 2 — Local context
+### Layer 2, Local context
 
 ```
 changed function
@@ -230,7 +230,7 @@ same file
 
 ---
 
-### Layer 3 — Dependency context
+### Layer 3, Dependency context
 
 ```
 functions called
@@ -239,7 +239,7 @@ callers
 
 ---
 
-### Layer 4 — Architectural context
+### Layer 4, Architectural context
 
 ```
 module
@@ -249,7 +249,7 @@ API boundary
 
 ---
 
-### Layer 5 — Documentation
+### Layer 5, Documentation
 
 ```
 README
@@ -464,7 +464,7 @@ Sourcegraph, Google e Meta.
 
 ---
 
-# 🏗 Etapa 1 — Construir o Codebase Knowledge Graph
+# 🏗 Etapa 1, Construir o Codebase Knowledge Graph
 
 Primeiro o sistema transforma o repositório inteiro em um **grafo de dependências semânticas**.
 
@@ -512,7 +512,7 @@ Isso cria um **mapa navegável da arquitetura**.
 
 ---
 
-# ⚙️ Etapa 2 — Indexar o grafo
+# ⚙️ Etapa 2, Indexar o grafo
 
 O sistema salva esse grafo em um banco especializado:
 
@@ -535,7 +535,7 @@ Isso encontra **tudo que pode ser afetado**.
 
 ---
 
-# 🔎 Etapa 3 — Impact Scope Resolver
+# 🔎 Etapa 3, Impact Scope Resolver
 
 Quando chega um PR:
 
@@ -576,7 +576,7 @@ impact scope = alto
 
 ---
 
-# 🌳 Etapa 4 — Graph-of-Thought reasoning
+# 🌳 Etapa 4, Graph-of-Thought reasoning
 
 Agora entra o raciocínio da IA.
 
@@ -697,7 +697,7 @@ Exemplo comum em repos grandes.
 
 ---
 
-## Problema 1 — limite de tokens
+## Problema 1, limite de tokens
 
 Mesmo modelos grandes têm limite.
 
@@ -727,7 +727,7 @@ contexto confuso
 
 ---
 
-## Problema 2 — sinal perdido no ruído
+## Problema 2, sinal perdido no ruído
 
 Exemplo:
 

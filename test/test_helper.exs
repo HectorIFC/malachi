@@ -1,7 +1,7 @@
 # Start Erlang distribution BEFORE the app, with the same node name the multinode tests use. The app forms
 # an ra cluster for the replicated user store at boot; if a later test renamed the node
 # (`:net_kernel.start`), that cluster (formed under the old name) would be orphaned. Naming the node up
-# front keeps it stable — the multinode tests then see `:already_started` and do not rename it.
+# front keeps it stable. The multinode tests then see `:already_started` and do not rename it.
 _ = System.cmd("epmd", ["-daemon"])
 
 case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do

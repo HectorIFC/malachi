@@ -15,7 +15,7 @@ defmodule Malachi.Auth.LockoutRegistryTest do
     end)
   end
 
-  describe "failed_attempt — counting" do
+  describe "failed_attempt, counting" do
     test "increments the counter below the threshold without locking" do
       {state, reply} = Reg.apply(Reg.new(), {:failed_attempt, @key, @config}, 1000)
       assert reply == %{count: 1, locked: nil}
@@ -37,7 +37,7 @@ defmodule Malachi.Auth.LockoutRegistryTest do
     end
   end
 
-  describe "failed_attempt — progressive lockout" do
+  describe "failed_attempt, progressive lockout" do
     test "locks exactly at the threshold with the base duration" do
       {state, reply} = fail_n(Reg.new(), @key, 5, 1000)
       assert %{count: 5, locked: %{duration_ms: duration, locked_until: until}} = reply

@@ -138,7 +138,7 @@ defmodule Malachi.LogProtocolTest do
       assert ok?(code)
 
       # fetch as a group member: the sole member owns the topic's ranges, so it gets every record plus an
-      # opaque cursor — no range id ever crosses the wire
+      # opaque cursor: no range id ever crosses the wire
       assert {code, payload} = fetch(socket, topic, group: "g", member: "m1")
       assert ok?(code)
       {records, cursor} = Wire.decode_fetch_resp(payload)

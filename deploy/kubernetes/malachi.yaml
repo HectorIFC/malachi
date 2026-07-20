@@ -1,4 +1,4 @@
-# Malachi on Kubernetes — a 3-node CP cluster as a StatefulSet, with rack (zone) aware placement.
+# Malachi on Kubernetes: a 3-node CP cluster as a StatefulSet, with rack (zone) aware placement.
 #
 # Why a StatefulSet: the control plane is Raft (`ra`), which needs STABLE node identities. A StatefulSet
 # gives each pod a stable name (malachi-0/1/2) and DNS, and a stable PersistentVolume, so a restarted pod
@@ -17,7 +17,7 @@ metadata:
     app: malachi
 ---
 # The zone-init container reads the pod's node zone label; nodes are cluster-scoped, so this is a
-# ClusterRole (get on nodes only — least privilege).
+# ClusterRole (get on nodes only, least privilege).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -196,7 +196,7 @@ spec:
               Z="$(cat /shared/zone 2>/dev/null)";
               [ -n "$Z" ] && export MALACHIMQ_LOG_ATTRIBUTES="zone=$Z";
               exec bin/malachi start
-          # Pause before SIGTERM so kube-proxy removes this pod from the Service endpoints first — new
+          # Pause before SIGTERM so kube-proxy removes this pod from the Service endpoints first, new
           # clients stop being routed here before the app starts draining.
           lifecycle:
             preStop:

@@ -6,7 +6,7 @@ defmodule Malachi.Cluster.LeaseServer do
   running (`:ra.start_in/1`). This module owns only the lease cluster, not ra's lifecycle.
 
   Commands return `{:ok, machine_reply}` (the machine reply is `{:ok, fence}` on grant or
-  `{:error, {:held, holder}}` on refusal) or `{:error, reason}` when the cluster is unreachable — the
+  `{:error, {:held, holder}}` on refusal) or `{:error, reason}` when the cluster is unreachable, the
   caller (`LeaseHolder`) distinguishes "refused" from "could not reach", treating the latter as
   not-renewed.
   """
@@ -43,13 +43,13 @@ defmodule Malachi.Cluster.LeaseServer do
   fully-replicated lease. Idempotent and best-effort: it tries to form the cluster if it is not yet
   formed (`start/2`, auto-fenced) **and** to start the local server if it is not running
   (`:ra.start_server`). The local node is already a config member (the initial `start_cluster` lists every
-  node), so starting its server rejoins the existing cluster and `ra` replicates the lease state to it —
+  node), so starting its server rejoins the existing cluster and `ra` replicates the lease state to it:
   recovering a node that was down when the cluster first formed. A no-op once the local server is up.
   Meant to be called periodically by `Malachi.Cluster.LeaseReconciler` until the node has joined.
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
     # formed cluster, which ra logs as a (harmless but noisy) "failed to form" error and needlessly churns
     # the shared ra system. Only a node that has not yet joined tries to form/join. Mirrors
     # `UserServer.reconcile/2` and `LockoutServer.reconcile/2`.
@@ -64,7 +64,7 @@ defmodule Malachi.Cluster.LeaseServer do
   end
 
   # Best-effort: starts the local lease server so it (re)joins the cluster. Any error (already started, or
-  # the cluster not yet formed) is ignored — reconcile is idempotent and LeaseReconciler retries.
+  # the cluster not yet formed) is ignored, reconcile is idempotent and LeaseReconciler retries.
   defp ensure_local_server(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, LeaseMachine, %{}}

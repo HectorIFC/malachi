@@ -11,7 +11,7 @@ defmodule Malachi.Cluster.RingTopology do
   the ring rides the existing gossip and every node converges on the latest version.
 
   Convergence is a CRDT join: `merge/2` keeps the **higher version** (last-version-wins), with a
-  deterministic term-order tiebreak on the rare same-version clash — so `merge` is commutative,
+  deterministic term-order tiebreak on the rare same-version clash, so `merge` is commutative,
   associative and idempotent, and every node reaches the same topology regardless of gossip order. Only
   the rebalancing leader `advance/3`s the version (one writer), so a same-version clash should not arise
   in normal operation; the tiebreak just keeps the math total.
@@ -29,7 +29,7 @@ defmodule Malachi.Cluster.RingTopology do
   @typedoc """
   A **split in flight**: the durable intent recorded before a split migrates, so a coordinator that takes
   over the lease after the previous one crashed mid-split can reconcile it (`nil` when none is pending).
-  Carries what a reconciler needs to identify and undo the split — the new vnode, its ring `token`, and its
+  Carries what a reconciler needs to identify and undo the split: the new vnode, its ring `token`, and its
   placement `nodes` (the old ring/placements are the topology's own, since a pending split has *not* yet
   advanced the ring).
   """
@@ -52,7 +52,7 @@ defmodule Malachi.Cluster.RingTopology do
 
   @doc """
   The `%{vnode_id => server_id}` routing map derived from the placements: each vnode's server id is
-  `{vnode_id, a_member}` (any member of its placement — ra resolves the live leader). A vnode with an
+  `{vnode_id, a_member}` (any member of its placement: ra resolves the live leader). A vnode with an
   empty placement is skipped (it has no cluster to route to). Used to point routing at the topology.
   """
   @spec servers(t()) :: %{term() => {term(), node()}}
@@ -61,7 +61,7 @@ defmodule Malachi.Cluster.RingTopology do
   end
 
   @doc """
-  A new topology at `version + 1` with `ring`/`placements` — the single-writer bump the rebalancing leader
+  A new topology at `version + 1` with `ring`/`placements`: the single-writer bump the rebalancing leader
   applies to **complete** a split (or any ring change). The monotonic version is what makes `merge/2`
   converge. Completing a ring change also **clears** any pending-split intent: the split it recorded is now
   reflected in the ring, so there is nothing left to reconcile.
@@ -83,7 +83,7 @@ defmodule Malachi.Cluster.RingTopology do
   end
 
   @doc """
-  Drops a pending-split intent at `version + 1`, **keeping the ring unchanged** — how an **aborted** split
+  Drops a pending-split intent at `version + 1`, **keeping the ring unchanged**, how an **aborted** split
   is published (the reconciler rolled the migration back, so the ring stays as it was and the intent is
   gone). Contrast `advance/3`, which clears the intent by moving the ring *forward* to the completed split.
   """
@@ -103,7 +103,7 @@ defmodule Malachi.Cluster.RingTopology do
       b.version > a.version -> b
       a.version > b.version -> a
       # same version (rare, since only the leader advances): a deterministic total order on the serialized
-      # value keeps the join order-independent — comparing the binaries, not the structs (which would be a
+      # value keeps the join order-independent: comparing the binaries, not the structs (which would be a
       # meaningless structural comparison)
       :erlang.term_to_binary(b) > :erlang.term_to_binary(a) -> b
       true -> a

@@ -4,7 +4,7 @@ defmodule Malachi.Cluster.MembershipServer do
   `Malachi.Cluster.Membership` view with a failure detector and gossip dissemination.
 
   Each **protocol period** it pings a random alive peer; if no `ack` arrives within `ack_timeout`,
-  it does not suspect immediately — it asks `indirect_fanout` random other peers to ping the target
+  it does not suspect immediately: it asks `indirect_fanout` random other peers to ping the target
   on its behalf (**indirect ping**), and only marks the peer `:suspect` if no ack (direct or
   relayed) arrives within `indirect_timeout`. This cuts false positives from a transiently lost
   direct path. If the suspicion is not refuted within `suspicion_timeout`, it confirms the peer
@@ -20,7 +20,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   On startup a node **joins** by sending each seed (its `:peers`) a `{:join, ...}`; the seed adds
   the joiner as `:alive` and replies with its full view, so the joiner learns the whole cluster at
-  once instead of waiting for gossip to converge. Join is best-effort — gossip is the safety net if
+  once instead of waiting for gossip to converge. Join is best-effort, gossip is the safety net if
   a seed is unreachable. (A node that restarts after being declared dead would rejoin at
   incarnation 0, which an existing `:dead` entry outranks; durable/higher rejoin incarnations are a
   later concern.)
@@ -28,7 +28,7 @@ defmodule Malachi.Cluster.MembershipServer do
   The same gossip also **piggybacks the cluster's versioned routing topology** (a
   `Malachi.Cluster.RingTopology`): every message carries it alongside the view updates, and peers keep the
   higher version (last-version-wins), so a vnode split's ring change disseminates and converges the same
-  way membership does — NorthGuard's *"minimal global state"* spread over the SWIM dissemination path.
+  way membership does: NorthGuard's *"minimal global state"* spread over the SWIM dissemination path.
 
   Scope: direct ping, indirect ping, suspicion, gossip (membership + topology), and a join handshake.
   """
@@ -291,7 +291,7 @@ defmodule Malachi.Cluster.MembershipServer do
   defp gossip_payload(state), do: {Membership.updates(state.view), state.topology}
 
   # Ingest a peer's gossip (the value bound in each message handler): merge its view updates and its
-  # topology observation. Tolerates an older peer that gossips a bare updates list (pre-topology) — its
+  # topology observation. Tolerates an older peer that gossips a bare updates list (pre-topology), its
   # view still merges and the topology is left as-is.
   defp merge_updates(state, {updates, topology}) do
     {view, _effects} = Membership.merge(state.view, updates)
@@ -305,7 +305,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   # Adopt `remote` if it is a newer topology than ours (CRDT last-version-wins), firing `on_topology` on
   # an actual **advance** (a version increase) so this node applies the new ring locally. A same-or-older
-  # version is a no-op — no adoption, no hook.
+  # version is a no-op: no adoption, no hook.
   defp adopt_topology(state, remote) do
     merged = merge_topology(state.topology, remote)
     if topology_advanced?(state.topology, merged), do: state.on_topology.(merged)

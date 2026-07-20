@@ -3,8 +3,8 @@ defmodule Malachi.TCPAcceptor do
   One acceptor of the `Malachi.TCPAcceptorPool`: a `GenServer` that owns a listen socket on a port and
   accepts client connections in a loop, one at a time.
 
-  Each accepted connection is completed — a TLS handshake for `:ssl` (recording the negotiated version
-  and success/failure metrics), or the raw socket for `:gen_tcp` — and handed to a fresh process that
+  Each accepted connection is completed. A TLS handshake for `:ssl` (recording the negotiated version
+  and success/failure metrics), or the raw socket for `:gen_tcp`, and handed to a fresh process that
   runs `Malachi.TCPProtocol` for that client. The accept loop self-schedules with an idle backoff: the
   poll timeout grows as consecutive accepts time out (capped at 30s), so an idle server does not
   busy-wait. Several acceptors share the same port (`reuseport`), spreading accepts across schedulers.
@@ -201,7 +201,7 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # The first frame must be an auth request — password (`auth`) or mTLS-identity (`mtls_auth`); any other
+  # The first frame must be an auth request: password (`auth`) or mTLS-identity (`mtls_auth`); any other
   # api_key or a malformed frame is rejected.
   defp process_auth_frame(frame_body, %{socket: socket, transport: transport} = state) do
     {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
@@ -312,7 +312,7 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # mTLS auth is honored only when explicitly enabled AND the listener verifies peer certs — under
+  # mTLS auth is honored only when explicitly enabled AND the listener verifies peer certs, under
   # verify_none a client could present a forged certificate, so it must never authenticate.
   defp ensure_mtls_allowed do
     cond do
@@ -349,7 +349,7 @@ defmodule Malachi.TCPAcceptor do
   defp mtls_client_error(reason), do: reason
 
   # OIDC/JWT auth (P4): authenticate the client from a signed JWT (bearer token) instead of a password. The
-  # token is self-contained (signed by the IdP), so it needs no TLS peer cert — but operators should run TLS
+  # token is self-contained (signed by the IdP), so it needs no TLS peer cert, but operators should run TLS
   # to keep the bearer token confidential in transit (documented). Gated behind an opt-in flag; on success the
   # session is minted exactly like the password path. No lockout (nothing to brute-force); the rate limit
   # still applies. `OidcConfig.load/0` fails closed when the deployment is not fully configured.
@@ -483,7 +483,7 @@ defmodule Malachi.TCPAcceptor do
   defp max_frame_size, do: Application.get_env(:malachi, :max_frame_size, 16_777_216)
 
   # Answers an oversized frame with a single error response (no correlation id is trustworthy on a hostile
-  # frame, so 0), best-effort — the caller then closes the connection.
+  # frame, so 0), best-effort: the caller then closes the connection.
   defp send_oversized_error(socket, transport), do: transport.send(socket, Wire.encode_error(0, :frame_too_large))
 
   defp close_oversized(%{socket: socket, transport: transport}) do

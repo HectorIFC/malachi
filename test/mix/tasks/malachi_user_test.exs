@@ -14,11 +14,11 @@ defmodule Mix.Tasks.Malachi.UserTest do
     end
   end
 
-  # A `call` seam that actually runs the function in-process (the real Auth) — proves the integration
+  # A `call` seam that actually runs the function in-process (the real Auth), proves the integration
   # end to end (only the cross-node RPC transport is skipped).
   defp local_call, do: fn module, fun, args -> {:ok, apply(module, fun, args)} end
 
-  describe "execute/3 — parsing and dispatch" do
+  describe "execute/3, parsing and dispatch" do
     test "create parses --perms into atoms, calls add_user, and reports success" do
       call = recording_call({:ok, :ok})
       assert {:ok, msg} = User.execute(["create", "alice", "pw"], [perms: "produce,consume"], call)
@@ -76,7 +76,7 @@ defmodule Mix.Tasks.Malachi.UserTest do
     end
   end
 
-  describe "execute/3 — integration against the real Auth (local seam)" do
+  describe "execute/3: integration against the real Auth (local seam)" do
     test "create then delete actually round-trips through the replicated user store" do
       username = "mixtask_#{System.unique_integer([:positive])}"
       on_exit(fn -> Malachi.Auth.remove_user(username) end)

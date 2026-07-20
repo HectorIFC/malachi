@@ -1,11 +1,11 @@
 defmodule Malachi.LogApi do
   @moduledoc """
-  The client-facing **log** API over a `Malachi.BrokerServer` — the NorthGuard model, not Kafka's.
+  The client-facing **log** API over a `Malachi.BrokerServer`: the NorthGuard model, not Kafka's.
 
   A client deals in `topic` + **key** (produce) + an **opaque cursor** (consume). It never sees
   partitions or offsets: those are internal (ranges and per-range offsets) and deliberately hidden,
   so the system can split/merge/restripe underneath without breaking clients. That hiding is the
-  point — it is what lets malachi evolve its physical layout where Kafka leaks it to the client.
+  point: it is what lets malachi evolve its physical layout where Kafka leaks it to the client.
 
   The cursor is just a token the client echoes back; today it encodes the consumer's position as
   `%{range_id => next_offset}`, but its contents are not part of the contract. Because it comes from
@@ -32,7 +32,7 @@ defmodule Malachi.LogApi do
   @typedoc "An opaque consumer position token (treat as a string; do not interpret)."
   @type cursor :: String.t()
 
-  @doc "Creates `topic`. The client does not specify partitions — the keyspace is internal."
+  @doc "Creates `topic`. The client does not specify partitions: the keyspace is internal."
   @spec create_topic(GenServer.server(), Metadata.topic_name()) :: :ok | {:error, term()}
   def create_topic(server, topic) do
     case BrokerServer.create_topic(server, topic, @default_keyspace_bits) do
@@ -55,7 +55,7 @@ defmodule Malachi.LogApi do
   end
 
   @doc """
-  Appends already-built `Malachi.Log.Record`s (offset unassigned) to `topic` — the binary protocol path,
+  Appends already-built `Malachi.Log.Record`s (offset unassigned) to `topic`: the binary protocol path,
   which decodes records off the wire directly, skipping the JSON map→record step of `produce/3`. Returns
   `{:ok, count}` or `{:error, reason}`.
   """
@@ -80,7 +80,7 @@ defmodule Malachi.LogApi do
 
   @doc """
   Fetches up to `max` records per current range of `topic` from the position in `cursor` (`nil` or
-  `:start` begins at the beginning). Returns `{:ok, records, next_cursor}` — advance by passing
+  `:start` begins at the beginning). Returns `{:ok, records, next_cursor}`, advance by passing
   `next_cursor` back. Records carry no client-visible offset.
   """
   @spec fetch(GenServer.server(), Metadata.topic_name(), cursor() | nil | :start, pos_integer(), non_neg_integer()) ::
@@ -111,7 +111,7 @@ defmodule Malachi.LogApi do
 
   @doc """
   Fetches for `member` of consumer `group` on `topic`: consults the `coordinator` for the member's
-  assigned ranges (registering it if new — the fetch is the heartbeat) and consumes **only** those ranges
+  assigned ranges (registering it if new: the fetch is the heartbeat) and consumes **only** those ranges
   from the group's committed positions. Returns `{:ok, records, next_cursor}`; the opaque cursor covers
   only the member's slice, so `commit/4` advances just its ranges (the client never sees a range id).
   Members of the same group thus consume **disjoint** records in parallel.
@@ -132,7 +132,7 @@ defmodule Malachi.LogApi do
         {records, next_cursor} = do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
         {:ok, records, next_cursor}
 
-      # this node no longer owns the topic's coordination (stale routing during failover) — the client
+      # this node no longer owns the topic's coordination (stale routing during failover), the client
       # re-resolves and retries against the new owner
       {:error, _reason} = error ->
         error
@@ -165,7 +165,7 @@ defmodule Malachi.LogApi do
 
   @doc """
   Like `subscribe/5` but for a consumer-group **member**: registers the member with the `coordinator`,
-  scopes the push stream to its assigned ranges (server-side — the client still only gets records + an
+  scopes the push stream to its assigned ranges (server-side: the client still only gets records + an
   opaque cursor), and lets the broker leave the group when the calling process exits. The member stays
   alive by acking (`stream_ack_member/7`); the coordinator does not run in the broker, so the broker never
   calls it (deadlock-safe).

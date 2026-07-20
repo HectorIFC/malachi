@@ -159,10 +159,10 @@ defmodule Malachi.MixProject do
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
       # OpenTelemetry: trace client operations (produce/fetch). Exporter is off by default (traces_exporter
-      # :none) — set it to :otlp with an endpoint to ship spans to a collector.
+      # :none). Set it to :otlp with an endpoint to ship spans to a collector.
       {:opentelemetry_api, "~> 1.4"},
       {:opentelemetry, "~> 1.5"},
-      # Raft (RabbitMQ's) — replicates the Metadata state machine (DS-RSM vnodes)
+      # Raft (RabbitMQ's): replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
       # MALACHIMQ_CLUSTER_STRATEGY (gossip/kubernetes/epmd). Absent => single-node, no distribution.

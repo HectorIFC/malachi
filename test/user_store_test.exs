@@ -65,7 +65,7 @@ defmodule Malachi.Auth.UserStoreTest do
       assert {:error, :user_not_found} = UserStore.get_user("del_user")
     end
 
-    test "is idempotent — deleting non-existent user returns :ok" do
+    test "is idempotent, deleting non-existent user returns :ok" do
       assert :ok = UserStore.delete_user("nonexistent")
     end
   end

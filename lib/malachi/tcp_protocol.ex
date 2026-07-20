@@ -6,7 +6,7 @@ defmodule Malachi.TCPProtocol do
 
   A frame body comes from an untrusted client, so `process_frame/4` decodes inside a `try`: Wire's payload
   decoders raise on a malformed body, and the boundary answers a single error frame rather than crashing
-  the connection. The client deals in `topic` + key + an **opaque cursor** — never partitions or offsets.
+  the connection. The client deals in `topic` + key + an **opaque cursor**, never partitions or offsets.
   """
 
   alias Malachi.Auth.AclStore
@@ -20,7 +20,7 @@ defmodule Malachi.TCPProtocol do
 
   @doc """
   Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. A
-  `subscribe` frame is the exception — it registers a push stream and returns `{:stream, correlation_id}`
+  `subscribe` frame is the exception. It registers a push stream and returns `{:stream, correlation_id}`
   (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
   """
   @spec process_frame(term(), binary(), map(), atom()) :: :ok | {:stream, non_neg_integer()}
@@ -55,7 +55,7 @@ defmodule Malachi.TCPProtocol do
   @doc """
   Processes one client frame while the connection is in streaming mode. The only inbound frame is a
   `stream_ack` (applied for its window credit + durable commit); any other frame gets an error response
-  and the stream continues. Returns `:ok`. A malformed frame is answered, not fatal — the stream ends
+  and the stream continues. Returns `:ok`. A malformed frame is answered, not fatal: the stream ends
   only when the socket closes (the broker then drops the subscriber via the process `:DOWN`).
   """
   @spec process_stream_frame(term(), binary(), atom()) :: :ok

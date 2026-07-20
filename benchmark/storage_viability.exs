@@ -6,7 +6,7 @@
 #   - segments up to 1GB, file-per-segment, Direct I/O (O_DIRECT) + RocksDB sparse index
 #
 # This measures the LOCAL single-replica write/read hot path in pure Elixir.
-# (Replication/coordination is NOT the language-sensitive part — BEAM is strong there.)
+# (Replication/coordination is NOT the language-sensitive part, BEAM is strong there.)
 
 defmodule Bench do
   @dir "/tmp/ng_bench_data"
@@ -137,7 +137,7 @@ Bench.durable(1024, 4096, 1000, &:file.sync/1)      # 4MB batches
 Bench.durable(1024, 10240, 500, &:file.sync/1)      # 10MB batches (NG threshold)
 # count-driven (NorthGuard flushes at 20k records), small records
 Bench.durable(256, 20000, 300, &:file.sync/1)       # 20k x 256B ~= 5MB
-# datasync variant (fdatasync — metadata-light)
+# datasync variant (fdatasync, metadata-light)
 IO.puts("  -- datasync (fdatasync) variant --")
 Bench.durable(1024, 10240, 500, &:file.datasync/1)  # 10MB w/ datasync
 

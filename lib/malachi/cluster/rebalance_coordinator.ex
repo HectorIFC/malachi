@@ -2,7 +2,7 @@ defmodule Malachi.Cluster.RebalanceCoordinator do
   @moduledoc """
   The manual **plan/commit** coordinator for dynamic rebalancing (R3-b). An operator calls `plan/1` to
   see the changes that would move each vnode to the placement desired over the live membership, then
-  `commit/1` to apply them. Commit is **never automatic** — nothing moves until the operator asks.
+  `commit/1` to apply them. Commit is **never automatic**, nothing moves until the operator asks.
 
   It is a GenServer so commits serialize (one at a time) and it holds the wiring; the world is reached
   through seams, so it is testable without ra or a real lease:

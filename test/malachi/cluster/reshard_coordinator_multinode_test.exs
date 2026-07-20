@@ -100,8 +100,8 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
     assert map_size(topology.placements) == 3
     assert topology.pending == nil
 
-    # the topic survived the migrations: it resolves under the grown ring and its metadata — including the
-    # committed offsets, which travel with the topic export — is intact on whichever vnode now owns it
+    # the topic survived the migrations: it resolves under the grown ring and its metadata, including the
+    # committed offsets, which travel with the topic export: is intact on whichever vnode now owns it
     grown = %ReplicatedDSRSM{ring: topology.ring, vnodes: RingTopology.servers(topology)}
     assert {:ok, _owner} = ReplicatedDSRSM.vnode_for(grown, "orders")
     {:ok, metadata} = ReplicatedDSRSM.query(grown, "orders", &Function.identity/1)

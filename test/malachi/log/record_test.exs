@@ -8,7 +8,7 @@ defmodule Malachi.Log.RecordTest do
     test "matches the encoded frame size across key/value/header shapes" do
       records = [
         Record.new("value", key: "key"),
-        # nil key (absent) vs empty-binary key — same length here, but exercise both flags
+        # nil key (absent) vs empty-binary key: same length here, but exercise both flags
         Record.new("value", key: nil),
         Record.new("value", key: ""),
         Record.new("", key: "k"),

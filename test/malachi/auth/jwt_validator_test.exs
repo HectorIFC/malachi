@@ -15,7 +15,7 @@ defmodule Malachi.Auth.JwtValidatorTest do
     {:ok, sign: sign, config: config, claims: claims, now: now}
   end
 
-  describe "validate/2 — happy path" do
+  describe "validate/2, happy path" do
     test "accepts a well-formed token and returns its claims", %{sign: sign, config: config, claims: claims} do
       token = JwtFixtures.sign(sign, claims)
       assert {:ok, decoded} = JwtValidator.validate(token, config)
@@ -24,7 +24,7 @@ defmodule Malachi.Auth.JwtValidatorTest do
     end
   end
 
-  describe "validate/2 — claim validation" do
+  describe "validate/2, claim validation" do
     test "rejects an expired token", %{sign: sign, config: config, claims: claims, now: now} do
       token = JwtFixtures.sign(sign, %{claims | "exp" => now - 10})
       assert {:error, :token_expired} = JwtValidator.validate(token, config)
@@ -46,7 +46,7 @@ defmodule Malachi.Auth.JwtValidatorTest do
     end
   end
 
-  describe "validate/2 — signature attacks (security-critical)" do
+  describe "validate/2, signature attacks (security-critical)" do
     test "rejects a token signed by a different key", %{config: config, claims: claims} do
       {other_sign, _} = JwtFixtures.rs256_keypair()
       forged = JwtFixtures.sign(other_sign, claims)
@@ -73,7 +73,7 @@ defmodule Malachi.Auth.JwtValidatorTest do
     end
   end
 
-  describe "validate/2 — bad input" do
+  describe "validate/2, bad input" do
     test "rejects a non-binary token", %{config: config} do
       assert {:error, :invalid_token} = JwtValidator.validate(nil, config)
     end

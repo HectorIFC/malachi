@@ -71,7 +71,7 @@ defmodule Malachi.Auth.UserServerHaTest do
     {:ok, server_id} = UserServer.start(name, nodes)
     assert {:ok, :ok} = put(server_id, "admin", "hash1", [:admin])
 
-    # each peer reads from its OWN local replica — the user replicated cluster-wide
+    # each peer reads from its OWN local replica: the user replicated cluster-wide
     for n <- [n1, n2] do
       assert {:ok, {"admin", "hash1", [:admin]}} =
                eventually(fn -> :erpc.call(n, UserServer, :get_user, [{name, n}, "admin"]) end)
@@ -88,7 +88,7 @@ defmodule Malachi.Auth.UserServerHaTest do
     {:ok, server_id} = UserServer.start(name, nodes)
     assert {:ok, :ok} = put(server_id, "admin", "hash1", [:admin])
 
-    # kill one member — a 3-node cluster keeps quorum with the remaining 2
+    # kill one member: a 3-node cluster keeps quorum with the remaining 2
     {peer2, _} = List.last(peers)
     :ok = try_stop(peer2)
 

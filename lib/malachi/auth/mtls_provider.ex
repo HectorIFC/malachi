@@ -1,21 +1,21 @@
 defmodule Malachi.Auth.MtlsProvider do
   @moduledoc """
-  The mTLS-identity authentication provider (P4, decision 1A) — a `Malachi.Auth.AuthProvider`.
+  The mTLS-identity authentication provider (P4, decision 1A), a `Malachi.Auth.AuthProvider`.
 
   Authenticates a client by the **certificate** it presented at the TLS handshake instead of a password: it
   reads an identity string from the peer certificate (`Malachi.Auth.CertIdentity`, per the configured policy)
-  and looks that username up in the replicated user store for its permissions (decision 2A — the cert
+  and looks that username up in the replicated user store for its permissions (decision 2A, the cert
   authenticates, the internal record authorizes). This is the NorthGuard-style service identity: a service
   proves who it is with its cert, no shared secret.
 
-  The certificate's chain and validity are **not** re-checked here — that is the acceptor's TLS `verify_peer`
+  The certificate's chain and validity are **not** re-checked here: that is the acceptor's TLS `verify_peer`
   (a certificate reaches this provider only after the TLS layer validated it). This provider maps an already
   trusted certificate to a malachi identity.
 
   `credentials` is the DER-encoded peer certificate. `context` carries:
 
-    * `:policy` — which field names the identity (`:cn` | `{:san, :uri | :dns | :email}`, default `:cn`)
-    * `:lookup` — a `(username -> {:ok, {username, hash, permissions}} | {:error, reason})` seam
+    * `:policy`, which field names the identity (`:cn` | `{:san, :uri | :dns | :email}`, default `:cn`)
+    * `:lookup`. A `(username -> {:ok, {username, hash, permissions}} | {:error, reason})` seam
       (default `Malachi.Auth.UserStore.get_user/1`)
   """
 

@@ -1,7 +1,7 @@
 defmodule Malachi.TelemetryTest do
   # Exercises the hot-path telemetry events end to end (in-process): attach a handler that forwards each
   # event to the test process, drive produce/consume/auth against the live broker, and assert the
-  # measurements/metadata. async: false — it uses the shared broker and a global telemetry handler.
+  # measurements/metadata. async: false: it uses the shared broker and a global telemetry handler.
   use ExUnit.Case, async: false
 
   alias Malachi.LogApi

@@ -58,7 +58,7 @@ defmodule Malachi.Cluster.LeaseTest do
 
   test "the same holder renewing after its own expiry keeps its fence" do
     {state, {:ok, 1}} = acquire(Lease.new(), :a, 1_000)
-    # :a lets it lapse, then renews itself — no one stole it, so the token is unchanged
+    # :a lets it lapse, then renews itself: no one stole it, so the token is unchanged
     {state, reply} = acquire(state, :a, 1_000 + @duration + 5_000)
 
     assert reply == {:ok, 1}

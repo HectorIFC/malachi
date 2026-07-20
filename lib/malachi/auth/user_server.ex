@@ -5,14 +5,14 @@ defmodule Malachi.Auth.UserServer do
   `Malachi.Cluster.LeaseServer`; `ra` must already be running (`:ra.start_in/1`). This module owns only the
   user cluster, not ra's lifecycle.
 
-  **Writes** (`put_user`/`delete_user`/`update_password`/`import_users`) go through the log — replicated by
+  **Writes** (`put_user`/`delete_user`/`update_password`/`import_users`) go through the log, replicated by
   consensus, so every node converges on the same users (unlike the old node-local Mnesia store). They return
   `{:ok, machine_reply}` (e.g. `{:ok, :ok}` or `{:ok, {:error, :user_exists}}`) or `{:error, reason}` when
   the cluster is unreachable.
 
   **Reads** (`get_user`/`list_users`/`export_users`) use `:ra.local_query` against the **local** replica:
   fast (no consensus round-trip) and adequate for the auth hot path, which runs once per connection. They
-  are eventually consistent — a just-written user propagates within replication lag — which is acceptable
+  are eventually consistent: a just-written user propagates within replication lag - which is acceptable
   for auth; a caller needing linearizable reads can query the leader instead.
   """
 
@@ -52,7 +52,7 @@ defmodule Malachi.Auth.UserServer do
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
     # formed cluster, which ra logs as an error. Only a node that has not yet joined tries to form/join.
     case :ra.members({cluster_name, node()}) do
       {:ok, _members, _leader} ->
@@ -65,7 +65,7 @@ defmodule Malachi.Auth.UserServer do
   end
 
   # Best-effort: starts the local user server so it (re)joins the cluster. Any error (already started, or the
-  # cluster not yet formed) is ignored — reconcile is idempotent and the caller retries.
+  # cluster not yet formed) is ignored: reconcile is idempotent and the caller retries.
   defp ensure_local_server(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, UserMachine, %{}}

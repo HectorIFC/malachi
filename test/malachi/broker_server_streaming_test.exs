@@ -194,7 +194,7 @@ defmodule Malachi.BrokerServerStreamingTest do
     pid =
       spawn(fn ->
         :ok = LogApi.subscribe_member(broker, coord1, "t", "g", :m1, 10, 10)
-        # the member re-resolves to coord2 and acks there (a heartbeat) — this must refresh sub.coordinator
+        # the member re-resolves to coord2 and acks there (a heartbeat): this must refresh sub.coordinator
         :ok = LogApi.stream_ack_member(broker, coord2, "t", "g", :m1, nil, 0)
         send(test, :acked)
         Process.sleep(:infinity)

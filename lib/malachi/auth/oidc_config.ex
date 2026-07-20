@@ -5,16 +5,16 @@ defmodule Malachi.Auth.OidcConfig do
   Reads the operator's OIDC settings and produces the map `Malachi.Auth.JwtProvider` / `Malachi.Auth.JwtValidator`
   expect: a `Joken.Signer` (algorithm + the IdP's **public** key, from a configured PEM), the expected
   `issuer` and `audience`, and the `identity_claim` naming the username. Returns `{:error, :oidc_misconfigured}`
-  when a required setting is missing/blank or the PEM cannot be parsed into a signer — so a half-configured
+  when a required setting is missing/blank or the PEM cannot be parsed into a signer, so a half-configured
   deployment fails closed rather than trusting tokens it cannot verify.
 
   Settings (`:malachi` app env, populated from `MALACHIMQ_OIDC_*` in `config/runtime.exs`):
 
-    * `:oidc_public_key`    — the IdP signing key as a PEM string (required)
-    * `:oidc_issuer`        — the expected `iss` (required)
-    * `:oidc_audience`      — the expected `aud` (required)
-    * `:oidc_algorithm`     — JWS algorithm, default `\"RS256\"`
-    * `:oidc_identity_claim` — the claim naming the username, default `\"sub\"`
+    * `:oidc_public_key`: the IdP signing key as a PEM string (required)
+    * `:oidc_issuer`: the expected `iss` (required)
+    * `:oidc_audience`: the expected `aud` (required)
+    * `:oidc_algorithm`, JWS algorithm, default `\"RS256\"`
+    * `:oidc_identity_claim`: the claim naming the username, default `\"sub\"`
   """
 
   @default_algorithm "RS256"
@@ -53,7 +53,7 @@ defmodule Malachi.Auth.OidcConfig do
 
   defp build_signer(pem) do
     # Joken.Signer.create is lenient on a bad PEM (it fails only later, at verify time, rejecting every
-    # token). Validate the PEM up front so a misconfigured key fails at load — the operator learns
+    # token). Validate the PEM up front so a misconfigured key fails at load: the operator learns
     # immediately instead of via silent auth failures.
     case :public_key.pem_decode(pem) do
       [] -> {:error, :oidc_misconfigured}

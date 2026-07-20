@@ -40,7 +40,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert read_values(ref, @segment) == ["a", "b"]
 
     assert ReplicationServer.delete(ref, @segment) == :ok
-    # the segment is gone — a read finds nothing (:eof -> [])
+    # the segment is gone. A read finds nothing (:eof -> [])
     assert read_values(ref, @segment) == []
 
     # deleting an already-removed (now unknown) segment is still :ok

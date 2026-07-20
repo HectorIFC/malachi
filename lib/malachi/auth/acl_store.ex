@@ -1,6 +1,6 @@
 defmodule Malachi.Auth.AclStore do
   @moduledoc """
-  The cluster's per-topic ACL store — a thin **facade** over the ra-replicated ACL cluster
+  The cluster's per-topic ACL store: a thin **facade** over the ra-replicated ACL cluster
   (`Malachi.Auth.AclServer`), the counterpart of `Malachi.Auth.UserStore`. `Malachi.Application` starts the
   ra cluster at boot; this module routes grants/revokes through the log (consensus) and authorization reads
   to the local replica (`:ra.local_query`, fast and eventually consistent).
@@ -30,7 +30,7 @@ defmodule Malachi.Auth.AclStore do
 
   @doc """
   Whether `username` has a grant for `operation` on `topic`, from the local replica. **Fails closed**: an
-  unreachable ACL store returns `false` (deny) — authorization must not grant access it cannot verify.
+  unreachable ACL store returns `false` (deny): authorization must not grant access it cannot verify.
   """
   @spec authorized?(String.t(), AclRegistry.operation(), String.t()) :: boolean()
   def authorized?(username, operation, topic) do

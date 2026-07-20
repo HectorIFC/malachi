@@ -9,7 +9,7 @@ defmodule Malachi.Cluster.LeaseHolder do
     * a **leader** that renews stays leader (recording the local time of the successful renewal);
     * a leader told the lease is **held by another** drops leadership immediately (`on_lost`);
     * a leader that **cannot reach** the lease keeps trying until `:renew_deadline_ms` has passed since
-      its last successful renewal, then **proactively drops** leadership (`on_lost`) — the k8s
+      its last successful renewal, then **proactively drops** leadership (`on_lost`), the k8s
       *OnStoppedLeading*: give up before the lease could expire and be stolen, so two nodes never both
       believe they lead.
 
@@ -47,7 +47,7 @@ defmodule Malachi.Cluster.LeaseHolder do
   @spec tick_now(GenServer.server()) :: {:follower | :leader, non_neg_integer() | nil}
   def tick_now(server), do: GenServer.call(server, :tick_now)
 
-  @doc "Whether this node currently holds the lease. A plain read — does not force a tick."
+  @doc "Whether this node currently holds the lease. A plain read, does not force a tick."
   @spec leader?(GenServer.server()) :: boolean()
   def leader?(server), do: GenServer.call(server, :leader?)
 
@@ -117,7 +117,7 @@ defmodule Malachi.Cluster.LeaseHolder do
         state |> lose_leadership() |> become_leader(fence)
 
       {:error, :held} ->
-        # someone else holds it now — we have definitively lost
+        # someone else holds it now: we have definitively lost
         lose_leadership(state)
 
       {:error, _unreachable} ->

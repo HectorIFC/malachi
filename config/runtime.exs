@@ -144,7 +144,7 @@ config :malachi,
   oidc_identity_claim: System.get_env("MALACHIMQ_OIDC_IDENTITY_CLAIM") || "sub",
   # Per-topic ACL enforcement (P5). Default (false) is backward-compatible: a global produce/consume
   # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
-  # permissions and denies by default — a produce/consume needs an explicit ACL grant (or :admin).
+  # permissions and denies by default. A produce/consume needs an explicit ACL grant (or :admin).
   acl_strict: System.get_env("MALACHIMQ_ACL_STRICT") == "true",
   default_delivery_mode: System.get_env("MALACHIMQ_DEFAULT_DELIVERY_MODE") || "at_least_once",
   channel_send_concurrency: String.to_integer(System.get_env("MALACHIMQ_CHANNEL_SEND_CONCURRENCY") || "5000"),
@@ -186,7 +186,7 @@ config :malachi,
   log_attributes: System.get_env("MALACHIMQ_LOG_ATTRIBUTES"),
   # The attribute key to spread segment replicas over (e.g. "rack"); absent => no spread (plain HRW).
   log_spread_by: System.get_env("MALACHIMQ_LOG_SPREAD_BY"),
-  # Static cluster topology "node1=rack_a,node2=rack_b,..." — the per-node value of :log_spread_by,
+  # Static cluster topology "node1=rack_a,node2=rack_b,...". The per-node value of :log_spread_by,
   # identical on every node. With both set, control-plane vnode replicas spread across distinct
   # racks/zones (A1, deterministic). Absent => plain HRW placement. Parsed by parse_topology/1.
   log_topology: System.get_env("MALACHIMQ_LOG_TOPOLOGY"),
@@ -216,7 +216,7 @@ config :malachi,
   # How often each node reconciles itself into the lease cluster (self-join, so a staggered boot converges
   # to a fully-replicated lease). Idempotent once joined.
   lease_reconcile_interval_ms: parse_int.(System.get_env("MALACHIMQ_LEASE_RECONCILE_INTERVAL_MS"), 30_000),
-  # Automatic rebalancing (sharded control plane only). Off by default — the operator drives the
+  # Automatic rebalancing (sharded control plane only). Off by default: the operator drives the
   # RebalanceCoordinator. When on, the lease holder commits the plan once it stays the same for
   # `stabilization` reconciles (interval apart), so a transient membership flap does not move vnodes.
   # Graceful-shutdown drain window: after quiescing the acceptor (no new connections), wait this long for
@@ -338,7 +338,7 @@ explicit_standard_users =
 {default_users, generate_admin} =
   cond do
     disable_default_users ->
-      # No default users — manage via the API.
+      # No default users, manage via the API.
       {[], false}
 
     default_users_env ->
@@ -361,7 +361,7 @@ explicit_standard_users =
 
     true ->
       # Any other environment (production included): seed the standard users whose password is set, and
-      # generate a random admin on first boot when none is configured — Malachi.Auth logs it once, and the
+      # generate a random admin on first boot when none is configured, Malachi.Auth logs it once, and the
       # replicated store dedups so exactly one node's password wins. No weak fallback and no hard failure;
       # MALACHIMQ_DISABLE_DEFAULT_USERS opts out of default users entirely.
       {explicit_standard_users, admin_pass == nil}

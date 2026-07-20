@@ -2,14 +2,14 @@ defmodule Malachi.Cluster.AutoRebalancer do
   @moduledoc """
   Level-triggered **automatic** rebalancing (opt-in). A periodic reconcile that, on the lease holder,
   commits the current rebalancing plan once it has stayed the **same for `stabilization` consecutive
-  ticks** — so a transient SWIM membership flap (a node briefly suspected, then alive again) never
+  ticks**, so a transient SWIM membership flap (a node briefly suspected, then alive again) never
   triggers a vnode move. This is the k8s-controller pattern: SWIM does the fast, event-driven *detection*;
   the *decision* to move vnodes reconciles desired-vs-actual and converges.
 
   It is **policy** on top of the `Malachi.Cluster.RebalanceCoordinator` *mechanism* (which stays
   manual-by-default): the seams `:plan_fun` / `:commit_fun` / `:leader?` wire to the coordinator and the
   lease holder, so the timing logic is testable by driving one reconcile with the timer out of the way.
-  Off by default — nothing moves unless it is enabled and this node holds the lease.
+  Off by default: nothing moves unless it is enabled and this node holds the lease.
 
   ## Options
     * `:plan_fun`   - `(-> [Rebalance.change()])`, the current plan (wired to `RebalanceCoordinator.plan/1`)
@@ -44,7 +44,7 @@ defmodule Malachi.Cluster.AutoRebalancer do
       commit_fun: Keyword.fetch!(opts, :commit_fun),
       leader?: Keyword.fetch!(opts, :leader?),
       interval: Keyword.get(opts, :interval, @default_interval),
-      # at least 1 — a 0 would defeat the flap protection (commit on the very first non-empty plan)
+      # at least 1: a 0 would defeat the flap protection (commit on the very first non-empty plan)
       stabilization: max(1, Keyword.get(opts, :stabilization, @default_stabilization)),
       on_result: Keyword.get(opts, :on_result, &log_result/1),
       last_plan: [],
@@ -76,7 +76,7 @@ defmodule Malachi.Cluster.AutoRebalancer do
 
   defp on_leader(%{last_plan: last} = state) do
     case state.plan_fun.() do
-      # nothing to do — reset so a later change starts its stabilization window fresh
+      # nothing to do: reset so a later change starts its stabilization window fresh
       [] -> %{state | last_plan: [], stable_count: 0}
       # unchanged plan (non-empty; the empty case is handled above): one more stable tick
       ^last -> maybe_commit(state, last, state.stable_count + 1)

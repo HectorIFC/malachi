@@ -18,8 +18,8 @@ defmodule Mix.Tasks.Malachi.Acl do
 
   Options:
 
-    * `--node`   — the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
-    * `--cookie` — the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
+    * `--node`: the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
+    * `--cookie`: the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
 
   The target node must be **named** (a release, or `iex --name ... -S mix`); an unnamed `mix run` node is not
   reachable.

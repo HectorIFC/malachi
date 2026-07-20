@@ -1,11 +1,11 @@
 defmodule Malachi.Auth.JwtValidator do
   @moduledoc """
-  Pure validation of a signed JWT (JWS) and extraction of its identity claim — the deterministic core of the
+  Pure validation of a signed JWT (JWS) and extraction of its identity claim: the deterministic core of the
   OIDC auth provider (P4). Given a token and a validation `config`, it verifies the signature and the standard
   claims (`iss`, `aud`, `exp`) and returns the claim set, or a specific error.
 
   Signature verification is delegated to `Joken`/`jose` (a maintained library) rather than hand-rolled, and
-  the algorithm is pinned by the **configured signer**, never taken from the token's own `alg` header — so the
+  the algorithm is pinned by the **configured signer**, never taken from the token's own `alg` header, so the
   classic JWT footguns are closed: an `alg: none` (unsigned) token and an HS256/RS256 confusion attack (HMAC
   signing with the public key as the secret) both fail signature verification. Pure and side-effect free: it
   does not fetch keys or read a clock beyond `exp`/`nbf` comparison (the library uses the system clock for
@@ -21,7 +21,7 @@ defmodule Malachi.Auth.JwtValidator do
   @doc """
   Verifies `token`'s signature and standard claims against `config`. Returns `{:ok, claims}` (the decoded
   claim map) or `{:error, reason}` where `reason` is `:invalid_signature` (bad/`none`/confused signature or a
-  malformed token), `:token_expired`, `:missing_expiry` (no `exp` claim — a token must expire),
+  malformed token), `:token_expired`, `:missing_expiry` (no `exp` claim: a token must expire),
   `:invalid_issuer`, `:invalid_audience`, `:invalid_claims`, or `:invalid_token`.
   """
   @spec validate(String.t(), config()) :: {:ok, map()} | {:error, atom()}
@@ -40,7 +40,7 @@ defmodule Malachi.Auth.JwtValidator do
   def validate(_token, _config), do: {:error, :invalid_token}
 
   # Require an `exp` claim: joken's default validator checks `exp` is in the future only when it is present,
-  # so a token that omits `exp` would otherwise be accepted as never-expiring — a policy we reject.
+  # so a token that omits `exp` would otherwise be accepted as never-expiring: a policy we reject.
   defp require_expiry(claims) do
     case Map.get(claims, "exp") do
       exp when is_integer(exp) -> {:ok, claims}

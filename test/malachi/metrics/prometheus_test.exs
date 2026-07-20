@@ -121,7 +121,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     refute render([]) =~ "malachi_topic_ranges"
   end
 
-  test "label values are escaped (defensive — topic names are normally restricted)" do
+  test "label values are escaped (defensive, topic names are normally restricted)" do
     out =
       render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
 

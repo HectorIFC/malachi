@@ -69,7 +69,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
     [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
     {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y"])
 
-    # none of a, b, c is live — only d, which has no copy
+    # none of a, b, c is live, only d, which has no copy
     result = SelfHealing.heal_sealed(metadata, [d], 3)
 
     assert result.applied == []
@@ -84,7 +84,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
     assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) == %{applied: [], failed: []}
   end
 
-  test "ignores active (unsealed) segments — those heal on the write path" do
+  test "ignores active (unsealed) segments: those heal on the write path" do
     [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
     {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
     segment_id = {root, 0}

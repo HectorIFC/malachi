@@ -1,14 +1,14 @@
 defmodule Malachi.Cluster.ReshardCoordinator do
   @moduledoc """
   Drives a **grow re-sharding** under the lease: takes the ring from its current vnode count up to a larger
-  target, one `Malachi.Cluster.SplitCoordinator` split at a time. A `GenServer` so reshards **serialize** —
+  target, one `Malachi.Cluster.SplitCoordinator` split at a time. A `GenServer` so reshards **serialize**:
   each step mutates the ring, and two reshards at once would race it (the same reason splits serialize).
 
   **Level-triggered and resumable.** Rather than executing a plan computed once, each iteration re-reads the
   **live** ring, asks `Malachi.Cluster.ReshardPlan` for the steps that remain, and performs only the **first**
   one. Because the plan is a pure function of `(ring, target)` and split-natural steps never move an existing
   token, an interrupted reshard converges simply by re-issuing the same target: the splits already done are
-  reflected in the ring, so the remaining plan is exactly what is left. Nothing extra is persisted — the
+  reflected in the ring, so the remaining plan is exactly what is left. Nothing extra is persisted, the
   target is the operator's input (there is no durable reshard intent; a single split's own `pending` intent
   already makes each step crash-safe).
 
@@ -39,7 +39,7 @@ defmodule Malachi.Cluster.ReshardCoordinator do
   Grows the ring to `target_count` vnodes, performing the required splits one at a time. Returns `:ok` when
   the ring is at (or reaches) the target, `{:error, :not_leader}` unless this node holds the lease,
   `{:error, :no_topology}` if the cluster has no ring yet, `{:error, :cannot_shrink}` for a smaller target
-  (grow-only), or `{:error, {:split_failed, vnode_id, reason}}` if a step fails — earlier steps stay applied
+  (grow-only), or `{:error, {:split_failed, vnode_id, reason}}` if a step fails, earlier steps stay applied
   and re-issuing the same target resumes from there.
 
   Serialized with other reshards and may take a long time (each step migrates metadata), so it uses an
@@ -71,7 +71,7 @@ defmodule Malachi.Cluster.ReshardCoordinator do
 
   # One level-triggered pass: read the live ring, plan what remains, do the first step, recurse.
   #
-  # Re-planning the whole remainder each pass and using only its head is deliberate — it is exactly what
+  # Re-planning the whole remainder each pass and using only its head is deliberate: it is exactly what
   # makes an interrupted reshard resumable (the plan is re-derived from the live ring, never replayed from a
   # stale one). The discarded tail costs O(steps x vnodes) of pure ring math per pass, which is immaterial at
   # realistic vnode counts and reshards being rare operator actions.

@@ -32,7 +32,7 @@ defmodule Malachi.MetadataPropertyTest do
   end
 
   # The reverse indexes (topic_ranges/range_segments) must stay exactly equal to what a scan of the
-  # source-of-truth maps would produce — otherwise a future O(1) lookup over them would lie. Compares the
+  # source-of-truth maps would produce: otherwise a future O(1) lookup over them would lie. Compares the
   # maintained index against one rebuilt from `ranges`/`segments`, which catches missing, extra, stale,
   # and lingering-empty entries at once. (V-idx-b then switches the readers to use the index.)
   property "the secondary indexes equal a scan-derived index after any sequence of operations" do

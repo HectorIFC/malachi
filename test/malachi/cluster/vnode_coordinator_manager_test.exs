@@ -43,7 +43,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
 
     assert_receive {:stop, {:handle, :a}}
     assert_receive {:spawn, :c}
-    # b was already running and is still led — it must not be stopped or respawned
+    # b was already running and is still led: it must not be stopped or respawned
     refute_receive {:stop, {:handle, :b}}
     refute_receive {:spawn, :b}
   end

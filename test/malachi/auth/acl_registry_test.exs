@@ -5,7 +5,7 @@ defmodule Malachi.Auth.AclRegistryTest do
 
   defp grant(state, username, op, resource), do: elem(Reg.apply(state, {:grant, username, op, resource}), 0)
 
-  describe "grant / authorized? — literal" do
+  describe "grant / authorized?, literal" do
     test "a literal grant authorizes exactly that topic and no other" do
       state = grant(Reg.new(), "alice", :produce, {:literal, "orders.eu"})
       assert Reg.authorized?(state, "alice", :produce, "orders.eu")
@@ -17,7 +17,7 @@ defmodule Malachi.Auth.AclRegistryTest do
     end
   end
 
-  describe "grant / authorized? — prefix" do
+  describe "grant / authorized?, prefix" do
     test "a prefix grant authorizes any topic under the prefix" do
       state = grant(Reg.new(), "alice", :consume, {:prefix, "orders."})
       assert Reg.authorized?(state, "alice", :consume, "orders.eu")

@@ -14,7 +14,7 @@ config :malachi,
   log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.system_time(:nanosecond)}"),
   # The app now starts ra unconditionally (the replicated user store); isolate its on-disk data per run.
   ra_data_dir: Path.join(System.tmp_dir!(), "malachi_ra_test_#{System.system_time(:nanosecond)}"),
-  # Deterministic credentials the test suite authenticates with. Test-only — never shipped to prod (the base
+  # Deterministic credentials the test suite authenticates with. Test-only, never shipped to prod (the base
   # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.
   default_users: [
     {"admin", "admin123", [:admin]},

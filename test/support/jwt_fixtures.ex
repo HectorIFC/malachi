@@ -2,7 +2,7 @@ defmodule Malachi.Test.JwtFixtures do
   @moduledoc """
   Helpers for JWT/OIDC tests: generate a throwaway RSA keypair at runtime and sign tokens with it.
 
-  Keys are generated in-process per call — nothing is written to disk, so no key material (public or private)
+  Keys are generated in-process per call: nothing is written to disk, so no key material (public or private)
   is checked into the repo, mirroring how the mTLS tests avoid committing private keys.
   """
 

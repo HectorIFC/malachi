@@ -6,7 +6,7 @@ defmodule Malachi.Cluster.Failover do
   `plan/2` returns the `:set_segment_replicas` commands that **promote** a live replica to primary
   by moving it to the head of the segment's replica set. The dead broker stays in the set as a
   follower that simply will not ack (the quorum comes from the live replicas); once the segment
-  seals, `Malachi.Cluster.SelfHealing` replaces it. No data moves — the live replicas already hold
+  seals, `Malachi.Cluster.SelfHealing` replaces it. No data moves: the live replicas already hold
   the segment.
 
   Only active segments are considered: sealed segments are immutable, and their reads are restored

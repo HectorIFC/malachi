@@ -20,7 +20,7 @@ defmodule Malachi.Auth.LockoutManager do
 
   ## Process role and blocking
 
-  Reads (`locked?`/`get_failed_attempts`/`list_locked_accounts`) are direct local queries — no consensus,
+  Reads (`locked?`/`get_failed_attempts`/`list_locked_accounts`) are direct local queries, no consensus,
   no GenServer round-trip. The hot-path **writes** (`record_failed_attempt`/`record_successful_auth`) run in
   a **background task** on `Malachi.TaskSupervisor`, so the auth path never blocks on a consensus round-trip
   or an ra leader election, and no single process funnels every write; `ra` serializes the concurrent writes
@@ -63,7 +63,7 @@ defmodule Malachi.Auth.LockoutManager do
         status
 
       {:error, reason} ->
-        # Fail open: a transient store hiccup must not lock out legitimate users — the rate limiter is the
+        # Fail open: a transient store hiccup must not lock out legitimate users: the rate limiter is the
         # backstop. Logged so an operator sees the enforcement gap.
         Logger.warning(I18n.t(:lockout_store_unavailable, operation: "locked?", reason: inspect(reason)))
         :not_locked
@@ -95,7 +95,7 @@ defmodule Malachi.Auth.LockoutManager do
   @doc """
   Unlocks an account manually (administrative action).
 
-  `ip` is a specific IP or `:all` to unlock every IP for the user. Synchronous — returns `:ok` (single IP)
+  `ip` is a specific IP or `:all` to unlock every IP for the user. Synchronous, returns `:ok` (single IP)
   or `{:ok, cleared_count}` (`:all`) once the change is committed, or `{:error, reason}` if the store is
   unreachable.
   """
@@ -133,7 +133,7 @@ defmodule Malachi.Auth.LockoutManager do
 
   @impl true
   def handle_info(:cleanup, state) do
-    # Compaction only — expiry is evaluated lazily on read, so a failed cleanup is harmless (retried next tick).
+    # Compaction only: expiry is evaluated lazily on read, so a failed cleanup is harmless (retried next tick).
     _ = LockoutServer.cleanup(server_id(), @attempt_ttl_ms)
     schedule_cleanup()
     {:noreply, state}
@@ -255,7 +255,7 @@ defmodule Malachi.Auth.LockoutManager do
   end
 
   # The lockout config, read once per write and carried inside the command so every replica applies the
-  # identical decision (the machine itself reads no config — that would be non-deterministic).
+  # identical decision (the machine itself reads no config: that would be non-deterministic).
   defp config do
     %{
       max_attempts: Application.get_env(:malachi, :max_auth_attempts, 5),

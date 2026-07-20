@@ -3,7 +3,7 @@ defmodule Malachi.Cluster.Rebalance do
   Executes a rebalancing plan (from `Malachi.Application.rebalance_plan/2`) against the vnodes' ra
   clusters (R3). For each change it **adds the joining members before removing the leaving ones**
   (add-before-remove, so a vnode never drops below quorum mid-move) through injected `add_member` /
-  `remove_member` seams — so the executor is testable without ra, and R3-b supplies the real ra ops.
+  `remove_member` seams, so the executor is testable without ra, and R3-b supplies the real ra ops.
 
   It is **idempotent**: the seams must treat an already-present add / already-gone remove as `:ok`, so an
   interrupted commit can be re-run. It is **fail-fast**: within a change the first failing add stops it
@@ -75,7 +75,7 @@ defmodule Malachi.Cluster.Rebalance do
   Adds `new_node` to vnode `vnode_id`'s ra cluster (the real `add_member` seam `apply_plan/4` uses in
   production): starts the ra server on `new_node` (via `:erpc`, as a member of the existing cluster) then
   adds it to the consensus, routing the change through `current_members` (any of them reaches the
-  leader). **Idempotent** — an already-running server or already-present member counts as `:ok`. On
+  leader). **Idempotent**. An already-running server or already-present member counts as `:ok`. On
   success ra replicates the vnode's state (log/snapshot) to the new member automatically.
   """
   @spec ra_add_member(atom(), node(), [node()]) :: :ok | {:error, term()}
@@ -91,7 +91,7 @@ defmodule Malachi.Cluster.Rebalance do
 
   @doc """
   Removes `leaving_node` from vnode `vnode_id`'s ra cluster: removes it from the consensus (routing
-  through `current_members`), then stops its server. **Idempotent** — a non-member counts as `:ok`.
+  through `current_members`), then stops its server. **Idempotent**. A non-member counts as `:ok`.
   """
   @spec ra_remove_member(atom(), node(), [node()]) :: :ok | {:error, term()}
   def ra_remove_member(vnode_id, leaving_node, current_members) do

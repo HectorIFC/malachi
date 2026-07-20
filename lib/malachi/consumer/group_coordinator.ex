@@ -1,18 +1,18 @@
 defmodule Malachi.Consumer.GroupCoordinator do
   @moduledoc """
   Tracks the members of consumer groups and assigns each topic's ranges across them (via
-  `Malachi.Consumer.Assignment`), so members consume in parallel — one range per member.
+  `Malachi.Consumer.Assignment`), so members consume in parallel: one range per member.
 
   A group is keyed by `{group, topic}`. Members `join`, then `heartbeat` to stay alive; a member that
   stops heartbeating for `session_ms` is evicted (a dead consumer). Rebalancing is **eager**: any
-  membership change — join, leave, eviction — or a change in the topic's ranges recomputes the whole
+  membership change: join, leave, eviction - or a change in the topic's ranges recomputes the whole
   assignment and bumps a **generation** counter; a member re-reads its assignment on the next heartbeat and
   sees the new generation, its signal to take over its (possibly changed) ranges. Because the assignment is
   deterministic and sticky (S1), a rebalance moves few ranges.
 
   This is the coordinator **logic** as a single GenServer, reached through seams (`:clock`, `:ranges_fun`)
   so it is testable without a cluster; which node coordinates which group (or replicating the membership)
-  is a separate wiring concern. Member state is soft — a coordinator restart just makes members re-join.
+  is a separate wiring concern. Member state is soft: a coordinator restart just makes members re-join.
 
   ## Options
     * `:ranges_fun` - `(topic -> [range_id])`, the topic's current ranges (default `fn _ -> [] end`)
@@ -204,7 +204,7 @@ defmodule Malachi.Consumer.GroupCoordinator do
   end
 
   # Recompute the assignment over the current members and ranges; bump the generation only if it changed
-  # (level-triggered — safe to run every tick).
+  # (level-triggered, safe to run every tick).
   defp rebalance(group_state, topic, ranges_fun) do
     assignment = Assignment.assign(ranges_fun.(topic), Map.keys(group_state.members))
 

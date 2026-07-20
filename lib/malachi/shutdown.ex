@@ -3,13 +3,13 @@ defmodule Malachi.Shutdown do
   Graceful shutdown orchestration, run from `Malachi.Application.prep_stop/1` on SIGTERM (or
   `bin/malachi stop`). Three ordered steps, so a rolling upgrade does not cut in-flight work:
 
-    1. **quiesce** — stop accepting new client connections by terminating the TCP acceptor pool (so the
+    1. **quiesce**: stop accepting new client connections by terminating the TCP acceptor pool (so the
        app supervisor does not restart it). Already-accepted connections are separate spawned processes
        and keep serving.
-    2. **drain** — wait a bounded window (`:shutdown_grace_ms`, default 5s) for in-flight requests to
+    2. **drain**. Wait a bounded window (`:shutdown_grace_ms`, default 5s) for in-flight requests to
        finish. Bounded on purpose: streaming connections stay open indefinitely, so draining until zero
        connections would never converge.
-    3. **close** — close the remaining connections.
+    3. **close**, close the remaining connections.
 
   The lease is released separately by the `Malachi.Cluster.LeaseHolder` terminate callback during the
   supervision-tree teardown that follows (fast failover instead of waiting for expiry), and `ra` persists

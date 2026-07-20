@@ -13,11 +13,11 @@ defmodule Mix.Tasks.Malachi.AclTest do
     end
   end
 
-  # A `call` seam that actually runs the function in-process (the real Auth) — proves the integration end to
+  # A `call` seam that actually runs the function in-process (the real Auth), proves the integration end to
   # end (only the cross-node RPC transport is skipped).
   defp local_call, do: fn module, fun, args -> {:ok, apply(module, fun, args)} end
 
-  describe "execute/3 — parsing and dispatch" do
+  describe "execute/3, parsing and dispatch" do
     test "grant parses the operation to an atom, calls grant_acl, and reports success" do
       call = recording_call({:ok, :ok})
       assert {:ok, msg} = Acl.execute(["grant", "alice", "produce", "orders.*"], [], call)
@@ -65,7 +65,7 @@ defmodule Mix.Tasks.Malachi.AclTest do
     end
   end
 
-  describe "execute/3 — integration against the real Auth (local seam)" do
+  describe "execute/3: integration against the real Auth (local seam)" do
     test "grant then revoke actually round-trips through the replicated ACL store" do
       username = "acltask_#{System.unique_integer([:positive])}"
 

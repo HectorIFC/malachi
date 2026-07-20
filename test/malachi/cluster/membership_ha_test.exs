@@ -37,7 +37,7 @@ defmodule Malachi.Cluster.MembershipHaTest do
     _kind, _reason -> :ok
   end
 
-  # The member reference for a node — node-qualified so it resolves from any node (the bug the
+  # The member reference for a node: node-qualified so it resolves from any node (the bug the
   # :self_ref option fixes: a bare local name would resolve to a different server on each node).
   defp ref(node), do: {@name, node}
 

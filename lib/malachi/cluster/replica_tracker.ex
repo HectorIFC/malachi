@@ -1,12 +1,12 @@
 defmodule Malachi.Cluster.ReplicaTracker do
   @moduledoc """
-  Pure quorum-commit tracking for the replication of a **single segment** — the deterministic
+  Pure quorum-commit tracking for the replication of a **single segment**, the deterministic
   core of the data-plane replication mechanism, with no processes or network.
 
   A segment is replicated across an ordered `replica_set` (chosen by `Malachi.Cluster.Placement`).
   The first broker is the **primary**: it accepts writes and forwards records to the followers.
   Each replica reports the highest offset it has durably stored (its *match offset*); this module
-  folds those reports into the segment's **commit offset** — the highest offset present on a
+  folds those reports into the segment's **commit offset**: the highest offset present on a
   **quorum** (majority) of replicas, which is the point up to which the data is durable and may be
   acknowledged to producers.
 
@@ -37,7 +37,7 @@ defmodule Malachi.Cluster.ReplicaTracker do
 
   @doc """
   Builds a tracker for a segment replicated across `replica_set` (the first broker is the
-  primary). Duplicates are ignored. Raises `ArgumentError` on an empty/invalid replica set —
+  primary). Duplicates are ignored. Raises `ArgumentError` on an empty/invalid replica set:
   `Malachi.Cluster.Placement.place/3` always yields a non-empty, distinct set.
   """
   @spec new([Metadata.broker()]) :: t()

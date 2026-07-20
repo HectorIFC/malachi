@@ -2,8 +2,8 @@ defmodule Malachi.TCPAcceptorPool do
   @moduledoc """
   Supervises a pool of `Malachi.TCPAcceptor`s listening on the same port (plain TCP or TLS).
 
-  On start it opens one throwaway listen socket to validate the transport/TLS options — failing fast
-  if they are wrong — closes it, then starts one acceptor per online scheduler, each opening its own
+  On start it opens one throwaway listen socket to validate the transport/TLS options, failing fast
+  if they are wrong: closes it, then starts one acceptor per online scheduler, each opening its own
   listen socket on the shared port (`reuseport`). Plain TCP or TLS is chosen from `:enable_tls`; the
   TLS options (cert/key files, protocol versions, ciphers, peer verification) are read from config.
   """

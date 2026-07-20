@@ -1,5 +1,5 @@
 defmodule Malachi.MtlsAuthTest do
-  # async: false — mutates global app config (mtls_auth / tls_verify) and shares the running acceptor.
+  # async: false: mutates global app config (mtls_auth / tls_verify) and shares the running acceptor.
   use ExUnit.Case, async: false
 
   alias Malachi.Test.TCPHelper

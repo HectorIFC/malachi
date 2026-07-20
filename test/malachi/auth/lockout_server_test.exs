@@ -1,5 +1,5 @@
 defmodule Malachi.Auth.LockoutServerTest do
-  # async: false — ra is global/stateful (one data dir, on-disk Raft logs).
+  # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
   alias Malachi.Auth.LockoutServer
@@ -83,7 +83,7 @@ defmodule Malachi.Auth.LockoutServerTest do
     server_id = start_cluster()
 
     # A 1ms lockout: genuinely expired a moment after it is applied. `t0` is captured before the attempts,
-    # so it precedes locked_until (= apply_time + 1) — an at-t0 read therefore sees the entry while stored.
+    # so it precedes locked_until (= apply_time + 1): an at-t0 read therefore sees the entry while stored.
     t0 = now()
     short = %{@config | base_duration_ms: 1}
     for _ <- 1..5, do: LockoutServer.record_failed_attempt(server_id, @key, short)
@@ -95,7 +95,7 @@ defmodule Malachi.Auth.LockoutServerTest do
     Process.sleep(5)
     assert {:ok, :ok} = LockoutServer.cleanup(server_id, 0)
 
-    # The same at-t0 read now reports not_locked — only possible if cleanup removed the entry, since
+    # The same at-t0 read now reports not_locked: only possible if cleanup removed the entry, since
     # time-filtering alone cannot change the result of a read at a fixed past `now`.
     assert {:ok, :not_locked} = LockoutServer.locked?(server_id, @key, t0)
     # cleanup(ttl: 0) also drops the failed-attempt counters older than the leader clock.

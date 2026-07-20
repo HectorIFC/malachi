@@ -4,7 +4,7 @@ defmodule Malachi.Metadata do
   replicated source of truth for **metadata** about topics, ranges and segments.
 
   Unlike the data-plane storage (`Malachi.Broker`/`Log`, which hold open file handles),
-  this holds only metadata — it is pure data and a pure transition function. All
+  this holds only metadata: it is pure data and a pure transition function. All
   mutations go through `apply/2` (`command -> {new_state, reply}`), exactly the contract a
   Raft machine's `apply` needs, so the `ra` integration in Phase 1b replicates this state
   without changes. This is what makes topic structure durable (the item deferred from
@@ -74,7 +74,7 @@ defmodule Malachi.Metadata do
 
   @typedoc """
   A consumer's per-range stream position. Opaque to the metadata (it only stores/returns it); set
-  by the log layer as a `Malachi.Broker.consume_cursor` — `:start` or `{source_index, source_offset}`.
+  by the log layer as a `Malachi.Broker.consume_cursor`, `:start` or `{source_index, source_offset}`.
   """
   @type position :: :start | {non_neg_integer(), non_neg_integer()}
 
@@ -109,7 +109,7 @@ defmodule Malachi.Metadata do
           # as MapSets (O(1) add/remove, dedup); an entry exists iff the key has ≥1 member.
           topic_ranges: %{topic_name() => MapSet.t(range_id())},
           range_segments: %{range_id() => MapSet.t(segment_id())},
-          # Topics currently **fenced for migration** (a vnode split copying them to another vnode) — a set
+          # Topics currently **fenced for migration** (a vnode split copying them to another vnode), a set
           # kept as a `%{name => true}` map: every mutating command targeting one is rejected with
           # `{:error, :migrating}`, so the split's snapshot is not raced. Cleared on extract/`:end_migration`.
           migrating: %{topic_name() => true}
@@ -164,7 +164,7 @@ defmodule Malachi.Metadata do
 
   `register_segment` requires the `segment_id` to be **globally unique** across the cluster
   (the broker-assigned contract). Within a vnode this is checked (`:segment_exists`), but
-  uniqueness across vnodes is the caller's responsibility — it is what keeps a topic's
+  uniqueness across vnodes is the caller's responsibility: it is what keeps a topic's
   segments safe when it migrates to another vnode (see `insert_topic/2`).
   """
   @spec apply(t(), command()) :: {t(), term()}
@@ -308,7 +308,7 @@ defmodule Malachi.Metadata do
 
   defp do_apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
     # Retention removes an expired segment from the control plane. Only sealed segments are
-    # deletable — the active segment is still being written and must never be dropped.
+    # deletable: the active segment is still being written and must never be dropped.
     case Map.fetch(state.segments, segment_id) do
       :error ->
         {state, {:error, :no_such_segment}}
@@ -330,7 +330,7 @@ defmodule Malachi.Metadata do
     # A consumer group's durable position, **merged per range** (last commit wins for each range) rather
     # than replaced: with a partitioned group, each member commits only the ranges it owns, and must not
     # clobber the positions of ranges owned by other members. Then **prune** offsets of ranges that are no
-    # longer active — a split/merge retires a range whose committed offset can never be consumed again (the
+    # longer active: a split/merge retires a range whose committed offset can never be consumed again (the
     # active children resume from `:start`), so without this the map would grow one dead key per split.
     # Pruning is skipped when the topic is not routed yet (an offset committed before `create_topic`).
     merged = Map.merge(committed_offsets(state, group, topic), offsets)
@@ -362,8 +362,8 @@ defmodule Malachi.Metadata do
 
   # Vnode-split migration (driven through each vnode's Raft log): `:extract_topic` removes a topic's full
   # metadata from the source vnode and returns it as an `export` (the reply), `:insert_topic` restores that
-  # export on the destination vnode. Together they relocate a topic — with its ranges, segments and
-  # committed offsets — from one vnode to another, keeping the move deterministic and replay-safe.
+  # export on the destination vnode. Together they relocate a topic, with its ranges, segments and
+  # committed offsets: from one vnode to another, keeping the move deterministic and replay-safe.
   defp do_apply(%__MODULE__{} = state, {:extract_topic, name}) do
     extract_topic(state, name)
   end
@@ -388,7 +388,7 @@ defmodule Malachi.Metadata do
 
   # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
   # replicated by Raft, a command that raises in `apply` would crash every replica
-  # deterministically (and again on replay) — e.g. an older replica seeing a newer
+  # deterministically (and again on replay), e.g. an older replica seeing a newer
   # command during a rolling upgrade. Keep the replica alive and surface the problem.
   defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
 
@@ -406,7 +406,7 @@ defmodule Malachi.Metadata do
   @spec get_segment(t(), segment_id()) :: segment_meta() | nil
   def get_segment(%__MODULE__{} = state, segment_id), do: Map.get(state.segments, segment_id)
 
-  @doc "All ranges of a topic (any state). O(k) via the `topic_ranges` index — see `apply/2`."
+  @doc "All ranges of a topic (any state). O(k) via the `topic_ranges` index, see `apply/2`."
   @spec ranges_of_topic(t(), topic_name()) :: [range_meta()]
   def ranges_of_topic(%__MODULE__{} = state, name) do
     state.topic_ranges
@@ -420,7 +420,7 @@ defmodule Malachi.Metadata do
     state |> ranges_of_topic(name) |> Enum.filter(&(&1.state == :active))
   end
 
-  @doc "All segments of a range. O(k) via the `range_segments` index — see `apply/2`."
+  @doc "All segments of a range. O(k) via the `range_segments` index, see `apply/2`."
   @spec segments_of_range(t(), range_id()) :: [segment_meta()]
   def segments_of_range(%__MODULE__{} = state, range_id) do
     state.range_segments
@@ -468,7 +468,7 @@ defmodule Malachi.Metadata do
 
   @doc """
   The JSON-serializable drill-down for a single `name`: its ranges (sorted by seq), each with its
-  segments (sorted by start_offset). `nil` if the topic does not exist. Pure — the on-demand counterpart
+  segments (sorted by start_offset). `nil` if the topic does not exist. Pure: the on-demand counterpart
   to `overview/1`, so the per-second stream stays light and segment detail is fetched only when a topic
   is expanded. `range_id`/`segment_id` tuples are flattened to display fields (`seq`, `start_offset`).
   """
@@ -534,8 +534,8 @@ defmodule Malachi.Metadata do
   # --- migration (vnode split) ---
 
   @doc """
-  A **read-only** snapshot of a topic's full metadata — topic + all its ranges/segments + its consumer
-  groups' committed offsets (keyed by group, the topic implied) — as a `topic_export`, or `nil` if the
+  A **read-only** snapshot of a topic's full metadata: topic + all its ranges/segments + its consumer
+  groups' committed offsets (keyed by group, the topic implied): as a `topic_export`, or `nil` if the
   topic is absent. This is what a **copy-first** vnode split reads and `insert_topic/2`s into the new
   vnode *before* `extract_topic/2` removes it from the source, so a failed migration never loses a topic.
   """
@@ -555,9 +555,9 @@ defmodule Malachi.Metadata do
   end
 
   @doc """
-  Removes a topic and all its ranges/segments — and its consumer groups' committed offsets —
+  Removes a topic and all its ranges/segments, and its consumer groups' committed offsets:
   from `state`, returning `{state_without_topic, export}` (or `{state, nil}` if the topic is
-  absent). The export can be re-inserted on another vnode with `insert_topic/2` — this is how
+  absent). The export can be re-inserted on another vnode with `insert_topic/2`: this is how
   a vnode split migrates a topic's metadata to a new vnode. Offsets ride along (keyed by group,
   the topic implied) so a consumer group keeps its committed position across a split.
   """
@@ -593,7 +593,7 @@ defmodule Malachi.Metadata do
   Segment ids, however, are caller-supplied and independent of range ids: this merges them
   by id, so a segment id that already exists in `state` is **overwritten**. Migration is
   therefore safe only if segment ids are globally unique across the cluster (the
-  broker-assigned contract — see `register_segment` in `apply/2`).
+  broker-assigned contract, see `register_segment` in `apply/2`).
   """
   @spec insert_topic(t(), topic_export()) :: t()
   def insert_topic(%__MODULE__{} = state, export) do
@@ -617,7 +617,7 @@ defmodule Malachi.Metadata do
   # --- internals: topic ---
 
   # Topic names are used in file paths (range log directories), so restrict them to a safe
-  # allowlist and reject "."/".." — preventing path traversal at the data plane.
+  # allowlist and reject "."/"..": preventing path traversal at the data plane.
   defp valid_topic_name?(name) do
     is_binary(name) and name not in ["", ".", ".."] and name =~ ~r/\A[A-Za-z0-9._-]+\z/
   end

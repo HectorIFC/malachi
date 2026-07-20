@@ -2,11 +2,11 @@
 'use strict';
 
 /**
- * Malachi Subscriber — server-push streaming over the binary log protocol.
+ * Malachi Subscriber: server-push streaming over the binary log protocol.
  *
  * subscribe opens a push stream for a consumer group, flow-controlled by a credit window: the server
  * pushes up to `window` in-flight records, and each streamAck durably commits the group's position and
- * returns that many records of credit. This replaces the old channel pub/sub — channels are gone; a
+ * returns that many records of credit. This replaces the old channel pub/sub, channels are gone; a
  * topic + consumer group with server-push is the real-time equivalent.
  *
  * Usage:
@@ -45,7 +45,7 @@ async function run(topic, { group, member, window, max, heartbeatMs }) {
 
   // A member ack doubles as a coordinator heartbeat + range refresh. Acking real records resets the
   // timer; while idle, a periodic empty ack (null cursor, 0 credit) keeps the membership from being
-  // evicted on session timeout — closing the idle-member liveness gap.
+  // evicted on session timeout, closing the idle-member liveness gap.
   const ack = (cursor, count) => {
     client.streamAck(topic, group, member, cursor, count);
     lastAck = Date.now();
@@ -113,7 +113,7 @@ async function run(topic, { group, member, window, max, heartbeatMs }) {
 
 function help() {
   console.log(`
-${colors.cyan('Malachi Subscriber')} — server-push streaming from a topic
+${colors.cyan('Malachi Subscriber')}, server-push streaming from a topic
 
 ${colors.yellow('Usage')}
   node subscriber.js [topic] [options]

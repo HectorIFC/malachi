@@ -1,6 +1,6 @@
 defmodule Malachi.Log.Segment do
   @moduledoc """
-  Metadata describing one segment — the unit of replication in NorthGuard's model.
+  Metadata describing one segment: the unit of replication in NorthGuard's model.
 
   A segment is a sequence of `Malachi.Log.Record`s persisted to a single file
   (file-per-segment). It is either `:active` (records may be appended) or `:sealed`
@@ -9,7 +9,7 @@ defmodule Malachi.Log.Segment do
 
   This struct is pure data; durable I/O lives in `Malachi.Storage.SegmentStore`
   implementations. The counters here (`byte_size`, `record_count`) reflect *flushed*
-  (durable, committed) state — not data still buffered in memory.
+  (durable, committed) state, not data still buffered in memory.
   """
 
   # NorthGuard seals at 1GB or after 1h active.

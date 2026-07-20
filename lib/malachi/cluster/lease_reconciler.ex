@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.LeaseReconciler do
   @moduledoc """
   Periodically reconciles this node into the lease cluster (R3-b-iii hardening). On start and every
-  `:interval` ms it calls the injected `:reconcile` seam — wired to `LeaseServer.reconcile/2` — which
+  `:interval` ms it calls the injected `:reconcile` seam, wired to `LeaseServer.reconcile/2` - which
   bootstraps the lease cluster if unformed and starts the local server so a node that was down when the
   cluster first formed rejoins. Level-triggered and idempotent (a joined node's reconcile is a no-op), so
   it just keeps ticking; it does not track state. Keeps the `LeaseHolder` free of ra/membership concerns.

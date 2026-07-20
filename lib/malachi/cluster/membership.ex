@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.Membership do
   @moduledoc """
   The **pure** state of SWIM-style cluster membership: who is `:alive`, `:suspect`, or `:dead`,
-  with per-member **incarnation** numbers. No processes, timers, or network — this is the
+  with per-member **incarnation** numbers. No processes, timers, or network: this is the
   deterministic core that the failure detector and gossip transport (later slices) drive.
 
   Each member owns its incarnation: only that member raises its own, to **refute** a false
@@ -14,7 +14,7 @@ defmodule Malachi.Cluster.Membership do
     * equal `{incarnation, rank}` changes nothing (idempotent).
 
   Because the merge is a commutative, associative, idempotent join, applying a batch of gossiped
-  updates **converges** regardless of order — what makes infection-style dissemination correct.
+  updates **converges** regardless of order, what makes infection-style dissemination correct.
 
   The one exception is an update about **self**: a `:suspect`/`:dead` about us is refuted by
   bumping our own incarnation above it and re-announcing `:alive`, so we never stay suspected while
@@ -105,7 +105,7 @@ defmodule Malachi.Cluster.Membership do
     apply_update(view, {member, :dead, incarnation(view, member) || 0, attributes(view, member)})
   end
 
-  @doc "The sorted list of `:alive` members — the live broker set for placement and healing."
+  @doc "The sorted list of `:alive` members: the live broker set for placement and healing."
   @spec alive_members(t()) :: [member()]
   def alive_members(%__MODULE__{} = view) do
     for({member, %{status: :alive}} <- view.members, do: member) |> Enum.sort()

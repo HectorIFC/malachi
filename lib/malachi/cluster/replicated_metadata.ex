@@ -34,7 +34,7 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
 
   @doc """
   Submits `command` through the Raft log and, on commit, applies it to the local cache too.
-  Returns `{reply, replicated_metadata}` — `reply` is the machine reply (e.g. `{:ok, root_id}` or
+  Returns `{reply, replicated_metadata}`. `reply` is the machine reply (e.g. `{:ok, root_id}` or
   `{:error, :already_exists}`), or `{:error, reason}` on a transport failure (cache unchanged).
   """
   @spec command(t(), Metadata.command()) :: {term(), t()}

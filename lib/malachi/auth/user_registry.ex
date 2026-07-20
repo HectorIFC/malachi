@@ -1,16 +1,16 @@
 defmodule Malachi.Auth.UserRegistry do
   @moduledoc """
-  The pure state of the cluster's **user registry** — the credentials and permissions of every principal
+  The pure state of the cluster's **user registry**: the credentials and permissions of every principal
   (admins, producers, consumers, service accounts). It is the deterministic core replicated by
   `Malachi.Auth.UserMachine` over a dedicated `ra` cluster (exactly as `Malachi.Cluster.Lease` sits behind
-  `LeaseMachine`), so every node reaches the same user set from the same command log — replacing the old
+  `LeaseMachine`), so every node reaches the same user set from the same command log, replacing the old
   node-local Mnesia store, which never replicated.
 
   Users are **global, small, rarely-written metadata**: a single replicated Raft group is the right home
   (as Kafka KRaft / Redpanda keep credentials + ACLs in one controller quorum), while the data plane scales
   by sharding vnodes. Auth reads come from the local `ra` replica (fast, local); writes go through the log.
 
-  `apply/3` takes the current time from the caller — `UserMachine` passes the ra leader's `system_time` —
+  `apply/3` takes the current time from the caller: `UserMachine` passes the ra leader's `system_time`:
   and never reads a clock itself: reading a wall clock inside `apply` would be non-deterministic and break
   Raft. `created_at`/`updated_at` are therefore the leader's stamp, replicated in the log.
   """
@@ -91,7 +91,7 @@ defmodule Malachi.Auth.UserRegistry do
   end
 
   # Defensive catch-all: an unknown command must NOT crash the machine. Once replicated by Raft, a command
-  # that raised in apply would crash every replica deterministically (and on replay) — e.g. an older replica
+  # that raised in apply would crash every replica deterministically (and on replay), e.g. an older replica
   # seeing a newer command during a rolling upgrade. Keep the replica alive and surface the problem.
   def apply(%__MODULE__{} = state, _unknown_command, _now), do: {state, {:error, :unknown_command}}
 
@@ -112,7 +112,7 @@ defmodule Malachi.Auth.UserRegistry do
 
   @doc """
   Every user as a JSON-serializable map (no hashes): `%{username, permissions (as strings), created_at,
-  updated_at}` — the export shape consumed by `import_users`.
+  updated_at}`: the export shape consumed by `import_users`.
   """
   @spec export_users(t()) :: [
           %{username: username(), permissions: [String.t()], created_at: integer(), updated_at: integer()}

@@ -2,8 +2,8 @@ defmodule Malachi.Cluster.MetadataMachine do
   @moduledoc """
   A `ra` (Raft) state machine that replicates `Malachi.Metadata`.
 
-  ra's `apply/3` delegates to the pure, deterministic `Metadata.apply/2` — exactly the
-  contract the metadata machine was designed for — so the control-plane metadata becomes
+  ra's `apply/3` delegates to the pure, deterministic `Metadata.apply/2`, exactly the
+  contract the metadata machine was designed for, so the control-plane metadata becomes
   durable and Raft-replicated with **no change to the business logic**. One ra cluster
   backs one DS-RSM vnode; leadership of that cluster is the vnode's coordinator.
 

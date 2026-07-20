@@ -12,11 +12,11 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   The value threaded through calls holds only the ring and a `vnode_id => server_id` map
   (both immutable); the metadata itself lives in the ra processes, so `command/3`/`query/3`
-  do not change it — only `add_vnode/3` does (and starts the vnode's cluster as a side
+  do not change it: only `add_vnode/3` does (and starts the vnode's cluster as a side
   effect). `ra` must already be running (e.g. `:ra.start_in/1`), as with
   `Malachi.Cluster.MetadataServer`.
 
-  Each vnode's cluster can span several nodes (`add_vnode/4`), so a vnode survives losing a member —
+  Each vnode's cluster can span several nodes (`add_vnode/4`), so a vnode survives losing a member:
   HA per vnode. `split_vnode/4` grows the ring at runtime, migrating the displaced topics' metadata
   between the source and new Raft groups (the dynamically-sharded part); fencing concurrent writes to a
   migrating topic (zero-window cutover) is a later step.
@@ -42,7 +42,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   @doc """
   Adds a vnode at `token` and starts its Raft cluster (named `vnode_id`) across `nodes` (default the
-  local node). With several nodes the vnode is replicated and survives losing a member — HA per
+  local node). With several nodes the vnode is replicated and survives losing a member, HA per
   vnode. The stored server id addresses a **real member** (see `MetadataServer.start/2`), so a vnode
   placed on a subset of nodes is reachable even from a node that hosts no replica of it. Propagates
   ring placement errors and `ra` start errors.
@@ -56,8 +56,8 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   @doc """
-  Places `vnode_id` at `token` on the ring pointing at `server_id`, **without** starting its ra cluster
-  — the routing-only counterpart of `add_vnode/4` for a node that is not the bootstrap orchestrator: the
+  Places `vnode_id` at `token` on the ring pointing at `server_id`, **without** starting its ra cluster:
+  the routing-only counterpart of `add_vnode/4` for a node that is not the bootstrap orchestrator: the
   orchestrator started the cluster (across the placement nodes), and this node only routes to it.
   `server_id` must address a real member of the vnode's placement. Propagates ring placement errors.
   """
@@ -71,13 +71,13 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   @doc """
   Splits the ring by adding a vnode at `token` (a new ra cluster on `nodes`) and **migrating** every topic
-  that now routes to it out of its current vnode — vnode split over real Raft (the NorthGuard model: spawn
+  that now routes to it out of its current vnode. Vnode split over real Raft (the NorthGuard model: spawn
   a new group and break off that half of the state). Each displaced topic is **fenced** on the source first
-  (`:begin_migration`, so a concurrent write is rejected and cannot race the copy — seal-first), then
+  (`:begin_migration`, so a concurrent write is rejected and cannot race the copy, seal-first), then
   **copy-first**: `insert_topic` into the new vnode, then `extract_topic` from the source (which lifts the
   fence), so no single failure loses a topic (a crash after the insert leaves a harmless duplicate the new
   ring routes past). Returns the grown state on full success; propagates a ring/start error, or
-  `{:error, {:fence | :migrate, topic, reason}}` on failure — a partial split leaves its remaining fences up
+  `{:error, {:fence | :migrate, topic, reason}}` on failure: a partial split leaves its remaining fences up
   (writes to those topics stay blocked) for the caller/coordinator to reconcile. A topic *created* mid-split
   that routes to the new vnode is not caught here (create is not fenced); today's caller quiesces the split.
   """
@@ -91,11 +91,11 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   @doc """
-  Resumes and **completes** a split whose coordinator crashed mid-way — the complete-forward counterpart of
+  Resumes and **completes** a split whose coordinator crashed mid-way: the complete-forward counterpart of
   `abort_split/3` (the NorthGuard "carrying it out to the end"). Re-drives the same migration as
   `split_vnode/4`, but idempotently and **without rolling back** on failure: `ensure_started/2` reuses the
   new vnode's cluster if it is already up (a crash may have started it), and the migration re-drives only
-  what is left — a topic already moved off its source is skipped, and re-fencing / re-inserting are no-ops
+  what is left: a topic already moved off its source is skipped, and re-fencing / re-inserting are no-ops
   (see `Malachi.Metadata.insert_topic/2`). `state` is the pre-split topology (a pending split never advanced
   the ring). On success returns the grown state; on failure returns the error **leaving the partial state in
   place** for the next resume to finish (keep-trying, so a transient outage does not undo progress).
@@ -112,21 +112,21 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Aborts a split that a crashed coordinator left in flight, rolling it back to the pre-split state: moves
   every topic that reached the new vnode back to its owner under `state`'s (unchanged) ring and lifts any
-  migration fence left on a source — the same derived, best-effort rollback an in-call failure runs (B1).
+  migration fence left on a source: the same derived, best-effort rollback an in-call failure runs (B1).
   `state` is the pre-split topology (a pending split never advanced the ring); `new_server_id` addresses the
   new vnode's (possibly unreachable) cluster.
 
-  Returns `:ok` only when the rollback is **complete** — the new vnode is confirmed **empty** (every topic
+  Returns `:ok` only when the rollback is **complete**: the new vnode is confirmed **empty** (every topic
   moved back), so its orphan ra cluster is **deleted** (letting a later retry recreate it). Returns
   `{:error, :incomplete}` when the new vnode still holds topics or is unreachable: the cluster is **left
-  intact** (deleting it would lose those topics) for the caller to retry — the new vnode's data is safe
+  intact** (deleting it would lose those topics) for the caller to retry: the new vnode's data is safe
   there, just not yet moved back. Idempotent: safe to re-run.
   """
   @spec abort_split(t(), vnode_id(), MetadataServer.server_id()) :: :ok | {:error, :incomplete}
   def abort_split(%__MODULE__{} = state, new_vnode_id, new_server_id) do
     roll_back(state, new_server_id)
 
-    # delete the orphan new vnode only once it is confirmed empty — deleting one that still holds topics
+    # delete the orphan new vnode only once it is confirmed empty, deleting one that still holds topics
     # (a move-back that failed, or an unreachable vnode) would lose them. Query with a named stdlib capture
     # (loadable on a possibly-remote leader) and test emptiness locally.
     case MetadataServer.query(new_server_id, &Function.identity/1) do
@@ -170,13 +170,13 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @spec vnode_for(t(), Metadata.topic_name()) :: {:ok, vnode_id()} | {:error, :empty}
   def vnode_for(%__MODULE__{} = state, topic_name), do: HashRing.route(state.ring, topic_name)
 
-  @doc "The ra server id of `vnode_id` — for routing a write to that vnode's cluster."
+  @doc "The ra server id of `vnode_id`: for routing a write to that vnode's cluster."
   @spec server_for(t(), vnode_id()) :: MetadataServer.server_id()
   def server_for(%__MODULE__{} = state, vnode_id), do: Map.fetch!(state.vnodes, vnode_id)
 
   @doc """
   Reads every vnode's replicated `Metadata` into a local `Malachi.Cluster.DSRSM` cache sharing this
-  ring — the read-side mirror a broker threads (reads served locally; writes routed back through the
+  ring: the read-side mirror a broker threads (reads served locally; writes routed back through the
   vnodes' ra clusters via `server_for/2`).
 
   A vnode whose cluster is not ready yet (still electing, or the orchestrator has not bootstrapped it)
@@ -222,7 +222,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   # The migration loop shared by a fresh split (`migrate_displaced`, which rolls back on failure) and a
   # resumed one (`complete_split`, which does not). For each source vnode, migrate its topics that now route
   # to the new vnode under `new_ring`; halt on the first failure. Walks the sources in a deterministic
-  # (id-sorted) order so a split — and any partial state a failure leaves — is reproducible rather than
+  # (id-sorted) order so a split, and any partial state a failure leaves - is reproducible rather than
   # dependent on map iteration order.
   defp do_migrate(state, new_ring, new_vnode_id, new_server_id) do
     Enum.reduce_while(Enum.sort(state.vnodes), :ok, fn {_source_id, source_server}, :ok ->
@@ -233,7 +233,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end)
   end
 
-  # `do_migrate` for a **fresh** split: **all-or-nothing** — on any failure it best-effort **rolls back**
+  # `do_migrate` for a **fresh** split: **all-or-nothing**: on any failure it best-effort **rolls back**
   # (moves anything that reached the new vnode back to its old-ring owner and lifts any fence left on a
   # source), so a failed split leaves no orphaned topic and no stuck fence.
   defp migrate_displaced(state, new_ring, new_vnode_id, new_server_id) do
@@ -286,7 +286,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   end
 
   # Move a topic between vnodes, copy-first: insert its `export` into `to_server`'s log, then extract it
-  # from `from_server`'s — a failure before the extract leaves the source intact (no loss); after it, a
+  # from `from_server`'s: a failure before the extract leaves the source intact (no loss); after it, a
   # harmless duplicate. Used to migrate (source→new) and to roll a failed split back (new→source).
   defp move_topic(from_server, to_server, export, name) do
     with {:ok, _ok} <- MetadataServer.command(to_server, {:insert_topic, export}),
@@ -300,7 +300,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   # Best-effort rollback of a failed split, **derived from the current state** (no per-step tracking): move
   # every topic that reached the new vnode back to the source it owns under the (unchanged) ring, then lift
   # any migration fence left on a source. Idempotent; a failed rollback step is swallowed (left for
-  # manual/coordinator recovery) — the point is that a mid-split failure never orphans a topic or sticks a
+  # manual/coordinator recovery): the point is that a mid-split failure never orphans a topic or sticks a
   # fence in the common case.
   defp roll_back(state, new_server_id) do
     case MetadataServer.query(new_server_id, &Function.identity/1) do

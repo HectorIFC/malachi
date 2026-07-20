@@ -211,7 +211,7 @@ defmodule Malachi.BrokerTest do
     test "delivers pre-split records via the active children, exactly once (no loss)", %{store: store} do
       {broker, root_id} = broker_with_topic()
 
-      # produced before the split — these live in the parent's segments, which leave active_range_ids
+      # produced before the split: these live in the parent's segments, which leave active_range_ids
       parent_records = for index <- 0..19, do: record("v#{index}", "k#{index}")
       {broker, {:ok, _placements}} = produce(broker, store, "events", parent_records)
       {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
@@ -251,7 +251,7 @@ defmodule Malachi.BrokerTest do
       {broker, root_id} = broker_with_topic()
       {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1")])
 
-      # a forged/stale cursor pointing past the range's sources has nothing to read — pause, no crash
+      # a forged/stale cursor pointing past the range's sources has nothing to read, pause, no crash
       assert {:ok, [], {9999, 0}} = Broker.read_consume(broker, root_id, {9999, 0}, 100, read_fun(store))
     end
   end

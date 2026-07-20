@@ -7,15 +7,15 @@ defmodule Malachi.Cluster.DSRSM do
 
   ## Sharding granularity (Phase 1a)
 
-  A topic's metadata — the topic plus **all** its ranges and segments — is co-located on a
+  A topic's metadata: the topic plus **all** its ranges and segments - is co-located on a
   single vnode, routed by **topic name**. Every command and query therefore carries the
   topic name. This keeps each operation single-vnode and keeps range ids unique within the
   vnode that owns them.
 
   NorthGuard additionally shards a topic's ranges/segments by *range id* across vnodes (so a
   single hot topic spreads out). That requires cross-vnode operations and a
-  globally-unique range-id scheme, so it — and **vnode split** (rebalancing, which migrates
-  metadata between vnodes) — are deferred to a later increment. See `docs/NORTHGUARD_PORT.md`.
+  globally-unique range-id scheme, so it, and **vnode split** (rebalancing, which migrates
+  metadata between vnodes): are deferred to a later increment. See `docs/NORTHGUARD_PORT.md`.
 
   ## Caller contract: `(topic_name, range_id/segment_id)` must match
 
@@ -26,7 +26,7 @@ defmodule Malachi.Cluster.DSRSM do
   silently act on B's range. Callers (the coordinator) must pass matching pairs.
 
   > TODO: this validation gap closes with range-id sharding (Phase 1b+), where range/segment
-  > operations route by range id and the range's own vnode is authoritative — the topic
+  > operations route by range id and the range's own vnode is authoritative, the topic
   > param drops out for those ops, so a mismatch becomes impossible rather than relying on
   > the caller.
 
@@ -55,7 +55,7 @@ defmodule Malachi.Cluster.DSRSM do
   def new(opts \\ []), do: %__MODULE__{ring: HashRing.new(opts), vnodes: %{}}
 
   @doc """
-  A DS-RSM with a single vnode holding `metadata` — the trivial, unsharded shape. Seeds a one-vnode
+  A DS-RSM with a single vnode holding `metadata`: the trivial, unsharded shape. Seeds a one-vnode
   control plane (the current single-cluster runtime and tests) before real multi-vnode sharding: with
   one vnode every topic routes to it, so behavior matches a plain `Malachi.Metadata`.
   """
@@ -66,7 +66,7 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
-  A DS-RSM over `ring` whose vnodes already hold `metadata_by_vnode` (`%{vnode_id => Metadata}`) —
+  A DS-RSM over `ring` whose vnodes already hold `metadata_by_vnode` (`%{vnode_id => Metadata}`):
   used to seed a local read cache that mirrors an authoritative `Malachi.Cluster.ReplicatedDSRSM`
   sharing the same ring: reads are served from this cache, writes routed back through the vnodes' ra
   clusters. `metadata_by_vnode` must key exactly the ring's vnodes.
@@ -77,7 +77,7 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
-  Adds a vnode at `token`, migrating any displaced topics to it — the general "grow the
+  Adds a vnode at `token`, migrating any displaced topics to it: the general "grow the
   ring" entry point. Delegates to `split_vnode/3`, so it is safe whether or not topics
   already exist (migration is a no-op on an empty ring). Propagates `HashRing` placement
   errors (`:token_out_of_range`, `:token_taken`, `:already_present`).
@@ -86,12 +86,12 @@ defmodule Malachi.Cluster.DSRSM do
   def add_vnode(%__MODULE__{} = dsrsm, vnode_id, token), do: split_vnode(dsrsm, vnode_id, token)
 
   @doc """
-  Adds a new vnode at `token` and **migrates** to it every topic that now routes there —
+  Adds a new vnode at `token` and **migrates** to it every topic that now routes there:
   the "dynamically sharded" part of DS-RSM (rebalancing). Adding a vnode only steals an arc
   from one existing vnode, so only that vnode's affected topics move; their full metadata
   (topic + ranges + segments) is relocated. Range ids stay valid because they are globally
   unique (`{topic, seq}`); migration is likewise safe for segments only if segment ids are
-  globally unique (the broker-assigned contract — see `Malachi.Metadata`). Propagates
+  globally unique (the broker-assigned contract, see `Malachi.Metadata`). Propagates
   `HashRing` placement errors.
   """
   @spec split_vnode(t(), vnode_id(), HashRing.token()) :: {:ok, t()} | {:error, atom()}
@@ -111,7 +111,7 @@ defmodule Malachi.Cluster.DSRSM do
   returning `{new_dsrsm, reply}`. `reply` is whatever `Metadata.apply/2` returns, or
   `{:error, :no_vnode}` if the ring is empty.
 
-  For range/segment commands, the targeted id **must** belong to `topic_name` — see the
+  For range/segment commands, the targeted id **must** belong to `topic_name`, see the
   caller contract in the module docs (a mismatch is not rejected and may act on a
   co-located topic's metadata).
   """
@@ -121,7 +121,7 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
-  Routes `topic_name` to its vnode and updates that vnode's `Metadata` with `update_fun` — the
+  Routes `topic_name` to its vnode and updates that vnode's `Metadata` with `update_fun`, the
   general single-vnode mutation combinator. `update_fun` receives the vnode's `Metadata` and returns
   `{new_metadata, reply}` (the `Malachi.Metadata.apply/2` shape); the new metadata replaces the
   vnode's and `reply` is returned as-is. `{dsrsm, {:error, :no_vnode}}` if the ring is empty.
@@ -205,7 +205,7 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
-  The union of every vnode's `Metadata` — a single flat view for whole-cluster consumers (retention,
+  The union of every vnode's `Metadata`: a single flat view for whole-cluster consumers (retention,
   healing) that iterate all segments. Topics/ranges/segments/offsets are disjoint across vnodes (each
   topic lives on one vnode), so the union is unambiguous; with one vnode it is that vnode's metadata.
   """
@@ -228,7 +228,7 @@ defmodule Malachi.Cluster.DSRSM do
       segments: Map.merge(acc.segments, from.segments),
       committed_offsets: Map.merge(acc.committed_offsets, from.committed_offsets),
       policies: Map.merge(acc.policies, from.policies),
-      # Shards are disjoint by topic (and range), so the index keys never collide — a plain merge keeps
+      # Shards are disjoint by topic (and range), so the index keys never collide: a plain merge keeps
       # the reverse indexes exact on the merged view too.
       topic_ranges: Map.merge(acc.topic_ranges, from.topic_ranges),
       range_segments: Map.merge(acc.range_segments, from.range_segments)

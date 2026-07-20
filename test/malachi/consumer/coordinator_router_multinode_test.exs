@@ -1,6 +1,6 @@
 defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
   # Real multi-node validation of the A1/A2 coordinator routing: spins up peer BEAM nodes, forms a vnode's
-  # ra cluster across them, and checks that `CoordinatorRouter` tracks the *live* Raft leader — owns?/resolve
+  # ra cluster across them, and checks that `CoordinatorRouter` tracks the *live* Raft leader, owns?/resolve
   # point at the leader, a group member forwarded there gets a disjoint assignment, a follower rejects
   # coordination (the guard), and after the leader dies the routing reconverges on the newly-elected leader.
   # async: false and tagged so it can be excluded where multi-node networking is unavailable.
@@ -35,7 +35,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     on_exit(fn -> try_stop(peer) end)
 
     :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
-    # the coordinator's ranges_fun is &Fixtures.ranges/1 — make sure that module is loadable on the peer
+    # the coordinator's ranges_fun is &Fixtures.ranges/1: make sure that module is loadable on the peer
     _ = :erpc.call(node, :code, :ensure_loaded, [Malachi.Consumer.CoordinatorRouterMultinodeFixtures])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
     data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_router_#{name}_#{System.unique_integer([:positive])}"
@@ -77,7 +77,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     ]
   end
 
-  # Start an unlinked coordinator registered under `name` on `node` (GenServer.start, not start_link — the
+  # Start an unlinked coordinator registered under `name` on `node` (GenServer.start, not start_link, the
   # erpc worker that runs it exits, and an unlinked child survives that).
   defp start_coordinator_on(node, name) do
     {:ok, _} = :erpc.call(node, GenServer, :start, [GroupCoordinator, coordinator_opts(), [name: name]])
@@ -97,7 +97,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
 
     # Determine the leader once (nothing triggers a re-election until we kill it below), then pick a
     # `probe` follower we never kill, so `:ra.members({vnode, probe})` resolves the live leader for the
-    # whole test — including after the leader dies. Route the topology's server id through the probe.
+    # whole test: including after the leader dies. Route the topology's server id through the probe.
     {:ok, leader} = leader_via(vnode, node_a)
     followers = nodes -- [leader]
     probe = hd(followers)
@@ -122,7 +122,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     end
 
     # a coordinator on the leader; two members forwarded there (from this primary node) partition the
-    # ranges disjointly — the cross-node forwarding + single-authority invariant, end to end
+    # ranges disjointly: the cross-node forwarding + single-authority invariant, end to end
     start_coordinator_on(leader, coord_name)
 
     ref = {coord_name, leader}
@@ -151,7 +151,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
 
     assert new_leader != leader
     assert :erpc.call(new_leader, CoordinatorRouter, :owns?, ["t"]) == true
-    # resolve on the new leader now returns the bare per-vnode name (local) — members reconverge here
+    # resolve on the new leader now returns the bare per-vnode name (local), members reconverge here
     assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
   end
 end

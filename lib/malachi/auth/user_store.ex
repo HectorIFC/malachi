@@ -1,10 +1,10 @@
 defmodule Malachi.Auth.UserStore do
   @moduledoc """
-  The cluster's user store — a thin **facade** over the ra-replicated user cluster
+  The cluster's user store: a thin **facade** over the ra-replicated user cluster
   (`Malachi.Auth.UserServer`). Replaces the old node-local Mnesia store: users now replicate across the
   cluster (P2), so a user created on one node exists on every node.
 
-  Stateless — the cluster name is fixed and the local server id is `{name, node()}`. `Malachi.Application`
+  Stateless: the cluster name is fixed and the local server id is `{name, node()}`. `Malachi.Application`
   starts the ra cluster and a reconciler at boot; this module just routes CRUD to it: **writes** go through
   the log (consensus); **reads** come from the local replica (`:ra.local_query`, fast and eventually
   consistent). The public API (`insert_user`/`delete_user`/`update_password`/`get_user`/`list_users`/

@@ -4,7 +4,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   **sealed** segments to the currently live brokers, closing the loop *broker dies → membership
   marks it gone → its segments are healed*.
 
-  It is decoupled from where membership and metadata actually live, via injected seams — so it can
+  It is decoupled from where membership and metadata actually live, via injected seams, so it can
   be tested in-process and wired to the real `Malachi.Cluster.MembershipServer` and control plane
   later without change:
 

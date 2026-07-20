@@ -1,19 +1,19 @@
 defmodule Malachi.Log do
   @moduledoc """
-  An append-only log made of a sequence of segments — the building block beneath
+  An append-only log made of a sequence of segments: the building block beneath
   NorthGuard's `Range`.
 
   A log owns a directory of segment files. At most one segment is *active* (appendable);
   the rest are *sealed* (immutable). When the active segment hits a seal threshold (size
   or age), the log **rolls**: it seals the active segment and a subsequent append opens a
   new one. New brokers/segments are created cheaply, which is what gives NorthGuard its
-  "balanced by design" property — modelled here at the single-node level.
+  "balanced by design" property, modelled here at the single-node level.
 
   ## Offsets and segment naming
 
   Offsets are globally monotonic across the whole log. Each segment is named by its
   zero-padded `base_offset` (Kafka-style), so segments sort by base offset and each
-  sealed segment's end offset is simply the next segment's base offset — no manifest and
+  sealed segment's end offset is simply the next segment's base offset: no manifest and
   no scan of sealed segments is needed to route reads.
 
   ## Reads
@@ -159,7 +159,7 @@ defmodule Malachi.Log do
   def close(%__MODULE__{} = log), do: log.store.close(log.active)
 
   @doc """
-  Closes the log and removes its directory with every segment file — irreversible. The log owns its
+  Closes the log and removes its directory with every segment file, irreversible. The log owns its
   directory, so this drops all of its data (used by retention to expire a whole segment). Best-effort
   on the file removal: a leftover file without control-plane metadata is harmless.
   """

@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.VnodeCoordinatorManager do
   @moduledoc """
   Keeps this node's per-vnode coordinators in sync with the vnodes it currently leads (1C-b-ii). On a
-  **level-triggered** reconcile — right after start (`handle_continue`) and every `:interval` ms — it
+  **level-triggered** reconcile. Right after start (`handle_continue`) and every `:interval` ms - it
   compares the vnodes this node leads now (`:leading`) with the ones it already runs coordinators for,
   then **starts** coordinators for newly-led vnodes and **stops** them for vnodes it no longer leads.
   Generic and testable via seams:

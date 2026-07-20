@@ -1,6 +1,6 @@
 defmodule Malachi.TLSEnforcementTest do
   # These tests mutate global :malachi TLS/HSTS application env, so they must not run concurrently with
-  # other modules (async: false). Each test's mutations are rolled back after it runs by the setup below —
+  # other modules (async: false). Each test's mutations are rolled back after it runs by the setup below:
   # otherwise a test that sets :enable_tls = true leaks into "TLS is disabled by default" under a
   # different seed order (a flaky, order-dependent failure).
   use ExUnit.Case, async: false

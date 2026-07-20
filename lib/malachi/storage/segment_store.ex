@@ -12,8 +12,8 @@ defmodule Malachi.Storage.SegmentStore do
   ## Durability contract
 
   `append/2` only buffers; records become durable and readable after `sync/1`, which
-  must fsync before returning. `read/3` serves only committed (synced) records — never
-  buffered-but-unsynced data — matching NorthGuard's "ack only committed records".
+  must fsync before returning. `read/3` serves only committed (synced) records, never
+  buffered-but-unsynced data, matching NorthGuard's "ack only committed records".
   """
 
   alias Malachi.Log.Record

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The Malachi binary wire protocol, in Node.js — a faithful port of lib/malachi/wire.ex.
+ * The Malachi binary wire protocol, in Node.js: a faithful port of lib/malachi/wire.ex.
  *
  * Every message is a length-prefixed frame:
  *
@@ -10,7 +10,7 @@
  *   Response:  <correlation_id:u32> <error_code:u16> <payload>   // 0 = ok, 1 = error (reason string)
  *
  * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>), so a record on
- * the wire carries no offset — position travels only in the opaque cursor.
+ * the wire carries no offset: position travels only in the opaque cursor.
  */
 
 const API = {
@@ -199,7 +199,7 @@ function encodeCommitReq(topic, group, cursor) {
 }
 
 // member is an optional consumer-group member id (null = whole-group subscription); with it set the
-// server scopes the push stream to the member's ranges (opaque — the push is still records + cursor).
+// server scopes the push stream to the member's ranges (opaque: the push is still records + cursor).
 function encodeSubscribeReq(topic, group, member, window, max) {
   return Buffer.concat([putStr(topic), putStr(group), putStr(member), u32(window), u32(max)]);
 }
@@ -229,7 +229,7 @@ function encodeChangePasswordReq(username, newPassword) {
   return Buffer.concat([putStr(username), putStr(newPassword)]);
 }
 
-// list_users response: <count::u32, (putStr(username), <count::u32, putStr(perm)*>)*> — no hashes.
+// list_users response: <count::u32, (putStr(username), <count::u32, putStr(perm)*>)*>, no hashes.
 function decodeListUsersResp(payload) {
   const r = new Reader(payload);
   const count = r.u32();

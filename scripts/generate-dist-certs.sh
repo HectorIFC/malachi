@@ -1,7 +1,7 @@
 #!/bin/bash
 # Generates DEVELOPMENT certificates for Malachi inter-node TLS (Erlang distribution): a shared CA and one
 # CA-signed node certificate (usable by every node, since inet_tls_dist verifies the chain, not the
-# hostname), plus a ready-to-use ssl_dist options file. NOT for production — use your real PKI there.
+# hostname), plus a ready-to-use ssl_dist options file. NOT for production, use your real PKI there.
 set -e
 
 CERT_DIR="priv/dist_cert"

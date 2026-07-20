@@ -6,10 +6,10 @@ defmodule Malachi.Broker do
   `Malachi.Cluster.ReplicationServer`; the broker drives them through **injected effect functions**
   so its routing/lifecycle logic stays pure and testable with in-memory fakes.
 
-  `Malachi.Metadata` is the source of truth for structure — which topics and ranges exist, their
+  `Malachi.Metadata` is the source of truth for structure, which topics and ranges exist, their
   keyspace bounds and active/sealed state. Producing routes each record to the active range that
   owns its key (hashed with `Malachi.Keyspace`). Within a range the data is divided into
-  **segments** — NorthGuard's unit of replication: each active range has one open segment, whose
+  **segments**. NorthGuard's unit of replication: each active range has one open segment, whose
   ordered `replica_set` is chosen by `Malachi.Cluster.Placement`. The broker registers segments,
   tallies bytes, and seals/rolls the active one once it reaches `:segment_max_bytes`. Offsets are
   contiguous *per range* (a segment is a window `[start_offset, ...)` of its range).
@@ -17,10 +17,10 @@ defmodule Malachi.Broker do
   Effects are injected, never performed here:
 
     * `replicate_fun.(primary, segment_id, replica_set, base_offset, records)` →
-      `{:ok, last_offset} | {:error, reason}` — appends/replicates a batch (e.g.
+      `{:ok, last_offset} | {:error, reason}`, appends/replicates a batch (e.g.
       `&Malachi.Cluster.ReplicationServer.replicate/5`).
     * `read_fun.(ref, segment_id, offset, max_records)` →
-      `{:ok, records} | :eof | {:error, reason}` — reads one segment (e.g.
+      `{:ok, records} | :eof | {:error, reason}`, reads one segment (e.g.
       `&Malachi.Cluster.ReplicationServer.read/4`).
 
   The broker is a functional value threaded through calls (no GenServer); `Malachi.BrokerServer`
@@ -34,7 +34,7 @@ defmodule Malachi.Broker do
   alias Malachi.Metadata
 
   # 64 MiB: the active segment seals once it reaches this many encoded bytes (soft threshold,
-  # checked at produce-batch boundaries — see `commit_batch/4`).
+  # checked at produce-batch boundaries, see `commit_batch/4`).
   @default_segment_max_bytes 64 * 1024 * 1024
 
   @typedoc "The broker's view of the open (unsealed) segment of a range."
@@ -61,7 +61,7 @@ defmodule Malachi.Broker do
 
   @typedoc """
   Routes a metadata command to the vnode owning `topic_name` and applies it there, returning
-  `{dsrsm, reply}` — the `Malachi.Cluster.DSRSM.command/3` shape. The default `&DSRSM.command/3`
+  `{dsrsm, reply}`: the `Malachi.Cluster.DSRSM.command/3` shape. The default `&DSRSM.command/3`
   applies in memory; a Raft-backed variant (see `Malachi.BrokerServer`) injects an authoritative
   apply through `Malachi.Cluster.ReplicatedMetadata` into the routed vnode.
   """
@@ -259,7 +259,7 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  The current metadata as one flat view — the union of the sharded vnodes (see
+  The current metadata as one flat view: the union of the sharded vnodes (see
   `Malachi.Cluster.DSRSM.merged_metadata/1`), for whole-cluster consumers like retention and healing.
   """
   @spec metadata(t()) :: Metadata.t()
@@ -267,7 +267,7 @@ defmodule Malachi.Broker do
 
   @doc """
   Per-topic count of segments whose replica set spans fewer than `min_domains` distinct `spread_by`
-  domains — the failure-domain diversity violations (`Malachi.Cluster.Placement.domain_violations/4`),
+  domains: the failure-domain diversity violations (`Malachi.Cluster.Placement.domain_violations/4`),
   keyed by topic. Empty when `spread_by` or `min_domains` is unset (nothing to check). This surfaces the
   HA degradation a `:soft` policy allows (under-diversified placements are kept, not rejected), for
   metrics/alerting.
@@ -330,7 +330,7 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  Replaces the broker's local metadata cache — e.g. re-seeded from the authoritative ra clusters by a
+  Replaces the broker's local metadata cache, e.g. re-seeded from the authoritative ra clusters by a
   periodic refresh, which fills in vnodes not yet ready at boot and picks up writes made through other
   nodes. The ra log is the source of truth, so a refresh only ever moves the cache forward.
   """
@@ -378,7 +378,7 @@ defmodule Malachi.Broker do
 
   @doc """
   Convenience that pages `stream_history/5` to the end and returns every record as one ordered
-  list. Loads the whole history into memory — for bounded/administrative use.
+  list. Loads the whole history into memory, for bounded/administrative use.
   """
   @spec read_history(t(), Metadata.range_id(), read_fun()) ::
           {:ok, [Record.t()]} | {:error, term()}
@@ -389,7 +389,7 @@ defmodule Malachi.Broker do
   @doc """
   Reads up to `max_records` of `range_id`'s **cross-epoch** stream for live consumption: first the
   records its sealed ancestors hold for this range's keyspace slice (oldest first, in
-  happens-before order), then the range's own records — and it **tails** the active range. Unlike
+  happens-before order), then the range's own records, and it **tails** the active range. Unlike
   `stream_history/5`, the self source never terminates: when the range is caught up it returns an
   empty page whose cursor stays on the self source, so records produced later are delivered on a
   later call. This is what lets a consumer drain a range's full history across splits/merges (the
@@ -457,7 +457,7 @@ defmodule Malachi.Broker do
 
   defp replicate_group(broker, range_id, records, placements, replicate_fun) do
     case ensure_segment(broker, range_id) do
-      # Opening the segment (its register_segment command) failed — abort this group, keeping the
+      # Opening the segment (its register_segment command) failed, abort this group, keeping the
       # pre-open broker (no phantom segment); a retry re-places.
       {:error, reason} ->
         {:halt, {:error, reason, broker}}
@@ -585,7 +585,7 @@ defmodule Malachi.Broker do
     broker.command_fun.(broker.dsrsm, command_topic(command), command)
   end
 
-  # The topic whose shard owns each control-plane command the broker emits — so the DSRSM dispatches
+  # The topic whose shard owns each control-plane command the broker emits, so the DSRSM dispatches
   # it to the right vnode. Every such command targets exactly one topic, named directly or derivable
   # from its range id (`{topic, seq}`) or segment id (`{range_id, seq}`).
   defp command_topic({:create_topic, name, _bits}), do: name
@@ -628,7 +628,7 @@ defmodule Malachi.Broker do
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 
   # The earliest offset still stored for a range: the smallest segment start_offset (0 if none).
-  # Retention deletes the oldest segments — a contiguous prefix — so a consumer positioned below this
+  # Retention deletes the oldest segments: a contiguous prefix - so a consumer positioned below this
   # has had its data expired; read callers clamp up to it to skip transparently to what still exists.
   defp earliest_offset(broker, range_id) do
     broker.dsrsm

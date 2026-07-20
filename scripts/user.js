@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Malachi User admin CLI — manage users over the binary protocol (requires the admin permission).
+ * Malachi User admin CLI: manage users over the binary protocol (requires the admin permission).
  *
  * Users live in the replicated user store, so a change made through any node propagates cluster-wide.
  *

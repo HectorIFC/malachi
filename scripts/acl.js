@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Malachi ACL admin CLI — manage per-topic ACLs over the binary protocol (requires the admin permission).
+ * Malachi ACL admin CLI: manage per-topic ACLs over the binary protocol (requires the admin permission).
  *
  * ACLs live in the replicated ACL store, so a change made through any node propagates cluster-wide. An
  * operation is `produce` or `consume`; a pattern is an exact topic ("orders.eu") or a `*`-suffixed prefix

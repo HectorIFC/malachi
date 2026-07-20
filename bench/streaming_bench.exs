@@ -3,13 +3,13 @@
 # Standalone script (does NOT touch lib/). Models the three delivery mechanisms on top of a single
 # serialized GenServer "broker" so the numbers reflect the ARCHITECTURAL difference, not a TCP path:
 #
-#   push        — broker send/2s every record to every subscriber on produce (1A, no flow control)
-#   push+window — broker only sends up to `window` records ahead of each subscriber's acked position;
+#   push: broker send/2s every record to every subscriber on produce (1A, no flow control)
+#   push+window: broker only sends up to `window` records ahead of each subscriber's acked position;
 #                 the subscriber returns credit as it processes (NorthGuard-style sessionized windowing)
-#   pull        — subscribers repeatedly ask the broker for the next batch (1B, Kafka-style fetch)
+#   pull: subscribers repeatedly ask the broker for the next batch (1B, Kafka-style fetch)
 #
 # Metrics per run: wall time & throughput, total reductions (CPU), and the PEAK subscriber mailbox
-# (message_queue_len) — the memory/backpressure signal that separates windowing from raw push.
+# (message_queue_len): the memory/backpressure signal that separates windowing from raw push.
 #
 # Run: mix run bench/streaming_bench.exs
 
@@ -60,7 +60,7 @@ defmodule StreamBench do
       {:noreply, push_windowed(s)}
     end
 
-    # for each windowed sub, send records in (sent_hi, acked+window] — but we track only acked and a
+    # for each windowed sub, send records in (sent_hi, acked+window], but we track only acked and a
     # per-sub "sent" high-water in the value tuple {window, sent}
     defp push_windowed(s) do
       subs =

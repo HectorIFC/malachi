@@ -179,7 +179,7 @@ defmodule Malachi.MemoryMonitor do
   defp do_system_gc(state) do
     before = :erlang.memory(:total)
 
-    # GC all processes — use :erlang.garbage_collect/1 which is safe for dead pids
+    # GC all processes. Use :erlang.garbage_collect/1 which is safe for dead pids
     Process.list()
     |> Enum.each(fn pid ->
       try do

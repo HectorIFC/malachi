@@ -1,15 +1,15 @@
 defmodule Malachi.Telemetry do
   @moduledoc """
   The telemetry events Malachi emits on its hot paths. Attach a handler with `:telemetry.attach/4` (or
-  `attach_many/4`) to feed metrics, logs, or traces — Malachi ships a default handler that folds a few of
+  `attach_many/4`) to feed metrics, logs, or traces: Malachi ships a default handler that folds a few of
   these into the ETS `Malachi.Metrics` (which the Prometheus endpoint exposes).
 
-  Events — `event name` — `measurements` / `metadata`:
+  Events, `event name` - `measurements` / `metadata`:
 
-    * `[:malachi, :produce]` — `%{count, bytes}` / `%{topic}` — records appended to a topic.
-    * `[:malachi, :consume]` — `%{count}` / `%{topic}` — records read from a topic.
-    * `[:malachi, :auth]` — `%{count: 1}` / `%{result: :ok | :error}` — an authentication attempt.
-    * `[:malachi, :replication, :commit]` — `%{count}` / `%{result: :ok | :no_quorum}` — a quorum
+    * `[:malachi, :produce]`: `%{count, bytes}` / `%{topic}` - records appended to a topic.
+    * `[:malachi, :consume]`: `%{count}` / `%{topic}` - records read from a topic.
+    * `[:malachi, :auth]`. `%{count: 1}` / `%{result: :ok | :error}` - an authentication attempt.
+    * `[:malachi, :replication, :commit]`. `%{count}` / `%{result: :ok | :no_quorum}` - a quorum
       replication of a batch (`count` = records in the batch; `result` is whether a quorum stored it).
 
   Emitting is a no-op fast path when nothing is attached, so these are safe on the hot path.

@@ -4,7 +4,7 @@
 #
 # Each topic is fixed-size (3 ranges, 2 segments), so a topic's own set (k) is constant while the vnode's
 # total (n) grows with the topic count. The point: the index lookup stays flat (O(k)) while the scan
-# grows linearly (O(n)) — the tax every produce/consume paid before, and why it mattered as a broker
+# grows linearly (O(n)): the tax every produce/consume paid before, and why it mattered as a broker
 # accumulates topics and (via retention) sealed segments.
 #
 # Run: mix run bench/metadata_index_bench.exs
@@ -21,7 +21,7 @@ defmodule MetadataIndexBench do
 
   # A metadata with `n` fixed-size topics: each is created, its root split (→ sealed root + 2 active
   # children = 3 ranges), and one segment registered on each child (2 segments). Segment ids are
-  # {topic, tag} — globally unique, no dynamic atoms.
+  # {topic, tag}, globally unique, no dynamic atoms.
   defp build(n) do
     Enum.reduce(1..n, Metadata.new(), fn i, state ->
       topic = "t#{i}"
@@ -44,7 +44,7 @@ defmodule MetadataIndexBench do
   end
 
   def run do
-    IO.puts("secondary index vs scan — per-call latency (µs), averaged over #{@iters} calls\n")
+    IO.puts("secondary index vs scan: per-call latency (µs), averaged over #{@iters} calls\n")
 
     IO.puts("ranges_of_topic (one topic; k = 3 ranges)")
     :io.format(~c"~-9s ~9s ~11s ~12s ~12s ~9s~n", [~c"", ~c"topics", ~c"total_rng", ~c"index_us", ~c"scan_us", ~c"speedup"])

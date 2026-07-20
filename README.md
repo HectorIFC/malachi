@@ -4,9 +4,9 @@
 
 # Malachi
 
-An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture — a CP
+An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture, a CP
 (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and
-**opaque cursors** — never partitions or offsets — so the broker can split, merge, and restripe its
+**opaque cursors**: never partitions or offsets - so the broker can split, merge, and restripe its
 storage underneath without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
 self-healing, and rack-aware placement.
 
@@ -48,9 +48,9 @@ Watch Malachi in action:
 
 A client deals in three things and nothing else:
 
-- **topic** — a named, ordered, replicated log.
-- **key** — on produce, routes each record to a range of the topic's keyspace (ordering is per key).
-- **opaque cursor** — on consume, a position token the client echoes back. It is deliberately opaque:
+- **topic**: a named, ordered, replicated log.
+- **key**: on produce, routes each record to a range of the topic's keyspace (ordering is per key).
+- **opaque cursor**: on consume, a position token the client echoes back. It is deliberately opaque:
   internally it encodes per-range positions, but the client never sees partitions or offsets, so the
   broker can split/merge/restripe ranges underneath without breaking the client. This is the core
   difference from Kafka, which leaks partitions and offsets to the client.
@@ -78,7 +78,7 @@ broker = Malachi.LogBroker
 
 LogApi.create_topic(broker, "events")
 
-# produce by key — no partitions, no offsets exposed
+# produce by key: no partitions, no offsets exposed
 LogApi.produce(broker, "events", [
   %{"key" => "user-1", "value" => "hello"},
   %{"key" => "user-2", "value" => "world"}
@@ -88,7 +88,7 @@ LogApi.produce(broker, "events", [
 {:ok, records, cursor} = LogApi.fetch(broker, "events", :start, 100)
 Enum.map(records, & &1.value)        #=> ["hello", "world"]
 
-# resume by passing the cursor back — nothing new yet
+# resume by passing the cursor back, nothing new yet
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
@@ -104,12 +104,12 @@ discover and connect peers over Erlang distribution automatically (run each node
 member set from `MALACHIMQ_LOG_NODES`, and membership changes ride on the rebalancing coordinator. Absent
 the variable, nothing changes (single-node, no distribution required).
 
-- `gossip` — UDP multicast, near-zero config (dev/LAN). Tune with `MALACHIMQ_CLUSTER_GOSSIP_PORT`,
+- `gossip`: UDP multicast, near-zero config (dev/LAN). Tune with `MALACHIMQ_CLUSTER_GOSSIP_PORT`,
   `MALACHIMQ_CLUSTER_GOSSIP_SECRET`, `MALACHIMQ_CLUSTER_GOSSIP_MULTICAST_ADDR`.
-- `kubernetes` — pod discovery via the Kubernetes API. Requires `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR`
+- `kubernetes`: pod discovery via the Kubernetes API. Requires `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR`
   and `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME`; optional `MALACHIMQ_CLUSTER_KUBERNETES_NAMESPACE` and
   `MALACHIMQ_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
-- `epmd` — a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
+- `epmd`: a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
 
 For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/README.md) ships a worked example: a 3-node
 CP cluster as a StatefulSet with stable Raft identities, zone-aware placement (`min_domains`), and the
@@ -203,14 +203,14 @@ readinessProbe: { httpGet: { path: /ready,  port: 4041 } }
 ### Prometheus metrics
 
 `GET /metrics` serves the **Prometheus text exposition** (v0.0.4) when the scraper asks for it
-(`Accept: text/plain`), and the JSON dashboard payload otherwise — same path, content-negotiated. Series
+(`Accept: text/plain`), and the JSON dashboard payload otherwise, same path, content-negotiated. Series
 are namespaced `malachi_`: BEAM health (`malachi_process_count`, `malachi_memory_bytes`,
 `malachi_uptime_seconds`, …), security counters (`malachi_rate_limit_blocked_total`,
 `malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), operation totals fed by the telemetry
 events (`malachi_records_produced_total`, `malachi_bytes_produced_total`, `malachi_records_consumed_total`,
 `malachi_auth_attempts_total{result}`, `malachi_replication_commits_total{result}`), and per-topic gauges
 (`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`,
-`malachi_domain_violations` — segments spanning fewer than `min_domains` failure domains, …).
+`malachi_domain_violations`: segments spanning fewer than `min_domains` failure domains, …).
 
 `/metrics` requires authentication (any user), so a scrape config passes a token:
 
@@ -224,7 +224,7 @@ scrape_configs:
 
 ### Telemetry events
 
-Malachi emits `:telemetry` events on its hot paths — attach a handler to feed metrics, logs, or traces
+Malachi emits `:telemetry` events on its hot paths: attach a handler to feed metrics, logs, or traces
 (see `Malachi.Telemetry`):
 
 | Event | Measurements | Metadata |
@@ -243,9 +243,9 @@ end, nil)
 ### Tracing (OpenTelemetry)
 
 Client operations are traced with OpenTelemetry: `malachi.produce` and `malachi.consume` spans carry
-`malachi.topic`, `malachi.records`, and `malachi.bytes` attributes. A produce is a **distributed trace** —
+`malachi.topic`, `malachi.records`, and `malachi.bytes` attributes. A produce is a **distributed trace**:
 its context propagates across processes and nodes into child spans `malachi.broker.produce` and
-`malachi.replication.commit` (the quorum commit on the primary). Tracing is **off by default** — the
+`malachi.replication.commit` (the quorum commit on the primary). Tracing is **off by default**, the
 sampler drops every span, so there is no per-operation cost until you opt in. To trace, turn the sampler
 on, add `{:opentelemetry_exporter, "~> 1.8"}`, and point it at your collector:
 
@@ -277,7 +277,7 @@ In **dev/test** these convenience users are seeded:
 
 ### First boot in production
 
-No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN_PASS`, Malachi **generates a random admin password and logs it once** — save it from the logs (it cannot be recovered). Provide your own with `MALACHIMQ_ADMIN_PASS` (and `MALACHIMQ_PRODUCER_PASS` / `MALACHIMQ_CONSUMER_PASS` / `MALACHIMQ_APP_PASS` for the other service accounts), or set `MALACHIMQ_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
+No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN_PASS`, Malachi **generates a random admin password and logs it once**: save it from the logs (it cannot be recovered). Provide your own with `MALACHIMQ_ADMIN_PASS` (and `MALACHIMQ_PRODUCER_PASS` / `MALACHIMQ_CONSUMER_PASS` / `MALACHIMQ_APP_PASS` for the other service accounts), or set `MALACHIMQ_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
 
 ### Environment Variables
 
@@ -318,7 +318,7 @@ No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN
 | `MALACHIMQ_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
 | `MALACHIMQ_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
 | `MALACHIMQ_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
-| `MALACHIMQ_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`) — rack/DC-aware placement |
+| `MALACHIMQ_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
 | `MALACHIMQ_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
 | `MALACHIMQ_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
 | `MALACHIMQ_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
@@ -409,7 +409,7 @@ For production, use certificates from:
 ### Inter-node TLS (Erlang distribution)
 
 The sections above secure the **client** connection (port 4040). In a multi-node cluster the nodes also
-talk to each other over **Erlang distribution** (the `ra` control plane and segment replication) — by
+talk to each other over **Erlang distribution** (the `ra` control plane and segment replication), by
 default that traffic is plaintext, guarded only by the distribution cookie. Set `MALACHIMQ_DIST_TLS=true`
 to run distribution over **mutual TLS** instead: each node presents a CA-signed certificate and verifies
 its peers, so the inter-node traffic is encrypted *and* authenticated.
@@ -426,7 +426,7 @@ MALACHIMQ_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
 
 `MALACHIMQ_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
 client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates the flag into
-`-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster — the handshake rejects it. The
+`-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster: the handshake rejects it. The
 [Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
 
 ## 🔐 Dashboard Security (v0.5.0+)
@@ -721,12 +721,12 @@ operation:
 | 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit (a **member** ack also heartbeats) |
 | 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
-Records on the wire carry **no offset** — position travels only in the opaque cursor, and permissions
+Records on the wire carry **no offset**: position travels only in the opaque cursor, and permissions
 (`:produce`/`:consume`) are enforced per operation against the authenticated session.
 
 A `fetch` with a **consumer-group member id** is server-scoped: the coordinator assigns each member of a
 group a share of the topic's ranges, so members consume in **parallel** and disjointly. The client still
-only sees records + an opaque cursor — ranges never cross the wire — and the member stays alive by
+only sees records + an opaque cursor: ranges never cross the wire - and the member stays alive by
 fetching (or explicitly `leave_group`s on shutdown).
 
 Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the
@@ -736,17 +736,17 @@ A `subscribe` with a **member id** scopes the push stream to that member's range
 still opaque); the member ack doubles as a coordinator heartbeat, so an idle member sends a periodic
 empty ack to stay alive (and `leave_group`s on shutdown for a fast rebalance). A member's coordination
 is owned by one node (the leader of the topic's vnode); during a leadership failover a member request may
-briefly get `not_owner`, which is transient — the reference client backs off and retries (the server
+briefly get `not_owner`, which is transient: the reference client backs off and retries (the server
 re-resolves the new leader).
 
 ### Reference client (Node.js)
 
 `scripts/` ships a dependency-free Node.js reference client that speaks the protocol above:
 
-- `scripts/lib/wire.js` — the binary codec, a direct port of `Malachi.Wire` (framing, envelope, records).
-- `scripts/lib/client.js` — a connection that multiplexes requests by `correlation_id` and routes push
+- `scripts/lib/wire.js`: the binary codec, a direct port of `Malachi.Wire` (framing, envelope, records).
+- `scripts/lib/client.js`: a connection that multiplexes requests by `correlation_id` and routes push
   frames to a subscription callback.
-- `scripts/producer.js` / `consumer.js` / `subscriber.js` — CLIs for append, pull, and server-push.
+- `scripts/producer.js` / `consumer.js` / `subscriber.js`, CLIs for append, pull, and server-push.
 
 ```bash
 # append 100 records to a topic (creating it first)
@@ -780,7 +780,7 @@ with `MALACHI_HOST`/`MALACHI_PORT`. The same flow is exercised in-VM by `Malachi
 `scripts/loadtest.js` is a load generator built on the same client, in two modes. **Closed-loop**
 (default) runs N connections in a tight `op → await` loop to find the ceiling and the latency at
 saturation. **Open-loop** (`--rate <rps>`) fires requests at a fixed arrival rate and measures latency
-from each request's *scheduled* time — correcting coordinated omission, so a stall shows up as latency on
+from each request's *scheduled* time: correcting coordinated omission, so a stall shows up as latency on
 the requests that queued behind it. Both report throughput (ops/s, records/s, MB/s) and latency
 percentiles (p50/p90/p95/p99).
 
@@ -928,10 +928,10 @@ Malachi.Auth.change_password("myuser", "newpass")
 
 Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
 
-- **Control plane** — topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
-- **Data plane** — a `Log` of `segments` per range, replicated by quorum across nodes; placement is HRW/rendezvous and rack-aware.
-- **Membership** — SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
-- **Client** — a compact binary protocol over TCP; topics, keys, and opaque cursors (never partitions or offsets).
+- **Control plane**: topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
+- **Data plane**: a `Log` of `segments` per range, replicated by quorum across nodes; placement is HRW/rendezvous and rack-aware.
+- **Membership**: SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
+- **Client**: a compact binary protocol over TCP; topics, keys, and opaque cursors (never partitions or offsets).
 
 See [docs/NORTHGUARD_PORT.md](docs/NORTHGUARD_PORT.md) for the full design and the porting log.
 
@@ -1001,10 +1001,10 @@ Examples:
 
 ## 📋 Input validation
 
-Malachi validates untrusted input at the connection boundary — a malformed frame is answered with an
+Malachi validates untrusted input at the connection boundary: a malformed frame is answered with an
 error, never a crash.
 
-**Topic names** — an allowlist that is path-traversal safe (a topic name becomes an on-disk directory
+**Topic names**: an allowlist that is path-traversal safe (a topic name becomes an on-disk directory
 name): allowed characters `A-Z a-z 0-9 . _ -`, non-empty, and never `.` or `..`. Enforced
 deterministically in the control plane (`Malachi.Metadata`), so it holds identically on every replica.
 
@@ -1013,15 +1013,15 @@ valid:    orders   user.events   app-logs_v2   api.v1.payments
 invalid:  "my topic" (space)   api/v1/events (slash)   user:session (colon)   ""   .   ..
 ```
 
-**Frame size** — the binary protocol rejects a frame whose declared length exceeds `:max_frame_size`
+**Frame size**. The binary protocol rejects a frame whose declared length exceeds `:max_frame_size`
 (application config, default 16 MiB) **at the 4-byte length prefix**, before the body is buffered, so a
 hostile length prefix cannot exhaust memory.
 
-**Records** — a record's value is arbitrary bytes (non-UTF-8 survives the round trip); headers are
+**Records**: a record's value is arbitrary bytes (non-UTF-8 survives the round trip); headers are
 key/value byte-string pairs. Both are bounded by the frame cap, and records carry no client-visible offset.
 
-The underlying security infra — authentication (Argon2), rate limiting, connection limits, account
-lockout, audit logging — is covered above and in [SECURITY.md](SECURITY.md).
+The underlying security infra: authentication (Argon2), rate limiting, connection limits, account
+lockout, audit logging, is covered above and in [SECURITY.md](SECURITY.md).
 
 ## 🔖 Versioning
 

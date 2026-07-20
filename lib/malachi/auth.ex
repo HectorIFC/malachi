@@ -55,7 +55,7 @@ defmodule Malachi.Auth do
   end
 
   @doc """
-  Verifies a username/password against the user store **without** creating a session — the session-less core
+  Verifies a username/password against the user store **without** creating a session: the session-less core
   of authentication, used by `Malachi.Auth.PasswordProvider` (P4). Returns `{:ok, permissions}` or
   `{:error, :invalid_password | :user_not_found}`.
 
@@ -204,8 +204,8 @@ defmodule Malachi.Auth do
   end
 
   @doc """
-  Whether the subject has `permission` (or is `:admin`). Accepts either a `username` — looked up in
-  the user table, where an unknown user has no permissions — or a permission list directly.
+  Whether the subject has `permission` (or is `:admin`). Accepts either a `username`, looked up in
+  the user table, where an unknown user has no permissions, or a permission list directly.
   """
   def has_permission?(username, permission) when is_binary(username) do
     case UserStore.get_user(username) do
@@ -261,7 +261,7 @@ defmodule Malachi.Auth do
       write_concurrency: true
     ])
 
-    # Seed default users from config into the replicated user store (idempotent — skips existing). The
+    # Seed default users from config into the replicated user store (idempotent, skips existing). The
     # ra user cluster is started by Malachi.Application before this child, so writes have a leader.
     seed_default_users()
 
@@ -325,7 +325,7 @@ defmodule Malachi.Auth do
 
   defp seed_default_users do
     # Users to seed come entirely from config (config/dev.exs, config/test.exs, or env via
-    # config/runtime.exs). No hard-coded fallback — an empty list seeds nothing.
+    # config/runtime.exs). No hard-coded fallback: an empty list seeds nothing.
     default_users = Application.get_env(:malachi, :default_users, [])
 
     # A shared deadline across all users: at cold boot a multi-node cluster may not have elected a leader
@@ -355,7 +355,7 @@ defmodule Malachi.Auth do
   end
 
   @doc """
-  Generates a random password for `username` (an admin) and seeds it — but only when generation is enabled
+  Generates a random password for `username` (an admin) and seeds it, but only when generation is enabled
   (`:generate_admin` config, set when no admin password is configured) and no such user exists yet. The
   password is **logged once**; the replicated store dedups, so on a multi-node boot exactly one node's seed
   succeeds and announces its password (the others get `:user_exists` and discard theirs). A no-op when
@@ -369,7 +369,7 @@ defmodule Malachi.Auth do
 
       case seed_insert(username, hash_password(password), [:admin], deadline) do
         :ok -> announce_generated_admin(username, password)
-        # already seeded (an explicit config or another node) or unreachable — no password to announce
+        # already seeded (an explicit config or another node) or unreachable: no password to announce
         _other -> :ok
       end
     else

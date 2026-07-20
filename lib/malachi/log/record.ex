@@ -1,7 +1,7 @@
 defmodule Malachi.Log.Record do
   @moduledoc """
   The most granular unit of data in Malachi's log storage, mirroring NorthGuard's
-  record: a `key`, a `value`, and user-defined `headers` — all opaque bytes — plus a
+  record: a `key`, a `value`, and user-defined `headers`, all opaque bytes - plus a
   logical `offset` (assigned on append) and a `timestamp`.
 
   ## On-disk frame format
@@ -78,7 +78,7 @@ defmodule Malachi.Log.Record do
   end
 
   @doc """
-  The exact on-disk frame size, in bytes, this record will occupy — matching `encode/1`
+  The exact on-disk frame size, in bytes, this record will occupy, matching `encode/1`
   byte-for-byte. The `offset` need not be assigned, since it is always a fixed 8 bytes. Used by
   the broker to drive size-based segment rollover with the same accounting the log writes.
   """

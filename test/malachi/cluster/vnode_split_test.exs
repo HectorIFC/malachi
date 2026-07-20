@@ -64,7 +64,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     # the leader splits end to end
     assert :ok = VnodeSplit.split(membership, dest, token, [node()], fn -> true end)
 
-    # the topology bumped twice — begin_split (v1, intent recorded) then advance (v2, split complete) — and
+    # the topology bumped twice: begin_split (v1, intent recorded) then advance (v2, split complete) - and
     # the completed topology has the new vnode with the intent cleared, published back to the membership
     topo = MembershipServer.topology(membership)
     assert topo.version == 2
@@ -98,7 +98,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     topo = MembershipServer.topology(membership)
     assert topo.version == 2
     assert topo.pending == nil
-    # the ring is untouched — the split never took effect, only the source exists
+    # the ring is untouched: the split never took effect, only the source exists
     assert HashRing.vnode_ids(topo.ring) == [source]
   end
 
@@ -114,7 +114,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     token = :erlang.phash2("orders", Integer.pow(2, 32))
 
     # simulate a crash mid-split: the migration ran (so "orders" physically lives on dest and dest's cluster
-    # is up), but the coordinator died before advancing the topology — so the membership still carries the
+    # is up), but the coordinator died before advancing the topology, so the membership still carries the
     # *pending intent* over the *old* ring (begin_split, v1), exactly the interrupted state B2-2 leaves.
     {:ok, _grown} = ReplicatedDSRSM.split_vnode(replicated, dest, token, [node()])
     base = RingTopology.new(replicated.ring, %{source => [node()]})

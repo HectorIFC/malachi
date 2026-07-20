@@ -5,7 +5,7 @@ defmodule Malachi.Storage.ElixirStore do
   File-per-segment, append-only, with batched writes and an fsync-before-ack durability
   contract. `append/2` buffers; the buffer is flushed and fsynced on an explicit `sync/1`
   or automatically once it reaches `:flush_bytes` (default 10MB) or `:flush_count` records
-  (default 20k) — NorthGuard's size and count triggers. Maintains an in-memory sparse index
+  (default 20k): NorthGuard's size and count triggers. Maintains an in-memory sparse index
   (`{offset, file_position}` every `:index_interval` bytes) for seeking, kept in an `:array`
   sorted by offset so a lookup is an O(log n) binary search; the index is persisted to a
   sidecar on `seal/1` and rebuilt by scanning on `recover/3`.

@@ -1,21 +1,21 @@
 defmodule Malachi.Cluster.Retention do
   @moduledoc """
-  Pure retention policy for **sealed** segments — the decision layer, no storage or timers.
+  Pure retention policy for **sealed** segments: the decision layer, no storage or timers.
 
   Given the control-plane `Malachi.Metadata`, the current time, and a policy, it returns the sealed
   segment ids to expire. Two independent rules, unioned:
 
-    * **age** — a sealed segment older than `:max_age_ms` (by its `sealed_at`) expires;
-    * **size** — per range, if the sealed segments total more than `:max_bytes`, the oldest expire
+    * **age**. A sealed segment older than `:max_age_ms` (by its `sealed_at`) expires;
+    * **size**. Per range, if the sealed segments total more than `:max_bytes`, the oldest expire
       until the range is back under the limit.
 
   Size is scoped **per range** (the natural unit; a range's segments have contiguous offsets), age
-  is per segment. The **active** segment is never returned — it is still being written. A `nil`
+  is per segment. The **active** segment is never returned: it is still being written. A `nil`
   bound disables that rule. `Malachi.Cluster.RetentionCoordinator` executes the returned ids.
 
   The bound applied to each range is its **topic's policy retention merged over the global policy**
   (the policy overrides only the keys it sets; `Malachi.Metadata.topic_policy/2`), or the global
-  policy passed in when the topic has no policy — so retention is per-topic (C3c-2b).
+  policy passed in when the topic has no policy, so retention is per-topic (C3c-2b).
   """
 
   alias Malachi.Metadata

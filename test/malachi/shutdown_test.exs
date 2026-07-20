@@ -12,7 +12,7 @@ defmodule Malachi.ShutdownTest do
 
   defp events(log), do: Agent.get(log, &Enum.reverse(&1))
 
-  test "runs quiesce, then drains for drain_ms, then closes — in that order" do
+  test "runs quiesce, then drains for drain_ms, then closes, in that order" do
     {log, rec} = recorder()
 
     assert :ok =

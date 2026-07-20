@@ -1,5 +1,5 @@
 defmodule Malachi.LogStreamingTest do
-  # End-to-end over the real TCP server (started by the app): the B2 streaming path — subscribe opens a
+  # End-to-end over the real TCP server (started by the app): the B2 streaming path, subscribe opens a
   # server-push stream (pushes tagged with the subscribe's correlation id), a credit window bounds
   # in-flight records, and a stream_ack returns credit while durably committing the group. Exercises the
   # binary wiring (Wire subscribe/stream_ack + the acceptor's active-mode stream loop) against the live
@@ -92,7 +92,7 @@ defmodule Malachi.LogStreamingTest do
     with_session("app", "app123", fn sub ->
       corr = 55
       # subscribe as member "m1" of group "g": the sole member owns every range, so the server pushes
-      # the whole backlog — but only as records + an opaque cursor (no range id ever crosses the wire)
+      # the whole backlog, but only as records + an opaque cursor (no range id ever crosses the wire)
       TCPHelper.subscribe(sub, topic, "g", "m1", 10, 100, corr)
 
       {records, cursor} = TCPHelper.recv_push(sub, corr)
@@ -140,7 +140,7 @@ defmodule Malachi.LogStreamingTest do
     end)
   end
 
-  test "subscribe requires :consume — a producer-only session gets an error, not a stream" do
+  test "subscribe requires :consume: a producer-only session gets an error, not a stream" do
     topic = "stream_perm_#{System.unique_integer([:positive])}"
 
     on_producer("producer", "producer123", fn prod ->

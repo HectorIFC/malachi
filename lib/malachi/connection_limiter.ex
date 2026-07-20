@@ -104,7 +104,7 @@ defmodule Malachi.ConnectionLimiter do
   end
 
   @doc """
-  Clears all tracked connections — the per-IP and global counters and the process monitors. This does not
+  Clears all tracked connections: the per-IP and global counters and the process monitors. This does not
   change limiting behavior; it only resets the tracked state, so it is primarily for tests that need a
   known-clean baseline (the tracker is process-global, shared with the live server and every other test).
   """

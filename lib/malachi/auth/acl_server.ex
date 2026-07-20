@@ -5,11 +5,11 @@ defmodule Malachi.Auth.AclServer do
   `Malachi.Auth.UserServer`; `ra` must already be running. This module owns only the ACL cluster, not ra's
   lifecycle.
 
-  **Writes** (`grant`/`revoke`/`revoke_user`) go through the log — replicated by consensus, so every node
+  **Writes** (`grant`/`revoke`/`revoke_user`) go through the log, replicated by consensus, so every node
   enforces the same ACLs. **Reads** (`authorized?`/`list_grants`/`list_all`) use `:ra.local_query` against
   the **local** replica: fast (no consensus round-trip) and adequate for the produce/consume hot path, which
-  authorizes every request. They are eventually consistent — a just-granted ACL propagates within
-  replication lag — acceptable for authorization.
+  authorizes every request. They are eventually consistent: a just-granted ACL propagates within
+  replication lag, acceptable for authorization.
   """
 
   alias Malachi.Auth.AclMachine
@@ -45,7 +45,7 @@ defmodule Malachi.Auth.AclServer do
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
   def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case) — avoids re-issuing start_cluster on a
+    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
     # formed cluster, which ra logs as an error. Only a node that has not yet joined tries to form/join.
     case :ra.members({cluster_name, node()}) do
       {:ok, _members, _leader} ->
@@ -58,7 +58,7 @@ defmodule Malachi.Auth.AclServer do
   end
 
   # Best-effort: starts the local ACL server so it (re)joins the cluster. Any error (already started, or the
-  # cluster not yet formed) is ignored — reconcile is idempotent and the caller retries.
+  # cluster not yet formed) is ignored: reconcile is idempotent and the caller retries.
   defp ensure_local_server(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, AclMachine, %{}}

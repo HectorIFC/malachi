@@ -1,5 +1,5 @@
 defmodule Malachi.Auth.UserServerTest do
-  # async: false — ra is global/stateful (one data dir, on-disk Raft logs).
+  # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
   alias Malachi.Auth.UserServer

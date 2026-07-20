@@ -2,11 +2,11 @@
 'use strict';
 
 /**
- * Malachi Consumer — pulls records from a topic over the binary log protocol.
+ * Malachi Consumer: pulls records from a topic over the binary log protocol.
  *
  * The client drives its own position with an opaque cursor: each fetch returns a batch plus the next
  * cursor to pass back. With --group, position is committed server-side so a restart resumes where it left
- * off (the old queue ack/nack is gone — commit is by cursor, per consumer group). This replaces the old
+ * off (the old queue ack/nack is gone: commit is by cursor, per consumer group). This replaces the old
  * queue "subscribe": here the client polls; for server-push use subscriber.js.
  *
  * Usage:
@@ -53,7 +53,7 @@ async function run(topic, { group, member, max, follow }) {
       try {
         await client.leaveGroup(topic, group, member);
       } catch (_e) {
-        // best-effort — the coordinator evicts on session timeout anyway
+        // best-effort: the coordinator evicts on session timeout anyway
       }
     }
   };
@@ -111,7 +111,7 @@ async function run(topic, { group, member, max, follow }) {
 
 function help() {
   console.log(`
-${colors.cyan('Malachi Consumer')} — pull records from a topic
+${colors.cyan('Malachi Consumer')}, pull records from a topic
 
 ${colors.yellow('Usage')}
   node consumer.js [topic] [options]

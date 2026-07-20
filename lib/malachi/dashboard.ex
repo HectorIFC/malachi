@@ -481,7 +481,7 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  # PUT /users/:username/password — rotate a user's password.
+  # PUT /users/:username/password, rotate a user's password.
   defp handle_user_password(socket, rest, headers) do
     case String.split(rest, "/") do
       [username, "password"] when username != "" -> handle_change_password(socket, username, headers)
@@ -613,7 +613,7 @@ defmodule Malachi.Dashboard do
     do: serve_ready(socket)
 
   # /metrics serves the Prometheus text exposition to a scraper (Accept: text/plain/openmetrics) and the
-  # JSON dashboard payload otherwise — same auth (any authenticated user), one conventional path.
+  # JSON dashboard payload otherwise: same auth (any authenticated user), one conventional path.
   defp handle_route(socket, %{method: :GET, path: "/metrics"}, headers, _client_ip, _session) do
     if prometheus_scrape?(headers), do: serve_prometheus(socket), else: serve_metrics(socket)
   end
@@ -646,7 +646,7 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, _session),
     do: handle_user_password(socket, rest, headers)
 
-  # Per-topic ACL management (P5): /users/:username/acls — GET lists, POST grants, DELETE revokes. A DELETE
+  # Per-topic ACL management (P5): /users/:username/acls: GET lists, POST grants, DELETE revokes. A DELETE
   # on a bare /users/:username (no /acls suffix) falls back to deleting the user.
   defp handle_route(socket, %{method: :GET, path: "/users/" <> rest}, _headers, _client_ip, _session),
     do: route_acl(socket, rest, &handle_list_acls(socket, &1), fn -> serve_404(socket) end)
@@ -680,7 +680,7 @@ defmodule Malachi.Dashboard do
 
   # The light payload served by both /metrics (one-shot) and /stream (per-tick): the BEAM/security system
   # snapshot plus a per-topic log-stack summary (counts/bytes/groups). The per-range/segment drill-down is
-  # NOT here — it is fetched on demand per topic via /topic, so the stream stays small as segments grow.
+  # NOT here: it is fetched on demand per topic via /topic, so the stream stays small as segments grow.
   defp dashboard_metrics do
     %{system: Metrics.get_system_metrics(), topics: topics_overview()}
   end
@@ -724,7 +724,7 @@ defmodule Malachi.Dashboard do
   end
 
   # On-demand drill-down for one topic (its ranges and segments), read from `?name=`. 404 for an unknown
-  # or missing topic. Keeps the per-second stream light — segment detail is fetched only on expand.
+  # or missing topic. Keeps the per-second stream light: segment detail is fetched only on expand.
   defp serve_topic_detail(socket, query) do
     name = query |> URI.decode_query() |> Map.get("name")
     detail = name && with_metadata(nil, &Metadata.topic_detail(&1, name))
@@ -760,7 +760,7 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
-  # Liveness: the HTTP server answered, so the node is up. Always 200 — unauthenticated (probes).
+  # Liveness: the HTTP server answered, so the node is up. Always 200, unauthenticated (probes).
   defp serve_health(socket), do: serve_status(socket, "/health", 200, "ok")
 
   # Readiness: 200 once the log broker is running (ready to serve produce/consume), else 503, so a load
@@ -1068,7 +1068,7 @@ defmodule Malachi.Dashboard do
         }
 
         // Drill-down state, keyed by topic name, survives the per-second summary re-render. The heavy
-        // per-range/segment detail is NOT in the stream — it is fetched once, on expand, into topicDetails.
+        // per-range/segment detail is NOT in the stream: it is fetched once, on expand, into topicDetails.
         const expandedTopics = new Set();
         const topicDetails = {};
         let lastTopics = [];
@@ -1105,7 +1105,7 @@ defmodule Malachi.Dashboard do
           return segments.map(s => `
             <div class="seg-row">
               <span>off ${s.start_offset}</span>
-              <span>len ${s.length == null ? '—' : s.length}</span>
+              <span>len ${s.length == null ? '-' : s.length}</span>
               <span>${formatBytes(s.byte_size)}</span>
               <span class="badge badge-${escapeHtml(s.state)}">${escapeHtml(s.state)}</span>
             </div>
@@ -1158,7 +1158,7 @@ defmodule Malachi.Dashboard do
           el.innerHTML = lastTopics.map(renderTopicCard).join('');
         }
 
-        // Auth is handled via HttpOnly cookies — sent automatically by the browser.
+        // Auth is handled via HttpOnly cookies, sent automatically by the browser.
         const source = new EventSource('/stream');
         source.onmessage = (event) => {
           const data = JSON.parse(event.data);

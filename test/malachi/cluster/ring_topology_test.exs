@@ -45,7 +45,7 @@ defmodule Malachi.Cluster.RingTopologyTest do
 
       assert t1.version == 1
       assert t1.pending == %{new_vnode: :v1, token: 100, nodes: [:a, :b]}
-      # the ring still routes by the pre-split placement — only v0 exists until the split completes
+      # the ring still routes by the pre-split placement: only v0 exists until the split completes
       assert t1.ring == t0.ring
       assert t1.placements == t0.placements
     end
