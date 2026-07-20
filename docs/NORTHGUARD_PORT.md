@@ -956,54 +956,61 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       its own unit tests (`input_fuzzing`/`attack_simulation`/`security_performance_regression`, through
       the pure `SecurityHelper`). **Suite: 969 tests, 0 failures, 0 skipped; credo and dialyzer clean. B1
       is complete.**
-    - **B2: streaming push+windowing (sessionized streaming NorthGuard).** O gap da tabela ("windowing
-      por stream"). Decisões (alinhadas ao NorthGuard, revistas por dúvida do usuário): flow control por
-      **ack explícito de crédito** (o que o benchmark validou; sem ele → OOM) e posição por **grupo
-      durável** (o *consumer-group management* do NorthGuard, não cursor efêmero, reusa o `commit`
-      existente). O ack faz **dupla função: devolve crédito da janela E commita a posição do grupo**
-      (at-least-once).
-      - ✅ **B2-a. Subscribers no `BrokerServer` (núcleo).** Estado `subscribers: %{topic => [sub]}`
-        (`sub = %{pid, ref, topic, group, positions, window, in_flight, max}`). `subscribe/5` registra
-        (+`Process.monitor`), carrega a posição commitada do grupo (`committed_offsets`) e faz um push
-        inicial; o `produce` chama `wake_subscribers/3` (irmão do `wake_waiters/3`) que empurra o que
-        **couber na janela** (`min(max, window - in_flight)` via `consume_ranges`, enviando
-        `{:log_records, topic, records, next_positions}`); `stream_ack/5` **commita** a posição
-        (`commit_offset`, durável) e **devolve `count` crédito** liberando mais pushes; `:DOWN`/
-        `unsubscribe/2` removem. Puro do lado do socket. O subscriber é um pid. Testado (in-process):
-        backlog no subscribe + push no produce; a janela limita in-flight até o ack; o ack commita
-        durável; nova subscrição do grupo retoma da posição commitada; subscriber morto é removido via
-        `:DOWN`. Dialyzer/credo limpos; broker+log e2e verdes.
-      - ✅ **B2-b: fiação binária do streaming.** `Wire` ganha `api_key` `subscribe` (5) e `stream_ack`
-        (6) + codecs (`encode/decode_subscribe_req` = topic/group/window/max; `encode/decode_stream_ack_req`
-        = topic/group/cursor/count); o **push reusa `encode_fetch_resp`** (records + cursor opaco). Decisões
-        (defaults técnicos naturais): **um stream por conexão** (o `subscribe` toma a conexão), **push =
-        response com o `correlation_id` do subscribe** (o cliente associa aquele corr_id ao stream, à la
-        gRPC streaming), **ack fire-and-forget** (sem response: o "resultado" são mais pushes). O
-        `TCPProtocol.process_frame` devolve `{:stream, corr}` no `subscribe` (após gate `:consume` +
-        registro via `LogApi.subscribe`); o `tcp_acceptor` então troca a conexão para **active mode** e
-        entra no `stream_loop` full-duplex: um `receive` trata os `{:log_records, ...}` do broker
-        (encaminhados como frames de push, `LogApi.encode_cursor` positions→cursor, agora público) **e** os
-        frames de ack do cliente (`process_stream_frame/3` → `LogApi.stream_ack`, decode cursor→positions).
-        Sem frame de unsubscribe: a conexão fechada mata o processo → `:DOWN` no `BrokerServer` remove o
-        subscriber (o cleanup do B2-a). Window/batch são limitados server-side (`stream_window`/`fetch_max`).
-        E2e via TCP (`log_streaming_test`): backlog no subscribe + push num produce de outra conexão; a
-        janela limita in-flight até o ack devolver crédito; `subscribe` sem `:consume` recebe erro (não vira
-        stream). Dialyzer/credo limpos; 385 testes verdes.
-    - ✅ **B3b: deletar o modelo de fila legado (sub-fatiado; ordem forçada pelas deps de compilação:
-      callers antes de callees).** O modelo (queues/channels) está **morto no caminho vivo**, nada fora
-      dos próprios módulos + periféricos (metrics/dashboard/backpressure/benchmark/application) chama
-      `Queue`/`Channel`/`Consumer`/etc. Decisão do dashboard: **aparar para sistema-só** (1A), não remover
-      (preserva o servidor HTTP + auth + painel de sistema/TLS, model-agnostic; painel NorthGuard de
-      topics/streams fica para depois).
-      - ✅ **B3b-i: aparar o dashboard.** `dashboard.ex` deixa de renderizar/buscar filas/canais:
-        `serve_metrics`/`stream_metrics` emitem só `%{system: get_system_metrics()}` (sem enriquecimento
-        via `ConnectionRegistry`); removidos os cards HTML de Queues/Channels, o JS de fila/canal
+    - **B2: push streaming with windowing (NorthGuard's sessionized streaming).** The gap in the table
+      ("per-stream windowing"). Decisions (aligned with NorthGuard, revisited after a question from the
+      user): flow control through an **explicit credit ack** (what the benchmark validated; without it,
+      OOM) and position by **durable group** (NorthGuard's *consumer-group management*, not an ephemeral
+      cursor, reusing the existing `commit`). The ack does **double duty: it returns window credit AND
+      commits the group's position** (at-least-once).
+      - ✅ **B2-a. Subscribers in `BrokerServer` (the core).** State `subscribers: %{topic => [sub]}`
+        (`sub = %{pid, ref, topic, group, positions, window, in_flight, max}`). `subscribe/5` registers
+        (plus a `Process.monitor`), loads the group's committed position (`committed_offsets`) and does an
+        initial push; `produce` calls `wake_subscribers/3` (the sibling of `wake_waiters/3`), which pushes
+        whatever **fits in the window** (`min(max, window - in_flight)` through `consume_ranges`, sending
+        `{:log_records, topic, records, next_positions}`); `stream_ack/5` **commits** the position
+        (`commit_offset`, durable) and **returns `count` credit**, unblocking further pushes; `:DOWN` and
+        `unsubscribe/2` remove it. Free of any socket concerns: a subscriber is just a pid. Tested
+        (in-process): the backlog on subscribe plus a push on produce; the window bounding in-flight until
+        the ack; the ack committing durably; a new subscription for the group resuming from the committed
+        position; a dead subscriber removed through `:DOWN`. Dialyzer and credo clean; broker and log e2e
+        green.
+      - ✅ **B2-b: the binary wiring for streaming.** `Wire` gains the `subscribe` (5) and `stream_ack`
+        (6) `api_key`s plus codecs (`encode/decode_subscribe_req` for topic/group/window/max;
+        `encode/decode_stream_ack_req` for topic/group/cursor/count); the **push reuses
+        `encode_fetch_resp`** (records plus the opaque cursor). Decisions (natural technical defaults):
+        **one stream per connection** (a `subscribe` takes over the connection), **a push is a response
+        carrying the subscribe's `correlation_id`** (the client associates that corr_id with the stream,
+        gRPC-streaming style), and a **fire-and-forget ack** (no response: the "result" is more pushes).
+        `TCPProtocol.process_frame` returns `{:stream, corr}` on a `subscribe` (after the `:consume` gate
+        plus registration through `LogApi.subscribe`); `tcp_acceptor` then switches the connection to
+        **active mode** and enters the full-duplex `stream_loop`: one `receive` handles the broker's
+        `{:log_records, ...}` (forwarded as push frames, with the now-public `LogApi.encode_cursor`
+        turning positions into a cursor) **and** the client's ack frames (`process_stream_frame/3` →
+        `LogApi.stream_ack`, decoding the cursor into positions). There is no unsubscribe frame: closing
+        the connection kills the process, so the `:DOWN` in `BrokerServer` removes the subscriber (B2-a's
+        cleanup). Window and batch are bounded server-side (`stream_window`/`fetch_max`).
+        E2e over TCP (`log_streaming_test`): the backlog on subscribe plus a push from a produce on
+        another connection; the window bounding in-flight until the ack returns credit; a `subscribe`
+        without `:consume` getting an error (and not becoming a stream). Dialyzer and credo clean; 385
+        tests green.
+    - ✅ **B3b: deleting the legacy queue model (sub-sliced; the order forced by compilation
+      dependencies: callers before callees).** The model (queues and channels) is **dead on the live
+      path**: nothing outside its own modules plus the peripherals
+      (metrics/dashboard/backpressure/benchmark/application) calls `Queue`/`Channel`/`Consumer` and the
+      rest. The dashboard decision: **trim it to system-only** (1A) rather than remove it (preserving the
+      HTTP server, auth and the system/TLS panel, all model-agnostic; a NorthGuard panel for topics and
+      streams comes later).
+      - ✅ **B3b-i: trimming the dashboard.** `dashboard.ex` stops rendering and fetching queues and
+        channels: `serve_metrics`/`stream_metrics` emit only `%{system: get_system_metrics()}` (with no
+        enrichment through `ConnectionRegistry`); removed the Queues and Channels HTML cards, the queue
+        and channel JS
         (`renderQueues`/`renderChannels`/`renderConnectionList`/`changeQueuePage`/`escapeHtml`/`formatTime`),
-        o CSS morto (queue-card/channel-card/pressure/utilization/connection/pagination) e o alias órfão
-        `ConnectionRegistry`. As rotas (`/`, `/metrics`, `/stream`, `/rate_limits`, auth) ficam intactas.
-        Desacopla o dashboard dos getters de fila do `Metrics` (pré-requisito de B3b-iii). Testes de
-        dashboard (status/rota) verdes (30); credo/dialyzer limpos. `security_xss_test` ficou stale
-        (referencia o `escapeHtml`/nomes de fila removidos; ainda passa, é tautológico), limpeza à parte.
+        the dead CSS (queue-card/channel-card/pressure/utilization/connection/pagination) and the orphan
+        `ConnectionRegistry` alias. The routes (`/`, `/metrics`, `/stream`, `/rate_limits`, auth) stay
+        intact. This decouples the dashboard from `Metrics`'s queue getters (a prerequisite for B3b-iii).
+        Dashboard tests (status and routing) green (30); credo and dialyzer clean. `security_xss_test`
+        went stale (it references the removed `escapeHtml` and queue names; it still passes, but
+        tautologically), cleaned up separately.
       - ✅ **B3b-ii: deletar o núcleo do modelo de fila.** Removidos os 6 módulos-núcleo
         (`queue`/`channel`/`consumer`/`ack_manager`/`partition_manager`/`queue_config`) + `benchmark.ex`
         (superado por `bench/*.exs`) + `backpressure.ex`, e as 7 entradas de supervisão do `application.ex`
