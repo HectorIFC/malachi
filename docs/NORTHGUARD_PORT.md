@@ -2121,13 +2121,15 @@ site em `hectorifc.github.io/malachi`, com referência de API e guias.
 - ⬜ **DOC-2b/2c: os guias que faltam.** Produzir e consumir; streaming com backpressure; autenticação
   (senha, mTLS, OIDC); ACLs por-tópico; clustering, sharding e re-sharding; operação (dashboard,
   métricas, TLS).
-- ✅ **Removida a `docs/index.html`.** Com a fonte do Pages virando "GitHub Actions" ela deixaria de ser
-  servida de qualquer forma, e continuava no repositório afirmando as três coisas falsas acima. Saíram
-  junto os dois assets que só ela referenciava (`style.css`, `favicon.ico`); a `logo.jpeg` **ficou**,
-  porque o `README.md` e o `mix.exs` (logo do ExDoc) a usam. O dashboard não entra na conta: serve a
-  própria cópia em `priv/static/logo.jpeg`. O vídeo de demo não se perdeu:
-  segue no `README.md`, que é extra do site. O único conteúdo que some é a tabela "How It Compares"
-  (contra RabbitMQ e Redis Pub/Sub), cujo enquadramento de fila era parte do erro.
+- ✅ **Removida a landing page `docs/index.html` e os três órfãos dela.** Com a fonte do Pages virando
+  "GitHub Actions" ela deixaria de ser servida de qualquer forma, e continuava no repositório afirmando
+  as três coisas falsas acima. Saíram
+  junto os dois assets que só ela referenciava (`style.css`, `favicon.ico`) e o `.nojekyll`, que existia
+  só para o modo "Pages a partir de `docs/`": no caminho via Actions o artifact é servido direto e o
+  Jekyll nunca roda. A `logo.jpeg` **ficou**, porque o `README.md` e o `mix.exs` (logo do ExDoc) a usam.
+  O dashboard não entra na conta: serve a própria cópia em `priv/static/logo.jpeg`. O vídeo de demo não
+  se perdeu: segue no `README.md`, que é extra do site. O único conteúdo que some é a tabela "How It
+  Compares" (contra RabbitMQ e Redis Pub/Sub), cujo enquadramento de fila era parte do erro.
 
 > **Ação de operador, não commit:** trocar a fonte do Pages pra "GitHub Actions" em Settings → Pages. E o
 > `workflow_dispatch` só aparece na UI quando o arquivo está na branch default, então a ordem que
