@@ -150,129 +150,135 @@ NorthGuard says storage is pluggable ("fps-store" is only the primary implementa
 > left of it is an **operator action**, switching the Pages source to "GitHub Actions", which no commit
 > can perform.
 
-### Fase 0: Persistência e modelo de log (Elixir puro)
-- ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
-  (file-per-segment, batching, fsync-antes-do-ack, índice esparso, sealing, crash recovery,
-  `open_read` barato p/ segments selados via `.idx`).
-- ✅ Tipos `Malachi.Log.Record` (framing + CRC32) e `Malachi.Log.Segment` (offsets lógicos).
-- ✅ `Malachi.Log`, log multi-segment: rolling/sealing automático (size/age), leitura
-  contínua atravessando segments, recovery do diretório inteiro (só escaneia o último segment).
-- ✅ Flush por **tamanho** (`:flush_bytes`, default 10MB, gatilho de tamanho do NorthGuard):
-  `append` faz flush+fsync automático ao atingir o limite.
-- ✅ `Malachi.Range`. Abstração de log sobre keyspace `[0, 2^bits)`: chaves por hash
-  (`:erlang.phash2`), ranges como blocos buddy-allocator, **split/merge lógicos** (não movem
-  dados), buddy único, linhagem (`parents`) para **happens-before**.
-- ✅ `Malachi.Topic`. Coleção nomeada de ranges que **cobrem todo o keyspace**: roteamento de
-  records por chave (`route`/`append`), orquestração de split/merge mantendo a cobertura,
-  sealing, ranges selados retidos para leitura. Metadados do topic são **em memória** por ora
-  (persistência durável vem com o DS-RSM da Fase 1).
-- ✅ Índice esparso em `:array` (busca binária O(log n), insert O(log n)).
-- ✅ **Recovery em chunks** (`scan_segment`): nunca carrega o segment inteiro na memória.
-- ✅ **Flush por contagem** (`:flush_count`, default 20k) no `ElixirStore` + **flush por tempo**
-  (~10ms) e **acesso concorrente serializado** no `Malachi.TopicServer` (GenServer que envolve o
-  Topic, com timer de flush e flush no shutdown).
-- ✅ **Leitura cross-epoch** (`Topic.read_history/2`): histórico de uma chave através de um split
-  (epoch do pai → epoch do filho), via linhagem + happens-before.
-- ✅ Testes: property-based (`stream_data`) + unit, append/read/seal/crash-recovery/roll/
-  auto-flush (size+count) + split/merge/buddy/happens-before + cobertura/roteamento/cross-epoch +
-  flush por tempo e concorrência no TopicServer. **66 testes + 2 propriedades.**
+### Phase 0: persistence and the log model (pure Elixir)
+- ✅ The `Malachi.Storage.SegmentStore` behaviour plus the `Malachi.Storage.ElixirStore`
+  implementation (file-per-segment, batching, fsync-before-ack, sparse index, sealing, crash
+  recovery, a cheap `open_read` for sealed segments through the `.idx`).
+- ✅ The `Malachi.Log.Record` (framing + CRC32) and `Malachi.Log.Segment` (logical offsets) types.
+- ✅ `Malachi.Log`, the multi-segment log: automatic rolling and sealing (size/age), continuous
+  reads crossing segments, recovery of the whole directory (scanning only the last segment).
+- ✅ Flush by **size** (`:flush_bytes`, default 10MB, NorthGuard's size trigger): `append`
+  flushes and fsyncs automatically on reaching the limit.
+- ✅ `Malachi.Range`. A log abstraction over the `[0, 2^bits)` keyspace: keys by hash
+  (`:erlang.phash2`), ranges as buddy-allocator blocks, **logical split and merge** (they do not
+  move data), a single buddy, and lineage (`parents`) for **happens-before**.
+- ✅ `Malachi.Topic`. A named collection of ranges that **cover the whole keyspace**: routing
+  records by key (`route`/`append`), orchestrating split and merge while preserving coverage,
+  sealing, and retaining sealed ranges for reads. Topic metadata is **in memory** for now
+  (durable persistence arrives with phase 1's DS-RSM).
+- ✅ A sparse index in an `:array` (binary search O(log n), insert O(log n)).
+- ✅ **Chunked recovery** (`scan_segment`): it never loads a whole segment into memory.
+- ✅ **Flush by count** (`:flush_count`, default 20k) in `ElixirStore`, plus **flush by time**
+  (~10ms) and **serialized concurrent access** in `Malachi.TopicServer` (a GenServer wrapping the
+  Topic, with a flush timer and a flush on shutdown).
+- ✅ **Cross-epoch reads** (`Topic.read_history/2`): the history of one key across a split
+  (parent epoch → child epoch), through lineage plus happens-before.
+- ✅ Tests: property-based (`stream_data`) plus unit, covering append/read/seal/crash-recovery/roll
+  and auto-flush (size and count), split/merge/buddy/happens-before, coverage/routing/cross-epoch,
+  and flush-by-time plus concurrency in TopicServer. **66 tests + 2 properties.**
 
-> **Fase 0 concluída.** Único item adiado de propósito: **persistência durável dos metadados do
-> topic** (quais ranges existem): entra no **DS-RSM da Fase 1**, fiel ao NorthGuard, onde essa
-> metadata vive no coordinator/vnode (Raft).
+> **Phase 0 complete.** The only item deferred on purpose: **durable persistence of topic
+> metadata** (which ranges exist). It goes into **phase 1's DS-RSM**, faithful to NorthGuard, where
+> that metadata lives in the coordinator/vnode (Raft).
 
-### Fase 1, Distribuição
+### Phase 1, distribution
 
-Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
-`ElixirStore`→Rust NIF). A máquina de estado do metadado é desenhada com o contrato
-`apply/2` de um Raft, então o `ra` pluga sem retrabalho.
+Confirmed strategy: **pure logic first, `ra` afterwards** (the same pattern as
+`ElixirStore`→Rust NIF). The metadata state machine is designed against a Raft's `apply/2`
+contract, so `ra` plugs in without rework.
 
-**Fase 1a, DS-RSM (lógica pura, sem deps):**
-- ✅ `Malachi.Cluster.HashRing`. Consistent hashing: vnodes em tokens no anel `[0, 2^bits)`,
-  `route` por ceiling com wraparound, `boundaries` (arco do vnode), add/remove. Movimentação
-  mínima ao adicionar/remover vnode (testado).
-- ✅ `Malachi.Keyspace`, math de keyspace compartilhada (`size_for_bits!`, `position_of`,
-  `within?`, `splittable?`, `split_point`, `buddies?`); `Range` e `HashRing` refatorados para
-  usá-la (mata a duplicação de hash + validação `1..32`).
-- ✅ `Malachi.Metadata`: máquina de estado do vnode/coordinator (`apply/2` **determinístico**,
-  contrato de Raft): topics, ranges (split/merge buddy via `Keyspace`, linhagem) e segments
-  (replica set, estado active/sealed). Ids de range vêm de um contador no estado (sem
-  `unique_integer`/timestamp dentro do `apply` → seguro p/ replicação). **Resolve a persistência
-  de metadados do topic adiada da Fase 0.** Testado inclusive com replay do log (determinismo) e
-  com catch-all defensivo (comando desconhecido retorna erro, não derruba a réplica).
-  - ✅ Índices secundários `%{topic => range_ids}` e `%{range_id => segment_ids}`, hoje
-    `ranges_of_topic`/`segments_of_range` varrem **todos** os ranges/segments do vnode (O(n)), e estão no
-    hot path (todo produce roteia por `active_ranges_of_topic`; todo consume lê `segments_of_range`), então
-    o custo cresce com o total de metadado acumulado (retenção guarda selados). Fatiado:
-    - ✅ **V-idx-a: manter + validar o índice.** `Metadata` ganha `topic_ranges`/`range_segments`
-      (MapSets, entrada existe sse tem ≥1 membro), mantidos **dentro do `apply/2` determinístico** (não é
-      cache lateral. Replicado igual em todo nó `ra`) em cada mutação de membership: `create_topic`,
-      `split_range`, `merge_ranges`, `register_segment` (+), `delete_segment`, `delete_topic` (−), e a
-      migração `extract_topic`/`insert_topic`; seal/set_replicas/commit/policies não mexem. `DSRSM.merged_metadata`
-      também une o índice (shards disjuntos por topic → `Map.merge` exato). **Nenhum leitor usa ainda**, os
-      scans seguem intactos. Property test: o índice == um índice reconstruído por scan após qualquer
-      sequência de comandos (pega faltante/extra/stale/vazio); a property de determinismo já cobre o índice
-      (compara o state inteiro). 685 testes, 0 falhas; credo/dialyzer limpos.
-    - ✅ **V-idx-b: trocar os leitores para o índice.** `ranges_of_topic`/`segments_of_range` viram lookup
-      `Map.get(index) |> Enum.map(&Map.fetch!(...))` = **O(1)+O(k)** (o `fetch!` é seguro pelo invariante do
-      V-idx-a, e serve de canário se algum dia divergir). Também index-based os scans internos por-topic:
-      `seal_topic` (sela só os ranges do topic) e `delete_topic` (dropa só os ranges/segments do topic):
-      removidos os helpers de scan `seal_ranges_of_topic`/`range_ids_of_topic`(scan)/`drop_segments_in`. O
-      caminho `DSRSM` usa o índice de graça (delega aos leitores do `Metadata` via `query`; o merge do
-      índice no `merged_metadata` veio no V-idx-a). Pré-condição verificada: nenhum `%Metadata{}` é
-      construído com dados sem índice (todos vêm de `apply`/merge/migração). Os leitores antigos já eram
-      não-ordenados, então nenhum caller dependia da ordem, sem regressão. Validado pela suíte inteira
-      (broker/DSRSM/produce/consume exercitam os leitores nos caminhos vivos) + as properties. 686 testes,
-      0 falhas; credo/dialyzer limpos.
-    - ✅ **V-idx-c: medir o ganho.** `bench/metadata_index_bench.exs` compara índice vs scan (reimplementado
-      inline) no mesmo Metadata, com topics de tamanho fixo (3 ranges, 2 segments cada) e o total crescendo.
-      Resultado: o índice é **plano** (~0,2 µs, O(k)) enquanto o scan cresce **linear** (O(n)), de ~7,5 µs
-      (300 ranges) a **~7,3 ms** (150k ranges) por chamada de `ranges_of_topic`, e a ~9,9 ms para
-      `segments_of_range` (100k segments). Speedup de ~12× (pequeno) a **~33.000×** (ranges) / **~67.000×**
-      (segments). Como isso era um imposto **por produce/consume**, a 50k topics o scan sozinho custava
-      milissegundos por mensagem; o índice o zera. **Índice secundário (V-idx-a/b/c) completo.**
-- ✅ `Malachi.Cluster.DSRSM`. Junta tudo: HashRing + um `Metadata` por vnode; `command/3` e
-  queries roteados por **nome do topic** ao vnode dono (sharding de topics entre vnodes, testado).
-  Determinístico (replay). Decisão Fase 1a: metadado de um topic **co-localizado** num vnode
-  (route por nome): desvio anotado do range-id sharding do NorthGuard.
-- ✅ **Split de vnode** (o "D". Dinâmico - do DS-RSM): `DSRSM.split_vnode/3` adiciona um vnode
-  e **migra** os topics deslocados (topic + ranges + segments) para ele. Viabilizado por range id
-  `{topic, seq}` (globalmente único → sem colisão na migração); helpers `Metadata.extract_topic/2`
-  e `insert_topic/2`. Testado: migração sem perda + ranges/segments acompanham o topic.
-  - ⏸️ **Desvio deliberado (não planejado): sharding de range/segment por range id (cross-vnode).** O
-    NorthGuard sharda o *metadado* por range id; o malachi co-localiza o metadado de um topic num vnode
-    (route por nome). **Decisão de não fazer** (avaliado): (1) os **dados já são shardados cross-node**:
-    cada segment tem réplicas colocadas por HRW em nós distintos, então um topic movimentado já espalha
-    dados por ranges→segments→nós; só a *granularidade de gestão do metadado* difere. (2) O sharding **por
-    topic já espalha a carga de metadado** pelo cluster; o range-sharding só escalaria a taxa de *mutação
-    estrutural* (splits/segments/s) de **um único** topic além de um grupo Raft, barra altíssima (mutações
-    de metadado não são por-record). (3) O custo é reintroduzir **transações cross-Raft** para operações de
-    topic (seal/delete tocam ranges em N vnodes), alocação de range id distribuída, `create`/`split`
-    cross-vnode, e reads **scatter-gather** (desfazendo o índice O(1) do V-idx), exatamente a complexidade
-    que a co-localização evita. Pior custo/benefício do roadmap; **reavaliar só se surgir um gargalo
-    concreto de metadado de um único topic**.
+**Phase 1a, DS-RSM (pure logic, no dependencies):**
+- ✅ `Malachi.Cluster.HashRing`. Consistent hashing: vnodes at tokens on the `[0, 2^bits)` ring,
+  `route` by ceiling with wraparound, `boundaries` (a vnode's arc), add/remove. Minimal movement
+  when adding or removing a vnode (tested).
+- ✅ `Malachi.Keyspace`, the shared keyspace math (`size_for_bits!`, `position_of`, `within?`,
+  `splittable?`, `split_point`, `buddies?`); `Range` and `HashRing` were refactored to use it
+  (killing the duplicated hashing plus the `1..32` validation).
+- ✅ `Malachi.Metadata`: the vnode/coordinator state machine (a **deterministic** `apply/2`, the
+  Raft contract): topics, ranges (buddy split/merge through `Keyspace`, lineage) and segments
+  (replica set, active/sealed state). Range ids come from a counter in the state (no
+  `unique_integer` or timestamp inside `apply`, so it is safe to replicate). **It resolves the
+  topic-metadata persistence deferred from phase 0.** Tested including log replay (determinism)
+  and a defensive catch-all (an unknown command returns an error instead of taking the replica
+  down).
+  - ✅ Secondary indexes `%{topic => range_ids}` and `%{range_id => segment_ids}`. Until then
+    `ranges_of_topic`/`segments_of_range` scanned **every** range and segment in the vnode (O(n)), and
+    they sit on the hot path (every produce routes through `active_ranges_of_topic`; every consume reads
+    `segments_of_range`), so the cost grew with the total accumulated metadata (retention keeps sealed
+    ones). Sliced up:
+    - ✅ **V-idx-a: maintain and validate the index.** `Metadata` gains `topic_ranges`/`range_segments`
+      (MapSets, where an entry exists iff it has at least one member), maintained **inside the
+      deterministic `apply/2`** (not a side cache: it is replicated identically on every `ra` node) on
+      every membership mutation: `create_topic`, `split_range`, `merge_ranges`, `register_segment` (+),
+      `delete_segment`, `delete_topic` (−), and the `extract_topic`/`insert_topic` migration;
+      seal/set_replicas/commit/policies do not touch it. `DSRSM.merged_metadata` merges the index too
+      (shards are disjoint by topic, so `Map.merge` is exact). **No reader uses it yet**, the scans stay
+      intact. Property test: the index equals an index rebuilt by scanning, after any sequence of commands
+      (catching missing, extra, stale and empty entries); the determinism property already covers the index
+      (it compares the whole state). 685 tests, 0 failures; credo and dialyzer clean.
+    - ✅ **V-idx-b: switch the readers to the index.** `ranges_of_topic`/`segments_of_range` become a
+      `Map.get(index) |> Enum.map(&Map.fetch!(...))` lookup, so **O(1)+O(k)** (the `fetch!` is safe by
+      V-idx-a's invariant, and doubles as a canary should it ever diverge). The internal per-topic scans
+      became index-based as well: `seal_topic` (sealing only that topic's ranges) and `delete_topic`
+      (dropping only that topic's ranges and segments), which removed the scan helpers
+      `seal_ranges_of_topic`, `range_ids_of_topic` (the scanning one) and `drop_segments_in`. The `DSRSM`
+      path gets the index for free (it delegates to `Metadata`'s readers through `query`; merging the index
+      in `merged_metadata` came in V-idx-a). Precondition verified: no `%Metadata{}` is built from data
+      without an index (they all come from `apply`, merge or migration). The old readers were already
+      unordered, so no caller depended on ordering, hence no regression. Validated by the whole suite
+      (broker/DSRSM/produce/consume exercise the readers on live paths) plus the properties. 686 tests, 0
+      failures; credo and dialyzer clean.
+    - ✅ **V-idx-c: measure the gain.** `bench/metadata_index_bench.exs` compares the index against a scan
+      (reimplemented inline) over the same Metadata, with fixed-size topics (3 ranges, 2 segments each) and
+      a growing total. Result: the index is **flat** (~0.2 µs, O(k)) while the scan grows **linearly**
+      (O(n)), from ~7.5 µs (300 ranges) to **~7.3 ms** (150k ranges) per `ranges_of_topic` call, and to
+      ~9.9 ms for `segments_of_range` (100k segments). Speedup ranges from ~12x (small) to **~33,000x**
+      (ranges) and **~67,000x** (segments). Since this was a tax **per produce and consume**, at 50k topics
+      the scan alone cost milliseconds per message; the index zeroes it. **The secondary index
+      (V-idx-a/b/c) is complete.**
+- ✅ `Malachi.Cluster.DSRSM`. It ties everything together: a HashRing plus one `Metadata` per vnode;
+  `command/3` and queries routed by **topic name** to the owning vnode (sharding topics across vnodes,
+  tested). Deterministic (replay). Phase 1a decision: a topic's metadata is **co-located** in one
+  vnode (routed by name), a recorded deviation from NorthGuard's range-id sharding.
+- ✅ **Vnode split** (the "D", Dynamic, in DS-RSM): `DSRSM.split_vnode/3` adds a vnode and
+  **migrates** the displaced topics (topic + ranges + segments) to it. Made possible by the
+  `{topic, seq}` range id (globally unique, so no collision during migration); helpers
+  `Metadata.extract_topic/2` and `insert_topic/2`. Tested: migration without loss, and ranges and
+  segments follow the topic.
+  - ⏸️ **A deliberate deviation (unplanned): sharding ranges and segments by range id (cross-vnode).**
+    NorthGuard shards the *metadata* by range id; malachi co-locates a topic's metadata in one vnode
+    (routed by name). **Decided against** (after evaluation): (1) the **data is already sharded across
+    nodes**: every segment has replicas placed by HRW on distinct nodes, so a busy topic already spreads
+    data over ranges→segments→nodes; only the *granularity of metadata management* differs. (2) Sharding
+    **by topic already spreads the metadata load** across the cluster; range sharding would only scale the
+    rate of *structural mutation* (splits and segments per second) for **a single** topic beyond one Raft
+    group, which is a very high bar (metadata mutations are not per record). (3) The cost is
+    reintroducing **cross-Raft transactions** for topic operations (seal and delete touch ranges in N
+    vnodes), distributed range-id allocation, cross-vnode `create`/`split`, and **scatter-gather** reads
+    (undoing V-idx's O(1) index), which is exactly the complexity co-location avoids. The worst
+    cost/benefit on the roadmap; **revisit only if a concrete single-topic metadata bottleneck appears**.
 
-**Bridge control plane → data plane (1a.5):**
-- ✅ `Malachi.Broker`: compõe o control plane (`Metadata`, fonte da verdade da estrutura) com
-  o data plane (um `Log` por range, indexado por range id). `produce` roteia por chave usando os
-  ranges ativos do `Metadata` + `Keyspace`; `split_range`/`merge_ranges` passam pelo `Metadata`
-  (estrutura) e selam/flusham os logs afetados. As decisões lógicas vivem só no control plane.
-- ✅ Leitura **cross-epoch** migrada para o `Broker` (`read_history`/`stream_history`, linhagem via
-  `Metadata.parents`) + `Broker.pending?`. Validação de **nome de topic** no `Metadata.create_topic`
-  (allowlist; rejeita `..`/`/`): fecha o path-traversal no data plane, no control plane.
-- ✅ `Malachi.BrokerServer`. GenServer sobre o `Broker`: flush por **tempo** (~10ms) + acesso
-  **serializado** (concorrência), flush no shutdown. Paridade com o antigo `TopicServer`.
-- ✅ **Duplicação removida:** `Topic`/`TopicServer`/`Range` **deletados** (sua orquestração de
-  split/merge/coverage/lineage duplicava o `Metadata`). O caminho único agora é
-  control plane (`Metadata`/`DSRSM`) + `Broker`/`BrokerServer`. **Bridge concluído.**
+**Bridging the control plane to the data plane (1a.5):**
+- ✅ `Malachi.Broker`: it composes the control plane (`Metadata`, the source of truth for structure)
+  with the data plane (one `Log` per range, indexed by range id). `produce` routes by key using
+  `Metadata`'s active ranges plus `Keyspace`; `split_range`/`merge_ranges` go through `Metadata` (the
+  structure) and seal or flush the affected logs. The logical decisions live in the control plane only.
+- ✅ **Cross-epoch** reads moved into `Broker` (`read_history`/`stream_history`, lineage through
+  `Metadata.parents`) plus `Broker.pending?`. **Topic-name** validation in `Metadata.create_topic` (an
+  allowlist rejecting `..` and `/`) closes the data plane's path traversal, in the control plane.
+- ✅ `Malachi.BrokerServer`. A GenServer over `Broker`: flush by **time** (~10ms) plus **serialized**
+  access (concurrency), and a flush on shutdown. Parity with the old `TopicServer`.
+- ✅ **Duplication removed:** `Topic`, `TopicServer` and `Range` were **deleted** (their
+  split/merge/coverage/lineage orchestration duplicated `Metadata`). The single path is now the control
+  plane (`Metadata`/`DSRSM`) plus `Broker`/`BrokerServer`. **The bridge is complete.**
 
-**Hardening do DS-RSM (property-based, substituto da simulação determinística):**
-- ✅ Property tests model-based (`stream_data`) para `Metadata` e `DSRSM`: sequências aleatórias
-  de create/split/merge/register/seal/delete + **split de vnode**, sempre escolhendo alvos
-  válidos do estado atual. Invariantes verificadas: cobertura do keyspace por topic ativo,
-  integridade referencial (range→topic, segment→range, id `{topic, seq}` bem-formado), **nenhum
-  topic órfão** (sempre vive no vnode que o roteia, mesmo após split de vnode) e **determinismo**
-  (mesma sequência → mesmo estado).
+**Hardening the DS-RSM (property-based, our substitute for deterministic simulation):**
+- ✅ Model-based property tests (`stream_data`) for `Metadata` and `DSRSM`: random sequences of
+  create/split/merge/register/seal/delete plus **vnode split**, always picking targets that are
+  valid in the current state. Invariants checked: keyspace coverage per active topic, referential
+  integrity (range→topic, segment→range, a well-formed `{topic, seq}` id), **no orphan topic**
+  (it always lives in the vnode that routes to it, even after a vnode split) and **determinism**
+  (the same sequence yields the same state).
 
 **Fase 1b, Replicação e membership:**
 - ✅ **`ra` integrado** (Raft real): `Malachi.Cluster.MetadataMachine` é uma `:ra_machine` cujo
