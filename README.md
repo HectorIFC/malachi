@@ -111,7 +111,7 @@ the variable, nothing changes (single-node, no distribution required).
   `MALACHIMQ_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
 - `epmd` — a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
 
-For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/) ships a worked example: a 3-node
+For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/README.md) ships a worked example: a 3-node
 CP cluster as a StatefulSet with stable Raft identities, zone-aware placement (`min_domains`), and the
 health/readiness probes wired up.
 
@@ -397,7 +397,6 @@ For production, use certificates from:
 - **DigiCert**, **GlobalSign** (commercial CAs)
 - **Internal PKI** (corporate environments)
 
-See [TLS Security Advisory](docs/SECURITY_ADVISORY_TLS.md) for complete documentation.
 
 ### TLS Features
 
@@ -428,7 +427,7 @@ MALACHIMQ_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
 `MALACHIMQ_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
 client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates the flag into
 `-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster — the handshake rejects it. The
-[Kubernetes example](deploy/kubernetes/) wires this up (the `malachi-dist-tls` Secret + the two env vars).
+[Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
 
 ## 🔐 Dashboard Security (v0.5.0+)
 
@@ -893,7 +892,7 @@ The project uses GitHub Actions for continuous integration:
 - ✅ **Performance Benchmarks** - Automated regression detection on PRs
 - ✅ **Daily Security Scans** - Scheduled vulnerability scanning (2 AM UTC)
 
-See [CI/CD Documentation](docs/CI_CD.md) for details.
+See [the CI workflow](.github/workflows/ci.yml) for details.
 
 ## 🌍 Internationalization (i18n)
 
@@ -944,7 +943,7 @@ We welcome contributions! Please follow these guidelines:
 
 1. Check existing issues and PRs
 2. Discuss major changes in an issue first
-3. Read [CI/CD Documentation](docs/CI_CD.md)
+3. Read [the CI workflow](.github/workflows/ci.yml)
 
 ### Development Process
 
@@ -1028,4 +1027,4 @@ This project uses [SEMVER](https://semver.org/) with automated releases.
 - **Minor**: New features → Add `minor` label or use `feat:` prefix
 - **Major**: Breaking changes → Add `major` label or use `[major]` in title
 
-See [VERSIONING.md](docs/VERSIONING.md) for details.
+See [the changelog](CHANGELOG.md) for details.

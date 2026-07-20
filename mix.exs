@@ -15,11 +15,101 @@ defmodule Malachi.MixProject do
       description: description(),
       package: package(),
       source_url: @source_url,
+      docs: docs(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
       elixirc_paths: elixirc_paths(Mix.env()),
       # `:mix` is a build-time app, so it is not in the default PLT; the `Mix.Tasks.*` admin task references
       # Mix.Task/Mix.shell/Mix.raise, which dialyzer would otherwise flag as unknown functions.
       dialyzer: [plt_add_apps: [:mix]]
+    ]
+  end
+
+  # The published documentation site (ExDoc): API reference plus the repository's guides as extra pages.
+  # `mix docs` writes to `doc/` (gitignored); the Pages workflow deploys that. Note `docs/` is *source*
+  # (the guides), so the two never collide.
+  defp docs do
+    [
+      main: "readme",
+      logo: "docs/logo.jpeg",
+      source_ref: "v#{@version}",
+      # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
+      formatters: ["html"],
+      extras: extras(),
+      groups_for_extras: groups_for_extras(),
+      groups_for_modules: groups_for_modules()
+    ]
+  end
+
+  defp extras do
+    [
+      "README.md": [title: "Overview"],
+      "CHANGELOG.md": [title: "Changelog"],
+      "docs/NORTHGUARD_PORT.md": [title: "NorthGuard port (design)"],
+      "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
+      "SECURITY.md": [title: "Security policy"],
+      "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
+      "RATE_LIMITING.md": [title: "Rate limiting"],
+      "BACKPRESSURE_IMPLEMENTATION.md": [title: "Backpressure"],
+      "OVERFLOW_STRATEGIES.md": [title: "Overflow strategies"],
+      "DOCKER_README.md": [title: "Running with Docker"],
+      "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
+      "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
+      "docs/HOOKS.md": [title: "Git hooks"]
+    ]
+  end
+
+  defp groups_for_extras do
+    [
+      Architecture: ["docs/NORTHGUARD_PORT.md", "docs/AUTH_USER_MANAGEMENT.md"],
+      Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
+      Operations: [
+        "RATE_LIMITING.md",
+        "BACKPRESSURE_IMPLEMENTATION.md",
+        "OVERFLOW_STRATEGIES.md",
+        "DOCKER_README.md",
+        "docs/DOCKER_TESTING.md",
+        "docs/MULTI_ARCH_BUILD.md"
+      ],
+      Development: ["docs/HOOKS.md", "CHANGELOG.md"]
+    ]
+  end
+
+  # ~90 modules, so group them by concern rather than listing one flat sidebar.
+  defp groups_for_modules do
+    [
+      "Log and storage": [
+        Malachi.Log,
+        Malachi.LogApi,
+        Malachi.Broker,
+        Malachi.BrokerServer,
+        Malachi.Keyspace,
+        Malachi.Metadata,
+        ~r/^Malachi\.Log\./,
+        ~r/^Malachi\.Storage\./
+      ],
+      "Cluster and Raft": [~r/^Malachi\.Cluster\./],
+      "Consumer groups": [~r/^Malachi\.Consumer\./],
+      "Auth and security": [Malachi.Auth, Malachi.AuditLog, Malachi.TLSValidator, ~r/^Malachi\.Auth\./],
+      "Wire protocol and networking": [
+        Malachi.Wire,
+        Malachi.TCPProtocol,
+        Malachi.TCPAcceptor,
+        Malachi.TCPAcceptorPool,
+        Malachi.SocketHelper,
+        Malachi.ConnectionRegistry,
+        Malachi.ConnectionLimiter,
+        Malachi.RateLimiter
+      ],
+      Observability: [Malachi.Metrics, Malachi.Telemetry, Malachi.Dashboard, ~r/^Malachi\.(Metrics|Telemetry|Dashboard)\./],
+      Operations: [
+        Malachi.Application,
+        Malachi.Shutdown,
+        Malachi.MemoryMonitor,
+        Malachi.AtomMonitor,
+        Malachi.I18n,
+        ~r/^Malachi\.CLI\./
+      ],
+      "Mix tasks": [~r/^Mix\.Tasks\./]
     ]
   end
 

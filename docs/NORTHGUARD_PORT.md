@@ -575,7 +575,7 @@ Estratégia confirmada: **lógica pura primeiro, `ra` depois** (mesmo padrão de
   ativo o `Broker` mantém um segment aberto (span lógico de offsets sobre o `Log` único do range,
   A1): no 1º produce registra o segment escolhendo o `replica_set` via `Placement.place` sobre
   `:brokers`/`:replication_factor` (defaults `[node()]`/`1`); contabiliza os bytes apendados
-  (`Record.encoded_size/1`, casado byte-a-byte com `encode/1`) e **sela + rola** ao cruzar
+  (`Malachi.Log.Record.encoded_size/1`, casado byte-a-byte com `encode/1`) e **sela + rola** ao cruzar
   `:segment_max_bytes` (threshold *soft*, checado no limite do batch). `split`/`merge` selam o
   segment ativo do range afetado. `segment_id = {range_id, seq}` (globalmente único; seq por-range
   persiste entre selas → id nunca reusado). API de `produce`/`read` inalterada (segments são
@@ -840,7 +840,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       `<<correlation_id::32, error_code::16, payload>>` (o `correlation_id` habilita **pipelining**), e os
       codecs das 4 operações de log (create_topic/produce/fetch/commit). Records **sem offset** no wire (o
       cliente nunca vê offset; o cursor opaco carrega a posição) — encoding próprio, distinto do
-      `Record.encode/1` de disco. Cursor/key são byte-strings com flag de presença (`nil` ≠ vazio). Puro;
+      `Malachi.Log.Record.encode/1` de disco. Cursor/key são byte-strings com flag de presença (`nil` ≠ vazio). Puro;
       a fiação no socket é B1b. Testado: round-trip de frame (+ `:incomplete` em prefixo parcial, dois
       frames num buffer), envelope, wire-record (nil-key vs vazio, bytes não-UTF-8, property de round-trip),
       e as 4 operações.
@@ -1023,7 +1023,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
           `connection_limiter_test` (limite **global** — estado compartilhado entre testes; passa isolado,
           não relacionado ao O3) → registrado p/ fix à parte. 698 testes (credo/dialyzer limpos).
         - ✅ **O4 — handler default telemetry → Metrics.** `Malachi.Telemetry.MetricsReporter` anexa (idempotente,
-          no `Metrics.init`) aos 4 eventos e dobra cada um em contadores ETS: produce (`records_produced`+
+          no Metrics.init) aos 4 eventos e dobra cada um em contadores ETS: produce (`records_produced`+
           `bytes_produced`), consume (`records_consumed`), auth (`{:auth_result, :ok|:error}`), replicação
           (`{:replication_result, :ok|:no_quorum}`). `get_system_metrics` ganha a seção `operations`, e o
           Prometheus emite `malachi_records_produced_total`/`bytes_produced_total`/`records_consumed_total`,
@@ -1111,7 +1111,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       `metadata_cluster`/`metadata_nodes` quando `:log_cluster` está configurado (env
       `MALACHIMQ_LOG_CLUSTER`/`MALACHIMQ_LOG_NODES`/`MALACHIMQ_RA_DATA_DIR`), iniciando `ra`; **ausente
       = single-node in-memory** (default preservado). A decisão config→opções é uma função pura
-      testável (`Application.metadata_cluster_opts/2`). O mecanismo (metadata sobrevive à perda do
+      testável (`Malachi.Application.metadata_cluster_opts/2`). O mecanismo (metadata sobrevive à perda do
       líder) já é provado por `metadata_ha_test`/`broker_server_ra_test` — não duplicado. Também
       **isolado o `log_data_dir` por execução de teste** (`config/test.exs`): o dir fixo persistia entre
       runs e, com metadata in-memory reiniciando, um topic reusado colidia com um segment em disco
@@ -1123,7 +1123,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       clampado ao nº de nós pelo broker). O `Placement` (HRW) escolhe o `replica_set` entre esses brokers;
       o primário replica cross-node via `{name, node}` e commita por **quórum**. Broker set **estático**
       (todos os nós da config); um follower caído é tolerado pelo quórum (o `live_brokers` ao vivo é D3).
-      Fiação testável por funções puras (`Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
+      Fiação testável por funções puras (`Malachi.Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
       quórum/tolerância já é coberto por `replication_server_test`, e a integração (BrokerServer + 3 brokers
       + rf=3 + ra → produce/consume por quórum ponta a ponta) por `broker_server_ra_test`.
     - ✅ **D3 — Membership + healing/failover ao vivo.**
@@ -1213,7 +1213,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
     nó propaga a um peer via gossip.
   - ✅ **C2c — fiação na app (C2 completa).** `application.ex` liga os attributes do self no
     `MembershipServer` do cluster: `MALACHIMQ_LOG_ATTRIBUTES` (formato `"rack=a,dc=east"`) é parseado por
-    `Application.parse_attributes/1` (função pura testável: ignora entradas sem `=`, trima, preserva `=` no
+    `Malachi.Application.parse_attributes/1` (função pura testável: ignora entradas sem `=`, trima, preserva `=` no
     valor) e passado como `:attributes`. Ausente → `%{}`. Testado: parse (vazio, pares, trim, entradas
     inválidas, valor com `=`). **C2 (attributes via SWIM) completa** — os brokers disseminam seus attrs por
     gossip, prontos para o placement rack-aware de C3.
@@ -1284,7 +1284,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       novo, compartilhando o ring), e um `command_fun/3` sharded que roteia por topic ao cluster `ra` do
       vnode (`ReplicatedDSRSM.server_for/2`, novo) aplicando via `ReplicatedMetadata.apply_command` no
       `update_vnode`. O caminho `:metadata_cluster` (1 vnode, D-a/D1) segue intacto. Config: `log_vnodes`
-      (inteiro N; `Application.sharded_vnodes/2` gera N vnodes com tokens uniformes no ring de 32 bits).
+      (inteiro N; `Malachi.Application.sharded_vnodes/2` gera N vnodes com tokens uniformes no ring de 32 bits).
       Testado: 2 vnodes, cada topic vive em exatamente o cluster `ra` que seu nome roteia (nunca no outro),
       e os topics se distribuem entre os vnodes; `sharded_vnodes/2` (tokens distintos, em range).
     - ✅ **D-b-2 — HA por vnode.** `ReplicatedDSRSM.add_vnode/4` passa a receber os `nodes`, iniciando o
@@ -1313,7 +1313,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
          adiado em D-b-2). Sem espalhar os vnodes, "o líder do vnode" é qualquer um dos M nós e há pouca
          distribuição real a fazer. **Fatia D-c-1** (decisão: **1A** HRW reusando `Placement`; **2A**
          núcleo puro primeiro):
-           - ✅ **D-c-1a — núcleo puro.** `Application.place_vnodes/3` atribui a cada vnode
+           - ✅ **D-c-1a — núcleo puro.** `Malachi.Application.place_vnodes/3` atribui a cada vnode
              (`{vnode_id, token}`) os `R` nós do seu cluster `ra`, escolhidos de `nodes` por rendezvous
              (o mesmo HRW `Placement.place/4` dos segments) → `{vnode_id, token, nodes}`; determinístico,
              mínimo movimento, `R` efetivo = `min(R, M)`. Testado isolado (HRW espalha, determinismo,
@@ -1328,7 +1328,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              e o `snapshot` materializa tudo. (Decisão **1A**: mecanismo isolado do bootstrap distribuído.)
            - ✅ **D-c-1c — bootstrap distribuído (seed estático).** `Application.metadata_opts` liga o
              `place_vnodes` (`metadata_vnodes` vira `[{vnode_id, token, nodes}]`, R = `log_vnode_replication_factor`)
-             e injeta a política `bootstrap_orchestrator?` = `Application.static_seed/1` (verdade só no menor nó).
+             e injeta a política `bootstrap_orchestrator?` = `Malachi.Application.static_seed/1` (verdade só no menor nó).
              No `BrokerServer`, o **orquestrador** faz `add_vnode` (start_cluster) de cada vnode; os **não-orquestradores**
              fazem `ReplicatedDSRSM.route_vnode/4` (novo — registra no ring + server de um membro, **sem** iniciar), de
              modo que exatamente um nó bootstrapa cada vnode (padrão RabbitMQ/`ra`). O `snapshot/1` ficou **tolerante**
@@ -1339,7 +1339,7 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
              (single-node), e `:multinode` — orquestrador inicia sobre 2 nós, não-orquestrador só roteia e lê/escreve
              cross-node. **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
            - ✅ **D-c-1d — `membership_leader` + reconcile loop.** A política de orquestração passa do seed
-             estático para `Application.membership_leader/1` — verdade só no menor nó **vivo** (`MembershipServer.
+             estático para `Malachi.Application.membership_leader/1` — verdade só no menor nó **vivo** (`MembershipServer.
              alive_members`, SWIM), então o papel **faz failover** quando o líder cai (tolerante: se a membership
              não responde → não-líder, nunca dois). O bootstrap vira **reconcile** (controller-style, k8s): no
              boot **todo** nó só faz `route_vnode` (`build_replicated` sem `start`); o `BrokerServer` reconcilia
@@ -1369,14 +1369,14 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
       espelha `ready?/1`: lê o líder que `:ra.members` reporta (qualquer membro alcançável responde) e
       é verdade só se ele for o **próprio** `server_id` — passe o server **local** (`{vnode_id, node()}`)
       para perguntar "este nó lidera este vnode?". Cluster não-formado/inalcançável → false (nunca
-      assume liderança). `Application.leading_vnodes/3` é o seletor puro: dado o placement
+      assume liderança). `Malachi.Application.leading_vnodes/3` é o seletor puro: dado o placement
       (`[{vnode_id, token, nodes}]` do bootstrap), o nó local e o predicado `leader?` (default
       `MetadataServer.leader?/1`), retorna os vnodes que o nó **hospeda** (placement o inclui) **e**
       **lidera** — curto-circuitando `leader?` para vnodes não-hospedados. É onde 1C-b-ii vai rodar os
       coordinators, um por vnode, no líder Raft dele (o NorthGuard literal, distribuindo a carga vs o
       líder único de membership do 1C-a). Testado: `leader?` no líder single-node (ra real) + não-formado
       → false; `leading_vnodes` filtra host×lidera, preserva ordem, não consulta liderança de não-hospedado.
-    - ✅ **1C-b-ii-α — coordinator apontado a um vnode.** `Application.vnode_metadata_source/1` é um
+    - ✅ **1C-b-ii-α — coordinator apontado a um vnode.** `Malachi.Application.vnode_metadata_source/1` é um
       `metadata_source` ligado a **um** vnode: lê a visão local do `Metadata` daquele vnode via
       `MetadataServer.query({vnode_id, node()}, & &1)` (consistent query ao ra do vnode), **tolerante**
       (vnode não-formado/inalcançável → `Metadata.new()`, sem crashar o coordinator). Como o tipo é o
@@ -1550,13 +1550,13 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
   então não movemos dados de metadata à mão; o **data plane** (segments) já é coberto pelo *healing*
   (1C-b). Modelo **manual** *staged → planned → committed* (riak_core; gatilho automático fica para
   depois, por cima do mesmo motor). Decomposto em:
-  - ✅ **R1 — `desired_placement` (núcleo puro).** `Application.desired_placement/5` recomputa o placement
+  - ✅ **R1 — `desired_placement` (núcleo puro).** `Malachi.Application.desired_placement/5` recomputa o placement
     desejado sobre um conjunto de nós arbitrário (a membership **viva**, vs a config estática `:log_nodes`):
     compõe `sharded_vnodes/2` (vnodes lógicos fixos) + `place_vnodes/4` (HRW). Determinístico e
     **movimento mínimo** — um vnode só muda se **adotar** um nó que entrou ou **detinha** um que saiu; o
     resto fica posto. Testado: determinismo; ao **adicionar** um nó, um vnode só muda se adota o novo nó
     (e algum adota); ao **remover**, só muda quem o detinha (e ele some do placement); clamp a `min(rf, |nós|)`.
-  - ✅ **R2 — plano de rebalanceamento (núcleo puro).** `Application.rebalance_plan/2` faz o diff do
+  - ✅ **R2 — plano de rebalanceamento (núcleo puro).** `Malachi.Application.rebalance_plan/2` faz o diff do
     placement **atual** × `desired_placement` (R1) por vnode: para cada vnode cujo conjunto de nós difere,
     devolve `%{vnode_id:, add:, remove:}` (nós a entrar / a sair do cluster `ra`); vnodes já corretos são
     omitidos (plano vazio = nada a fazer). *Staged/planned* — computa sem aplicar. A ordem segura é
@@ -1607,10 +1607,10 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       antes de remove; add que falha não remove; erro no remove reportado; idempotência; plano completo;
       fail-fast entre vnodes; parada por perda de liderança.
     - **R3-b — coordenador plan/commit + ops `ra`/wiring.**
-      - ✅ **R3-b-i — plano do estado vivo (núcleo com seams).** `Application.readable_placement/2` monta o
+      - ✅ **R3-b-i — plano do estado vivo (núcleo com seams).** `Malachi.Application.readable_placement/2` monta o
         placement **atual** a partir das memberships `ra` dos vnodes via o seam `members_of`
         (`vnode_id -> {:ok, nodes} | {:error, _}`), **omitindo** vnodes ilegíveis (conservador: nunca
-        planejar um vnode que não conseguimos ver). `Application.live_rebalance_plan/5` é o *plan*: faz o
+        planejar um vnode que não conseguimos ver). `Malachi.Application.live_rebalance_plan/5` é o *plan*: faz o
         diff do atual (legível) contra o `place_vnodes` **desejado** sobre os nós **vivos**, só para os
         vnodes legíveis, e devolve o plano (`rebalance_plan/2`) que alimenta `Rebalance.apply_plan/4` (o
         *commit*, sob o lease). Fica junto de R1/R2 no `Application` (evita ciclo com `Rebalance`, que só
@@ -1742,7 +1742,7 @@ são portáveis** — trocando "gossip" por "Raft" e preservando determinismo.
       do `TCPAcceptorPool` no root supervisor — para de aceitar e **não** reinicia; as conexões, que são
       `spawn` unlinked registradas no `ConnectionRegistry`, sobrevivem) → **drain** (sleep
       `shutdown_grace_ms`, default 5s, janela para in-flight terminar) → **close** (`close_all`). O lease já
-      é liberado pelo `LeaseHolder.terminate` na teardown seguinte (failover rápido) e o `ra` persiste em
+      é liberado pelo LeaseHolder.terminate na teardown seguinte (failover rápido) e o `ra` persiste em
       disco (o pod volta e re-join como o mesmo membro). Passos são **seams** → a orquestração
       (ordem + janela) é unit-testável sem parar o app real. k8s: `terminationGracePeriodSeconds: 40` +
       `preStop` (`sleep 5` — kube-proxy tira o pod dos endpoints do Service **antes** do SIGTERM, então

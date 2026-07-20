@@ -11,7 +11,7 @@ defmodule Malachi.Shutdown do
        connections would never converge.
     3. **close** — close the remaining connections.
 
-  The lease is released separately by `Malachi.Cluster.LeaseHolder.terminate/2` during the
+  The lease is released separately by the `Malachi.Cluster.LeaseHolder` terminate callback during the
   supervision-tree teardown that follows (fast failover instead of waiting for expiry), and `ra` persists
   to disk so a restarted node rejoins as the same member.
 

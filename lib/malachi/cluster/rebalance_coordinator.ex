@@ -7,7 +7,7 @@ defmodule Malachi.Cluster.RebalanceCoordinator do
   It is a GenServer so commits serialize (one at a time) and it holds the wiring; the world is reached
   through seams, so it is testable without ra or a real lease:
 
-    * `:plan_fun` - `(-> plan)`, the current rebalancing plan (wired to `Application.live_rebalance_plan/5`);
+    * `:plan_fun` - `(-> plan)`, the current rebalancing plan (wired to `Malachi.Application.live_rebalance_plan/5`);
     * `:add_member` / `:remove_member` - the `Malachi.Cluster.Rebalance` member ops (wired to `ra_*`);
     * `:leader?` - `(-> boolean())`, whether this node currently holds the lease (wired to the
       `LeaseHolder`); `commit/1` refuses unless it holds the lease, and passes this same check to

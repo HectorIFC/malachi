@@ -2,8 +2,8 @@ defmodule Malachi.Telemetry.MetricsReporter do
   @moduledoc """
   The default telemetry handler: folds the `Malachi.Telemetry` hot-path events into the ETS
   `Malachi.Metrics` counters, so produce/consume/auth/replication totals show up on the Prometheus
-  `/metrics` endpoint without every operator wiring their own handler. Attached once at boot (from
-  `Malachi.Metrics.init/1`); users may still attach their own handlers alongside this one.
+  `/metrics` endpoint without every operator wiring their own handler. Attached once at boot (when
+  `Malachi.Metrics` starts); users may still attach their own handlers alongside this one.
   """
 
   alias Malachi.Metrics

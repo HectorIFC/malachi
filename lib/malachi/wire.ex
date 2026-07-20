@@ -10,7 +10,7 @@ defmodule Malachi.Wire do
 
   `correlation_id` lets a client pipeline (match each response to its request). Records on the wire carry
   **no offset** — the client never sees one; the opaque cursor carries position — so this is a distinct
-  encoding from `Record.encode/1` (the on-disk frame, which includes the offset). Keys and cursors are
+  encoding from `Malachi.Log.Record.encode/1` (the on-disk frame, which includes the offset). Keys and cursors are
   length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure — this module
   only encodes/decodes binaries; the socket wiring is B1b.
 
