@@ -1,153 +1,154 @@
-# Malachi → NorthGuard: design doc de port open-source em Elixir
+# Malachi → NorthGuard: an open-source Elixir port design doc
 
-> Status: **proposta** · Estratégia escolhida: **B faseado** (Elixir puro → Rust NIF só onde o profiling exigir)
-> Decisão de viabilidade registrada em [Viabilidade](#1-viabilidade-medida) (benchmark em `benchmark/storage_viability.exs`).
+> Status: **proposal** · Chosen strategy: **phased B** (pure Elixir → a Rust NIF only where profiling demands it)
+> Feasibility decision recorded in [Feasibility](#1-feasibility-measured) (benchmark in `benchmark/storage_viability.exs`).
 
-Objetivo: reimplementar a **arquitetura** do [NorthGuard](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)
-(log storage escalável da LinkedIn) como projeto **open source em Elixir**, partindo do
-malachi atual (broker TCP 100% in-memory).
+Goal: reimplement the **architecture** of [NorthGuard](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)
+(LinkedIn's scalable log storage) as an **open-source Elixir project**, starting from the
+malachi of the day (a 100% in-memory TCP broker).
 
-> **Objetivo evoluído (a partir de 2026-06-27):** com a arquitetura NorthGuard concluída e sem SPOF
-> (control plane Raft multi-nó + data plane com replicação por quórum, self-healing, failover,
-> catch-up e membership SWIM), o novo norte é tornar o **malachi um produto escalável e vendável,
-> melhor que o Kafka open source**, usando os conceitos do NorthGuard. Hoje há **dois mundos
-> desconectados**: o broker TCP in-memory vivo (modelo de filas/pub-sub, estilo RabbitMQ) e o stack
-> NorthGuard (modelo de log, estilo Kafka). **A prioridade #1 é conectá-los** (expor o stack
-> NorthGuard ao cliente: a "Fase 3" abaixo); escala (incl. sharding) deixa de ser fora do alvo.
+> **Evolved goal (from 2026-06-27):** with the NorthGuard architecture complete and free of any SPOF
+> (a multi-node Raft control plane plus a data plane with quorum replication, self-healing, failover,
+> catch-up and SWIM membership), the new direction is to make **malachi a scalable, sellable product,
+> better than open-source Kafka**, using NorthGuard's concepts. Today there are **two disconnected
+> worlds**: the live in-memory TCP broker (a queue/pub-sub model, RabbitMQ style) and the NorthGuard
+> stack (a log model, Kafka style). **Priority #1 is connecting them** (exposing the NorthGuard stack
+> to the client: "Phase 3" below); scale, sharding included, is no longer out of target.
 
 ---
 
-## 1. Viabilidade (medida)
+## 1. Feasibility (measured)
 
-Benchmark de I/O do BEAM puro no caminho crítico do storage (Apple M1, OTP 28 JIT, SSD NVMe).
-Reproduza com `elixir benchmark/storage_viability.exs`.
+An I/O benchmark of the pure BEAM on the storage critical path (Apple M1, OTP 28 JIT, NVMe SSD).
+Reproduce it with `elixir benchmark/storage_viability.exs`.
 
-| Cenário (Elixir puro, `:file` raw) | Throughput | Latência/flush |
+| Scenario (pure Elixir, raw `:file`) | Throughput | Latency/flush |
 |---|---|---|
-| Durável fsync/batch, 10MB (alvo NG) | 472 MB/s · 484k rec/s | p50 **8.0ms** · p99 92ms |
-| Durável, 20k×256B (count-driven) | 1234 MB/s · 5M rec/s | p50 3.4ms · p99 12.7ms |
-| Não-durável (teto) | 612–1507 MB/s |, |
-| Leitura sequencial | 2487 MB/s |, |
+| Durable fsync/batch, 10MB (the NG target) | 472 MB/s · 484k rec/s | p50 **8.0ms** · p99 92ms |
+| Durable, 20k×256B (count-driven) | 1234 MB/s · 5M rec/s | p50 3.4ms · p99 12.7ms |
+| Non-durable (ceiling) | 612–1507 MB/s | n/a |
+| Sequential read | 2487 MB/s | n/a |
 
-**Alvo real do NorthGuard:** ~20 MB/s de escrita por broker (steady-state), ~60 MB/s com
-replicação 3×. O Elixir puro entrega **~10–50× isso** num laptop. **Throughput não é o gargalo.**
+**NorthGuard's real target:** ~20 MB/s of writes per broker (steady state), ~60 MB/s with 3x
+replication. Pure Elixir delivers **~10 to 50x that** on a laptop. **Throughput is not the bottleneck.**
 
-**Veredito:** Fase 0/1 em Elixir puro é viável e performática. O Rust NIF (Fase 2) se justifica
-por três motivos, e nenhum deles é throughput:
-1. **Cauda de latência** (vistos picos de até ~1.5s no max sob flush grande; pode piorar sob
-   concorrência real de milhares de conexões + N segments com fsync simultâneo).
-2. **`O_DIRECT`**: NorthGuard usa Direct I/O para evitar degradação do page cache em réplicas
-   não-consumidas e leituras de segments antigos. BEAM puro não expõe O_DIRECT.
-3. **Cache em nível de aplicação** alimentado pelos consume streams (idem item 2).
+**Verdict:** phases 0 and 1 in pure Elixir are feasible and fast. The Rust NIF (phase 2) is justified
+by three things, none of which is throughput:
+1. **Latency tail** (peaks up to ~1.5s observed at max under a large flush; it can get worse under
+   real concurrency of thousands of connections plus N segments fsyncing at once).
+2. **`O_DIRECT`**: NorthGuard uses Direct I/O to avoid page cache degradation on unconsumed replicas
+   and reads of old segments. The pure BEAM does not expose O_DIRECT.
+3. **Application-level cache** fed by the consume streams (same reason as item 2).
 
-Caveat: no macOS `:file.sync` não faz `F_FULLFSYNC`; latências são otimistas vs. Linux server
-(onde fsync é mais lento porém mais consistente). Throughput é representativo.
+Caveat: on macOS `:file.sync` does not issue `F_FULLFSYNC`, so the latencies are optimistic against a
+Linux server (where fsync is slower but more consistent). Throughput is representative.
 
 ---
 
-## 2. Gap analysis: malachi hoje vs. NorthGuard
+## 2. Gap analysis: malachi today vs. NorthGuard
 
-O malachi já tem **a metade que o BEAM faz melhor que C++**. O que falta é a metade durável.
+Malachi already has **the half the BEAM does better than C++**. What is missing is the durable half.
 
-| Capacidade | malachi hoje | NorthGuard | Gap |
+| Capability | malachi today | NorthGuard | Gap |
 |---|---|---|---|
-| Data plane TCP, conexões, sessões | ✅ `tcp_acceptor(_pool)`, `tcp_protocol`, `connection_registry` | sessionized streaming | **Adaptar** (pipelining/windowing) |
-| Backpressure / flow control | ✅ `backpressure`, `rate_limiter`, `connection_limiter` | windowing por stream | **Adaptar** |
-| Fila / partição em memória | ✅ `queue`, `partition_manager`, `consumer`, `ack_manager` | range/segment durável | **Substituir modelo** |
-| **Persistência durável (log)** | ❌ tudo em memória | fps-store (WAL, file-per-segment, fsync) | **Construir** ← núcleo |
-| **Modelo record→segment→range→topic** | ❌ (queue/partition) | ✅ | **Construir** |
-| **Metadados sharded (DS-RSM/Raft)** | ❌ | ✅ vnodes + coordinators | **Construir** |
-| **Membership gossip (SWIM)** | ❌ (`connection_registry` local) | ✅ | **Construir** |
-| **Striping / self-balancing** | ❌ | ✅ segment como unidade de replicação | **Construir** |
-| Auth / TLS / métricas / dashboard | ✅ `auth/*`, `tls_validator`, `metrics`, `dashboard` | (interno LinkedIn) | **Manter** |
-| Storage policies / attributes | ❌ | ✅ expressões sobre attributes | **Construir** |
+| TCP data plane, connections, sessions | ✅ `tcp_acceptor(_pool)`, `tcp_protocol`, `connection_registry` | sessionized streaming | **Adapt** (pipelining/windowing) |
+| Backpressure / flow control | ✅ `backpressure`, `rate_limiter`, `connection_limiter` | per-stream windowing | **Adapt** |
+| In-memory queue / partition | ✅ `queue`, `partition_manager`, `consumer`, `ack_manager` | durable range/segment | **Replace the model** |
+| **Durable persistence (log)** | ❌ everything in memory | fps-store (WAL, file-per-segment, fsync) | **Build** ← the core |
+| **record→segment→range→topic model** | ❌ (queue/partition) | ✅ | **Build** |
+| **Sharded metadata (DS-RSM/Raft)** | ❌ | ✅ vnodes + coordinators | **Build** |
+| **Gossip membership (SWIM)** | ❌ (local `connection_registry`) | ✅ | **Build** |
+| **Striping / self-balancing** | ❌ | ✅ the segment as the unit of replication | **Build** |
+| Auth / TLS / metrics / dashboard | ✅ `auth/*`, `tls_validator`, `metrics`, `dashboard` | (LinkedIn-internal) | **Keep** |
+| Storage policies / attributes | ❌ | ✅ expressions over attributes | **Build** |
 
 ---
 
-## 3. Arquitetura-alvo
+## 3. Target architecture
 
-### 3.1 Modelo de dados (igual ao NorthGuard)
+### 3.1 Data model (same as NorthGuard)
 
 ```
-Topic   ── coleção nomeada de Ranges que cobrem todo o keyspace
- └ Range  ── abstração de LOG: segments p/ uma faixa contígua de chaves (active|sealed)
-    └ Segment ── UNIDADE DE REPLICAÇÃO: sequência de records (active|sealed; sela em 1GB / 1h / falha)
-       └ Record ── key + value + headers (bytes), offset lógico no segment
+Topic   ── a named collection of Ranges covering the whole keyspace
+ └ Range  ── a LOG abstraction: segments for a contiguous band of keys (active|sealed)
+    └ Segment ── THE UNIT OF REPLICATION: a sequence of records (active|sealed; seals at 1GB / 1h / failure)
+       └ Record ── key + value + headers (bytes), a logical offset within the segment
 ```
 
-- **Split/merge de range são operações puramente lógicas de metadados**, segments nunca são
-  fisicamente combinados/copiados (confirmado no vídeo do meetup). Merge só entre *buddy ranges*
-  (estilo buddy allocator).
-- Ordenação total preservada via happens-before em splits/merges.
+- **Range split and merge are purely logical metadata operations**, segments are never physically
+  combined or copied (confirmed in the meetup video). Merge happens only between *buddy ranges*
+  (buddy-allocator style).
+- Total ordering is preserved through happens-before on splits and merges.
 
-### 3.2 Camada de storage, `Malachi.SegmentStore` (behaviour pluggable)
+### 3.2 Storage layer, `Malachi.SegmentStore` (a pluggable behaviour)
 
-NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária). Replicamos isso:
+NorthGuard says storage is pluggable ("fps-store" is only the primary implementation). We mirror that:
 
 ```elixir
 @callback open(seg_id, opts) :: {:ok, handle} | {:error, term}
 @callback append(handle, batch :: [record]) :: {:ok, base_offset} | {:error, term}
-@callback sync(handle) :: :ok | {:error, term}        # fsync, chamado antes do ack
+@callback sync(handle) :: :ok | {:error, term}        # fsync, called before the ack
 @callback read(handle, offset, max_bytes) :: {:ok, [record]} | :eof
-@callback seal(handle) :: :ok                          # torna imutável
+@callback seal(handle) :: :ok                          # makes it immutable
 @callback sparse_index(handle, offset) :: {:ok, file_pos}
 ```
 
-- **Fase 0/1:** `Malachi.SegmentStore.Elixir`, `:file` `[:raw, :binary]`, batching por
-  10ms / N records / N bytes, fsync antes do ack, índice esparso em ETS/DETS ou arquivo `.idx`.
-- **Fase 2 (condicional):** `Malachi.SegmentStore.Native`, Rust NIF (Rustler) com O_DIRECT,
-  buffers alinhados, cache em nível de app; índice em `erlang-rocksdb`.
+- **Phases 0 and 1:** `Malachi.SegmentStore.Elixir`, `:file` `[:raw, :binary]`, batching by
+  10ms / N records / N bytes, fsync before the ack, a sparse index in ETS/DETS or an `.idx` file.
+- **Phase 2 (conditional):** `Malachi.SegmentStore.Native`, a Rust NIF (Rustler) with O_DIRECT,
+  aligned buffers and an app-level cache; the index in `erlang-rocksdb`.
 
-### 3.3 Metadados, DS-RSM com `ra`
+### 3.3 Metadata, DS-RSM over `ra`
 
-- **vnode** = grupo Raft (`ra`) guardando um shard do metadado (topics/ranges/segments).
-- **coordinator** = líder do vnode; carrega a "lógica de negócio" (sela/deleta topic,
-  split/merge range, replica sets de segment, self-healing de segments sub-replicados).
-- **DS-RSM** = vnodes sobre um hash ring (consistent hashing). Hash por nome do topic; por
-  range ID para range/segment. **Posição do vnode no anel é estável** mesmo quando réplicas
-  Raft entram/saem (detalhe do vídeo). **vnodes podem dar split** (quebra o estado em dois
-  grupos Raft).
+- **vnode** = a Raft group (`ra`) holding one shard of the metadata (topics/ranges/segments).
+- **coordinator** = the vnode's leader; it carries the "business logic" (seal or delete a topic,
+  split or merge a range, segment replica sets, self-healing of under-replicated segments).
+- **DS-RSM** = vnodes over a hash ring (consistent hashing). Hash by topic name, and by range id for
+  ranges and segments. **A vnode's position on the ring is stable** even as Raft replicas join and
+  leave (a detail from the video). **vnodes can split** (breaking the state into two Raft groups).
 
 ### 3.4 Membership, SWIM
 
-- `partisan` (suporta SWIM) ou impl própria. Random probing p/ detecção + dissemination
-  estilo infecção. Espalha **estado global mínimo**: host/port/attributes dos brokers +
-  fronteiras/líder/term dos vnodes (para roteamento).
+- `partisan` (which supports SWIM) or our own implementation. Random probing for detection plus
+  infection-style dissemination. It spreads **minimal global state**: broker host/port/attributes plus
+  vnode boundaries/leader/term (for routing).
 
-### 3.5 Protocolos
+### 3.5 Protocols
 
-- **Metadados = unary** (1 req → 1 resp): create/delete/topicMetadata/segmentMetadata.
-  Qualquer broker é proxy → roteia ao líder do vnode via estado gossipado.
-- **Dados = streaming sessionizado** (produce/consume/replication) com pipelining + windowing.
-  Reaproveita `tcp_protocol` + `backpressure` do malachi. Consume pode usar `:file.sendfile`.
+- **Metadata = unary** (1 request → 1 response): create/delete/topicMetadata/segmentMetadata.
+  Any broker acts as a proxy and routes to the vnode leader using the gossiped state.
+- **Data = sessionized streaming** (produce/consume/replication) with pipelining and windowing.
+  It reuses malachi's `tcp_protocol` and `backpressure`. Consume can use `:file.sendfile`.
 
 ### 3.6 Storage/metadata policies
 
-- Policy = nome + retenção + constraints. Constraint = expressão sobre **attributes**
-  (k/v opacos que admins ligam a brokers). Generaliza rack/DC-awareness sem o core entender
-  "rack". Decide replica sets de segment e replicas de vnode.
+- A policy is a name plus retention plus constraints. A constraint is an expression over
+  **attributes** (opaque k/v that admins attach to brokers). This generalizes rack and DC awareness
+  without the core understanding what a "rack" is. It decides segment replica sets and vnode
+  replicas.
 
 ---
 
-## 4. Roadmap faseado
+## 4. Phased roadmap
 
-> **STATUS DA AUDITORIA (2026-07-19).** O core do port está funcionalmente **completo**: Fase 0 (modelo de
-> log durável) ✅, Fase 1 (distribuição: DS-RSM sobre `ra`, membership SWIM, replicação por quórum) ✅, e a
-> Fase 3/escala (control plane **shardado** por vnodes, **split de vnode sobre `ra`** end-to-end, **heal**
-> re-replicação, **failover de primário**, **consumer groups multi-nó** A1–A5, lease/rebalancing incl.
-> auto-rebalancer opt-in) ✅. **Auth/segurança** (Fases P1–P6 + mTLS/OIDC + ACL por-tópico) ✅, **pausado por
-> maturidade** (2026-07-19). Os marcadores 🚧/⏳ antigos nas linhas do split/heal/failover/coordinator foram
-> **corrigidos nesta auditoria**. Estavam stale. LDAP e multi-tenancy tenant/namespace (5-1B) foram
-> **recusados** por decisão (ver `AUTH_USER_MANAGEMENT.md`).
+> **AUDIT STATUS (2026-07-19).** The core of the port is functionally **complete**: phase 0 (the durable
+> log model) ✅, phase 1 (distribution: DS-RSM over `ra`, SWIM membership, quorum replication) ✅, and
+> phase 3 / scale (a **sharded** control plane over vnodes, **vnode split over `ra`** end to end,
+> **heal** re-replication, **primary failover**, **multi-node consumer groups** A1 to A5,
+> lease/rebalancing including the opt-in auto-rebalancer) ✅. **Auth and security** (phases P1 to P6 plus
+> mTLS/OIDC plus per-topic ACL) ✅, **paused on maturity** (2026-07-19). The old 🚧/⏳ markers on the
+> split/heal/failover/coordinator lines were **corrected in that audit**. They were stale. LDAP and
+> tenant/namespace multi-tenancy (5-1B) were **declined** by decision (see `AUTH_USER_MANAGEMENT.md`).
 >
-> **Atualização (2026-07-20).** O **re-sharding (grow)** saiu de aberto: RS-1/RS-2/RS-3 entregues
-> (`ReshardPlan`, `ReshardCoordinator`, fiação + `mix malachi.reshard --to N`), ver §8.4 fim. A seção 7,
-> que listava quatro "questões em aberto", virou **registro de decisão**: as quatro já estavam
-> implementadas. **Genuinamente aberto agora:** (1) **ring durável** (o reshard e o split não sobrevivem
-> a restart de cluster inteiro, ⏳ anotado em §8.4), (2) **merge/shrink** de vnodes (fora de escopo
-> registrado), (3) **Fase 2, eficiência nativa** (NIF Rust/RocksDB, **condicional a profiling**). A
-> **trilha de documentação** (§9) fechou: 9 guias, o site ExDoc e o workflow de Pages. Resta dela só uma
-> **ação de operador**, trocar a fonte do Pages para "GitHub Actions", que nenhum commit resolve.
+> **Update (2026-07-20).** **Re-sharding (grow)** is no longer open: RS-1/RS-2/RS-3 delivered
+> (`ReshardPlan`, `ReshardCoordinator`, the wiring plus `mix malachi.reshard --to N`), see the end of
+> §8.4. Section 7, which listed four "open questions", became a **decision record**: all four were
+> already implemented. **Genuinely open now:** (1) a **durable ring** (reshard and split do not survive a
+> full-cluster restart, ⏳ noted in §8.4), (2) vnode **merge/shrink** (recorded as out of scope), (3)
+> **phase 2, native efficiency** (a Rust/RocksDB NIF, **conditional on profiling**). The
+> **documentation trail** (§9) is closed: 9 guides, the ExDoc site and the Pages workflow. All that is
+> left of it is an **operator action**, switching the Pages source to "GitHub Actions", which no commit
+> can perform.
 
 ### Fase 0: Persistência e modelo de log (Elixir puro)
 - ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
@@ -1423,67 +1424,70 @@ Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS
 
 ---
 
-## 5. Dependências candidatas
+## 5. Candidate dependencies
 
-| Necessidade | Lib | Notas |
+| Need | Library | Notes |
 |---|---|---|
-| Raft (DS-RSM/vnodes) | [`ra`](https://github.com/rabbitmq/ra) | Raft de produção do RabbitMQ |
-| Membership SWIM/gossip | [`partisan`](https://github.com/lasp-lang/partisan) | ou impl própria |
-| Índice esparso nativo (Fase 2) | [`erlang-rocksdb`](https://github.com/emqx/erlang-rocksdb) | binding RocksDB |
-| NIF nativo (Fase 2) | [`rustler`](https://github.com/rusterlium/rustler) | NIFs Rust memory-safe + dirty schedulers |
-| Testes de propriedade | `stream_data` / `PropEr` | substituto parcial da sim determinística |
+| Raft (DS-RSM/vnodes) | [`ra`](https://github.com/rabbitmq/ra) | RabbitMQ's production Raft |
+| SWIM/gossip membership | [`partisan`](https://github.com/lasp-lang/partisan) | or our own implementation |
+| Native sparse index (phase 2) | [`erlang-rocksdb`](https://github.com/emqx/erlang-rocksdb) | RocksDB binding |
+| Native NIF (phase 2) | [`rustler`](https://github.com/rusterlium/rustler) | memory-safe Rust NIFs + dirty schedulers |
+| Property testing | `stream_data` / `PropEr` | a partial substitute for deterministic simulation |
 
 ---
 
-## 6. O que NÃO vamos replicar (e o substituto)
+## 6. What we will NOT replicate (and the substitute)
 
-**Simulação determinística** (cluster+clientes single-thread, swap de time/net/disk/RNG, replay
-exato de falhas): um dos pilares de confiabilidade do NorthGuard - **é essencialmente inviável
-no BEAM**, porque não controlamos o scheduler (preemptivo, multicore). É um downgrade real de
-garantias e precisa ser aceito explicitamente.
+**Deterministic simulation** (single-threaded cluster and clients, swappable time/net/disk/RNG, exact
+replay of failures) is one of NorthGuard's reliability pillars, and it is **essentially unfeasible on
+the BEAM**, because we do not control the scheduler (preemptive, multicore). It is a real downgrade in
+guarantees and has to be accepted explicitly.
 
-Substitutos:
-- Property-based stateful testing (`stream_data`/`PropEr`) do modelo de log e da máquina de estados.
-- `Concuerror` para checagem de concorrência (escala limitada).
-- Testes estilo Jepsen para consistência distribuída.
-- Fault injection via `partisan` (partições de rede) + chaos no storage (corrupção/erro de I/O).
+Substitutes:
+- Property-based stateful testing (`stream_data`/`PropEr`) of the log model and the state machine.
+- `Concuerror` for concurrency checking (limited scale).
+- Jepsen-style tests for distributed consistency.
+- Fault injection through `partisan` (network partitions) plus storage chaos (corruption, I/O errors).
 
 ---
 
-## 7. Decisões de arquitetura (as quatro questões que abriram o port)
+## 7. Architecture decisions (the four questions that opened the port)
 
-Esta seção nasceu como "questões em aberto". As quatro foram **decididas e implementadas**; ficam aqui
-com a resposta e o motivo, que é o que ainda tem valor. Cada uma aponta pro código que a materializa.
+This section began life as "open questions". All four were **decided and implemented**; they stay here
+with the answer and the reason, which is the part that still has value. Each points at the code that
+implements it.
 
-1. **Replicação: sobre `ra` ou do zero?** → **As duas, em planos separados.** O **control plane**
-   (metadado) roda sobre `ra`: cada vnode é um cluster Raft, com a máquina em
-   `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). O **data plane** (records nos segments)
-   **não** passa pelo `ra`: é replicação por quórum própria em `Malachi.Cluster.ReplicationServer`, que
-   embarca do primário pros followers e só reconhece a escrita depois que um quórum deu `fsync`,
-   tolerando até ⌊(N-1)/2⌋ followers lentos ou inalcançáveis (`{:error, :no_quorum}` fora disso). O
-   motivo da divisão: metadado é pequeno, precisa de linearizabilidade e muda pouco, o que é exatamente
-   o ponto forte do Raft; records são volume alto e sequencial, onde passar cada batch por um log de
-   consenso pagaria uma segunda escrita durável sem ganhar nada, já que o próprio segment **é** o log.
+1. **Replication: over `ra` or from scratch?** → **Both, in separate planes.** The **control plane**
+   (metadata) runs over `ra`: each vnode is a Raft cluster, with the machine in
+   `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). The **data plane** (records in
+   segments) does **not** go through `ra`: it is our own quorum replication in
+   `Malachi.Cluster.ReplicationServer`, which ships from the primary to the followers and only
+   acknowledges the write once a quorum has `fsync`ed it, tolerating up to ⌊(N-1)/2⌋ slow or
+   unreachable followers (`{:error, :no_quorum}` beyond that). The reason for the split: metadata is
+   small, needs linearizability and changes rarely, which is exactly Raft's strength; records are high
+   volume and sequential, where routing every batch through a consensus log would pay for a second
+   durable write and gain nothing, since the segment **is** the log.
 
-2. **Índice esparso: `.idx` próprio, ETS persistido ou DETS?** → **Arquivo `.idx` próprio.** Um sidecar
-   por segment (`Malachi.Log.Segment.index_path/1` devolve `<id>.idx`), carregado em memória num
-   `:array` ordenado por offset para busca floor em O(log n), com uma entrada a cada
-   `@default_index_interval` (4096) bytes. ETS persistido e DETS foram descartados: ambos acoplariam o
-   formato em disco a estruturas do BEAM, e o objetivo do port é um formato de segment que uma
-   implementação nativa (Fase 2) possa reabrir sem falar BEAM.
+2. **Sparse index: our own `.idx`, persisted ETS, or DETS?** → **Our own `.idx` file.** One sidecar per
+   segment (`Malachi.Log.Segment.index_path/1` returns `<id>.idx`), loaded into memory as an `:array`
+   sorted by offset for an O(log n) floor lookup, with one entry every
+   `@default_index_interval` (4096) bytes. Persisted ETS and DETS were both discarded: either would
+   couple the on-disk format to BEAM structures, and the point of the port is a segment format that a
+   native implementation (phase 2) can reopen without speaking BEAM.
 
-3. **Protocolo: manter o do malachi ou sessionizar como o NorthGuard?** → **Mantido e estendido.**
-   Continua `<<len::32, body>>` com `<<api_key::16, correlation_id::32, payload>>`, onde o
-   `correlation_id` já dá pipelining (casar resposta com request), que era o ganho concreto que a
-   sessionização traria. Estendido pra 17 api_keys, cobrindo o log, consumer groups, auth (senha, mTLS,
-   token) e ACLs. Ver `Malachi.Wire`.
+3. **Protocol: keep malachi's or sessionize it like NorthGuard?** → **Kept and extended.** It is still
+   `<<len::32, body>>` carrying `<<api_key::16, correlation_id::32, payload>>`, where the
+   `correlation_id` already gives pipelining (matching a response to its request), which was the
+   concrete gain sessionizing would have brought. Extended to 17 api_keys, covering the log, consumer
+   groups, auth (password, mTLS, token) and ACLs. See `Malachi.Wire`.
 
-4. **Offset: opaco ou `long` simples?** → **Cursor opaco desde o início**, estilo Xinfra. O cliente
-   nunca vê offset: os records na wire não carregam nenhum, a posição viaja no cursor
-   (`Malachi.LogApi`, `@type cursor :: String.t()`). Isso é o que permite re-shardar e splitar range sem
-   quebrar cliente, já que a posição não é mais um número que ele possa ter interpretado. Como o cursor
-   volta de um cliente não confiável, `decode_cursor/1` desserializa com `binary_to_term(_, [:safe])` e
-   ainda valida o formato, então um cursor forjado não vira átomo novo nem termo arbitrário.
+4. **Offset: opaque or a plain `long`?** → **An opaque cursor from the start**, Xinfra style. The
+   client never sees an offset: records on the wire carry none, and the position travels in the cursor
+   (`Malachi.LogApi`, `@type cursor :: String.t()`). That is what makes it possible to reshard and
+   split ranges without breaking clients, since the position is no longer a number they could have
+   interpreted. Because the cursor comes back from an untrusted client, `decode_cursor/1` deserializes
+   with `binary_to_term(_, [:safe])` and validates the shape as well, so a forged cursor cannot mint a
+   new atom or an arbitrary term.
 
 ---
 
@@ -2100,57 +2104,58 @@ o que foi deliberadamente **não** adotado (com o porquê):
 
 ---
 
-## 9. Documentação e tutoriais (GitHub Pages)
+## 9. Documentation and tutorials (GitHub Pages)
 
-O port tem cobertura de `@moduledoc` densa, mas nada disso era **publicado**: o `ex_doc` estava no
-projeto sem configuração, e o `mix docs` do CI descartava a saída. A trilha abaixo transforma isso num
-site em `hectorifc.github.io/malachi`, com referência de API e guias.
+The port has dense `@moduledoc` coverage, but none of it was **published**: `ex_doc` was in the project
+without configuration, and CI's `mix docs` threw the output away. The trail below turns that into a site
+at `hectorifc.github.io/malachi`, with an API reference and guides.
 
-- ✅ **DOC-1: configurar o ExDoc + `LICENSE`.** Bloco `docs:` no `mix.exs` (`main: "introduction"`,
-  `formatters: ["html"]` só, o epub dobrava o build do CI), `extras` com 16 documentos agrupados por
-  `groups_for_extras`, e `groups_for_modules` organizando os ~93 módulos em 8 grupos. Criado o `LICENSE`
-  (MIT), que o `package/0` declarava desde sempre sem o arquivo existir.
-- ✅ **DOC-2a: os três primeiros guias.** `introduction`, `getting-started` e `log-model` em
-  `docs/guides/`. A `introduction` foi **reescrita**, não herdada da landing page `docs/index.html`:
-  aquela página afirma "Message Queue", "ETS tables" e "SHA256 password hashing", e as três são falsas
-  (é um log, o storage é segment durável + `ra`, e o hashing é **Argon2**).
-- ✅ **DOC-3: publicar.** `.github/workflows/pages.yml`, build em push pra `main` + `workflow_dispatch`,
-  com o mesmo portão `--warnings-as-errors` do CI (referência quebrada falha o build em vez de publicar
-  link morto). Permissões **por job**: o build só lê a árvore, e só o deploy carrega as credenciais do
-  Pages, já que o build roda código de terceiros (`mix deps.get`). `cancel-in-progress: false` porque
-  cancelar um run no meio do upload deixaria o site meio publicado.
-- ✅ **DOC-2b: produzir/consumir e streaming.** `produce-and-consume` (batching numa chamada, o que a
-  chave decide e o que não decide, as três formas de rastrear posição, a obrigação de idempotência do
-  at-least-once, e os dois erros transitórios `:migrating`/`:not_owner` que um cliente correto re-tenta) e
-  `streaming-with-backpressure` (por que a janela de crédito existe, o budget exato
-  `min(max, window - in_flight)`, por que o ack funde crédito e commit, e o ack de member que também é
-  heartbeat).
-- ✅ **DOC-2c: segurança e operação.** `authentication` (os três mecanismos e por que identidade é
-  plugável enquanto autorização não é), `per-topic-acls` (a decisão em três regras e uma ordem de adoção
-  do modo estrito que não tranca todos os clientes), `clustering-and-resharding` (descoberta versus
-  membership de dados, os dois planos de replicação, crescer o ring) e `operations` (portas, probes,
-  métricas, retenção, TLS, checklist de produção). Total: **9 guias**, 22 extras, 119 páginas.
-- ✅ **Removida a landing page `docs/index.html` e os três órfãos dela.** Com a fonte do Pages virando
-  "GitHub Actions" ela deixaria de ser servida de qualquer forma, e continuava no repositório afirmando
-  as três coisas falsas acima. Saíram
-  junto os dois assets que só ela referenciava (`style.css`, `favicon.ico`) e o `.nojekyll`, que existia
-  só para o modo "Pages a partir de `docs/`": no caminho via Actions o artifact é servido direto e o
-  Jekyll nunca roda. A `logo.jpeg` **ficou**, porque o `README.md` e o `mix.exs` (logo do ExDoc) a usam.
-  O dashboard não entra na conta: serve a própria cópia em `priv/static/logo.jpeg`. O vídeo de demo não
-  se perdeu: segue no `README.md`, que é extra do site. O único conteúdo que some é a tabela "How It
-  Compares" (contra RabbitMQ e Redis Pub/Sub), cujo enquadramento de fila era parte do erro.
+- ✅ **DOC-1: configure ExDoc plus a `LICENSE`.** A `docs:` block in `mix.exs` (`main: "introduction"`,
+  `formatters: ["html"]` only, since the epub doubled the CI build), `extras` with 16 documents grouped
+  by `groups_for_extras`, and `groups_for_modules` organizing the ~93 modules into 8 groups. Created the
+  `LICENSE` (MIT), which `package/0` had always declared without the file existing.
+- ✅ **DOC-2a: the first three guides.** `introduction`, `getting-started` and `log-model` under
+  `docs/guides/`. The `introduction` was **rewritten**, not inherited from the `docs/index.html` landing
+  page: that page claimed "Message Queue", "ETS tables" and "SHA256 password hashing", and all three are
+  false (it is a log, the storage is durable segments plus `ra`, and the hashing is **Argon2**).
+- ✅ **DOC-3: publish.** `.github/workflows/pages.yml`, building on push to `main` plus
+  `workflow_dispatch`, with the same `--warnings-as-errors` gate CI uses (a broken reference fails the
+  build instead of publishing a dead link). Permissions are **per job**: the build only reads the tree,
+  and only the deploy carries the Pages credentials, since the build runs third-party code
+  (`mix deps.get`). `cancel-in-progress: false`, because cancelling a run mid-upload would leave the
+  site half published.
+- ✅ **DOC-2b: produce/consume and streaming.** `produce-and-consume` (batching in one call, what a key
+  does and does not decide, the three ways to track position, the idempotency at-least-once obliges,
+  and the two transient errors `:migrating`/`:not_owner` a correct client retries) and
+  `streaming-with-backpressure` (why the credit window exists, the exact budget
+  `min(max, window - in_flight)`, why the ack fuses credit with commit, and the member ack that doubles
+  as a heartbeat).
+- ✅ **DOC-2c: security and operations.** `authentication` (the three mechanisms and why identity is
+  pluggable while authorization is not), `per-topic-acls` (the three-rule decision and an adoption order
+  for strict mode that does not lock every client out), `clustering-and-resharding` (discovery versus
+  data membership, the two replication planes, growing the ring) and `operations` (ports, probes,
+  metrics, retention, TLS, a production checklist). Total: **9 guides**, 22 extras, 119 pages.
+- ✅ **Removed the `docs/index.html` landing page and its three orphans.** With the Pages source moving
+  to "GitHub Actions" it would have stopped being served anyway, and it sat in the repository asserting
+  the three false claims above. Two assets only it referenced went with it (`style.css`,
+  `favicon.ico`), plus the `.nojekyll` that existed only for the "Pages from `docs/`" mode: on the
+  Actions path the artifact is served directly and Jekyll never runs. The `logo.jpeg` **stayed**,
+  because `README.md` and `mix.exs` (the ExDoc logo) use it. The dashboard does not count here: it
+  serves its own copy at `priv/static/logo.jpeg`. The demo video was not lost either: it is still in
+  `README.md`, which ships as a site extra. The only content that goes is the "How It Compares" table
+  (against RabbitMQ and Redis Pub/Sub), whose queue framing was part of the error.
 
-> **O que a verificação dos guias pegou.** Os exemplos foram **executados** contra um broker de pé, não
-> relidos, e cada env var, rota e default foi conferido contra a fonte. Isso rendeu cinco correções que
-> nenhuma ferramenta acusaria, porque `mix docs` compila prosa errada sem reclamar: o broker nomeado
-> `Malachi.Broker` em vez de `Malachi.LogBroker` nos oito trechos Elixir; um `stream_ack` que passava as
-> positions do push direto, quando a chamada quer cursor e precisa de `encode_cursor/1` antes;
-> `RETENTION_MAX_BYTES=0` documentado como "unlimited", quando o valor de desligar é a variável **ausente**
-> e `0` é um orçamento real que expira todo segment selado; o checklist mandando ligar `REQUIRE_TLS`, que
-> em prod **já** é true por default, errando o risco real (alguém setar `false` pra contornar certificado);
-> e o lockout descrito por usuário quando a chave é `{usuário, IP}`, com a escalada real
-> `base → ×3 → ×9 → ×24 → ×72`.
+> **What verifying the guides caught.** The examples were **executed** against a running broker rather
+> than read back, and every env var, route and default was checked against the source. That produced
+> five corrections no tool would flag, because `mix docs` compiles wrong prose without complaint: the
+> broker named `Malachi.Broker` instead of `Malachi.LogBroker` across all eight Elixir snippets; a
+> `stream_ack` that passed the pushed positions straight through, when the call wants a cursor and needs
+> `encode_cursor/1` first; `RETENTION_MAX_BYTES=0` documented as "unlimited", when the disable value is
+> the **absent** variable and `0` is a real budget that expires every sealed segment; the checklist
+> telling operators to enable `REQUIRE_TLS`, which in production **already** defaults to true, missing
+> the real risk (someone setting `false` to work around a certificate); and the lockout described as
+> per user when the key is `{user, IP}`, with the real ladder `base → ×3 → ×9 → ×24 → ×72`.
 
-> **Ação de operador, não commit:** trocar a fonte do Pages pra "GitHub Actions" em Settings → Pages. E o
-> `workflow_dispatch` só aparece na UI quando o arquivo está na branch default, então a ordem que
-> funciona é merge na `main` primeiro, troca do Settings depois.
+> **An operator action, not a commit:** switch the Pages source to "GitHub Actions" under Settings →
+> Pages. And `workflow_dispatch` only appears in the UI once the file is on the default branch, so the
+> order that works is merge to `main` first, switch the setting afterwards.
