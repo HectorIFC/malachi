@@ -145,8 +145,9 @@ NorthGuard diz que o storage é pluggable ("fps-store" é só a impl primária).
 > que listava quatro "questões em aberto", virou **registro de decisão**: as quatro já estavam
 > implementadas. **Genuinamente aberto agora:** (1) **ring durável** (o reshard e o split não sobrevivem
 > a restart de cluster inteiro, ⏳ anotado em §8.4), (2) **merge/shrink** de vnodes (fora de escopo
-> registrado), (3) **Fase 2, eficiência nativa** (NIF Rust/RocksDB, **condicional a profiling**), (4) a
-> **trilha de documentação** (§9).
+> registrado), (3) **Fase 2, eficiência nativa** (NIF Rust/RocksDB, **condicional a profiling**). A
+> **trilha de documentação** (§9) fechou: 9 guias, o site ExDoc e o workflow de Pages. Resta dela só uma
+> **ação de operador**, trocar a fonte do Pages para "GitHub Actions", que nenhum commit resolve.
 
 ### Fase 0: Persistência e modelo de log (Elixir puro)
 - ✅ `Malachi.Storage.SegmentStore` behaviour + impl `Malachi.Storage.ElixirStore`
@@ -2118,9 +2119,17 @@ site em `hectorifc.github.io/malachi`, com referência de API e guias.
   link morto). Permissões **por job**: o build só lê a árvore, e só o deploy carrega as credenciais do
   Pages, já que o build roda código de terceiros (`mix deps.get`). `cancel-in-progress: false` porque
   cancelar um run no meio do upload deixaria o site meio publicado.
-- ⬜ **DOC-2b/2c: os guias que faltam.** Produzir e consumir; streaming com backpressure; autenticação
-  (senha, mTLS, OIDC); ACLs por-tópico; clustering, sharding e re-sharding; operação (dashboard,
-  métricas, TLS).
+- ✅ **DOC-2b: produzir/consumir e streaming.** `produce-and-consume` (batching numa chamada, o que a
+  chave decide e o que não decide, as três formas de rastrear posição, a obrigação de idempotência do
+  at-least-once, e os dois erros transitórios `:migrating`/`:not_owner` que um cliente correto re-tenta) e
+  `streaming-with-backpressure` (por que a janela de crédito existe, o budget exato
+  `min(max, window - in_flight)`, por que o ack funde crédito e commit, e o ack de member que também é
+  heartbeat).
+- ✅ **DOC-2c: segurança e operação.** `authentication` (os três mecanismos e por que identidade é
+  plugável enquanto autorização não é), `per-topic-acls` (a decisão em três regras e uma ordem de adoção
+  do modo estrito que não tranca todos os clientes), `clustering-and-resharding` (descoberta versus
+  membership de dados, os dois planos de replicação, crescer o ring) e `operations` (portas, probes,
+  métricas, retenção, TLS, checklist de produção). Total: **9 guias**, 22 extras, 119 páginas.
 - ✅ **Removida a landing page `docs/index.html` e os três órfãos dela.** Com a fonte do Pages virando
   "GitHub Actions" ela deixaria de ser servida de qualquer forma, e continuava no repositório afirmando
   as três coisas falsas acima. Saíram
@@ -2130,6 +2139,17 @@ site em `hectorifc.github.io/malachi`, com referência de API e guias.
   O dashboard não entra na conta: serve a própria cópia em `priv/static/logo.jpeg`. O vídeo de demo não
   se perdeu: segue no `README.md`, que é extra do site. O único conteúdo que some é a tabela "How It
   Compares" (contra RabbitMQ e Redis Pub/Sub), cujo enquadramento de fila era parte do erro.
+
+> **O que a verificação dos guias pegou.** Os exemplos foram **executados** contra um broker de pé, não
+> relidos, e cada env var, rota e default foi conferido contra a fonte. Isso rendeu cinco correções que
+> nenhuma ferramenta acusaria, porque `mix docs` compila prosa errada sem reclamar: o broker nomeado
+> `Malachi.Broker` em vez de `Malachi.LogBroker` nos oito trechos Elixir; um `stream_ack` que passava as
+> positions do push direto, quando a chamada quer cursor e precisa de `encode_cursor/1` antes;
+> `RETENTION_MAX_BYTES=0` documentado como "unlimited", quando o valor de desligar é a variável **ausente**
+> e `0` é um orçamento real que expira todo segment selado; o checklist mandando ligar `REQUIRE_TLS`, que
+> em prod **já** é true por default, errando o risco real (alguém setar `false` pra contornar certificado);
+> e o lockout descrito por usuário quando a chave é `{usuário, IP}`, com a escalada real
+> `base → ×3 → ×9 → ×24 → ×72`.
 
 > **Ação de operador, não commit:** trocar a fonte do Pages pra "GitHub Actions" em Settings → Pages. E o
 > `workflow_dispatch` só aparece na UI quando o arquivo está na branch default, então a ordem que
