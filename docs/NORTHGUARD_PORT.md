@@ -506,50 +506,55 @@ contract, so `ra` plugs in without rework.
         forward, which is simpler and safer, and the operator re-issues; aborting sub-case 1 brings the
         furniture back (nothing disappears). Promotable to *complete-forward* (1B) later on the same
         foundation.
-        - ✅ **B2-1: a intenção durável na `RingTopology` (núcleo puro).** Novo campo `pending`
-          (`%{new_vnode, token, nodes}` | `nil`) que carrega o que um reconciliador precisa pra identificar e
-          desfazer o split (o ring/placements *velhos* são os da própria topologia, pois um split pendente ainda
-          **não** avançou o ring). Transições: `begin_split/4` grava a intenção em `version + 1` **sem mexer no
-          ring** (o gossip dissemina *antes* de migrar, pra o failover em qualquer nó achar); `advance/3`
-          (completar) move o ring adiante **e limpa** a intenção; novo `clear_pending/1` (abortar) limpa a
-          intenção **mantendo** o ring. A intenção viaja no mesmo gossip/CRDT (`merge/2` carrega o `pending` da
-          versão maior. Sem mudança na lógica de merge). Testado: `new`/`advance` não deixam pendência;
-          `begin_split` grava a intenção sem mover o ring; `advance` completa (ring adiante + intenção limpa);
-          `clear_pending` aborta (intenção limpa + ring intacto); a intenção converge via `merge`. Suíte 812
-          testes 0 falhas (+5); credo/dialyzer/format limpos.
-        - ✅ **B2-2: o `VnodeSplit` grava/limpa a intenção em volta da migração.** O `do_split` agora, antes de
-          migrar, **publica** a intenção (`begin_split` → `set_topology`, gossipada com o ring *velho*, v+1)
-          pra o failover achá-la; ao **completar**, `advance` (a partir do `pending`, não do `current`, senão
-          colidiria a versão) move o ring adiante **e limpa** a intenção (v+2); numa **falha lógica**, o
-          `split_vnode` já reverteu em-processo (B1), então só `clear_pending` (v+2, ring intacto) descarta a
-          intenção agora obsoleta e devolve o erro: assim nenhum reconciliador de failover age sobre um split
-          já desfeito. Só um **crash** antes do clear deixa a intenção pendente (é o que o B2-3 reconcilia). Um
-          split feliz agora bumpa **duas** versões (begin+advance). Testado (`:multinode`): o split feliz sobe a
-          topologia pra **v2** com o vnode novo e `pending == nil`; uma falha lógica (novo vnode num nó
-          inalcançável) devolve `{:error, _}`, sobe pra **v2** com `pending == nil` e o ring **inalterado** (só a
-          origem). Suíte 812 testes 0 falhas (+1 multinode); credo/dialyzer/format limpos.
-        - ✅ **B2-3. O reconcile no failover (gatilho 3A: `on_acquired` + `init`).** Fecha o 1A. Novo
-          `ReplicatedDSRSM.abort_split/3` (público) reusa o `roll_back` do B1 (move os tópicos migrados de volta
-          + destrava fences) e então **deleta o cluster órfão do vnode novo, mas só se confirmado vazio**:
-          deletar um vnode que ainda tem tópicos (um move-back que falhou, ou inalcançável) os perderia, então
-          nesse caso o cluster fica **intacto** e retorna `{:error, :incomplete}` (o dado está a salvo lá). Novo
-          `VnodeSplit.reconcile/2` (leader-gated): lê a topologia, e se há `pending`, monta o `ReplicatedDSRSM` do
-          ring *velho* (um split pendente não avançou o ring), aborta e, **só no `:ok`** (rollback completo):
-          publica o `clear_pending`; num `:incomplete` **mantém a intenção pendente** pra um retry futuro (nunca
-          abandona dado encalhado). O `SplitCoordinator` ganha `reconcile/1` (cast, **serializa** com splits no mesmo
-          processo) disparado em **dois** pontos: no `on_acquired` do `LeaseHolder` (failover entre nós) **e** no
-          próprio `init` (restart do GenServer com o mesmo líder): ambos protegidos por `leader?`. É o análogo do
-          NorthGuard (transcrição 500-508: coordenador = líder do grupo raft, *"responsible for carrying it out"*;
-          a recuperação é nativa do raft: o novo líder relê o log, sem poll periódico): o **eixo do gatilho** (3A)
-          é fiel; no **eixo estratégia** o NorthGuard completa-adiante (1B) e nós abortamos (1A) por simplicidade.
-          Fiado na `application.ex` (`on_acquired` → `SplitCoordinator.reconcile`). Testado: reconcile aborta um
-          split cujo coordenador "morreu" no meio (migração feita, intenção `pending`): o tópico volta pra origem
-          com offsets, un-fenced/gravável, o cluster órfão é deletado, e o abort sobe (v2, `pending` limpo, ring
-          intacto); com o vnode novo **inalcançável** a intenção fica pendente (v1, não limpa) pra retry, sem perda;
-          no-op sem `pending`; recusa se não-líder; o coordinator sobrevive ao reconcile no `init`+cast.
-          Suíte 815 testes 0 falhas (+5, sendo +2 multinode); credo/dialyzer/format limpos. **B2 completo, split
-          resiliente a crash do coordenador (abort + retry). Promoção futura opcional: 1B (complete-forward, o
-          "carrying it out até o fim" literal) e/ou 3C (varredura periódica).**
+        - ✅ **B2-1: the durable intent in `RingTopology` (pure core).** A new `pending` field
+          (`%{new_vnode, token, nodes}` | `nil`) carrying what a reconciler needs in order to identify and undo
+          the split (the *old* ring and placements are the topology's own, since a pending split has **not**
+          advanced the ring yet). Transitions: `begin_split/4` records the intent at `version + 1` **without
+          touching the ring** (gossip disseminates it *before* the migration, so a failover on any node can find
+          it); `advance/3` (completing) moves the ring forward **and clears** the intent; a new
+          `clear_pending/1` (aborting) clears the intent while **keeping** the ring. The intent travels over the
+          same gossip/CRDT (`merge/2` carries the higher version's `pending`, with no change to the merge
+          logic). Tested: `new` and `advance` leave nothing pending; `begin_split` records the intent without
+          moving the ring; `advance` completes (ring forward plus intent cleared); `clear_pending` aborts
+          (intent cleared, ring intact); the intent converges through `merge`. Suite at 812 tests, 0 failures
+          (+5); credo, dialyzer and format clean.
+        - ✅ **B2-2: `VnodeSplit` records and clears the intent around the migration.** `do_split` now
+          **publishes** the intent before migrating (`begin_split` → `set_topology`, gossiped with the *old*
+          ring, v+1) so a failover can find it; on **completion**, `advance` (from the `pending`, not from
+          `current`, which would collide on the version) moves the ring forward **and clears** the intent
+          (v+2); on a **logical failure**, `split_vnode` has already reverted in-process (B1), so only
+          `clear_pending` (v+2, ring intact) discards the now-obsolete intent and returns the error, meaning no
+          failover reconciler acts on a split that was already undone. Only a **crash** before the clear leaves
+          the intent pending (which is what B2-3 reconciles). A happy split now bumps **two** versions (begin
+          plus advance). Tested (`:multinode`): the happy split raises the topology to **v2** with the new vnode
+          and `pending == nil`; a logical failure (the new vnode on an unreachable node) returns `{:error, _}`,
+          raises to **v2** with `pending == nil` and leaves the ring **unchanged** (source only). Suite at 812
+          tests, 0 failures (+1 multinode); credo, dialyzer and format clean.
+        - ✅ **B2-3. The reconcile on failover (trigger 3A: `on_acquired` plus `init`).** This closes 1A. A new
+          public `ReplicatedDSRSM.abort_split/3` reuses B1's `roll_back` (moving the migrated topics back and
+          releasing fences) and then **deletes the new vnode's orphan cluster, but only once confirmed empty**:
+          deleting a vnode that still holds topics (a move-back that failed, or was unreachable) would lose
+          them, so in that case the cluster is left **intact** and it returns `{:error, :incomplete}` (the data
+          is safe there). A new leader-gated `VnodeSplit.reconcile/2` reads the topology and, if there is a
+          `pending`, builds the `ReplicatedDSRSM` of the *old* ring (a pending split did not advance the ring),
+          aborts, and **only on `:ok`** (a complete rollback) publishes the `clear_pending`; on an
+          `:incomplete` it **keeps the intent pending** for a future retry (never abandoning stranded data).
+          `SplitCoordinator` gains `reconcile/1` (a cast, which **serializes** with splits in the same process)
+          fired at **two** points: on `LeaseHolder`'s `on_acquired` (failover between nodes) **and** in its own
+          `init` (a GenServer restart under the same leader); both are guarded by `leader?`. It is the
+          NorthGuard analogue (transcript 500-508: the coordinator is the raft group's leader, *"responsible for
+          carrying it out"*; recovery is native to raft, since the new leader re-reads the log, with no periodic
+          poll): the **trigger axis** (3A) is faithful, while on the **strategy axis** NorthGuard completes
+          forward (1B) and we abort (1A) for simplicity. Wired into `application.ex` (`on_acquired` →
+          `SplitCoordinator.reconcile`). Tested: reconcile aborts a split whose coordinator "died" midway
+          (migration done, intent `pending`), so the topic returns to its source with offsets, un-fenced and
+          writable, the orphan cluster is deleted, and the abort is published (v2, `pending` cleared, ring
+          intact); with the new vnode **unreachable** the intent stays pending (v1, not cleared) for a retry,
+          without loss; a no-op when there is no `pending`; a refusal when not the leader; and the coordinator
+          survives the reconcile in `init` plus the cast. Suite at 815 tests, 0 failures (+5, of which +2 are
+          multinode); credo, dialyzer and format clean. **B2 complete: the split is resilient to a coordinator
+          crash (abort plus retry). Optional future promotion: 1B (complete-forward, the literal "carrying it
+          out to the end") and/or 3C (a periodic sweep).**
       - ✅ **Endurecimento 1B: reconcile por *complete-forward* (o "carrying it out" literal do NorthGuard)**
         (política **1B-fwd** escolhida). Promove o reconcile do B2-3 de *abortar* pra *completar-adiante*: em vez
         de reverter um split interrompido e o operador re-emitir, o novo coordenador **retoma a migração de onde
