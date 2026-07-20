@@ -285,14 +285,34 @@ defmodule Malachi.AuthTest do
       assert [{^token, _data}] = :ets.lookup(:malachi_sessions, token)
     end
 
-    test "expiry is checked before IP binding, so a stale token from another IP reports expiry", %{ip: ip} do
+    test "an expired token replayed from another IP still raises the hijack signal", %{ip: ip} do
       Application.put_env(:malachi, :session_timeout_seconds, -1)
       {:ok, token} = SessionManager.create_session("cleanup_other_ip", [:produce], ip)
 
-      # the expiry branch runs first, so this is :session_expired rather than :session_hijack_attempt,
-      # and the row is reaped even though the caller failed the binding check
-      assert {:error, :session_expired} = SessionManager.validate_session(token, {198, 51, 100, 9})
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          # the caller is told the accurate reason, expiry, not that it looks like an attacker
+          assert {:error, :session_expired} = SessionManager.validate_session(token, {198, 51, 100, 9})
+        end)
+
+      # but the binding mismatch is still recorded, otherwise a stolen token replayed after it expired
+      # would leave no trace, since the expiry branch answers first
+      assert log =~ "cleanup_other_ip"
+      assert log =~ "198.51.100.9"
       assert [] = :ets.lookup(:malachi_sessions, token)
+    end
+
+    test "an expired token replayed from its own IP raises no hijack signal", %{ip: ip} do
+      Application.put_env(:malachi, :session_timeout_seconds, -1)
+      {:ok, token} = SessionManager.create_session("cleanup_same_ip", [:produce], ip)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :session_expired} = SessionManager.validate_session(token, ip)
+        end)
+
+      # plain expiry is not a theft signal, so the warning must not fire for every timed-out session
+      refute log =~ "cleanup_same_ip"
     end
   end
 

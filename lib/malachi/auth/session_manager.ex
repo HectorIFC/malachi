@@ -117,10 +117,17 @@ defmodule Malachi.Auth.SessionManager do
     case :ets.lookup(@table_sessions, token) do
       [{^token, session_data}] ->
         now = System.system_time(:second)
+        binding_ok? = valid_client_binding?(session_data, client_ip, user_agent)
 
         cond do
           session_data.expires_at < now ->
             :ets.delete(@table_sessions, token)
+
+            # This branch runs before the binding one, so a stolen token replayed from a foreign IP after
+            # it expired would otherwise leave no theft signal at all. Record the mismatch, but still
+            # answer :session_expired: that is the accurate reason, and it keeps a legitimate client whose
+            # IP moved (NAT, mobile) from being told it looks like an attacker.
+            maybe_log_hijack_attempt(binding_ok?, session_data, token, client_ip)
 
             Malachi.AuditLog.log_event(
               :session_expired,
@@ -132,30 +139,8 @@ defmodule Malachi.Auth.SessionManager do
 
             {:error, :session_expired}
 
-          not valid_client_binding?(session_data, client_ip, user_agent) ->
-            Logger.warning(
-              I18n.t(:session_hijack_attempt,
-                username: session_data.username,
-                ip: format_ip(client_ip)
-              ),
-              username: session_data.username,
-              session_ip: format_ip(session_data.ip),
-              request_ip: format_ip(client_ip),
-              token_prefix: String.slice(token, 0, 8)
-            )
-
-            Malachi.AuditLog.log_event(
-              :session_hijack_attempt,
-              %{username: session_data.username, ip: client_ip},
-              "validate_session",
-              :failure,
-              %{
-                session_ip: format_ip(session_data.ip),
-                request_ip: format_ip(client_ip),
-                token_prefix: String.slice(token, 0, 8)
-              }
-            )
-
+          not binding_ok? ->
+            maybe_log_hijack_attempt(binding_ok?, session_data, token, client_ip)
             {:error, :session_hijack_attempt}
 
           true ->
@@ -308,6 +293,35 @@ defmodule Malachi.Auth.SessionManager do
   defp generate_token do
     :crypto.strong_rand_bytes(32)
     |> Base.url_encode64(padding: false)
+  end
+
+  # Records a client-binding mismatch, as an operator-facing warning and as an audit event. Takes the
+  # already-computed verdict so both the expiry and the binding branch of `validate_session/3` can call it
+  # without evaluating the binding twice, and so an expired-and-moved token still raises the theft signal.
+  defp maybe_log_hijack_attempt(true = _binding_ok?, _session_data, _token, _client_ip), do: :ok
+
+  defp maybe_log_hijack_attempt(false = _binding_ok?, session_data, token, client_ip) do
+    token_prefix = String.slice(token, 0, 8)
+
+    Logger.warning(
+      I18n.t(:session_hijack_attempt, username: session_data.username, ip: format_ip(client_ip)),
+      username: session_data.username,
+      session_ip: format_ip(session_data.ip),
+      request_ip: format_ip(client_ip),
+      token_prefix: token_prefix
+    )
+
+    Malachi.AuditLog.log_event(
+      :session_hijack_attempt,
+      %{username: session_data.username, ip: client_ip},
+      "validate_session",
+      :failure,
+      %{
+        session_ip: format_ip(session_data.ip),
+        request_ip: format_ip(client_ip),
+        token_prefix: token_prefix
+      }
+    )
   end
 
   defp valid_client_binding?(session_data, client_ip, _user_agent) do
