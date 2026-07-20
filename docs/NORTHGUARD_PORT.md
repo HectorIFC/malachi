@@ -446,61 +446,66 @@ contract, so `ra` plugs in without rework.
         starts routing to and living in the new vnode's cluster). Suite at 805 tests, 0 failures (+1
         multinode); credo, dialyzer and format clean. **Vnode split over `ra` (VS + Int): what NorthGuard does,
         working end to end.**
-      - ✅ **Endurecimento C. Retry do cliente Node no `:migrating`.** Fecha a resiliência do cliente no split,
-        o análogo do retry do `:not_owner` (A5) e do que o NorthGuard faz numa mudança (transcrição: *"seal it,
-        make a new one, move the producers over"*. Selar, criar o novo e **mover os produtores**). O `:migrating`
-        surge em escritas de **metadado** num topic em migração, **produce** (ao rolar segmento) e **commit**
-        (offset). Node-only: `isMigrating(err)` no `client.js` (um `MalachiError` de mensagem `"migrating"`) e um
-        helper **compartilhado** `withRetry(fn, retryable, ms, onRetry)` no `cli.js` (retenta com back-off
-        enquanto o erro é transiente; não-retryable propaga). `producer.js` (produce batch) e `consumer.js` (o
-        commit antes de avançar o cursor) passam por `withRetry(..., isMigrating, ...)`, imprimem `~` e re-tentam
-        contra a localização nova quando o split termina. Validado: `node --check` nos scripts + sanity de
-        `isMigrating` e `withRetry` (retenta-então-ok; propaga não-retryable). Sem harness de teste JS (padrão das
-        fatias de cliente Node). **Resiliência de cliente ao ciclo de vida do split (`:migrating` + `:not_owner`)
-        fechada.**
-      - ✅ **Endurecimento A: `SplitCoordinator` (dirige o split sob o lease).** Fecha a lacuna de o
-        `VnodeSplit` ser só uma função: novo `Malachi.Cluster.SplitCoordinator` (GenServer) **serializa** splits
-        (um por vez: um split muta o ring, dois correriam) e é fiado na árvore sob a `rebalance_children`
-        (control plane shardado). É o modelo NorthGuard *"the coordinator is responsible for carrying it out"*: só
-        o **dono do lease** age (seam `leader?` = `LeaseHolder.leader?`, como o `RebalanceCoordinator`), lê/publica
-        a topologia via a membership (`Malachi.LogMembership`), e `split/4` delega ao `VnodeSplit.split/5`
-        (migração fencida sobre `ra` → avança versão → `set_topology` → gossip propaga → todo nó adota). **Operator
-        -driven** (nada splita sozinho; um operador ou política futura chama `split/4`), como o
-        `RebalanceCoordinator`. Seams mantêm testável sem lease/ra. Single-node/não-shardado não sobe o
-        coordinator. Testado in-VM (seams injetados): recusa `{:error, :not_leader}` se não é líder; como líder,
-        delega ao `VnodeSplit` (sem topologia baseline → `{:error, :no_topology}`). Boot single-node ok. Suíte 807
-        testes 0 falhas (+2); credo/dialyzer/format limpos. **Split de vnode agora é dirigido no runtime sob o
-        lease. Endurecimento restante: reconciliação de split parcial (VS-2c-2: o coordenador retomar/completar
-        um split incompleto no failover, o "carrying it out até o fim" do NorthGuard).**
-      - ✅ **Endurecimento B1: `split_vnode` faz rollback numa falha de migração.** Antes, uma migração que
-        falhava no meio deixava um estado parcial (um topic já no vnode novo + fences de pé), tudo pra
-        reconciliação futura. Agora o `migrate_displaced` é **tudo-ou-nada**: se qualquer origem falha, ele
-        **reverte**: move de volta pro dono do ring **velho** cada topic que chegou ao vnode novo (`move_topic`
-        na direção inversa: `insert` na origem → `extract` do novo, o mesmo copy-first) e **destrava** qualquer
-        fence deixado numa origem (varre `meta.migrating` de cada uma, `:end_migration`). O rollback é **derivado
-        do estado** (sem rastrear passo-a-passo): lê o metadado do vnode novo e reroteia cada topic pelo ring
-        velho: idempotente; um passo de rollback que falha é engolido (fica pra recuperação manual/coordenador),
-        mas o caso comum nunca **orfana** um topic nem **prende** um fence. Unificação DRY: o `migrate_topic` de
-        ida virou `move_topic(from, to, export, name)`, reusado nos dois sentidos. A iteração das origens agora é
-        **ordenada por id** (`Enum.sort`): split reproduzível → estado de falha parcial previsível. Testado
-        (`:multinode`): (1) o split que falha em subir o vnode novo não toca a origem (falha **antes** de fenciar);
-        (2): o novo - um split que falha **no meio** (2ª origem com o cluster `ra` caído, após a 1ª já ter migrado
-        "orders") **reverte**: "orders" volta pra origem com offsets intactos, sem fence preso (gravável de novo,
-        não `{:error, :migrating}`), e o vnode novo fica **vazio** (nada orfanado). Suíte 807 testes 0 falhas (+1
-        multinode); credo/dialyzer/format limpos. **Endurecimento restante: B2, reconciliação por saga/intent
-        pra crash do coordenador *no meio* do split (VS-2c-2, o "carrying it out até o fim" do NorthGuard).**
-      - ✅ **Endurecimento B2: reconciliação de split interrompido pelo crash do coordenador** (estratégia
-        **1A: intenção durável + abort**, escolhida). O B1 cobre falhas *lógicas* dentro de uma chamada de
-        `split_vnode`; **não** cobre o coordenador (processo/nó) **morrer no meio**, aí o rollback em-processo
-        do B1 nunca roda e o estado durável (nos logs `ra`) fica pela metade: (sub-caso 1) copiou tudo mas não
-        publicou a topologia → o anel ainda roteia pra origem esvaziada, **perda aparente**; (sub-caso 2) migrou
-        parte → fences presos, escritas bloqueadas pra sempre. O NorthGuard resolve porque o split é dirigido
-        pelo **coordenador do vnode** (líder de um grupo raft): a intenção vive no log raft e o **novo líder
-        retoma** ("carrying it out"). No malachi o split é dirigido pelo **lease global**, então precisamos de
-        uma **intenção durável** + um **reconcile no failover**. Decisão (1A): reconciliar por **abort** (reverter
-        via o `roll_back` do B1) em vez de completar-adiante: mais simples/seguro, o operador re-emite; o abort
-        do sub-caso 1 traz os móveis de volta (nada some). Promovível a *complete-forward* (1B) depois sobre a
-        mesma base.
+      - ✅ **Hardening C. Node client retry on `:migrating`.** This closes client resilience during a split,
+        the analogue of the `:not_owner` retry (A5) and of what NorthGuard does on a change (transcript:
+        *"seal it, make a new one, move the producers over"*, that is: seal it, create the new one and **move
+        the producers**). `:migrating` shows up on **metadata** writes to a migrating topic, on **produce**
+        (when rolling a segment) and on **commit** (offset). Node-only: `isMigrating(err)` in `client.js` (a
+        `MalachiError` whose message is `"migrating"`) plus a **shared** `withRetry(fn, retryable, ms, onRetry)`
+        helper in `cli.js` (retrying with back-off while the error is transient; a non-retryable one
+        propagates). `producer.js` (the produce batch) and `consumer.js` (the commit before advancing the
+        cursor) go through `withRetry(..., isMigrating, ...)`, print `~` and retry against the new location once
+        the split finishes. Validated with `node --check` on the scripts plus sanity checks of `isMigrating` and
+        `withRetry` (retry-then-ok; a non-retryable error propagates). No JS test harness (the standard for Node
+        client slices). **Client resilience to the split lifecycle (`:migrating` + `:not_owner`) is closed.**
+      - ✅ **Hardening A: `SplitCoordinator` (driving the split under the lease).** This closes the gap of
+        `VnodeSplit` being only a function: a new `Malachi.Cluster.SplitCoordinator` (GenServer) **serializes**
+        splits (one at a time, since a split mutates the ring and two would race) and is wired into the tree
+        under `rebalance_children` (the sharded control plane). It is the NorthGuard model, *"the coordinator is
+        responsible for carrying it out"*: only the **lease holder** acts (the `leader?` seam being
+        `LeaseHolder.leader?`, as in `RebalanceCoordinator`), it reads and publishes the topology through
+        membership (`Malachi.LogMembership`), and `split/4` delegates to `VnodeSplit.split/5` (a fenced
+        migration over `ra` → advance the version → `set_topology` → gossip propagates → every node adopts).
+        **Operator-driven** (nothing splits on its own; an operator, or a future policy, calls `split/4`), like
+        `RebalanceCoordinator`. The seams keep it testable without a lease or `ra`. Single-node and non-sharded
+        do not start the coordinator. Tested in-VM (with injected seams): it refuses with
+        `{:error, :not_leader}` when not the leader; as leader it delegates to `VnodeSplit` (with no baseline
+        topology, `{:error, :no_topology}`). Single-node boot fine. Suite at 807 tests, 0 failures (+2); credo,
+        dialyzer and format clean. **Vnode split is now driven at runtime under the lease. Hardening still
+        open: reconciling a partial split (VS-2c-2: the coordinator resuming or completing an incomplete split
+        after a failover, NorthGuard's "carrying it out to the end").**
+      - ✅ **Hardening B1: `split_vnode` rolls back on a migration failure.** Before, a migration that failed
+        midway left partial state (a topic already on the new vnode plus fences up), all of it for future
+        reconciliation. Now `migrate_displaced` is **all or nothing**: if any source fails, it **reverts**,
+        moving every topic that reached the new vnode back to its owner under the **old** ring (`move_topic` in
+        the reverse direction: `insert` on the source → `extract` from the new one, the same copy-first) and
+        **releasing** any fence left on a source (scanning each one's `meta.migrating` and issuing
+        `:end_migration`). The rollback is **derived from state** (nothing is tracked step by step): it reads
+        the new vnode's metadata and re-routes each topic through the old ring, so it is idempotent; a rollback
+        step that fails is swallowed (left to manual recovery or the coordinator), but the common case never
+        **orphans** a topic nor **traps** a fence. A DRY unification: the outbound `migrate_topic` became
+        `move_topic(from, to, export, name)`, reused in both directions. Iteration over sources is now
+        **ordered by id** (`Enum.sort`), so a split is reproducible and a partial-failure state is predictable.
+        Tested (`:multinode`): (1) a split that fails to bring the new vnode up does not touch the source (it
+        fails **before** fencing); (2) the new one, a split that fails **midway** (the second source with its
+        `ra` cluster down, after the first had already migrated "orders"), **reverts**: "orders" returns to its
+        source with offsets intact and no trapped fence (writable again, not `{:error, :migrating}`), and the
+        new vnode is left **empty** (nothing orphaned). Suite at 807 tests, 0 failures (+1 multinode); credo,
+        dialyzer and format clean. **Hardening still open: B2, saga/intent reconciliation for a coordinator
+        crash *in the middle* of a split (VS-2c-2, NorthGuard's "carrying it out to the end").**
+      - ✅ **Hardening B2: reconciling a split interrupted by a coordinator crash** (strategy **1A: a durable
+        intent plus abort**, as chosen). B1 covers *logical* failures inside one `split_vnode` call; it does
+        **not** cover the coordinator (process or node) **dying midway**, where B1's in-process rollback never
+        runs and the durable state (in the `ra` logs) is left half done: (sub-case 1) everything was copied but
+        the topology was not published, so the ring still routes to the emptied source, an **apparent loss**;
+        (sub-case 2) only part migrated, so fences are trapped and writes blocked forever. NorthGuard solves
+        this because the split is driven by the **vnode's coordinator** (the leader of a raft group): the intent
+        lives in the raft log and the **new leader resumes** it ("carrying it out"). In malachi the split is
+        driven by the **global lease**, so we need a **durable intent** plus a **reconcile on failover**.
+        Decision (1A): reconcile by **abort** (reverting through B1's `roll_back`) rather than completing
+        forward, which is simpler and safer, and the operator re-issues; aborting sub-case 1 brings the
+        furniture back (nothing disappears). Promotable to *complete-forward* (1B) later on the same
+        foundation.
         - ✅ **B2-1: a intenção durável na `RingTopology` (núcleo puro).** Novo campo `pending`
           (`%{new_vnode, token, nodes}` | `nil`) que carrega o que um reconciliador precisa pra identificar e
           desfazer o split (o ring/placements *velhos* são os da própria topologia, pois um split pendente ainda
