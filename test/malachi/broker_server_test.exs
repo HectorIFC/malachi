@@ -89,7 +89,7 @@ defmodule Malachi.BrokerServerTest do
   end
 
   describe "durability" do
-    test "records are durable on return. No explicit sync needed", %{tmp_dir: directory} do
+    test "records are durable on return: no explicit sync needed", %{tmp_dir: directory} do
       {server, root_id} = with_topic(directory)
 
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0"), record("b", "k1")])

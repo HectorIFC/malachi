@@ -13,7 +13,7 @@ defmodule Malachi.Cluster.TopologyTest do
     end
   end
 
-  describe "build/1, gossip" do
+  describe "build/1: gossip" do
     test "defaults the port and omits optional secret/multicast_addr" do
       assert [malachi: [strategy: Cluster.Strategy.Gossip, config: config]] =
                Topology.build(%{strategy: :gossip})
@@ -44,7 +44,7 @@ defmodule Malachi.Cluster.TopologyTest do
     end
   end
 
-  describe "build/1, kubernetes" do
+  describe "build/1: kubernetes" do
     test "builds selector/basename/mode and defaults the polling interval" do
       assert [malachi: [strategy: Cluster.Strategy.Kubernetes, config: config]] =
                Topology.build(%{
@@ -86,7 +86,7 @@ defmodule Malachi.Cluster.TopologyTest do
     end
   end
 
-  describe "build/1, epmd" do
+  describe "build/1: epmd" do
     test "uses the static host list" do
       hosts = [:malachi@a, :malachi@b]
 
@@ -103,7 +103,7 @@ defmodule Malachi.Cluster.TopologyTest do
     end
   end
 
-  describe "build/1, invalid" do
+  describe "build/1: invalid" do
     test "raises on an unknown strategy" do
       assert_raise ArgumentError, ~r/unknown cluster strategy/, fn ->
         Topology.build(%{strategy: :consul})

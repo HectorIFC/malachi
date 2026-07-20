@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Malachi.UserTest do
   # end to end (only the cross-node RPC transport is skipped).
   defp local_call, do: fn module, fun, args -> {:ok, apply(module, fun, args)} end
 
-  describe "execute/3, parsing and dispatch" do
+  describe "execute/3: parsing and dispatch" do
     test "create parses --perms into atoms, calls add_user, and reports success" do
       call = recording_call({:ok, :ok})
       assert {:ok, msg} = User.execute(["create", "alice", "pw"], [perms: "produce,consume"], call)
