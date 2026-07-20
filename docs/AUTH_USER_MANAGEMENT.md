@@ -1,311 +1,348 @@
-# ADR: Arquitetura de autenticação e gestão de usuários
+# ADR: authentication and user management architecture
 
-> Status: **Proposta** · Data: 2026-07-16 · Escopo: authn/authz e ciclo de vida de usuários do Malachi
+> Status: **Proposal** · Date: 2026-07-16 · Scope: Malachi's authn/authz and user lifecycle
 >
-> Guia irmão (práticas, não arquitetura): [SECURITY_DEVELOPMENT.md](SECURITY_DEVELOPMENT.md) ·
-> Design geral do port: [NORTHGUARD_PORT.md](NORTHGUARD_PORT.md)
+> Sibling guide (practices, not architecture): [SECURITY_DEVELOPMENT.md](SECURITY_DEVELOPMENT.md) ·
+> Overall port design: [NORTHGUARD_PORT.md](NORTHGUARD_PORT.md)
 
-Este documento **não** implementa nada: registra o estado atual, compara com concorrentes e o NorthGuard,
-e propõe um roadmap faseado. A ordem/execução das fatias é decidida em conversas futuras.
-
----
-
-## 1. Contexto
-
-O Malachi mira ser um produto **vendável**: escalável, seguro e fácil de operar. Duas perguntas
-estratégicas motivaram esta análise:
-
-1. É aceitável ter **usuários/senhas padrão hardcoded no código**?
-2. **Mnesia/ETS** é a forma certa de gerenciar usuários (produtores, consumidores, admin) num produto
-   **distribuído**?
-
-A resposta curta: (1) não: é um anti-padrão que já tem mitigações, mas deveria ser eliminado; (2) o
-problema não é "Mnesia vs ETS" em si, e sim que a **implementação atual não replica os usuários entre nós**,
-um gap arquitetural real para um sistema de cluster.
+This document implements **nothing**: it records the current state, compares it with competitors and with
+NorthGuard, and proposes a phased roadmap. The order and execution of the slices is decided in later
+conversations.
 
 ---
 
-## 2. Estado atual (o que o código faz hoje)
+## 1. Context
 
-Todo o stack de auth é **Malachi-original** (o NorthGuard não descreve auth, ver §4). Vive em
+Malachi aims to be a **sellable** product: scalable, secure and easy to operate. Two strategic questions
+prompted this analysis:
+
+1. Is it acceptable to ship **default users and passwords hardcoded in the source**?
+2. Is **Mnesia/ETS** the right way to manage users (producers, consumers, admin) in a **distributed**
+   product?
+
+The short answer: (1) no, it is an anti-pattern that already has mitigations but should be eliminated; (2)
+the problem is not "Mnesia vs ETS" as such, it is that the **current implementation does not replicate
+users across nodes**, a real architectural gap for a clustered system.
+
+---
+
+## 2. Current state (what the code does today)
+
+The whole auth stack is **Malachi-original** (NorthGuard does not describe auth, see §4). It lives in
 `lib/malachi/auth.ex` + `lib/malachi/auth/{user_store,session_manager,lockout_manager,config_validator}.ex`,
-fiado na árvore em `lib/malachi/application.ex`.
+wired into the tree in `lib/malachi/application.ex`.
 
-### O que já está bem-feito (reconhecer antes de criticar)
-- **Senhas hasheadas com Argon2**. Nunca em texto puro no banco (`lib/malachi/auth.ex:302` hash,
-  `auth.ex:306` verify; dep `{:argon2_elixir, "~> 4.1.3"}` em `mix.exs:52`).
-- **Mitigação de timing**, usuário inexistente ainda roda `Argon2.no_user_verify()` (`auth.ex:80`).
-- **Guard de produção**. Em `:prod` o boot **falha** (`config/runtime.exs:308` `raise`) se você não
-  sobrescrever os defaults; `ConfigValidator` mantém uma blacklist de senhas fracas
-  (`config_validator.ex:29-40`).
-- **Sessões endurecidas**: tokens de 32 bytes aleatórios, IP-binding por padrão, expiração, detecção de
-  hijack (`lib/malachi/auth/session_manager.ex`).
+### What is already done well (acknowledge before criticising)
+- **Passwords hashed with Argon2**. Never in plaintext at rest (`lib/malachi/auth.ex:302` hash,
+  `auth.ex:306` verify; dependency `{:argon2_elixir, "~> 4.1.3"}` in `mix.exs:52`).
+- **Timing mitigation**: an unknown user still runs `Argon2.no_user_verify()` (`auth.ex:80`).
+- **Production guard**. Under `:prod` the boot **fails** (`config/runtime.exs:308` `raise`) unless you
+  override the defaults; `ConfigValidator` keeps a weak-password blacklist (`config_validator.ex:29-40`).
+- **Hardened sessions**: 32 random bytes per token, IP binding on by default, expiry, hijack detection
+  (`lib/malachi/auth/session_manager.ex`).
 
-### As lacunas
-- **Storage node-local, não replicado (crítico).** Mnesia `disc_copies` + cache ETS
-  (`lib/malachi/auth/user_store.ex`). A tabela é criada só em `[node]` (`user_store.ex:337` `create_schema`,
-  `user_store.ex:350` `{storage_type, [node]}`, `user_store.ex:353` `create_table`); **não há**
-  `add_table_copy`/`extra_db_nodes` em lugar nenhum. Consequência: **cada nó tem seu próprio user store**; um
-  nó novo **re-semeia do config**, não sincroniza. Um usuário criado no nó A **não existe** no nó B.
-- **Credenciais padrão hardcoded.** `admin/admin123`, `producer/producer123`, `consumer/consumer123`,
-  `app/app123` em texto puro em `config/config.exs:14-19` (hasheadas só ao semear). Fresta: o mínimo de 12
-  caracteres só é exigido se `require_strong_passwords` estiver ligado, e o default é **false**
-  (`runtime.exs:361`); dev/staging rodam com `admin123`.
-- **Sem gestão em runtime.** Só funções in-process `Auth.add_user/remove_user/change_password/list_users`
-  (`auth.ex:146-167`). **Não há CLI, endpoint HTTP nem op de wire** para CRUD de usuário. Como o Mnesia não
-  replica, uma mudança via RPC/IEx cai **num nó só**.
-- **AutZ grosso e global.** Três permissões `:admin`/`:produce`/`:consume` (`auth.ex:144`), impostas no
-  boundary TCP (`lib/malachi/tcp_protocol.ex:196-204`) e no dashboard (`lib/malachi/dashboard.ex:245-268`).
-  **Sem ACL por-tópico e sem multi-tenancy.**
-- **Sessões e lockouts voláteis.** ETS puro: somem no restart e não cruzam nós
+### The gaps
+- **Node-local storage, not replicated (critical).** Mnesia `disc_copies` + an ETS cache
+  (`lib/malachi/auth/user_store.ex`). The table is created on `[node]` only (`user_store.ex:337`
+  `create_schema`, `user_store.ex:350` `{storage_type, [node]}`, `user_store.ex:353` `create_table`); there
+  is **no** `add_table_copy` or `extra_db_nodes` anywhere. Consequence: **every node has its own user
+  store**; a new node **reseeds from config** rather than syncing. A user created on node A **does not
+  exist** on node B.
+- **Hardcoded default credentials.** `admin/admin123`, `producer/producer123`, `consumer/consumer123`,
+  `app/app123` in plaintext in `config/config.exs:14-19` (hashed only when seeded). The loophole: the
+  12-character minimum only applies when `require_strong_passwords` is on, and it defaults to **false**
+  (`runtime.exs:361`), so dev and staging run on `admin123`.
+- **No runtime management.** Only the in-process functions
+  `Auth.add_user/remove_user/change_password/list_users` (`auth.ex:146-167`). There is **no CLI, HTTP
+  endpoint or wire op** for user CRUD. Since Mnesia does not replicate, a change made over RPC or IEx lands
+  on **one node only**.
+- **Coarse, global authz.** Three permissions, `:admin`/`:produce`/`:consume` (`auth.ex:144`), enforced at
+  the TCP boundary (`lib/malachi/tcp_protocol.ex:196-204`) and in the dashboard
+  (`lib/malachi/dashboard.ex:245-268`). **No per-topic ACL and no multi-tenancy.**
+- **Volatile sessions and lockouts.** Plain ETS: they vanish on restart and do not cross nodes
   (`session_manager.ex`, `lockout_manager.ex:18-20`).
-- **Sem auth externa.** Nenhum SASL/OIDC/JWT/LDAP/token. mTLS é opt-in mas **verifica sem autenticar**: um
-  cert de cliente válido **não** é mapeado para usuário/permissão: a auth por senha ainda roda
-  (`lib/malachi/tcp_acceptor_pool.ex:111-118`; `lib/malachi/tls_validator.ex` só valida o cert do servidor).
+- **No external auth.** No SASL/OIDC/JWT/LDAP/token. mTLS is opt-in but **verifies without
+  authenticating**: a valid client certificate is **not** mapped to a user or permission, and password auth
+  still runs (`lib/malachi/tcp_acceptor_pool.ex:111-118`; `lib/malachi/tls_validator.ex` only validates the
+  server certificate).
 
 ---
 
-## 3. Problemas e decisões
+## 3. Problems and decisions
 
-Cada item segue o padrão: problema concreto → opções (esforço/risco) → recomendação → como os outros tratam.
+Each item follows the same shape: concrete problem → options (effort/risk) → recommendation → how others
+handle it.
 
-### P1, Credenciais padrão hardcoded no código
-**Problema:** senhas em texto puro versionadas (`config/config.exs:14-19`). Anti-padrão OWASP/CWE-798. As
-mitigações de prod ajudam, mas o padrão persiste e dev/staging ficam expostos.
+### P1, hardcoded default credentials in the source
+**Problem:** plaintext passwords under version control (`config/config.exs:14-19`). An OWASP/CWE-798
+anti-pattern. The production mitigations help, but the pattern persists and dev/staging stay exposed.
 
-- **(a) Eliminar defaults: gerar admin aleatório no 1º boot e logar 1x.** Padrão de Postgres/Elasticsearch/
-  Redpanda. *Esforço*: baixo-médio. *Risco*: baixo. *Impacto*: primeiro contato do operador muda (lê o log).
-- **(b) Exigir provisionamento explícito** (nenhum usuário até criar via CLI/env). *Esforço*: médio.
-  *Risco*: baixo. *Fricção*: maior no onboarding.
-- **(c) Manter, só endurecer o gating** (ligar `require_strong_passwords` por padrão, defaults fracos só em
-  `:dev`/`:test`). *Esforço*: mínimo. *Risco*: o padrão "credencial no código" continua.
+- **(a) Drop the defaults: generate a random admin on first boot and log it once.** The
+  Postgres/Elasticsearch/Redpanda pattern. *Effort*: low to medium. *Risk*: low. *Impact*: the operator's
+  first contact changes (they read the log).
+- **(b) Require explicit provisioning** (no users at all until one is created via CLI or env). *Effort*:
+  medium. *Risk*: low. *Friction*: higher onboarding cost.
+- **(c) Keep them, only harden the gating** (turn `require_strong_passwords` on by default, weak defaults
+  only under `:dev`/`:test`). *Effort*: minimal. *Risk*: the "credential in the source" pattern remains.
 
-**Recomendação: (a) + endurecer o gating de (c).** Elimina o segredo versionado com a menor fricção; defaults
-fracos só em `:dev`/`:test`. **Concorrentes:** nenhum embarca senha fixa; Redpanda/ES imprimem credencial
-gerada no 1º boot. **NorthGuard:** não aplicável (delega à plataforma).
+**Recommendation: (a) plus the hardened gating from (c).** It removes the versioned secret at the lowest
+friction; weak defaults stay confined to `:dev`/`:test`. **Competitors:** none ships a fixed password;
+Redpanda and ES print a generated credential on first boot. **NorthGuard:** not applicable (it delegates to
+the platform).
 
-### P2: User store node-local (não replicado) - o gap arquitetural
-**Problema:** usuários não são consistentes no cluster (§2). Num produto distribuído isso está **quebrado**.
+### P2: node-local user store (not replicated), the architectural gap
+**Problem:** users are not consistent across the cluster (§2). In a distributed product that is simply
+**broken**.
 
-- **(a) Mover usuários para o control plane `ra`** (Raft) já existente. Usuários são "metadado global,
-  pequeno, crítico, consistente": exatamente o que o `ra` do Malachi já replica (metadata/vnodes + lease).
-  *Esforço*: médio-alto. *Risco*: médio. *Ganho*: replicação/consistência + reuso de bootstrap/failover.
-- **(b) Replicar o Mnesia de verdade** (`add_table_copy`, `disc_copies` multi-nó, como o RabbitMQ).
-  *Esforço*: médio. *Risco*: médio-alto (netsplit/merge/backup do Mnesia; um 2º mecanismo de replicação
-  além do `ra`). *Ganho*: menos reescrita.
-- **(c) Manter node-local.** *Rejeitar*: não serve a um produto de cluster.
+- **(a) Move users into the existing `ra` control plane** (Raft). Users are "global metadata: small,
+  critical, consistent", exactly what Malachi's `ra` already replicates (metadata/vnodes + lease).
+  *Effort*: medium to high. *Risk*: medium. *Gain*: replication and consistency, plus reuse of the existing
+  bootstrap and failover.
+- **(b) Actually replicate Mnesia** (`add_table_copy`, multi-node `disc_copies`, the RabbitMQ way).
+  *Effort*: medium. *Risk*: medium to high (Mnesia netsplit/merge/backup, and a second replication
+  mechanism alongside `ra`). *Gain*: less rewriting.
+- **(c) Stay node-local.** *Reject*: it does not serve a clustered product.
 
-**Recomendação: (a).** Alinha com a arquitetura (um só quórum replicado para todo metadado crítico) e é
-como Kafka/Redpanda fazem. **Concorrentes:** Kafka/Redpanda guardam credenciais **no próprio log de metadata
-replicado** (KRaft/controller Raft); RabbitMQ usa Mnesia **replicado**. **NorthGuard:** silente.
+**Recommendation: (a).** It aligns with the architecture (a single replicated quorum for all critical
+metadata) and it is how Kafka and Redpanda do it. **Competitors:** Kafka and Redpanda keep credentials **in
+the replicated metadata log itself** (KRaft / controller Raft); RabbitMQ uses **replicated** Mnesia.
+**NorthGuard:** silent on this.
 
-### P3, Sem superfície de gestão em runtime
-**Problema:** não há CLI/API/wire para CRUD e rotação de usuário (`auth.ex:146-167` só in-process).
+### P3, no runtime management surface
+**Problem:** there is no CLI, API or wire op for user CRUD and rotation (`auth.ex:146-167` is in-process
+only).
 
-- **(a) CLI administrativo + admin API/wire-op** (create/update/delete/rotate/list). *Esforço*: médio.
-  *Risco*: baixo (depende de P2 para valer no cluster). *Ganho*: operabilidade real.
-- **(b) Só CLI** (sem API). *Esforço*: baixo. *Limite*: automação/integração mais difícil.
-- **(c) Manter config/env no boot.** *Rejeitar* para produto: rotação exige restart e não cobre o cluster.
+- **(a) Admin CLI plus an admin API/wire op** (create/update/delete/rotate/list). *Effort*: medium. *Risk*:
+  low (depends on P2 to be meaningful across the cluster). *Gain*: real operability.
+- **(b) CLI only** (no API). *Effort*: low. *Limit*: automation and integration get harder.
+- **(c) Keep config/env at boot.** *Reject* for a product: rotation would need a restart and it does not
+  cover the cluster.
 
-**Recomendação: (a), depois de P2.** **Concorrentes:** `rabbitmqctl`+HTTP API (RabbitMQ), CLI+Admin API
-(Kafka), REST admin (Pulsar), `nsc` (NATS). **NorthGuard:** silente.
+**Recommendation: (a), after P2.** **Competitors:** `rabbitmqctl` + HTTP API (RabbitMQ), CLI + Admin API
+(Kafka), REST admin (Pulsar), `nsc` (NATS). **NorthGuard:** silent on this.
 
-### P4: Auth externa ausente (table-stakes de vendabilidade) 🚧 Em andamento (contrato + mTLS + OIDC feitos; falta LDAP)
-**Problema:** só username/password interno; nenhum IdP externo; mTLS verifica mas não autentica.
+### P4: no external auth (table stakes for sellability) 🚧 In progress (contract + mTLS + OIDC done; LDAP missing)
+**Problem:** internal username/password only; no external IdP; mTLS verifies but does not authenticate.
 
-- **(a) Definir plug points**: mapear identidade de **mTLS→usuário** e interfaces plugáveis para **OIDC/JWT**
-  e **LDAP** (definir o **contrato**, implementar 1 provider de referência). *Esforço*: médio-alto.
-  *Risco*: médio. *Ganho*: o cliente pluga o IdP dele.
-- **(b) Implementar um mecanismo específico** (só OIDC, por ex.). *Esforço*: médio. *Limite*: acopla a um IdP.
-- **(c) Nada.** *Limite*: barra a venda enterprise.
+- **(a) Define the plug points**: map **mTLS identity to a user** and provide pluggable interfaces for
+  **OIDC/JWT** and **LDAP** (define the **contract**, implement one reference provider). *Effort*: medium
+  to high. *Risk*: medium. *Gain*: the customer plugs in their own IdP.
+- **(b) Implement one specific mechanism** (OIDC only, say). *Effort*: medium. *Limit*: couples us to a
+  single IdP.
+- **(c) Nothing.** *Limit*: blocks the enterprise sale.
 
-**Recomendação: (a): contrato plugável primeiro, mTLS-identidade como 1º provider.** **Concorrentes:** todos
-plugáveis (Kafka SASL/OAuth/Kerberos; Pulsar JWT/OAuth2/TLS; RabbitMQ LDAP/OAuth2; NATS JWT descentralizado).
-**NorthGuard:** delega à plataforma da LinkedIn (mTLS de serviço + authz central): um produto OSS não pode
-assumir essa plataforma, por isso precisa dos plug points.
+**Recommendation: (a): the pluggable contract first, mTLS identity as the first provider.**
+**Competitors:** all pluggable (Kafka SASL/OAuth/Kerberos; Pulsar JWT/OAuth2/TLS; RabbitMQ LDAP/OAuth2;
+NATS decentralized JWT). **NorthGuard:** delegates to LinkedIn's platform (service mTLS + central authz).
+An OSS product cannot assume that platform exists, which is exactly why it needs the plug points.
 
-**Implementado (decisão 1A: mTLS-identidade primeiro; 2A: CN→user; 3A: frame `mtls_auth` explícito).** O
-contrato `Malachi.Auth.AuthProvider` (`authenticate(credentials, context) → {:ok, %{username, permissions}}`)
-separa **autenticação plugável** de **autorização interna** (perms do `UserStore` replicado). Providers:
-`PasswordProvider` (envolve o `Auth.verify_credentials/2` sem-sessão) e `MtlsProvider` (mapeia o cert via
-`CertIdentity`: CN ou SAN, política configurável - e busca perms no store). No wire, um api_key `mtls_auth`
-(payload vazio) faz o acceptor resolver a identidade do **peercert** e mintar a sessão como no path de senha.
-**Gate de segurança:** o `mtls_auth` só é honrado com opt-in (`MALACHIMQ_MTLS_AUTH`) **e** `verify_peer` ligado:
-sob `verify_none` um cert forjado nunca autentica; falhas de mapeamento colapsam para `:invalid_credentials`
-(não vazam quais identidades existem); sem lockout (não há senha pra brute-force), mas com rate-limit por IP.
-**Também implementado (2º provider: OIDC/JWT; decisão 1A joken/jose, 2A chave estática, 3A perms do
-`UserStore`).** Um cliente apresenta um **JWT assinado** por um IdP externo num frame `token_auth`; o
-`JwtProvider` valida (assinatura + `iss`/`aud`/`exp` via `JwtValidator`, sobre `joken`/`jose`) e mapeia uma
-claim (`sub` por padrão) → usuário, buscando perms no store: igual a Kafka/Pulsar (o token identifica, o
-store autoriza). **Segurança:** algoritmo fixado pelo signer configurado (não pelo header do token) → `alg:none`
-e confusão HS256↔RS256 rejeitados; `exp` obrigatório; opt-in (`MALACHIMQ_OIDC_AUTH`) com `OidcConfig`
-falhando fechado se chave/issuer/audience faltarem. Bearer token deve trafegar sobre TLS (documentado). O
-`resolve_permissions` (fail-closed) é compartilhado com o mTLS.
-**Falta (próxima fatia, adiada):** provider **LDAP** sobre o mesmo contrato; e opcionalmente **JWKS** (2B) no OIDC.
+**Implemented (decision 1A: mTLS identity first; 2A: CN→user; 3A: an explicit `mtls_auth` frame).** The
+`Malachi.Auth.AuthProvider` contract (`authenticate(credentials, context) → {:ok, %{username,
+permissions}}`) separates **pluggable authentication** from **internal authorization** (permissions come
+from the replicated `UserStore`). Providers: `PasswordProvider` (wrapping the sessionless
+`Auth.verify_credentials/2`) and `MtlsProvider` (mapping the certificate through `CertIdentity`: CN or SAN,
+configurable policy, then looking permissions up in the store). On the wire, an `mtls_auth` api_key (empty
+payload) makes the acceptor resolve the **peer certificate** identity and mint the session as the password
+path does. **Security gate:** `mtls_auth` is honoured only with opt-in (`MALACHIMQ_MTLS_AUTH`) **and**
+`verify_peer` on: under `verify_none` a forged certificate can never authenticate; mapping failures all
+collapse to `:invalid_credentials` (so they do not leak which identities exist); no lockout (there is no
+password to brute-force), but per-IP rate limiting applies.
 
-### P5: AutZ grosso / sem multi-tenancy 🚧 Em andamento (ACL por-tópico feito; falta gestão remota + tenants)
-**Problema:** RBAC global de 3 permissões; sem ACL por-tópico nem isolamento por tenant.
+**Also implemented (second provider: OIDC/JWT; decision 1A joken/jose, 2A static key, 3A permissions from
+the `UserStore`).** A client presents a **JWT signed** by an external IdP in a `token_auth` frame;
+`JwtProvider` validates it (signature plus `iss`/`aud`/`exp` through `JwtValidator`, over `joken`/`jose`)
+and maps a claim (`sub` by default) to a user, taking permissions from the store: the Kafka/Pulsar model,
+where the token identifies and the store authorizes. **Security:** the algorithm is pinned by the
+configured signer, not by the token header, so `alg:none` and HS256↔RS256 confusion are both rejected;
+`exp` is mandatory; opt-in (`MALACHIMQ_OIDC_AUTH`) with `OidcConfig` failing closed when the key, issuer or
+audience is missing. Bearer tokens must travel over TLS (documented). The fail-closed
+`resolve_permissions` is shared with mTLS.
 
-- **(a) ACL por-recurso (tópico/grupo) + tenants/vhosts.** *Esforço*: alto. *Risco*: médio-alto (toca o
-  boundary e o metadata). *Ganho*: isolamento real (multi-tenant).
-- **(b) Só ACL por-tópico** (sem tenant). *Esforço*: médio. *Ganho*: parcial.
-- **(c) Manter global.** OK para single-tenant; barra multi-tenant.
+**Missing (next slice, deferred):** an **LDAP** provider over the same contract, and optionally **JWKS**
+(2B) for OIDC.
 
-**Recomendação: (a), faseado depois de P2-P4.** **Concorrentes:** ACLs por-recurso (Kafka/Redpanda),
-vhosts (RabbitMQ), tenant→namespace→topic (Pulsar), accounts (NATS). **NorthGuard:** silente.
+### P5: coarse authz / no multi-tenancy 🚧 In progress (per-topic ACL done; remote management and tenants missing)
+**Problem:** a global three-permission RBAC; no per-topic ACL and no tenant isolation.
 
-**Implementado. 1ª fatia: ACL por-tópico (decisão 5-1A; 2A literal+prefixo; 3A allow-only/deny-by-default).**
-Grants `{username, :produce|:consume, {:literal,t}|{:prefix,p}}` num cluster `ra` dedicado (`Malachi.LogAcls`),
-espelhando usuários/lockouts: `AclRegistry` puro + `AclMachine`/`AclServer` + fachada `AclStore`. O
-enforcement acontece no mesmo `with_permission` do boundary (agora `with_topic_permission`, que passa o
-tópico) via `Authorization.allow?`: **admin → global-perm (não-estrito) → ACL** (o ACL é consultado por um
-*thunk lazy*, então o hot path só paga a leitura quando precisa). **Backward-compat:** default (não-estrito)
-mantém a perm global como wildcard → habilitar ACL **não quebra** nada; `MALACHIMQ_ACL_STRICT=true` liga o
-modo estrito (deny-by-default, só admin+ACL liberam). Reads fail-closed (store indisponível → nega). Gestão
-in-process via `Auth.grant_acl`/`revoke_acl`/`list_acls`; deletar usuário revoga seus grants.
-**Gestão remota nas 4 superfícies (P5-4, como o P3):** wire ops admin-gated (`api_key`s 14/15/16), REST no
-dashboard (`/users/:u/acls`), CLI Node (`scripts/acl.js`) e mix task (`mix malachi.acl` via RPC, o
-boilerplate de conexão foi extraído para `Malachi.CLI.Rpc`, compartilhado com `mix malachi.user`).
-**Falta:** a hierarquia de **tenants/namespaces** (5-1B, isolamento real), adiada.
+- **(a) Per-resource ACLs (topic/group) plus tenants/vhosts.** *Effort*: high. *Risk*: medium to high (it
+  touches the boundary and the metadata). *Gain*: real isolation (multi-tenant).
+- **(b) Per-topic ACL only** (no tenants). *Effort*: medium. *Gain*: partial.
+- **(c) Stay global.** Fine for single-tenant; blocks multi-tenant.
 
-### P6: Sessões e lockouts voláteis ✅ (lockouts feitos; sessões mantidas node-local por decisão)
-**Problema:** ETS puro → perdidos no restart, não cruzam nós (`lockout_manager.ex:18-20`).
+**Recommendation: (a), phased after P2 to P4.** **Competitors:** per-resource ACLs (Kafka/Redpanda), vhosts
+(RabbitMQ), tenant→namespace→topic (Pulsar), accounts (NATS). **NorthGuard:** silent on this.
 
-- **(a) Persistir/replicar** (junto de P2, no mesmo mecanismo). *Esforço*: médio. *Ganho*: lockout e sessão
-  sobrevivem a restart/failover.
-- **(b) Só persistir local.** *Esforço*: baixo. *Limite*: não cobre o cluster.
-- **(c) Manter volátil.** Aceitável a curto prazo; lockout reinicia no restart (janela de brute-force).
+**Implemented. First slice: per-topic ACL (decision 5-1A; 2A literal+prefix; 3A allow-only,
+deny-by-default).** Grants `{username, :produce|:consume, {:literal,t}|{:prefix,p}}` in a dedicated `ra`
+cluster (`Malachi.LogAcls`), mirroring users and lockouts: a pure `AclRegistry` plus
+`AclMachine`/`AclServer` plus the `AclStore` facade. Enforcement happens in the same boundary
+`with_permission` (now `with_topic_permission`, which passes the topic) through `Authorization.allow?`:
+**admin → global permission (non-strict) → ACL** (the ACL is consulted through a *lazy thunk*, so the hot
+path only pays for the read when it actually needs it). **Backward compatibility:** the default
+(non-strict) keeps the global permission as a wildcard, so enabling ACLs **breaks nothing**;
+`MALACHIMQ_ACL_STRICT=true` turns on strict mode (deny-by-default, only admin and an ACL allow). Reads fail
+closed (store unavailable means deny). In-process management through
+`Auth.grant_acl`/`revoke_acl`/`list_acls`; deleting a user revokes their grants.
 
-**Recomendação: (a).** **Implementado (decisão 1A: só lockouts → `ra`).** Os lockouts foram movidos para um
-cluster `ra` dedicado (`Malachi.LogLockouts`), espelhando o padrão de P2: núcleo puro determinístico
-`LockoutRegistry` + `LockoutMachine` (alimentando `meta.system_time`) + `LockoutServer`, com a fachada
-`LockoutManager` reescrita sobre ele (API pública inalterada). Brute-force agora é protegido **cluster-wide**
-(tentativas espalhadas por nós contam contra um único limite) e **sobrevive a restart**. As **sessões**
-permanecem em ETS **de propósito**: têm expiração deslizante (escrita a cada validação = alta rotatividade,
-mau encaixe no `ra`), a conexão do wire cai no restart de qualquer forma (re-login é barato) e o benefício
-cross-node só afetaria o dashboard de baixo tráfego. Documentado como intencionalmente node-local/efêmero.
+**Remote management on all four surfaces (P5-4, as in P3):** admin-gated wire ops (`api_key`s 14/15/16),
+REST on the dashboard (`/users/:u/acls`), a Node CLI (`scripts/acl.js`) and a mix task (`mix malachi.acl`
+over RPC; the connection boilerplate was extracted into `Malachi.CLI.Rpc`, shared with `mix malachi.user`).
+
+**Missing:** the **tenant/namespace** hierarchy (5-1B, real isolation), deferred.
+
+### P6: volatile sessions and lockouts ✅ (lockouts done; sessions kept node-local by decision)
+**Problem:** plain ETS, so they are lost on restart and do not cross nodes (`lockout_manager.ex:18-20`).
+
+- **(a) Persist and replicate** (alongside P2, in the same mechanism). *Effort*: medium. *Gain*: lockouts
+  and sessions survive restart and failover.
+- **(b) Persist locally only.** *Effort*: low. *Limit*: does not cover the cluster.
+- **(c) Stay volatile.** Acceptable short-term; a lockout resets on restart (a brute-force window).
+
+**Recommendation: (a).** **Implemented (decision 1A: lockouts only → `ra`).** Lockouts moved into a
+dedicated `ra` cluster (`Malachi.LogLockouts`), mirroring the P2 pattern: the deterministic pure core
+`LockoutRegistry` plus `LockoutMachine` (fed by `meta.system_time`) plus `LockoutServer`, with the
+`LockoutManager` facade rewritten on top (public API unchanged). Brute-force is now protected
+**cluster-wide** (attempts spread across nodes count against a single limit) and **survives a restart**.
+**Sessions** stay in ETS **on purpose**: they have a sliding expiry (a write on every validation, so high
+churn, a poor fit for `ra`), the wire connection drops on restart anyway (re-login is cheap), and the
+cross-node benefit would only reach the low-traffic dashboard. Documented as intentionally node-local and
+ephemeral.
 
 ---
 
-## 4. Como os concorrentes (e o NorthGuard) resolvem
+## 4. How the competitors (and NorthGuard) solve it
 
-| Sistema | AutN | Onde vivem credenciais + ACLs | AutZ / multi-tenancy | Gestão |
+| System | AuthN | Where credentials + ACLs live | AuthZ / multi-tenancy | Management |
 |---|---|---|---|---|
-| **Kafka / Redpanda** | SASL (SCRAM/Kerberos/OAUTHBEARER) + mTLS | **no log de metadata replicado** (KRaft / controller Raft) | ACL por-recurso; authorizer plugável | CLI + Admin API |
-| **RabbitMQ** | interno (**Mnesia**, igual ao Malachi) + LDAP/OAuth2/JWT/HTTP plugáveis | Mnesia **replicado** | permissões por **vhost** (multi-tenant) + topic authz | `rabbitmqctl` + HTTP API + UI |
-| **Pulsar** | plugável: JWT, OAuth2, TLS, Kerberos, Athenz | ZooKeeper/etcd | **multi-tenancy first-class** (tenant→namespace→topic) | REST admin + CLI |
-| **NATS** | **JWT descentralizado** (assinado por operator) + nkeys | nos próprios JWTs (sem DB central) | **accounts** (multi-tenant) | `nsc` CLI |
-| **NorthGuard** | *não descrito*: delega à plataforma da LinkedIn (mTLS de serviço + authz central) | - | - | - |
+| **Kafka / Redpanda** | SASL (SCRAM/Kerberos/OAUTHBEARER) + mTLS | **in the replicated metadata log** (KRaft / controller Raft) | per-resource ACL; pluggable authorizer | CLI + Admin API |
+| **RabbitMQ** | internal (**Mnesia**, like Malachi) + pluggable LDAP/OAuth2/JWT/HTTP | **replicated** Mnesia | per-**vhost** permissions (multi-tenant) + topic authz | `rabbitmqctl` + HTTP API + UI |
+| **Pulsar** | pluggable: JWT, OAuth2, TLS, Kerberos, Athenz | ZooKeeper/etcd | **first-class multi-tenancy** (tenant→namespace→topic) | REST admin + CLI |
+| **NATS** | **decentralized JWT** (operator-signed) + nkeys | in the JWTs themselves (no central DB) | **accounts** (multi-tenant) | `nsc` CLI |
+| **NorthGuard** | *not described*: delegates to LinkedIn's platform (service mTLS + central authz) | - | - | - |
 
-**Lições:** (1) credenciais + ACLs no **mesmo quórum replicado** do resto do metadata (KRaft/Redpanda) →
-valida **P2** (mover usuários para o `ra`). (2) Auth **plugável** é table-stakes → **P4**. (3) Multi-tenancy
-+ ACL por-recurso separa "brinquedo" de "vendável" → **P5**. (4) Gestão em runtime (CLI+API) é obrigatória →
-**P3**. Sobre o **NorthGuard**: em escala interna, auth é problema de *plataforma*, não uma tabela de
-usuários por-serviço: um produto OSS não pode assumir isso, então oferece os plug points no lugar.
-
----
-
-## 5. Roadmap faseado recomendado
-
-1. **Fase 1: Segurança (P1). ✅ Feito (decisão 1A).** Removidas as credenciais fracas versionadas dos três
-   pontos (`config/config.exs`, os fallbacks `|| "admin123"` do `config/runtime.exs`, o fallback do
-   `seed_default_users` em `lib/malachi/auth.ex`). O config base semeia `[]`; os defaults de conveniência
-   ficam só em `config/dev.exs` e `config/test.exs` (nunca no caminho de prod); prod **exige senha explícita**
-   via env (`*_PASS` ou `MALACHIMQ_DEFAULT_USERS`). A Fase 1 escolheu **1A (exigir senha explícita, `raise`)**
-   como interino porque, sem o P2 (replicação), um admin gerado divergiria por-nó.
-   `require_strong_passwords` deixado como está (ortogonal).
-   **✅ Promovido para generate-random depois do P2 (decisão 1A+2A):** o `raise` foi **substituído** por gerar
-   um **admin aleatório** no 1º boot e logá-lo **uma vez** (padrão Redpanda/ES). Cluster-safe: cada nó gera e
-   chama `put_user` por consenso, o `:user_exists` do `ra` deduplica → exatamente **um** password vence e é
-   logado. Só o admin é gerado (escopo 2A); producer/consumer/app são semeados só se configurados. Flag
-   `:generate_admin` (setada no `runtime.exs` quando não há `MALACHIMQ_ADMIN_PASS`); `Auth.generate_admin_if_absent/1`
-   gera+semeia+loga; `ConfigValidator` ciente da flag. `MALACHIMQ_DISABLE_DEFAULT_USERS` é o opt-out.
-   *Tradeoff:* a senha aparece no log (o operador deve protegê-lo / rotacionar), padrão da indústria.
-2. **Fase 2: Replicação no `ra` (P2) + persistência de lockout (P6). ✅ Feito (decisão 1A).**
-   Move os usuários do Mnesia node-local para um **cluster `ra` dedicado** (`UserMachine` sobre a máquina pura
-   `UserRegistry`), espelhando o par `Lease`/`LeaseMachine`: escritas por consenso, leituras do replica local
-   (o replica é o cache: sem sync de ETS entre nós). Greenfield (dropa o Mnesia). Confirmado escalável ao
-   nível NorthGuard: usuários são metadado global small-data/rare-write/local-read: um único grupo Raft é o
-   home certo (KRaft/Redpanda), o eixo que escala (throughput/nós) é o data plane já shardado; escala de
-   identidade extrema fica pro P4 (IdP externo). Sub-fatiado: **P2-1 ✅** (`Malachi.Auth.UserRegistry` puro:
-   `put_user`/`delete_user`/`update_password`/`import_users` + queries, timestamps do `meta.system_time`,
-   catch-all defensivo; 11 testes) → **P2-2 ✅** (`UserMachine` ra_machine alimentando o `meta.system_time` +
-   `UserServer` start/reconcile/comandos com **leituras via `:ra.local_query`** no replica local; testado que
-   um usuário escrito num nó é legível no replica local de **outro** nó: o que o Mnesia não fazia - e que o
-   store commita após perder um membro (HA)) → **P2-3 ✅** (`UserStore` religado como fachada **stateless** sobre
-   o `UserServer`, preservando a API pública: `Auth`/testes agnósticos ao backend; `Auth` lê via
-   `UserStore.get_user` (→ `:ra.local_query`) em vez do ETS, **removido**; o app sobe `ra` **sempre**
-   (single-node incluso) e forma o cluster `LogUsers` antes do `Auth`, que semeia os defaults por consenso
-   (idempotente, com retry pra janela de quórum multi-node); **Mnesia dropado** do `extra_applications`.
-   Fricção de teste resolvida: o app é dono do `ra`, então os testes de cluster não chamam mais `:ra.start_in`:
-   que **reinicia** o `ra` e mataria o `LogUsers` - e a distribuição sobe no `test_helper` com nome de nó
-   estável). **P2 completo: usuários replicados no cluster.** *Fundação para P3-P5.*
-   **P6 ✅ (decisão 1A: só lockouts → `ra`)**, sub-fatiado espelhando P2: **P6-1** (`LockoutRegistry` puro:
-   `failed_attempt`/`successful_auth`/`unlock_user`/`unlock_key`/`cleanup` + queries, escalonamento
-   progressivo idêntico ao legado, config **dentro do comando** e tempo via `now` → determinístico; 20 testes)
-   → **P6-2** (`LockoutMachine` alimentando `meta.system_time` + `LockoutServer` com escritas por consenso e
-   leituras via `:ra.local_query` usando o relógio local pra expiração; 7 testes de cluster real) → **P6-3**
-   (fachada `LockoutManager` reescrita sobre o cluster `LogLockouts`, **API pública inalterada**, efeitos
-   colaterais metrics/log/audit guiados pelo reply da máquina, cleanup timer no GenServer; fiado no
-   `application.ex` como `lockout_store_children/1`). Brute-force agora **cluster-wide** e **durável a restart**.
-   As **sessões** ficam em ETS de propósito (expiração deslizante = alta rotatividade, conexão cai no restart,
-   cross-node só serviria o dashboard), documentado como node-local/efêmero.
-3. **Fase 3: Gestão em runtime (P3). ✅ Feito (as 3 superfícies).** As três compartilham as
-   mesmas `Auth.*` (que já vão pro `ra`). **P3-1 ✅. Ops de wire admin-gated:** novos `api_key`s no protocolo
-   binário (`create_user`=8, `delete_user`=9, `change_password`=10, `list_users`=11), handlers no
-   `tcp_protocol` embrulhados em `with_permission(session, :admin, ...)` chamando `Auth.add_user`/`remove_user`/
-   `change_password`/`list_users`; codecs no `Wire` (permissões como strings, mapeadas de volta pros átomos
-   permitidos com validação → `:invalid_permissions`); senhas cruzam a rede em claro (como o handshake) → TLS
-   em prod. Modelo Kafka AdminClient. Testado end-to-end (`log_protocol_test`): admin cria um usuário que
-   autentica + usa a permissão + é listado, delete revoga; troca de senha; não-admin negado; permissão inválida
-   rejeitada. → **P3-2 ✅. CLI Node sobre as ops:** métodos `createUser`/`deleteUser`/`changePassword`/
-   `listUsers` no `MalachiClient` (+ codecs no `scripts/lib/wire.js`) e um CLI `scripts/user.js`
-   (`list`/`create`/`passwd`/`delete`, default admin/admin123). Validado **end-to-end contra o servidor real**
-   (boot em dev → list/create/passwd/delete via CLI, não-admin negado, help), sem harness de teste JS (padrão
-   das fatias de cliente Node). → **P3-3 ✅. API REST admin no dashboard:** endpoints `GET /users`,
-   `POST /users`, `PUT /users/:username/password`, `DELETE /users/:username` (JSON, Bearer/cookie token),
-   admin-gated automaticamente pelo `has_required_permission?` (admin → tudo, não-admin → deny). Status codes
-   REST (201/409/404/400; 403 não-admin; 401 sem token). DRY: o `parse_permissions` foi extraído para
-   `Auth.parse_permissions/1` (público, robusto a input não-lista) e reusado no `tcp_protocol` e no dashboard;
-   `read_json_body` extraído (o `handle_login` passou a usá-lo). Testado no `dashboard_security_test` (auth on):
-   list/create+auth/passwd/delete, duplicata 409, permissão inválida 400, não-admin 403, sem token 401.
-   → **P3-4 ✅. Mix task + RPC (operador na máquina):** `mix malachi.user list|create|passwd|delete` conecta a
-   um nó **nomeado** em execução via distribuição Erlang (RPC pra `Auth.*`), reusando `Auth.parse_permissions`
-   local; `--node`/`--cookie`/`--perms` (defaults `$MALACHI_NODE`/`$RELEASE_COOKIE`). Core `execute/3` com o
-   RPC como *seam* (testável): 9 testes (parsing/dispatch/erros + integração real via seam local); validado
-   end-to-end contra um nó nomeado vivo (create/list/passwd/delete). É o análogo do `bin/malachi rpc` de release.
-   `:mix` adicionado ao PLT do dialyzer. **Fase 3 completa, 3 superfícies (wire+CLI, REST, mix task).**
-4. **Fase 4: Auth externa plugável (P4). 🚧 Contrato + mTLS + OIDC feitos (decisão 1A/2A/3A). Falta LDAP.**
-   Sub-fatiado (mTLS): **P4-1** (behaviour `AuthProvider` + `CertIdentity` puro, extração CN/SAN do DER X.509,
-   política `:cn | {:san, kind}`; 11 testes com certs reais) → **P4-2** (`PasswordProvider` + `MtlsProvider`
-   sobre o contrato; extraído `Auth.verify_credentials/2` sem-sessão, DRY; providers com seams, testados sem
-   app/TLS; mTLS mapeia cert→user e busca perms no store, fail-closed em registro divergente) → **P4-3** (wire
-   `mtls_auth` + handshake no acceptor: resolve o peercert e minta a sessão como no path de senha, **gateado
-   em opt-in + `verify_peer`** pra um cert forjado nunca autenticar; `MALACHIMQ_MTLS_AUTH`/`MALACHIMQ_MTLS_POLICY`).
-   Sub-fatiado (OIDC): **OIDC-1** (`JwtValidator` puro sobre `joken`/`jose`, assinatura + iss/aud/exp; alg
-   fixado pelo signer → `alg:none`/confusão HS256 rejeitados; `exp` obrigatório; 12 testes, chaves geradas em
-   runtime) → **OIDC-2** (`JwtProvider` + `OidcConfig` que monta o signer do PEM e falha fechado; extraído
-   `AuthProvider.resolve_permissions/2` compartilhado com o mTLS, DRY) → **OIDC-3** (wire `token_auth` +
-   handshake gateado em opt-in; `MALACHIMQ_OIDC_*`; e2e sobre TCP plano, token válido→sessão, forjado/expirado/
-   não-provisionado→`invalid_credentials`). *Falta o provider LDAP, e opcionalmente JWKS (2B) no OIDC.*
-5. **Fase 5: Multi-tenancy / ACL por-recurso (P5). 🚧 ACL por-tópico feito (decisão 5-1A/2A/3A).**
-   Sub-fatiado: **P5-1** (`AclRegistry` puro, grants literal/prefixo + matching; `Authorization.allow?` com
-   thunk lazy: admin/global-não-estrito/ACL; 21 testes) → **P5-2** (`AclMachine`/`AclServer`, cluster `ra`
-   `LogAcls`, como usuários/lockouts) → **P5-3** (fachada `AclStore` + `Auth.grant_acl`/`revoke_acl`/`list_acls`
-   + hook de revoke no delete de usuário; enforcement no `with_topic_permission` do boundary; `MALACHIMQ_ACL_STRICT`;
-   e2e sobre a wire: não-estrito não quebra, estrito nega sem grant, grant/prefixo liberam, admin bypassa).
-   **P5-4 ✅**: gestão remota nas 4 superfícies (wire ops `api_key`s 14/15/16, REST `/users/:u/acls`,
-   `scripts/acl.js`, `mix malachi.acl`; RPC extraído para `Malachi.CLI.Rpc`, compartilhado com o user task).
-   *Falta só a hierarquia tenant/namespace (5-1B).*
-
-Cada fase é uma decisão própria (opções + recomendação) quando for implementada, seguindo a cadência do
-`CLAUDE.md`.
+**Lessons:** (1) credentials and ACLs belong in the **same replicated quorum** as the rest of the metadata
+(KRaft/Redpanda), which validates **P2** (move users into `ra`). (2) **Pluggable** auth is table stakes,
+hence **P4**. (3) Multi-tenancy plus per-resource ACLs is what separates a toy from a sellable product,
+hence **P5**. (4) Runtime management (CLI + API) is mandatory, hence **P3**. On **NorthGuard**: at internal
+scale, auth is a *platform* problem rather than a per-service user table. An OSS product cannot assume
+that, so it offers the plug points instead.
 
 ---
 
-## 6. Referências
+## 5. Recommended phased roadmap
 
-- Práticas de segurança e testes: [SECURITY_DEVELOPMENT.md](SECURITY_DEVELOPMENT.md)
-- Design do port NorthGuard: [NORTHGUARD_PORT.md](NORTHGUARD_PORT.md)
-- Código: `lib/malachi/auth.ex`, `lib/malachi/auth/{user_store,session_manager,lockout_manager,config_validator}.ex`,
+1. **Phase 1: security (P1). ✅ Done (decision 1A).** Removed the versioned weak credentials from all three
+   places (`config/config.exs`, the `|| "admin123"` fallbacks in `config/runtime.exs`, and the
+   `seed_default_users` fallback in `lib/malachi/auth.ex`). The base config seeds `[]`; the convenience
+   defaults live only in `config/dev.exs` and `config/test.exs` (never on the production path); production
+   **requires an explicit password** through env (`*_PASS` or `MALACHIMQ_DEFAULT_USERS`). Phase 1 chose
+   **1A (require an explicit password, `raise`)** as an interim step because, without P2 (replication), a
+   generated admin would diverge per node. `require_strong_passwords` was left as-is (orthogonal).
+   **✅ Promoted to generate-random after P2 (decision 1A+2A):** the `raise` was **replaced** by generating
+   a **random admin** on first boot and logging it **once** (the Redpanda/ES pattern). Cluster-safe: each
+   node generates one and calls `put_user` through consensus, and `ra`'s `:user_exists` deduplicates, so
+   exactly **one** password wins and is logged. Only the admin is generated (scope 2A);
+   producer/consumer/app are seeded only when configured. The `:generate_admin` flag (set in `runtime.exs`
+   when `MALACHIMQ_ADMIN_PASS` is absent); `Auth.generate_admin_if_absent/1` generates, seeds and logs;
+   `ConfigValidator` is aware of the flag. `MALACHIMQ_DISABLE_DEFAULT_USERS` is the opt-out. *Tradeoff:* the
+   password appears in the log (the operator must protect it or rotate), which is the industry pattern.
+2. **Phase 2: replication over `ra` (P2) plus lockout persistence (P6). ✅ Done (decision 1A).**
+   Moves users out of node-local Mnesia into a **dedicated `ra` cluster** (`UserMachine` over the pure
+   `UserRegistry` machine), mirroring the `Lease`/`LeaseMachine` pair: writes by consensus, reads from the
+   local replica (the replica *is* the cache, so there is no ETS sync between nodes). Greenfield (drops
+   Mnesia). Confirmed to scale to NorthGuard levels: users are global metadata that is small-data,
+   rare-write, local-read, so a single Raft group is the right home (KRaft/Redpanda); the axis that scales
+   (throughput and nodes) is the already-sharded data plane, and extreme identity scale is P4's problem (an
+   external IdP). Sub-sliced: **P2-1 ✅** (a pure `Malachi.Auth.UserRegistry`:
+   `put_user`/`delete_user`/`update_password`/`import_users` plus queries, timestamps from
+   `meta.system_time`, a defensive catch-all; 11 tests) → **P2-2 ✅** (a `UserMachine` ra_machine fed by
+   `meta.system_time` plus a `UserServer` with start/reconcile/commands and **reads through
+   `:ra.local_query`** on the local replica; tested that a user written on one node is readable from
+   **another** node's local replica, which is exactly what Mnesia did not do, and that the store commits
+   after losing a member (HA)) → **P2-3 ✅** (`UserStore` rewired as a **stateless** facade over
+   `UserServer`, preserving the public API, so `Auth` and the tests stay backend-agnostic; `Auth` reads
+   through `UserStore.get_user` (→ `:ra.local_query`) instead of ETS, which was **removed**; the app starts
+   `ra` **always** (single-node included) and forms the `LogUsers` cluster before `Auth`, which seeds the
+   defaults by consensus (idempotent, with a retry for the multi-node quorum window); **Mnesia dropped**
+   from `extra_applications`. A test friction was resolved along the way: the app owns `ra`, so the cluster
+   tests no longer call `:ra.start_in`, which **restarts** `ra` and would kill `LogUsers`, and distribution
+   comes up in `test_helper` under a stable node name). **P2 complete: users are replicated across the
+   cluster.** *Foundation for P3 to P5.*
+   **P6 ✅ (decision 1A: lockouts only → `ra`)**, sub-sliced to mirror P2: **P6-1** (a pure
+   `LockoutRegistry`: `failed_attempt`/`successful_auth`/`unlock_user`/`unlock_key`/`cleanup` plus queries,
+   progressive escalation identical to the legacy one, config carried **inside the command** and time
+   supplied as `now`, so it is deterministic; 20 tests) → **P6-2** (`LockoutMachine` fed by
+   `meta.system_time` plus `LockoutServer` with consensus writes and `:ra.local_query` reads using the
+   local clock for expiry; 7 tests against a real cluster) → **P6-3** (the `LockoutManager` facade rewritten
+   over the `LogLockouts` cluster, **public API unchanged**, metrics/log/audit side effects driven by the
+   machine's reply, cleanup timer in the GenServer; wired into `application.ex` as
+   `lockout_store_children/1`). Brute-force is now **cluster-wide** and **durable across restarts**.
+   **Sessions** stay in ETS on purpose (sliding expiry means high churn, the connection drops on restart,
+   and cross-node would only serve the dashboard), documented as node-local and ephemeral.
+3. **Phase 3: runtime management (P3). ✅ Done (all three surfaces).** All three share the same `Auth.*`
+   functions (which already go through `ra`). **P3-1 ✅. Admin-gated wire ops:** new `api_key`s in the
+   binary protocol (`create_user`=8, `delete_user`=9, `change_password`=10, `list_users`=11), handlers in
+   `tcp_protocol` wrapped in `with_permission(session, :admin, ...)` calling
+   `Auth.add_user`/`remove_user`/`change_password`/`list_users`; codecs in `Wire` (permissions as strings,
+   mapped back to the allowed atoms with validation → `:invalid_permissions`); passwords cross the network
+   in the clear (as the handshake does), so TLS in production. The Kafka AdminClient model. Tested
+   end-to-end (`log_protocol_test`): an admin creates a user who then authenticates, uses the permission and
+   is listed, and delete revokes; password change; non-admin denied; invalid permission rejected. →
+   **P3-2 ✅. A Node CLI over those ops:** `createUser`/`deleteUser`/`changePassword`/`listUsers` methods on
+   `MalachiClient` (plus codecs in `scripts/lib/wire.js`) and a `scripts/user.js` CLI
+   (`list`/`create`/`passwd`/`delete`, defaulting to admin/admin123). Validated **end-to-end against the
+   real server** (boot in dev, then list/create/passwd/delete through the CLI, non-admin denied, help), with
+   no JS test harness (the standard for Node client slices). → **P3-3 ✅. An admin REST API on the
+   dashboard:** endpoints `GET /users`, `POST /users`, `PUT /users/:username/password`,
+   `DELETE /users/:username` (JSON, Bearer or cookie token), admin-gated automatically by
+   `has_required_permission?` (admin gets everything, non-admin is denied). REST status codes
+   (201/409/404/400; 403 for non-admin; 401 without a token). DRY: `parse_permissions` was extracted into
+   `Auth.parse_permissions/1` (public, robust against non-list input) and reused by both `tcp_protocol` and
+   the dashboard; `read_json_body` was extracted too (and `handle_login` now uses it). Tested in
+   `dashboard_security_test` (auth on): list/create+auth/passwd/delete, 409 on a duplicate, 400 on an
+   invalid permission, 403 for non-admin, 401 without a token. → **P3-4 ✅. Mix task plus RPC (the operator
+   on the machine):** `mix malachi.user list|create|passwd|delete` connects to a **named** running node over
+   Erlang distribution (RPC to `Auth.*`), reusing `Auth.parse_permissions` locally; `--node`/`--cookie`/
+   `--perms` (defaulting to `$MALACHI_NODE`/`$RELEASE_COOKIE`). The `execute/3` core takes the RPC as a
+   *seam* (so it is testable): 9 tests (parsing/dispatch/errors plus a real integration through the local
+   seam); validated end-to-end against a live named node (create/list/passwd/delete). It is the analogue of
+   a release's `bin/malachi rpc`. `:mix` was added to the dialyzer PLT. **Phase 3 complete: three surfaces
+   (wire + CLI, REST, mix task).**
+4. **Phase 4: pluggable external auth (P4). 🚧 Contract + mTLS + OIDC done (decisions 1A/2A/3A). LDAP
+   missing.** Sub-sliced (mTLS): **P4-1** (the `AuthProvider` behaviour plus a pure `CertIdentity`, CN/SAN
+   extraction from the X.509 DER, policy `:cn | {:san, kind}`; 11 tests against real certificates) →
+   **P4-2** (`PasswordProvider` and `MtlsProvider` over the contract; the sessionless
+   `Auth.verify_credentials/2` extracted for DRY; providers built with seams so they test without the app
+   or TLS; mTLS maps certificate to user and looks permissions up in the store, failing closed on a
+   mismatched record) → **P4-3** (the `mtls_auth` wire op plus the acceptor handshake: it resolves the peer
+   certificate and mints the session as the password path does, **gated on opt-in plus `verify_peer`** so a
+   forged certificate can never authenticate; `MALACHIMQ_MTLS_AUTH`/`MALACHIMQ_MTLS_POLICY`).
+   Sub-sliced (OIDC): **OIDC-1** (a pure `JwtValidator` over `joken`/`jose`, signature plus iss/aud/exp; the
+   algorithm pinned by the signer, so `alg:none` and HS256 confusion are rejected; `exp` mandatory; 12
+   tests, keys generated at runtime) → **OIDC-2** (`JwtProvider` plus an `OidcConfig` that builds the signer
+   from the PEM and fails closed; `AuthProvider.resolve_permissions/2` extracted and shared with mTLS, DRY)
+   → **OIDC-3** (the `token_auth` wire op plus a handshake gated on opt-in; `MALACHIMQ_OIDC_*`; end-to-end
+   over plain TCP, valid token yields a session, while forged, expired or unprovisioned yield
+   `invalid_credentials`). *The LDAP provider is missing, and optionally JWKS (2B) for OIDC.*
+5. **Phase 5: multi-tenancy / per-resource ACL (P5). 🚧 Per-topic ACL done (decisions 5-1A/2A/3A).**
+   Sub-sliced: **P5-1** (a pure `AclRegistry`, literal and prefix grants plus matching; `Authorization.allow?`
+   with a lazy thunk: admin / global-non-strict / ACL; 21 tests) → **P5-2** (`AclMachine`/`AclServer`, the
+   `LogAcls` `ra` cluster, as for users and lockouts) → **P5-3** (the `AclStore` facade plus
+   `Auth.grant_acl`/`revoke_acl`/`list_acls` plus a revoke hook on user deletion; enforcement in the
+   boundary's `with_topic_permission`; `MALACHIMQ_ACL_STRICT`; end-to-end over the wire: non-strict breaks
+   nothing, strict denies without a grant, a grant or prefix allows, admin bypasses).
+   **P5-4 ✅**: remote management on all four surfaces (wire ops `api_key`s 14/15/16, REST
+   `/users/:u/acls`, `scripts/acl.js`, `mix malachi.acl`; the RPC extracted into `Malachi.CLI.Rpc`, shared
+   with the user task). *Only the tenant/namespace hierarchy (5-1B) is missing.*
+
+Each phase is its own decision (options plus a recommendation) when it comes to be implemented, following
+the cadence in `CLAUDE.md`.
+
+---
+
+## 6. References
+
+- Security practices and testing: [SECURITY_DEVELOPMENT.md](SECURITY_DEVELOPMENT.md)
+- NorthGuard port design: [NORTHGUARD_PORT.md](NORTHGUARD_PORT.md)
+- Code: `lib/malachi/auth.ex`, `lib/malachi/auth/{user_store,session_manager,lockout_manager,config_validator}.ex`,
   `config/config.exs`, `config/runtime.exs`, `lib/malachi/tcp_protocol.ex`, `lib/malachi/dashboard.ex`.
