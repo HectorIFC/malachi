@@ -218,7 +218,7 @@ defmodule Malachi.Auth.SessionManager do
   - `{:ok, count}` - Number of sessions revoked
   """
   def revoke_all_sessions(username) do
-    # Busca todas as sessões do usuário
+    # Collect every session token belonging to this user
     sessions =
       :ets.select(@table_sessions, [
         {{:"$1", %{username: :"$2"}}, [{:==, :"$2", username}], [:"$1"]}
