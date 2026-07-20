@@ -28,6 +28,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.SplitCoordinator
@@ -247,7 +248,8 @@ defmodule Malachi.Application do
       lease_reconciler_child(nodes),
       lease_holder_child(),
       rebalance_coordinator_child(nodes, vnodes),
-      split_coordinator_child()
+      split_coordinator_child(),
+      reshard_coordinator_child()
     ] ++ auto_rebalancer_children()
   end
 
@@ -261,6 +263,42 @@ defmodule Malachi.Application do
     ]
 
     %{id: Malachi.LogSplitCoordinator, start: {SplitCoordinator, :start_link, [opts]}}
+  end
+
+  # The grow-reshard coordinator (operator-driven, lease-gated): grows the ring to a target vnode count by
+  # driving the split coordinator one split at a time (`mix malachi.reshard`). Listed after the split
+  # coordinator, which it calls.
+  defp reshard_coordinator_child do
+    replication_factor = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
+    place_opts = vnode_place_opts()
+
+    opts = [
+      name: Malachi.LogReshardCoordinator,
+      ring: &current_ring/0,
+      split: &SplitCoordinator.split(Malachi.LogSplitCoordinator, &1, &2, &3),
+      placement: &place_new_vnode(&1, replication_factor, place_opts),
+      leader?: fn -> LeaseHolder.leader?(@log_lease_holder) end
+    ]
+
+    %{id: Malachi.LogReshardCoordinator, start: {ReshardCoordinator, :start_link, [opts]}}
+  end
+
+  # The cluster's current routing ring, from the gossiped topology (nil when there is none yet).
+  defp current_ring do
+    case MembershipServer.topology(Malachi.LogMembership) do
+      %RingTopology{ring: ring} -> ring
+      _absent -> nil
+    end
+  end
+
+  # Where a new vnode's ra cluster should live: the same deterministic HRW placement the boot ring uses, over
+  # the live members. An empty result (membership unavailable) is refused by the coordinator rather than
+  # starting a memberless cluster.
+  defp place_new_vnode(vnode_id, replication_factor, place_opts) do
+    case Placement.place(vnode_id, alive_nodes(), replication_factor, place_opts) do
+      {:ok, chosen} -> chosen
+      {:error, _reason} -> []
+    end
   end
 
   # Opt-in automatic rebalancing (default off = the operator drives the coordinator). Level-triggered: on

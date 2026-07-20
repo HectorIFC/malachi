@@ -2043,4 +2043,23 @@ o que foi deliberadamente **não** adotado (com o porquê):
   liderança reseta; resultado de falha-parcial repassado ao `on_result` — 7. Suíte 738 testes 0 falhas;
   credo/dialyzer limpos. README com os env vars. *(workqueue/expectations do k8s seguem **não** adotados —
   a cardinalidade é baixa, o `ra` serializa a membership e a estabilização já dá o debounce.)*
-- **Re-sharding** — mudar a **contagem** de vnodes (R1/R2 assumem o mesmo conjunto de vnode ids).
+- 🚧 **Re-sharding** — mudar a **contagem** de vnodes (R1/R2 assumem o mesmo conjunto de vnode ids; por isso
+  o re-sharding **não** passa pelo rebalancer e sim pelo caminho de **split**). **Grow implementado**
+  (decisão: só aumentar; geometria **split-natural**): **RS-1** `Malachi.Cluster.ReshardPlan` — plano puro que
+  leva o ring à contagem-alvo repetindo "splitar o **maior arco** no midpoint", sem mover token existente
+  (property: cresce a exatamente N, determinístico, o maior arco nunca aumenta) → **RS-2**
+  `Malachi.Cluster.ReshardCoordinator` — GenServer lease-gated que executa **um** split por vez pelo
+  `SplitCoordinator`; **level-triggered**, re-planeja do ring vivo a cada passe, então um reshard
+  interrompido converge só re-emitindo o mesmo alvo (nada de intent multi-passo novo); guard
+  `:ring_did_not_advance` contra loop e recusa de placement vazio → **RS-3** fiação no `application.ex`
+  (`reshard_coordinator_child`, junto do split coordinator sob o lease) + **`mix malachi.reshard --to N`**
+  via RPC (reusa `Malachi.CLI.Rpc`) + `:multinode` sobre `ra` real (1→3 vnodes com topic **e offsets
+  commitados** preservados; resume de grow parcial).
+  - ⏳ **Dependência anotada — ring durável.** O ring é estado global mínimo **gossip-only** (fiel ao
+    NorthGuard) e num **restart de cluster inteiro** reseeda do config (`MALACHIMQ_LOG_VNODES` via
+    `sharded_vnodes/2`), cuja geometria **não** bate com o ring split-natural — o metadado migrado ficaria
+    órfão. **Gap pré-existente, compartilhado com o split.** Escopo atual: reshard **em runtime**. Tornar o
+    ring durável (e o reshard sobrevivente a restart total) é o follow-up natural, e beneficia o split também.
+  - **Fora de escopo (registrado):** **merge/diminuir** vnodes (drenar pro sucessor + `remove_vnode` +
+    deletar o grupo `ra` — genuinamente novo) e **retoken-to-even** (geometria exata de `sharded_vnodes/2`,
+    exigiria primitiva de mover-token migrando todo vnode).
