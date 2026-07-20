@@ -13,8 +13,17 @@ defmodule Malachi.Auth.CertIdentity do
 
   # The X.509 records live in public_key's OTP-PUB-KEY.hrl; extracting them lets us read fields by name
   # (robust across OTP versions) instead of by tuple position.
-  Record.defrecordp(:otp_cert, :OTPCertificate, Record.extract(:OTPCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl"))
-  Record.defrecordp(:otp_tbs, :OTPTBSCertificate, Record.extract(:OTPTBSCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl"))
+  Record.defrecordp(
+    :otp_cert,
+    :OTPCertificate,
+    Record.extract(:OTPCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
+  )
+
+  Record.defrecordp(
+    :otp_tbs,
+    :OTPTBSCertificate,
+    Record.extract(:OTPTBSCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
+  )
 
   # id-at-commonName and id-ce-subjectAltName (RFC 5280).
   @cn_oid {2, 5, 4, 3}

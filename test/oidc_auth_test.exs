@@ -37,7 +37,8 @@ defmodule Malachi.OidcAuthTest do
     Application.put_env(:malachi, :oidc_audience, @audience)
   end
 
-  defp token_for(sign, sub, now), do: JwtFixtures.sign(sign, %{"iss" => @issuer, "aud" => @audience, "sub" => sub, "exp" => now + 300})
+  defp token_for(sign, sub, now),
+    do: JwtFixtures.sign(sign, %{"iss" => @issuer, "aud" => @audience, "sub" => sub, "exp" => now + 300})
 
   describe "token_auth handshake gate" do
     test "is rejected when the feature is disabled (default)", %{sign: sign, now: now} do
@@ -65,10 +66,16 @@ defmodule Malachi.OidcAuthTest do
       assert is_binary(session_token) and session_token != ""
     end
 
-    test "a valid token for an unprovisioned identity is rejected without leaking why", %{sign: sign, public_pem: pem, now: now} do
+    test "a valid token for an unprovisioned identity is rejected without leaking why", %{
+      sign: sign,
+      public_pem: pem,
+      now: now
+    } do
       enable_oidc(pem)
       {:ok, socket} = TCPHelper.connect()
-      assert {false, "invalid_credentials"} = token_auth(socket, token_for(sign, "ghost_#{System.unique_integer([:positive])}", now))
+
+      assert {false, "invalid_credentials"} =
+               token_auth(socket, token_for(sign, "ghost_#{System.unique_integer([:positive])}", now))
     end
 
     test "a token signed by the wrong key is rejected as invalid_credentials", %{public_pem: pem, now: now} do

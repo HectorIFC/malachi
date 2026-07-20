@@ -46,7 +46,9 @@ end
 # Reads a file's contents (e.g. the OIDC public-key PEM) from a path, or nil when the path is unset or the
 # file cannot be read. A missing/unreadable key leaves :oidc_public_key nil, and OidcConfig fails closed.
 read_file = fn
-  nil -> nil
+  nil ->
+    nil
+
   path ->
     case File.read(path) do
       {:ok, contents} -> contents

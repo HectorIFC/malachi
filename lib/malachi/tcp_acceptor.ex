@@ -287,7 +287,15 @@ defmodule Malachi.TCPAcceptor do
            MtlsProvider.authenticate(der, %{policy: mtls_identity_policy()}) do
       {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
       Logger.info(I18n.t(:auth_success, username: username))
-      Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "mtls_authenticate", :success, %{})
+
+      Malachi.AuditLog.log_event(
+        :auth_success,
+        %{username: username, ip: client_ip},
+        "mtls_authenticate",
+        :success,
+        %{}
+      )
+
       validate_token_and_respond(token, correlation_id, state, client_ip)
     else
       {:error, reason} ->
@@ -360,7 +368,15 @@ defmodule Malachi.TCPAcceptor do
          {:ok, %{username: username, permissions: permissions}} <- JwtProvider.authenticate(jwt, config) do
       {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
       Logger.info(I18n.t(:auth_success, username: username))
-      Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "token_authenticate", :success, %{})
+
+      Malachi.AuditLog.log_event(
+        :auth_success,
+        %{username: username, ip: client_ip},
+        "token_authenticate",
+        :success,
+        %{}
+      )
+
       validate_token_and_respond(token, correlation_id, state, client_ip)
     else
       {:error, reason} ->

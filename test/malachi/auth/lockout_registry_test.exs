@@ -50,7 +50,11 @@ defmodule Malachi.Auth.LockoutRegistryTest do
     test "escalates on each multiple of max_attempts: base -> x3 -> x9 -> x24 -> x72 (capped)" do
       escalate = fn count ->
         {_state, %{locked: %{duration_ms: d}}} =
-          Reg.apply(%Reg{attempts: %{@key => %{count: count - 1, first_at: 0, last_at: 0}}}, {:failed_attempt, @key, @config}, 0)
+          Reg.apply(
+            %Reg{attempts: %{@key => %{count: count - 1, first_at: 0, last_at: 0}}},
+            {:failed_attempt, @key, @config},
+            0
+          )
 
         d
       end

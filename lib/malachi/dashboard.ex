@@ -472,8 +472,11 @@ defmodule Malachi.Dashboard do
     case read_json_body(socket, headers) do
       {:ok, %{"username" => username, "password" => password} = body} ->
         case Auth.parse_permissions(Map.get(body, "permissions", ["produce", "consume"])) do
-          {:ok, permissions} -> respond_user_result(socket, Auth.add_user(username, password, permissions), "201 Created")
-          :error -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_permissions"})
+          {:ok, permissions} ->
+            respond_user_result(socket, Auth.add_user(username, password, permissions), "201 Created")
+
+          :error ->
+            send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_permissions"})
         end
 
       _malformed ->
@@ -491,8 +494,11 @@ defmodule Malachi.Dashboard do
 
   defp handle_change_password(socket, username, headers) do
     case read_json_body(socket, headers) do
-      {:ok, %{"password" => password}} -> respond_user_result(socket, Auth.change_password(username, password), "200 OK")
-      _malformed -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+      {:ok, %{"password" => password}} ->
+        respond_user_result(socket, Auth.change_password(username, password), "200 OK")
+
+      _malformed ->
+        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
     end
   end
 

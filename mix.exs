@@ -109,7 +109,12 @@ defmodule Malachi.MixProject do
         Malachi.ConnectionLimiter,
         Malachi.RateLimiter
       ],
-      Observability: [Malachi.Metrics, Malachi.Telemetry, Malachi.Dashboard, ~r/^Malachi\.(Metrics|Telemetry|Dashboard)\./],
+      Observability: [
+        Malachi.Metrics,
+        Malachi.Telemetry,
+        Malachi.Dashboard,
+        ~r/^Malachi\.(Metrics|Telemetry|Dashboard)\./
+      ],
       Operations: [
         Malachi.Application,
         Malachi.Shutdown,

@@ -59,6 +59,7 @@ defmodule Malachi.Auth.UserServerTest do
     assert {:ok, {:ok, %{imported: 2, skipped: 1}}} = UserServer.import_users(server_id, users)
 
     assert {:ok, listed} = UserServer.list_users(server_id)
+
     assert Enum.sort_by(listed, & &1.username) == [
              %{username: "admin", permissions: [:admin]},
              %{username: "app", permissions: [:produce, :consume]},

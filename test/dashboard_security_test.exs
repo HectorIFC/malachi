@@ -589,7 +589,10 @@ defmodule Malachi.DashboardSecurityTest do
 
       {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
       body = Jason.encode!(%{password: "New-Pass-222"})
-      {:ok, response} = DashboardHelper.authenticated_request(socket, :PUT, "/users/#{username}/password", token, body: body)
+
+      {:ok, response} =
+        DashboardHelper.authenticated_request(socket, :PUT, "/users/#{username}/password", token, body: body)
+
       :gen_tcp.close(socket)
 
       assert status_code(response) == 200

@@ -40,7 +40,11 @@ defmodule Malachi.Auth.JwtValidatorTest do
       assert {:error, :invalid_audience} = JwtValidator.validate(token, config)
     end
 
-    test "rejects a token with no exp claim (never-expiring tokens are not allowed)", %{sign: sign, config: config, claims: claims} do
+    test "rejects a token with no exp claim (never-expiring tokens are not allowed)", %{
+      sign: sign,
+      config: config,
+      claims: claims
+    } do
       token = JwtFixtures.sign(sign, Map.delete(claims, "exp"))
       assert {:error, :missing_expiry} = JwtValidator.validate(token, config)
     end
@@ -60,7 +64,10 @@ defmodule Malachi.Auth.JwtValidatorTest do
       assert {:error, :invalid_signature} = JwtValidator.validate(none_token, config)
     end
 
-    test "rejects an HS256/RS256 confusion token (HMAC using the public key as the secret)", %{config: config, claims: claims} do
+    test "rejects an HS256/RS256 confusion token (HMAC using the public key as the secret)", %{
+      config: config,
+      claims: claims
+    } do
       %Joken.Signer{} = verify = config.signer
       public_pem = verify.jwk |> JOSE.JWK.to_pem() |> elem(1)
       hs_signer = Joken.Signer.create("HS256", public_pem)

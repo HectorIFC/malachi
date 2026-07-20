@@ -43,7 +43,10 @@ defmodule Malachi.Auth.AclRegistry do
 
         set ->
           remaining = MapSet.delete(set, {operation, resource})
-          if MapSet.size(remaining) == 0, do: Map.delete(state.grants, username), else: Map.put(state.grants, username, remaining)
+
+          if MapSet.size(remaining) == 0,
+            do: Map.delete(state.grants, username),
+            else: Map.put(state.grants, username, remaining)
       end
 
     {%{state | grants: grants}, :ok}

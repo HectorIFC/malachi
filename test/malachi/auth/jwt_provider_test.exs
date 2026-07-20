@@ -33,7 +33,10 @@ defmodule Malachi.Auth.JwtProviderTest do
 
   test "honors a configurable identity claim", ctx do
     token = JwtFixtures.sign(ctx.sign, Map.put(ctx.claims, "preferred_username", "svc"))
-    context = ctx.context |> Map.put(:identity_claim, "preferred_username") |> Map.put(:lookup, lookup(%{"svc" => [:admin]}))
+
+    context =
+      ctx.context |> Map.put(:identity_claim, "preferred_username") |> Map.put(:lookup, lookup(%{"svc" => [:admin]}))
+
     assert {:ok, %{username: "svc", permissions: [:admin]}} = JwtProvider.authenticate(token, context)
   end
 
