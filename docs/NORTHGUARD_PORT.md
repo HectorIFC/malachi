@@ -669,51 +669,53 @@ contract, so `ra` plugs in without rework.
   **10ms time-based flush is gone** and `sync/1` became a no-op. `produce` returns
   `{broker, {:ok, placements} | {:error, reason}}` (a per-group commit; an immutable value makes the
   transaction free). No duplicated storage. Full suite green (831 tests).
-- ✅ **`Malachi.Cluster.Catchup` (primitiva de catch-up/backfill)**, copia os records de um
-  segment de uma réplica **fonte** para uma **alvo** no intervalo `[from, to)`. Serve aos dois
-  casos: seguidor atrasado fechando o gap do segment ativo, e réplica nova (do `Placement.heal`)
-  fazendo **backfill** de um segment selado inteiro. Roda por **orquestração externa** (no processo
-  do chamador, via `ReplicationServer.read/4` na fonte + `follow/4` no alvo): nada aninhado num
-  `handle_call` que está sendo aguardado, então não há o deadlock primário↔seguidor. Expostos no
-  `ReplicationServer`: `follow/4` (append de réplica) e `end_offset/2` (até onde o alvo está, ou
-  `:empty`). Se a fonte estiver ela mesma atrás, para no que tem e devolve o offset alcançado.
-  Testado in-process: backfill de réplica fresca, catch-up só do gap, base não-zero preservada,
-  fonte incompleta, no-op quando já alcançado, `:empty`. Escopo: a primitiva (dirigida pelo
-  chamador).
-- ✅ **`Malachi.Cluster.SelfHealing` (heal → backfill de selados)**, fecha o loop de self-healing
-  para segments **selados**: `Placement` decide, `Catchup` executa. `heal_sealed/4` (metadata +
-  brokers vivos + rf) acha os selados sub-replicados, escolhe o replica set curado via
-  `Placement.place`, faz **backfill** de cada réplica nova a partir de uma réplica viva
-  (`Catchup.run`), e devolve os comandos `:set_segment_replicas` (que tiveram backfill ok) para o
-  control plane aplicar, além dos segments que não deu para curar (ex.: `:no_live_source`). Só
-  selados (range `[start, start+length)` fixo → backfill bem-definido); o segment ativo se recupera
-  pelo gatilho no write-path (fatia (a), adiada). Brokers vivos vêm como parâmetro (membership
-  depois). Testado in-process: backfill da réplica nova + comando + loop fecha (re-heal vazio),
-  todas as réplicas mortas → `:no_live_source`, nada a fazer quando ok, ativo ignorado.
-- ✅ **Catch-up automático no write-path (segment ativo)**, fecha a metade que faltava da
-  recuperação (a de selados é o `SelfHealing`). Quando o fan-out do primário chega num seguidor com
-  `next_offset < expected_first` (ficou para trás), o `ReplicationServer` **dispara um processo
-  monitorado em background** que roda o `Catchup` puxando do primário (`from = seu próprio fim`,
-  `to = fim do primário`), responde `:out_of_sync` (a escrita commita via as réplicas em dia) e o
-  seguidor **reentra no quórum num batch posterior**. Um conjunto `catching_up` deduplica catch-ups
-  por segment; o `:DOWN` do monitor limpa o flag em sucesso/falha; a checagem de offset do `follow`
-  garante segurança sob corrida (um append concorrente faz o catch-up abortar e o próximo gap
-  re-disparar: converge, sem duplicar/corromper). A mensagem de `follow` carrega o ref do primário
-  como fonte; os `follow` do `Catchup` passam `nil` (não re-disparam). Testado in-process:
-  seguidor perde um batch → é caçado de volta ao log completo → reentra no quórum.
-- ✅ **Backfill de réplica nova em segment ativo (missed-start)**, extensão mínima do gatilho: a
-  mensagem de `follow` passa a carregar o `base` do segment e o log fresco abre **no `base`** (não
-  no offset do batch). Assim uma réplica **recém-adicionada** a um segment ativo vê o gap do começo
-  (`next = base < expected`), o gatilho existente puxa `[base, cabeça)` e ela **converge na cabeça
-  móvel** via os re-disparos missed-middle, entrando no write-path ao alcançar (estilo ISR: não conta
-  no quórum até sincronizar). Zero código de gatilho novo. Limitação conhecida: sob escrita sustentada
-  muito rápida pode não alcançar (sem throttling, refinamento futuro). Testado in-process: réplica
-  nova num segment ativo backfilla do começo e passa a seguir ao vivo.
-  - ✅ **Failover de primário fiado.** `Malachi.Cluster.Failover.plan/2` (promove uma réplica viva à cabeça
-    do `replica_set` quando o primário de um segment **ativo** morre: dado já está nela, sem mover bytes),
-    aplicado pelo `HealCoordinator` junto do heal, contra o live set multi-nó do membership SWIM. Testado
-    (`failover_test`, `replicated_dsrsm_ha_test`). *(A camada pura já anotava "failover depois" no
-    `ReplicaTracker`/`ReplicationServer`, feito.)*
+- ✅ **`Malachi.Cluster.Catchup` (the catch-up/backfill primitive)** copies a segment's records from a
+  **source** replica to a **target** one over the `[from, to)` interval. It serves both cases: a lagging
+  follower closing the active segment's gap, and a new replica (from `Placement.heal`) **backfilling** an
+  entire sealed segment. It runs by **external orchestration** (in the caller's process, through
+  `ReplicationServer.read/4` on the source plus `follow/4` on the target), so nothing is nested inside a
+  `handle_call` that is being awaited, which is what avoids the primary↔follower deadlock. Exposed on
+  `ReplicationServer`: `follow/4` (a replica append) and `end_offset/2` (how far the target has got, or
+  `:empty`). If the source is itself behind, it stops at what it has and returns the offset reached.
+  Tested in-process: backfilling a fresh replica, catching up only the gap, preserving a non-zero base,
+  an incomplete source, a no-op when already caught up, and `:empty`. Scope: the primitive itself (driven
+  by the caller).
+- ✅ **`Malachi.Cluster.SelfHealing` (heal → backfilling sealed segments)** closes the self-healing loop
+  for **sealed** segments: `Placement` decides, `Catchup` executes. `heal_sealed/4` (metadata plus live
+  brokers plus rf) finds the under-replicated sealed segments, picks the healed replica set through
+  `Placement.place`, **backfills** each new replica from a live one (`Catchup.run`), and returns the
+  `:set_segment_replicas` commands (for those whose backfill succeeded) for the control plane to apply,
+  along with the segments it could not heal (for example `:no_live_source`). Sealed only (a fixed
+  `[start, start+length)` range makes the backfill well defined); the active segment recovers through the
+  write-path trigger (slice (a), deferred). Live brokers come in as a parameter (membership comes later).
+  Tested in-process: backfilling the new replica plus the command plus the loop closing (a re-heal is
+  empty), all replicas dead yielding `:no_live_source`, nothing to do when healthy, and the active
+  segment ignored.
+- ✅ **Automatic catch-up on the write path (active segment)** closes the missing half of recovery (the
+  sealed half being `SelfHealing`). When the primary's fan-out reaches a follower whose
+  `next_offset < expected_first` (it fell behind), `ReplicationServer` **spawns a monitored background
+  process** that runs `Catchup` pulling from the primary (`from = its own end`, `to = the primary's
+  end`), answers `:out_of_sync` (the write commits through the up-to-date replicas) and the follower
+  **rejoins the quorum on a later batch**. A `catching_up` set de-duplicates catch-ups per segment; the
+  monitor's `:DOWN` clears the flag on success or failure; and `follow`'s offset check keeps it safe
+  under a race (a concurrent append makes the catch-up abort and the next gap re-triggers it, so it
+  converges without duplicating or corrupting). The `follow` message carries the primary's ref as the
+  source; `Catchup`'s own `follow` calls pass `nil` (so they do not re-trigger). Tested in-process: a
+  follower misses a batch, is chased back to the full log, and rejoins the quorum.
+- ✅ **Backfilling a new replica on an active segment (missed-start)**, a minimal extension of the
+  trigger: the `follow` message now carries the segment's `base`, and a fresh log opens **at the `base`**
+  rather than at the batch's offset. So a **newly added** replica on an active segment sees the gap from
+  the start (`next = base < expected`), the existing trigger pulls `[base, head)`, and it **converges on
+  the moving head** through the missed-middle re-triggers, entering the write path once it catches up
+  (ISR style: it does not count toward the quorum until it is in sync). Zero new trigger code. A known
+  limitation: under sustained very fast writes it may never catch up (no throttling, a future
+  refinement). Tested in-process: a new replica on an active segment backfills from the start and then
+  follows live.
+  - ✅ **Primary failover wired in.** `Malachi.Cluster.Failover.plan/2` (promoting a live replica to the
+    head of the `replica_set` when an **active** segment's primary dies: the data is already there, so no
+    bytes move), applied by the `HealCoordinator` alongside the heal, against the SWIM membership's
+    multi-node live set. Tested (`failover_test`, `replicated_dsrsm_ha_test`). *(The pure layer already
+    noted "failover later" in `ReplicaTracker`/`ReplicationServer`; done.)*
 - ✅ **`Malachi.Cluster.Membership` (máquina de estado SWIM pura)**: a view determinística de
   membership: `alive`/`suspect`/`dead` por membro + **incarnation**, sem processos/timers/rede. A
   regra única é um *join* na ordem lexicográfica `{incarnation, rank}` (`alive < suspect < dead`),
