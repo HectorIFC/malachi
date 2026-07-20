@@ -14,7 +14,7 @@ Malachi provides comprehensive resource management through configurable overflow
 - [Backpressure Signaling](#backpressure-signaling)
 - [Message Size Limits](#message-size-limits)
 - [Dynamic Configuration Updates](#dynamic-configuration-updates)
-- [Monitoring & Metrics](#monitoring--metrics)
+- [Monitoring & Metrics](#monitoring-metrics)
 - [Best Practices](#best-practices)
 - [Examples](#examples)
 
@@ -415,6 +415,8 @@ Response:
 - `block_timeout_ms`: Timeout for blocked producers
 - `max_blocked_producers`: Concurrent blocked producer limit
 - `max_message_size_bytes`: Maximum message size
+
+<a id="monitoring-metrics"></a>
 
 ## Monitoring & Metrics
 

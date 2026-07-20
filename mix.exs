@@ -29,7 +29,7 @@ defmodule Malachi.MixProject do
   # (the guides), so the two never collide.
   defp docs do
     [
-      main: "readme",
+      main: "introduction",
       logo: "docs/logo.jpeg",
       source_ref: "v#{@version}",
       # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
@@ -42,6 +42,9 @@ defmodule Malachi.MixProject do
 
   defp extras do
     [
+      "docs/guides/introduction.md": [title: "Introduction"],
+      "docs/guides/getting-started.md": [title: "Getting started"],
+      "docs/guides/log-model.md": [title: "The log model"],
       "README.md": [title: "Overview"],
       "CHANGELOG.md": [title: "Changelog"],
       "docs/NORTHGUARD_PORT.md": [title: "NorthGuard port (design)"],
@@ -60,6 +63,12 @@ defmodule Malachi.MixProject do
 
   defp groups_for_extras do
     [
+      Guides: [
+        "docs/guides/introduction.md",
+        "docs/guides/getting-started.md",
+        "docs/guides/log-model.md",
+        "README.md"
+      ],
       Architecture: ["docs/NORTHGUARD_PORT.md", "docs/AUTH_USER_MANAGEMENT.md"],
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [

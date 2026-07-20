@@ -93,7 +93,7 @@ Enum.map(records, & &1.value)        #=> ["hello", "world"]
 ```
 
 Single-node is in-memory by default; set `MALACHIMQ_LOG_CLUSTER` / `MALACHIMQ_LOG_NODES` for a replicated,
-HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#-client-protocol)
+HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#client-protocol)
 on port 4040.
 
 ### Node discovery (libcluster)
@@ -175,7 +175,7 @@ Malachi v0.5.0 includes comprehensive security hardening:
 - **Memory Monitoring** - Automatic GC triggers and memory usage alerts
 - **Security CI/CD** - Automated scanning with Gitleaks, Trivy, Sobelow, and CodeQL
 
-For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Hardening](#-security-hardening) section below.
+For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Hardening](#security-hardening) section below.
 
 ## 📦 Ports
 
@@ -630,6 +630,8 @@ Malachi.AuditLog.get_events_by_user("admin", 50)
 Malachi.AuditLog.get_stats()
 ```
 
+<a id="security-hardening"></a>
+
 ## 🛡️ Security Hardening
 
 ### Production Checklist
@@ -691,6 +693,8 @@ Returns:
   }
 }
 ```
+
+<a id="client-protocol"></a>
 
 ## 📡 Client protocol
 
