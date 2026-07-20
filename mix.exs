@@ -45,6 +45,8 @@ defmodule Malachi.MixProject do
       "docs/guides/introduction.md": [title: "Introduction"],
       "docs/guides/getting-started.md": [title: "Getting started"],
       "docs/guides/log-model.md": [title: "The log model"],
+      "docs/guides/produce-and-consume.md": [title: "Produce and consume"],
+      "docs/guides/streaming-with-backpressure.md": [title: "Streaming with backpressure"],
       "README.md": [title: "Overview"],
       "CHANGELOG.md": [title: "Changelog"],
       "docs/NORTHGUARD_PORT.md": [title: "NorthGuard port (design)"],
@@ -67,6 +69,8 @@ defmodule Malachi.MixProject do
         "docs/guides/introduction.md",
         "docs/guides/getting-started.md",
         "docs/guides/log-model.md",
+        "docs/guides/produce-and-consume.md",
+        "docs/guides/streaming-with-backpressure.md",
         "README.md"
       ],
       Architecture: ["docs/NORTHGUARD_PORT.md", "docs/AUTH_USER_MANAGEMENT.md"],

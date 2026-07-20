@@ -85,5 +85,8 @@ authenticated admin session: see the dashboard section of the README for the cre
 ## Next steps
 
 - [The log model](log-model.md): why cursors are opaque and what a *range* is.
+- [Produce and consume](produce-and-consume.md): batching, keys and ordering, consumer groups, and the
+  errors a correct client retries.
+- [Streaming with backpressure](streaming-with-backpressure.md): server push and the credit window.
 - `Malachi.Wire`: the binary protocol, if you are writing a client.
 - The *Observability* section of the [README](../../README.md), Prometheus metrics, telemetry, tracing.
