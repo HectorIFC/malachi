@@ -899,56 +899,63 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     **binary protocol**. Authorized to **remove the legacy queue model** (queues and channels) and
     **replace** JSON with the binary one. Fronts: **B1** the binary protocol → **B2** push streaming with
     windowing → **B3** removing the legacy queues. Each sliced up (a testable core plus wiring).
-    - ✅ **B1a: codec binário (`Malachi.Wire`, núcleo puro).** Framing length-prefixed
-      (`<<len::32, body>>`), envelope request `<<api_key::16, correlation_id::32, payload>>` / response
-      `<<correlation_id::32, error_code::16, payload>>` (o `correlation_id` habilita **pipelining**), e os
-      codecs das 4 operações de log (create_topic/produce/fetch/commit). Records **sem offset** no wire (o
-      cliente nunca vê offset; o cursor opaco carrega a posição), encoding próprio, distinto do
-      `Malachi.Log.Record.encode/1` de disco. Cursor/key são byte-strings com flag de presença (`nil` ≠ vazio). Puro;
-      a fiação no socket é B1b. Testado: round-trip de frame (+ `:incomplete` em prefixo parcial, dois
-      frames num buffer), envelope, wire-record (nil-key vs vazio, bytes não-UTF-8, property de round-trip),
-      e as 4 operações.
-    - ✅ **B3a. Remover o *protocolo* de fila (antes de B1b).** Ordem invertida: mudar o loop de conexão
-      para frames binários torna as 14 ações JSON de fila/canal inacessíveis e quebraria seus testes;
-      então o legado de *protocolo* de fila sai primeiro, deixando o `tcp_protocol` só com log, aí B1b
-      converte log JSON→binário limpo. Removidas as 14 `handle_action` de fila/canal e seus helpers
-      (`publish`/`enqueue`/`build_queue_options`/backpressure/…) do `tcp_protocol` (1130→~200 linhas, só
-      create_topic/produce/fetch/commit + auth/permissão compartilhados); removido o modo `subscribed`/
-      `receive_active_loop` do `tcp_acceptor` (era push de fila: B2 reintroduz um loop de *streaming de
-      log* próprio). Os **módulos** `Queue`/`Channel`/etc. ficam (B3b os deleta + ajusta metrics/dashboard).
-      Testes: `tcp_queue_management` (100% fila) deletado; os 7 de protocolo/segurança via socket
-      (`tcp_protocol`, `channel_integration`, `comprehensive_security`, `protocol_fuzzing`, `rate_limiting`,
-      `validation`, `penetration`) **pulados** (`@moduletag :skip`) para reescrever contra o binário em B1b
-      (evita migrá-los para um log-JSON que some): a infra (`Auth`/`RateLimiter`/`Validator`) segue coberta
-      por seus unit tests, e o **log e2e** (`log_protocol_test`) continua verde. Suíte: 1087 testes, 0
-      falhas, 94 skipped; credo + dialyzer limpos.
-    - ✅ **B1b-i: fiação binária (e2e).** O `tcp_acceptor` lê frames `Wire` length-prefixed (o listen
-      socket mudou de `packet: :line` para `packet: 0`: raw; o `Wire` faz o framing) num buffer que
-      tolera frames divididos em vários `recv` (`decode_frame` → `:incomplete`); o **auth** também virou
-      binário (novo `api_key` 0, req username/password → resp token). O `tcp_protocol.process_frame/4`
-      decodifica o request **na borda com `try`** (frame malformado → um frame de erro, sem crashar),
-      roteia por `api_key` e responde binário via `Wire.encode_ok`/`encode_error` (error_code 0 = ok, 1 =
-      erro com a reason como string). `LogApi.produce_records/3` (novo) aceita `%Record{}` direto do wire,
-      pulando o passo map→record do `produce/3` JSON; o `fetch_req` ganhou `group` (cursor tem
-      precedência). O `TCPHelper` ganhou os helpers binários (`request`/`recv_frame`/`authenticate_wire`)
-      e o `log_protocol_test` foi **reescrito** para o binário (o caso de base64 saiu: o valor é bytes
-      nativos; o de cursor malformado virou bytes inválidos). Testado: log e2e binário (create/produce/
-      fetch/grupos/commit/binário/long-poll/permissões) + `Wire` (auth/ok/error round-trip). Suíte: 1055
-      testes, 0 falhas, 94 skipped; credo + dialyzer limpos.
-    - ✅ **B1b-ii: cobertura de segurança do binário.** Os 6 testes de protocolo pulados no B3a eram
-      ~100% fila/JSON (queue/channel/publish/subscribe como veículo, fuzzing de **JSON**, validação de
-      `queue_name`. Tudo obsoleto no binário sem filas), então em vez de adaptá-los 1:1 foram **deletados**
-      (+ `channel_integration`) e substituídos por um `binary_protocol_security_test` coeso sobre o
-      protocolo que **de fato** roda: auth (credenciais inválidas → frame de erro; primeiro frame não-auth
-      → `auth_required`; primeiro frame malformado não crasha), permissões (produce→`:produce`,
-      fetch→`:consume`), frames malformados autenticados (`api_key` desconhecido → erro e a conexão segue
-      servindo; payload truncado → `malformed_request` com o correlation id preservado) e fuzzing
-      (bytes aleatórios + length-prefix mentiroso → o servidor sobrevive, provado por uma conexão nova).
-      Ajuste no acceptor: credenciais inválidas agora respondem um frame de erro (o auth JSON antigo só
-      fechava). Os helpers JSON do `TCPHelper` (`send_line`/`recv_line`/`authenticate`) foram removidos (só
-      binário resta); a infra (`Auth`/`RateLimiter`/`Validator`/`LockoutManager`) segue coberta por seus
-      unit tests (`input_fuzzing`/`attack_simulation`/`security_performance_regression`, via o
-      `SecurityHelper` puro). **Suíte: 969 testes, 0 falhas, 0 skipped; credo + dialyzer limpos. B1 completo.**
+    - ✅ **B1a: the binary codec (`Malachi.Wire`, a pure core).** Length-prefixed framing
+      (`<<len::32, body>>`), a request envelope `<<api_key::16, correlation_id::32, payload>>` and a
+      response one `<<correlation_id::32, error_code::16, payload>>` (the `correlation_id` enables
+      **pipelining**), plus codecs for the 4 log operations (create_topic/produce/fetch/commit). Records
+      carry **no offset** on the wire (the client never sees one; the opaque cursor holds the position),
+      with its own encoding, distinct from the on-disk `Malachi.Log.Record.encode/1`. Cursor and key are
+      byte strings with a presence flag (`nil` is not the same as empty). Pure; the socket wiring is B1b.
+      Tested: a frame round trip (plus `:incomplete` on a partial prefix, and two frames in one buffer),
+      the envelope, the wire record (a nil key versus an empty one, non-UTF-8 bytes, a round-trip
+      property), and the 4 operations.
+    - ✅ **B3a. Removing the queue *protocol* (before B1b).** The order was inverted: switching the
+      connection loop to binary frames makes the 14 JSON queue and channel actions unreachable and would
+      break their tests, so the legacy queue *protocol* goes first, leaving `tcp_protocol` with log only,
+      and then B1b converts log from JSON to binary cleanly. Removed the 14 queue and channel
+      `handle_action` clauses and their helpers
+      (`publish`/`enqueue`/`build_queue_options`/backpressure/…) from `tcp_protocol` (1130 lines down to
+      ~200, just create_topic/produce/fetch/commit plus the shared auth and permission code); removed the
+      `subscribed`/`receive_active_loop` mode from `tcp_acceptor` (it was queue push: B2 reintroduces its
+      own *log streaming* loop). The `Queue`/`Channel` **modules** stay (B3b deletes them and adjusts
+      metrics and the dashboard). Tests: `tcp_queue_management` (100% queue) deleted; the 7
+      protocol/security tests that go over the socket (`tcp_protocol`, `channel_integration`,
+      `comprehensive_security`, `protocol_fuzzing`, `rate_limiting`, `validation`, `penetration`) were
+      **skipped** (`@moduletag :skip`) to be rewritten against the binary protocol in B1b (avoiding
+      migrating them onto a log-JSON that is about to disappear): the infrastructure
+      (`Auth`/`RateLimiter`/`Validator`) stays covered by its own unit tests, and the **log e2e**
+      (`log_protocol_test`) stays green. Suite: 1087 tests, 0 failures, 94 skipped; credo and dialyzer
+      clean.
+    - ✅ **B1b-i: the binary wiring (e2e).** `tcp_acceptor` reads length-prefixed `Wire` frames (the
+      listen socket moved from `packet: :line` to `packet: 0`, raw, since `Wire` does the framing) into a
+      buffer that tolerates frames split across several `recv` calls (`decode_frame` → `:incomplete`);
+      **auth** went binary too (a new `api_key` 0, a username/password request and a token response).
+      `tcp_protocol.process_frame/4` decodes the request **at the edge inside a `try`** (a malformed frame
+      yields an error frame rather than a crash), routes by `api_key` and replies in binary through
+      `Wire.encode_ok`/`encode_error` (error_code 0 for ok, 1 for an error with the reason as a string). A
+      new `LogApi.produce_records/3` accepts a `%Record{}` straight off the wire, skipping the map→record
+      step of the JSON `produce/3`; `fetch_req` gained a `group` (with the cursor taking precedence).
+      `TCPHelper` gained the binary helpers (`request`/`recv_frame`/`authenticate_wire`) and
+      `log_protocol_test` was **rewritten** for the binary protocol (the base64 case went away, since the
+      value is native bytes, and the malformed-cursor one became invalid bytes). Tested: binary log e2e
+      (create/produce/fetch/groups/commit/binary/long-poll/permissions) plus `Wire` (auth/ok/error round
+      trips). Suite: 1055 tests, 0 failures, 94 skipped; credo and dialyzer clean.
+    - ✅ **B1b-ii: security coverage for the binary protocol.** The 6 protocol tests skipped in B3a were
+      ~100% queue and JSON (queue/channel/publish/subscribe as the vehicle, **JSON** fuzzing,
+      `queue_name` validation: all obsolete on a binary protocol with no queues), so rather than adapting
+      them one to one they were **deleted** (along with `channel_integration`) and replaced by a cohesive
+      `binary_protocol_security_test` over the protocol that **actually** runs: auth (invalid credentials
+      yield an error frame; a first frame that is not auth yields `auth_required`; a malformed first frame
+      does not crash), permissions (produce needs `:produce`, fetch needs `:consume`), malformed frames
+      once authenticated (an unknown `api_key` yields an error and the connection keeps serving; a
+      truncated payload yields `malformed_request` with the correlation id preserved) and fuzzing (random
+      bytes plus a lying length prefix: the server survives, proven by a fresh connection). One acceptor
+      adjustment: invalid credentials now answer with an error frame (the old JSON auth just closed).
+      `TCPHelper`'s JSON helpers (`send_line`/`recv_line`/`authenticate`) were removed (only binary
+      remains); the infrastructure (`Auth`/`RateLimiter`/`Validator`/`LockoutManager`) stays covered by
+      its own unit tests (`input_fuzzing`/`attack_simulation`/`security_performance_regression`, through
+      the pure `SecurityHelper`). **Suite: 969 tests, 0 failures, 0 skipped; credo and dialyzer clean. B1
+      is complete.**
     - **B2: streaming push+windowing (sessionized streaming NorthGuard).** O gap da tabela ("windowing
       por stream"). Decisões (alinhadas ao NorthGuard, revistas por dúvida do usuário): flow control por
       **ack explícito de crédito** (o que o benchmark validou; sem ele → OOM) e posição por **grupo
