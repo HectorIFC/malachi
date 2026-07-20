@@ -1011,47 +1011,53 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
         Dashboard tests (status and routing) green (30); credo and dialyzer clean. `security_xss_test`
         went stale (it references the removed `escapeHtml` and queue names; it still passes, but
         tautologically), cleaned up separately.
-      - ✅ **B3b-ii: deletar o núcleo do modelo de fila.** Removidos os 6 módulos-núcleo
-        (`queue`/`channel`/`consumer`/`ack_manager`/`partition_manager`/`queue_config`) + `benchmark.ex`
-        (superado por `bench/*.exs`) + `backpressure.ex`, e as 7 entradas de supervisão do `application.ex`
+      - ✅ **B3b-ii: deleting the queue model's core.** Removed the 6 core modules
+        (`queue`/`channel`/`consumer`/`ack_manager`/`partition_manager`/`queue_config`) plus `benchmark.ex`
+        (superseded by `bench/*.exs`) plus `backpressure.ex`, and the 7 supervision entries in
+        `application.ex`
         (`QueueRegistry`/`ChannelRegistry`/`Queue`/`ChannelSupervisor`/`PartitionManager`/`QueueConfig`/
-        `AckManager`). No `metrics.ex`, os **getters** que dependiam desses módulos saíram já aqui (forçado
-        pela compilação: `get_metrics`/`get_all_metrics`/`get_channel_metrics`/`get_all_channel_metrics` +
-        privados órfãos `get_gauge`/`get_latency_stats`/`get_all_queues`/`get_all_channels`; `take_snapshot`
-        agora captura só sistema): os **contadores** puros de ETS (increment_*/record_latency/reset) ficam
-        para B3b-iii. Testes: deletados os puros de fila (queue/channel/consumer/ack_manager/
-        partition_manager/queue_config/integration/at_most_once/one_to_million/atom_exhaustion/
-        overflow_integration/backpressure + helpers mass_spawn/test_helpers); adaptados os mistos
-        (`application_test`/`malachimq_test` → apontam para o stack de log; `attack_simulation` → removidos
-        os 2 testes de fila, mantidos os de segurança; `atom_safety` → mantidos só Validator+AtomMonitor;
-        `metrics_test` → reduzido a system-metrics+history). Também removida a **duplicata stale**
-        `test/application_test.exs` (colidia com `test/malachi/application_test.exs` no mesmo módulo
-        `Malachi.ApplicationTest`: bug latente exposto pelo compilador paralelo). 783 testes, 0 falhas;
-        credo/dialyzer limpos (−23 arquivos).
-      - ✅ **B3b-iii: remover os contadores de fila/canal mortos do `metrics.ex`.** Deleção pura de código
-        morto (a superfície de teste já ficou limpa no B3b-ii): saem `increment_enqueued`/`processed`/
-        `errors`/`acked`/`nacked`/`retried`/`dead_lettered`/`rejected`/`dropped`, `increment_channel_*`,
+        `AckManager`). In `metrics.ex`, the **getters** that depended on those modules went here too
+        (forced by compilation:
+        `get_metrics`/`get_all_metrics`/`get_channel_metrics`/`get_all_channel_metrics` plus the orphan
+        privates `get_gauge`/`get_latency_stats`/`get_all_queues`/`get_all_channels`; `take_snapshot` now
+        captures the system only); the pure ETS **counters** (increment_*/record_latency/reset) were left
+        for B3b-iii. Tests: deleted the purely queue ones
+        (queue/channel/consumer/ack_manager/partition_manager/queue_config/integration/at_most_once/
+        one_to_million/atom_exhaustion/overflow_integration/backpressure plus the mass_spawn and
+        test_helpers helpers); adapted the mixed ones (`application_test` and `malachimq_test` now point
+        at the log stack; `attack_simulation` lost its 2 queue tests and kept the security ones;
+        `atom_safety` kept only Validator and AtomMonitor; `metrics_test` shrank to system metrics plus
+        history). Also removed the **stale duplicate** `test/application_test.exs` (it collided with
+        `test/malachi/application_test.exs` on the same `Malachi.ApplicationTest` module: a latent bug the
+        parallel compiler exposed). 783 tests, 0 failures; credo and dialyzer clean (23 files fewer).
+      - ✅ **B3b-iii: removing the dead queue and channel counters from `metrics.ex`.** A pure dead-code
+        deletion (the test surface was already cleaned in B3b-ii): out go
+        `increment_enqueued`/`processed`/`errors`/`acked`/`nacked`/`retried`/`dead_lettered`/`rejected`/
+        `dropped`, `increment_channel_*`,
         `set_blocked_producers_count`/`increment_total_producers_blocked`/`record_buffer_utilization`,
-        `record_latency` e `reset_metrics`. Sobra o que é operacional/segurança (rate-limit, connection-limit,
-        validation, auth/lockout, audit, dashboard-auth, TLS) + `get_system_metrics` + `get_history`;
-        moduledoc atualizado. 783 testes verdes (1 flake **pré-existente e não relacionado** em
-        `tls_enforcement_test`: o arquivo faz 6 `put_env(:enable_tls)` sem `on_exit` de restauração, passa
-        isolado; fix num commit à parte); credo/dialyzer limpos. **Camada B do cliente concluída.**
-      - ✅ **Painel NorthGuard no dashboard (com drill-down on-demand).** Devolve, no modelo certo, a
-        visibilidade que o trim do B3b-i tirou, em **dois níveis** para o stream ficar leve. Funções **puras**
-        no `Metadata`: `overview/1` (resumo por topic, estado/keyspace/política, contagens de ranges e
-        segments, bytes totais, grupos consumidores) e `topic_detail/2` (o drill-down de **um** topic, seus
-        ranges, cada um com seus segments; `nil` se o topic não existe). Ambas reusam `ranges_of_topic`/
-        `segments_of_range` e achatam os ids de tupla p/ JSON. O `/metrics` e o `/stream` (1s) mandam só o
-        **resumo** (via `dashboard_metrics/0`); o detalhe é buscado **on-demand** por topic no novo endpoint
-        `GET /topic?name=` (autenticado como o `/metrics`; `serve_json/3` DRY; a query string agora é
-        preservada no roteamento). No front, expandir um topic dispara um `fetch` único (`loadTopicDetail`,
-        cacheado em `topicDetails`, mostra "loading…" até chegar); o cabeçalho-resumo segue vivo pelo stream.
-        Nomes de topic/grupo **escapados** (XSS, `escapeHtml`; toggle por índice; URL via
-        `encodeURIComponent`). Testado: `overview/1`+`topic_detail/2` unit (4); e2e de `/metrics` (resumo) e
-        `/topic` (detalhe + 404); functional-check do fluxo on-demand em node (fetch encodado, loading,
-        render pós-fetch, escaping). Assim o tradeoff do stream-full sumiu: zero tráfego de segment a não ser
-        no topic expandido. 790 testes, 0 falhas; credo/dialyzer limpos.
+        `record_latency` and `reset_metrics`. What remains is operational and security related
+        (rate limiting, connection limiting, validation, auth and lockout, audit, dashboard auth, TLS)
+        plus `get_system_metrics` and `get_history`; the moduledoc was updated. 783 tests green (with 1
+        **pre-existing, unrelated** flake in `tls_enforcement_test`: that file does 6
+        `put_env(:enable_tls)` calls without an `on_exit` to restore, and passes in isolation; fixed in a
+        separate commit); credo and dialyzer clean. **The client's layer B is complete.**
+      - ✅ **A NorthGuard panel on the dashboard (with on-demand drill-down).** It gives back, in the right
+        model, the visibility B3b-i's trim removed, in **two levels** so the stream stays light. **Pure**
+        functions in `Metadata`: `overview/1` (a per-topic summary: state, keyspace, policy, range and
+        segment counts, total bytes, consumer groups) and `topic_detail/2` (the drill-down for **one**
+        topic, its ranges, each with its segments; `nil` when the topic does not exist). Both reuse
+        `ranges_of_topic`/`segments_of_range` and flatten the tuple ids for JSON. `/metrics` and `/stream`
+        (every 1s) send only the **summary** (through `dashboard_metrics/0`); the detail is fetched
+        **on demand** per topic from a new `GET /topic?name=` endpoint (authenticated like `/metrics`;
+        `serve_json/3` for DRY; the query string is now preserved through routing). On the front end,
+        expanding a topic fires a single `fetch` (`loadTopicDetail`, cached in `topicDetails`, showing
+        "loading…" until it arrives); the summary header stays live through the stream. Topic and group
+        names are **escaped** (XSS, `escapeHtml`; the toggle is by index; the URL goes through
+        `encodeURIComponent`). Tested: `overview/1` and `topic_detail/2` units (4); e2e for `/metrics`
+        (the summary) and `/topic` (the detail plus a 404); a functional check of the on-demand flow in
+        node (an encoded fetch, loading, the post-fetch render, escaping). The full-stream tradeoff is
+        gone: zero segment traffic unless a topic is expanded. 790 tests, 0 failures; credo and dialyzer
+        clean.
       - ✅ **Cap de tamanho de frame no protocolo binário (fix de DoS).** Achado ao investigar o `Validator`
         órfão: o caminho binário **não tinha teto de frame**: o enforcement de tamanho saiu junto com o
         modelo de fila no B3b e o binário nunca o replicou. O `tcp_acceptor` acumulava `buffer <> data` até
