@@ -115,8 +115,6 @@ config :malachi,
   dashboard_port: String.to_integer(System.get_env("MALACHIMQ_DASHBOARD_PORT") || "4041"),
   locale: System.get_env("MALACHI_LOCALE") || "en_US",
   partition_multiplier: String.to_integer(System.get_env("MALACHIMQ_PARTITION_MULTIPLIER") || "100"),
-  session_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_TIMEOUT_MS") || "3600000"),
-  session_cleanup_interval_ms: String.to_integer(System.get_env("MALACHIMQ_SESSION_CLEANUP_MS") || "60000"),
   auth_timeout_ms: String.to_integer(System.get_env("MALACHIMQ_AUTH_TIMEOUT_MS") || "10000"),
   tcp_recv_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_RECV_TIMEOUT") || "30000"),
   tcp_send_timeout: String.to_integer(System.get_env("MALACHIMQ_TCP_SEND_TIMEOUT") || "30000"),
@@ -379,7 +377,9 @@ config :malachi,
   lockout_duration_ms: parse_int.(System.get_env("MALACHIMQ_LOCKOUT_DURATION_MS"), 300_000),
   progressive_lockout: System.get_env("MALACHIMQ_PROGRESSIVE_LOCKOUT") != "false",
 
-  # Session security configuration
+  # Session security configuration. The TTL is seconds, not milliseconds: a `session_timeout_ms` used to
+  # sit alongside this one and was the only variant the README documented, but nothing ever read it, so
+  # setting it silently left the TTL at the default. It is gone; this is the knob.
   session_timeout_seconds: parse_int.(System.get_env("MALACHIMQ_SESSION_TIMEOUT_SEC"), 3600),
   session_ip_binding: System.get_env("MALACHIMQ_SESSION_IP_BINDING") != "false",
   session_ua_binding: System.get_env("MALACHIMQ_SESSION_UA_BINDING") == "true",

@@ -14,9 +14,14 @@ defmodule Malachi.Auth.SessionManager do
   - `session_timeout_seconds` - Session expiration time (default: 3600 = 1 hour)
   - `session_ip_binding` - Enables IP binding (default: true)
   - `session_ua_binding` - Enables User-Agent binding (default: false, not implemented)
-  - `trusted_proxy_ranges` - List of CIDR ranges for trusted proxies
+  - `trusted_proxy_ranges` - List of CIDR ranges for trusted proxies (default: `[]`, nothing is trusted)
 
   ## Trusted Proxies
+
+  The default is an empty list, so **no range is trusted and no session is exempted** from the binding
+  check (which itself runs unless `session_ip_binding` is false). The ranges below are an example to
+  copy, not a default: without this setting a client whose public address changes (mobile, a NAT pool
+  that rotates) fails the check on its next request.
 
   For environments with NAT or corporate proxies, configure trusted ranges:
 
@@ -342,7 +347,7 @@ defmodule Malachi.Auth.SessionManager do
     ip_binding = Application.get_env(:malachi, :session_ip_binding, true)
     ua_binding = Application.get_env(:malachi, :session_ua_binding, false)
 
-    # Se binding foi desabilitado para proxy confiável, sempre válido
+    # A session created behind a trusted proxy has binding switched off, so it always passes
     if Map.get(session_data, :ip_binding_disabled, false) do
       true
     else
@@ -353,10 +358,10 @@ defmodule Malachi.Auth.SessionManager do
           true
         end
 
-      # User-Agent binding não implementado - sempre válido
+      # User-Agent binding is not implemented, so this arm always passes
       ua_valid =
         if ua_binding do
-          # Futura implementação: session_data.user_agent == user_agent
+          # Future implementation: session_data.user_agent == user_agent
           true
         else
           true
@@ -372,7 +377,7 @@ defmodule Malachi.Auth.SessionManager do
     if Enum.empty?(trusted_ranges) do
       false
     else
-      # Converte IP para formato que inet_cidr aceita
+      # Convert the IP tuple to the string form inet_cidr accepts
       ip_string = format_ip(ip)
 
       Enum.any?(trusted_ranges, fn range ->

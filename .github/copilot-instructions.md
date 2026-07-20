@@ -273,8 +273,7 @@ Configuration flows: `config/config.exs` → `config/runtime.exs` (env vars) →
 | `MALACHIMQ_APP_PASS` | `app123` (dev) | App password (**required** in prod) |
 | `MALACHIMQ_DEFAULT_USERS` | - | Custom users: `user:pass:perm1,perm2;...` |
 | `MALACHIMQ_DISABLE_DEFAULT_USERS` | `false` | Disable all default users |
-| `MALACHIMQ_SESSION_TIMEOUT_MS` | `3600000` | Session token TTL (1 hour) |
-| `MALACHIMQ_SESSION_CLEANUP_MS` | `60000` | Session cleanup interval |
+| `MALACHIMQ_SESSION_TIMEOUT_SEC` | `3600` | Session token TTL (1 hour) |
 | `MALACHIMQ_AUTH_TIMEOUT_MS` | `10000` | Auth request timeout |
 | `MALACHIMQ_SESSION_IP_BINDING` | `true` | Bind sessions to client IP |
 | `MALACHIMQ_SESSION_UA_BINDING` | `false` | Bind sessions to user-agent |

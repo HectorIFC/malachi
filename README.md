@@ -290,7 +290,7 @@ No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN
 | `MALACHIMQ_PRODUCER_PASS` | producer123 | Producer password |
 | `MALACHIMQ_CONSUMER_PASS` | consumer123 | Consumer password |
 | `MALACHIMQ_APP_PASS` | app123 | App password |
-| `MALACHIMQ_SESSION_TIMEOUT_MS` | 3600000 | Session timeout (1h) |
+| `MALACHIMQ_SESSION_TIMEOUT_SEC` | 3600 | Session timeout (1h) |
 | `MALACHIMQ_ENABLE_TLS` | false | Enable TLS encryption |
 | `MALACHIMQ_TLS_CERTFILE` | - | TLS certificate file path |
 | `MALACHIMQ_TLS_KEYFILE` | - | TLS private key file path |

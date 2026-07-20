@@ -9,8 +9,6 @@ config :malachi,
   # rejected at the length prefix, before the body is buffered, bounding per-connection memory.
   max_frame_size: 16_777_216,
   auth_timeout_ms: 10_000,
-  session_timeout_ms: 3_600_000,
-  session_cleanup_interval_ms: 60_000,
   # No default users are shipped in the base config: credentials must never be hard-coded in source. The
   # dev/test convenience defaults live in config/dev.exs and config/test.exs (never shipped to prod); prod
   # requires explicit passwords via env (see config/runtime.exs). Empty here means "seed nothing".
