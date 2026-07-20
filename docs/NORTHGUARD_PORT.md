@@ -555,62 +555,68 @@ contract, so `ra` plugs in without rework.
           multinode); credo, dialyzer and format clean. **B2 complete: the split is resilient to a coordinator
           crash (abort plus retry). Optional future promotion: 1B (complete-forward, the literal "carrying it
           out to the end") and/or 3C (a periodic sweep).**
-      - ✅ **Endurecimento 1B: reconcile por *complete-forward* (o "carrying it out" literal do NorthGuard)**
-        (política **1B-fwd** escolhida). Promove o reconcile do B2-3 de *abortar* pra *completar-adiante*: em vez
-        de reverter um split interrompido e o operador re-emitir, o novo coordenador **retoma a migração de onde
-        parou e a completa** (publica o ring novo): exatamente o que o NorthGuard faz (o novo líder do grupo raft
-        relê o log e leva a operação até o fim). Descoberta ao investigar: a migração **já é idempotente por
-        construção** (o `migrate_from` calcula os deslocados dos tópicos *atuais* da origem → já-migrado é pulado;
-        `begin_migration` idempotente se presente; `extract` de ausente é no-op; `insert` sobrescreve via
-        `Map.merge` + índices `MapSet`), então retomar "só termina o que falta". Os únicos atritos: (1) o
-        `MetadataServer.start` erra se o cluster do vnode novo já existe; (2) o `split_vnode` reverte numa falha
-        (B1): na retomada queremos **manter pendente e re-tentar**, não reverter. Política 1B-fwd: sempre
-        completa-adiante; se não der agora (inalcançável), mantém a intenção pendente pra retry; `abort_split`
-        (B2-3) vira **API de abort manual** do operador. Sub-fatiado:
-        - ✅ **1B-1. A fundação idempotente.** Novo `MetadataServer.ensure_started/2`: sobe o cluster do vnode
-          como o `start/2`, mas **idempotente**. Se já está rodando (alcançável via `:ra.members`) devolve o
-          `server_id` sem reiniciar; senão sobe. Fecha o atrito (1): resume não falha num cluster já formado; erra
-          só se o cluster nem roda nem sobe (placement inalcançável → o caller re-tenta). Confirmada e travada por
-          teste a idempotência do `insert_topic` (re-inserir o mesmo export é no-op: `Map.merge` sobrescreve,
-          índices `MapSet.put` de-dup). A invariante que torna o resume seguro. Testado: `ensure_started` forma um
-          cluster fresco e depois **reusa** o rodando sem reiniciar (estado preservado); `insert_topic` idempotente
-          (puro). Suíte 817 testes 0 falhas (+2); credo/dialyzer/format limpos.
-        - ✅ **1B-2: `ReplicatedDSRSM.complete_split` (retomada idempotente, sem rollback).** Refatorado: o loop
-          de migração virou `do_migrate/4` (percorre as origens em ordem, sem rollback), compartilhado por
-          `migrate_displaced` (fresh split = `do_migrate` **+ rollback** na falha, B1) e pelo novo
-          `complete_split/4`. O `complete_split` espelha o `split_vnode` mas (1) usa `ensure_started/2` (reusa o
-          cluster do vnode novo se já subiu) e (2) **não reverte** numa falha, devolve o erro **deixando o estado
-          parcial no lugar** pro próximo resume terminar (keep-trying; uma queda transiente não desfaz o
-          progresso). Idempotente por construção (o `migrate_from` pula o já-migrado; `insert`/`begin_migration`
-          são no-ops). Testado (`:multinode`): `complete_split` do zero migra o deslocado (mesmo resultado do
-          `split_vnode`, com offsets, gravável); e **retomando** um split já migrado (dirigido antes por
-          `split_vnode`, cluster do dest de pé) termina idempotente: nada some, sem duplicata na origem, e um
-          terceiro drive devolve exatamente o mesmo estado (igualdade estrutural). Suíte 817 testes 0 falhas (+2
-          multinode); credo/dialyzer/format limpos.
-        - ✅ **1B-3: o `VnodeSplit.reconcile` agora completa-adiante.** Trocado o `abort_split` pelo
-          `complete_split` no reconcile: ao achar uma intenção `pending` (agora lendo também o `token`), retoma o
-          split e. No `{:ok, grown}` - publica a topologia **completa** (`advance`, que avança o ring e limpa a
-          intenção), como um split normal faria; numa falha (vnode inalcançável → `complete_split` nem sobe o
-          cluster) **mantém pendente** pra retry, sem desfazer progresso. É o *"carrying it out to the end"* do
-          NorthGuard: o coordenador que assume **leva o split até o fim** em vez de desfazê-lo. O `abort_split`
-          (B2-3) fica como **escape hatch manual** do operador (inverso do reconcile), agora com teste direto.
-          Testes atualizados: o reconcile de um split interrompido agora **completa** (o tópico fica no vnode
-          novo, a topologia avança pra v2 com o vnode novo, offsets intactos, gravável) em vez de reverter; o caso
-          do vnode novo inalcançável segue mantendo a intenção pendente (agora porque não dá pra completar); e um
-          teste novo cobre o `abort_split` direto (reverte o migrado pra origem + deleta o órfão). Suíte 817 testes
-          0 falhas (+1 multinode); credo/dialyzer/format limpos. **1B completo, reconcile de split interrompido
-          agora completa-adiante (o modelo fiel do NorthGuard); abort permanece como ferramenta manual. Endurecimento
-          de split (A/B/C/1A/1B) fechado; resta o 3C opcional (varredura periódica, mais operabilidade-k8s que
-          NorthGuard).**
-- ✅ **`Malachi.Cluster.Placement`**: política **pura** de placement + self-healing de réplicas
-  de segment (a camada de *decisão* do data plane; o `Metadata` já guarda o *estado* dos segments).
-  Usa **rendezvous (HRW) hashing**: `place/3` escolhe o replica set (determinístico → seguro p/
-  Raft; mínimo reshuffle), `under_replicated/3` detecta segments com réplica morta (alvo clampado
-  ao nº de brokers vivos), `heal/3` emite comandos `:set_segment_replicas` que restauram a
-  replicação. Cobre segments **sealed** também (durabilidade). `available_brokers` é parâmetro
-  abstrato. Fixa o contrato que a futura membership servirá. Property tests: tamanho/distinção do
-  replica set, determinismo independente de ordem, **retenção sob remoção de broker (min-reshuffle)**
-  e **fixpoint do `heal` em uma passada**.
+      - ✅ **Hardening 1B: reconcile by *complete-forward* (NorthGuard's literal "carrying it out")**
+        (policy **1B-fwd** chosen). It promotes B2-3's reconcile from *aborting* to *completing forward*:
+        instead of reverting an interrupted split and having the operator re-issue it, the new coordinator
+        **resumes the migration where it stopped and finishes it** (publishing the new ring), which is exactly
+        what NorthGuard does (the raft group's new leader re-reads the log and carries the operation to the
+        end). Discovered while investigating: the migration **is already idempotent by construction**
+        (`migrate_from` computes the displaced set from the source's *current* topics, so anything already
+        migrated is skipped; `begin_migration` is idempotent when present; `extract` of an absent topic is a
+        no-op; `insert` overwrites through `Map.merge` plus `MapSet` indexes), so resuming "only finishes what
+        is left". The only friction: (1) `MetadataServer.start` errors if the new vnode's cluster already
+        exists; (2) `split_vnode` reverts on a failure (B1), whereas on a resume we want to **keep it pending
+        and retry**, not revert. Policy 1B-fwd: always complete forward; if it cannot right now (unreachable),
+        keep the intent pending for a retry; `abort_split` (B2-3) becomes the operator's **manual abort API**.
+        Sub-sliced:
+        - ✅ **1B-1. The idempotent foundation.** A new `MetadataServer.ensure_started/2` brings the vnode's
+          cluster up the way `start/2` does, but **idempotently**. If it is already running (reachable through
+          `:ra.members`) it returns the `server_id` without restarting; otherwise it starts it. That closes
+          friction (1): a resume does not fail against an already-formed cluster, and it errors only when the
+          cluster neither runs nor starts (an unreachable placement, so the caller retries). `insert_topic`'s
+          idempotence was confirmed and locked down by a test (re-inserting the same export is a no-op:
+          `Map.merge` overwrites and the `MapSet.put` indexes de-duplicate). That is the invariant that makes
+          the resume safe. Tested: `ensure_started` forms a fresh cluster and then **reuses** the running one
+          without restarting (state preserved); `insert_topic` is idempotent (pure). Suite at 817 tests, 0
+          failures (+2); credo, dialyzer and format clean.
+        - ✅ **1B-2: `ReplicatedDSRSM.complete_split` (idempotent resume, no rollback).** Refactored: the
+          migration loop became `do_migrate/4` (walking the sources in order, without rollback), shared by
+          `migrate_displaced` (a fresh split being `do_migrate` **plus rollback** on failure, B1) and by the new
+          `complete_split/4`. `complete_split` mirrors `split_vnode` but (1) uses `ensure_started/2` (reusing
+          the new vnode's cluster if it is already up) and (2) **does not revert** on a failure: it returns the
+          error and **leaves the partial state in place** for the next resume to finish (keep-trying, so a
+          transient outage does not undo progress). Idempotent by construction (`migrate_from` skips what has
+          already migrated; `insert` and `begin_migration` are no-ops). Tested (`:multinode`): `complete_split`
+          from scratch migrates the displaced topic (the same result as `split_vnode`, with offsets, writable);
+          and **resuming** an already-migrated split (previously driven by `split_vnode`, with the destination
+          cluster up) finishes idempotently: nothing disappears, no duplicate on the source, and a third drive
+          returns exactly the same state (structural equality). Suite at 817 tests, 0 failures (+2 multinode);
+          credo, dialyzer and format clean.
+        - ✅ **1B-3: `VnodeSplit.reconcile` now completes forward.** `abort_split` was swapped for
+          `complete_split` in the reconcile: on finding a `pending` intent (now reading the `token` as well) it
+          resumes the split, and on `{:ok, grown}` publishes the **complete** topology (`advance`, which moves
+          the ring forward and clears the intent), just as a normal split would; on a failure (an unreachable
+          vnode, where `complete_split` cannot even bring the cluster up) it **keeps it pending** for a retry,
+          without undoing progress. This is NorthGuard's *"carrying it out to the end"*: the coordinator that
+          takes over **carries the split to completion** rather than unwinding it. `abort_split` (B2-3) remains
+          as the operator's **manual escape hatch** (the inverse of the reconcile), now with a direct test.
+          Tests updated: reconciling an interrupted split now **completes** it (the topic stays on the new
+          vnode, the topology advances to v2 with the new vnode, offsets intact, writable) instead of
+          reverting; the unreachable-new-vnode case still keeps the intent pending (now because it cannot
+          complete); and a new test covers `abort_split` directly (reverting the migrated topic to its source
+          and deleting the orphan). Suite at 817 tests, 0 failures (+1 multinode); credo, dialyzer and format
+          clean. **1B complete: reconciling an interrupted split now completes forward (NorthGuard's faithful
+          model), with abort left as a manual tool. Split hardening (A/B/C/1A/1B) is closed; only the optional
+          3C remains (a periodic sweep, more k8s operability than NorthGuard).**
+- ✅ **`Malachi.Cluster.Placement`**: the **pure** placement and segment-replica self-healing policy
+  (the data plane's *decision* layer; `Metadata` already holds the segments' *state*). It uses
+  **rendezvous (HRW) hashing**: `place/3` picks the replica set (deterministic, so it is safe for Raft,
+  with minimal reshuffle), `under_replicated/3` detects segments with a dead replica (the target clamped
+  to the number of live brokers), and `heal/3` emits `:set_segment_replicas` commands that restore
+  replication. It covers **sealed** segments too (durability). `available_brokers` is an abstract
+  parameter. It pins down the contract the future membership will serve. Property tests: the replica
+  set's size and distinctness, determinism independent of ordering, **retention under broker removal
+  (min-reshuffle)**, and **`heal` reaching a fixpoint in one pass**.
 - ✅ **Ciclo de vida do segment no `Broker`**: o data plane agora *cria* segments. A cada range
   ativo o `Broker` mantém um segment aberto (span lógico de offsets sobre o `Log` único do range,
   A1): no 1º produce registra o segment escolhendo o `replica_set` via `Placement.place` sobre
