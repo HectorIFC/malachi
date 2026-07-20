@@ -112,6 +112,20 @@ defmodule Malachi.Auth.SessionManager do
   - `{:error, :session_expired}` - Session expired
   - `{:error, :session_hijack_attempt}` - IP or UA do not match
   - `{:error, :invalid_session}` - Token does not exist
+
+  ## Audit effects
+
+  Expiry is reported ahead of a binding mismatch, because expiry is the accurate reason and a legitimate
+  client whose IP moved (NAT, mobile) should not be told it looks like an attacker. The mismatch is still
+  recorded, so **one call can emit two audit events**: a token that is both expired and presented from a
+  new IP logs `:session_expired` and `:session_hijack_attempt` together, and returns `:session_expired`.
+
+  Two consequences for anyone reading `Malachi.Metrics`, which exposes these as separate counters:
+
+  - The audit counters are **not disjoint**. Summing them does not give a count of failed validations.
+  - `:session_hijack_attempt` counts *a token presented from an unexpected IP*, not *a live session
+    stolen*. Ordinary timeouts behind a changing NAT reach it, so alert thresholds should be set against
+    that broader meaning.
   """
   def validate_session(token, client_ip, user_agent \\ "") do
     case :ets.lookup(@table_sessions, token) do
