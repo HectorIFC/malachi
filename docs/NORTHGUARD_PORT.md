@@ -817,82 +817,88 @@ contract, so `ra` plugs in without rework.
     with the previous metadata intact; flake-checked 5x. (Excluded from the default `mix test` because it
     needs epmd and distribution.) **1b complete.**
 
-### Fase 3. Produto: conectar os dois mundos + escala (novo norte)
-Tornar o stack NorthGuard o broker **vivo** e escalável, melhor que o Kafka OSS.
+### Phase 3. Product: connecting the two worlds plus scale (the new direction)
+Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
 
-- ✅ **B: Conectar TCP/cliente ↔ stack NorthGuard (log API com cursor opaco).** Hoje o `tcp_protocol`
-  fala filas (`publish`/`subscribe`/`ack`/`channel_*`) sobre `Queue`/`Channel`; o stack NorthGuard fala
-  log sobre `BrokerServer`. **Contrato de cliente = jeito NorthGuard, NÃO Kafka:** o cliente usa
-  `topic` + **chave** (produce) + **cursor opaco** (consume), **nunca** vê partition/offset (escondidos
-  de propósito, para o sistema split/merge/restripe por baixo sem quebrar o cliente; é o diferencial vs
-  Kafka). O cursor é um token que hoje codifica `%{range_id => offset}` por dentro, mas o cliente o trata
-  como opaco. **Prioridade #1.** Fatias:
-  - ✅ **1ª fatia, núcleo `Malachi.LogApi`:** `create_topic`/`produce` (por chave)/`fetch` (cursor
-    opaco) sobre `BrokerServer`; decode do cursor **seguro** (`binary_to_term [:safe]` + validação de
-    forma). Cliente nunca vê partition/offset. Testado isolado.
-  - ✅ **1ª fatia. Fiação:** `BrokerServer` (`Malachi.LogBroker`) subido na árvore de supervisão
-    (`application.ex`, single-node/in-memory por default; data dir via `:log_data_dir`); ações
-    `create_topic`/`produce`/`fetch` adicionadas ao `tcp_protocol` (aditivo, filas/canais continuam),
-    com auth (`:produce`/`:consume`), `max` limitado, records→JSON **sem offset**. **Cliente alcança o
-    stack NorthGuard de ponta a ponta**: testado e2e via TCP real (produce por chave → fetch por
-    cursor opaco; permissões; re-fetch vazio).
-  - ✅ **Consumer groups + posição commitada server-side (Opção A, offsets no Metadata RSM).** Um grupo
-    consome com `fetch_group(topic, group)` (retoma da posição **duravelmente** commitada do grupo) e
-    avança-a com `commit(topic, group, cursor)` (estilo at-least-once / commit manual do Kafka). O cursor
-    segue **opaco** (o cliente nunca vê offset). Os offsets vivem no `Metadata` determinístico
-    (`{:commit_offset, group, topic, offsets}` + query `committed_offsets/3`), então ganham durabilidade
-    e HA **de graça** pelo caminho `command_fun`/`ra` existente. Exposto no `BrokerServer`/`LogApi` e no
-    `tcp_protocol` (`fetch` aceita `"group"`; nova ação `commit`). Testado: unit do Metadata (last-commit-wins,
-    grupos/topics independentes), round-trip `LogApi` (retoma após commit; re-leitura sem commit = at-least-once),
-    e2e via TCP (produce → fetch por grupo → commit → fetch retoma vazio). Offsets commitados crescem o
-    estado do Metadata (escala → futuro store log-based, estilo `__consumer_offsets`, alinhado ao roadmap D).
-  - ✅ **Consumo split-aware (cursor cobrindo ranges que dividem).** Antes, o consumo lia só o offset
-    linear de cada range **ativo**, então registros escritos **antes** de um split (que vivem nos segments
-    do range-pai, agora selado e fora do conjunto ativo) eram **perdidos**. Agora `read_consume/5` no
-    `Broker` faz leitura **cross-epoch ao vivo**: drena os ancestrais selados (filtrados à fatia de
-    keyspace do range, via `parents` + `Keyspace`) e depois faz **tailing** do range ativo, sem marcar
-    `:done` no self (diferente de `stream_history/5`, que é para história *bounded*), reusando
-    `history_sources`/`filter_records` (DRY). A posição por range vira um `consume_cursor`
-    (`:start | {source_index, source_offset}`), carregada opacamente no cursor do cliente e nos offsets
-    commitados (tipo `Metadata.position`). `fetch`/`fetch_group` herdam o fix. **Split durante o consumo
-    (decisão A):** os filhos não herdam a posição do pai → recomeçam do início e **reprocessam** sua fatia
-    (at-least-once, zero perda; splits são raros/administrativos). Testado: `Broker` (entrega cross-epoch
-    exata pós-split, tailing de novos registros, range inexistente) e integração `LogApi`/`BrokerServer`
-    (fresh consumer vê todos os pré+pós-split; grupo commitado reprocessa após split).
-  - ✅ **Payloads binários (base64 no protocolo JSON).** O storage e o `LogApi` sempre aceitaram bytes
-    arbitrários (`build_record` é `is_binary(value)`); o gargalo era só a borda JSON: o `value` vinha do
-    `Jason.decode` (sempre UTF-8) e, no fetch, um `value` não-UTF-8 **derrubava o `Jason.encode!`**.
-    Agora **todo `value` no wire é base64** (escolha do esquema: uniforme): o `produce` decodifica
-    (`Base.decode64`) cada `value` para bytes antes de chamar o `LogApi`, e o `record_to_json` codifica
-    (`Base.encode64`) no fetch. base64 vive **só no `tcp_protocol`** (o `LogApi` segue binário-nativo);
-    `key`/`headers` permanecem UTF-8. base64 inválido → `:invalid_base64`. **Breaking** (clientes JSON
-    agora mandam/recebem `value` em base64). Testado e2e: round-trip de bytes não-UTF-8, base64 inválido
-    rejeitado, e os testes existentes migrados para base64.
-  - ✅ **Long-poll no `fetch`/`fetch_group` (event-driven, *waiters* no `BrokerServer`).** Antes, um
-    consumidor *caught up* recebia `[]` na hora e tinha que re-pollar (busy-poll). Agora um `wait_ms`
-    opcional (clampado a 30s no `tcp_protocol`) faz a chamada **bloquear** até um produce ao topic
-    entregar dados ou o timeout expirar (`[]`). Mecanismo escolhido após **benchmark** (`bench/`): A:
-    *waiters* dentro do `BrokerServer` (o GenServer que já serializa produce+fetch) guardam os fetches
-    pendentes vazios (`{from, topic, positions, max}` + timer); o `produce` ao topic re-consome cada
-    waiter e responde (`GenServer.reply`) os que têm dados, o timeout responde `[]`. Medições: A entrega
-    ~35-47% mais rápido que pub/sub via Registry (B) em todas as escalas e é **self-contained** (sem
-    estado global); o contra de A (produtor bloqueia no fan-out) só é material com milhares de
-    consumidores no mesmo topic: fora do single-node atual; ao ir multi-nó, o fan-out migra para um
-    mecanismo distribuído. A orquestração de leitura multi-range **migrou** do `LogApi` para o
-    `BrokerServer` (`consume_ranges`): 1 call coesa em vez de N+1, e é o que o produce re-executa para
-    acordar waiters. Testado: `BrokerServer` (acorda no produce, timeout vazio, acorda só o topic
-    produzido), `LogApi` (bloqueia até produce; timeout), e2e TCP (wake por produtor concorrente; timeout).
-  - ✅ **Rearquitetura da camada de cliente (protocolo binário + streaming), guiada por benchmark.** A
-    funcionalidade de log sobre TCP estava completa, mas o **estilo** era JSON+base64 request/response:
-    não o "sessionized streaming com windowing" do NorthGuard. Decidido **empiricamente** (`bench/`,
-    1M msgs): (a) **protocolo binário** vs JSON+base64: **-29% bytes on-wire, 8.9x menos CPU no encode,
-    17.3x no decode** (`protocol_bench.exs`); (b) **entrega push** (subscribers no broker) 35-44% mais
-    rápida que Registry pub/sub, **mas sem windowing a mailbox explode** (consumidor lento → pico 190.276)
-    → **OOM**; com janela fica em 999 (`streaming_bench.exs`); (c) baseline do sistema 657k produce /
-    1.2M consume rec/s, memória plana (`throughput_1m.exs`). Alvo NorthGuard-fiel = **push + windowing** +
-    **protocolo binário**. Autorizado **remover o modelo de fila legado** (queues/channels) e **substituir**
-    o JSON pelo binário. Frentes: **B1** protocolo binário → **B2** streaming push+windowing → **B3** remover
-    filas legado. Cada uma fatiada (núcleo testável + fiação).
+- ✅ **B: connect the TCP client to the NorthGuard stack (a log API with an opaque cursor).** At the time
+  `tcp_protocol` spoke queues (`publish`/`subscribe`/`ack`/`channel_*`) over `Queue`/`Channel`, while the
+  NorthGuard stack spoke log over `BrokerServer`. **The client contract is the NorthGuard way, NOT
+  Kafka's:** the client uses `topic` plus a **key** (produce) plus an **opaque cursor** (consume), and
+  **never** sees a partition or offset (hidden on purpose, so the system can split, merge and restripe
+  underneath without breaking the client; it is the differentiator against Kafka). The cursor is a token
+  that today encodes `%{range_id => offset}` internally, but the client treats it as opaque.
+  **Priority #1.** Slices:
+  - ✅ **First slice, the `Malachi.LogApi` core:** `create_topic`/`produce` (by key)/`fetch` (opaque
+    cursor) over `BrokerServer`; a **safe** cursor decode (`binary_to_term [:safe]` plus shape
+    validation). The client never sees a partition or offset. Tested in isolation.
+  - ✅ **First slice, the wiring:** `BrokerServer` (`Malachi.LogBroker`) started in the supervision tree
+    (`application.ex`, single-node and in-memory by default; the data dir through `:log_data_dir`); the
+    `create_topic`/`produce`/`fetch` actions added to `tcp_protocol` (additively, so queues and channels
+    kept working), with auth (`:produce`/`:consume`), a bounded `max`, and records rendered to JSON
+    **without an offset**. **The client reaches the NorthGuard stack end to end**: tested e2e over real
+    TCP (produce by key → fetch by opaque cursor; permissions; an empty re-fetch).
+  - ✅ **Consumer groups plus a server-side committed position (option A, offsets in the Metadata RSM).**
+    A group consumes with `fetch_group(topic, group)` (resuming from the group's **durably** committed
+    position) and advances it with `commit(topic, group, cursor)` (Kafka's at-least-once, manual-commit
+    style). The cursor stays **opaque** (the client never sees an offset). The offsets live in the
+    deterministic `Metadata` (`{:commit_offset, group, topic, offsets}` plus a `committed_offsets/3`
+    query), so they get durability and HA **for free** through the existing `command_fun`/`ra` path.
+    Exposed on `BrokerServer`/`LogApi` and in `tcp_protocol` (`fetch` accepts a `"group"`; a new `commit`
+    action). Tested: a Metadata unit test (last-commit-wins,
+    independent groups and topics), a `LogApi` round trip (resuming after a commit; re-reading without a
+    commit is at-least-once), and e2e over TCP (produce → fetch by group → commit → the fetch resumes
+    empty). Committed offsets grow the Metadata state (at scale, a future log-based store in the
+    `__consumer_offsets` style, aligned with roadmap D).
+  - ✅ **Split-aware consumption (a cursor spanning ranges that split).** Before, consumption read only
+    each **active** range's linear offset, so records written **before** a split (which live in the parent
+    range's segments, now sealed and out of the active set) were **lost**. Now `read_consume/5` in
+    `Broker` does a **live cross-epoch** read: it drains the sealed ancestors (filtered to the range's
+    keyspace slice, through `parents` plus `Keyspace`) and then **tails** the active range, without
+    marking `:done` on self (unlike `stream_history/5`, which is for *bounded* history), reusing
+    `history_sources`/`filter_records` (DRY). The per-range position becomes a `consume_cursor`
+    (`:start | {source_index, source_offset}`), carried opaquely in the client's cursor and in the
+    committed offsets (the `Metadata.position` type). `fetch`/`fetch_group` inherit the fix. **A split
+    during consumption (decision A):** the children do not inherit the parent's position, so they restart
+    from the beginning and **reprocess** their slice (at-least-once, zero loss; splits are rare and
+    administrative). Tested: `Broker` (exact cross-epoch delivery after a split, tailing new records, a
+    nonexistent range) plus `LogApi`/`BrokerServer` integration (a fresh consumer sees everything from
+    before and after the split; a committed group reprocesses after a split).
+  - ✅ **Binary payloads (base64 over the JSON protocol).** Storage and `LogApi` always accepted
+    arbitrary bytes (`build_record` guards on `is_binary(value)`); the bottleneck was only the JSON edge:
+    `value` came from `Jason.decode` (always UTF-8) and, on fetch, a non-UTF-8 `value` **crashed
+    `Jason.encode!`**. Now **every `value` on the wire is base64** (a uniform scheme, by choice):
+    `produce` decodes each `value` to bytes (`Base.decode64`) before calling `LogApi`, and
+    `record_to_json` encodes it (`Base.encode64`) on fetch. base64 lives **only in `tcp_protocol`**
+    (`LogApi` stays binary-native); `key` and `headers` remain UTF-8. Invalid base64 yields
+    `:invalid_base64`. **Breaking** (JSON clients now send and receive `value` as base64). Tested e2e: a
+    round trip of non-UTF-8 bytes, invalid base64 rejected, and the existing tests migrated to base64.
+  - ✅ **Long polling on `fetch`/`fetch_group` (event-driven, with *waiters* in `BrokerServer`).**
+    Before, a *caught-up* consumer got `[]` immediately and had to re-poll (busy polling). Now an optional
+    `wait_ms` (clamped to 30s in `tcp_protocol`) makes the call **block** until a produce to the topic
+    delivers data or the timeout expires (`[]`). The mechanism was chosen after a **benchmark**
+    (`bench/`): A, *waiters* inside `BrokerServer` (the GenServer that already serializes produce and
+    fetch) hold the pending empty fetches (`{from, topic, positions, max}` plus a timer); a produce to the
+    topic re-consumes each waiter and replies (`GenServer.reply`) to those that now have data, while the
+    timeout replies `[]`. Measurements: A delivers ~35-47% faster than Registry-based pub/sub (B) at every
+    scale and is **self-contained** (no global state); A's downside (the producer blocking on the fan-out)
+    only matters with thousands of consumers on the same topic, which is beyond today's single node, and
+    going multi-node moves the fan-out to a distributed mechanism anyway. The multi-range read
+    orchestration **moved** from `LogApi` into `BrokerServer` (`consume_ranges`): one cohesive call
+    instead of N+1, and it is what produce re-runs to wake waiters. Tested: `BrokerServer` (waking on
+    produce, an empty timeout, waking only the topic produced to), `LogApi` (blocking until a produce; the
+    timeout), and e2e over TCP (woken by a concurrent producer; the timeout).
+  - ✅ **Re-architecting the client layer (binary protocol plus streaming), driven by benchmark.** The log
+    functionality over TCP was complete, but the **style** was JSON+base64 request/response, not
+    NorthGuard's "sessionized streaming with windowing". Decided **empirically** (`bench/`, 1M messages):
+    (a) a **binary protocol** against JSON+base64: **29% fewer bytes on the wire, 8.9x less CPU to
+    encode, 17.3x less to decode** (`protocol_bench.exs`); (b) **push delivery** (subscribers in the
+    broker) 35-44% faster than Registry pub/sub, **but without windowing the mailbox explodes** (a slow
+    consumer peaked at 190,276) and hits **OOM**, while with a window it stays at 999
+    (`streaming_bench.exs`); (c) a system baseline of 657k produce and 1.2M consume records/s, with flat
+    memory (`throughput_1m.exs`). The NorthGuard-faithful target is **push plus windowing** over a
+    **binary protocol**. Authorized to **remove the legacy queue model** (queues and channels) and
+    **replace** JSON with the binary one. Fronts: **B1** the binary protocol → **B2** push streaming with
+    windowing → **B3** removing the legacy queues. Each sliced up (a testable core plus wiring).
     - ✅ **B1a: codec binário (`Malachi.Wire`, núcleo puro).** Framing length-prefixed
       (`<<len::32, body>>`), envelope request `<<api_key::16, correlation_id::32, payload>>` / response
       `<<correlation_id::32, error_code::16, payload>>` (o `correlation_id` habilita **pipelining**), e os
