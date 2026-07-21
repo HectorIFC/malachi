@@ -1901,38 +1901,45 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       `domain_violations/4` (5+3); the broker hard-fail e2e (a produce aborts with 2 racks and min_domains
       3; soft places it; hard passes with min_domains 2 and 3); and rack-aware heal forwarding `:spread`
       (1). Suite at 727 tests, 0 failures; credo and dialyzer clean. The README gained the env vars.
-      - ✅ **Surfacing de `domain_violations` (métrica + painel).** Fecha o loop da metade "reportar" do 1A: o
-        `domain_violations/4` era uma função pura que **nada chamava**, então com política **soft** o operador
-        ficava cego para a degradação de HA. `Broker.domain_violations/1` (puro) computa, do próprio broker
-        (merged metadata + `spread_by` + `broker_attributes` vivos + `min_domains`), as violações **por topic**
-        (`%{topic => count}` via `Enum.frequencies_by(&topic_of_segment/1)`; `%{}` se spread/min_domains não
-        configurados); `BrokerServer.domain_violations/1` expõe via call. O `dashboard` anexa o count a cada
-        topic no `topics_overview` (default 0), o `Prometheus.export` emite o gauge por-topic
-        `malachi_domain_violations` (`Map.get(.., 0)` defensivo), e o painel mostra um badge `⚠ N HA` **só
-        quando > 0** (alto sinal, sem clutter). Testado: `Broker.domain_violations` (soft abaixo do alvo → 1;
-        no alvo → vazio; não configurado → vazio) + gauge do Prometheus (emite por-topic, default 0 na
-        ausência da chave): 4. Suíte 731 testes 0 falhas; credo/dialyzer limpos; badge JS validado. README
-        com o gauge.
-    - ✅ **Exemplo de deploy Kubernetes (amarra libcluster + placement num deploy real).** `deploy/kubernetes/`:
-      um manifest (`malachi.yaml`, 8 docs) de um **cluster CP de 3 nós** com placement rack (zona) aware,
-      + README explicando o racional. Decisões: **1A** descoberta por **epmd (lista estática de FQDNs)**:
-      um StatefulSet CP/Raft tem identidades **estáveis** (idiomático, e os node names casam com o
-      `RELEASE_NODE`: determinístico, o que importa já que não há cluster real p/ testar); **2A** rack-aware
-      **de verdade** via init container. Peças: **StatefulSet** (identidade/DNS/PV estáveis p/ o `ra`;
-      `podManagementPolicy: Parallel` forma o quórum junto), **headless Service** (`publishNotReadyAddresses`
-      p/ os peers se resolverem durante a formação), **client Service** (4040/4041), **PDB** `minAvailable: 2`
-      (maioria Raft em drains), **ClusterRole** least-privilege (`get nodes`) + SA/binding p/ o init. Node name
-      distribuído via `RELEASE_NODE=malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE)...` +
-      `RELEASE_DISTRIBUTION=name` + `ERL_AFLAGS` fixando a porta de dist; peer set do `ra` = os 3 FQDNs em
-      `MALACHIMQ_LOG_NODES`; `MALACHIMQ_CLUSTER_STRATEGY=epmd` reusa a lista. Rack-awareness:
-      `topologySpreadConstraints` por zona + init container (`kubectl get node`) escreve a zona num emptyDir
-      que o main container dobra em `MALACHIMQ_LOG_ATTRIBUTES=zone=<z>`, com `LOG_SPREAD_BY=zone`/
-      `MIN_DOMAINS=2`/`PLACEMENT_POLICY=soft` (violações viram o gauge do slice anterior; nó sem label →
-      fallback informativo). Probes `/health`+`/ready` (do O1). Sem mudança de código Elixir (node name via
-      `RELEASE_*`; o `vm.args` já usa `inet_res`). Validado: YAML parseia (8 docs) + spot-check dos valores
-      críticos (ordem do env com POD_NAME antes do RELEASE_NODE, refs `$(VAR)`, command colapsado). Doc da
-      alternativa `kubernetes` (dinâmica, RBAC em pods) p/ deploys autoescaláveis. README principal aponta.
-      (Não testável sem um cluster k8s real, config determinística por construção.)
+      - ✅ **Surfacing `domain_violations` (a metric plus the panel).** This closes the "report" half of 1A:
+        `domain_violations/4` was a pure function **nothing called**, so under the **soft** policy an
+        operator was blind to HA degradation. `Broker.domain_violations/1` (pure) computes, from the broker
+        itself (merged metadata plus `spread_by` plus live `broker_attributes` plus `min_domains`), the
+        violations **per topic** (`%{topic => count}` through
+        `Enum.frequencies_by(&topic_of_segment/1)`; `%{}` when spread or min_domains are not configured);
+        `BrokerServer.domain_violations/1` exposes it through a call. The `dashboard` attaches the count to
+        each topic in `topics_overview` (defaulting to 0), `Prometheus.export` emits the per-topic
+        `malachi_domain_violations` gauge (with a defensive `Map.get(.., 0)`), and the panel shows a
+        `⚠ N HA` badge **only when the count exceeds 0** (high signal, no clutter). Tested:
+        `Broker.domain_violations` (soft and below target yields 1; at target yields empty; unconfigured
+        yields empty) plus the Prometheus gauge (emitted per topic, defaulting to 0 when the key is
+        absent): 4 tests. Suite at 731 tests, 0 failures; credo and dialyzer clean; the JS badge validated.
+        The README gained the gauge.
+    - ✅ **A Kubernetes deploy example (tying libcluster and placement into a real deploy).**
+      `deploy/kubernetes/`: a manifest (`malachi.yaml`, 8 documents) for a **3-node CP cluster** with
+      rack-aware (zone-aware) placement, plus a README explaining the rationale. Decisions: **1A**
+      discovery through **epmd (a static list of FQDNs)**, since a CP/Raft StatefulSet has **stable**
+      identities (idiomatic, and the node names match `RELEASE_NODE`, so it is deterministic, which matters
+      given there is no real cluster to test against); **2A** genuinely rack-aware, through an init
+      container. The pieces: a **StatefulSet** (stable identity, DNS and PV for `ra`;
+      `podManagementPolicy: Parallel` so the quorum forms together), a **headless Service**
+      (`publishNotReadyAddresses` so peers resolve each other during formation), a **client Service**
+      (4040/4041), a **PDB** with `minAvailable: 2` (preserving the Raft majority through drains), and a
+      least-privilege **ClusterRole** (`get nodes`) with an SA and binding for the init container. The
+      distributed node name comes from
+      `RELEASE_NODE=malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE)...` plus
+      `RELEASE_DISTRIBUTION=name` plus `ERL_AFLAGS` pinning the distribution port; `ra`'s peer set is the 3
+      FQDNs in `MALACHIMQ_LOG_NODES`; and `MALACHIMQ_CLUSTER_STRATEGY=epmd` reuses that list.
+      Rack-awareness: `topologySpreadConstraints` by zone plus an init container (`kubectl get node`) that
+      writes the zone into an emptyDir, which the main container folds into
+      `MALACHIMQ_LOG_ATTRIBUTES=zone=<z>`, with `LOG_SPREAD_BY=zone`, `MIN_DOMAINS=2` and
+      `PLACEMENT_POLICY=soft` (violations surface through the previous slice's gauge; a node without the
+      label falls back informatively). Probes `/health` and `/ready` (from O1). No Elixir code changed (the
+      node name comes through `RELEASE_*`, and `vm.args` already uses `inet_res`). Validated: the YAML
+      parses (8 documents) plus a spot check of the critical values (the env ordering with POD_NAME before
+      RELEASE_NODE, the `$(VAR)` references, the collapsed command). The `kubernetes` alternative (dynamic,
+      with RBAC over pods) is documented for autoscaling deploys. The main README points at it. (Not
+      testable without a real k8s cluster; the config is deterministic by construction.)
     - ✅ **TLS na distribuição Erlang inter-nó (G3).** Fecha um gap de segurança de produção: metadata
       (`ra`) + replicação de dados trafegavam em **texto puro** entre nós (só o cookie autenticava).
       Decisão **1A**: **TLS mútuo** (`verify_peer` + `fail_if_no_peer_cert`), CA compartilhada, cert por nó,
