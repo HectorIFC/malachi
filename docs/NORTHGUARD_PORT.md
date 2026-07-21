@@ -2233,95 +2233,104 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         `coordinator_name/2`; multinode green 2x; single-node boot. Suite at 781 tests, 0 failures (plus 1
         for `coordinator_name`); credo, dialyzer and format clean. **Next: A5 (a Node client retry on
         `:not_owner`, for client resilience during the failover window).**
-      - ✅ **A5. Resiliência do cliente Node no `:not_owner` (janela de failover).** Fecha o item de cliente do
-        A4: quando um request de membro é encaminhado a um coordinator que acabou de perder a liderança do vnode,
-        o servidor responde `:not_owner` (guard do A2); é **transitório** (o servidor re-resolve o líder atual no
-        próximo request), então o cliente deve **retry** em vez de falhar. Node-only (nenhum Elixir): `client.js`
-        exporta `isNotOwner(err)` (um `MalachiError` com mensagem `"not_owner"`); `cli.js` ganha `sleep/1`.
-        `consumer.js` (fetch por membro) faz **try/catch** no fetch, em `:not_owner`, back-off de 200ms e
-        `continue` (retenta; imprime `~`). `subscriber.js` (subscribe por membro) reestrutura o subscribe num
-        `startStream()` e, no `onError`, se `:not_owner`, **re-subscreve** após 200ms (em vez de sair) contra o
-        novo dono. O `stream_ack` (heartbeat) já era fire-and-forget e auto-cura no próximo ack, sem mudança.
-        Validado: `node --check` nos scripts + sanity de `isNotOwner` (não-owner, outra razão, erro não-Malachi).
-        Sem harness de teste JS (padrão das fatias de cliente Node anteriores). **A1–A5 fecham o épico de
-        coordinator cluster wiring: consumer groups corretos e resilientes multi-nó, fiéis ao NorthGuard.**
+      - ✅ **A5. Node client resilience on `:not_owner` (the failover window).** This closes A4's client
+        item: when a member request is forwarded to a coordinator that has just lost the vnode's leadership,
+        the server answers `:not_owner` (A2's guard); it is **transient** (the server re-resolves the
+        current leader on the next request), so the client should **retry** rather than fail. Node-only (no
+        Elixir): `client.js` exports `isNotOwner(err)` (a `MalachiError` whose message is `"not_owner"`) and
+        `cli.js` gains `sleep/1`. `consumer.js` (member fetch) wraps the fetch in a **try/catch** and, on
+        `:not_owner`, backs off 200ms and `continue`s (retrying, printing `~`). `subscriber.js` (member
+        subscribe) restructures the subscribe into a `startStream()` and, in `onError`, **re-subscribes**
+        after 200ms against the new owner on `:not_owner` (instead of exiting). `stream_ack` (the heartbeat)
+        was already fire-and-forget and self-heals on the next ack, so it needed no change. Validated:
+        `node --check` on the scripts plus a sanity check of `isNotOwner` (a non-owner error, a different
+        reason, and a non-Malachi error). No JS test harness (the standard for previous Node client
+        slices). **A1 through A5 close the coordinator cluster-wiring epic: consumer groups that are correct
+        and resilient across nodes, faithful to NorthGuard.**
 
-### 8.4 Status de adoção e desvios deliberados (retrospectiva)
+### 8.4 Adoption status and deliberate deviations (a retrospective)
 
-As ideias de riak_core e k8s acima **já foram absorvidas** pelas fatias da Fase 1/3. O que foi adotado, e
-o que foi deliberadamente **não** adotado (com o porquê):
+The riak_core and k8s ideas above have **already been absorbed** by the phase 1 and 3 slices. What was
+adopted, and what was deliberately **not** adopted (with the reason):
 
-**Adotado (com a fatia que o realizou):**
-- **Fencing via consenso**: bootstrap auto-fencido pelo **nome do cluster `ra`** + **Lease sobre `ra`**
-  para o trabalho contínuo do líder (R0): triângulo `duração > renew_deadline > retry_period`, token de
-  fencing versionado (CAS), largar **proativo** (o *OnStoppedLeading* do k8s) e **relógio do líder** (não
-  do cliente: carimbado uma vez e replicado no log, sem clock skew). [k8s Lease + RabbitMQ/`ra`]
+**Adopted (with the slice that delivered it):**
+- **Fencing through consensus**: a bootstrap self-fenced by the **`ra` cluster's name**, plus a **Lease
+  over `ra`** for the leader's continuous work (R0): the `duration > renew_deadline > retry_period`
+  triangle, a versioned fencing token (CAS), **proactively** giving up (k8s's *OnStoppedLeading*) and the
+  **leader's clock** (not the client's: stamped once and replicated in the log, so there is no clock
+  skew). [k8s Lease + RabbitMQ/`ra`]
 - **Staged → planned → committed**: R1 (`desired_placement`) → R2 (`rebalance_plan`) → R3 (`apply_plan`
-  sob o lease). [riak_core claimant]
-- **Eleição pelo menor nó vivo + fencing**, `membership_leader` / `LeaseHolder`. [ambos]
-- **Reconcile level-triggered / idempotente**: os coordinators (heal/retention/rebalance/lease) reconciliam
-  **desejado × atual**, idempotentes, só-o-líder-age. [k8s controller]
-- **Placement determinístico, rack/DC-aware**: A1 (`spread`) + A2 (`maxSkew` via `place_balanced`) +
-  `min_domains`/hard-soft (fatia de hardening de placement), **sem randomização** (raft-safe: toda réplica
-  computa o mesmo). [k8s PodTopologySpread `topologyKey`/`maxSkew`/`minDomains`/`whenUnsatisfiable` +
-  riak_core binring `target_n_val`]
-- **Movimento mínimo**: o HRW é *min-reshuffle* (remover um broker só move o que ele detinha; survivors
-  mantêm rank); R1/R2 só movem vnodes afetados; o `heal` preserva réplicas vivas. [riak_core]
-- **Add-before-remove** no rebalancing (o quórum nunca cai abaixo no meio da mudança). [riak_core/`ra`]
+  under the lease). [riak_core's claimant]
+- **Election by the lowest live node plus fencing**, `membership_leader` / `LeaseHolder`. [both]
+- **Level-triggered, idempotent reconcile**: the coordinators (heal, retention, rebalance, lease)
+  reconcile **desired versus actual**, idempotently, with only the leader acting. [k8s controller]
+- **Deterministic, rack- and DC-aware placement**: A1 (`spread`) plus A2 (`maxSkew` through
+  `place_balanced`) plus `min_domains` and hard-versus-soft (the placement hardening slice), **without
+  randomization** (raft-safe: every replica computes the same). [k8s PodTopologySpread
+  `topologyKey`/`maxSkew`/`minDomains`/`whenUnsatisfiable` + riak_core binring `target_n_val`]
+- **Minimal movement**: HRW is *min-reshuffle* (removing a broker only moves what it held; survivors keep
+  their rank); R1 and R2 only move affected vnodes; and `heal` preserves live replicas. [riak_core]
+- **Add-before-remove** during rebalancing (the quorum never drops mid-change). [riak_core/`ra`]
 
-**Desvios deliberados / não adotado:**
-- **workqueue + expectations** (k8s controller): **não** adotado. Os coordinators são **síncronos, por
-  tick** (level-triggered simples), sem fila com dedupe/rate-limit nem rastreamento de operações em voo com
-  TTL. Justificativa: a cardinalidade do reconcile é baixa (poucos vnodes por tick), o `ra` já **serializa**
-  as mudanças de membership (uma por vez, com retry em `:cluster_change_not_permitted`) e o commit de
-  rebalancing é **manual**: não há a explosão de eventos que motiva workqueue/expectations no k8s.
-  Reavaliar **se** um gatilho automático de rebalancing for adicionado.
-- **sticky preference no `heal`** (k8s): não precisou de código dedicado: o HRW já prefere réplicas
-  sobreviventes **inerentemente** (min-reshuffle). Mesma propriedade, de graça.
-- **`target_n_val` "nós E locations distintos"** (riak_core): coberto por **composição**, não por um
-  parâmetro único: `Placement.place` já devolve brokers **distintos** (nós distintos) e `min_domains`
-  garante **domínios distintos**; juntos ≡ `target_n_val`.
-- **binring V4 (min-movement exato)** (riak_core `update()` antes de `solve()`): usamos HRW (movimento
-  mínimo **estatístico**) + `maxSkew` (A2) para uniformidade, suficiente para o control plane (poucos
-  vnodes); não portamos o algoritmo exato do binring.
-- **etcd único** (k8s): não adotado: é justamente o **gargalo de escala** (~5000 nodes) que o sharding por
-  vnode (fatia D) evita.
+**Deliberate deviations / not adopted:**
+- **workqueue plus expectations** (the k8s controller): **not** adopted. The coordinators are
+  **synchronous and per tick** (plain level-triggered), with no queue carrying dedupe and rate limiting,
+  and no TTL-based tracking of in-flight operations. The justification: reconcile cardinality is low (a
+  few vnodes per tick), `ra` already **serializes** membership changes (one at a time, retrying on
+  `:cluster_change_not_permitted`), and the rebalancing commit is **manual**, so there is none of the
+  event explosion that motivates workqueue and expectations in k8s. Revisit **if** an automatic
+  rebalancing trigger is added.
+- **Sticky preference in `heal`** (k8s): no dedicated code was needed, because HRW **inherently** prefers
+  surviving replicas (min-reshuffle). The same property, for free.
+- **`target_n_val`, "distinct nodes AND distinct locations"** (riak_core): covered by **composition**
+  rather than a single parameter: `Placement.place` already returns **distinct** brokers (distinct nodes)
+  and `min_domains` guarantees **distinct domains**; together they are equivalent to `target_n_val`.
+- **binring V4 (exact minimal movement)** (riak_core's `update()` before `solve()`): we use HRW
+  (**statistical** minimal movement) plus `maxSkew` (A2) for uniformity, which suffices for the control
+  plane (few vnodes); we did not port binring's exact algorithm.
+- **A single etcd** (k8s): not adopted, since it is precisely the **scale bottleneck** (~5000 nodes) that
+  per-vnode sharding (slice D) avoids.
 
-**Ainda aberto (por cima do mesmo motor):**
-- ✅ **Gatilho automático de rebalancing (feito, opt-in).** `Malachi.Cluster.AutoRebalancer`, **política
-  level-triggered** por cima do mecanismo `RebalanceCoordinator` (que segue manual-by-default). A cada tick
-  (default 30s), **só no holder do lease**: pega o `plan`; se **não-vazio e igual** por `stabilization`
-  ticks consecutivos (default 3 ≈ 90s), chama `commit` (que re-gate o líder). Plan vazio ou que mudou →
-  reseta o contador: assim um **flap do SWIM** (nó brevemente suspeito → volta) **nunca** move vnode. É o
-  padrão que a tabela acima registrou: SWIM faz a *detecção* event-driven; a *decisão* de mover reconcilia
-  e converge (nada de eventos perdidos). Seams (`plan_fun`/`commit_fun`/`leader?`) → testável sem `ra`/lease
-  dirigindo `reconcile_now`. **Opt-in** (`MALACHIMQ_AUTO_REBALANCE`, default off = comportamento manual
-  atual intacto); `interval`/`stabilization` configuráveis; subido no `rebalance_children` só quando
-  sharded + habilitado. Testado: commit após N ticks estáveis; plan que muda reseta a janela; plan vazio
-  nunca commita; não-líder não commita; `stabilization: 1` commita na 1ª observação; perda/reganho de
-  liderança reseta; resultado de falha-parcial repassado ao `on_result`, 7. Suíte 738 testes 0 falhas;
-  credo/dialyzer limpos. README com os env vars. *(workqueue/expectations do k8s seguem **não** adotados:
-  a cardinalidade é baixa, o `ra` serializa a membership e a estabilização já dá o debounce.)*
-- 🚧 **Re-sharding**: mudar a **contagem** de vnodes (R1/R2 assumem o mesmo conjunto de vnode ids; por isso
-  o re-sharding **não** passa pelo rebalancer e sim pelo caminho de **split**). **Grow implementado**
-  (decisão: só aumentar; geometria **split-natural**): **RS-1** `Malachi.Cluster.ReshardPlan`, plano puro que
-  leva o ring à contagem-alvo repetindo "splitar o **maior arco** no midpoint", sem mover token existente
-  (property: cresce a exatamente N, determinístico, o maior arco nunca aumenta) → **RS-2**
-  `Malachi.Cluster.ReshardCoordinator`: GenServer lease-gated que executa **um** split por vez pelo
-  `SplitCoordinator`; **level-triggered**, re-planeja do ring vivo a cada passe, então um reshard
-  interrompido converge só re-emitindo o mesmo alvo (nada de intent multi-passo novo); guard
-  `:ring_did_not_advance` contra loop e recusa de placement vazio → **RS-3** fiação no `application.ex`
-  (`reshard_coordinator_child`, junto do split coordinator sob o lease) + **`mix malachi.reshard --to N`**
-  via RPC (reusa `Malachi.CLI.Rpc`) + `:multinode` sobre `ra` real (1→3 vnodes com topic **e offsets
-  commitados** preservados; resume de grow parcial).
-  - ⏳ **Dependência anotada: ring durável.** O ring é estado global mínimo **gossip-only** (fiel ao
-    NorthGuard) e num **restart de cluster inteiro** reseeda do config (`MALACHIMQ_LOG_VNODES` via
-    `sharded_vnodes/2`), cuja geometria **não** bate com o ring split-natural: o metadado migrado ficaria
-    órfão. **Gap pré-existente, compartilhado com o split.** Escopo atual: reshard **em runtime**. Tornar o
-    ring durável (e o reshard sobrevivente a restart total) é o follow-up natural, e beneficia o split também.
-  - **Fora de escopo (registrado):** **merge/diminuir** vnodes (drenar pro sucessor + `remove_vnode` +
-    deletar o grupo `ra`: genuinamente novo) e **retoken-to-even** (geometria exata de `sharded_vnodes/2`,
-    exigiria primitiva de mover-token migrando todo vnode).
+**Still open (on top of the same engine):**
+- ✅ **An automatic rebalancing trigger (done, opt-in).** `Malachi.Cluster.AutoRebalancer` is a
+  **level-triggered policy** on top of the `RebalanceCoordinator` mechanism (which stays manual by
+  default). Each tick (default 30s), **only on the lease holder**: it takes the `plan`; if that plan is
+  **non-empty and identical** for `stabilization` consecutive ticks (default 3, so about 90s), it calls
+  `commit` (which re-gates on leadership). An empty or changed plan resets the counter, so a **SWIM flap**
+  (a node briefly suspected, then back) **never** moves a vnode. It is the pattern the table above
+  recorded: SWIM does the *detection* event-driven, while the *decision* to move reconciles and converges
+  (no lost events). Seams (`plan_fun`/`commit_fun`/`leader?`) make it testable without `ra` or a lease, by
+  driving `reconcile_now`. **Opt-in** (`MALACHIMQ_AUTO_REBALANCE`, defaulting to off, leaving today's
+  manual behaviour untouched); `interval` and `stabilization` are configurable; and it only starts in
+  `rebalance_children` when sharded and enabled. Tested: a commit after N stable ticks; a changed plan
+  resetting the window; an empty plan never committing; a non-leader never committing; `stabilization: 1`
+  committing on the first observation; losing and regaining leadership resetting it; and a partial-failure
+  result passed to `on_result`: 7 tests. Suite at 738 tests, 0 failures; credo and dialyzer clean. The
+  README gained the env vars. *(k8s's workqueue and expectations remain **not** adopted: cardinality is
+  low, `ra` serializes membership, and the stabilization window already provides the debounce.)*
+- 🚧 **Re-sharding**: changing the vnode **count** (R1 and R2 assume the same set of vnode ids, which is
+  why re-sharding does **not** go through the rebalancer but through the **split** path). **Grow is
+  implemented** (decision: grow only; **split-natural** geometry): **RS-1**
+  `Malachi.Cluster.ReshardPlan`, a pure plan that takes the ring to a target count by repeatedly
+  "splitting the **largest arc** at its midpoint", without moving any existing token (as properties: it
+  grows to exactly N, deterministically, and the largest arc never increases) → **RS-2**
+  `Malachi.Cluster.ReshardCoordinator`, a lease-gated GenServer that performs **one** split at a time
+  through `SplitCoordinator`; it is **level-triggered**, re-planning from the live ring on each pass, so an
+  interrupted reshard converges simply by re-issuing the same target (with no new multi-step intent); plus
+  a `:ring_did_not_advance` guard against looping and a refusal on empty placement → **RS-3** the wiring in
+  `application.ex` (`reshard_coordinator_child`, alongside the split coordinator under the lease) plus
+  **`mix malachi.reshard --to N`** over RPC (reusing `Malachi.CLI.Rpc`) plus a `:multinode` run against
+  real `ra` (1 to 3 vnodes with the topic **and its committed offsets** preserved; plus resuming a partial
+  grow).
+  - ⏳ **A recorded dependency: a durable ring.** The ring is minimal global state, **gossip-only**
+    (faithful to NorthGuard), and on a **full-cluster restart** it reseeds from config
+    (`MALACHIMQ_LOG_VNODES` through `sharded_vnodes/2`), whose geometry does **not** match a split-natural
+    ring, so the migrated metadata would be orphaned. **A pre-existing gap, shared with split.** Current
+    scope: reshard **at runtime**. Making the ring durable (and a reshard survive a full restart) is the
+    natural follow-up, and it benefits split too.
+  - **Out of scope (recorded):** vnode **merge/shrink** (draining into the successor plus `remove_vnode`
+    plus deleting the `ra` group: genuinely new) and **retoken-to-even** (the exact geometry of
+    `sharded_vnodes/2`, which would need a move-token primitive migrating a whole vnode).
 
 ---
 
