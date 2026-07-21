@@ -224,8 +224,15 @@ config :malachi,
   shutdown_grace_ms: parse_int.(System.get_env("MALACHI_SHUTDOWN_GRACE_MS"), 5_000),
   auto_rebalance: System.get_env("MALACHI_AUTO_REBALANCE") == "true",
   auto_rebalance_interval_ms: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_INTERVAL_MS"), 30_000),
-  auto_rebalance_stabilization: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_STABILIZATION"), 3),
-  ra_data_dir: System.get_env("MALACHI_RA_DATA_DIR") || Path.join(System.tmp_dir!(), "malachi_ra")
+  auto_rebalance_stabilization: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_STABILIZATION"), 3)
+
+# On-disk data directories, set **only** when the operator supplies them. Setting them unconditionally
+# here would override config/test.exs, whose per-run paths exist because a fixed directory surviving
+# between runs made a reused topic collide with a leftover segment (`Log.ensure_active :already_exists`).
+# With neither the env var nor test.exs in play, `Malachi.Application` supplies the same defaults these
+# lines used to hardcode, so dev and prod behavior is unchanged.
+if dir = System.get_env("MALACHI_LOG_DATA_DIR"), do: config(:malachi, log_data_dir: dir)
+if dir = System.get_env("MALACHI_RA_DATA_DIR"), do: config(:malachi, ra_data_dir: dir)
 
 # Only set rate limiting and connection limiting configs in non-test environments
 # Test environment sets these in test.exs with permissive values
