@@ -1792,54 +1792,63 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       does not re-fire `on_acquired`; it holds until the deadline then drops; it drops immediately when
       held by another; a token change yields lost then acquired; and a leader releases on shutdown (while
       a follower does not). **R0 is complete.**
-  - **R3. Execução** (*committed*): aplica o plano por vnode via `ra`, **sob o lease**. Escopo: control
-    plane (o `ra` transfere o estado ao adicionar membro); o data plane fica com o *healing*.
-    - ✅ **R3-a: executor de uma mudança (núcleo com seams).** `Malachi.Cluster.Rebalance`: `apply_change/3`
-      aplica cada `add` **antes** de cada `remove` (add-before-remove, para o vnode nunca cair abaixo do
-      quórum) via seams `add_member`/`remove_member` (`(vnode_id, node -> :ok | {:error, _})`); **idempotente**
-      (add de quem já é membro / remove de quem já saiu = `:ok`, então um commit interrompido é
-      re-executável); **fail-fast** (um `add` que falha **não** tenta os removes, protege o quórum).
-      `apply_plan/4` aplica o plano mudança-a-mudança, fail-fast entre vnodes (para no 1º erro, devolve
-      `{:error, {aplicados, falha}}`), e **revalida `leader?` antes de cada mudança** (para com
-      `:lost_leadership` se o holder soltou o lease no meio). Testado (seams que gravam a ordem): add
-      antes de remove; add que falha não remove; erro no remove reportado; idempotência; plano completo;
-      fail-fast entre vnodes; parada por perda de liderança.
+  - **R3. Execution** (*committed*): applies the plan per vnode through `ra`, **under the lease**. Scope:
+    the control plane (`ra` transfers the state when a member is added); the data plane stays with
+    *healing*.
+    - ✅ **R3-a: the single-change executor (a core with seams).** `Malachi.Cluster.Rebalance`:
+      `apply_change/3` applies every `add` **before** every `remove` (add-before-remove, so the vnode
+      never drops below quorum) through the `add_member`/`remove_member` seams
+      (`(vnode_id, node -> :ok | {:error, _})`); it is **idempotent** (adding an existing member or
+      removing one that already left is `:ok`, so an interrupted commit is re-runnable) and **fail-fast**
+      (an `add` that fails does **not** attempt the removes, protecting the quorum). `apply_plan/4`
+      applies the plan change by change, fail-fast across vnodes (stopping at the first error and
+      returning `{:error, {applied, failure}}`), and **re-checks `leader?` before each change** (stopping
+      with `:lost_leadership` if the holder released the lease midway). Tested (with seams that record
+      the order): add before remove; a failing add does not remove; an error on remove is reported;
+      idempotence; a complete plan; fail-fast across vnodes; and stopping on lost leadership.
     - **R3-b, coordenador plan/commit + ops `ra`/wiring.**
-      - ✅ **R3-b-i: plano do estado vivo (núcleo com seams).** `Malachi.Application.readable_placement/2` monta o
-        placement **atual** a partir das memberships `ra` dos vnodes via o seam `members_of`
-        (`vnode_id -> {:ok, nodes} | {:error, _}`), **omitindo** vnodes ilegíveis (conservador: nunca
-        planejar um vnode que não conseguimos ver). `Malachi.Application.live_rebalance_plan/5` é o *plan*: faz o
-        diff do atual (legível) contra o `place_vnodes` **desejado** sobre os nós **vivos**, só para os
-        vnodes legíveis, e devolve o plano (`rebalance_plan/2`) que alimenta `Rebalance.apply_plan/4` (o
-        *commit*, sob o lease). Fica junto de R1/R2 no `Application` (evita ciclo com `Rebalance`, que só
-        executa). Testado: `readable_placement` omite ilegível; `live_rebalance_plan` = diff atual×desejado
-        sobre vivos; vazio quando já casa; nunca planeja vnode ilegível.
-      - ✅ **R3-b-ii: ops `ra` reais + coordenador (motor).** `Rebalance.ra_add_member/3` e
-        `ra_remove_member/3` são os seams reais do `apply_plan`: **add** = `add_member` (anuncia o membro:
-        ele nem precisa estar rodando) **depois** `start_server` no nó via `:erpc` (a ordem que a doc do
-        `ra` prescreve; o líder então replica log/snapshot ao novo membro); **remove** = `remove_member`
-        depois `stop_server`. **Idempotentes** (`already_member`/`not_member`/`already_started` aninhado →
-        `:ok`) e com **retry** em `:cluster_change_not_permitted`: o `ra` só permite **uma** mudança de
-        membership por vez, então o `add`-then-`remove` de um mesmo change (e ops repetidas) esperam a
-        anterior assentar. `RebalanceCoordinator` (GenServer, seams `plan_fun`/`add_member`/`remove_member`/
-        `leader?`) expõe `plan/1` (calcula, não aplica) e `commit/1` (**recusa `:not_leader`** se não for o
-        holder do lease; senão `apply_plan` fail-fast, passando o mesmo `leader?` para parar se o lease cair
-        no meio). Commit **sempre manual**. Testado: coordenador por seams (plan/commit/recusa/fail-fast) +
-        **`:multinode`** real: `ra_add_member` cresce um vnode para um novo nó e o `ra` transfere o estado,
-        `ra_remove_member` encolhe, ambos idempotentes.
-      - ✅ **R3-b-iii: wiring (\"ligar na tomada\").** Quando **sharded**, `Application.log_children`
-        adiciona `rebalance_children`: bootstrapa o `LeaseServer` (cluster `ra` dedicado `Malachi.LogLease`,
-        **auto-fencido** no boot: todo nó chama, um forma) e sobe o `LeaseHolder` (`Malachi.LogLeaseHolder`,
-        triângulo default 15s/10s/2s via `lease_duration_ms`/`lease_renew_deadline_ms`/`lease_retry_period_ms`,
-        `renew`/`release` reais sobre o `LeaseServer`) e o `RebalanceCoordinator` (`Malachi.LogRebalanceCoordinator`)
-        com os seams reais: `plan_fun`=`live_rebalance_plan`, `add_member`/`remove_member`=`Rebalance.ra_*`
-        resolvendo os membros via `try_members/2` (tenta cada nó como ponto de entrada: o holder pode não
-        hospedar o vnode; qualquer membro roteia ao líder), `leader?`=`LeaseHolder.leader?`. Adicionei
-        `LeaseHolder.leader?/1` (lê o papel sem forçar tick). O **commit segue manual** (o operador chama
-        `RebalanceCoordinator.plan/1`/`commit/1`); o `LeaseHolder` só mantém a eleição rodando (k8s). O
-        caminho **não-sharded é inalterado**. Testado: `leader?/1` e `try_members/2` isolados + suíte
-        completa (1048 testes) verde = boot não regride; comportamento das ops apoiado no `:multinode` de
-        R3-b-ii. **Rebalancing dinâmico completo: a Fase 1 (distribuição) fecha aqui.**
+      - ✅ **R3-b-i: planning from live state (a core with seams).**
+        `Malachi.Application.readable_placement/2` builds the **current** placement from the vnodes' `ra`
+        memberships through the `members_of` seam (`vnode_id -> {:ok, nodes} | {:error, _}`),
+        **omitting** unreadable vnodes (conservatively: never plan for a vnode we cannot see).
+        `Malachi.Application.live_rebalance_plan/5` is the *plan*: it diffs the current (readable)
+        placement against the **desired** `place_vnodes` over the **live** nodes, for the readable vnodes
+        only, and returns the plan (`rebalance_plan/2`) that feeds `Rebalance.apply_plan/4` (the *commit*,
+        under the lease). It sits alongside R1 and R2 in `Application` (avoiding a cycle with `Rebalance`,
+        which only executes). Tested: `readable_placement` omits the unreadable; `live_rebalance_plan` is
+        the current-versus-desired diff over live nodes; empty when they already match; and it never plans
+        for an unreadable vnode.
+      - ✅ **R3-b-ii: the real `ra` ops plus the coordinator (the engine).** `Rebalance.ra_add_member/3` and
+        `ra_remove_member/3` are `apply_plan`'s real seams: **add** is `add_member` (announcing the member,
+        which need not even be running) **followed by** `start_server` on that node through `:erpc` (the
+        order `ra`'s documentation prescribes; the leader then replicates the log or a snapshot to the new
+        member); **remove** is `remove_member` followed by `stop_server`. Both are **idempotent** (a nested
+        `already_member`/`not_member`/`already_started` becomes `:ok`) and **retry** on
+        `:cluster_change_not_permitted`: `ra` permits only **one** membership change at a time, so the
+        add-then-remove within a single change (and repeated ops) wait for the previous one to settle.
+        `RebalanceCoordinator` (a GenServer with `plan_fun`/`add_member`/`remove_member`/`leader?` seams)
+        exposes `plan/1` (computing without applying) and `commit/1` (**refusing with `:not_leader`** when
+        it does not hold the lease; otherwise a fail-fast `apply_plan`, passing the same `leader?` so it
+        stops if the lease drops midway). Commit is **always manual**. Tested: the coordinator through
+        seams (plan, commit, refusal, fail-fast) plus a real **`:multinode`** run where `ra_add_member`
+        grows a vnode onto a new node and `ra` transfers the state, `ra_remove_member` shrinks it, and both
+        are idempotent.
+      - ✅ **R3-b-iii: the wiring ("plugging it in").** When **sharded**, `Application.log_children` adds
+        `rebalance_children`: it bootstraps the `LeaseServer` (a dedicated `ra` cluster,
+        `Malachi.LogLease`, **self-fencing** at boot, since every node calls and one forms it) and starts
+        the `LeaseHolder` (`Malachi.LogLeaseHolder`, with the default 15s/10s/2s triangle through
+        `lease_duration_ms`/`lease_renew_deadline_ms`/`lease_retry_period_ms`, and real `renew`/`release`
+        over the `LeaseServer`) plus the `RebalanceCoordinator`
+        (`Malachi.LogRebalanceCoordinator`) with the real seams: `plan_fun` is `live_rebalance_plan`,
+        `add_member`/`remove_member` are `Rebalance.ra_*` resolving members through `try_members/2` (which
+        tries each node as an entry point, since the holder may not host the vnode and any member routes
+        to the leader), and `leader?` is `LeaseHolder.leader?`. `LeaseHolder.leader?/1` was added (reading
+        the role without forcing a tick). The **commit stays manual** (an operator calls
+        `RebalanceCoordinator.plan/1` and `commit/1`); the `LeaseHolder` merely keeps the election running
+        (the k8s way). The **non-sharded path is unchanged**. Tested: `leader?/1` and `try_members/2` in
+        isolation plus the full suite (1048 tests) green, showing boot does not regress; the ops'
+        behaviour rests on R3-b-ii's `:multinode` run. **Dynamic rebalancing is complete: phase 1
+        (distribution) closes here.**
       - ✅ **Reconcile do lease (endurecimento).** O bootstrap `auto-fencido` acima forma o cluster do
         lease só com a **maioria** (Raft); um nó que estava down quando o cluster formou fica membro da
         **config** (o `start_cluster` inicial lista todos os nós) mas sem servidor rodando, reduzindo a
