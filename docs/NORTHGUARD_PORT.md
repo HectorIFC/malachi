@@ -2017,32 +2017,37 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         merge test (two members, one commits only its range, and the other's is preserved) plus the existing
         ones (last-wins per range). Suite at 747 tests, 0 failures; credo and dialyzer clean. **Next: S3
         (the coordinator: membership plus heartbeat, exposing S1's assignment).**
-      - ✅ **S3: coordinator de grupo (membership + heartbeat + assignment).** `Malachi.Consumer.GroupCoordinator`
-        (GenServer) rastreia os membros por `{group, topic}` e atribui as ranges do topic via S1. API: `join`
-        (adiciona membro → rebalance → devolve `{:ok, generation, ranges}`), `heartbeat` (renova a sessão,
-        devolve a assignment atual + generation, ou `{:error, :unknown_member}` se foi evictado → re-join),
-        `leave`, `assignment` (leitura sem renovar), `reconcile_now` (roda um tick sync, seam de teste).
-        **Eager (decisão 1A)**: qualquer mudança de membership (join/leave/eviction) ou de ranges recomputa a
-        assignment inteira e **bump da `generation`** (epoch à la Kafka): o membro re-lê no heartbeat e vê a
-        generation nova = reassumir; **level-triggered** (só bumpa se a assignment mudou de fato, então o tick
-        é idempotente). Session-timeout: um membro silencioso por `session_ms` é **evictado** no reconcile
-        (tick periódico), suas ranges reatribuídas; grupo sem membros é **dropado** (sem leak de estado).
-        Só a **lógica** do coordinator, como instância única, com seams (`clock`/`ranges_fun`) → testável sem
-        cluster; o **roteamento no cluster** (qual nó coordena qual grupo, Kafka hasheia group→broker, ou
-        replicar a membership) fica para a fatia de wiring. Estado de membro é **soft** (restart → membros
-        re-join). Testado: membro sozinho pega tudo (gen 1); dois membros particionam (disjunto/completo, gen
-        avança); leave devolve as ranges; **eviction** por session-timeout + re-join obrigatório; grupo vazio
-        dropado; mudança de ranges rebalanceia no reconcile; reconcile idempotente (sem mudança → mesma gen);
-        heartbeat de membro desconhecido rejeitado, 8. credo/dialyzer limpos.
-      - ⚠️ **Correção de rumo (fidelidade NorthGuard) antes do S4.** Revisão apontou que S1–S3 importaram o
-        **modelo Kafka** (assignment de `range_ids` **visível ao cliente**). Isso **violaria** o princípio
-        central do projeto (doc §B: *"contrato de cliente = jeito NorthGuard, NÃO Kafka: … cursor opaco …
-        nunca vê partition/offset"*). Ranges são o equivalente NorthGuard de partitions → têm de ficar
-        **escondidas**. O maquinário S1–S3 é **server-side e correto** (o coordinator computa a assignment
-        internamente); o `[range_ids]` que ele devolve é **detalhe interno**, não vai ao wire. Plano de S4/S5
-        **reajustado para opaco**: o servidor escopa o fetch à assignment do membro e devolve records +
-        **cursor opaco**; o cliente **nunca** vê range_id. Membership **implícita via fetch** (o fetch é o
-        heartbeat) + `leave` explícito depois.
+      - ✅ **S3: the group coordinator (membership plus heartbeat plus assignment).**
+        `Malachi.Consumer.GroupCoordinator` (a GenServer) tracks the members of each `{group, topic}` and
+        assigns the topic's ranges through S1. The API: `join` (adds a member, rebalances, returns
+        `{:ok, generation, ranges}`), `heartbeat` (renews the session and returns the current assignment
+        plus generation, or `{:error, :unknown_member}` if the member was evicted, meaning it must
+        re-join), `leave`, `assignment` (a read without renewing) and `reconcile_now` (running a
+        synchronous tick, a test seam). **Eager (decision 1A)**: any membership change (join, leave,
+        eviction) or range change recomputes the whole assignment and **bumps the `generation`** (an epoch,
+        Kafka style): the member re-reads on its heartbeat, sees the new generation and takes over again;
+        it is **level-triggered** (the bump only happens if the assignment actually changed, so the tick is
+        idempotent). Session timeout: a member silent for `session_ms` is **evicted** during the reconcile
+        (a periodic tick) and its ranges reassigned; a group with no members is **dropped** (no state
+        leak). This is only the coordinator's **logic**, as a single instance, with seams
+        (`clock`/`ranges_fun`) so it tests without a cluster; **cluster routing** (which node coordinates
+        which group, where Kafka hashes group to broker, or replicating the membership) is left to the
+        wiring slice. Member state is **soft** (on restart, members re-join). Tested: a lone member takes
+        everything (generation 1); two members partition it (disjoint and complete, with the generation
+        advancing); a leave returns the ranges; **eviction** by session timeout plus a mandatory re-join;
+        an empty group dropped; a range change rebalancing on reconcile; the reconcile being idempotent
+        (no change means the same generation); and a heartbeat from an unknown member rejected: 8 tests.
+        Credo and dialyzer clean.
+      - ⚠️ **A course correction (NorthGuard fidelity) before S4.** Review pointed out that S1 through S3
+        had imported the **Kafka model** (a `range_ids` assignment **visible to the client**). That would
+        **violate** the project's central principle (doc §B: *"the client contract is the NorthGuard way,
+        NOT Kafka's: … an opaque cursor … never sees a partition or offset"*). Ranges are NorthGuard's
+        equivalent of partitions, so they must stay **hidden**. The S1 to S3 machinery is **server-side and
+        correct** (the coordinator computes the assignment internally); the `[range_ids]` it returns is an
+        **internal detail** and never reaches the wire. The S4/S5 plan was **readjusted to be opaque**: the
+        server scopes the fetch to the member's assignment and returns records plus an **opaque cursor**;
+        the client **never** sees a range id. Membership becomes **implicit through the fetch** (the fetch
+        is the heartbeat), with an explicit `leave` later.
       - ✅ **S4: consumo particionado server-side (opaco, in-VM).** `GroupCoordinator.poll/4` é o entry-point
         do fetch: registra o membro se novo (rebalance) ou só renova a sessão se conhecido (sem rebalance) e
         devolve as ranges dele, então o membro fica vivo **buscando**, sem heartbeat separado. O caminho do
