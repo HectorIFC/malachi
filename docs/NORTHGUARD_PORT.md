@@ -1292,48 +1292,53 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       `expire_segment`. Tested: `Retention` (age, per-range size, the union, never the active one, `nil`
       disabling) and the coordinator (a sweep through `run_now` and through a tick, with the complete meta
       reaching the seam).
-    - ✅ **C1b-2: read path (avança em dado expirado).** Retenção deleta sempre um **prefixo contíguo**
-      (os segments mais antigos), então o read path só precisa saber o menor `start_offset` ainda armazenado
-      (`earliest_offset/2`) e **clampar o offset a ele** antes de ler. `consume_page` (consumo ao vivo) e
-      `read_history_page` (admin) clampam: um consumidor cujo cursor caiu num buraco expirado avança
-      transparentemente para o dado vivo (at-least-once, cursor opaco intacto) em vez de ver `:eof` enganoso;
-      como não há buracos internos, `offset + length` continua correto (sem mudar `read`/`locate_segment`).
-      Testado: consumidor abaixo do earliest pula os segments expirados e lê o que resta.
-    - ✅ **C1b-3: config + fiação (retenção C1 completa).** `Broker.delete_segment/2` +
-      `BrokerServer.delete_segment/2` (aplicam `:delete_segment` pelo control plane, Raft-backed quando
-      configurado). A `expire_segment` real (na `application.ex`): remove do control plane e então deleta
-      o storage em cada réplica (`ReplicationServer.delete`), **best-effort** (control plane idempotente,
-      storage tolera segment ausente). Config por env: `MALACHIMQ_RETENTION_MAX_AGE_MS` /
-      `MALACHIMQ_RETENTION_MAX_BYTES` (ambos ausentes = **guarda para sempre**, coordenador não sobe) /
-      `MALACHIMQ_RETENTION_INTERVAL_MS`. O `RetentionCoordinator` sobe na árvore **sempre que há política**
-      (importa single-node também), após o `LogBroker`. Testado: `BrokerServer.delete_segment` (drop do
-      selado), e **e2e** (produce → sela → sweep do coordenador → segment some do control plane **e** do
-      storage). **C1 (retenção tempo+tamanho) completa.**
-- ✅ **C2: Attributes** (k/v opacos que o admin liga a brokers; base de rack/DC-awareness).
-  **Decisão:** disseminar via **Membership/SWIM** (fiel ao NorthGuard: "membership piggyback host/port/
-  attributes"), não no Metadata. O usuário priorizou fidelidade. Incremental: C2a (Membership puro) →
-  C2b (server + API + gossip) → C2c (fiação + config).
-  - ✅ **C2a: `Membership` puro com attributes.** Os attrs de um membro **viajam com o update**,
-    governados pela mesma **incarnation**: o `update` vira 4-tupla `{member, status, incarnation,
-    attributes}` e o `member_state` ganha `attributes`. Só o dono muda seus attrs, via `set_attributes/2`,
-    que **sobe a própria incarnation** para a mudança vencer o merge em todo lugar; uma suspeita/confirmação
-    de outro nó carrega os attrs **já conhecidos** (preserva-os). O `overrides?` (precedência `{incarnation,
-    rank}`) não muda. `new/2` aceita `:attributes` do self; query `attributes/2`. Testado: propagação/troca
-    por incarnation, `set_attributes`, preservação em suspect, gossip via `updates`; convergência
-    order-independent preservada (property; attrs são consistentes por-incarnation, então os generators
-    usam `%{}`). Multinode SWIM (D3a) segue convergindo com a 4-tupla.
-  - ✅ **C2b. `MembershipServer` com attributes.** Opção `:attributes` (attrs iniciais do self,
-    passados ao `Membership.new`); API `set_attributes/2` (muda os próprios attrs em runtime, sobe a
-    incarnation) e `attributes/2` (lê os de um membro). Disseminação é **passiva** (anti-entropy): o
-    server ignora os effects e o gossip periódico (ping/ack piggyback `updates`) propaga, nenhum push
-    proativo, consistente com o resto do server. Testado: attrs iniciais legíveis, e `set_attributes` num
-    nó propaga a um peer via gossip.
-  - ✅ **C2c: fiação na app (C2 completa).** `application.ex` liga os attributes do self no
-    `MembershipServer` do cluster: `MALACHIMQ_LOG_ATTRIBUTES` (formato `"rack=a,dc=east"`) é parseado por
-    `Malachi.Application.parse_attributes/1` (função pura testável: ignora entradas sem `=`, trima, preserva `=` no
-    valor) e passado como `:attributes`. Ausente → `%{}`. Testado: parse (vazio, pares, trim, entradas
-    inválidas, valor com `=`). **C2 (attributes via SWIM) completa**: os brokers disseminam seus attrs por
-    gossip, prontos para o placement rack-aware de C3.
+    - ✅ **C1b-2: the read path (advancing past expired data).** Retention always deletes a **contiguous
+      prefix** (the oldest segments), so the read path only needs to know the smallest `start_offset` still
+      stored (`earliest_offset/2`) and to **clamp the offset to it** before reading. `consume_page` (live
+      consumption) and `read_history_page` (admin) both clamp: a consumer whose cursor landed in an expired
+      hole advances transparently to live data (at-least-once, with the opaque cursor intact) instead of
+      seeing a misleading `:eof`; and since there are no interior holes, `offset + length` stays correct
+      (with no change to `read`/`locate_segment`). Tested: a consumer below the earliest offset skips the
+      expired segments and reads what remains.
+    - ✅ **C1b-3: config plus wiring (C1 retention complete).** `Broker.delete_segment/2` and
+      `BrokerServer.delete_segment/2` (applying `:delete_segment` through the control plane, Raft-backed
+      when configured). The real `expire_segment` (in `application.ex`) removes it from the control plane
+      and then deletes the storage on each replica (`ReplicationServer.delete`), **best-effort** (the
+      control plane is idempotent and storage tolerates an absent segment). Config through env:
+      `MALACHIMQ_RETENTION_MAX_AGE_MS` / `MALACHIMQ_RETENTION_MAX_BYTES` (both absent means **keep
+      forever**, and the coordinator does not start) / `MALACHIMQ_RETENTION_INTERVAL_MS`.
+      `RetentionCoordinator` joins the tree **whenever there is a policy** (it matters single-node too),
+      after `LogBroker`. Tested: `BrokerServer.delete_segment` (dropping a sealed segment) and **e2e**
+      (produce → seal → a coordinator sweep → the segment disappears from the control plane **and** from
+      storage). **C1 (retention by time and size) is complete.**
+- ✅ **C2: attributes** (opaque k/v that an admin attaches to brokers; the basis of rack and DC
+  awareness). **Decision:** disseminate them through **Membership/SWIM** (faithful to NorthGuard:
+  "membership piggyback host/port/attributes") rather than in Metadata. The user prioritized fidelity.
+  Incrementally: C2a (pure Membership) → C2b (the server plus the API plus gossip) → C2c (wiring plus
+  config).
+  - ✅ **C2a: pure `Membership` with attributes.** A member's attrs **travel with the update**, governed
+    by the same **incarnation**: `update` becomes a 4-tuple `{member, status, incarnation, attributes}`
+    and `member_state` gains `attributes`. Only the owner changes its own attrs, through
+    `set_attributes/2`, which **raises its own incarnation** so the change wins the merge everywhere; a
+    suspicion or confirmation from another node carries the attrs it **already knows** (preserving them).
+    `overrides?` (the `{incarnation, rank}` precedence) is unchanged. `new/2` accepts the self's
+    `:attributes`; `attributes/2` queries them. Tested: propagation and replacement by incarnation,
+    `set_attributes`, preservation under suspicion, gossip through `updates`; order-independent
+    convergence preserved (a property; attrs are consistent per incarnation, so the generators use `%{}`).
+    Multinode SWIM (D3a) keeps converging with the 4-tuple.
+  - ✅ **C2b. `MembershipServer` with attributes.** An `:attributes` option (the self's initial attrs,
+    passed to `Membership.new`); a `set_attributes/2` API (changing our own attrs at runtime, raising the
+    incarnation) and `attributes/2` (reading a member's). Dissemination is **passive** (anti-entropy): the
+    server ignores the effects and the periodic gossip (ping and ack piggybacking `updates`) propagates
+    them, with no proactive push, consistent with the rest of the server. Tested: the initial attrs are
+    readable, and `set_attributes` on one node propagates to a peer through gossip.
+  - ✅ **C2c: the application wiring (C2 complete).** `application.ex` connects the self's attributes to
+    the cluster's `MembershipServer`: `MALACHIMQ_LOG_ATTRIBUTES` (in the form `"rack=a,dc=east"`) is
+    parsed by `Malachi.Application.parse_attributes/1` (a pure, testable function: it ignores entries
+    without `=`, trims, and preserves `=` inside the value) and passed as `:attributes`. Absent yields
+    `%{}`. Tested: the parse (empty, pairs, trimming, invalid entries, a value containing `=`). **C2
+    (attributes over SWIM) is complete**: brokers disseminate their attrs by gossip, ready for C3's
+    rack-aware placement.
 - ✅ **C3: Policies** (nome + retenção + constraints sobre attributes → replica sets; fiel ao NorthGuard,
   que unifica tudo em *policies*). Incremental: C3a (Placement puro com spread) → C3b (integração: attrs do
   membership → placement) → C3c (policies por-topic: definição + associação + retenção por-topic).
