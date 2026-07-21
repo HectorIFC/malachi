@@ -1940,34 +1940,39 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       RELEASE_NODE, the `$(VAR)` references, the collapsed command). The `kubernetes` alternative (dynamic,
       with RBAC over pods) is documented for autoscaling deploys. The main README points at it. (Not
       testable without a real k8s cluster; the config is deterministic by construction.)
-    - ✅ **TLS na distribuição Erlang inter-nó (G3).** Fecha um gap de segurança de produção: metadata
-      (`ra`) + replicação de dados trafegavam em **texto puro** entre nós (só o cookie autenticava).
-      Decisão **1A**: **TLS mútuo** (`verify_peer` + `fail_if_no_peer_cert`), CA compartilhada, cert por nó,
-      cifra **e** autentica. Config de VM/release (não código Elixir): `rel/env.sh.eex` traduz
-      `MALACHIMQ_DIST_TLS=true` em `-proto_dist inet_tls -ssl_dist_optfile $MALACHIMQ_DIST_TLS_OPTFILE`
-      (via `ELIXIR_ERL_OPTIONS`), **fail-fast** se o optfile faltar/for ilegível; default off = texto puro
-      atual intacto. Artefatos: `rel/dist_tls.conf.example` (template do ssl_dist optfile), helper de dev
-      `scripts/generate-dist-certs.sh` (CA + cert de nó com EKU server/clientAuth + emite um optfile pronto),
-      `.gitignore` de `priv/dist_cert/` (nunca commitar chaves). Fiado no exemplo k8s (Secret `malachi-dist-tls`
-      com ca/node cert+key+optfile, volume readOnly em `/etc/malachi/dist`, 2 env). **Validado localmente de
-      fato** (≠ k8s): 2 nós BEAM sobre TLS dist se pingam (`:pong`), e um nó **sem** TLS é **rejeitado** no
-      handshake (`:pang`: prova que a TLS é imposta, não silenciosamente plaintext); os 3 caminhos do
-      `env.sh.eex` (off/on/fail-fast); optfile é term Erlang válido (`:file.consult`); YAML k8s parseia (9
-      docs). Sem mudança de código Elixir; README (seção inter-node TLS) + deploy README.
-    - ✅ **Shutdown gracioso / rolling-upgrade (G4).** O `prep_stop` antigo **fechava tudo de imediato**
-      (sem quiesce nem janela → in-flight cortado, e race com accepts novos durante o fechamento). Decisão
-      **1A** (janela limitada: o modelo certo para um broker com **streaming**, onde drenar-até-0-conexões
-      nunca converge). Novo `Malachi.Shutdown.graceful/1` orquestra 3 passos: **quiesce** (`terminate_child`
-      do `TCPAcceptorPool` no root supervisor: para de aceitar e **não** reinicia; as conexões, que são
-      `spawn` unlinked registradas no `ConnectionRegistry`, sobrevivem) → **drain** (sleep
-      `shutdown_grace_ms`, default 5s, janela para in-flight terminar) → **close** (`close_all`). O lease já
-      é liberado pelo LeaseHolder.terminate na teardown seguinte (failover rápido) e o `ra` persiste em
-      disco (o pod volta e re-join como o mesmo membro). Passos são **seams** → a orquestração
-      (ordem + janela) é unit-testável sem parar o app real. k8s: `terminationGracePeriodSeconds: 40` +
-      `preStop` (`sleep 5`: kube-proxy tira o pod dos endpoints do Service **antes** do SIGTERM, então
-      clientes param de ser roteados antes do drain). Config `MALACHIMQ_SHUTDOWN_GRACE_MS`. Testado:
-      `graceful/1` roda quiesce→sleep(drain_ms)→close **em ordem**; pula o sleep com `drain_ms: 0`;
-      default vem do config: 3. Suíte verde; credo/dialyzer limpos. README (env var) + k8s (grace/preStop).
+    - ✅ **TLS on inter-node Erlang distribution (G3).** This closes a production security gap: metadata
+      (`ra`) and data replication travelled in **plaintext** between nodes (only the cookie authenticated).
+      Decision **1A**: **mutual TLS** (`verify_peer` plus `fail_if_no_peer_cert`), a shared CA and a
+      per-node certificate, which both encrypts **and** authenticates. It is VM and release config (not
+      Elixir code): `rel/env.sh.eex` translates `MALACHIMQ_DIST_TLS=true` into
+      `-proto_dist inet_tls -ssl_dist_optfile $MALACHIMQ_DIST_TLS_OPTFILE` (through `ELIXIR_ERL_OPTIONS`),
+      **failing fast** if the optfile is missing or unreadable; the default is off, leaving today's
+      plaintext untouched. Artefacts: `rel/dist_tls.conf.example` (an ssl_dist optfile template), a dev
+      helper `scripts/generate-dist-certs.sh` (a CA plus a node certificate with server and clientAuth EKUs,
+      emitting a ready optfile), and a `.gitignore` entry for `priv/dist_cert/` (never commit keys). Wired
+      into the k8s example (a `malachi-dist-tls` Secret carrying the ca, the node cert and key and the
+      optfile, mounted read-only at `/etc/malachi/dist`, plus 2 env vars). **Genuinely validated locally**
+      (unlike the k8s parts): 2 BEAM nodes over dist TLS ping each other (`:pong`), and a node **without**
+      TLS is **rejected** at the handshake (`:pang`, which proves TLS is enforced rather than silently
+      falling back to plaintext); the 3 paths through `env.sh.eex` (off, on, fail-fast); the optfile is a
+      valid Erlang term (`:file.consult`); and the k8s YAML parses (9 documents). No Elixir code changed;
+      the README gained an inter-node TLS section, as did the deploy README.
+    - ✅ **Graceful shutdown / rolling upgrade (G4).** The old `prep_stop` **closed everything at once**
+      (no quiesce, no window, so in-flight work was cut off, and it raced with new accepts during the
+      close). Decision **1A** (a bounded window: the right model for a broker with **streaming**, where
+      draining to zero connections never converges). A new `Malachi.Shutdown.graceful/1` orchestrates 3
+      steps: **quiesce** (a `terminate_child` of `TCPAcceptorPool` on the root supervisor, so it stops
+      accepting and does **not** restart; the connections, which are unlinked `spawn`s registered in
+      `ConnectionRegistry`, survive) → **drain** (sleeping `shutdown_grace_ms`, default 5s, the window for
+      in-flight work to finish) → **close** (`close_all`). The lease is already released by
+      `LeaseHolder.terminate` in the teardown that follows (making failover quick) and `ra` persists to
+      disk (so the pod comes back and rejoins as the same member). The steps are **seams**, so the
+      orchestration (order plus window) is unit-testable without stopping the real app. On k8s:
+      `terminationGracePeriodSeconds: 40` plus a `preStop` (`sleep 5`, since kube-proxy removes the pod
+      from the Service endpoints **before** the SIGTERM, so clients stop being routed before the drain).
+      Config: `MALACHIMQ_SHUTDOWN_GRACE_MS`. Tested: `graceful/1` runs quiesce → sleep(drain_ms) → close
+      **in order**; it skips the sleep with `drain_ms: 0`; and the default comes from config: 3 tests.
+      Suite green; credo and dialyzer clean. The README gained the env var, and k8s the grace and preStop.
     - ✅ **Consumer group coordination (G1: épico, fatiado; concluído S1–S5 + Str-1/Str-2).** Antes um grupo era
       uma **posição única compartilhada** (todos os consumidores liam a mesma posição commitada, sem paralelismo).
       Alvo NorthGuard/Kafka **atingido**: cada **range** do topic atribuída a **exatamente um** membro do grupo,
