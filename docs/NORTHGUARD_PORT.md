@@ -1390,41 +1390,45 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       wins, `nil` included). Only `place_opts` and `effective_spread_by` change. Tested: a policy turning
       spread on over a global-off; an explicit `nil` turning it off over a global-on (that is, plain
       rendezvous).
-- ✅ **D. Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
-  por vnode) para **escalar o control plane** além de um cluster Raft único. Decisão: **1A**, o cache
-  do `Broker` vira um `DSRSM` (espelha o par `Metadata`/`ReplicatedMetadata`), roteando leituras/escritas
-  por topic; e **2A**. Incremental, núcleo puro primeiro. Infra já pronta: `HashRing`, `DSRSM` (puro),
-  `ReplicatedDSRSM` (ra), `MetadataMachine`/`MetadataServer`.
-  - ✅ **D-a: `Broker` sobre `DSRSM` (in-memory, 1 vnode).** O cache do `Broker` deixa de ser um
-    `Metadata` e passa a ser um `DSRSM` (`broker.dsrsm`), roteado por topic (derivável do `range_id`
-    `{topic, seq}`/`segment_id`). Novo combinador puro `DSRSM.update_vnode/3` (roteia + aplica uma
-    função ao `Metadata` do vnode); `DSRSM.command/3` delega a ele com `&Metadata.apply/2` (property
-    tests intactos). `command_fun` do `Broker` vira `(DSRSM, topic, command) -> {DSRSM, reply}` (default
-    `&DSRSM.command/3`); `apply_metadata` deriva o topic via `command_topic/1`. Acessores novos no
-    `DSRSM`: `single/1` (forma trivial 1-vnode p/ seed), `committed_offsets/3`, `topic_policy/2`,
-    `merged_metadata/1` (união dos shards → `Broker.metadata/1` p/ retention/healing). No `BrokerServer`,
-    o caminho Raft embrulha o cluster único como `DSRSM.single(seed)` + um `command_fun/3` que injeta
-    `ReplicatedMetadata.apply_command` no `update_vnode` (D-b troca pelo `ReplicatedDSRSM` real). Com 1
-    vnode, comportamento idêntico: suite completa verde (981) como rede de segurança.
-  - ✅ **D-b** (runtime/`BrokerServer` sobre `ReplicatedDSRSM`, N vnodes). Decisão: **1A**, D-b-1
-    (N vnodes **single-node**) primeiro; HA-por-vnode (D-b-2) depois.
-    - ✅ **D-b-1. Control plane sharded single-node.** `BrokerServer` ganha o caminho `:metadata_vnodes`
-      (`[{cluster_name, token}]`): inicia N clusters `ra` via `ReplicatedDSRSM` (um por vnode), materializa
-      o cache local com `ReplicatedDSRSM.snapshot/1` (novo: lê o `Metadata` de cada vnode → `DSRSM.seed/2`,
-      novo, compartilhando o ring), e um `command_fun/3` sharded que roteia por topic ao cluster `ra` do
-      vnode (`ReplicatedDSRSM.server_for/2`, novo) aplicando via `ReplicatedMetadata.apply_command` no
-      `update_vnode`. O caminho `:metadata_cluster` (1 vnode, D-a/D1) segue intacto. Config: `log_vnodes`
-      (inteiro N; `Malachi.Application.sharded_vnodes/2` gera N vnodes com tokens uniformes no ring de 32 bits).
-      Testado: 2 vnodes, cada topic vive em exatamente o cluster `ra` que seu nome roteia (nunca no outro),
-      e os topics se distribuem entre os vnodes; `sharded_vnodes/2` (tokens distintos, em range).
-    - ✅ **D-b-2: HA por vnode.** `ReplicatedDSRSM.add_vnode/4` passa a receber os `nodes`, iniciando o
-      cluster `ra` de cada vnode sobre eles (`MetadataServer.start/2`), então cada vnode sobrevive à perda
-      de um membro. Modelo: **todos os vnodes sobre o mesmo conjunto de M nós** (espelha o D1; placement de
-      vnodes por subconjuntos de nós fica para depois). `BrokerServer` passa os `metadata_nodes` ao caminho
-      sharded (`start_vnodes/2`); `Application.metadata_opts` inclui `metadata_nodes` no caminho sharded.
-      `snapshot/1` usa `&Function.identity/1` (query linearizável roda no líder, possivelmente remoto).
-      Testado (`:multinode`): 2 vnodes sobre 3 nós, mata um membro do vnode dono (o líder se for peer →
-      failover; senão um follower), o vnode ainda commita e os metadados (dele e do outro vnode) intactos.
+- ✅ **D. Sharding through `ReplicatedDSRSM`** (now **in scope**): sharded metadata (one `ra` cluster per
+  vnode) to **scale the control plane** beyond a single Raft cluster. Decision: **1A**, where the `Broker`'s
+  cache becomes a `DSRSM` (mirroring the `Metadata`/`ReplicatedMetadata` pair), routing reads and writes by
+  topic; plus **2A**. Incremental, pure core first. The infrastructure was already in place: `HashRing`,
+  `DSRSM` (pure), `ReplicatedDSRSM` (over ra), and `MetadataMachine`/`MetadataServer`.
+  - ✅ **D-a: `Broker` over `DSRSM` (in-memory, 1 vnode).** The `Broker`'s cache stops being a `Metadata`
+    and becomes a `DSRSM` (`broker.dsrsm`), routed by topic (derivable from the `range_id` `{topic, seq}`
+    or the `segment_id`). A new pure combinator `DSRSM.update_vnode/3` (routes, then applies a function to
+    that vnode's `Metadata`); `DSRSM.command/3` delegates to it with `&Metadata.apply/2` (leaving the
+    property tests intact). `Broker`'s `command_fun` becomes `(DSRSM, topic, command) -> {DSRSM, reply}`
+    (defaulting to `&DSRSM.command/3`); `apply_metadata` derives the topic through `command_topic/1`. New
+    accessors on `DSRSM`: `single/1` (the trivial 1-vnode form, for seeding), `committed_offsets/3`,
+    `topic_policy/2` and `merged_metadata/1` (the union of the shards, feeding `Broker.metadata/1` for
+    retention and healing). In `BrokerServer`, the Raft path wraps the single cluster as
+    `DSRSM.single(seed)` plus a `command_fun/3` that injects `ReplicatedMetadata.apply_command` into
+    `update_vnode` (D-b swaps in the real `ReplicatedDSRSM`). With 1 vnode the behaviour is identical: the
+    full suite stayed green (981) as the safety net.
+  - ✅ **D-b** (the runtime, `BrokerServer` over `ReplicatedDSRSM`, N vnodes). Decision: **1A**, D-b-1
+    (N vnodes **single-node**) first; per-vnode HA (D-b-2) after.
+    - ✅ **D-b-1. A sharded control plane, single-node.** `BrokerServer` gains the `:metadata_vnodes` path
+      (`[{cluster_name, token}]`): it starts N `ra` clusters through `ReplicatedDSRSM` (one per vnode),
+      materializes the local cache with `ReplicatedDSRSM.snapshot/1` (new: it reads each vnode's `Metadata`
+      into `DSRSM.seed/2`, also new, sharing the ring), and uses a sharded `command_fun/3` that routes by
+      topic to the vnode's `ra` cluster (`ReplicatedDSRSM.server_for/2`, new) applying through
+      `ReplicatedMetadata.apply_command` inside `update_vnode`. The `:metadata_cluster` path (1 vnode,
+      D-a/D1) is untouched. Config: `log_vnodes` (an integer N;
+      `Malachi.Application.sharded_vnodes/2` generates N vnodes with tokens spread uniformly over the
+      32-bit ring). Tested: with 2 vnodes, each topic lives in exactly the `ra` cluster its name routes to
+      (never the other), and topics distribute across the vnodes; plus `sharded_vnodes/2` (distinct tokens,
+      within range).
+    - ✅ **D-b-2: per-vnode HA.** `ReplicatedDSRSM.add_vnode/4` now takes the `nodes`, starting each
+      vnode's `ra` cluster across them (`MetadataServer.start/2`), so every vnode survives losing a member.
+      The model: **all vnodes over the same set of M nodes** (mirroring D1; placing vnodes on subsets of
+      nodes is left for later). `BrokerServer` passes the `metadata_nodes` into the sharded path
+      (`start_vnodes/2`); `Application.metadata_opts` includes `metadata_nodes` on the sharded path.
+      `snapshot/1` uses `&Function.identity/1` (a linearizable query runs on the leader, possibly remote).
+      Tested (`:multinode`): 2 vnodes over 3 nodes, killing one member of the owning vnode (the leader if
+      it is a peer, triggering failover, otherwise a follower), and the vnode still commits with the
+      metadata intact, both its own and the other vnode's.
   - ✅ **D-c: gestão do control plane por vnode** (retention/healing/failover). **Concluído por 1C-a +
     1C-b** (coordinators só-no-líder + manager per-vnode-leader; ver as sub-fatias abaixo). O texto a
     seguir é o **contexto do débito** que motivou 1C. O estado *antes* de 1C. **Estado pré-1C:** as
