@@ -1636,77 +1636,84 @@ implements it.
 
 ---
 
-## 8. Referências de design externas: riak_core e Kubernetes
+## 8. External design references: riak_core and Kubernetes
 
-Analisamos três repositórios **riak_core** (a biblioteca de consistent hashing / vnodes / membership /
-handoff do Riak) e o **Kubernetes**, para aprender como sistemas maduros resolvem os problemas que a
-Fase 1 (distribuição) enfrenta: bootstrap distribuído, leader election com fencing, placement com
-tolerância a falha, e reconcile loops.
+We studied three repositories, **riak_core** (Riak's consistent hashing, vnodes, membership and handoff
+library) and **Kubernetes**, to learn how mature systems solve the problems phase 1 (distribution) runs
+into: distributed bootstrap, leader election with fencing, failure-tolerant placement, and reconcile
+loops.
 
-**Enquadramento comum.** Os três convergem no mesmo padrão para coordenar shards: um **coordenador único
-eleito**, com **fencing via consenso**. RabbitMQ (mesma lib `ra` que usamos) fencia pelo **nome do
-cluster**; riak_core usa um *claimant* (fencing **fraco**, gossip); k8s usa um *Lease* sobre etcd
-(fencing **forte**, CAS linearizável). **Veredito geral: referência de design, não dependência**, o
-riak_core é **AP** (gossip + vector clocks; consenso forte só no `riak_ensemble`, externo) e o k8s
-centraliza o metadata num **único** cluster **etcd** (Raft, não-sharded). O malachi é **CP e sharded**
-(um cluster `ra` por vnode), então nenhum serve como dependência direta, mas os **algoritmos e padrões
-são portáveis**: trocando "gossip" por "Raft" e preservando determinismo.
+**The common framing.** All three converge on the same pattern for coordinating shards: a **single
+elected coordinator**, with **fencing through consensus**. RabbitMQ (the same `ra` library we use) fences
+on the **cluster name**; riak_core uses a *claimant* (**weak** fencing, over gossip); k8s uses a *Lease*
+over etcd (**strong** fencing, a linearizable CAS). **The overall verdict: a design reference, not a
+dependency.** riak_core is **AP** (gossip plus vector clocks; strong consensus only in `riak_ensemble`,
+which is external) and k8s centralizes metadata in a **single** **etcd** cluster (Raft, not sharded).
+Malachi is **CP and sharded** (one `ra` cluster per vnode), so neither serves as a direct dependency, but
+the **algorithms and patterns are portable**: swap "gossip" for "Raft" and preserve determinism.
 
-### 8.1 riak_core (AP). Referência: OpenRiak (`~/riak_core`, Apache 2.0, fork ativo)
+### 8.1 riak_core (AP). Reference: OpenRiak (`~/riak_core`, Apache 2.0, an active fork)
 
-- **Onde o malachi já está à frente (por ser CP):** metadata em Raft (> gossip); SWIM com suspicion
-  (> gossip simples); failover automático; retention; atributos rack/DC. *Não regredir ao portar.*
-- **`riak_core_claimant` → D-c-1d + rebalancing:** o modelo **staged → planned → committed** (o *plan*
-  computa o ring novo sem mudar estado; o *commit* valida que nada divergiu) + eleição **lexicográfica**
-  (menor node = o nosso `static_seed`). O fencing do claimant é **fraco** (gossip + vclock, split-brain
-  possível): o que **valida** a decisão do malachi de fenciar o bootstrap pelo **nome** do cluster `ra`.
-- **`riak_core_claim_binring` V4 → upgrade do `place_vnodes`:** garante réplicas em nós **e** *locations*
-  (rack/DC) distintos (`target_n_val`), balanceamento uniforme (k ou k+1 por nó) e rebalanceamento com
-  **movimento mínimo** (`update()` antes de `solve()`). Doc bem comentada: `~/riak_core/docs/claim-version4.md`.
-- **Ring versioning + ciclo de claim → re-clustering dinâmico** (add/remove nós), **feito** no rebalancing
-  R1→R3 (diff do placement vivo + `apply_plan` sob o lease); o gatilho segue **manual** (ver 8.4).
-- **Ignorar:** gossip do ring, vector clocks (o Raft já dá ordem/consenso), `node_watcher` (o SWIM
-  resolve), preflist-sobre-vnodes (desvio intencional: o malachi sharda **metadata por topic**, não
-  distribui keys de dados sobre o ring).
+- **Where malachi is already ahead (by being CP):** metadata in Raft (over gossip); SWIM with suspicion
+  (over plain gossip); automatic failover; retention; rack and DC attributes. *Do not regress while
+  porting.*
+- **`riak_core_claimant` → D-c-1d plus rebalancing:** the **staged → planned → committed** model (the
+  *plan* computes the new ring without changing state; the *commit* validates that nothing diverged) plus
+  **lexicographic** election (the lowest node, which is our `static_seed`). The claimant's fencing is
+  **weak** (gossip plus a vclock, so split brain is possible), which **validates** malachi's decision to
+  fence the bootstrap on the `ra` cluster's **name**.
+- **`riak_core_claim_binring` V4 → an upgrade for `place_vnodes`:** it guarantees replicas on distinct
+  nodes **and** distinct *locations* (rack/DC) (`target_n_val`), uniform balancing (k or k+1 per node) and
+  rebalancing with **minimal movement** (`update()` before `solve()`). Well-commented documentation:
+  `~/riak_core/docs/claim-version4.md`.
+- **Ring versioning plus the claim cycle → dynamic re-clustering** (adding and removing nodes), **done**
+  in rebalancing R1 through R3 (diffing the live placement plus `apply_plan` under the lease); the trigger
+  is still **manual** (see 8.4).
+- **Ignore:** ring gossip, vector clocks (Raft already provides ordering and consensus), `node_watcher`
+  (SWIM covers it), and preflist-over-vnodes (an intentional deviation: malachi shards **metadata by
+  topic** rather than distributing data keys over the ring).
 
-### 8.2 Kubernetes (CP via etcd único)
+### 8.2 Kubernetes (CP through a single etcd)
 
-- **Leader election + Lease → D-c-1d e, sobretudo, 1C (coordinators no líder):** o "triângulo"
-  `LeaseDuration > RenewDeadline > RetryPeriod` + **CAS linearizável** (etcd; o nosso `ra` dá o mesmo) +
-  **desistir proativo** ao não conseguir renovar (`OnStoppedLeading`, evita split-brain) + **relógio
-  local** (tolera clock skew; premissa: NTP, drift ≤ ~`lease/10`). Traduz para um **lease armazenado num
-  cluster `ra`** (comando CAS versionado). **Nuance-chave:** o fencing-por-nome do `ra` **basta para o
-  bootstrap** (start único, auto-fencido); o **lease** só é necessário para o **trabalho contínuo** do
-  líder, retention/healing/rebalancing (o 1C). Arquivos: `client-go/tools/leaderelection/`
-  (`leaderelection.go`, `resourcelock/leaselock.go`), `api/coordination/v1/types.go`.
-- **Controller/reconcile → coordinators + reconcile de bootstrap:** **level-triggered** (reconciliar o
-  estado completo *desejado × atual*: os coordinators do malachi já fazem isso); **idempotência**;
-  **workqueue** com dedupe + rate-limit + retry/backoff; **expectations** (rastrear operações em voo com
-  TTL, para não re-agir cedo demais); **só-o-líder-age**; **observabilidade** (healthz de convergência).
-  Referência: `pkg/controller/replicaset/replica_set.go`, `client-go/util/workqueue`.
-- **Scheduler / PodTopologySpread → `place_vnodes`:** `topologyKey` (= o nosso `spread_by`/atributos),
-  **`maxSkew`** (desbalanceamento máximo entre racks/zonas), **`minDomains`** (domínios distintos
-  mínimos), **`whenUnsatisfiable`** (hard `DoNotSchedule` vs soft `ScheduleAnyway`), e pipeline
-  **Filter → Score**. **Ressalva crítica:** o k8s **randomiza** o tie-break; o `place_vnodes` deve
-  permanecer **determinístico** (raft-safe: toda réplica computa o mesmo placement). Portar as *ideias*
-  (maxSkew / minDomains / hard-soft) sobre funções puras, sem randomização; e adotar *sticky preference*
-  no `heal()` (preferir réplicas sobreviventes → menos churn). Referência:
-  `pkg/scheduler/framework/plugins/podtopologyspread/`.
-- **Trade-off registrado:** o etcd único é simples, mas é o **gargalo de escala** do k8s (~5000 nodes por
-  cluster). O sharding do malachi paga complexidade (bootstrap / leader / fencing) justamente para
-  **escalar além de um quórum**: a motivação da fatia D.
+- **Leader election plus Lease → D-c-1d and, above all, 1C (coordinators on the leader):** the "triangle"
+  `LeaseDuration > RenewDeadline > RetryPeriod`, plus a **linearizable CAS** (etcd; our `ra` gives the
+  same), plus **proactively giving up** when a renewal fails (`OnStoppedLeading`, which avoids split
+  brain), plus a **local clock** (tolerating clock skew; the premise being NTP, with drift at most about
+  `lease/10`). It translates into a **lease stored in an `ra` cluster** (a versioned CAS command). **The
+  key nuance:** `ra`'s fencing-by-name **suffices for the bootstrap** (a single, self-fencing start); the
+  **lease** is only necessary for the leader's **continuous** work, retention, healing and rebalancing
+  (1C). Files: `client-go/tools/leaderelection/` (`leaderelection.go`,
+  `resourcelock/leaselock.go`), `api/coordination/v1/types.go`.
+- **Controller/reconcile → the coordinators plus the bootstrap reconcile:** **level-triggered**
+  (reconciling the complete *desired versus actual* state, which malachi's coordinators already do);
+  **idempotence**; a **workqueue** with dedupe, rate limiting and retry/backoff; **expectations**
+  (tracking in-flight operations with a TTL, so as not to react again too early); **only the leader
+  acts**; and **observability** (a convergence healthz). Reference:
+  `pkg/controller/replicaset/replica_set.go`, `client-go/util/workqueue`.
+- **Scheduler / PodTopologySpread → `place_vnodes`:** `topologyKey` (equivalent to our `spread_by` and
+  attributes), **`maxSkew`** (the maximum imbalance across racks or zones), **`minDomains`** (the minimum
+  number of distinct domains), **`whenUnsatisfiable`** (hard `DoNotSchedule` versus soft
+  `ScheduleAnyway`), and the **Filter → Score** pipeline. **A critical caveat:** k8s **randomizes** the
+  tie-break, whereas `place_vnodes` must stay **deterministic** (raft-safe: every replica computes the
+  same placement). So port the *ideas* (maxSkew, minDomains, hard versus soft) onto pure functions,
+  without randomization; and adopt a *sticky preference* in `heal()` (preferring surviving replicas, which
+  means less churn). Reference: `pkg/scheduler/framework/plugins/podtopologyspread/`.
+- **A recorded trade-off:** a single etcd is simple, but it is k8s's **scale bottleneck** (roughly 5000
+  nodes per cluster). Malachi's sharding pays complexity (bootstrap, leader, fencing) precisely to
+  **scale beyond one quorum**, which is the motivation behind slice D.
 
-### 8.3 Síntese: como isso informou as fatias (o histórico de execução)
+### 8.3 Synthesis: how this informed the slices (the execution history)
 
-> Nota: as fatias abaixo (D-c-1d, 1C, place_vnodes, rebalancing) **estão feitas**, este bloco é o
-> histórico. O resumo do que foi adotado × desviado está em **8.4**.
+> Note: the slices below (D-c-1d, 1C, place_vnodes, rebalancing) **are done**; this block is the
+> history. The summary of what was adopted versus deviated from is in **8.4**.
 
-- **D-c-1d (`membership_leader`):** eleição pelo menor nó **vivo** (SWIM) + fencing por nome do `ra` no
-  bootstrap; reconcile loop **level-triggered / idempotente** (padrão *controller* do k8s).
-- **1C (coordinators no líder):** aqui entra o **Lease sobre `ra`** (k8s) para fenciar o trabalho
-  **contínuo**, e o modelo **staged / planned / committed** (riak_core claimant) para mudanças de ring.
-- **Upgrade do `place_vnodes`:** `target_n_val` / location-awareness (riak_core binring) + `maxSkew` /
-  `minDomains` / hard-soft (k8s topology spread), **mantendo o determinismo**.
+- **D-c-1d (`membership_leader`):** election by the lowest **live** node (SWIM) plus fencing on the `ra`
+  name during bootstrap; a **level-triggered, idempotent** reconcile loop (the k8s *controller* pattern).
+- **1C (coordinators on the leader):** this is where the **Lease over `ra`** (k8s) comes in to fence
+  **continuous** work, along with the **staged / planned / committed** model (riak_core's claimant) for
+  ring changes.
+- **Upgrading `place_vnodes`:** `target_n_val` and location awareness (riak_core's binring) plus
+  `maxSkew`, `minDomains` and hard-versus-soft (k8s topology spread), **while keeping determinism**.
   - ✅ **A1: rack-spread (feito).** `place_vnodes/4` ganha `place_opts`, repassado a `Placement.place/4`;
     com `[spread: {attribute_key, node_attributes}]` as R réplicas de cada vnode caem em **racks/zonas
     distintos** (`target_n_val`/`minDomains`), então perder um rack inteiro não leva a maioria das réplicas
