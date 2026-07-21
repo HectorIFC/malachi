@@ -129,6 +129,7 @@ defmodule Malachi.MixProject do
       ],
       Operations: [
         Malachi.Application,
+        Malachi.Config,
         Malachi.Shutdown,
         Malachi.MemoryMonitor,
         Malachi.AtomMonitor,

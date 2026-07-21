@@ -243,26 +243,13 @@ if config_env() != :test do
     max_connections_per_ip: parse_int.(System.get_env("MALACHI_MAX_CONN_PER_IP"), 100),
     max_total_connections: parse_int.(System.get_env("MALACHI_MAX_TOTAL_CONN"), 10_000)
 
-  # On-disk data directories, set only when the operator supplies one. Blank (including whitespace) counts
-  # as absent, and in production a relative path is rejected rather than accepted: it resolves against the
-  # process working directory, so the node would write its durable segments to ephemeral container storage
-  # instead of the mounted volume, and the loss would only surface on the next restart. Dropping the
-  # leading slash is the likely typo, since the deployed value is an absolute path. With nothing set,
-  # `Malachi.Application` supplies the defaults, so dev is unchanged and test.exs keeps the per-run paths
-  # that stop a leftover segment from colliding with a reused topic (`Log.ensure_active :already_exists`).
-  data_dir = fn var ->
-    case System.get_env(var) |> to_string() |> String.trim() do
-      "" ->
-        nil
-
-      dir ->
-        if actual_env == :prod and Path.type(dir) != :absolute do
-          raise "#{var} must be an absolute path, got: #{inspect(dir)}"
-        end
-
-        dir
-    end
-  end
+  # On-disk data directories, set only when the operator supplies one. Malachi.Config.data_dir/3 trims,
+  # treats blank as absent, and rejects a relative path in production (it would resolve against the process
+  # working directory and lose durable segments to ephemeral storage). The rules live there, with tests,
+  # because this file is skipped under config_env() == :test and so cannot be exercised by the suite. With
+  # nothing set, `Malachi.Application` supplies the defaults, so dev is unchanged and test.exs keeps the
+  # per-run paths that stop a leftover segment from colliding with a reused topic (`:already_exists`).
+  data_dir = fn var -> Malachi.Config.data_dir(var, System.get_env(var), actual_env) end
 
   log_data_dir = data_dir.("MALACHI_LOG_DATA_DIR")
   ra_data_dir = data_dir.("MALACHI_RA_DATA_DIR")
