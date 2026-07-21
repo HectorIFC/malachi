@@ -1749,44 +1749,49 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
     joined or **held** one that left; everything else stays put. Tested: determinism; on **adding** a
     node, a vnode only changes if it adopts the new one (and some do); on **removing**, only the holders
     change (and the node disappears from the placement); plus the clamp to `min(rf, |nodes|)`.
-  - ✅ **R2: plano de rebalanceamento (núcleo puro).** `Malachi.Application.rebalance_plan/2` faz o diff do
-    placement **atual** × `desired_placement` (R1) por vnode: para cada vnode cujo conjunto de nós difere,
-    devolve `%{vnode_id:, add:, remove:}` (nós a entrar / a sair do cluster `ra`); vnodes já corretos são
-    omitidos (plano vazio = nada a fazer). *Staged/planned*: computa sem aplicar. A ordem segura é
-    **add-before-remove** (o R3 adiciona antes de remover, então um vnode nunca cai abaixo do quórum no
-    meio da mudança; com RF constante, `add` e `remove` têm o mesmo tamanho). Assume o **mesmo conjunto de
-    vnode ids** em atual e desejado (mudar a contagem é re-sharding, fora de escopo). Determinístico
-    (segue a ordem do desejado). Testado: vazio quando nada muda; add/remove por vnode alterado (omite os
-    iguais); num *join* o RF fica constante (add/remove equilibrados → nunca abaixo do quórum); num
-    *leave* só os vnodes que detinham o nó que saiu entram no plano e nenhum re-adiciona o nó removido.
-  - **R0. Lease sobre `ra`** (fencing forte, k8s): pré-requisito de R3 (o movimento de vnodes é
-    **não-idempotente**: é aqui que o lease finalmente entra, como antecipado no 1C-b).
-    - ✅ **R0-a: máquina de estado do lease (núcleo puro + `ra`).** `Malachi.Cluster.Lease` é o estado
-      puro (`holder`, `fence`, `renew_at`, `duration_ms`): `acquire_or_renew` concede se **livre**, **já é
-      o holder** (renovação) ou **expirado** (`now >= renew_at + duration_ms`), senão `{:error, {:held,
-      holder}}`; `release` é idempotente. O **fencing token** (`fence`) é monotônico e sobe **só quando o
-      holder muda** (renovação mantém): o holder o carrega para o trabalho que fencia, e uma escrita de
-      ex-holder com token obsoleto pode ser rejeitada (a proteção contra dois chefes). O tempo (`now`) é
-      **injetado**, nunca lido dentro do `apply` (seria não-determinístico e quebraria o Raft):
-      `LeaseMachine` (`:ra_machine`) alimenta o `meta.system_time` do `ra` (relógio do **líder**,
-      carimbado uma vez e replicado no log), então um único relógio decide a expiração, sem o skew
-      entre nós que um tempo vindo do cliente carregaria. `LeaseServer` espelha o `MetadataServer` sobre
-      um cluster `ra` **dedicado** (isolado do metadata). Testado: `Lease` puro exaustivo (aquisição/
-      renovação mantém fence/roubo na expiração incrementa fence/fronteira exata do deadline/release
-      idempotente com token obsoleto) + integração `ra` real (acquire/renew/held/release/durável a restart).
-    - ✅ **R0-b: `LeaseHolder` (o client).** GenServer que roda o triângulo de timers `duração >
-      renew_deadline_ms > retry_period_ms`: a cada `retry_period` chama o seam `renew` (acquire-or-renew);
-      um *follower* que adquire vira *leader* e chama `on_acquired(fence)`; um *leader* que renova segue
-      líder (marca o instante do renew no **relógio local**); se lhe dizem que o lease está com **outro**
-      larga na hora (`on_lost`); se **não alcança** o lease, segue tentando até passar `renew_deadline_ms`
-      desde o último renew bem-sucedido e então **larga proativo** (`on_lost`, o *OnStoppedLeading* do k8s:
-      desiste antes de o lease poder expirar/ser roubado, para nunca haver dois líderes). Um salto do
-      **fencing token** durante a liderança (gap: perdeu e reganhou) dispara `on_lost` seguido de
-      `on_acquired` sob o novo token. No shutdown normal, um líder **libera** o lease (failover sem
-      esperar expiração). Tudo por **seams injetados** (`renew`/`release`/`clock`/callbacks), então a
-      lógica de tempo é testada sem `ra`, controlando o relógio. Testado: adquire→líder; renova sem
-      re-`on_acquired`; segura até o deadline e larga; largada imediata quando held-por-outro; troca de
-      token → lost+acquired; release no shutdown do líder (e não do follower). **R0 completo.**
+  - ✅ **R2: the rebalancing plan (the pure core).** `Malachi.Application.rebalance_plan/2` diffs the
+    **current** placement against `desired_placement` (R1) per vnode: for each vnode whose node set
+    differs it returns `%{vnode_id:, add:, remove:}` (the nodes to join or leave that `ra` cluster);
+    vnodes that are already correct are omitted (an empty plan means nothing to do). *Staged/planned*: it
+    computes without applying. The safe order is **add before remove** (R3 adds first, so a vnode never
+    drops below quorum mid-change; with a constant RF, `add` and `remove` are the same size). It assumes
+    the **same set of vnode ids** in current and desired (changing the count is re-sharding, out of
+    scope). Deterministic (it follows the desired order). Tested: empty when nothing changes; add and
+    remove per changed vnode (omitting the unchanged); on a *join* the RF stays constant (add and remove
+    balanced, so never below quorum); and on a *leave* only the vnodes that held the departing node enter
+    the plan, and none re-adds the removed node.
+  - **R0. A lease over `ra`** (strong fencing, the k8s way): a prerequisite for R3 (moving vnodes is
+    **non-idempotent**, which is where the lease finally comes in, as 1C-b anticipated).
+    - ✅ **R0-a: the lease state machine (pure core plus `ra`).** `Malachi.Cluster.Lease` is the pure state
+      (`holder`, `fence`, `renew_at`, `duration_ms`): `acquire_or_renew` grants it when the lease is
+      **free**, when the caller **already holds it** (a renewal) or when it has **expired**
+      (`now >= renew_at + duration_ms`), otherwise `{:error, {:held, holder}}`; `release` is idempotent.
+      The **fencing token** (`fence`) is monotonic and rises **only when the holder changes** (a renewal
+      keeps it): the holder carries it into the work it fences, so a former holder writing with a stale
+      token can be rejected, which is the protection against two bosses. Time (`now`) is **injected**,
+      never read inside `apply` (which would be non-deterministic and would break Raft): `LeaseMachine`
+      (a `:ra_machine`) is fed by `ra`'s `meta.system_time` (the **leader's** clock, stamped once and
+      replicated in the log), so a single clock decides expiry, without the inter-node skew a
+      client-supplied time would carry. `LeaseServer` mirrors `MetadataServer` over a **dedicated** `ra`
+      cluster (isolated from the metadata). Tested: the pure `Lease` exhaustively (acquisition, a renewal
+      keeping the fence, a steal on expiry incrementing it, the exact deadline boundary, an idempotent
+      release with a stale token) plus real `ra` integration (acquire, renew, held, release, and
+      durability across a restart).
+    - ✅ **R0-b: `LeaseHolder` (the client).** A GenServer running the timer triangle
+      `duration > renew_deadline_ms > retry_period_ms`: every `retry_period` it calls the `renew` seam
+      (acquire-or-renew); a *follower* that acquires becomes *leader* and calls `on_acquired(fence)`; a
+      *leader* that renews stays leader (stamping the renewal instant on the **local clock**); if it is
+      told the lease is held by **someone else** it drops immediately (`on_lost`); and if it **cannot
+      reach** the lease it keeps trying until `renew_deadline_ms` has passed since the last successful
+      renewal, then **drops proactively** (`on_lost`, the k8s *OnStoppedLeading*: giving up before the
+      lease could expire or be stolen, so there are never two leaders). A jump in the **fencing token**
+      during leadership (a gap where it lost and regained) fires `on_lost` followed by `on_acquired` under
+      the new token. On a normal shutdown, a leader **releases** the lease (failover without waiting for
+      expiry). All of it through **injected seams** (`renew`/`release`/`clock`/callbacks), so the timing
+      logic is tested without `ra`, by controlling the clock. Tested: acquiring makes it leader; renewing
+      does not re-fire `on_acquired`; it holds until the deadline then drops; it drops immediately when
+      held by another; a token change yields lost then acquired; and a leader releases on shutdown (while
+      a follower does not). **R0 is complete.**
   - **R3. Execução** (*committed*): aplica o plano por vnode via `ra`, **sob o lease**. Escopo: control
     plane (o `ra` transfere o estado ao adicionar membro); o data plane fica com o *healing*.
     - ✅ **R3-a: executor de uma mudança (núcleo com seams).** `Malachi.Cluster.Rebalance`: `apply_change/3`
