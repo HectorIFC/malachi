@@ -1104,46 +1104,54 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
           (defensively). Tested: a module unit test (HELP/TYPE, labels, int and float values, escaping, no
           topics) plus e2e (`Accept: text/plain` yielding an exposition with `malachi_up` and the created
           topic's gauge). 695 tests, 0 failures; credo and dialyzer clean.
-        - ✅ **O3. Eventos `:telemetry` nos hot paths.** Dep `:telemetry` + módulo `Malachi.Telemetry`
-          (catálogo + wrappers, DRY) emitindo em: **produce** (`LogApi.produce_records` → `%{count, bytes}`/
-          `%{topic}`), **consume** (`LogApi.do_fetch` → `%{count}`/`%{topic}`), **auth** (`Auth.authenticate/3`
-          refatorado num wrapper fino → `%{count:1}`/`%{result: :ok|:error}`), e **replicação** (`ReplicationServer`
-          no reply do quórum → `%{count}`/`%{result: :ok|:no_quorum}`). Emitir é no-op quando nada está
-          anexado (seguro no hot path). Testado: handler anexado + produce/consume/auth (+ o commit de
-          replicação que o single-node dispara). Achado no caminho: um **flake pré-existente** no
-          `connection_limiter_test` (limite **global**, estado compartilhado entre testes; passa isolado,
-          não relacionado ao O3) → registrado p/ fix à parte. 698 testes (credo/dialyzer limpos).
-        - ✅ **O4: handler default telemetry → Metrics.** `Malachi.Telemetry.MetricsReporter` anexa (idempotente,
-          no Metrics.init) aos 4 eventos e dobra cada um em contadores ETS: produce (`records_produced`+
-          `bytes_produced`), consume (`records_consumed`), auth (`{:auth_result, :ok|:error}`), replicação
-          (`{:replication_result, :ok|:no_quorum}`). `get_system_metrics` ganha a seção `operations`, e o
-          Prometheus emite `malachi_records_produced_total`/`bytes_produced_total`/`records_consumed_total`,
-          `malachi_auth_attempts_total{result}` e `malachi_replication_commits_total{result}`, assim o
-          endpoint do O2 ganha throughput/auth/replicação sem cada operador escrever handler (podem anexar os
-          seus ao lado). Testado: reporter e2e (evento → contador via `get_system_metrics`) + o Prometheus com
-          a seção. 700 testes, 0 falhas; credo/dialyzer limpos. **Bloco A+B da observabilidade concluído.**
-        - ✅ **O5: OpenTelemetry tracing (bloco C; C-lite → C-full).** Tradeoff registrado: OTel é pesado
-          (deps + precisa de collector) e os eventos do O3 já são base; decisão **C-lite primeiro**.
-          - ✅ **O5a: spans nas operações do cliente.** Deps `opentelemetry_api`+`opentelemetry` (API 1.5 +
-            SDK 1.7; sem exporter/grpcbox. Footprint enxuto). Tracing **off por default** (`sampler:
-            :always_off` + `traces_exporter: :none`) → o `with_span` no hot path é **no-op**, zero custo por
-            operação até o operador optar (sampler `:always_on` + exporter OTLP). O `LogApi` embrulha
-            `produce_records`/`do_fetch` em `Tracer.with_span` (`malachi.produce`/`malachi.consume`) com
-            atributos `malachi.topic`/`records`/`bytes`. Sem propagação cross-process ainda (span por
-            operação, raiz). Testado: comportamento intacto + **captura real de span** (test.exs usa `sampler:
-            :always_on` + o `simple` processor + `otel_exporter_pid`; assere nome + atributos via record do
-            header OTel + `otel_attributes.map`). 702 testes, 0 falhas; credo/dialyzer limpos.
-          - ✅ **O5b: propagação de contexto cross-process/cross-node.** O trace do produce agora atravessa
-            os processos: `BrokerServer.produce` captura o `otel_ctx` do caller (o span `malachi.produce` do
-            `LogApi`) e o passa na mensagem do GenServer; o `handle_call` **anexa** o ctx e embrulha o trabalho
-            num span filho `malachi.broker.produce`. Idem no hop mais fundo: `ReplicationServer.replicate`
-            captura o ctx (agora o span do broker) e o passa (mensagem virou 6-tupla nas 3 clauses); o
-            `handle_call` anexa + span `malachi.replication.commit`: como o ctx é um mapa serializável, isso
-            **linka cross-node** (produce num nó, replicação no primário remoto, mesmo trace). Tracing off por
-            default → `get_current`/`attach`/`detach` são pdict-ops baratas quando não há span. Testado: um
-            produce gera os 3 spans com o **mesmo trace_id** e a cadeia de parent correta
-            (produce → broker.produce → replication.commit). 703 testes, 0 falhas; credo/dialyzer limpos.
-            **Observabilidade (A/B/C) concluída.**
+        - ✅ **O3. `:telemetry` events on the hot paths.** The `:telemetry` dependency plus a
+          `Malachi.Telemetry` module (a catalog plus wrappers, DRY) emitting on: **produce**
+          (`LogApi.produce_records` → `%{count, bytes}`/`%{topic}`), **consume** (`LogApi.do_fetch` →
+          `%{count}`/`%{topic}`), **auth** (`Auth.authenticate/3` refactored into a thin wrapper →
+          `%{count:1}`/`%{result: :ok|:error}`), and **replication** (`ReplicationServer` on the quorum
+          reply → `%{count}`/`%{result: :ok|:no_quorum}`). Emitting is a no-op when nothing is attached
+          (safe on the hot path). Tested: an attached handler plus produce, consume and auth (plus the
+          replication commit that single-node triggers). Found along the way: a **pre-existing flake** in
+          `connection_limiter_test` (a **global** limit, so state is shared between tests; it passes in
+          isolation and is unrelated to O3), recorded for a separate fix. 698 tests (credo and dialyzer
+          clean).
+        - ✅ **O4: a default telemetry handler feeding Metrics.** `Malachi.Telemetry.MetricsReporter`
+          attaches (idempotently, in Metrics.init) to the 4 events and folds each into ETS counters:
+          produce (`records_produced` and `bytes_produced`), consume (`records_consumed`), auth
+          (`{:auth_result, :ok|:error}`) and replication (`{:replication_result, :ok|:no_quorum}`).
+          `get_system_metrics` gains an `operations` section, and Prometheus emits
+          `malachi_records_produced_total`/`bytes_produced_total`/`records_consumed_total`,
+          `malachi_auth_attempts_total{result}` and `malachi_replication_commits_total{result}`, so O2's
+          endpoint gains throughput, auth and replication figures without every operator writing a handler
+          (they can attach their own alongside). Tested: the reporter e2e (an event reaching a counter
+          through `get_system_metrics`) plus Prometheus carrying the section. 700 tests, 0 failures; credo
+          and dialyzer clean. **Observability blocks A and B are complete.**
+        - ✅ **O5: OpenTelemetry tracing (block C; C-lite then C-full).** A recorded tradeoff: OTel is
+          heavy (dependencies plus it needs a collector) and O3's events already provide a baseline, so the
+          decision was **C-lite first**.
+          - ✅ **O5a: spans on the client operations.** The `opentelemetry_api` and `opentelemetry`
+            dependencies (API 1.5 plus SDK 1.7; no exporter or grpcbox, keeping the footprint lean).
+            Tracing is **off by default** (`sampler: :always_off` plus `traces_exporter: :none`), so
+            `with_span` on the hot path is a **no-op**, costing nothing per operation until an operator
+            opts in (an `:always_on` sampler plus an OTLP exporter). `LogApi` wraps
+            `produce_records`/`do_fetch` in `Tracer.with_span` (`malachi.produce`/`malachi.consume`) with
+            `malachi.topic`/`records`/`bytes` attributes. No cross-process propagation yet (one root span
+            per operation). Tested: behaviour unchanged plus a **real span capture** (test.exs uses
+            `sampler: :always_on` plus the `simple` processor plus `otel_exporter_pid`; it asserts the name
+            and attributes through the OTel header's record plus `otel_attributes.map`). 702 tests, 0
+            failures; credo and dialyzer clean.
+          - ✅ **O5b: cross-process and cross-node context propagation.** A produce trace now crosses
+            process boundaries: `BrokerServer.produce` captures the caller's `otel_ctx` (`LogApi`'s
+            `malachi.produce` span) and passes it in the GenServer message; `handle_call` **attaches** the
+            ctx and wraps the work in a child `malachi.broker.produce` span. The same at the deeper hop:
+            `ReplicationServer.replicate` captures the ctx (by then the broker's span) and passes it (the
+            message became a 6-tuple across the 3 clauses); `handle_call` attaches it and opens a
+            `malachi.replication.commit` span. Since the ctx is a serializable map, this **links across
+            nodes** (a produce on one node, replication on the remote primary, one trace). With tracing off
+            by default, `get_current`/`attach`/`detach` are cheap process-dictionary operations when there
+            is no span. Tested: one produce generates the 3 spans with the **same trace_id** and the right
+            parent chain (produce → broker.produce → replication.commit). 703 tests, 0 failures; credo and
+            dialyzer clean. **Observability (A/B/C) is complete.**
   - ✅ **Cliente de referência (Node.js) reformulado para a nova arquitetura.** Os scripts Node.js antigos
     falavam o protocolo JSON de fila/canal (removido no B3b); reescritos para o **protocolo binário
     (`Malachi.Wire`) + modelo de log** (topic/key/cursor opaco). Estrutura: `scripts/lib/wire.js`, port
