@@ -1236,55 +1236,62 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       quorum-and-tolerance mechanism is already covered by `replication_server_test`, and the integration
       (BrokerServer plus 3 brokers plus rf=3 plus ra, producing and consuming by quorum end to end) by
       `broker_server_ra_test`.
-    - ✅ **D3, Membership + healing/failover ao vivo.**
-      - ✅ **D3a: `MembershipServer` cross-node.** O SWIM identificava cada membro pelo `self_ref`, que
-        era o `:name` de registro: os testes eram todos in-process (átomos únicos). Cross-node isso
-        colidia: o mesmo átomo `Malachi.LogMembership` resolve para o servidor **local** em cada nó, então
-        o remetente gossipado apontava para o próprio receptor e a view não convergia. Agora o
-        `MembershipServer` aceita `:self_ref` (identidade **node-qualified** `{name, node()}`, gossipada)
-        distinto do `:name` (registro local), + `start/1` (não-linkado, p/ iniciar em nós remotos). Provado
-        por **teste multinode** real (`membership_ha_test`): 3 nós `:peer` convergem via seeds e detectam a
-        morte de um nó (SWIM: suspeita → dead → sai do alive set).
-      - ✅ **D3b: Fiação na app.** Em modo cluster, `application.ex` sobe (nesta ordem)
-        `MembershipServer` → `ReplicationServer` → `LogBroker` → `HealCoordinator`. O `MembershipServer`
-        usa `self_ref: {Malachi.LogMembership, node()}` e `peers: membership_seeds(log_nodes)` (os outros
-        nós). O `live_brokers` (fun) deriva de `alive_members` → refs `{Malachi.LogReplication, node}`, e é
-        passado ao `LogBroker` (que estreita o placement de novos segments ao conjunto vivo; `:brokers`
-        estático é o placement inicial) **e** ao `HealCoordinator`. O `HealCoordinator` (`metadata_source:
-        BrokerServer.metadata`, `apply_command: BrokerServer.apply_heal`, `replication_factor`) fecha o loop
-        *broker morre → membership marca gone → segments re-replicados + primário promovido*. Fiação pura
-        testável (`membership_seeds/1`, `live_replication_refs/1`); o loop de healing/failover já é coberto
-        por `heal_coordinator_test`/`self_healing_test`/`failover_test`, e o membership cross-node por D3a.
-  - ✅ **Deploy multi-nó/replicado completo** (D1 control plane HA + D2 data plane replicado + D3
-    membership/healing/failover ao vivo). Ligado por config estática; `libcluster` (descoberta dinâmica)
-    fica como conveniência futura.
-- ✅ **C. Features NorthGuard restantes.** Decisão: começar por **C1 - retenção (tempo+tamanho)**;
-  attributes (C2) e policies (C3) depois. Design aprovado: `sealed_at` explícito no segment (idade),
-  retenção por tamanho **por range**, e consumidor num dado expirado **avança para o início disponível**
-  (mantém o cursor opaco). Sub-fatias: C1a (primitiva de delete) → C1b (coordenador + política + fiação).
-  - ✅ **C1a: control plane.** `segment_meta` ganha `sealed_at` (epoch ms, `nil` enquanto ativo); o
-    comando `seal_segment` carrega o `sealed_at` (gerado no `Broker` como os timestamps de `Record`, então
-    determinístico entre réplicas). Novo comando `{:delete_segment, segment_id}`: remove um segment
-    **selado** do control plane (`:segment_active` se ainda ativo, nunca dropa o ativo; `:no_such_segment`
-    se ausente). Testado: unit do `delete_segment` (selado/ativo/inexistente), `sealed_at` no seal,
-    determinismo preservado (property tests).
-  - ✅ **C1a: storage delete.** Cada segment do broker é um `Log` num subdiretório próprio, e o
-    `ReplicationServer` guarda `logs: %{segment_id => Log}`; então deletar é **fechar o `Log` + apagar o
-    diretório**: sem precisar de delete granular no `SegmentStore`. `Log.delete/1` (fecha + `rm_rf` do
-    diretório, best-effort). `ReplicationServer.delete/2` (client + handle_call): fecha/apaga se o log
-    está aberto, senão limpa arquivos órfãos em disco (pós-restart); **idempotente** (deletar um segment
-    desconhecido é `:ok`). Testado: `Log.delete` (diretório some), `ReplicationServer.delete` (dados
-    somem → read vira `:eof`; idempotência).
-  - ✅ **C1b: coordenador + read path + fiação** (incremental).
-    - ✅ **C1b-1: política + `RetentionCoordinator`.** `segment_meta` ganha `byte_size` (via `seal_segment`,
-      do `active.bytes` do Broker: determinístico, como `sealed_at`; retenção por tamanho precisa de bytes).
-      Módulo **puro** `Malachi.Cluster.Retention`: `expired(metadata, now_ms, policy)` → ids de segments
-      **selados** a expirar por **idade** (`sealed_at` > `max_age_ms`) e por **tamanho** (soma `byte_size`
-      por **range** > `max_bytes` → mais antigos primeiro), unidos; nunca o ativo; bound `nil` desliga a
-      regra. `RetentionCoordinator` (GenServer periódico, modelo `HealCoordinator`) com seams
-      (`metadata_source`, `expire_segment`, `policy`, `clock`, `interval`): cada sweep resolve os ids para
-      seus metas e chama `expire_segment`. Testado: `Retention` (idade, tamanho por-range, união, nunca o
-      ativo, `nil` desliga) e o coordenador (sweep via `run_now` e via tick, meta completa ao seam).
+    - ✅ **D3, live membership plus healing and failover.**
+      - ✅ **D3a: a cross-node `MembershipServer`.** SWIM identified each member by its `self_ref`, which
+        was the registration `:name`: every test was in-process (with unique atoms). Cross-node that
+        collided, because the same `Malachi.LogMembership` atom resolves to the **local** server on every
+        node, so a gossiped sender pointed at the receiver itself and the view never converged. Now
+        `MembershipServer` accepts a `:self_ref` (a **node-qualified** identity `{name, node()}`, which is
+        what gets gossiped) distinct from `:name` (the local registration), plus `start/1` (unlinked, for
+        starting on remote nodes). Proven by a real **multinode test** (`membership_ha_test`): 3 `:peer`
+        nodes converge through the seeds and detect one node's death (SWIM: suspect → dead → out of the
+        alive set).
+      - ✅ **D3b: the application wiring.** In cluster mode, `application.ex` starts (in this order)
+        `MembershipServer` → `ReplicationServer` → `LogBroker` → `HealCoordinator`. `MembershipServer` uses
+        `self_ref: {Malachi.LogMembership, node()}` and `peers: membership_seeds(log_nodes)` (the other
+        nodes). The `live_brokers` function derives from `alive_members` into
+        `{Malachi.LogReplication, node}` refs, and is passed both to `LogBroker` (which narrows new
+        segments' placement to the live set, with the static `:brokers` being the initial placement) **and**
+        to `HealCoordinator`. `HealCoordinator` (`metadata_source: BrokerServer.metadata`,
+        `apply_command: BrokerServer.apply_heal`, `replication_factor`) closes the loop *a broker dies →
+        membership marks it gone → segments are re-replicated and a primary is promoted*. The wiring is
+        pure and testable (`membership_seeds/1`, `live_replication_refs/1`); the healing and failover loop
+        is already covered by `heal_coordinator_test`/`self_healing_test`/`failover_test`, and cross-node
+        membership by D3a.
+  - ✅ **The multi-node, replicated deploy is complete** (D1 control-plane HA plus D2 a replicated data
+    plane plus D3 live membership, healing and failover). Wired through static config; `libcluster`
+    (dynamic discovery) is left as a future convenience.
+- ✅ **C. The remaining NorthGuard features.** Decision: start with **C1, retention (by time and size)**;
+  attributes (C2) and policies (C3) come after. The approved design: an explicit `sealed_at` on the segment
+  (for age), size retention **per range**, and a consumer sitting on expired data **advancing to the
+  earliest available point** (keeping the cursor opaque). Sub-slices: C1a (the delete primitive) → C1b (the
+  coordinator plus the policy plus the wiring).
+  - ✅ **C1a: the control plane.** `segment_meta` gains `sealed_at` (epoch ms, `nil` while active); the
+    `seal_segment` command carries the `sealed_at` (generated in `Broker` the way `Record` timestamps are,
+    so it stays deterministic across replicas). A new `{:delete_segment, segment_id}` command removes a
+    **sealed** segment from the control plane (`:segment_active` if it is still active, so it never drops
+    the active one; `:no_such_segment` when absent). Tested: a `delete_segment` unit test
+    (sealed/active/nonexistent), `sealed_at` on the seal, and determinism preserved (property tests).
+  - ✅ **C1a: the storage delete.** Each of the broker's segments is a `Log` in its own subdirectory, and
+    `ReplicationServer` keeps `logs: %{segment_id => Log}`, so deleting means **closing the `Log` and
+    removing the directory**, with no need for a granular delete in `SegmentStore`. `Log.delete/1` (closes
+    it and `rm_rf`s the directory, best-effort). `ReplicationServer.delete/2` (client plus handle_call)
+    closes and removes it when the log is open, otherwise it cleans up orphan files on disk (after a
+    restart); it is **idempotent** (deleting an unknown segment is `:ok`). Tested: `Log.delete` (the
+    directory disappears) and `ReplicationServer.delete` (the data disappears, so a read becomes `:eof`;
+    plus idempotence).
+  - ✅ **C1b: the coordinator plus the read path plus the wiring** (incrementally).
+    - ✅ **C1b-1: the policy plus `RetentionCoordinator`.** `segment_meta` gains `byte_size` (through
+      `seal_segment`, from the Broker's `active.bytes`: deterministic, like `sealed_at`, since size
+      retention needs bytes). A **pure** `Malachi.Cluster.Retention` module: `expired(metadata, now_ms,
+      policy)` returns the ids of **sealed** segments to expire by **age** (`sealed_at` older than
+      `max_age_ms`) and by **size** (where the `byte_size` sum **per range** exceeds `max_bytes`, oldest
+      first), unioned; never the active one; a `nil` bound disables that rule. `RetentionCoordinator` (a
+      periodic GenServer on the `HealCoordinator` model) with seams (`metadata_source`, `expire_segment`,
+      `policy`, `clock`, `interval`): each sweep resolves the ids to their metas and calls
+      `expire_segment`. Tested: `Retention` (age, per-range size, the union, never the active one, `nil`
+      disabling) and the coordinator (a sweep through `run_now` and through a tick, with the complete meta
+      reaching the seam).
     - ✅ **C1b-2: read path (avança em dado expirado).** Retenção deleta sempre um **prefixo contíguo**
       (os segments mais antigos), então o read path só precisa saber o menor `start_offset` ainda armazenado
       (`earliest_offset/2`) e **clampar o offset a ele** antes de ler. `consume_page` (consumo ao vivo) e
