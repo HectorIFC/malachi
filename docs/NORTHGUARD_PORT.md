@@ -2120,31 +2120,32 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         disappears from the coordinator. Suite at 764 tests, 0 failures; credo, dialyzer and format clean.
         **Next: Str-2 (the wire: a member on subscribe and stream_ack, plus a Node subscriber client with a
         heartbeat).**
-      - ✅ **Streaming member-scoping. Str-2 (wire + cliente Node).** Expõe o Str-1 na borda: o `member`
-        (opcional) entra no **subscribe** e no **stream_ack** do protocolo binário, depois do `group`, como
-        no `fetch` (Str-1): `encode_subscribe_req(topic, group, member, window, max)` e
-        `encode_stream_ack_req(topic, group, member, cursor, count)` (`put_str(member)` = flag de presença;
-        `nil` = subscription whole-group, sem quebrar o caminho antigo). O `TCPProtocol` despacha por
-        presença: `subscribe`/`process_stream_frame` chamam `LogApi.subscribe_member`/`stream_ack_member`
-        quando `member != nil and group != nil`, senão o caminho whole-group, **zero range/offset no fio**
-        (o push segue records + cursor opaco). Cliente Node: `subscriber.js --member <m>` abre um stream
-        escopado, e: fechando o **gap de liveness do membro idle** anotado no Str-1 - um **heartbeat
-        periódico** (`setInterval` a 10s < os 30s de session timeout) emite um **ack vazio** (`cursor` nil,
-        `count` 0) só quando não houve ack real recente (`lastAck`), mantendo a membership viva; o `SIGINT`
-        faz `leaveGroup` (rebalance rápido). `streamAck` ganhou o `member` na assinatura (callers
-        whole-group. `loadtest.js` - passam `null`). Testes: round-trip de wire para subscribe/stream_ack
-        com/sem member; e2e TCP (`log_streaming_test`): subscribe como membro único recebe o backlog
-        inteiro **opaco** (offset nil), um member ack (commit + heartbeat + credit) é aceito e um produce
-        posterior ainda faz push. Suíte 767 testes 0 falhas; credo/dialyzer/format limpos. **G1 (consumer
-        groups) + streaming member-scoping concluídos.**
-    - ✅ **Coordinator cluster wiring (épico CONCLUÍDO: consumer groups corretos multi-nó; A1–A5 fecham, ver
-      abaixo).** Gap que o G1 deixou
-      explícito: o `GroupCoordinator` é um GenServer **local por nó** (`Malachi.LogGroupCoordinator`), com
-      membership em memória. Num cluster, membros conectados a nós diferentes veem assignments **divergentes**
-      → a invariante "cada range sob exatamente um membro" quebra entre nós. Alvo: rotear a coordenação de um
-      topic a **um** nó dono, como o NorthGuard roteia requests (broker consulta sua visão local da metadata
-      shardada. O `HashRing` sobre vnodes - e encaminha ao vnode dono). Fatiamento: **A1** roteamento +
-      encaminhamento · **A2** coordinator no líder do vnode · **A3** teste multi-nó.
+      - ✅ **Streaming member scoping. Str-2 (the wire plus the Node client).** This exposes Str-1 at the
+        edge: an optional `member` joins **subscribe** and **stream_ack** in the binary protocol, after the
+        `group`, exactly as in `fetch` (Str-1): `encode_subscribe_req(topic, group, member, window, max)`
+        and `encode_stream_ack_req(topic, group, member, cursor, count)` (`put_str(member)` acting as the
+        presence flag; `nil` means a whole-group subscription, leaving the old path unbroken). `TCPProtocol`
+        dispatches on presence: `subscribe` and `process_stream_frame` call
+        `LogApi.subscribe_member`/`stream_ack_member` when `member != nil and group != nil`, otherwise the
+        whole-group path, with **zero ranges or offsets on the wire** (the push is still records plus an
+        opaque cursor). The Node client: `subscriber.js --member <m>` opens a scoped stream and closes the
+        **idle-member liveness gap** Str-1 recorded, through a **periodic heartbeat** (a `setInterval` at
+        10s, below the 30s session timeout) that emits an **empty ack** (`cursor` nil, `count` 0) only when
+        there has been no recent real ack (`lastAck`), keeping the membership alive; `SIGINT` calls
+        `leaveGroup` (for a quick rebalance). `streamAck` gained the `member` in its signature (whole-group
+        callers, such as `loadtest.js`, pass `null`). Tests: wire round trips for subscribe and stream_ack
+        with and without a member; and e2e over TCP (`log_streaming_test`), where subscribing as a lone
+        member receives the whole backlog **opaquely** (a nil offset), a member ack (commit plus heartbeat
+        plus credit) is accepted, and a later produce still pushes. Suite at 767 tests, 0 failures; credo,
+        dialyzer and format clean. **G1 (consumer groups) plus streaming member scoping are complete.**
+    - ✅ **Coordinator cluster wiring (epic COMPLETE: correct multi-node consumer groups; A1 to A5 close it,
+      see below).** The gap G1 made explicit: `GroupCoordinator` is a **per-node local** GenServer
+      (`Malachi.LogGroupCoordinator`) with in-memory membership. In a cluster, members connected to
+      different nodes see **divergent** assignments, so the "each range under exactly one member" invariant
+      breaks across nodes. The target: route a topic's coordination to **one** owning node, the way
+      NorthGuard routes requests (a broker consults its local view of the sharded metadata, the `HashRing`
+      over vnodes, and forwards to the owning vnode). The slicing: **A1** routing plus forwarding · **A2**
+      the coordinator on the vnode's leader · **A3** a multi-node test.
       - ✅ **A1: roteamento do coordinator ao nó dono do vnode + encaminhamento.** Novo módulo **puro**
         `Malachi.Consumer.CoordinatorRouter`: `location(topic, topology, this_node, leader_fn)` roteia
         `topic → vnode` (via `HashRing`), resolve o **líder** do vnode e decide `:local | {:remote, node}`;
