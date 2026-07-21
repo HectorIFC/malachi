@@ -1339,49 +1339,57 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     `%{}`. Tested: the parse (empty, pairs, trimming, invalid entries, a value containing `=`). **C2
     (attributes over SWIM) is complete**: brokers disseminate their attrs by gossip, ready for C3's
     rack-aware placement.
-- ✅ **C3: Policies** (nome + retenção + constraints sobre attributes → replica sets; fiel ao NorthGuard,
-  que unifica tudo em *policies*). Incremental: C3a (Placement puro com spread) → C3b (integração: attrs do
-  membership → placement) → C3c (policies por-topic: definição + associação + retenção por-topic).
-  - ✅ **C3a. `Placement` puro com spread (rack-aware).** `place/4` ganha a opção `:spread =
-    {attribute_key, attributes}`: sobre o ranking HRW (determinístico), faz **round-robin pelos valores
-    distintos** do attribute: o melhor-rankeado de cada valor primeiro, depois o próximo de cada, até `rf`.
-    Com `rf ≤ nº de valores`, cada réplica num rack/DC distinto; senão best-effort round-robin. Determinístico
-    (ranking HRW + agrupamento estável); sem `:spread` → top-`rf` de antes (todos os callers de `place/3`
-    intactos). Testado: valores distintos, prioriza diversidade sobre rank puro (rf=2 em a,a,b → a,b),
-    best-effort com rf > valores, brokers sem o attribute agrupam à parte, determinismo.
-  - ✅ **C3b: integração (attributes → placement).** O `Broker` ganha `spread_by` (a chave de attribute)
-    e `broker_attributes` (map broker→attrs); `open` os aceita, `set_broker_attributes/2` os atualiza (como
-    `set_brokers`), e `open_segment` passa `:spread` ao `Placement.place` quando `spread_by` está setado
-    (senão placement normal. Todos os callers intactos). O `BrokerServer` aceita `:spread_by` + uma fun
-    `:broker_attributes` e a **refresca periodicamente** (mesmo timer de `:live_brokers`) para o broker:
-    então os attrs disseminados pelo membership (C2) fluem ao placement. Testado: produce espalha réplicas
-    por rack, `set_broker_attributes` afeta o placement seguinte, refresh do `BrokerServer` puxa os attrs.
-  - ✅ **C3c-1: fiação do rack-aware na app.** `data_plane_opts` liga `spread_by` (env
-    `MALACHIMQ_LOG_SPREAD_BY`, ex: `"rack"`) e uma fun `broker_attributes` derivada do `MembershipServer`:
-    `broker_attributes_for/2` (pura, testável) mapeia cada membro vivo `{LogMembership, node}` →
-    `{LogReplication, node}` com os attrs gossipados (C2). Com isso o **placement rack-aware funciona ponta
-    a ponta na aplicação** (attrs do membership → spread do placement). Ausente `spread_by` → HRW puro.
-  - ✅ **C3c-2. Policies por-topic** (o guarda-chuva NorthGuard). Decisão: policies **dinâmicas no
-    Metadata (`ra`)** + escopo **ambos** (retenção + placement por-topic). Incremental: 2a (Metadata:
-    policies + associação) → 2b (retenção por-topic) → 2c (placement por-topic). **Fecha C3.**
-    - ✅ **C3c-2a. Metadata: policies + associação.** `Metadata` ganha `policies: %{name => policy}`
-      (`policy = %{optional(:retention) => %{max_age_ms, max_bytes}, optional(:spread_by) => term}`), o
-      `topic_meta` ganha `policy: name | nil`, e dois comandos: `{:define_policy, name, policy}` (valida
-      name binário não-vazio + policy map; `:invalid_policy` senão) e `{:set_topic_policy, topic,
-      name | nil}` (`:no_such_topic`/`:no_such_policy`; `nil` desassocia → volta aos globais). Queries
-      `get_policy/2` e `topic_policy/2` (resolve a policy do topic). Determinismo preservado (property).
-      **Sem uso ainda**: 2b/2c ligam retenção/placement à policy do topic.
-    - ✅ **C3c-2b: retenção por-topic.** `Retention.expired/3` passa a resolver, **por range**, a retenção
-      efetiva = a `:retention` da policy do topic (`Metadata.topic_policy/2`) **mesclada sobre** a policy
-      global (a policy sobrepõe só as chaves que define; `Map.merge`), ou a global quando o topic não tem
-      policy. O `RetentionCoordinator` não muda (já passa o metadata + a global). Testado: policy do topic
-      sobrepõe a global, merge (chave não-definida cai na global), topic sem policy usa a global.
-    - ✅ **C3c-2c: placement por-topic.** `Broker.open_segment` resolve, por range, o `spread_by`
-      efetivo = o `:spread_by` da policy do topic (`Metadata.topic_policy/2`) quando a policy **define**
-      essa chave (`nil` explícito opta o topic **fora** do spread, rendezvous puro), sobrepondo o global;
-      senão o `spread_by` global do broker. Simétrico ao 2b (chave definida vence, `nil` incluso). Só
-      `place_opts/effective_spread_by` mudam. Testado: policy liga o spread sobre um global-off; `nil`
-      explícito desliga sobre um global-on (== rendezvous puro).
+- ✅ **C3: policies** (a name plus retention plus constraints over attributes, yielding replica sets;
+  faithful to NorthGuard, which unifies all of it under *policies*). Incrementally: C3a (pure Placement
+  with spread) → C3b (integration: membership attrs feeding placement) → C3c (per-topic policies:
+  definition plus association plus per-topic retention).
+  - ✅ **C3a. Pure `Placement` with spread (rack-aware).** `place/4` gains a `:spread =
+    {attribute_key, attributes}` option: over the (deterministic) HRW ranking it **round-robins across the
+    attribute's distinct values**, taking the best-ranked broker of each value first, then the next of
+    each, until `rf`. With `rf` at most the number of values, every replica lands in a distinct rack or
+    DC; beyond that it round-robins best-effort. Deterministic (the HRW ranking plus stable grouping);
+    without `:spread` it is the previous top-`rf` (so every `place/3` caller is untouched). Tested:
+    distinct values, prioritizing diversity over pure rank (rf=2 over a,a,b gives a,b), best-effort when
+    rf exceeds the value count, brokers lacking the attribute grouping separately, and determinism.
+  - ✅ **C3b: integration (attributes feeding placement).** `Broker` gains `spread_by` (the attribute key)
+    and `broker_attributes` (a broker-to-attrs map); `open` accepts them, `set_broker_attributes/2` updates
+    them (like `set_brokers`), and `open_segment` passes `:spread` to `Placement.place` when `spread_by` is
+    set (otherwise placement is unchanged, so every caller is untouched). `BrokerServer` accepts
+    `:spread_by` plus a `:broker_attributes` function and **refreshes it periodically** (on the same timer
+    as `:live_brokers`) into the broker, so the attrs the membership disseminates (C2) flow into placement.
+    Tested: a produce spreads replicas across racks, `set_broker_attributes` affects the next placement,
+    and `BrokerServer`'s refresh pulls the attrs.
+  - ✅ **C3c-1: wiring rack awareness into the application.** `data_plane_opts` connects `spread_by` (env
+    `MALACHIMQ_LOG_SPREAD_BY`, for example `"rack"`) and a `broker_attributes` function derived from
+    `MembershipServer`: `broker_attributes_for/2` (pure and testable) maps each live member
+    `{LogMembership, node}` to `{LogReplication, node}` carrying the gossiped attrs (C2). With that,
+    **rack-aware placement works end to end in the application** (membership attrs feeding placement
+    spread). Without `spread_by` it is plain HRW.
+  - ✅ **C3c-2. Per-topic policies** (NorthGuard's umbrella concept). Decision: policies live
+    **dynamically in Metadata (`ra`)**, with **both** scopes (per-topic retention and placement).
+    Incrementally: 2a (Metadata: policies plus association) → 2b (per-topic retention) → 2c (per-topic
+    placement). **This closes C3.**
+    - ✅ **C3c-2a. Metadata: policies plus association.** `Metadata` gains `policies: %{name => policy}`
+      (`policy = %{optional(:retention) => %{max_age_ms, max_bytes}, optional(:spread_by) => term}`),
+      `topic_meta` gains `policy: name | nil`, and two commands arrive: `{:define_policy, name, policy}`
+      (validating a non-empty binary name plus a policy map, `:invalid_policy` otherwise) and
+      `{:set_topic_policy, topic, name | nil}` (`:no_such_topic`/`:no_such_policy`; `nil` disassociates,
+      falling back to the globals). Queries: `get_policy/2` and `topic_policy/2` (resolving a topic's
+      policy). Determinism preserved (a property). **Unused so far**: 2b and 2c connect retention and
+      placement to the topic's policy.
+    - ✅ **C3c-2b: per-topic retention.** `Retention.expired/3` now resolves, **per range**, the effective
+      retention: the topic policy's `:retention` (`Metadata.topic_policy/2`) **merged over** the global
+      policy (the policy overrides only the keys it defines, through `Map.merge`), or the global one when
+      the topic has no policy. `RetentionCoordinator` is unchanged (it already passes the metadata plus the
+      global). Tested: a topic policy overriding the global, the merge (an undefined key falling through to
+      the global), and a topic without a policy using the global.
+    - ✅ **C3c-2c: per-topic placement.** `Broker.open_segment` resolves, per range, the effective
+      `spread_by`: the topic policy's `:spread_by` (`Metadata.topic_policy/2`) when the policy **defines**
+      that key (an explicit `nil` opts the topic **out** of spreading, back to plain rendezvous),
+      overriding the global; otherwise the broker's global `spread_by`. Symmetric with 2b (a defined key
+      wins, `nil` included). Only `place_opts` and `effective_spread_by` change. Tested: a policy turning
+      spread on over a global-off; an explicit `nil` turning it off over a global-on (that is, plain
+      rendezvous).
 - ✅ **D. Sharding via `ReplicatedDSRSM`** (agora **no alvo**): metadata sharded (um cluster `ra`
   por vnode) para **escalar o control plane** além de um cluster Raft único. Decisão: **1A**, o cache
   do `Broker` vira um `DSRSM` (espelha o par `Metadata`/`ReplicatedMetadata`), roteando leituras/escritas
