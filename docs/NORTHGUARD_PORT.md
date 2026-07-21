@@ -2048,38 +2048,45 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         server scopes the fetch to the member's assignment and returns records plus an **opaque cursor**;
         the client **never** sees a range id. Membership becomes **implicit through the fetch** (the fetch
         is the heartbeat), with an explicit `leave` later.
-      - ✅ **S4: consumo particionado server-side (opaco, in-VM).** `GroupCoordinator.poll/4` é o entry-point
-        do fetch: registra o membro se novo (rebalance) ou só renova a sessão se conhecido (sem rebalance) e
-        devolve as ranges dele, então o membro fica vivo **buscando**, sem heartbeat separado. O caminho do
-        `consume` ganhou um filtro **`ranges`** (`consume_ranges/5` + `selected_ranges/3`): `nil` = todas as
-        ranges ativas (grupo inteiro / consumidor único, comportamento atual); uma lista = **só** essas,
-        **interseccionadas com as ativas** (uma range atribuída que já fez split é pulada). Threadado por
-        `BrokerServer.consume/6` + o `handle_call({:consume})` (6-tupla) + o waiter do long-poll (guarda
-        `ranges`): subscriber de streaming inalterado (usa o default `nil`). Novo `LogApi.fetch_member/7`:
-        `poll` no coordinator → as ranges do membro → consume escopado das posições commitadas (S2), retorno
-        = records + **cursor opaco** (o cliente nunca vê range_id; o `commit` avança só as ranges do membro).
-        Backward-compat: `fetch_group` sem membro = grupo inteiro. Testado: `poll` (registra novo/heartbeat
-        conhecido/re-registra evictado: 2); **integração e2e in-VM** (topic com 2 ranges via split, 2 membros
-        pré-registrados buscam **disjunto e completo**: cada record por exatamente um membro; backward-compat
-        do fetch_group): 2. Suíte 759 testes 0 falhas; credo/dialyzer limpos.
-      - ✅ **S5: wire + cliente (opaco). Consumer group coordination completo.** Expõe o consumo
-        particionado do S4 sobre o protocolo binário **sem vazar range_id**. **Wire**: `fetch_req` ganha um
-        **member id** (`put_str`, após o group; nil = grupo inteiro / consumidor único, backward-compat):
-        precedência member (grupo, escopado) > cursor (paging do cliente) > group (resume); nova op
-        `leave_group` (api_key 7, `topic/group/member`, ack vazio). O `tcp_protocol` despacha `fetch` com
-        member → `LogApi.fetch_member` (retorno = `encode_fetch_resp`, records + **cursor opaco**, idêntico ao
-        fetch normal: zero range_id no wire) e trata `leave_group` → `GroupCoordinator.leave`. **Wiring**: o
-        `GroupCoordinator` sobe na árvore (`Malachi.LogGroupCoordinator`, `ranges_fun` = `active_range_ids` do
-        `LogBroker`). **Cliente Node**: `wire.js`/`client.js` (member no `fetch` + `leaveGroup`), `consumer.js`
-        modo **`--member`** (fetch escopado + commit + `leave` no exit; vários membros do mesmo `--group` com
-        `--member` distintos = consumo paralelo). Achado do dialyzer: o `@type api_key :: 0..6` fazia inferir
-        que o branch `leave_group` (7) era morto → atualizado p/ `0..7`. Testado: wire round-trip (member +
-        leave_group), **e2e via TCP** (member fetch server-scoped + cursor opaco + records sem offset +
-        leave_group ack) + suíte binária existente (backward-compat do fetch sem member); smoke Node real
-        (produce → consumer `--member` consome tudo como membro único + `leave`; consumer sem member =
-        backward-compat). Suíte 761 testes 0 falhas; credo/dialyzer/format limpos. README (tabela api_key +
-        exemplo de membros paralelos). **G1 (consumer group coordination) concluído** (S1–S5); pendências
-        anotadas: member-scoping do **streaming** (push) e prune de offsets stale (fatias futuras).
+      - ✅ **S4: server-side partitioned consumption (opaque, in-VM).** `GroupCoordinator.poll/4` is the
+        fetch's entry point: it registers the member if new (rebalancing) or merely renews the session if
+        known (no rebalance), and returns that member's ranges, so a member stays alive by **fetching**,
+        with no separate heartbeat. The `consume` path gained a **`ranges`** filter (`consume_ranges/5` plus
+        `selected_ranges/3`): `nil` means every active range (the whole group, or a single consumer, which
+        is the existing behaviour); a list means **only** those, **intersected with the active ones** (so an
+        assigned range that has since split is skipped). It is threaded through `BrokerServer.consume/6`
+        plus the `handle_call({:consume})` (now a 6-tuple) plus the long-poll waiter (which stores
+        `ranges`); the streaming subscriber is unchanged (it uses the `nil` default). A new
+        `LogApi.fetch_member/7`: `poll` the coordinator → the member's ranges → a consume scoped to the
+        committed positions (S2) → returning records plus an **opaque cursor** (the client never sees a
+        range id; the `commit` advances only that member's ranges). Backward compatible: a `fetch_group`
+        without a member is still the whole group. Tested: `poll` (registering a new member, a known
+        member's heartbeat, re-registering an evicted one: 2) and **in-VM e2e integration** (a topic with 2
+        ranges through a split, where 2 pre-registered members fetch **disjointly and completely**, each
+        record going to exactly one member; plus `fetch_group` backward compatibility): 2. Suite at 759
+        tests, 0 failures; credo and dialyzer clean.
+      - ✅ **S5: the wire plus the client (opaque). Consumer group coordination complete.** This exposes
+        S4's partitioned consumption over the binary protocol **without leaking a range id**. **The wire**:
+        `fetch_req` gains a **member id** (`put_str`, after the group; nil means the whole group or a single
+        consumer, for backward compatibility), with precedence member (group-scoped) > cursor (client
+        paging) > group (resume); plus a new `leave_group` op (api_key 7, carrying `topic/group/member`,
+        with an empty ack). `tcp_protocol` dispatches a `fetch` carrying a member to
+        `LogApi.fetch_member` (returning `encode_fetch_resp`, records plus an **opaque cursor**, identical
+        to a normal fetch: zero range ids on the wire) and handles `leave_group` through
+        `GroupCoordinator.leave`. **The wiring**: `GroupCoordinator` joins the tree
+        (`Malachi.LogGroupCoordinator`, with `ranges_fun` being `LogBroker`'s `active_range_ids`). **The
+        Node client**: `wire.js` and `client.js` (a member on `fetch`, plus `leaveGroup`), and
+        `consumer.js` gains a **`--member`** mode (a scoped fetch plus commit plus a `leave` on exit;
+        several members of the same `--group` with distinct `--member` ids give parallel consumption). A
+        dialyzer finding: `@type api_key :: 0..6` made it infer the `leave_group` (7) branch was dead, so
+        it was updated to `0..7`. Tested: a wire round trip (member plus leave_group), **e2e over TCP** (a
+        server-scoped member fetch plus an opaque cursor plus records without offsets plus the leave_group
+        ack) plus the existing binary suite (backward compatibility of a fetch without a member); and a
+        real Node smoke test (produce, then `consumer --member` consuming everything as a lone member and
+        leaving; a consumer without a member staying backward compatible). Suite at 761 tests, 0 failures;
+        credo, dialyzer and format clean. The README gained the api_key table plus a parallel-members
+        example. **G1 (consumer group coordination) is complete** (S1 to S5); recorded as pending: member
+        scoping for **streaming** (push) and pruning stale offsets (future slices).
       - ✅ **Prune de offsets stale (dívida do S2).** O merge por-range do S2 deixava uma key **morta** por
         split (o offset da range-pai persistia no mapa do grupo). O `apply({:commit_offset, ...})` agora,
         após o merge, **pruna** os offsets para as ranges **ativas** do topic (`prune_offsets/3` +
