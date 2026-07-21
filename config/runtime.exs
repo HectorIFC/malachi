@@ -227,7 +227,8 @@ config :malachi,
   auto_rebalance_stabilization: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_STABILIZATION"), 3)
 
 # Everything in this block is owned by config/test.exs when running tests. runtime.exs is evaluated after
-# the environment file, so setting any of it unconditionally would silently overwrite the test values.
+# the environment file, so setting any of it unconditionally would silently overwrite the test values,
+# which for the rate limits are deliberately permissive (integration tests make many connections).
 if config_env() != :test do
   config :malachi,
     # Rate limiting configuration
@@ -242,17 +243,32 @@ if config_env() != :test do
     max_connections_per_ip: parse_int.(System.get_env("MALACHI_MAX_CONN_PER_IP"), 100),
     max_total_connections: parse_int.(System.get_env("MALACHI_MAX_TOTAL_CONN"), 10_000)
 
-  # On-disk data directories, set only when the operator supplies one. A blank value counts as absent:
-  # "" is truthy here and would configure a relative path, so the node would write its durable segments
-  # under the process working directory instead of the operator's volume, which is the exact failure this
-  # setting exists to prevent. With nothing set, `Malachi.Application` supplies the defaults, so dev and
-  # prod are unchanged and test.exs keeps the per-run paths that stop a leftover segment from colliding
-  # with a reused topic (`Log.ensure_active :already_exists`).
-  log_data_dir = System.get_env("MALACHI_LOG_DATA_DIR")
-  ra_data_dir = System.get_env("MALACHI_RA_DATA_DIR")
+  # On-disk data directories, set only when the operator supplies one. Blank (including whitespace) counts
+  # as absent, and in production a relative path is rejected rather than accepted: it resolves against the
+  # process working directory, so the node would write its durable segments to ephemeral container storage
+  # instead of the mounted volume, and the loss would only surface on the next restart. Dropping the
+  # leading slash is the likely typo, since the deployed value is an absolute path. With nothing set,
+  # `Malachi.Application` supplies the defaults, so dev is unchanged and test.exs keeps the per-run paths
+  # that stop a leftover segment from colliding with a reused topic (`Log.ensure_active :already_exists`).
+  data_dir = fn var ->
+    case System.get_env(var) |> to_string() |> String.trim() do
+      "" ->
+        nil
 
-  if log_data_dir not in [nil, ""], do: config(:malachi, log_data_dir: log_data_dir)
-  if ra_data_dir not in [nil, ""], do: config(:malachi, ra_data_dir: ra_data_dir)
+      dir ->
+        if actual_env == :prod and Path.type(dir) != :absolute do
+          raise "#{var} must be an absolute path, got: #{inspect(dir)}"
+        end
+
+        dir
+    end
+  end
+
+  log_data_dir = data_dir.("MALACHI_LOG_DATA_DIR")
+  ra_data_dir = data_dir.("MALACHI_RA_DATA_DIR")
+
+  if log_data_dir, do: config(:malachi, log_data_dir: log_data_dir)
+  if ra_data_dir, do: config(:malachi, ra_data_dir: ra_data_dir)
 end
 
 config :malachi,
