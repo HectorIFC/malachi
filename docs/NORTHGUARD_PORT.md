@@ -2087,35 +2087,39 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         credo, dialyzer and format clean. The README gained the api_key table plus a parallel-members
         example. **G1 (consumer group coordination) is complete** (S1 to S5); recorded as pending: member
         scoping for **streaming** (push) and pruning stale offsets (future slices).
-      - ✅ **Prune de offsets stale (dívida do S2).** O merge por-range do S2 deixava uma key **morta** por
-        split (o offset da range-pai persistia no mapa do grupo). O `apply({:commit_offset, ...})` agora,
-        após o merge, **pruna** os offsets para as ranges **ativas** do topic (`prune_offsets/3` +
-        `active_range_id_set/2`, reusando o índice `topic_ranges` do V-idx + o filtro `state == :active`):
-        uma range retirada por split/merge tem o offset **descartado**, é seguro porque os filhos ativos
-        resumem de `:start` (o consume só lê ranges ativas; a semântica at-least-once de cross-epoch não
-        muda, só some a key morta). **Pulado quando o topic não está roteado** (offset commitado antes do
-        `create_topic`: `topic_ranges` sem a entrada → mantém como está), preservando o comportamento
-        pré-routing dos testes existentes. Bounda o mapa de offsets ao nº de ranges **ativas** (antes crescia
-        ~2^keyspace_bits com splits). Testado: split sela o root → o offset do root é prunado no commit
-        seguinte (fica só o do filho); os testes de merge/pre-routing do S2 seguem verdes (sem topic → sem
-        prune). Suíte 762 testes 0 falhas; credo/dialyzer/format limpos.
-      - ✅ **Streaming member-scoping: Str-1 (server-side, opaco).** Leva o consumo paralelo por grupo ao
-        push/subscribe (antes whole-group). **Restrição arquitetural** que ditou o design: o
-        `push_subscriber` roda **dentro** do handle_call do broker, mas o `ranges_fun` do coordinator
-        **chama de volta** o broker (`active_range_ids`) → se o broker chamasse o coordinator sincronamente,
-        deadlock (cada GenServer esperando o outro). Regra: **o broker nunca chama o coordinator.** Design:
-        toda coordenação no **`LogApi`**: `subscribe_member/7` faz `poll` (registra + ranges) e passa
-        `member`/`ranges`/`coordinator` ao `BrokerServer.subscribe` (via `group_opts`); o subscriber
-        **armazena** as ranges e o `push_subscriber` escopa o consume com elas (`consume_ranges/5`);
-        `stream_ack_member/7` re-poll (heartbeat + ranges frescas) → o broker **atualiza** as ranges do
-        subscriber no ack (pega rebalance). **Liveness**: o `:DOWN` do broker dispara um **`Task` assíncrono**
-        que chama `coordinator.leave` (async → não bloqueia o broker → sem deadlock) para rebalance rápido na
-        desconexão; membro idle fica vivo por ack periódico do cliente (Str-2). Positions escopadas por
-        `Map.take` no subscribe (como no `fetch_member`); **opaco** (o push segue `{:log_records, records,
-        cursor}`. Zero range_id). Testado in-VM: 2 membros pré-registrados recebem push **disjunto e
-        completo** (topic com 2 ranges via split); processo de um membro morrendo → **leave** async → o
-        membro some do coordinator. Suíte 764 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: Str-2
-        (wire: member no subscribe/stream_ack + cliente Node subscriber com member + heartbeat).**
+      - ✅ **Pruning stale offsets (S2's debt).** S2's per-range merge left a **dead** key behind on every
+        split (the parent range's offset persisted in the group's map). `apply({:commit_offset, ...})` now
+        **prunes**, after the merge, down to the topic's **active** ranges (`prune_offsets/3` plus
+        `active_range_id_set/2`, reusing V-idx's `topic_ranges` index plus a `state == :active` filter): a
+        range retired by a split or merge has its offset **discarded**, which is safe because the active
+        children resume from `:start` (a consume only reads active ranges; the at-least-once cross-epoch
+        semantics do not change, only the dead key disappears). It is **skipped when the topic is not
+        routed** (an offset committed before `create_topic`, where `topic_ranges` has no entry, is left as
+        is), preserving the pre-routing behaviour of the existing tests. This bounds the offset map to the
+        number of **active** ranges (it previously grew toward ~2^keyspace_bits with splits). Tested: a
+        split seals the root, so the root's offset is pruned on the next commit (leaving only the child's);
+        and S2's merge and pre-routing tests stay green (no topic means no prune). Suite at 762 tests, 0
+        failures; credo, dialyzer and format clean.
+      - ✅ **Streaming member scoping: Str-1 (server-side, opaque).** This brings per-group parallel
+        consumption to push/subscribe (which was whole-group before). **The architectural constraint** that
+        dictated the design: `push_subscriber` runs **inside** the broker's handle_call, but the
+        coordinator's `ranges_fun` **calls back into** the broker (`active_range_ids`), so if the broker
+        called the coordinator synchronously it would deadlock (each GenServer waiting on the other). The
+        rule: **the broker never calls the coordinator.** The design puts all coordination in **`LogApi`**:
+        `subscribe_member/7` does the `poll` (registering plus getting ranges) and passes
+        `member`/`ranges`/`coordinator` to `BrokerServer.subscribe` (through `group_opts`); the subscriber
+        **stores** the ranges and `push_subscriber` scopes the consume with them (`consume_ranges/5`);
+        `stream_ack_member/7` re-polls (a heartbeat plus fresh ranges) so the broker **updates** the
+        subscriber's ranges on the ack (picking up a rebalance). **Liveness**: the broker's `:DOWN` fires an
+        **async `Task`** that calls `coordinator.leave` (async, so it does not block the broker and cannot
+        deadlock) for a quick rebalance on disconnect; an idle member stays alive through the client's
+        periodic ack (Str-2). Positions are scoped by `Map.take` at subscribe time (as in `fetch_member`);
+        and it stays **opaque** (the push is still `{:log_records, records, cursor}`, with zero range ids).
+        Tested in-VM: 2 pre-registered members receive **disjoint and complete** pushes (a topic with 2
+        ranges through a split); and killing one member's process fires the async **leave**, so the member
+        disappears from the coordinator. Suite at 764 tests, 0 failures; credo, dialyzer and format clean.
+        **Next: Str-2 (the wire: a member on subscribe and stream_ack, plus a Node subscriber client with a
+        heartbeat).**
       - ✅ **Streaming member-scoping. Str-2 (wire + cliente Node).** Expõe o Str-1 na borda: o `member`
         (opcional) entra no **subscribe** e no **stream_ack** do protocolo binário, depois do `group`, como
         no `fetch` (Str-1): `encode_subscribe_req(topic, group, member, window, max)` e
