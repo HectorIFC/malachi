@@ -1849,53 +1849,58 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         isolation plus the full suite (1048 tests) green, showing boot does not regress; the ops'
         behaviour rests on R3-b-ii's `:multinode` run. **Dynamic rebalancing is complete: phase 1
         (distribution) closes here.**
-      - ✅ **Reconcile do lease (endurecimento).** O bootstrap `auto-fencido` acima forma o cluster do
-        lease só com a **maioria** (Raft); um nó que estava down quando o cluster formou fica membro da
-        **config** (o `start_cluster` inicial lista todos os nós) mas sem servidor rodando, reduzindo a
-        tolerância a falha do lease. `LeaseServer.reconcile/2` faz **self-join**, best-effort e idempotente:
-        (re)tenta formar o cluster (`start/2`, auto-fencido) e iniciar o servidor **local** (`:ra.start_server`),
-        que se re-junta ao cluster existente (já é membro da config) e o `ra` replica o estado do lease a
-        ele. `Malachi.Cluster.LeaseReconciler` (GenServer genérico, seam `:reconcile`) o chama após o boot
-        e a cada `lease_reconcile_interval_ms` (default 30s), *level-triggered*, mantém o `LeaseHolder`
-        livre de `ra`/membership. Subido no `rebalance_children` (primeiro, antes do holder). Testado:
-        reconcile bootstrapa quando não iniciado + é no-op idempotente num cluster formado (não perturba o
-        lease); o reconciler reconcilia no boot e sob demanda.
-    - ✅ **Descoberta dinâmica de nós (libcluster). Connectivity-only.** Fecha a lacuna de operabilidade: a
-      descoberta de peers era **estática** (`MALACHIMQ_LOG_NODES` + `Node.connect` manual / hostnames fixos).
-      Dep `{:libcluster, "~> 3.5"}` + um `Cluster.Supervisor` **opcional** na árvore (só quando
-      `MALACHIMQ_CLUSTER_STRATEGY` está setado; ausente = single-node, sem exigir distribuição, default
-      intacto). Decisão (**1A**): **connectivity-only**, libcluster só descobre+conecta nós (distribuição
-      Erlang); SWIM e o `ra` seguem usando o `log_nodes` para o *member set* inicial, e a mudança de
-      membership do `ra` continua pelo **R3 (rebalancing sob lease)** já feito, não duplica, de forma menos
-      segura, a formação Raft. Estratégias (**2A**): `gossip` (UDP multicast, dev/LAN), `kubernetes`
-      (descobre pods via API; `selector`+`node_basename` obrigatórios), `epmd` (lista estática reusando
-      `log_nodes`). Módulo **puro** `Malachi.Cluster.Topology.build/1` mapeia config→topologies (fail-fast:
-      raise em campo obrigatório faltante), unit-testável sem abrir socket multicast/k8s. Env parseado no
-      `runtime.exs` (`log_nodes` extraído p/ binding, reusado no `epmd`). Testado: `build/1` por estratégia
-      (defaults, campos obrigatórios, nils omitidos, unknown raise): 12 testes; smoke de boot real (default
-      → sem `ClusterSupervisor` e sem distribuição; `gossip` + `--sname` → `ClusterSupervisor` vivo). Suíte
-      completa 715 testes 0 falhas (boot não regride); credo/dialyzer limpos. README com a seção de node
-      discovery. **Fatia de operabilidade multi-nó fechada.**
-    - ✅ **Hardening de placement: garantia de domínios de falha (`min_domains`/`policy`).** O `Placement`
-      já fazia spread rack/DC + `max_skew`, mas o `:spread` é **best-effort**: com menos domínios que `rf`,
-      ou atributos faltando, as réplicas concentravam **silenciosamente**: um furo de HA (3 réplicas no
-      mesmo rack sobrevivem a zero falhas de rack). Decisão **1A**: `:hard` **falha rápido na colocação
-      inicial**; heal segue best-effort (durabilidade primeiro) + reporta. **Core (puro)**: `place/4` ganha
-      `:min_domains` (nº mínimo de valores distintos do atributo que o replica set deve cobrir; sem
-      `:spread`, brokers distintos) + `:policy` (`:soft` default = comportamento atual; `:hard` retorna
-      `{:error, {:insufficient_domains, coberto, exigido}}`). Broker sem atributo cai no domínio `nil` único
-      (conservador: não conta como domínio extra). Novo `domain_violations/4` reporta segmentos cujo replica
-      set cobre < `min_domains` domínios (alerta/observabilidade). **Fiação**: broker (`min_domains`/
-      `placement_policy` no struct/open; `place_opts` injeta; `open_segment` trata `{:error, ...}` → produce
-      aborta limpo, `register_segment` extraído), broker_server (threading), application (`data_plane_opts`
-      lê `log_min_domains`/`log_placement_policy`), config (`MALACHIMQ_LOG_MIN_DOMAINS`/
-      `MALACHIMQ_LOG_PLACEMENT_POLICY`). **Fix relacionado (Issue 2)**: o heal era **rack-blind**:
-      `self_healing` chamava `place/3` sem `:spread`; agora `HealCoordinator` resolve o spread por pass (via
-      `heal_spread/0`, atributos vivos) e o `self_healing` forwarda **só `:spread`** (strip de
-      `min_domains`/`policy`. Heal nunca hard-falha). Testado: `place/4` min_domains/policy (soft/hard,
-      met/unmet, sem-spread, nil-domain) + `domain_violations/4` (5+3); broker hard-fail e2e (produce aborta
-      com 2 racks/min_domains 3; soft coloca; hard passa com min_domains 2, 3); heal rack-aware forwardando
-      `:spread` (1). Suíte 727 testes 0 falhas; credo/dialyzer limpos. README com os env vars.
+      - ✅ **Lease reconcile (hardening).** The `self-fencing` bootstrap above forms the lease cluster with
+        only a **majority** (Raft); a node that was down when the cluster formed remains a member of the
+        **config** (the initial `start_cluster` lists every node) but with no server running, which reduces
+        the lease's fault tolerance. `LeaseServer.reconcile/2` performs a **self-join**, best-effort and
+        idempotent: it re-attempts to form the cluster (`start/2`, self-fencing) and to start the **local**
+        server (`:ra.start_server`), which rejoins the existing cluster (it is already a config member) and
+        `ra` replicates the lease state to it. `Malachi.Cluster.LeaseReconciler` (a generic GenServer with
+        a `:reconcile` seam) calls it after boot and every `lease_reconcile_interval_ms` (default 30s),
+        *level-triggered*, keeping `LeaseHolder` free of `ra` and membership concerns. It is started in
+        `rebalance_children` (first, before the holder). Tested: the reconcile bootstraps when nothing has
+        started and is an idempotent no-op against a formed cluster (it does not disturb the lease); and
+        the reconciler reconciles both at boot and on demand.
+    - ✅ **Dynamic node discovery (libcluster). Connectivity only.** This closes an operability gap: peer
+      discovery used to be **static** (`MALACHIMQ_LOG_NODES` plus a manual `Node.connect` or fixed
+      hostnames). The `{:libcluster, "~> 3.5"}` dependency plus an **optional** `Cluster.Supervisor` in the
+      tree (only when `MALACHIMQ_CLUSTER_STRATEGY` is set; absent means single-node, requiring no
+      distribution, so the default is untouched). Decision (**1A**): **connectivity only**, so libcluster
+      merely discovers and connects nodes (Erlang distribution); SWIM and `ra` keep using `log_nodes` for
+      the initial *member set*, and `ra` membership changes still go through the **R3 (rebalancing under
+      the lease)** already built, rather than duplicating Raft formation in a less safe way. Strategies
+      (**2A**): `gossip` (UDP multicast, for dev and LAN), `kubernetes` (discovering pods through the API;
+      `selector` and `node_basename` are required) and `epmd` (a static list reusing `log_nodes`). A
+      **pure** `Malachi.Cluster.Topology.build/1` module maps config to topologies (fail-fast: it raises on
+      a missing required field), unit-testable without opening a multicast or k8s socket. The env is parsed
+      in `runtime.exs` (`log_nodes` extracted into a binding, reused by `epmd`). Tested: `build/1` per
+      strategy (defaults, required fields, nils omitted, an unknown one raising): 12 tests; plus a real
+      boot smoke test (the default yields no `ClusterSupervisor` and no distribution; `gossip` plus
+      `--sname` yields a live `ClusterSupervisor`). Full suite at 715 tests, 0 failures (boot does not
+      regress); credo and dialyzer clean. The README gained a node-discovery section. **The multi-node
+      operability slice is closed.**
+    - ✅ **Placement hardening: a fault-domain guarantee (`min_domains`/`policy`).** `Placement` already did
+      rack and DC spread plus `max_skew`, but `:spread` is **best-effort**: with fewer domains than `rf`, or
+      with attributes missing, replicas concentrated **silently**, which is an HA hole (3 replicas in the
+      same rack survive zero rack failures). Decision **1A**: `:hard` **fails fast on initial placement**,
+      while heal stays best-effort (durability first) and reports. **The (pure) core**: `place/4` gains
+      `:min_domains` (the minimum number of distinct attribute values the replica set must cover; without
+      `:spread`, distinct brokers) plus `:policy` (`:soft`, the default, being current behaviour; `:hard`
+      returning `{:error, {:insufficient_domains, covered, required}}`). A broker with no attribute falls
+      into a single `nil` domain (conservatively: it does not count as an extra domain). A new
+      `domain_violations/4` reports the segments whose replica set covers fewer than `min_domains` domains
+      (for alerting and observability). **The wiring**: the broker (`min_domains` and `placement_policy` in
+      the struct and in `open`; `place_opts` injects them; `open_segment` handles `{:error, ...}` so a
+      produce aborts cleanly, with `register_segment` extracted), broker_server (threading them through),
+      application (`data_plane_opts` reads `log_min_domains`/`log_placement_policy`) and config
+      (`MALACHIMQ_LOG_MIN_DOMAINS`/`MALACHIMQ_LOG_PLACEMENT_POLICY`). **A related fix (Issue 2)**: heal was
+      **rack-blind**, since `self_healing` called `place/3` without `:spread`; now `HealCoordinator`
+      resolves the spread per pass (through `heal_spread/0`, using live attributes) and `self_healing`
+      forwards **only `:spread`** (stripping `min_domains` and `policy`, so heal never hard-fails). Tested:
+      `place/4` min_domains and policy (soft and hard, met and unmet, without spread, the nil domain) plus
+      `domain_violations/4` (5+3); the broker hard-fail e2e (a produce aborts with 2 racks and min_domains
+      3; soft places it; hard passes with min_domains 2 and 3); and rack-aware heal forwarding `:spread`
+      (1). Suite at 727 tests, 0 failures; credo and dialyzer clean. The README gained the env vars.
       - ✅ **Surfacing de `domain_violations` (métrica + painel).** Fecha o loop da metade "reportar" do 1A: o
         `domain_violations/4` era uma função pura que **nada chamava**, então com política **soft** o operador
         ficava cego para a degradação de HA. `Broker.domain_violations/1` (puro) computa, do próprio broker
