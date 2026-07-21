@@ -1479,81 +1479,93 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
              `route_vnode` plus the tolerant `snapshot` (single-node), and `:multinode`: the orchestrator
              starts across 2 nodes while a non-orchestrator only routes yet reads and writes cross-node.
              **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
-           - ✅ **D-c-1d: `membership_leader` + reconcile loop.** A política de orquestração passa do seed
-             estático para `Malachi.Application.membership_leader/1`: verdade só no menor nó **vivo** (`MembershipServer.
-             alive_members`, SWIM), então o papel **faz failover** quando o líder cai (tolerante: se a membership
-             não responde → não-líder, nunca dois). O bootstrap vira **reconcile** (controller-style, k8s): no
-             boot **todo** nó só faz `route_vnode` (`build_replicated` sem `start`); o `BrokerServer` reconcilia
-             (level-triggered, idempotente) logo após o boot e periodicamente, e **só no líder** - chamando
-             `MetadataServer.start/2` nos vnodes cujo cluster ainda não está pronto (`MetadataServer.ready?/1`,
-             novo). O **fencing** é o nome do cluster `ra` (um segundo `start` do mesmo vnode falha sem
-             duplicar: validado empiricamente); o *lease* (jeito k8s literal) fica para o **1C**, onde o líder
-             passa a fazer trabalho **contínuo** (retention/healing/rebalancing). `static_seed/1` permanece como
-             alternativa (testada). Testado: `membership_leader` (menor-vivo, tolerância); integração, o líder
-             bootstrapa os vnodes via reconcile e um `create_topic` commita. Ver seção 8 (referências k8s/riak_core).
-      2. **Detecção/reação a liderança Raft por vnode**: um supervisor que sobe/derruba coordinators
-         conforme a liderança muda (via eventos do `ra`), tolerando oscilação e split-brain momentâneo.
-    Sequência: D-b ✅ → **D-c-1 placement de vnodes** ✅ → **1C-a coordinators só-no-líder** ✅ →
-    **1C-b-i detecção de liderança Raft por vnode** ✅ → **1C-b-ii-α coordinator apontado a um vnode** ✅
-      → **1C-b-ii-β supervisor/manager per-vnode-leader** ✅. **1C-b completo.**
+           - ✅ **D-c-1d: `membership_leader` plus a reconcile loop.** The orchestration policy moves from
+             the static seed to `Malachi.Application.membership_leader/1`: true only on the lowest **live**
+             node (`MembershipServer.alive_members`, SWIM), so the role **fails over** when the leader
+             dies (tolerantly: if membership does not answer, the node is not the leader, so there are
+             never two). Bootstrap becomes a **reconcile** (controller style, k8s): at boot **every** node
+             only calls `route_vnode` (`build_replicated` without `start`); `BrokerServer` reconciles
+             (level-triggered, idempotent) right after boot and periodically, and **only on the leader**,
+             calling `MetadataServer.start/2` for the vnodes whose cluster is not ready yet
+             (`MetadataServer.ready?/1`, new). The **fencing** is the `ra` cluster's name (a second `start`
+             of the same vnode fails without duplicating: validated empirically); the *lease* (the literal
+             k8s way) is left for **1C**, where the leader starts doing **continuous** work (retention,
+             healing, rebalancing). `static_seed/1` stays available as an alternative (and is tested).
+             Tested: `membership_leader` (lowest-live, plus tolerance); and integration, where the leader
+             bootstraps the vnodes through the reconcile and a `create_topic` commits. See section 8 (the
+             k8s and riak_core references).
+      2. **Detecting and reacting to per-vnode Raft leadership**: a supervisor that starts and stops
+         coordinators as leadership changes (through `ra` events), tolerating oscillation and momentary
+         split brain.
+    The sequence: D-b ✅ → **D-c-1 vnode placement** ✅ → **1C-a leader-only coordinators** ✅ →
+    **1C-b-i per-vnode Raft leadership detection** ✅ → **1C-b-ii-α a coordinator aimed at one vnode** ✅
+      → **1C-b-ii-β the per-vnode-leader supervisor/manager** ✅. **1C-b is complete.**
 
-    - ✅ **1C-a: coordinators só-no-líder (sem lease).** `RetentionCoordinator` e `HealCoordinator`
-      ganham o seam `:leader?` (`(-> boolean())`, default sempre); a cada tick, só varrem/curam se
-      `leader?()`: senão o tick corre mas pula. O `Application` injeta `membership_leader(Malachi.
-      LogMembership)` (reusa D-c-1d) nos dois quando clustered (`coordinator_leader?/1`; single-node =
-      sempre age). Elimina a **redundância** (N nós faziam o mesmo trabalho) mantendo o modelo
-      level-triggered. **Sem lease:** o trabalho é idempotente + roteado ao `ra` (serial), então dois
-      coordinators transitórios (convergência SWIM) só refazem trabalho, não corrompem, o mesmo
-      raciocínio do bootstrap. `run_now/1`/`heal_now/1` ignoram o gate (triggers manuais). Testado:
-      não-líder pula o tick; o trigger manual age mesmo assim.
-    - ✅ **1C-b-i: detecção de liderança Raft por vnode (núcleo puro).** `MetadataServer.leader?/1`
-      espelha `ready?/1`: lê o líder que `:ra.members` reporta (qualquer membro alcançável responde) e
-      é verdade só se ele for o **próprio** `server_id`, passe o server **local** (`{vnode_id, node()}`)
-      para perguntar "este nó lidera este vnode?". Cluster não-formado/inalcançável → false (nunca
-      assume liderança). `Malachi.Application.leading_vnodes/3` é o seletor puro: dado o placement
-      (`[{vnode_id, token, nodes}]` do bootstrap), o nó local e o predicado `leader?` (default
-      `MetadataServer.leader?/1`), retorna os vnodes que o nó **hospeda** (placement o inclui) **e**
-      **lidera**: curto-circuitando `leader?` para vnodes não-hospedados. É onde 1C-b-ii vai rodar os
-      coordinators, um por vnode, no líder Raft dele (o NorthGuard literal, distribuindo a carga vs o
-      líder único de membership do 1C-a). Testado: `leader?` no líder single-node (ra real) + não-formado
-      → false; `leading_vnodes` filtra host×lidera, preserva ordem, não consulta liderança de não-hospedado.
-    - ✅ **1C-b-ii-α: coordinator apontado a um vnode.** `Malachi.Application.vnode_metadata_source/1` é um
-      `metadata_source` ligado a **um** vnode: lê a visão local do `Metadata` daquele vnode via
-      `MetadataServer.query({vnode_id, node()}, & &1)` (consistent query ao ra do vnode), **tolerante**
-      (vnode não-formado/inalcançável → `Metadata.new()`, sem crashar o coordinator). Como o tipo é o
-      mesmo (`Metadata.t()`) e `expire_segment`/`apply_heal` já roteiam ao vnode dono por topic, o
-      `RetentionCoordinator`/`HealCoordinator` **não mudam**: basta trocar o source (por-vnode em vez do
-      merge global) e o gate (`MetadataServer.leader?({vnode_id, node()})`). Testado (ra real): source
-      tolerante em vnode não-formado; lê só o shard do vnode; um `RetentionCoordinator` ligado a um vnode
-      expira só os segments **daquele** vnode.
-    - ✅ **1C-b-ii-β, supervisor/manager per-vnode-leader.** `Malachi.Cluster.VnodeCoordinatorManager`
-      (GenServer genérico, testável por seams `leading`/`spawn`/`stop`) reconcilia por **polling
-      level-triggered** (logo após o boot via `handle_continue`, depois a cada `:vnode_reconcile_interval_ms`,
-      default 5s): compara os vnodes que este nó lidera agora (`leading_vnodes/3` sobre `MetadataServer.
-      leader?`) com os que já roda, **sobe** um par retention+heal para os recém-liderados e **derruba** os
-      que deixou de liderar. Cada par vive sob um **supervisor por-vnode** (`:one_for_one`) num
-      `DynamicSupervisor` (`Malachi.LogVnodeCoordinatorSupervisor`), para que um coordinator que crashe
-      reinicie sem o manager perder o handle. No `Application`, `coordinator_children/2` **substitui** os
-      coordinators únicos do 1C-a pelo par supervisor+manager **quando sharded** (`vnode_placement/2` ≠
-      nil, extraído e reusado por `metadata_opts`); single-node / cluster de 1 vnode seguem no 1C-a.
-      Cada coordinator mantém o gate `MetadataServer.leader?({vnode_id, node()})` como **defesa em
-      profundidade** (se o manager atrasar numa oscilação, o coordinator não age após perder a liderança).
-      **Idempotente + sem lease** (mesmo raciocínio do 1C-a): um flap transitório só refaz trabalho
-      roteado ao `ra`, não corrompe. Testado: reconcile por seams (sobe/derruba/idempotente/esvazia) +
-      integração (ra real, single-node): o manager sobe um `RetentionCoordinator` real por vnode liderado
-      e cada um expira só os segments do **seu** vnode. O **lease sobre `ra`** fica para quando o
-      coordinator ganhar trabalho **não-idempotente** (rebalancing com movimento de dados).
+    - ✅ **1C-a: leader-only coordinators (no lease).** `RetentionCoordinator` and `HealCoordinator` gain
+      a `:leader?` seam (`(-> boolean())`, defaulting to always); on each tick they only sweep or heal if
+      `leader?()`, otherwise the tick runs but skips. `Application` injects
+      `membership_leader(Malachi.LogMembership)` (reusing D-c-1d) into both when clustered
+      (`coordinator_leader?/1`; single-node always acts). This removes the **redundancy** (N nodes doing
+      the same work) while keeping the level-triggered model. **No lease:** the work is idempotent and
+      routed through `ra` (which serializes), so two transient coordinators (during SWIM convergence)
+      merely redo work rather than corrupting anything, the same reasoning as the bootstrap.
+      `run_now/1` and `heal_now/1` bypass the gate (they are manual triggers). Tested: a non-leader skips
+      the tick; the manual trigger acts regardless.
+    - ✅ **1C-b-i: per-vnode Raft leadership detection (the pure core).** `MetadataServer.leader?/1`
+      mirrors `ready?/1`: it reads the leader `:ra.members` reports (any reachable member answers) and is
+      true only when that leader is the **given** `server_id`, so passing the **local** server
+      (`{vnode_id, node()}`) asks "does this node lead this vnode?". An unformed or unreachable cluster
+      yields false (it never assumes leadership). `Malachi.Application.leading_vnodes/3` is the pure
+      selector: given the placement (`[{vnode_id, token, nodes}]` from the bootstrap), the local node and
+      a `leader?` predicate (defaulting to `MetadataServer.leader?/1`), it returns the vnodes the node
+      **hosts** (the placement includes it) **and** **leads**, short-circuiting `leader?` for vnodes it
+      does not host. That is where 1C-b-ii will run the coordinators, one per vnode, on that vnode's Raft
+      leader (the literal NorthGuard model, distributing the load rather than 1C-a's single membership
+      leader). Tested: `leader?` on a single-node leader (real ra) plus an unformed cluster yielding
+      false; and `leading_vnodes` filtering host-and-leads, preserving order, and never querying
+      leadership for a vnode it does not host.
+    - ✅ **1C-b-ii-α: a coordinator aimed at one vnode.** `Malachi.Application.vnode_metadata_source/1` is
+      a `metadata_source` bound to **one** vnode: it reads that vnode's local `Metadata` view through
+      `MetadataServer.query({vnode_id, node()}, & &1)` (a consistent query against the vnode's ra),
+      **tolerantly** (an unformed or unreachable vnode yields `Metadata.new()` rather than crashing the
+      coordinator). Since the type is the same (`Metadata.t()`) and `expire_segment`/`apply_heal` already
+      route to the owning vnode by topic, `RetentionCoordinator` and `HealCoordinator` **do not change**:
+      it is enough to swap the source (per-vnode instead of the global merge) and the gate
+      (`MetadataServer.leader?({vnode_id, node()})`). Tested (against real ra): the source is tolerant of
+      an unformed vnode; it reads only that vnode's shard; and a `RetentionCoordinator` bound to one vnode
+      expires only **that** vnode's segments.
+    - ✅ **1C-b-ii-β, the per-vnode-leader supervisor and manager.**
+      `Malachi.Cluster.VnodeCoordinatorManager` (a generic GenServer, testable through the
+      `leading`/`spawn`/`stop` seams) reconciles by **level-triggered polling** (right after boot through
+      `handle_continue`, then every `:vnode_reconcile_interval_ms`, default 5s): it compares the vnodes
+      this node leads right now (`leading_vnodes/3` over `MetadataServer.leader?`) with the ones it
+      already runs, **starts** a retention-plus-heal pair for the newly led ones and **stops** those it no
+      longer leads. Each pair lives under a **per-vnode supervisor** (`:one_for_one`) inside a
+      `DynamicSupervisor` (`Malachi.LogVnodeCoordinatorSupervisor`), so a coordinator that crashes
+      restarts without the manager losing its handle. In `Application`, `coordinator_children/2`
+      **replaces** 1C-a's single coordinators with the supervisor-plus-manager pair **when sharded**
+      (`vnode_placement/2` is not nil, extracted and reused by `metadata_opts`); single-node and 1-vnode
+      clusters stay on 1C-a. Each coordinator keeps the `MetadataServer.leader?({vnode_id, node()})` gate
+      as **defence in depth** (if the manager lags during an oscillation, the coordinator still will not
+      act after losing leadership). **Idempotent and lease-free** (the same reasoning as 1C-a): a
+      transient flap merely redoes work routed through `ra`, it does not corrupt. Tested: the reconcile
+      through seams (start, stop, idempotence, draining) plus integration (real ra, single-node), where
+      the manager starts one real `RetentionCoordinator` per led vnode and each expires only **its own**
+      vnode's segments. A **lease over `ra`** is left for when the coordinator gains **non-idempotent**
+      work (rebalancing that moves data).
 
-    (A alternativa **1B**: coordinators iterando por-vnode mas ainda centralizados - evita materializar
-    o merge, mas é um meio-termo sem gargalo medido; preterida em favor de ir direto ao placement.)
+    (The **1B** alternative, coordinators iterating per vnode but still centralized, avoids materializing
+    the merge but is a halfway house with no measured bottleneck behind it; passed over in favour of going
+    straight to placement.)
 
-### Fase 2, Eficiência nativa (condicional, guiada por profiling)
-- `Malachi.SegmentStore.Native` em Rust (Rustler): O_DIRECT, cache de app, `erlang-rocksdb`.
-- Só implementar se a Fase 1 mostrar cauda de latência/page-cache como gargalo sob concorrência.
+### Phase 2, native efficiency (conditional, driven by profiling)
+- `Malachi.SegmentStore.Native` in Rust (Rustler): O_DIRECT, an app-level cache, `erlang-rocksdb`.
+- To be implemented only if phase 1 shows the latency tail or the page cache to be the bottleneck under
+  concurrency.
 
-### (Futuro) Camada Xinfra-like
-- Virtual topics com epochs, offsets opacos, migração dual-write, consumer-group management.
-  Fora do escopo inicial.
+### (Future) An Xinfra-like layer
+- Virtual topics with epochs, opaque offsets, dual-write migration, consumer-group management.
+  Out of the initial scope.
 
 ---
 
