@@ -1058,45 +1058,52 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
         node (an encoded fetch, loading, the post-fetch render, escaping). The full-stream tradeoff is
         gone: zero segment traffic unless a topic is expanded. 790 tests, 0 failures; credo and dialyzer
         clean.
-      - ✅ **Cap de tamanho de frame no protocolo binário (fix de DoS).** Achado ao investigar o `Validator`
-        órfão: o caminho binário **não tinha teto de frame**: o enforcement de tamanho saiu junto com o
-        modelo de fila no B3b e o binário nunca o replicou. O `tcp_acceptor` acumulava `buffer <> data` até
-        `Wire.decode_frame` casar (`<<len::32, body::binary-size(len)>>`, sem teto), então um cliente podia
-        anunciar `len = 4 GB` e forçar buffer ilimitado. Novo `Wire.decode_frame/2` rejeita
-        `{:error, :frame_too_large}` **assim que os 4 bytes do length-prefix chegam** (antes de bufferizar o
-        corpo); o acceptor aplica em todos os 3 pontos de leitura (auth, request loop, streaming), respondendo
-        um erro e fechando. Teto configurável (`:max_frame_size`, default 16 MiB). Testes: frame gigante
-        rejeitado (pós-auth e no handshake) sem bufferizar + servidor sobrevive; boundary (com cap reduzido:
-        frame no teto processa, 1 byte acima rejeita). 793 testes, 0 falhas; credo/dialyzer limpos.
-      - ✅ **Remoção do `Malachi.Validator` órfão.** Feito o fix de DoS (o único hardening real que ele fazia
-        agora vive no lugar certo, o boundary do wire), o `Validator` inteiro estava morto, 7 funções com
-        **0 callers vivos**, um GenServer supervisionado com ETS que ninguém usava (o modelo de fila era o
-        único cliente; o caminho binário valida topic name no próprio `Metadata.valid_topic_name?`).
-        Deletados: `validator.ex` + sua entrada de supervisão; as 3 métricas de validação do `Metrics`
-        (`increment_validation_error`/`cache_hit`/`cache_miss`) + a seção `validation` de `get_system_metrics`;
-        e o config morto de runtime.exs (bloco de name/header validation do Validator + o bloco resource/
-        backpressure e `max_dynamic_*`, resquícios do modelo de fila, todas com 0 readers). Testes: deletados
-        os puros de Validator (`validator_test`, `injection_attack_test`, `input_fuzzing_test`); adaptados os
-        mistos (`atom_safety` → só AtomMonitor; `attack_simulation` → removido o teste de nome via Validator;
-        `security_performance_regression` → removidos os benchmarks de Validator, mantidos Auth/RateLimiter/
-        ConnectionLimiter/lockout). Cobertura viva intacta: o caminho binário já é fuzzado pelo
-        `binary_protocol_security_test`. 685 testes, 0 falhas; credo/dialyzer limpos (−4 arquivos).
-      - ✅ **Observabilidade (A: Prometheus+health/ready · B: telemetry · C: OTel, cada fatiado).**
-        - ✅ **O1: health/readiness.** Endpoints HTTP **sem auth** na porta do dashboard (probes não
-          autenticam): `GET /health` (liveness, sempre 200 `{"status":"ok"}`) e `GET /ready` (readiness:
-          200 `{"status":"ready"}` se o `LogBroker` está vivo, senão 503 `not_ready`, pra um LB/k8s parar
-          de rotear a um nó ainda bootando ou sem broker). Adicionados a `is_public_route` (bypass de auth)
-          + `serve_status/4` (código variável). Testado: happy path (dashboard_test) e a **propriedade-chave**
-          (dashboard_security: 200 sem token mesmo com auth habilitado). README com exemplo de probes k8s.
-        - ✅ **O2, endpoint Prometheus.** Módulo **puro** `Malachi.Metrics.Prometheus` (`export(system,
-          topics) → iodata`) renderiza o formato-texto de exposição v0.0.4 a partir do `get_system_metrics`
-          + `Metadata.overview`: health do BEAM (process/memory/uptime/io/atom), contadores de segurança
-          (rate-limit por ação, failed-auth, lockouts, dashboard-auth, TLS handshakes) e gauges por-topic
-          (ranges/segments/bytes/grupos). O `/metrics` do dashboard virou **content-negotiated**: `Accept:
-          text/plain`/`openmetrics` → texto Prometheus, senão o JSON de sempre (preserva dashboard + o teste
-          JSON): mesma auth (any-user; scraper passa token). Labels escapados (defensivo). Testado: unit do
-          módulo (HELP/TYPE, labels, valores int/float, escaping, sem topics) + e2e (Accept: text/plain →
-          exposição com `malachi_up` e o gauge do topic criado). 695 testes, 0 falhas; credo/dialyzer limpos.
+      - ✅ **A frame size cap on the binary protocol (a DoS fix).** Found while investigating the orphan
+        `Validator`: the binary path had **no frame ceiling**. Size enforcement had gone out with the queue
+        model in B3b and the binary path never replicated it. `tcp_acceptor` accumulated `buffer <> data`
+        until `Wire.decode_frame` matched (`<<len::32, body::binary-size(len)>>`, with no ceiling), so a
+        client could announce `len = 4 GB` and force unbounded buffering. A new `Wire.decode_frame/2`
+        rejects with `{:error, :frame_too_large}` **as soon as the 4 length-prefix bytes arrive** (before
+        buffering the body); the acceptor applies it at all 3 read points (auth, the request loop,
+        streaming), answering an error and closing. The ceiling is configurable (`:max_frame_size`,
+        defaulting to 16 MiB). Tests: a giant frame rejected (both after auth and during the handshake)
+        without buffering, plus the server surviving; and the boundary (with a reduced cap: a frame at the
+        ceiling processes, one byte over is rejected). 793 tests, 0 failures; credo and dialyzer clean.
+      - ✅ **Removing the orphan `Malachi.Validator`.** With the DoS fix done (the one real piece of
+        hardening it still performed now lives in the right place, the wire boundary), the whole
+        `Validator` was dead: 7 functions with **0 live callers**, a supervised GenServer with an ETS table
+        nobody used (the queue model had been its only client; the binary path validates topic names in
+        `Metadata.valid_topic_name?` itself). Deleted: `validator.ex` plus its supervision entry; the 3
+        validation metrics in `Metrics`
+        (`increment_validation_error`/`cache_hit`/`cache_miss`) plus the `validation` section of
+        `get_system_metrics`; and the dead config in runtime.exs (the Validator's name and header
+        validation block, plus the resource and backpressure block and `max_dynamic_*`, leftovers of the
+        queue model, all with 0 readers). Tests: deleted the pure Validator ones (`validator_test`,
+        `injection_attack_test`, `input_fuzzing_test`); adapted the mixed ones (`atom_safety` kept only
+        AtomMonitor; `attack_simulation` lost its Validator-based name test;
+        `security_performance_regression` lost the Validator benchmarks and kept
+        Auth/RateLimiter/ConnectionLimiter/lockout). Live coverage is intact: the binary path is already
+        fuzzed by `binary_protocol_security_test`. 685 tests, 0 failures; credo and dialyzer clean (4
+        files fewer).
+      - ✅ **Observability (A: Prometheus plus health/ready · B: telemetry · C: OTel, each sliced).**
+        - ✅ **O1: health and readiness.** HTTP endpoints with **no auth** on the dashboard port (probes do
+          not authenticate): `GET /health` (liveness, always 200 `{"status":"ok"}`) and `GET /ready`
+          (readiness: 200 `{"status":"ready"}` when `LogBroker` is alive, otherwise 503 `not_ready`, so a
+          load balancer or k8s stops routing to a node that is still booting or has no broker). Added to
+          `is_public_route` (the auth bypass) along with `serve_status/4` (a variable status code). Tested:
+          the happy path (dashboard_test) and the **key property** (dashboard_security: 200 without a token
+          even with auth enabled). The README carries a k8s probe example.
+        - ✅ **O2, the Prometheus endpoint.** A **pure** `Malachi.Metrics.Prometheus` module
+          (`export(system, topics) → iodata`) renders the v0.0.4 text exposition format from
+          `get_system_metrics` together with `Metadata.overview`: BEAM health
+          (process/memory/uptime/io/atom), security counters (rate limiting per action, failed auth,
+          lockouts, dashboard auth, TLS handshakes) and per-topic gauges (ranges/segments/bytes/groups).
+          The dashboard's `/metrics` became **content-negotiated**: `Accept: text/plain` or `openmetrics`
+          yields the Prometheus text, anything else the usual JSON (preserving both the dashboard and the
+          JSON test), under the same auth (any user; a scraper passes a token). Labels are escaped
+          (defensively). Tested: a module unit test (HELP/TYPE, labels, int and float values, escaping, no
+          topics) plus e2e (`Accept: text/plain` yielding an exposition with `malachi_up` and the created
+          topic's gauge). 695 tests, 0 failures; credo and dialyzer clean.
         - ✅ **O3. Eventos `:telemetry` nos hot paths.** Dep `:telemetry` + módulo `Malachi.Telemetry`
           (catálogo + wrappers, DRY) emitindo em: **produce** (`LogApi.produce_records` → `%{count, bytes}`/
           `%{topic}`), **consume** (`LogApi.do_fetch` → `%{count}`/`%{topic}`), **auth** (`Auth.authenticate/3`
