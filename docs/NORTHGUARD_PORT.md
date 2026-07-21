@@ -2191,41 +2191,48 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         (poll and join yielding `:not_owner`; no phantom registration; a per-topic `owns_fun`: 3) plus the
         refresh (an ack through a different coordinator, so the `:DOWN` leave reaches the new one: 1). Suite
         at 780 tests, 0 failures; credo, dialyzer and format clean. **Next: A3 (`:multinode` validation).**
-      - ✅ **A3. Validação `:multinode` do roteamento (A1+A2 contra `ra` real).** Prova a máquina do A1/A2 entre nós
-        BEAM reais (harness `:peer` + `:erpc`, como o `rebalance_multinode_test`): sobe 3 peers, forma o cluster
-        `ra` de um vnode (quorum 2, tolera 1 falha), publica a topologia (`put_topology`) em cada nó, e verifica
-        contra a **liderança `ra` viva**: (1) `owns?`/`resolve` concordam: no líder `owns? == true` e `resolve`
-        devolve o nome local, em cada follower `owns? == false` e `resolve` devolve `{name, líder}`; (2)
-        **forwarding cross-node**: um coordinator no líder recebe dois membros (poll a partir do nó primário via
-        `{name, líder}`) e a assignment é **disjunta e completa**; (3) **guard**: um follower rejeita `poll` com
-        `{:error, :not_owner}`; (4) **failover**: mata o server `ra` do líder (`:ra.stop_server`) → os 2 restantes
-        elegem um novo líder → `owns?`/`resolve` **reconvergem** nele. Detalhes que aterraram o teste (registrados
-        p/ o A4): o `server_id` da topologia aponta um **probe** (follower que nunca morre) para o `:ra.members`
-        resolver o líder mesmo após o failover; o coordinator no peer sobe via `GenServer.start` **unlinked** (o
-        worker do `:erpc` morre e levaria junto um filho linkado); o `ranges_fun` é uma **captura de módulo em
-        `test/support`** (`&Fixtures.ranges/1`): fun anônima do `_test.exs` não é resolvível no peer (não está no
-        code path / MD5). `@moduletag :multinode` (excluído por default; roda com `--include multinode`). Suíte 780
-        testes 0 falhas (+1 multinode excluído); credo/dialyzer/format limpos. **G1/coordinator: A1+A2+A3 fecham a
-        correção multi-nó dos consumer groups. Próximo: A4 (lifecycle, coordinator por-vnode no líder via
-        `VnodeCoordinatorManager`, re-validado por este teste; + retry do cliente Node no `:not_owner`).**
-      - ✅ **A4: coordinator por-vnode no líder (lifecycle, o modelo NorthGuard "coordinator = líder do vnode").**
-        Antes (A1–A3) **todo nó** rodava um `GroupCoordinator` único e o roteamento mandava o cliente ao dono;
-        agora, no control plane **shardado**, cada vnode roda o **seu** coordinator **no líder**, gerido pelo
-        `VnodeCoordinatorManager` que já sobe heal/retention por-vnode, start/stop no gate de liderança
-        (`MetadataServer.leader?`). Ganhos sobre A1–A3: fidelidade, **isolamento de crash** (um vnode não derruba
-        os outros) e **handoff de failover mais limpo** (o manager para no líder velho e sobe fresco no novo).
-        **Naming**: o coordinator por-vnode registra sob `CoordinatorRouter.coordinator_name(base, vnode_id)`
-        (`Module.concat`, nome local por-vnode. Não `:global`, consistente com o roteamento explícito de
-        metadata do sistema); o `resolve/2` passa a **derivar** esse nome do vnode roteado (single-node sem
-        topologia → nome base). Refactor: `route/2` extraído (DRY entre `location`/`resolve`); o
-        `Malachi.LogGroupCoordinator` único vira **condicional** (só non-sharded, em `coordinator_children`);
-        `group_coordinator_vnode_child/1` entra no `start_vnode_coordinators/1` (id no supervisor por-vnode,
-        `owns_fun` como defesa na janela de flap). O `tcp_protocol` é inalterado (segue passando o nome base ao
-        `resolve`). **Single-node inalterado** (boot smoke: coordinator base registrado, `resolve` sem topologia
-        → base). O teste `:multinode` do A3 foi **re-validado** com os nomes por-vnode (`coordinator_name`).
-        Testado: `coordinator_name/2` puro; multinode 2x verde; boot single-node. Suíte 781 testes 0 falhas
-        (+1 `coordinator_name`); credo/dialyzer/format limpos. **Próximo: A5 (retry do cliente Node no
-        `:not_owner`: resiliência de cliente na janela de failover).**
+      - ✅ **A3. `:multinode` validation of the routing (A1 plus A2 against real `ra`).** This proves the A1
+        and A2 machinery across real BEAM nodes (a `:peer` plus `:erpc` harness, like
+        `rebalance_multinode_test`): it starts 3 peers, forms one vnode's `ra` cluster (quorum 2, tolerating
+        1 failure), publishes the topology (`put_topology`) on each node, and checks against **live `ra`
+        leadership**: (1) `owns?` and `resolve` agree, so on the leader `owns? == true` and `resolve`
+        returns the local name, while on each follower `owns? == false` and `resolve` returns
+        `{name, leader}`; (2) **cross-node forwarding**, where a coordinator on the leader takes two members
+        (polled from the primary node through `{name, leader}`) and the assignment is **disjoint and
+        complete**; (3) the **guard**, where a follower rejects a `poll` with `{:error, :not_owner}`; and
+        (4) **failover**, where killing the leader's `ra` server (`:ra.stop_server`) makes the remaining 2
+        elect a new leader and `owns?`/`resolve` **reconverge** on it. Details that grounded the test
+        (recorded for A4): the topology's `server_id` points at a **probe** (a follower that never dies) so
+        `:ra.members` can resolve the leader even after the failover; the coordinator on a peer starts
+        through an **unlinked** `GenServer.start` (the `:erpc` worker dies and would take a linked child
+        with it); and `ranges_fun` is a **module capture in `test/support`** (`&Fixtures.ranges/1`), because
+        an anonymous fun from a `_test.exs` is not resolvable on the peer (it is not on the code path, and
+        the MD5 differs). `@moduletag :multinode` (excluded by default; run it with `--include multinode`).
+        Suite at 780 tests, 0 failures (plus 1 excluded multinode); credo, dialyzer and format clean.
+        **G1/coordinator: A1 plus A2 plus A3 close the multi-node correctness of consumer groups. Next: A4
+        (the lifecycle, a per-vnode coordinator on the leader through `VnodeCoordinatorManager`, revalidated
+        by this test; plus a Node client retry on `:not_owner`).**
+      - ✅ **A4: a per-vnode coordinator on the leader (the lifecycle, NorthGuard's "coordinator = the
+        vnode's leader" model).** Before (A1 to A3) **every node** ran a single `GroupCoordinator` and the
+        routing sent the client to the owner; now, on a **sharded** control plane, each vnode runs **its
+        own** coordinator **on its leader**, managed by the `VnodeCoordinatorManager` that already starts
+        per-vnode heal and retention, starting and stopping on the leadership gate
+        (`MetadataServer.leader?`). The gains over A1 to A3: fidelity, **crash isolation** (one vnode does
+        not take the others down) and a **cleaner failover handoff** (the manager stops it on the old leader
+        and starts it fresh on the new one). **Naming**: the per-vnode coordinator registers under
+        `CoordinatorRouter.coordinator_name(base, vnode_id)` (a `Module.concat`, so a per-vnode local name;
+        not `:global`, which stays consistent with the system's explicit metadata routing), and `resolve/2`
+        now **derives** that name from the routed vnode (single-node without a topology falls back to the
+        base name). A refactor: `route/2` was extracted (DRY between `location` and `resolve`); the single
+        `Malachi.LogGroupCoordinator` became **conditional** (non-sharded only, in `coordinator_children`);
+        and `group_coordinator_vnode_child/1` joins `start_vnode_coordinators/1` (with an id in the
+        per-vnode supervisor, and `owns_fun` as a defence during a flap window). `tcp_protocol` is unchanged
+        (it still passes the base name to `resolve`). **Single-node is unchanged** (a boot smoke test: the
+        base coordinator is registered, and `resolve` without a topology gives the base). A3's `:multinode`
+        test was **revalidated** with the per-vnode names (`coordinator_name`). Tested: a pure
+        `coordinator_name/2`; multinode green 2x; single-node boot. Suite at 781 tests, 0 failures (plus 1
+        for `coordinator_name`); credo, dialyzer and format clean. **Next: A5 (a Node client retry on
+        `:not_owner`, for client resilience during the failover window).**
       - ✅ **A5. Resiliência do cliente Node no `:not_owner` (janela de failover).** Fecha o item de cliente do
         A4: quando um request de membro é encaminhado a um coordinator que acabou de perder a liderança do vnode,
         o servidor responde `:not_owner` (guard do A2); é **transitório** (o servidor re-resolve o líder atual no
