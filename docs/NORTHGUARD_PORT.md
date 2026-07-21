@@ -1152,42 +1152,48 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
             is no span. Tested: one produce generates the 3 spans with the **same trace_id** and the right
             parent chain (produce → broker.produce → replication.commit). 703 tests, 0 failures; credo and
             dialyzer clean. **Observability (A/B/C) is complete.**
-  - ✅ **Cliente de referência (Node.js) reformulado para a nova arquitetura.** Os scripts Node.js antigos
-    falavam o protocolo JSON de fila/canal (removido no B3b); reescritos para o **protocolo binário
-    (`Malachi.Wire`) + modelo de log** (topic/key/cursor opaco). Estrutura: `scripts/lib/wire.js`, port
-    fiel do codec (framing length-prefixed, envelope request/response, `put_str` com flag de presença,
-    records **sem offset**, todos os payloads das 7 operações); `scripts/lib/client.js`, conexão TCP que
-    **multiplexa requests por `correlation_id`** e roteia os frames de **push** (o servidor reusa o corr_id
-    do `subscribe`) para o callback da subscription, não para um request one-shot; `scripts/lib/cli.js`:
-    cores/config-de-env/parse-de-args compartilhados (DRY, os scripts antigos duplicavam). CLIs: `producer.js`
-    (append por chave, `--create`/`--key`/`--continuous`), `consumer.js` (pull dirigido por cursor;
-    `--group` resume + commita server-side; `--follow` long-poll), `subscriber.js` (server-push streaming
-    subscribe+ack com janela de crédito: substitui o `channel-*` pub/sub, que sumiu com o modelo de canal).
-    **Deletados:** `channel-publisher.js`/`channel-subscriber.js`/`channel-demo.sh` (modelo de canal
-    removido) e `i18n.js` (órfão; os novos scripts usam strings inglesas inline). `channel-demo.sh` virou
-    `streaming-demo.sh` (append → stream ao vivo). Validado e2e contra o servidor real: auth →
-    create_topic → produce → fetch-por-cursor (avança/drena) → commit+resume-de-grupo (2ª run consome 0) →
-    streaming push+ack (pré-existentes + ao vivo), e caminhos de erro limpos (`permission_denied`,
-    `invalid_credentials`: sem crash). README com a seção do cliente; `package.json` atualizado (v2, scripts
-    produce/consume/subscribe/demo). **Sem dependências** (só `net` da stdlib).
-  - ✅ **Load-test harness (Node.js, closed-loop).** `scripts/loadtest.js` gera carga sobre o cliente de
-    referência (escolhas: 1A Node reusando o cliente · 2C closed-loop agora, estruturado p/ open-loop depois
-    · 3A os quatro cenários). N conexões concorrentes, cada uma num loop `op → await` até o deadline; o driver
-    `closedLoop` é **separado das ops** (`produceOp`/`fetchOp`) pra um driver open-loop reusá-las. Cenários:
-    **produce** (append por chave), **fetch** (drena backlog dirigido por cursor, rebobina no fim), **stream**
-    (server-push subscribe+ack, throughput-only: latência de push não é comparável a round-trip), **mixed**
-    (metade produz, metade lê). Métricas: throughput (ops/s, records/s, MB/s) + latência p50/p90/p95/p99 via
-    **reservoir sampling** (Algoritmo R, cap `--samples`) com min/max/count/sum exatos à parte (o reservoir
-    clipa a cauda). Flags: `--connections/--duration/--batch/--record-size/--keys/--max/--window/--prepopulate/
-    --warmup/--json`; tópico único auto-criado por run; `--prepopulate` semeia backlog p/ fetch/stream/mixed.
-    Três correções achadas na revisão/validação: (1) backoff no erro não-fatal do `closedLoop` (senão
-    busy-spin pegando CPU); (2) `clearTimeout` no `streamDriver` quando `onError` resolve antes; (3) **grupo
-    único por invocação** no stream: o warmup commita (ack) até o fim do backlog, então compartilhar grupo
-    com o run medido o deixava vazio. Validado e2e (single-node local, records pequenos, ilustrativo):
-    produce ~42k rec/s, fetch ~307k rec/s (drain), stream ~26k rec/s (push), mixed ~25k rec/s / 7.5k ops/s:
-    0 erros; `--json` e `--warmup` (com reconexão dos clients p/ soltar a subscription) OK. Nota operacional:
-    muitas conexões estouram o rate-limit de auth (10/min/IP default), subir `MALACHIMQ_AUTH_RATE_LIMIT` pra
-    testes de escala. README com a seção de load test; `package.json` com o script `loadtest`.
+  - ✅ **The reference client (Node.js) reworked for the new architecture.** The old Node.js scripts spoke
+    the JSON queue and channel protocol (removed in B3b); they were rewritten for the **binary protocol
+    (`Malachi.Wire`) plus the log model** (topic/key/opaque cursor). The structure:
+    `scripts/lib/wire.js`, a faithful port of the codec (length-prefixed framing, the request and
+    response envelope, `put_str` with a presence flag, records **without an offset**, and all 7
+    operations' payloads); `scripts/lib/client.js`, a TCP connection that **multiplexes requests by
+    `correlation_id`** and routes the **push** frames (the server reuses the `subscribe`'s corr_id) to the
+    subscription's callback rather than to a one-shot request; and `scripts/lib/cli.js`, with shared
+    colours, env config and argument parsing (DRY, since the old scripts duplicated all of it). The CLIs:
+    `producer.js` (appending by key, `--create`/`--key`/`--continuous`), `consumer.js` (a cursor-driven
+    pull; `--group` resumes and commits server-side; `--follow` long-polls) and `subscriber.js`
+    (server-push streaming, subscribe plus ack with a credit window, replacing the `channel-*` pub/sub
+    that went away with the channel model). **Deleted:**
+    `channel-publisher.js`/`channel-subscriber.js`/`channel-demo.sh` (the channel model is gone) and
+    `i18n.js` (orphaned; the new scripts use inline English strings). `channel-demo.sh` became
+    `streaming-demo.sh` (append → a live stream). Validated e2e against the real server: auth →
+    create_topic → produce → fetch-by-cursor (advancing and draining) → commit plus group resume (a second
+    run consumes 0) → streaming push and ack (both pre-existing records and live ones), plus clean error
+    paths (`permission_denied`, `invalid_credentials`, with no crash). The README gained a client section;
+    `package.json` was updated (v2, with produce/consume/subscribe/demo scripts). **No dependencies** (just
+    stdlib `net`).
+  - ✅ **Load-test harness (Node.js, closed loop).** `scripts/loadtest.js` generates load through the
+    reference client (the choices: 1A Node reusing the client · 2C closed loop for now, structured so an
+    open-loop driver can follow · 3A all four scenarios). N concurrent connections, each in an
+    `op → await` loop until the deadline; the `closedLoop` driver is **separate from the ops**
+    (`produceOp`/`fetchOp`) so an open-loop driver can reuse them. Scenarios: **produce** (appending by
+    key), **fetch** (draining the backlog cursor-driven, rewinding at the end), **stream** (server-push
+    subscribe plus ack, throughput only, since push latency is not comparable to a round trip) and
+    **mixed** (half produce, half read). Metrics: throughput (ops/s, records/s, MB/s) plus p50/p90/p95/p99
+    latency through **reservoir sampling** (Algorithm R, capped by `--samples`) with exact
+    min/max/count/sum kept separately (the reservoir clips the tail). Flags:
+    `--connections/--duration/--batch/--record-size/--keys/--max/--window/--prepopulate/--warmup/--json`; a
+    single topic auto-created per run; `--prepopulate` seeds a backlog for fetch, stream and mixed. Three
+    fixes found during review and validation: (1) a backoff on `closedLoop`'s non-fatal error (otherwise it
+    busy-spins and eats CPU); (2) a `clearTimeout` in `streamDriver` when `onError` resolves first; and (3)
+    a **unique group per invocation** in the stream scenario, because the warmup acks through to the end of
+    the backlog, so sharing a group with the measured run left it empty. Validated e2e (local single node,
+    small records, illustrative): produce ~42k rec/s, fetch ~307k rec/s (drain), stream ~26k rec/s (push),
+    mixed ~25k rec/s and 7.5k ops/s, with 0 errors; `--json` and `--warmup` (reconnecting the clients to
+    release the subscription) both fine. An operational note: many connections blow through the auth rate
+    limit (10/min/IP by default), so raise `MALACHIMQ_AUTH_RATE_LIMIT` for scale tests. The README gained a
+    load-test section; `package.json` gained a `loadtest` script.
     - ✅ **Driver open-loop (o 2C).** `--rate <rps>` dispara requests a uma **taxa de chegada fixa**,
       independente de respostas anteriores, medindo a latência a partir do **tempo agendado** de cada request
       (não do envio real). **correção de coordinated omission**: um stall do servidor aparece como latência
