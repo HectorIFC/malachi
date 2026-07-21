@@ -1194,43 +1194,48 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     release the subscription) both fine. An operational note: many connections blow through the auth rate
     limit (10/min/IP by default), so raise `MALACHIMQ_AUTH_RATE_LIMIT` for scale tests. The README gained a
     load-test section; `package.json` gained a `loadtest` script.
-    - ✅ **Driver open-loop (o 2C).** `--rate <rps>` dispara requests a uma **taxa de chegada fixa**,
-      independente de respostas anteriores, medindo a latência a partir do **tempo agendado** de cada request
-      (não do envio real). **correção de coordinated omission**: um stall do servidor aparece como latência
-      alta nos requests que empilharam atrás, o que o closed-loop esconderia (o worker parado não emite). O
-      driver `openLoop` reusa as mesmas ops (`scenarioOps` extraído, DRY entre os dois drivers); fetch fica
-      stateless (ctx novo por request → lê do início). Requests espalhados round-robin no pool (o cliente
-      multiplexa por corr_id). Guard de memória: `--max-inflight` (default 100k), ao atingir, para de
-      empilhar e **flag `saturated`** (servidor não sustenta a taxa). Report ganha modo, alvo vs. atingido,
-      saturação e rótulo CO-corrected (texto + JSON). Não se aplica a `stream` (push; `--rate` ignorado com
-      aviso). Validado e2e: taxa **sustentável** (1200 rps → atingiu 1199, latência estável p50 1.5ms);
-      **sobrecarga** (5000 rps acima da capacidade single-node → latência CO explode, mean 2.6s/p99 5.1s, o
-      sinal que o closed-loop mascara); **guard** (`--max-inflight 200` flagou saturação e parou); closed-loop
-      inalterado. Três correções da revisão anterior seguem (backoff, timer, grupo único). README/help
-      atualizados.
-  - ✅ **Deploy multi-nó/replicado (incremental: D1 → D2 → D3).** As peças de HA já existiam e eram
-    testadas isoladamente (SWIM membership, replicação por quórum cross-node, `ra`, self-healing,
-    failover); esta fase **liga-as na aplicação**. Descoberta de nós **estática via config** (o SWIM
-    detecta falhas em runtime; `libcluster` fica para depois).
-    - ✅ **D1: Control plane HA (metadata via `ra`).** `application.ex` sobe o `Malachi.LogBroker` com
-      `metadata_cluster`/`metadata_nodes` quando `:log_cluster` está configurado (env
-      `MALACHIMQ_LOG_CLUSTER`/`MALACHIMQ_LOG_NODES`/`MALACHIMQ_RA_DATA_DIR`), iniciando `ra`; **ausente
-      = single-node in-memory** (default preservado). A decisão config→opções é uma função pura
-      testável (`Malachi.Application.metadata_cluster_opts/2`). O mecanismo (metadata sobrevive à perda do
-      líder) já é provado por `metadata_ha_test`/`broker_server_ra_test`, não duplicado. Também
-      **isolado o `log_data_dir` por execução de teste** (`config/test.exs`): o dir fixo persistia entre
-      runs e, com metadata in-memory reiniciando, um topic reusado colidia com um segment em disco
-      (`Log.ensure_active :already_exists`) → flakiness e2e; agora cada run usa um dir próprio, limpo no
-      `after_suite`.
-    - ✅ **D2: Data plane replicado.** Em modo cluster, `application.ex` sobe um `ReplicationServer`
-      **nomeado** (`Malachi.LogReplication`) por nó e liga o `LogBroker` a `brokers: [{Malachi.LogReplication,
-      n} | n ← log_nodes]` + `replication_factor` (env `MALACHIMQ_LOG_REPLICATION_FACTOR`, default 3,
-      clampado ao nº de nós pelo broker). O `Placement` (HRW) escolhe o `replica_set` entre esses brokers;
-      o primário replica cross-node via `{name, node}` e commita por **quórum**. Broker set **estático**
-      (todos os nós da config); um follower caído é tolerado pelo quórum (o `live_brokers` ao vivo é D3).
-      Fiação testável por funções puras (`Malachi.Application.broker_refs/1`, `data_plane_opts/2`); o mecanismo de
-      quórum/tolerância já é coberto por `replication_server_test`, e a integração (BrokerServer + 3 brokers
-      + rf=3 + ra → produce/consume por quórum ponta a ponta) por `broker_server_ra_test`.
+    - ✅ **The open-loop driver (2C).** `--rate <rps>` fires requests at a **fixed arrival rate**,
+      independent of previous responses, measuring latency from each request's **scheduled time** rather
+      than from when it was actually sent. This is the **coordinated-omission correction**: a server stall
+      shows up as high latency on the requests that queued behind it, which the closed loop would hide (a
+      stalled worker simply emits nothing). The `openLoop` driver reuses the same ops (`scenarioOps` was
+      extracted, DRY across both drivers); fetch becomes stateless (a fresh ctx per request, so it reads
+      from the beginning). Requests are spread round-robin across the pool (the client multiplexes by
+      corr_id). A memory guard: `--max-inflight` (default 100k), on reaching which it stops queueing and
+      raises the **`saturated` flag** (the server cannot sustain the rate). The report gained the mode,
+      target versus achieved, saturation and a CO-corrected label (in both text and JSON). It does not
+      apply to `stream` (which is push; `--rate` is ignored with a warning). Validated e2e: a
+      **sustainable** rate (1200 rps reaching 1199, with stable p50 latency of 1.5ms); **overload** (5000
+      rps beyond single-node capacity, where CO latency explodes to a mean of 2.6s and p99 of 5.1s, the
+      signal the closed loop masks); and the **guard** (`--max-inflight 200` flagged saturation and
+      stopped). The closed loop is unchanged. The three fixes from the previous review still hold (backoff,
+      timer, unique group). README and help updated.
+  - ✅ **A multi-node, replicated deploy (incrementally: D1 → D2 → D3).** The HA pieces already existed
+    and were tested in isolation (SWIM membership, cross-node quorum replication, `ra`, self-healing,
+    failover); this phase **wires them into the application**. Node discovery is **static, through config**
+    (SWIM detects failures at runtime; `libcluster` comes later).
+    - ✅ **D1: control-plane HA (metadata over `ra`).** `application.ex` starts `Malachi.LogBroker` with
+      `metadata_cluster`/`metadata_nodes` when `:log_cluster` is configured (env
+      `MALACHIMQ_LOG_CLUSTER`/`MALACHIMQ_LOG_NODES`/`MALACHIMQ_RA_DATA_DIR`), starting `ra`; **absent
+      means single-node in-memory** (the default is preserved). The config-to-options decision is a pure,
+      testable function (`Malachi.Application.metadata_cluster_opts/2`). The mechanism itself (metadata
+      surviving the loss of the leader) is already proven by
+      `metadata_ha_test`/`broker_server_ra_test`, so it is not duplicated. Also **isolated `log_data_dir`
+      per test run** (`config/test.exs`): the fixed directory persisted between runs and, with in-memory
+      metadata restarting, a reused topic collided with a segment on disk
+      (`Log.ensure_active :already_exists`), causing e2e flakiness; now each run gets its own directory,
+      cleaned in `after_suite`.
+    - ✅ **D2: a replicated data plane.** In cluster mode, `application.ex` starts one **named**
+      `ReplicationServer` (`Malachi.LogReplication`) per node and connects `LogBroker` to
+      `brokers: [{Malachi.LogReplication, n} | n ← log_nodes]` plus a `replication_factor` (env
+      `MALACHIMQ_LOG_REPLICATION_FACTOR`, default 3, clamped to the node count by the broker). `Placement`
+      (HRW) picks the `replica_set` among those brokers; the primary replicates cross-node through
+      `{name, node}` and commits by **quorum**. The broker set is **static** (every node in the config); a
+      downed follower is tolerated by the quorum (the live `live_brokers` is D3). The wiring is testable
+      through pure functions (`Malachi.Application.broker_refs/1`, `data_plane_opts/2`); the
+      quorum-and-tolerance mechanism is already covered by `replication_server_test`, and the integration
+      (BrokerServer plus 3 brokers plus rf=3 plus ra, producing and consuming by quorum end to end) by
+      `broker_server_ra_test`.
     - ✅ **D3, Membership + healing/failover ao vivo.**
       - ✅ **D3a: `MembershipServer` cross-node.** O SWIM identificava cada membro pelo `self_ref`, que
         era o `:name` de registro: os testes eram todos in-process (átomos únicos). Cross-node isso
