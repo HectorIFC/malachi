@@ -1429,49 +1429,56 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       Tested (`:multinode`): 2 vnodes over 3 nodes, killing one member of the owning vnode (the leader if
       it is a peer, triggering failover, otherwise a follower), and the vnode still commits with the
       metadata intact, both its own and the other vnode's.
-  - ✅ **D-c: gestão do control plane por vnode** (retention/healing/failover). **Concluído por 1C-a +
-    1C-b** (coordinators só-no-líder + manager per-vnode-leader; ver as sub-fatias abaixo). O texto a
-    seguir é o **contexto do débito** que motivou 1C. O estado *antes* de 1C. **Estado pré-1C:** as
-    *escritas* de metadata já eram sharded (D-b), mas a *gestão* seguia **centralizada**, um
-    `RetentionCoordinator` e um `HealCoordinator` no nó do `BrokerServer` leem `merged_metadata` (a
-    **união** de todos os shards) e emitem comandos (`delete_segment`/`set_segment_replicas`) que
-    **roteiam de volta** por topic ao vnode dono (via `command_topic/1`). Isso é **correto** sob
-    sharding (a união é exata; os comandos roteiam), mas reintroduz conceitualmente o ponto único que
-    o sharding elimina: um **débito de fidelidade de sequenciamento**, não de correção.
+  - ✅ **D-c: per-vnode control-plane management** (retention, healing, failover). **Closed by 1C-a plus
+    1C-b** (leader-only coordinators plus a per-vnode-leader manager; see the sub-slices below). What
+    follows is the **context of the debt** that motivated 1C, that is, the state *before* it.
+    **Pre-1C state:** metadata *writes* were already sharded (D-b), but *management* stayed
+    **centralized**: one `RetentionCoordinator` and one `HealCoordinator` on the `BrokerServer`'s node
+    read `merged_metadata` (the **union** of every shard) and emit commands
+    (`delete_segment`/`set_segment_replicas`) that **route back** by topic to the owning vnode (through
+    `command_topic/1`). That is **correct** under sharding (the union is exact and the commands route),
+    but it conceptually reintroduces the single point that sharding removes: a **sequencing-fidelity
+    debt**, not a correctness one.
 
-    O alvo fiel ao NorthGuard é **1C: um coordinator vivendo na liderança do grupo Raft de cada vnode**
-    (cada nó gerencia retention/healing dos vnodes que lidera). Isso **pertence à Fase 1** (distribuição),
-    **não** à Fase 2 (eficiência nativa/profiling). O motivo de 1C não vir já não é ser "otimização",
-    e sim ter **pré-requisitos**:
-      1. **Placement de vnodes por subconjuntos de nós** (hoje todos os vnodes vivem nos mesmos M nós:
-         adiado em D-b-2). Sem espalhar os vnodes, "o líder do vnode" é qualquer um dos M nós e há pouca
-         distribuição real a fazer. **Fatia D-c-1** (decisão: **1A** HRW reusando `Placement`; **2A**
-         núcleo puro primeiro):
-           - ✅ **D-c-1a: núcleo puro.** `Malachi.Application.place_vnodes/3` atribui a cada vnode
-             (`{vnode_id, token}`) os `R` nós do seu cluster `ra`, escolhidos de `nodes` por rendezvous
-             (o mesmo HRW `Placement.place/4` dos segments) → `{vnode_id, token, nodes}`; determinístico,
-             mínimo movimento, `R` efetivo = `min(R, M)`. Testado isolado (HRW espalha, determinismo,
-             clamp). **Sem uso ainda**, D-c-1b liga ao `ReplicatedDSRSM`/`BrokerServer`.
-           - ✅ **D-c-1b: roteamento cross-node.** `MetadataServer.start/2` passa a devolver o server de um
-             **membro real** (o nó local quando é membro; senão o primeiro do placement) em vez do local
-             sempre, então um vnode colocado num subconjunto de nós é alcançável de um nó que **não** hospeda
-             réplica dele (o `ra` roteia `command`/`query` desse membro ao líder; o chamador não precisa ser
-             membro). `ReplicatedDSRSM` armazena esse server; `command`/`query`/`snapshot`/`server_for`
-             passam a funcionar cross-node. Testado (`:multinode`): 2 vnodes em subconjuntos **disjuntos** de
-             3 nós, orquestrados de um nó que **não** hospeda nenhum, commits/queries roteiam ao membro certo
-             e o `snapshot` materializa tudo. (Decisão **1A**: mecanismo isolado do bootstrap distribuído.)
-           - ✅ **D-c-1c: bootstrap distribuído (seed estático).** `Application.metadata_opts` liga o
-             `place_vnodes` (`metadata_vnodes` vira `[{vnode_id, token, nodes}]`, R = `log_vnode_replication_factor`)
-             e injeta a política `bootstrap_orchestrator?` = `Malachi.Application.static_seed/1` (verdade só no menor nó).
-             No `BrokerServer`, o **orquestrador** faz `add_vnode` (start_cluster) de cada vnode; os **não-orquestradores**
-             fazem `ReplicatedDSRSM.route_vnode/4` (novo: registra no ring + server de um membro, **sem** iniciar), de
-             modo que exatamente um nó bootstrapa cada vnode (padrão RabbitMQ/`ra`). O `snapshot/1` ficou **tolerante**
-             (vnode não-pronto → `Metadata` vazio, sem crash) e o `BrokerServer` **re-seeda o cache** dos clusters `ra`
-             logo após o boot (janela de eleição) e periodicamente (`Broker.put_cache/2`), o que também cobre o
-             multi-writer. Escolha **1B/seed estático** (vs 1A concorrente, arriscado no `ra`; vs orquestração-pelo-líder,
-             que é a D-c-1d com fencing). Testado: `static_seed` (só o menor nó), `route_vnode` + `snapshot` tolerante
-             (single-node), e `:multinode`: orquestrador inicia sobre 2 nós, não-orquestrador só roteia e lê/escreve
-             cross-node. **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
+    The NorthGuard-faithful target is **1C: a coordinator living on the leadership of each vnode's Raft
+    group** (so each node manages retention and healing for the vnodes it leads). That **belongs to phase
+    1** (distribution), **not** phase 2 (native efficiency and profiling). The reason 1C did not come
+    sooner is not that it is an "optimization", it is that it has **prerequisites**:
+      1. **Placing vnodes on subsets of nodes** (until then every vnode lived on the same M nodes,
+         deferred in D-b-2). Without spreading the vnodes, "the vnode's leader" is any of the M nodes and
+         there is little real distribution to do. **Slice D-c-1** (decision: **1A** HRW reusing
+         `Placement`; **2A** pure core first):
+           - ✅ **D-c-1a: the pure core.** `Malachi.Application.place_vnodes/3` assigns each vnode
+             (`{vnode_id, token}`) the `R` nodes of its `ra` cluster, chosen from `nodes` by rendezvous
+             (the same HRW `Placement.place/4` the segments use), yielding `{vnode_id, token, nodes}`;
+             deterministic, minimal movement, with an effective `R` of `min(R, M)`. Tested in isolation
+             (HRW spreads, determinism, the clamp). **Unused so far**: D-c-1b connects it to
+             `ReplicatedDSRSM`/`BrokerServer`.
+           - ✅ **D-c-1b: cross-node routing.** `MetadataServer.start/2` now returns the server of a **real
+             member** (the local node when it is one, otherwise the first in the placement) rather than
+             always the local one, so a vnode placed on a subset of nodes is reachable from a node that
+             hosts **no** replica of it (`ra` routes that member's `command`/`query` to the leader; the
+             caller need not be a member). `ReplicatedDSRSM` stores that server, and
+             `command`/`query`/`snapshot`/`server_for` all start working cross-node. Tested
+             (`:multinode`): 2 vnodes on **disjoint** subsets of 3 nodes, orchestrated from a node hosting
+             neither, with commits and queries routing to the right member and `snapshot` materializing
+             everything. (Decision **1A**: the mechanism kept separate from distributed bootstrap.)
+           - ✅ **D-c-1c: distributed bootstrap (a static seed).** `Application.metadata_opts` wires in
+             `place_vnodes` (so `metadata_vnodes` becomes `[{vnode_id, token, nodes}]`, with R being
+             `log_vnode_replication_factor`) and injects the `bootstrap_orchestrator?` policy as
+             `Malachi.Application.static_seed/1` (true only on the lowest node). In `BrokerServer`, the
+             **orchestrator** does `add_vnode` (start_cluster) for each vnode, while the
+             **non-orchestrators** call `ReplicatedDSRSM.route_vnode/4` (new: it registers the ring entry
+             plus a member's server **without** starting anything), so exactly one node bootstraps each
+             vnode (the RabbitMQ and `ra` pattern). `snapshot/1` became **tolerant** (a vnode that is not
+             ready yields an empty `Metadata` rather than a crash) and `BrokerServer` **re-seeds the
+             cache** from the `ra` clusters right after boot (the election window) and periodically
+             (`Broker.put_cache/2`), which also covers the multi-writer case. The choice was **1B, the
+             static seed** (against 1A concurrent, which is risky on `ra`; and against leader-driven
+             orchestration, which is D-c-1d with fencing). Tested: `static_seed` (only the lowest node),
+             `route_vnode` plus the tolerant `snapshot` (single-node), and `:multinode`: the orchestrator
+             starts across 2 nodes while a non-orchestrator only routes yet reads and writes cross-node.
+             **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
            - ✅ **D-c-1d: `membership_leader` + reconcile loop.** A política de orquestração passa do seed
              estático para `Malachi.Application.membership_leader/1`: verdade só no menor nó **vivo** (`MembershipServer.
              alive_members`, SWIM), então o papel **faz failover** quando o líder cai (tolerante: se a membership
