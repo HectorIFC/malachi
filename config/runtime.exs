@@ -226,16 +226,8 @@ config :malachi,
   auto_rebalance_interval_ms: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_INTERVAL_MS"), 30_000),
   auto_rebalance_stabilization: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_STABILIZATION"), 3)
 
-# On-disk data directories, set **only** when the operator supplies them. Setting them unconditionally
-# here would override config/test.exs, whose per-run paths exist because a fixed directory surviving
-# between runs made a reused topic collide with a leftover segment (`Log.ensure_active :already_exists`).
-# With neither the env var nor test.exs in play, `Malachi.Application` supplies the same defaults these
-# lines used to hardcode, so dev and prod behavior is unchanged.
-if dir = System.get_env("MALACHI_LOG_DATA_DIR"), do: config(:malachi, log_data_dir: dir)
-if dir = System.get_env("MALACHI_RA_DATA_DIR"), do: config(:malachi, ra_data_dir: dir)
-
-# Only set rate limiting and connection limiting configs in non-test environments
-# Test environment sets these in test.exs with permissive values
+# Everything in this block is owned by config/test.exs when running tests. runtime.exs is evaluated after
+# the environment file, so setting any of it unconditionally would silently overwrite the test values.
 if config_env() != :test do
   config :malachi,
     # Rate limiting configuration
@@ -249,6 +241,18 @@ if config_env() != :test do
     # Connection limits
     max_connections_per_ip: parse_int.(System.get_env("MALACHI_MAX_CONN_PER_IP"), 100),
     max_total_connections: parse_int.(System.get_env("MALACHI_MAX_TOTAL_CONN"), 10_000)
+
+  # On-disk data directories, set only when the operator supplies one. A blank value counts as absent:
+  # "" is truthy here and would configure a relative path, so the node would write its durable segments
+  # under the process working directory instead of the operator's volume, which is the exact failure this
+  # setting exists to prevent. With nothing set, `Malachi.Application` supplies the defaults, so dev and
+  # prod are unchanged and test.exs keeps the per-run paths that stop a leftover segment from colliding
+  # with a reused topic (`Log.ensure_active :already_exists`).
+  log_data_dir = System.get_env("MALACHI_LOG_DATA_DIR")
+  ra_data_dir = System.get_env("MALACHI_RA_DATA_DIR")
+
+  if log_data_dir not in [nil, ""], do: config(:malachi, log_data_dir: log_data_dir)
+  if ra_data_dir not in [nil, ""], do: config(:malachi, ra_data_dir: ra_data_dir)
 end
 
 config :malachi,
