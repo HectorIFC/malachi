@@ -49,13 +49,13 @@ echo ""
 echo "Step 3: Starting container for functional tests..."
 docker run -d --name "$CONTAINER_NAME" \
     -p 14040:4040 -p 14041:4041 \
-    -e MALACHIMQ_ADMIN_PASS="$ADMIN_PASS" \
-    -e MALACHIMQ_PRODUCER_PASS="$PRODUCER_PASS" \
-    -e MALACHIMQ_CONSUMER_PASS="$CONSUMER_PASS" \
-    -e MALACHIMQ_APP_PASS="$APP_PASS" \
-    -e MALACHIMQ_REQUIRE_TLS=false \
-    -e MALACHIMQ_ENABLE_TLS=false \
-    -e MALACHIMQ_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume" \
+    -e MALACHI_ADMIN_PASS="$ADMIN_PASS" \
+    -e MALACHI_PRODUCER_PASS="$PRODUCER_PASS" \
+    -e MALACHI_CONSUMER_PASS="$CONSUMER_PASS" \
+    -e MALACHI_APP_PASS="$APP_PASS" \
+    -e MALACHI_REQUIRE_TLS=false \
+    -e MALACHI_ENABLE_TLS=false \
+    -e MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume" \
     "$IMAGE_NAME" > /dev/null
 
 # Wait for app to be fully started

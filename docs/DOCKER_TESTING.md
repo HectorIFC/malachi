@@ -143,10 +143,10 @@ Expected: `jit`
 ```bash
 docker run -d --name test-malachi \
   -p 4040:4040 -p 4041:4041 \
-  -e MALACHIMQ_ADMIN_PASS="your_admin_password" \
-  -e MALACHIMQ_PRODUCER_PASS="your_producer_password" \
-  -e MALACHIMQ_CONSUMER_PASS="your_consumer_password" \
-  -e MALACHIMQ_APP_PASS="your_app_password" \
+  -e MALACHI_ADMIN_PASS="your_admin_password" \
+  -e MALACHI_PRODUCER_PASS="your_producer_password" \
+  -e MALACHI_CONSUMER_PASS="your_consumer_password" \
+  -e MALACHI_APP_PASS="your_app_password" \
   hectorcardoso/malachi:latest
 docker logs -f test-malachi
 ```
@@ -249,7 +249,7 @@ docker exec <container_name> bin/malachi eval 'Malachi.Benchmark.system_info()'
 **Problem:** Container using > 500MiB during validation
 
 **Solutions:**
-- Reduce partition multiplier: `-e MALACHIMQ_PARTITION_MULTIPLIER=50`
+- Reduce partition multiplier: `-e MALACHI_PARTITION_MULTIPLIER=50`
 - Check for memory leaks in application code
 - Verify garbage collection is working
 

@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
 
   > #### Runtime operation {: .warning}
   > The ring is gossiped cluster state, not durable across a **full-cluster** restart (it reseeds from
-  > `MALACHIMQ_LOG_VNODES`). Treat a reshard as effective while the cluster is up.
+  > `MALACHI_LOG_VNODES`). Treat a reshard as effective while the cluster is up.
 
   Options:
 
@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
     * `--node`: the target node (default `$MALACHI_NODE` or `malachi@127.0.0.1`)
     * `--cookie`: the Erlang cookie (default `$RELEASE_COOKIE`, else `~/.erlang.cookie`)
 
-  The target node must be **named** and running a **sharded** control plane (`MALACHIMQ_LOG_VNODES` > 1 with
+  The target node must be **named** and running a **sharded** control plane (`MALACHI_LOG_VNODES` > 1 with
   a clustered log); otherwise there is no ring to grow.
   """
   use Mix.Task

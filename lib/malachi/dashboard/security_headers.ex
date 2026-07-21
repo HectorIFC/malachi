@@ -51,13 +51,13 @@ defmodule Malachi.Dashboard.SecurityHeaders do
   Builds Content Security Policy header.
 
   Default policy allows 'unsafe-inline' for compatibility with current dashboard.
-  Can be customized via MALACHIMQ_DASHBOARD_CSP environment variable.
+  Can be customized via MALACHI_DASHBOARD_CSP environment variable.
 
   ## Future Hardening
 
   For production environments, consider removing 'unsafe-inline' and using nonces:
 
-      export MALACHIMQ_DASHBOARD_CSP="default-src 'self'; script-src 'self' 'nonce-RANDOM'; style-src 'self' 'nonce-RANDOM'"
+      export MALACHI_DASHBOARD_CSP="default-src 'self'; script-src 'self' 'nonce-RANDOM'; style-src 'self' 'nonce-RANDOM'"
 
   This requires refactoring dashboard HTML to use nonce attributes.
   """
@@ -104,8 +104,8 @@ defmodule Malachi.Dashboard.SecurityHeaders do
 
   ## Configuration
 
-      export MALACHIMQ_DASHBOARD_CORS_ENABLED=true
-      export MALACHIMQ_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com"
+      export MALACHI_DASHBOARD_CORS_ENABLED=true
+      export MALACHI_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com"
   """
   def build_cors_headers(request_path) do
     # CORS only for API endpoints

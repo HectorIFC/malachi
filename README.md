@@ -92,24 +92,24 @@ Enum.map(records, & &1.value)        #=> ["hello", "world"]
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
-Single-node is in-memory by default; set `MALACHIMQ_LOG_CLUSTER` / `MALACHIMQ_LOG_NODES` for a replicated,
+Single-node is in-memory by default; set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated,
 HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#client-protocol)
 on port 4040.
 
 ### Node discovery (libcluster)
 
-For a multi-node deploy, set `MALACHIMQ_CLUSTER_STRATEGY` to have [libcluster](https://github.com/bitwalker/libcluster)
+For a multi-node deploy, set `MALACHI_CLUSTER_STRATEGY` to have [libcluster](https://github.com/bitwalker/libcluster)
 discover and connect peers over Erlang distribution automatically (run each node distributed, e.g.
 `--sname`/`--name`). This is connectivity-only: SWIM and the `ra` control plane still take their initial
-member set from `MALACHIMQ_LOG_NODES`, and membership changes ride on the rebalancing coordinator. Absent
+member set from `MALACHI_LOG_NODES`, and membership changes ride on the rebalancing coordinator. Absent
 the variable, nothing changes (single-node, no distribution required).
 
-- `gossip`: UDP multicast, near-zero config (dev/LAN). Tune with `MALACHIMQ_CLUSTER_GOSSIP_PORT`,
-  `MALACHIMQ_CLUSTER_GOSSIP_SECRET`, `MALACHIMQ_CLUSTER_GOSSIP_MULTICAST_ADDR`.
-- `kubernetes`: pod discovery via the Kubernetes API. Requires `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR`
-  and `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME`; optional `MALACHIMQ_CLUSTER_KUBERNETES_NAMESPACE` and
-  `MALACHIMQ_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
-- `epmd`: a static host list, reusing `MALACHIMQ_LOG_NODES`, that libcluster keeps connected.
+- `gossip`: UDP multicast, near-zero config (dev/LAN). Tune with `MALACHI_CLUSTER_GOSSIP_PORT`,
+  `MALACHI_CLUSTER_GOSSIP_SECRET`, `MALACHI_CLUSTER_GOSSIP_MULTICAST_ADDR`.
+- `kubernetes`: pod discovery via the Kubernetes API. Requires `MALACHI_CLUSTER_KUBERNETES_SELECTOR`
+  and `MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME`; optional `MALACHI_CLUSTER_KUBERNETES_NAMESPACE` and
+  `MALACHI_CLUSTER_KUBERNETES_MODE` (`hostname`/`ip`/`dns`).
+- `epmd`: a static host list, reusing `MALACHI_LOG_NODES`, that libcluster keeps connected.
 
 For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/README.md) ships a worked example: a 3-node
 CP cluster as a StatefulSet with stable Raft identities, zone-aware placement (`min_domains`), and the
@@ -128,7 +128,7 @@ docker run \
   --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
-  -e MALACHIMQ_ADMIN_PASS=your_secure_password \
+  -e MALACHI_ADMIN_PASS=your_secure_password \
   hectorcardoso/malachi:latest
 ```
 
@@ -277,68 +277,68 @@ In **dev/test** these convenience users are seeded:
 
 ### First boot in production
 
-No default credentials ship. On first boot, if you have not set `MALACHIMQ_ADMIN_PASS`, Malachi **generates a random admin password and logs it once**: save it from the logs (it cannot be recovered). Provide your own with `MALACHIMQ_ADMIN_PASS` (and `MALACHIMQ_PRODUCER_PASS` / `MALACHIMQ_CONSUMER_PASS` / `MALACHIMQ_APP_PASS` for the other service accounts), or set `MALACHIMQ_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
+No default credentials ship. On first boot, if you have not set `MALACHI_ADMIN_PASS`, Malachi **generates a random admin password and logs it once**: save it from the logs (it cannot be recovered). Provide your own with `MALACHI_ADMIN_PASS` (and `MALACHI_PRODUCER_PASS` / `MALACHI_CONSUMER_PASS` / `MALACHI_APP_PASS` for the other service accounts), or set `MALACHI_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_TCP_PORT` | 4040 | TCP server port |
-| `MALACHIMQ_DASHBOARD_PORT` | 4041 | Dashboard port |
+| `MALACHI_TCP_PORT` | 4040 | TCP server port |
+| `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_LOCALE` | en_US | Language (en_US, pt_BR) |
-| `MALACHIMQ_ADMIN_PASS` | admin123 | Admin password |
-| `MALACHIMQ_PRODUCER_PASS` | producer123 | Producer password |
-| `MALACHIMQ_CONSUMER_PASS` | consumer123 | Consumer password |
-| `MALACHIMQ_APP_PASS` | app123 | App password |
-| `MALACHIMQ_SESSION_TIMEOUT_SEC` | 3600 | Session timeout (1h) |
-| `MALACHIMQ_ENABLE_TLS` | false | Enable TLS encryption |
-| `MALACHIMQ_TLS_CERTFILE` | - | TLS certificate file path |
-| `MALACHIMQ_TLS_KEYFILE` | - | TLS private key file path |
-| `MALACHIMQ_TLS_CACERTFILE` | - | TLS CA certificate (optional) |
-| `MALACHIMQ_REQUIRE_TLS` | true (prod) | Require TLS in production |
-| `MALACHIMQ_TLS_VERSIONS` | tlsv1.3,tlsv1.2 | Allowed TLS versions |
-| `MALACHIMQ_RATE_LIMIT_ENABLED` | true | Enable rate limiting |
-| `MALACHIMQ_AUTH_RATE_LIMIT` | 10 | Auth attempts per window |
-| `MALACHIMQ_AUTH_RATE_WINDOW_MS` | 60000 | Auth rate limit window (ms) |
-| `MALACHIMQ_PUBLISH_RATE_LIMIT` | 1000 | Publish messages per window |
-| `MALACHIMQ_PUBLISH_RATE_WINDOW_MS` | 1000 | Publish rate limit window (ms) |
-| `MALACHIMQ_SUBSCRIBE_RATE_LIMIT` | 100 | Subscribe requests per window |
-| `MALACHIMQ_SUBSCRIBE_RATE_WINDOW_MS` | 60000 | Subscribe rate limit window (ms) |
-| `MALACHIMQ_MAX_CONN_PER_IP` | 100 | Max connections per IP |
-| `MALACHIMQ_MAX_TOTAL_CONN` | 10000 | Max total connections |
-| `MALACHIMQ_CONNECTION_LIMIT_ENABLED` | true | Enable connection limiting |
-| `MALACHIMQ_MAX_AUTH_ATTEMPTS` | 5 | Failed auth attempts before lockout |
-| `MALACHIMQ_LOCKOUT_DURATION_MS` | 300000 | Initial lockout duration (5 min) |
-| `MALACHIMQ_PROGRESSIVE_LOCKOUT` | true | Enable progressive lockout |
-| `MALACHIMQ_SESSION_IP_BINDING` | true | Bind sessions to source IP |
-| `MALACHIMQ_MIN_PASSWORD_LEN` | 12 | Minimum password length |
-| `MALACHIMQ_ATOM_WARNING_THRESHOLD` | 0.7 | Atom table warning at 70% |
-| `MALACHIMQ_ATOM_CRITICAL_THRESHOLD` | 0.9 | Atom table critical at 90% |
-| `MALACHIMQ_GC_THRESHOLD_MB` | 500 | Auto-GC memory threshold (MB) |
-| `MALACHIMQ_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
-| `MALACHIMQ_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
-| `MALACHIMQ_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
-| `MALACHIMQ_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
-| `MALACHIMQ_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
-| `MALACHIMQ_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
-| `MALACHIMQ_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
-| `MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
-| `MALACHIMQ_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
-| `MALACHIMQ_SHUTDOWN_GRACE_MS` | 5000 | Drain window on shutdown after the acceptor quiesces, before closing connections |
-| `MALACHIMQ_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
-| `MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
-| `MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
-| `MALACHIMQ_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
-| `MALACHIMQ_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
-| `MALACHIMQ_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
-| `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | 1 | Max audit log file size (MB) |
+| `MALACHI_ADMIN_PASS` | admin123 | Admin password |
+| `MALACHI_PRODUCER_PASS` | producer123 | Producer password |
+| `MALACHI_CONSUMER_PASS` | consumer123 | Consumer password |
+| `MALACHI_APP_PASS` | app123 | App password |
+| `MALACHI_SESSION_TIMEOUT_SEC` | 3600 | Session timeout (1h) |
+| `MALACHI_ENABLE_TLS` | false | Enable TLS encryption |
+| `MALACHI_TLS_CERTFILE` | - | TLS certificate file path |
+| `MALACHI_TLS_KEYFILE` | - | TLS private key file path |
+| `MALACHI_TLS_CACERTFILE` | - | TLS CA certificate (optional) |
+| `MALACHI_REQUIRE_TLS` | true (prod) | Require TLS in production |
+| `MALACHI_TLS_VERSIONS` | tlsv1.3,tlsv1.2 | Allowed TLS versions |
+| `MALACHI_RATE_LIMIT_ENABLED` | true | Enable rate limiting |
+| `MALACHI_AUTH_RATE_LIMIT` | 10 | Auth attempts per window |
+| `MALACHI_AUTH_RATE_WINDOW_MS` | 60000 | Auth rate limit window (ms) |
+| `MALACHI_PUBLISH_RATE_LIMIT` | 1000 | Publish messages per window |
+| `MALACHI_PUBLISH_RATE_WINDOW_MS` | 1000 | Publish rate limit window (ms) |
+| `MALACHI_SUBSCRIBE_RATE_LIMIT` | 100 | Subscribe requests per window |
+| `MALACHI_SUBSCRIBE_RATE_WINDOW_MS` | 60000 | Subscribe rate limit window (ms) |
+| `MALACHI_MAX_CONN_PER_IP` | 100 | Max connections per IP |
+| `MALACHI_MAX_TOTAL_CONN` | 10000 | Max total connections |
+| `MALACHI_CONNECTION_LIMIT_ENABLED` | true | Enable connection limiting |
+| `MALACHI_MAX_AUTH_ATTEMPTS` | 5 | Failed auth attempts before lockout |
+| `MALACHI_LOCKOUT_DURATION_MS` | 300000 | Initial lockout duration (5 min) |
+| `MALACHI_PROGRESSIVE_LOCKOUT` | true | Enable progressive lockout |
+| `MALACHI_SESSION_IP_BINDING` | true | Bind sessions to source IP |
+| `MALACHI_MIN_PASSWORD_LEN` | 12 | Minimum password length |
+| `MALACHI_ATOM_WARNING_THRESHOLD` | 0.7 | Atom table warning at 70% |
+| `MALACHI_ATOM_CRITICAL_THRESHOLD` | 0.9 | Atom table critical at 90% |
+| `MALACHI_GC_THRESHOLD_MB` | 500 | Auto-GC memory threshold (MB) |
+| `MALACHI_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
+| `MALACHI_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
+| `MALACHI_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
+| `MALACHI_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
+| `MALACHI_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
+| `MALACHI_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
+| `MALACHI_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
+| `MALACHI_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
+| `MALACHI_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
+| `MALACHI_SHUTDOWN_GRACE_MS` | 5000 | Drain window on shutdown after the acceptor quiesces, before closing connections |
+| `MALACHI_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
+| `MALACHI_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
+| `MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
+| `MALACHI_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
+| `MALACHI_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
+| `MALACHI_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
+| `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | 1 | Max audit log file size (MB) |
 
 ### Custom Users
 
 ```bash
 docker run \
-  -e MALACHIMQ_ADMIN_PASS="your_admin_password" \
-  -e MALACHIMQ_DEFAULT_USERS="user1:pass1:produce,consume;user2:pass2:admin" \
+  -e MALACHI_ADMIN_PASS="your_admin_password" \
+  -e MALACHI_DEFAULT_USERS="user1:pass1:produce,consume;user2:pass2:admin" \
   hectorcardoso/malachi:latest
 ```
 
@@ -364,10 +364,10 @@ Permissions: `admin`, `produce`, `consume`
 docker run \
   -p 4040:4040 \
   -v $(pwd)/priv/cert:/certs \
-  -e MALACHIMQ_ADMIN_PASS="your_secure_password" \
-  -e MALACHIMQ_ENABLE_TLS=true \
-  -e MALACHIMQ_TLS_CERTFILE=/certs/server.crt \
-  -e MALACHIMQ_TLS_KEYFILE=/certs/server.key \
+  -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_ENABLE_TLS=true \
+  -e MALACHI_TLS_CERTFILE=/certs/server.crt \
+  -e MALACHI_TLS_KEYFILE=/certs/server.key \
   hectorcardoso/malachi:latest
 ```
 
@@ -410,7 +410,7 @@ For production, use certificates from:
 
 The sections above secure the **client** connection (port 4040). In a multi-node cluster the nodes also
 talk to each other over **Erlang distribution** (the `ra` control plane and segment replication), by
-default that traffic is plaintext, guarded only by the distribution cookie. Set `MALACHIMQ_DIST_TLS=true`
+default that traffic is plaintext, guarded only by the distribution cookie. Set `MALACHI_DIST_TLS=true`
 to run distribution over **mutual TLS** instead: each node presents a CA-signed certificate and verifies
 its peers, so the inter-node traffic is encrypted *and* authenticated.
 
@@ -419,12 +419,12 @@ its peers, so the inter-node traffic is encrypted *and* authenticated.
 bash scripts/generate-dist-certs.sh
 
 # run a release with inter-node TLS (the script prints this line with real paths)
-MALACHIMQ_DIST_TLS=true \
-MALACHIMQ_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
+MALACHI_DIST_TLS=true \
+MALACHI_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
   bin/malachi start
 ```
 
-`MALACHIMQ_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
+`MALACHI_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
 client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates the flag into
 `-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster: the handshake rejects it. The
 [Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
@@ -444,13 +444,13 @@ You **MUST** configure dashboard credentials when deploying to production:
 ```bash
 # Option 1: Use existing admin user credentials
 docker run \
-  -e MALACHIMQ_DEFAULT_USERS="admin:your_strong_password:admin" \
+  -e MALACHI_DEFAULT_USERS="admin:your_strong_password:admin" \
   hectorcardoso/malachi:latest
 
 # Option 2: Separate dashboard credentials (recommended)
 docker run \
-  -e MALACHIMQ_DASHBOARD_USER="dashboard_admin" \
-  -e MALACHIMQ_DASHBOARD_PASS="dashboard_secure_pass_123" \
+  -e MALACHI_DASHBOARD_USER="dashboard_admin" \
+  -e MALACHI_DASHBOARD_PASS="dashboard_secure_pass_123" \
   hectorcardoso/malachi:latest
 ```
 
@@ -495,15 +495,15 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `MALACHIMQ_DASHBOARD_AUTH_ENABLED` | `true` (prod) | Enable/disable dashboard auth |
-| `MALACHIMQ_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission for HTML/SSE |
-| `MALACHIMQ_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Max auth attempts per window |
-| `MALACHIMQ_DASHBOARD_AUTH_RATE_WINDOW_MS` | `60000` | Rate limit window (1 minute) |
-| `MALACHIMQ_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS for `/metrics` and `/stream` |
-| `MALACHIMQ_DASHBOARD_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
-| `MALACHIMQ_DASHBOARD_CSP` | (default) | Custom Content-Security-Policy |
-| `MALACHIMQ_HSTS_ENABLED` | `true` | Enable HTTP Strict Transport Security |
-| `MALACHIMQ_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
+| `MALACHI_DASHBOARD_AUTH_ENABLED` | `true` (prod) | Enable/disable dashboard auth |
+| `MALACHI_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission for HTML/SSE |
+| `MALACHI_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Max auth attempts per window |
+| `MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS` | `60000` | Rate limit window (1 minute) |
+| `MALACHI_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS for `/metrics` and `/stream` |
+| `MALACHI_DASHBOARD_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
+| `MALACHI_DASHBOARD_CSP` | (default) | Custom Content-Security-Policy |
+| `MALACHI_HSTS_ENABLED` | `true` | Enable HTTP Strict Transport Security |
+| `MALACHI_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
 
 ### Disabling Authentication (NOT RECOMMENDED)
 
@@ -511,7 +511,7 @@ For development environments only:
 
 ```bash
 docker run \
-  -e MALACHIMQ_DASHBOARD_AUTH_ENABLED=false \
+  -e MALACHI_DASHBOARD_AUTH_ENABLED=false \
   hectorcardoso/malachi:latest
 ```
 
@@ -540,8 +540,8 @@ For web applications accessing metrics:
 
 ```bash
 docker run \
-  -e MALACHIMQ_DASHBOARD_CORS_ENABLED=true \
-  -e MALACHIMQ_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com" \
+  -e MALACHI_DASHBOARD_CORS_ENABLED=true \
+  -e MALACHI_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com" \
   hectorcardoso/malachi:latest
 ```
 
@@ -553,25 +553,25 @@ Malachi includes comprehensive audit logging for security-relevant events.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `MALACHIMQ_AUDIT_LOG_OUTPUT` | `both` | Output mode: `file`, `stdout`, `both`, `ets_only` |
-| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Audit log file path |
-| `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size in MB (auto-rotation) |
+| `MALACHI_AUDIT_LOG_OUTPUT` | `both` | Output mode: `file`, `stdout`, `both`, `ets_only` |
+| `MALACHI_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Audit log file path |
+| `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size in MB (auto-rotation) |
 
 ### Output Modes
 
 ```bash
 # File only (traditional deployments)
--e MALACHIMQ_AUDIT_LOG_OUTPUT=file \
--e MALACHIMQ_AUDIT_LOG_FILE=/var/log/malachi/audit.log
+-e MALACHI_AUDIT_LOG_OUTPUT=file \
+-e MALACHI_AUDIT_LOG_FILE=/var/log/malachi/audit.log
 
 # Stdout only (container/cloud environments)
--e MALACHIMQ_AUDIT_LOG_OUTPUT=stdout
+-e MALACHI_AUDIT_LOG_OUTPUT=stdout
 
 # Both file and stdout
--e MALACHIMQ_AUDIT_LOG_OUTPUT=both
+-e MALACHI_AUDIT_LOG_OUTPUT=both
 
 # ETS only (no file/stdout, in-memory only)
--e MALACHIMQ_AUDIT_LOG_OUTPUT=ets_only
+-e MALACHI_AUDIT_LOG_OUTPUT=ets_only
 ```
 
 ### Logged Events
@@ -636,22 +636,22 @@ Malachi.AuditLog.get_stats()
 
 ### Production Checklist
 
-- [ ] **Enable TLS encryption** (`MALACHIMQ_ENABLE_TLS=true`)
+- [ ] **Enable TLS encryption** (`MALACHI_ENABLE_TLS=true`)
 - [ ] **Use strong passwords** (min 16 characters, mix of letters/numbers/symbols)
 - [ ] **Configure dashboard authentication** (never disable in production)
-- [ ] **Enable HSTS** when using TLS (`MALACHIMQ_HSTS_ENABLED=true`)
+- [ ] **Enable HSTS** when using TLS (`MALACHI_HSTS_ENABLED=true`)
 - [ ] **Restrict CORS origins** (whitelist specific domains)
-- [ ] **Enable audit logging** (`MALACHIMQ_AUDIT_LOG_OUTPUT=both`)
+- [ ] **Enable audit logging** (`MALACHI_AUDIT_LOG_OUTPUT=both`)
 - [ ] **Monitor audit logs** for suspicious activity
 - [ ] **Use firewall rules** to restrict access to ports 4040/4041
 - [ ] **Run as non-root user** in containers
 - [ ] **Keep software updated** (latest Docker image)
-- [ ] **Configure rate limiting** (`MALACHIMQ_RATE_LIMIT_ENABLED=true`)
-- [ ] **Set connection limits** (adjust `MALACHIMQ_MAX_CONN_PER_IP` and `MALACHIMQ_MAX_TOTAL_CONN`)
-- [ ] **Set the frame-size cap** for your workload (`MALACHIMQ_MAX_FRAME_SIZE`, default 16 MiB)
-- [ ] **Enable session IP binding** (`MALACHIMQ_SESSION_IP_BINDING=true`)
-- [ ] **Set memory monitoring** (`MALACHIMQ_GC_THRESHOLD_MB` appropriate for your environment)
-- [ ] **Review atom table thresholds** (adjust `MALACHIMQ_ATOM_WARNING_THRESHOLD`)
+- [ ] **Configure rate limiting** (`MALACHI_RATE_LIMIT_ENABLED=true`)
+- [ ] **Set connection limits** (adjust `MALACHI_MAX_CONN_PER_IP` and `MALACHI_MAX_TOTAL_CONN`)
+- [ ] **Set the frame-size cap** for your workload (`MALACHI_MAX_FRAME_SIZE`, default 16 MiB)
+- [ ] **Enable session IP binding** (`MALACHI_SESSION_IP_BINDING=true`)
+- [ ] **Set memory monitoring** (`MALACHI_GC_THRESHOLD_MB` appropriate for your environment)
+- [ ] **Review atom table thresholds** (adjust `MALACHI_ATOM_WARNING_THRESHOLD`)
 
 ### Content Security Policy (CSP)
 
@@ -659,7 +659,7 @@ The default CSP allows `'unsafe-inline'` for compatibility. For maximum security
 
 ```bash
 docker run \
-  -e MALACHIMQ_DASHBOARD_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:" \
+  -e MALACHI_DASHBOARD_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:" \
   hectorcardoso/malachi:latest
 ```
 

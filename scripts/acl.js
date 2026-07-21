@@ -6,7 +6,7 @@
  *
  * ACLs live in the replicated ACL store, so a change made through any node propagates cluster-wide. An
  * operation is `produce` or `consume`; a pattern is an exact topic ("orders.eu") or a `*`-suffixed prefix
- * ("orders.*" = every topic starting with "orders."). ACLs are enforced when MALACHIMQ_ACL_STRICT is on;
+ * ("orders.*" = every topic starting with "orders."). ACLs are enforced when MALACHI_ACL_STRICT is on;
  * otherwise a user's global produce/consume permission already grants every topic and ACLs only add access.
  *
  * Usage:

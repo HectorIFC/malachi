@@ -143,7 +143,7 @@ from the replicated `UserStore`). Providers: `PasswordProvider` (wrapping the se
 `Auth.verify_credentials/2`) and `MtlsProvider` (mapping the certificate through `CertIdentity`: CN or SAN,
 configurable policy, then looking permissions up in the store). On the wire, an `mtls_auth` api_key (empty
 payload) makes the acceptor resolve the **peer certificate** identity and mint the session as the password
-path does. **Security gate:** `mtls_auth` is honoured only with opt-in (`MALACHIMQ_MTLS_AUTH`) **and**
+path does. **Security gate:** `mtls_auth` is honoured only with opt-in (`MALACHI_MTLS_AUTH`) **and**
 `verify_peer` on: under `verify_none` a forged certificate can never authenticate; mapping failures all
 collapse to `:invalid_credentials` (so they do not leak which identities exist); no lockout (there is no
 password to brute-force), but per-IP rate limiting applies.
@@ -154,7 +154,7 @@ the `UserStore`).** A client presents a **JWT signed** by an external IdP in a `
 and maps a claim (`sub` by default) to a user, taking permissions from the store: the Kafka/Pulsar model,
 where the token identifies and the store authorizes. **Security:** the algorithm is pinned by the
 configured signer, not by the token header, so `alg:none` and HS256↔RS256 confusion are both rejected;
-`exp` is mandatory; opt-in (`MALACHIMQ_OIDC_AUTH`) with `OidcConfig` failing closed when the key, issuer or
+`exp` is mandatory; opt-in (`MALACHI_OIDC_AUTH`) with `OidcConfig` failing closed when the key, issuer or
 audience is missing. Bearer tokens must travel over TLS (documented). The fail-closed
 `resolve_permissions` is shared with mTLS.
 
@@ -180,7 +180,7 @@ cluster (`Malachi.LogAcls`), mirroring users and lockouts: a pure `AclRegistry` 
 **admin → global permission (non-strict) → ACL** (the ACL is consulted through a *lazy thunk*, so the hot
 path only pays for the read when it actually needs it). **Backward compatibility:** the default
 (non-strict) keeps the global permission as a wildcard, so enabling ACLs **breaks nothing**;
-`MALACHIMQ_ACL_STRICT=true` turns on strict mode (deny-by-default, only admin and an ACL allow). Reads fail
+`MALACHI_ACL_STRICT=true` turns on strict mode (deny-by-default, only admin and an ACL allow). Reads fail
 closed (store unavailable means deny). In-process management through
 `Auth.grant_acl`/`revoke_acl`/`list_acls`; deleting a user revokes their grants.
 
@@ -235,7 +235,7 @@ that, so it offers the plug points instead.
    places (`config/config.exs`, the `|| "admin123"` fallbacks in `config/runtime.exs`, and the
    `seed_default_users` fallback in `lib/malachi/auth.ex`). The base config seeds `[]`; the convenience
    defaults live only in `config/dev.exs` and `config/test.exs` (never on the production path); production
-   **requires an explicit password** through env (`*_PASS` or `MALACHIMQ_DEFAULT_USERS`). Phase 1 chose
+   **requires an explicit password** through env (`*_PASS` or `MALACHI_DEFAULT_USERS`). Phase 1 chose
    **1A (require an explicit password, `raise`)** as an interim step because, without P2 (replication), a
    generated admin would diverge per node. `require_strong_passwords` was left as-is (orthogonal).
    **✅ Promoted to generate-random after P2 (decision 1A+2A):** the `raise` was **replaced** by generating
@@ -243,8 +243,8 @@ that, so it offers the plug points instead.
    node generates one and calls `put_user` through consensus, and `ra`'s `:user_exists` deduplicates, so
    exactly **one** password wins and is logged. Only the admin is generated (scope 2A);
    producer/consumer/app are seeded only when configured. The `:generate_admin` flag (set in `runtime.exs`
-   when `MALACHIMQ_ADMIN_PASS` is absent); `Auth.generate_admin_if_absent/1` generates, seeds and logs;
-   `ConfigValidator` is aware of the flag. `MALACHIMQ_DISABLE_DEFAULT_USERS` is the opt-out. *Tradeoff:* the
+   when `MALACHI_ADMIN_PASS` is absent); `Auth.generate_admin_if_absent/1` generates, seeds and logs;
+   `ConfigValidator` is aware of the flag. `MALACHI_DISABLE_DEFAULT_USERS` is the opt-out. *Tradeoff:* the
    password appears in the log (the operator must protect it or rotate), which is the industry pattern.
 2. **Phase 2: replication over `ra` (P2) plus lockout persistence (P6). ✅ Done (decision 1A).**
    Moves users out of node-local Mnesia into a **dedicated `ra` cluster** (`UserMachine` over the pure
@@ -316,12 +316,12 @@ that, so it offers the plug points instead.
    or TLS; mTLS maps certificate to user and looks permissions up in the store, failing closed on a
    mismatched record) → **P4-3** (the `mtls_auth` wire op plus the acceptor handshake: it resolves the peer
    certificate and mints the session as the password path does, **gated on opt-in plus `verify_peer`** so a
-   forged certificate can never authenticate; `MALACHIMQ_MTLS_AUTH`/`MALACHIMQ_MTLS_POLICY`).
+   forged certificate can never authenticate; `MALACHI_MTLS_AUTH`/`MALACHI_MTLS_POLICY`).
    Sub-sliced (OIDC): **OIDC-1** (a pure `JwtValidator` over `joken`/`jose`, signature plus iss/aud/exp; the
    algorithm pinned by the signer, so `alg:none` and HS256 confusion are rejected; `exp` mandatory; 12
    tests, keys generated at runtime) → **OIDC-2** (`JwtProvider` plus an `OidcConfig` that builds the signer
    from the PEM and fails closed; `AuthProvider.resolve_permissions/2` extracted and shared with mTLS, DRY)
-   → **OIDC-3** (the `token_auth` wire op plus a handshake gated on opt-in; `MALACHIMQ_OIDC_*`; end-to-end
+   → **OIDC-3** (the `token_auth` wire op plus a handshake gated on opt-in; `MALACHI_OIDC_*`; end-to-end
    over plain TCP, valid token yields a session, while forged, expired or unprovisioned yield
    `invalid_credentials`). *The LDAP provider is missing, and optionally JWKS (2B) for OIDC.*
 5. **Phase 5: multi-tenancy / per-resource ACL (P5). 🚧 Per-topic ACL done (decisions 5-1A/2A/3A).**
@@ -329,7 +329,7 @@ that, so it offers the plug points instead.
    with a lazy thunk: admin / global-non-strict / ACL; 21 tests) → **P5-2** (`AclMachine`/`AclServer`, the
    `LogAcls` `ra` cluster, as for users and lockouts) → **P5-3** (the `AclStore` facade plus
    `Auth.grant_acl`/`revoke_acl`/`list_acls` plus a revoke hook on user deletion; enforcement in the
-   boundary's `with_topic_permission`; `MALACHIMQ_ACL_STRICT`; end-to-end over the wire: non-strict breaks
+   boundary's `with_topic_permission`; `MALACHI_ACL_STRICT`; end-to-end over the wire: non-strict breaks
    nothing, strict denies without a grant, a grant or prefix allows, admin bypasses).
    **P5-4 ✅**: remote management on all four surfaces (wire ops `api_key`s 14/15/16, REST
    `/users/:u/acls`, `scripts/acl.js`, `mix malachi.acl`; the RPC extracted into `Malachi.CLI.Rpc`, shared

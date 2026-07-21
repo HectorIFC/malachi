@@ -69,7 +69,7 @@ defmodule Malachi.Cluster.Topology do
     case Map.get(config, :epmd_hosts, []) do
       [] ->
         raise ArgumentError,
-              "cluster strategy :epmd requires a non-empty host list (set MALACHIMQ_LOG_NODES)"
+              "cluster strategy :epmd requires a non-empty host list (set MALACHI_LOG_NODES)"
 
       hosts ->
         [hosts: hosts]

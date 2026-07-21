@@ -92,10 +92,10 @@ defmodule Malachi.Auth.ConfigValidator do
           Fix options:
 
           1. Set strong password via environment variable:
-             export MALACHIMQ_#{String.upcase(username)}_PASS="$(openssl rand -base64 32)"
+             export MALACHI_#{String.upcase(username)}_PASS="$(openssl rand -base64 32)"
 
           2. Disable default users and manage via API:
-             export MALACHIMQ_DISABLE_DEFAULT_USERS=true
+             export MALACHI_DISABLE_DEFAULT_USERS=true
 
           Generate secure passwords:
              openssl rand -base64 32
@@ -123,7 +123,7 @@ defmodule Malachi.Auth.ConfigValidator do
           User '#{username}' has password with #{String.length(password)} characters.
           Minimum required: #{min_length} characters
 
-          Set MALACHIMQ_MIN_PASSWORD_LEN to adjust requirement,
+          Set MALACHI_MIN_PASSWORD_LEN to adjust requirement,
           or provide a longer password.
 
           ═══════════════════════════════════════════════════════════════

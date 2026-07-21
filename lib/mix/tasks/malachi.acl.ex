@@ -13,7 +13,7 @@ defmodule Mix.Tasks.Malachi.Acl do
       mix malachi.acl revoke <username> <operation> <pattern>
 
   `operation` is `produce` or `consume`; `pattern` is an exact topic (`orders.eu`) or a `*`-suffixed prefix
-  (`orders.*` = every topic starting with `orders.`). ACLs are enforced when `MALACHIMQ_ACL_STRICT` is on;
+  (`orders.*` = every topic starting with `orders.`). ACLs are enforced when `MALACHI_ACL_STRICT` is on;
   otherwise a user's global produce/consume permission already grants every topic and ACLs only add access.
 
   Options:

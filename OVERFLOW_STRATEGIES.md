@@ -39,25 +39,25 @@ Set these in `config/runtime.exs` or via environment:
 
 ```bash
 # Maximum message size in bytes (default: 1MB)
-export MALACHIMQ_MAX_MESSAGE_SIZE=1048576
+export MALACHI_MAX_MESSAGE_SIZE=1048576
 
 # Maximum buffered messages per queue (default: 10,000)
-export MALACHIMQ_MAX_BUFFER_SIZE=10000
+export MALACHI_MAX_BUFFER_SIZE=10000
 
 # Overflow behavior: drop_newest, drop_oldest, reject, block (default: drop_newest)
-export MALACHIMQ_OVERFLOW_BEHAVIOR=drop_newest
+export MALACHI_OVERFLOW_BEHAVIOR=drop_newest
 
 # Backpressure threshold 0.0-1.0 (default: 0.8 = 80% full)
-export MALACHIMQ_BACKPRESSURE_THRESHOLD=0.8
+export MALACHI_BACKPRESSURE_THRESHOLD=0.8
 
 # Timeout for blocked producers in milliseconds (default: 5000)
-export MALACHIMQ_BLOCK_TIMEOUT_MS=5000
+export MALACHI_BLOCK_TIMEOUT_MS=5000
 
 # Maximum concurrent blocked producers (default: 1000)
-export MALACHIMQ_MAX_BLOCKED_PRODUCERS=1000
+export MALACHI_MAX_BLOCKED_PRODUCERS=1000
 
 # Update safety threshold for config changes (default: 0.5 = 50%)
-export MALACHIMQ_UPDATE_EXCESS_THRESHOLD=0.5
+export MALACHI_UPDATE_EXCESS_THRESHOLD=0.5
 ```
 
 ### Per-Queue Configuration

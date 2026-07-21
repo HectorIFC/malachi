@@ -109,7 +109,7 @@ defmodule Malachi.Application do
   end
 
   # libcluster node discovery (connectivity-only): starts a Cluster.Supervisor only when a strategy is
-  # configured (MALACHIMQ_CLUSTER_STRATEGY). Absent => [] (single-node default, no Erlang distribution
+  # configured (MALACHI_CLUSTER_STRATEGY). Absent => [] (single-node default, no Erlang distribution
   # required). First in the tree so peers start connecting before the SWIM/ra bootstrap reads its members.
   defp cluster_children do
     topology = Application.get_env(:malachi, :cluster_topology, %{strategy: nil})

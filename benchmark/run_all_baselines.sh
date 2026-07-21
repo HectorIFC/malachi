@@ -29,12 +29,12 @@ echo ""
 
 # Load benchmark config, MIX_ENV=benchmark loads config/benchmark.exs (mnesia_dir, tuning params)
 export MIX_ENV=benchmark
-export MALACHIMQ_LOGGER_LEVEL=warning
+export MALACHI_LOGGER_LEVEL=warning
 
 # Disable rate limiting and connection limiting during benchmarks
 # Benchmarks measure performance under ideal conditions, not security features
-export MALACHIMQ_RATE_LIMIT_ENABLED=false
-export MALACHIMQ_CONNECTION_LIMIT_ENABLED=false
+export MALACHI_RATE_LIMIT_ENABLED=false
+export MALACHI_CONNECTION_LIMIT_ENABLED=false
 
 echo "Starting benchmark suite (this will take ~10 minutes)..."
 echo ""

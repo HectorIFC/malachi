@@ -12,8 +12,8 @@ that knows what a topic is.
 | mechanism | credential | enable with |
 |---|---|---|
 | password | username + password | on by default |
-| mTLS identity | a client certificate | `MALACHIMQ_MTLS_AUTH=true` + `verify_peer` |
-| OIDC / JWT | a signed bearer token | `MALACHIMQ_OIDC_AUTH=true` + issuer, audience, key |
+| mTLS identity | a client certificate | `MALACHI_MTLS_AUTH=true` + `verify_peer` |
+| OIDC / JWT | a signed bearer token | `MALACHI_OIDC_AUTH=true` + issuer, audience, key |
 
 Whichever one runs, it produces a **username**, and permissions come from the user store. A certificate or
 a token never carries permissions of its own. This means you provision a user once and can change how it
@@ -32,7 +32,7 @@ mix malachi.user delete alice
 
 The permissions are `admin`, `produce`, `consume`. `admin` is a superuser and bypasses every later check.
 
-Repeated failures trigger a **progressive lockout**. After `MALACHIMQ_MAX_AUTH_ATTEMPTS` failures the
+Repeated failures trigger a **progressive lockout**. After `MALACHI_MAX_AUTH_ATTEMPTS` failures the
 pair is locked for the base duration, and each further multiple of that attempt count escalates the
 multiplier: **base → ×3 → ×9 → ×24 → ×72**, then capped. A guessing loop slows to uselessness within a few
 rounds, while a legitimate user who mistypes once waits only the base duration.
@@ -42,12 +42,12 @@ of their own account by failing logins from elsewhere. The state is replicated o
 gains nothing by reconnecting to a different node.
 
 ```
-MALACHIMQ_MAX_AUTH_ATTEMPTS      attempts before the first lock
-MALACHIMQ_LOCKOUT_DURATION_MS    base lock duration
-MALACHIMQ_PROGRESSIVE_LOCKOUT    escalate on repeat (default true)
-MALACHIMQ_MIN_PASSWORD_LEN       minimum length
-MALACHIMQ_REQUIRE_STRONG_PASSWORDS
-MALACHIMQ_AUTH_RATE_LIMIT        per-IP attempts per window
+MALACHI_MAX_AUTH_ATTEMPTS      attempts before the first lock
+MALACHI_LOCKOUT_DURATION_MS    base lock duration
+MALACHI_PROGRESSIVE_LOCKOUT    escalate on repeat (default true)
+MALACHI_MIN_PASSWORD_LEN       minimum length
+MALACHI_REQUIRE_STRONG_PASSWORDS
+MALACHI_AUTH_RATE_LIMIT        per-IP attempts per window
 ```
 
 ## mTLS identity
@@ -56,21 +56,21 @@ The client presents a certificate during the TLS handshake and the broker derive
 password crosses the wire.
 
 ```bash
-MALACHIMQ_ENABLE_TLS=true
-MALACHIMQ_TLS_VERIFY=verify_peer
-MALACHIMQ_TLS_CACERTFILE=/etc/malachi/ca.pem
-MALACHIMQ_MTLS_AUTH=true
-MALACHIMQ_MTLS_POLICY=cn            # or san:uri, san:dns, san:email
+MALACHI_ENABLE_TLS=true
+MALACHI_TLS_VERIFY=verify_peer
+MALACHI_TLS_CACERTFILE=/etc/malachi/ca.pem
+MALACHI_MTLS_AUTH=true
+MALACHI_MTLS_POLICY=cn            # or san:uri, san:dns, san:email
 ```
 
-`MALACHIMQ_MTLS_POLICY` selects which field names the user: `cn` (default) uses the subject Common Name,
+`MALACHI_MTLS_POLICY` selects which field names the user: `cn` (default) uses the subject Common Name,
 and the `san:` forms use the first Subject Alternative Name of that kind. `san:uri` is the one to reach for
 with SPIFFE identities (`spiffe://malachi/svc-producer`).
 
 ### The safety gate that matters
 
 mTLS auth is honoured **only** when the listener actually verifies peer certificates. With
-`MALACHIMQ_TLS_VERIFY=verify_none` a client could present any certificate it liked, so the broker refuses
+`MALACHI_TLS_VERIFY=verify_none` a client could present any certificate it liked, so the broker refuses
 the mechanism outright rather than trusting an unverified name:
 
 | answer | meaning |
@@ -79,7 +79,7 @@ the mechanism outright rather than trusting an unverified name:
 | `mtls_auth_unavailable` | enabled, but the listener is not `verify_peer`, so the identity is untrustworthy |
 | `no_peer_certificate` | verified listener, but the client sent no certificate |
 
-The middle one is the interesting case: enabling `MALACHIMQ_MTLS_AUTH` alone does nothing. Both switches
+The middle one is the interesting case: enabling `MALACHI_MTLS_AUTH` alone does nothing. Both switches
 must be on.
 
 ## OIDC / JWT
@@ -88,12 +88,12 @@ The client presents a bearer token from your identity provider. The broker verif
 a public key you configure, then maps a claim to a username.
 
 ```bash
-MALACHIMQ_OIDC_AUTH=true
-MALACHIMQ_OIDC_PUBLIC_KEY_FILE=/etc/malachi/idp-public.pem
-MALACHIMQ_OIDC_ISSUER=https://idp.example.com
-MALACHIMQ_OIDC_AUDIENCE=malachi
-MALACHIMQ_OIDC_IDENTITY_CLAIM=sub     # default
-MALACHIMQ_OIDC_ALGORITHM=RS256        # default
+MALACHI_OIDC_AUTH=true
+MALACHI_OIDC_PUBLIC_KEY_FILE=/etc/malachi/idp-public.pem
+MALACHI_OIDC_ISSUER=https://idp.example.com
+MALACHI_OIDC_AUDIENCE=malachi
+MALACHI_OIDC_IDENTITY_CLAIM=sub     # default
+MALACHI_OIDC_ALGORITHM=RS256        # default
 ```
 
 Validation is deliberately strict, because the classic JWT failures are all "the library accepted
@@ -119,8 +119,8 @@ credential" tells an attacker which usernames are real.
 Authentication returns a session token used for the rest of the connection.
 
 ```
-MALACHIMQ_SESSION_TIMEOUT_SEC   session TTL in seconds (default 3600)
-MALACHIMQ_SESSION_IP_BINDING    bind a session to its origin IP (default true)
+MALACHI_SESSION_TIMEOUT_SEC   session TTL in seconds (default 3600)
+MALACHI_SESSION_IP_BINDING    bind a session to its origin IP (default true)
 ```
 
 With IP binding on, a session presented from a different address is refused and the mismatch is audited as

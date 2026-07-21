@@ -153,7 +153,7 @@ New fields:
 **No breaking changes** - all existing functionality preserved.
 
 **New features available:**
-1. Set overflow strategy via env var: `MALACHIMQ_OVERFLOW_BEHAVIOR=drop_oldest`
+1. Set overflow strategy via env var: `MALACHI_OVERFLOW_BEHAVIOR=drop_oldest`
 2. Update queue config at runtime: `{"action": "update_queue_config", ...}`
 3. Monitor backpressure: Check `pressure_status` in `/metrics`
 

@@ -122,14 +122,14 @@ jobs:
 
           echo "🚀 Starting container..."
           docker run -d --name malachi-test \
-            -e MALACHIMQ_CONFIG_ENV=test \
-            -e MALACHIMQ_TCP_PORT=4040 \
-            -e MALACHIMQ_DASHBOARD_PORT=4041 \
-            -e MALACHIMQ_ADMIN_PASS="$ADMIN_PASS" \
-            -e MALACHIMQ_PRODUCER_PASS="$PRODUCER_PASS" \
-            -e MALACHIMQ_CONSUMER_PASS="$CONSUMER_PASS" \
-            -e MALACHIMQ_APP_PASS="$APP_PASS" \
-            -e MALACHIMQ_REQUIRE_TLS=false \
+            -e MALACHI_CONFIG_ENV=test \
+            -e MALACHI_TCP_PORT=4040 \
+            -e MALACHI_DASHBOARD_PORT=4041 \
+            -e MALACHI_ADMIN_PASS="$ADMIN_PASS" \
+            -e MALACHI_PRODUCER_PASS="$PRODUCER_PASS" \
+            -e MALACHI_CONSUMER_PASS="$CONSUMER_PASS" \
+            -e MALACHI_APP_PASS="$APP_PASS" \
+            -e MALACHI_REQUIRE_TLS=false \
             -p 4040:4040 \
             -p 4041:4041 \
             malachi:test

@@ -1024,7 +1024,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
         for B3b-iii. Tests: deleted the purely queue ones
         (queue/channel/consumer/ack_manager/partition_manager/queue_config/integration/at_most_once/
         one_to_million/atom_exhaustion/overflow_integration/backpressure plus the mass_spawn and
-        test_helpers helpers); adapted the mixed ones (`application_test` and `malachimq_test` now point
+        test_helpers helpers); adapted the mixed ones (`application_test` and `malachi_test` now point
         at the log stack; `attack_simulation` lost its 2 queue tests and kept the security ones;
         `atom_safety` kept only Validator and AtomMonitor; `metrics_test` shrank to system metrics plus
         history). Also removed the **stale duplicate** `test/application_test.exs` (it collided with
@@ -1192,7 +1192,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     small records, illustrative): produce ~42k rec/s, fetch ~307k rec/s (drain), stream ~26k rec/s (push),
     mixed ~25k rec/s and 7.5k ops/s, with 0 errors; `--json` and `--warmup` (reconnecting the clients to
     release the subscription) both fine. An operational note: many connections blow through the auth rate
-    limit (10/min/IP by default), so raise `MALACHIMQ_AUTH_RATE_LIMIT` for scale tests. The README gained a
+    limit (10/min/IP by default), so raise `MALACHI_AUTH_RATE_LIMIT` for scale tests. The README gained a
     load-test section; `package.json` gained a `loadtest` script.
     - ✅ **The open-loop driver (2C).** `--rate <rps>` fires requests at a **fixed arrival rate**,
       independent of previous responses, measuring latency from each request's **scheduled time** rather
@@ -1216,7 +1216,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     (SWIM detects failures at runtime; `libcluster` comes later).
     - ✅ **D1: control-plane HA (metadata over `ra`).** `application.ex` starts `Malachi.LogBroker` with
       `metadata_cluster`/`metadata_nodes` when `:log_cluster` is configured (env
-      `MALACHIMQ_LOG_CLUSTER`/`MALACHIMQ_LOG_NODES`/`MALACHIMQ_RA_DATA_DIR`), starting `ra`; **absent
+      `MALACHI_LOG_CLUSTER`/`MALACHI_LOG_NODES`/`MALACHI_RA_DATA_DIR`), starting `ra`; **absent
       means single-node in-memory** (the default is preserved). The config-to-options decision is a pure,
       testable function (`Malachi.Application.metadata_cluster_opts/2`). The mechanism itself (metadata
       surviving the loss of the leader) is already proven by
@@ -1228,7 +1228,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     - ✅ **D2: a replicated data plane.** In cluster mode, `application.ex` starts one **named**
       `ReplicationServer` (`Malachi.LogReplication`) per node and connects `LogBroker` to
       `brokers: [{Malachi.LogReplication, n} | n ← log_nodes]` plus a `replication_factor` (env
-      `MALACHIMQ_LOG_REPLICATION_FACTOR`, default 3, clamped to the node count by the broker). `Placement`
+      `MALACHI_LOG_REPLICATION_FACTOR`, default 3, clamped to the node count by the broker). `Placement`
       (HRW) picks the `replica_set` among those brokers; the primary replicates cross-node through
       `{name, node}` and commits by **quorum**. The broker set is **static** (every node in the config); a
       downed follower is tolerated by the quorum (the live `live_brokers` is D3). The wiring is testable
@@ -1305,8 +1305,8 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
       when configured). The real `expire_segment` (in `application.ex`) removes it from the control plane
       and then deletes the storage on each replica (`ReplicationServer.delete`), **best-effort** (the
       control plane is idempotent and storage tolerates an absent segment). Config through env:
-      `MALACHIMQ_RETENTION_MAX_AGE_MS` / `MALACHIMQ_RETENTION_MAX_BYTES` (both absent means **keep
-      forever**, and the coordinator does not start) / `MALACHIMQ_RETENTION_INTERVAL_MS`.
+      `MALACHI_RETENTION_MAX_AGE_MS` / `MALACHI_RETENTION_MAX_BYTES` (both absent means **keep
+      forever**, and the coordinator does not start) / `MALACHI_RETENTION_INTERVAL_MS`.
       `RetentionCoordinator` joins the tree **whenever there is a policy** (it matters single-node too),
       after `LogBroker`. Tested: `BrokerServer.delete_segment` (dropping a sealed segment) and **e2e**
       (produce → seal → a coordinator sweep → the segment disappears from the control plane **and** from
@@ -1333,7 +1333,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     them, with no proactive push, consistent with the rest of the server. Tested: the initial attrs are
     readable, and `set_attributes` on one node propagates to a peer through gossip.
   - ✅ **C2c: the application wiring (C2 complete).** `application.ex` connects the self's attributes to
-    the cluster's `MembershipServer`: `MALACHIMQ_LOG_ATTRIBUTES` (in the form `"rack=a,dc=east"`) is
+    the cluster's `MembershipServer`: `MALACHI_LOG_ATTRIBUTES` (in the form `"rack=a,dc=east"`) is
     parsed by `Malachi.Application.parse_attributes/1` (a pure, testable function: it ignores entries
     without `=`, trims, and preserves `=` inside the value) and passed as `:attributes`. Absent yields
     `%{}`. Tested: the parse (empty, pairs, trimming, invalid entries, a value containing `=`). **C2
@@ -1360,7 +1360,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
     Tested: a produce spreads replicas across racks, `set_broker_attributes` affects the next placement,
     and `BrokerServer`'s refresh pulls the attrs.
   - ✅ **C3c-1: wiring rack awareness into the application.** `data_plane_opts` connects `spread_by` (env
-    `MALACHIMQ_LOG_SPREAD_BY`, for example `"rack"`) and a `broker_attributes` function derived from
+    `MALACHI_LOG_SPREAD_BY`, for example `"rack"`) and a `broker_attributes` function derived from
     `MembershipServer`: `broker_attributes_for/2` (pure and testable) maps each live member
     `{LogMembership, node}` to `{LogReplication, node}` carrying the gossiped attrs (C2). With that,
     **rack-aware placement works end to end in the application** (membership attrs feeding placement
@@ -1478,7 +1478,7 @@ Make the NorthGuard stack the **live**, scalable broker, better than OSS Kafka.
              orchestration, which is D-c-1d with fencing). Tested: `static_seed` (only the lowest node),
              `route_vnode` plus the tolerant `snapshot` (single-node), and `:multinode`: the orchestrator
              starts across 2 nodes while a non-orchestrator only routes yet reads and writes cross-node.
-             **Config:** `MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR`.
+             **Config:** `MALACHI_LOG_VNODE_REPLICATION_FACTOR`.
            - ✅ **D-c-1d: `membership_leader` plus a reconcile loop.** The orchestration policy moves from
              the static seed to `Malachi.Application.membership_leader/1`: true only on the lowest **live**
              node (`MembershipServer.alive_members`, SWIM), so the role **fails over** when the leader
@@ -1732,7 +1732,7 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
     `rf = 1` the cap is **hard**. With a large `max_skew` it degrades to plain HRW (minimal movement). It
     is **standalone** (it does not combine with A1's `:spread`: the two are mutually exclusive, and A2
     takes precedence). `place_vnodes/4` uses `place_balanced` when given `[max_skew: n]`;
-    `vnode_place_opts` wires it through `:log_max_skew` (`MALACHIMQ_LOG_MAX_SKEW`). Tested: plain HRW
+    `vnode_place_opts` wires it through `:log_max_skew` (`MALACHI_LOG_MAX_SKEW`). Tested: plain HRW
     piles 6 of 9 vnodes onto one node while the balanced version spreads them 3/3/3; a property for the
     hard cap (rf=1) and for every vnode receiving `min(rf, nodes)` distinct replicas; determinism; and
     degradation to HRW given slack. It solves **load**, not data loss (rack safety is A1).
@@ -1862,9 +1862,9 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         started and is an idempotent no-op against a formed cluster (it does not disturb the lease); and
         the reconciler reconciles both at boot and on demand.
     - ✅ **Dynamic node discovery (libcluster). Connectivity only.** This closes an operability gap: peer
-      discovery used to be **static** (`MALACHIMQ_LOG_NODES` plus a manual `Node.connect` or fixed
+      discovery used to be **static** (`MALACHI_LOG_NODES` plus a manual `Node.connect` or fixed
       hostnames). The `{:libcluster, "~> 3.5"}` dependency plus an **optional** `Cluster.Supervisor` in the
-      tree (only when `MALACHIMQ_CLUSTER_STRATEGY` is set; absent means single-node, requiring no
+      tree (only when `MALACHI_CLUSTER_STRATEGY` is set; absent means single-node, requiring no
       distribution, so the default is untouched). Decision (**1A**): **connectivity only**, so libcluster
       merely discovers and connects nodes (Erlang distribution); SWIM and `ra` keep using `log_nodes` for
       the initial *member set*, and `ra` membership changes still go through the **R3 (rebalancing under
@@ -1893,7 +1893,7 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       the struct and in `open`; `place_opts` injects them; `open_segment` handles `{:error, ...}` so a
       produce aborts cleanly, with `register_segment` extracted), broker_server (threading them through),
       application (`data_plane_opts` reads `log_min_domains`/`log_placement_policy`) and config
-      (`MALACHIMQ_LOG_MIN_DOMAINS`/`MALACHIMQ_LOG_PLACEMENT_POLICY`). **A related fix (Issue 2)**: heal was
+      (`MALACHI_LOG_MIN_DOMAINS`/`MALACHI_LOG_PLACEMENT_POLICY`). **A related fix (Issue 2)**: heal was
       **rack-blind**, since `self_healing` called `place/3` without `:spread`; now `HealCoordinator`
       resolves the spread per pass (through `heal_spread/0`, using live attributes) and `self_healing`
       forwards **only `:spread`** (stripping `min_domains` and `policy`, so heal never hard-fails). Tested:
@@ -1931,10 +1931,10 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       distributed node name comes from
       `RELEASE_NODE=malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE)...` plus
       `RELEASE_DISTRIBUTION=name` plus `ERL_AFLAGS` pinning the distribution port; `ra`'s peer set is the 3
-      FQDNs in `MALACHIMQ_LOG_NODES`; and `MALACHIMQ_CLUSTER_STRATEGY=epmd` reuses that list.
+      FQDNs in `MALACHI_LOG_NODES`; and `MALACHI_CLUSTER_STRATEGY=epmd` reuses that list.
       Rack-awareness: `topologySpreadConstraints` by zone plus an init container (`kubectl get node`) that
       writes the zone into an emptyDir, which the main container folds into
-      `MALACHIMQ_LOG_ATTRIBUTES=zone=<z>`, with `LOG_SPREAD_BY=zone`, `MIN_DOMAINS=2` and
+      `MALACHI_LOG_ATTRIBUTES=zone=<z>`, with `LOG_SPREAD_BY=zone`, `MIN_DOMAINS=2` and
       `PLACEMENT_POLICY=soft` (violations surface through the previous slice's gauge; a node without the
       label falls back informatively). Probes `/health` and `/ready` (from O1). No Elixir code changed (the
       node name comes through `RELEASE_*`, and `vm.args` already uses `inet_res`). Validated: the YAML
@@ -1946,8 +1946,8 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       (`ra`) and data replication travelled in **plaintext** between nodes (only the cookie authenticated).
       Decision **1A**: **mutual TLS** (`verify_peer` plus `fail_if_no_peer_cert`), a shared CA and a
       per-node certificate, which both encrypts **and** authenticates. It is VM and release config (not
-      Elixir code): `rel/env.sh.eex` translates `MALACHIMQ_DIST_TLS=true` into
-      `-proto_dist inet_tls -ssl_dist_optfile $MALACHIMQ_DIST_TLS_OPTFILE` (through `ELIXIR_ERL_OPTIONS`),
+      Elixir code): `rel/env.sh.eex` translates `MALACHI_DIST_TLS=true` into
+      `-proto_dist inet_tls -ssl_dist_optfile $MALACHI_DIST_TLS_OPTFILE` (through `ELIXIR_ERL_OPTIONS`),
       **failing fast** if the optfile is missing or unreadable; the default is off, leaving today's
       plaintext untouched. Artefacts: `rel/dist_tls.conf.example` (an ssl_dist optfile template), a dev
       helper `scripts/generate-dist-certs.sh` (a CA plus a node certificate with server and clientAuth EKUs,
@@ -1972,7 +1972,7 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       orchestration (order plus window) is unit-testable without stopping the real app. On k8s:
       `terminationGracePeriodSeconds: 40` plus a `preStop` (`sleep 5`, since kube-proxy removes the pod
       from the Service endpoints **before** the SIGTERM, so clients stop being routed before the drain).
-      Config: `MALACHIMQ_SHUTDOWN_GRACE_MS`. Tested: `graceful/1` runs quiesce → sleep(drain_ms) → close
+      Config: `MALACHI_SHUTDOWN_GRACE_MS`. Tested: `graceful/1` runs quiesce → sleep(drain_ms) → close
       **in order**; it skips the sleep with `drain_ms: 0`; and the default comes from config: 3 tests.
       Suite green; credo and dialyzer clean. The README gained the env var, and k8s the grace and preStop.
     - ✅ **Consumer group coordination (G1: an epic, sliced; S1 to S5 plus Str-1/Str-2 complete).** A group
@@ -2302,7 +2302,7 @@ adopted, and what was deliberately **not** adopted (with the reason):
   (a node briefly suspected, then back) **never** moves a vnode. It is the pattern the table above
   recorded: SWIM does the *detection* event-driven, while the *decision* to move reconciles and converges
   (no lost events). Seams (`plan_fun`/`commit_fun`/`leader?`) make it testable without `ra` or a lease, by
-  driving `reconcile_now`. **Opt-in** (`MALACHIMQ_AUTO_REBALANCE`, defaulting to off, leaving today's
+  driving `reconcile_now`. **Opt-in** (`MALACHI_AUTO_REBALANCE`, defaulting to off, leaving today's
   manual behaviour untouched); `interval` and `stabilization` are configurable; and it only starts in
   `rebalance_children` when sharded and enabled. Tested: a commit after N stable ticks; a changed plan
   resetting the window; an empty plan never committing; a non-leader never committing; `stabilization: 1`
@@ -2326,7 +2326,7 @@ adopted, and what was deliberately **not** adopted (with the reason):
   grow).
   - ⏳ **A recorded dependency: a durable ring.** The ring is minimal global state, **gossip-only**
     (faithful to NorthGuard), and on a **full-cluster restart** it reseeds from config
-    (`MALACHIMQ_LOG_VNODES` through `sharded_vnodes/2`), whose geometry does **not** match a split-natural
+    (`MALACHI_LOG_VNODES` through `sharded_vnodes/2`), whose geometry does **not** match a split-natural
     ring, so the migrated metadata would be orphaned. **A pre-existing gap, shared with split.** Current
     scope: reshard **at runtime**. Making the ring durable (and a reshard survive a full restart) is the
     natural follow-up, and it benefits split too.

@@ -149,7 +149,7 @@ spec:
         app: malachi
     spec:
       serviceAccountName: malachi
-      # Give graceful shutdown room: the preStop sleep + the app's drain window (MALACHIMQ_SHUTDOWN_GRACE_MS,
+      # Give graceful shutdown room: the preStop sleep + the app's drain window (MALACHI_SHUTDOWN_GRACE_MS,
       # default 5s) + lease release must fit inside this.
       terminationGracePeriodSeconds: 40
       securityContext:
@@ -158,7 +158,7 @@ spec:
         fsGroup: 1000 # so the malachi user (uid 1000) can write the mounted PersistentVolume
         runAsNonRoot: true
       # Spread the pods across zones so segment replicas can land in distinct failure domains. Pairs with
-      # MALACHIMQ_LOG_SPREAD_BY=zone + MALACHIMQ_LOG_MIN_DOMAINS below. Use DoNotSchedule to hard-require
+      # MALACHI_LOG_SPREAD_BY=zone + MALACHI_LOG_MIN_DOMAINS below. Use DoNotSchedule to hard-require
       # distinct zones (may leave pods Pending if zones are too few).
       topologySpreadConstraints:
         - maxSkew: 1
@@ -188,13 +188,13 @@ spec:
       containers:
         - name: malachi
           image: hectorcardoso/malachi:latest # <-- replace with your image
-          # Fold the injected zone into MALACHIMQ_LOG_ATTRIBUTES, then exec the release.
+          # Fold the injected zone into MALACHI_LOG_ATTRIBUTES, then exec the release.
           command:
             - /bin/sh
             - -c
             - >
               Z="$(cat /shared/zone 2>/dev/null)";
-              [ -n "$Z" ] && export MALACHIMQ_LOG_ATTRIBUTES="zone=$Z";
+              [ -n "$Z" ] && export MALACHI_LOG_ATTRIBUTES="zone=$Z";
               exec bin/malachi start
           # Pause before SIGTERM so kube-proxy removes this pod from the Service endpoints first, new
           # clients stop being routed here before the app starts draining.
@@ -213,7 +213,7 @@ spec:
               containerPort: 9100
           env:
             # --- Erlang distribution: stable, DNS-based node names (POD_NAME/POD_NAMESPACE are used by the
-            #     RELEASE_NODE and MALACHIMQ_LOG_NODES below, so they must come first) ---
+            #     RELEASE_NODE and MALACHI_LOG_NODES below, so they must come first) ---
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -235,53 +235,53 @@ spec:
               value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
             # --- Inter-node TLS: run Erlang distribution (ra + replication) over mutual TLS instead of
             #     plaintext. Certs + the options file come from the malachi-dist-tls Secret below. ---
-            - name: MALACHIMQ_DIST_TLS
+            - name: MALACHI_DIST_TLS
               value: "true"
-            - name: MALACHIMQ_DIST_TLS_OPTFILE
+            - name: MALACHI_DIST_TLS_OPTFILE
               value: /etc/malachi/dist/dist_tls.conf
             # --- Replicated log control plane over ra; the peer set is the 3 stable pod names ---
-            - name: MALACHIMQ_LOG_CLUSTER
+            - name: MALACHI_LOG_CLUSTER
               value: malachi
-            - name: MALACHIMQ_LOG_NODES
+            - name: MALACHI_LOG_NODES
               value: malachi@malachi-0.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-1.malachi-headless.$(POD_NAMESPACE).svc.cluster.local,malachi@malachi-2.malachi-headless.$(POD_NAMESPACE).svc.cluster.local
-            - name: MALACHIMQ_RA_DATA_DIR
+            - name: MALACHI_RA_DATA_DIR
               value: /app/data/ra
-            - name: MALACHIMQ_LOG_DATA_DIR
+            - name: MALACHI_LOG_DATA_DIR
               value: /app/data/log
-            - name: MALACHIMQ_LOG_REPLICATION_FACTOR
+            - name: MALACHI_LOG_REPLICATION_FACTOR
               value: "3"
-            # --- libcluster keeps the peers connected (epmd strategy reuses MALACHIMQ_LOG_NODES) ---
-            - name: MALACHIMQ_CLUSTER_STRATEGY
+            # --- libcluster keeps the peers connected (epmd strategy reuses MALACHI_LOG_NODES) ---
+            - name: MALACHI_CLUSTER_STRATEGY
               value: epmd
             # --- Rack-aware placement + failure-domain guarantee ---
-            - name: MALACHIMQ_LOG_SPREAD_BY
+            - name: MALACHI_LOG_SPREAD_BY
               value: zone
-            - name: MALACHIMQ_LOG_MIN_DOMAINS
+            - name: MALACHI_LOG_MIN_DOMAINS
               value: "2"
-            - name: MALACHIMQ_LOG_PLACEMENT_POLICY
+            - name: MALACHI_LOG_PLACEMENT_POLICY
               value: soft # 'hard' fails a produce that cannot span 2 zones
             # --- Auth: every seed user needs a non-default password (the prod validator raises otherwise) ---
-            - name: MALACHIMQ_ADMIN_PASS
+            - name: MALACHI_ADMIN_PASS
               valueFrom:
                 secretKeyRef:
                   name: malachi-secrets
                   key: admin-pass
-            - name: MALACHIMQ_PRODUCER_PASS
+            - name: MALACHI_PRODUCER_PASS
               valueFrom:
                 secretKeyRef:
                   name: malachi-secrets
                   key: producer-pass
-            - name: MALACHIMQ_CONSUMER_PASS
+            - name: MALACHI_CONSUMER_PASS
               valueFrom:
                 secretKeyRef:
                   name: malachi-secrets
                   key: consumer-pass
-            - name: MALACHIMQ_APP_PASS
+            - name: MALACHI_APP_PASS
               valueFrom:
                 secretKeyRef:
                   name: malachi-secrets
                   key: app-pass
-            - name: MALACHIMQ_AUDIT_LOG_OUTPUT
+            - name: MALACHI_AUDIT_LOG_OUTPUT
               value: stdout
           readinessProbe:
             httpGet:

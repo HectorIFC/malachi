@@ -249,104 +249,104 @@ Configuration flows: `config/config.exs` → `config/runtime.exs` (env vars) →
 ### Network & Protocol
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_TCP_PORT` | `4040` | TCP server port |
-| `MALACHIMQ_DASHBOARD_PORT` | `4041` | Dashboard HTTP port |
-| `MALACHIMQ_TCP_RECV_TIMEOUT` | `30000` | Receive timeout (ms) |
-| `MALACHIMQ_TCP_SEND_TIMEOUT` | `30000` | Send timeout (ms) |
-| `MALACHIMQ_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
-| `MALACHIMQ_SHARD_COUNT` | `1000` | Number of shards |
+| `MALACHI_TCP_PORT` | `4040` | TCP server port |
+| `MALACHI_DASHBOARD_PORT` | `4041` | Dashboard HTTP port |
+| `MALACHI_TCP_RECV_TIMEOUT` | `30000` | Receive timeout (ms) |
+| `MALACHI_TCP_SEND_TIMEOUT` | `30000` | Send timeout (ms) |
+| `MALACHI_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
+| `MALACHI_SHARD_COUNT` | `1000` | Number of shards |
 
 ### TLS/SSL
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_ENABLE_TLS` | `false` | Enable TLS encryption |
-| `MALACHIMQ_TLS_CERTFILE` | - | Path to TLS certificate |
-| `MALACHIMQ_TLS_KEYFILE` | - | Path to TLS private key |
-| `MALACHIMQ_TLS_CACERTFILE` | - | Path to CA certificate (mutual TLS) |
+| `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
+| `MALACHI_TLS_CERTFILE` | - | Path to TLS certificate |
+| `MALACHI_TLS_KEYFILE` | - | Path to TLS private key |
+| `MALACHI_TLS_CACERTFILE` | - | Path to CA certificate (mutual TLS) |
 
 ### Authentication & Sessions
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_ADMIN_PASS` | `admin123` (dev) | Admin password (**required** in prod) |
-| `MALACHIMQ_PRODUCER_PASS` | `producer123` (dev) | Producer password (**required** in prod) |
-| `MALACHIMQ_CONSUMER_PASS` | `consumer123` (dev) | Consumer password (**required** in prod) |
-| `MALACHIMQ_APP_PASS` | `app123` (dev) | App password (**required** in prod) |
-| `MALACHIMQ_DEFAULT_USERS` | - | Custom users: `user:pass:perm1,perm2;...` |
-| `MALACHIMQ_DISABLE_DEFAULT_USERS` | `false` | Disable all default users |
-| `MALACHIMQ_SESSION_TIMEOUT_SEC` | `3600` | Session token TTL (1 hour) |
-| `MALACHIMQ_AUTH_TIMEOUT_MS` | `10000` | Auth request timeout |
-| `MALACHIMQ_SESSION_IP_BINDING` | `true` | Bind sessions to client IP |
-| `MALACHIMQ_SESSION_UA_BINDING` | `false` | Bind sessions to user-agent |
-| `MALACHIMQ_MIN_PASSWORD_LEN` | `12` | Minimum password length |
-| `MALACHIMQ_REQUIRE_STRONG_PASSWORDS` | `false` | Enforce strong password policy |
+| `MALACHI_ADMIN_PASS` | `admin123` (dev) | Admin password (**required** in prod) |
+| `MALACHI_PRODUCER_PASS` | `producer123` (dev) | Producer password (**required** in prod) |
+| `MALACHI_CONSUMER_PASS` | `consumer123` (dev) | Consumer password (**required** in prod) |
+| `MALACHI_APP_PASS` | `app123` (dev) | App password (**required** in prod) |
+| `MALACHI_DEFAULT_USERS` | - | Custom users: `user:pass:perm1,perm2;...` |
+| `MALACHI_DISABLE_DEFAULT_USERS` | `false` | Disable all default users |
+| `MALACHI_SESSION_TIMEOUT_SEC` | `3600` | Session token TTL (1 hour) |
+| `MALACHI_AUTH_TIMEOUT_MS` | `10000` | Auth request timeout |
+| `MALACHI_SESSION_IP_BINDING` | `true` | Bind sessions to client IP |
+| `MALACHI_SESSION_UA_BINDING` | `false` | Bind sessions to user-agent |
+| `MALACHI_MIN_PASSWORD_LEN` | `12` | Minimum password length |
+| `MALACHI_REQUIRE_STRONG_PASSWORDS` | `false` | Enforce strong password policy |
 
 ### Account Lockout
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_MAX_AUTH_ATTEMPTS` | `5` | Failed attempts before lockout |
-| `MALACHIMQ_LOCKOUT_DURATION_MS` | `300000` | Lockout duration (5 min) |
-| `MALACHIMQ_PROGRESSIVE_LOCKOUT` | `true` | Increase lockout on repeated failures |
+| `MALACHI_MAX_AUTH_ATTEMPTS` | `5` | Failed attempts before lockout |
+| `MALACHI_LOCKOUT_DURATION_MS` | `300000` | Lockout duration (5 min) |
+| `MALACHI_PROGRESSIVE_LOCKOUT` | `true` | Increase lockout on repeated failures |
 
 ### Rate Limiting
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_RATE_LIMIT_ENABLED` | `true` (prod) | Enable rate limiting |
-| `MALACHIMQ_AUTH_RATE_LIMIT` | `10` | Auth attempts per window |
-| `MALACHIMQ_AUTH_RATE_WINDOW_MS` | `60000` | Auth rate window (1 min) |
-| `MALACHIMQ_PUBLISH_RATE_LIMIT` | `1000` | Publishes per window |
-| `MALACHIMQ_PUBLISH_RATE_WINDOW_MS` | `1000` | Publish rate window (1 sec) |
-| `MALACHIMQ_SUBSCRIBE_RATE_LIMIT` | `100` | Subscribes per window |
-| `MALACHIMQ_SUBSCRIBE_RATE_WINDOW_MS` | `60000` | Subscribe rate window (1 min) |
+| `MALACHI_RATE_LIMIT_ENABLED` | `true` (prod) | Enable rate limiting |
+| `MALACHI_AUTH_RATE_LIMIT` | `10` | Auth attempts per window |
+| `MALACHI_AUTH_RATE_WINDOW_MS` | `60000` | Auth rate window (1 min) |
+| `MALACHI_PUBLISH_RATE_LIMIT` | `1000` | Publishes per window |
+| `MALACHI_PUBLISH_RATE_WINDOW_MS` | `1000` | Publish rate window (1 sec) |
+| `MALACHI_SUBSCRIBE_RATE_LIMIT` | `100` | Subscribes per window |
+| `MALACHI_SUBSCRIBE_RATE_WINDOW_MS` | `60000` | Subscribe rate window (1 min) |
 
 ### Connection Limiting
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_CONNECTION_LIMIT_ENABLED` | `true` (prod) | Enable connection limiting |
-| `MALACHIMQ_MAX_CONN_PER_IP` | `100` | Max connections per IP |
-| `MALACHIMQ_MAX_TOTAL_CONN` | `10000` | Max total connections |
+| `MALACHI_CONNECTION_LIMIT_ENABLED` | `true` (prod) | Enable connection limiting |
+| `MALACHI_MAX_CONN_PER_IP` | `100` | Max connections per IP |
+| `MALACHI_MAX_TOTAL_CONN` | `10000` | Max total connections |
 
 ### Queue & Message Configuration
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_DEFAULT_DELIVERY_MODE` | `at_least_once` | Default delivery mode |
-| `MALACHIMQ_MAX_MESSAGE_SIZE` | `1048576` | Max message size (1MB) |
-| `MALACHIMQ_MAX_BUFFER_SIZE` | `10000` | Max messages per queue buffer |
-| `MALACHIMQ_OVERFLOW_BEHAVIOR` | `drop_newest` | Overflow: `drop_newest`, `drop_oldest`, `reject`, `block` |
-| `MALACHIMQ_BACKPRESSURE_THRESHOLD` | `0.8` | Buffer % to trigger backpressure |
-| `MALACHIMQ_BLOCK_TIMEOUT_MS` | `5000` | Timeout for `block` overflow strategy |
-| `MALACHIMQ_MAX_BLOCKED_PRODUCERS` | `1000` | Max blocked producers per queue |
-| `MALACHIMQ_CHANNEL_SEND_CONCURRENCY` | `5000` | Concurrent channel broadcast tasks |
+| `MALACHI_DEFAULT_DELIVERY_MODE` | `at_least_once` | Default delivery mode |
+| `MALACHI_MAX_MESSAGE_SIZE` | `1048576` | Max message size (1MB) |
+| `MALACHI_MAX_BUFFER_SIZE` | `10000` | Max messages per queue buffer |
+| `MALACHI_OVERFLOW_BEHAVIOR` | `drop_newest` | Overflow: `drop_newest`, `drop_oldest`, `reject`, `block` |
+| `MALACHI_BACKPRESSURE_THRESHOLD` | `0.8` | Buffer % to trigger backpressure |
+| `MALACHI_BLOCK_TIMEOUT_MS` | `5000` | Timeout for `block` overflow strategy |
+| `MALACHI_MAX_BLOCKED_PRODUCERS` | `1000` | Max blocked producers per queue |
+| `MALACHI_CHANNEL_SEND_CONCURRENCY` | `5000` | Concurrent channel broadcast tasks |
 
 ### Dashboard
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_DASHBOARD_AUTH_ENABLED` | `true` | Require auth for dashboard |
-| `MALACHIMQ_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission |
-| `MALACHIMQ_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Dashboard login rate limit |
-| `MALACHIMQ_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS |
-| `MALACHIMQ_DASHBOARD_CORS_ORIGINS` | `["*"]` | Allowed CORS origins (comma-separated) |
-| `MALACHIMQ_DASHBOARD_CSP` | (strict policy) | Custom Content-Security-Policy |
-| `MALACHIMQ_HSTS_ENABLED` | `true` | Enable HSTS header |
-| `MALACHIMQ_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
+| `MALACHI_DASHBOARD_AUTH_ENABLED` | `true` | Require auth for dashboard |
+| `MALACHI_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission |
+| `MALACHI_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Dashboard login rate limit |
+| `MALACHI_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS |
+| `MALACHI_DASHBOARD_CORS_ORIGINS` | `["*"]` | Allowed CORS origins (comma-separated) |
+| `MALACHI_DASHBOARD_CSP` | (strict policy) | Custom Content-Security-Policy |
+| `MALACHI_HSTS_ENABLED` | `true` | Enable HSTS header |
+| `MALACHI_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
 
 ### Audit Logging
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_AUDIT_LOG_OUTPUT` | `both` (prod) | Output: `file`, `stdout`, `both`, `ets_only` |
-| `MALACHIMQ_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Log file path |
-| `MALACHIMQ_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size before rotation |
+| `MALACHI_AUDIT_LOG_OUTPUT` | `both` (prod) | Output: `file`, `stdout`, `both`, `ets_only` |
+| `MALACHI_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Log file path |
+| `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size before rotation |
 
 ### Resource Monitoring
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_ATOM_CHECK_INTERVAL` | `60000` | Atom table check interval (ms) |
-| `MALACHIMQ_ATOM_WARNING_THRESHOLD` | `0.7` | Atom table warning at 70% |
-| `MALACHIMQ_ATOM_CRITICAL_THRESHOLD` | `0.9` | Atom table critical at 90% |
-| `MALACHIMQ_MEMORY_CHECK_INTERVAL` | `30000` | Memory check interval (ms) |
-| `MALACHIMQ_GC_THRESHOLD_MB` | `500` | Memory threshold for GC trigger |
-| `MALACHIMQ_AUTO_GC` | `true` | Enable automatic garbage collection |
-| `MALACHIMQ_MAX_DYNAMIC_QUEUES` | `10000` | Max dynamically created queues |
-| `MALACHIMQ_MAX_DYNAMIC_CHANNELS` | `1000` | Max dynamically created channels |
+| `MALACHI_ATOM_CHECK_INTERVAL` | `60000` | Atom table check interval (ms) |
+| `MALACHI_ATOM_WARNING_THRESHOLD` | `0.7` | Atom table warning at 70% |
+| `MALACHI_ATOM_CRITICAL_THRESHOLD` | `0.9` | Atom table critical at 90% |
+| `MALACHI_MEMORY_CHECK_INTERVAL` | `30000` | Memory check interval (ms) |
+| `MALACHI_GC_THRESHOLD_MB` | `500` | Memory threshold for GC trigger |
+| `MALACHI_AUTO_GC` | `true` | Enable automatic garbage collection |
+| `MALACHI_MAX_DYNAMIC_QUEUES` | `10000` | Max dynamically created queues |
+| `MALACHI_MAX_DYNAMIC_CHANNELS` | `1000` | Max dynamically created channels |
 
 ### Internationalization
 | Variable | Default | Description |
@@ -424,7 +424,7 @@ data: {
 
 ### TLS/mTLS
 - Optional TLS 1.2/1.3 encryption for TCP connections
-- Mutual TLS with client certificate verification via `MALACHIMQ_TLS_CACERTFILE`
+- Mutual TLS with client certificate verification via `MALACHI_TLS_CACERTFILE`
 - Dev certs: `./scripts/generate-dev-certs.sh`
 
 ### Rate Limiting (Token Bucket)

@@ -54,4 +54,4 @@ EOF
 echo "✅ CA + node cert generated, and a ready options file at $CERT_DIR/dist_tls.conf"
 echo ""
 echo "Run a release with inter-node TLS:"
-echo "  MALACHIMQ_DIST_TLS=true MALACHIMQ_DIST_TLS_OPTFILE=$ABS/dist_tls.conf bin/malachi start"
+echo "  MALACHI_DIST_TLS=true MALACHI_DIST_TLS_OPTFILE=$ABS/dist_tls.conf bin/malachi start"

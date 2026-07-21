@@ -30,35 +30,35 @@ All limits are configurable via environment variables:
 
 ```bash
 # Enable/disable rate limiting (default: true in production, false in test)
-MALACHIMQ_RATE_LIMIT_ENABLED=true
+MALACHI_RATE_LIMIT_ENABLED=true
 
 # Authentication rate limits (per IP)
-MALACHIMQ_AUTH_RATE_LIMIT=10              # Max attempts per window
-MALACHIMQ_AUTH_RATE_WINDOW_MS=60000       # Window duration (60 seconds)
+MALACHI_AUTH_RATE_LIMIT=10              # Max attempts per window
+MALACHI_AUTH_RATE_WINDOW_MS=60000       # Window duration (60 seconds)
 
 # Publish rate limits (per username)
-MALACHIMQ_PUBLISH_RATE_LIMIT=1000         # Max publishes per window
-MALACHIMQ_PUBLISH_RATE_WINDOW_MS=1000     # Window duration (1 second)
+MALACHI_PUBLISH_RATE_LIMIT=1000         # Max publishes per window
+MALACHI_PUBLISH_RATE_WINDOW_MS=1000     # Window duration (1 second)
 
 # Subscribe rate limits (per username)
-MALACHIMQ_SUBSCRIBE_RATE_LIMIT=100        # Max subscribes per window
-MALACHIMQ_SUBSCRIBE_RATE_WINDOW_MS=60000  # Window duration (60 seconds)
+MALACHI_SUBSCRIBE_RATE_LIMIT=100        # Max subscribes per window
+MALACHI_SUBSCRIBE_RATE_WINDOW_MS=60000  # Window duration (60 seconds)
 
 # Cleanup interval
-MALACHIMQ_RATE_LIMIT_CLEANUP_INTERVAL=300000  # 5 minutes
+MALACHI_RATE_LIMIT_CLEANUP_INTERVAL=300000  # 5 minutes
 ```
 
 ### Connection Limiting
 
 ```bash
 # Enable/disable connection limiting
-MALACHIMQ_CONNECTION_LIMIT_ENABLED=true
+MALACHI_CONNECTION_LIMIT_ENABLED=true
 
 # Per-IP connection limit
-MALACHIMQ_MAX_CONN_PER_IP=100
+MALACHI_MAX_CONN_PER_IP=100
 
 # Global connection limit
-MALACHIMQ_MAX_TOTAL_CONN=10000
+MALACHI_MAX_TOTAL_CONN=10000
 ```
 
 ## Architecture
@@ -354,21 +354,21 @@ The default limits are conservative and suitable for most deployments:
 
 **High-traffic scenarios**:
 ```bash
-MALACHIMQ_PUBLISH_RATE_LIMIT=10000
-MALACHIMQ_MAX_TOTAL_CONN=50000
+MALACHI_PUBLISH_RATE_LIMIT=10000
+MALACHI_MAX_TOTAL_CONN=50000
 ```
 
 **Security-focused**:
 ```bash
-MALACHIMQ_AUTH_RATE_LIMIT=5
-MALACHIMQ_AUTH_RATE_WINDOW_MS=120000  # 2 minutes
-MALACHIMQ_MAX_CONN_PER_IP=50
+MALACHI_AUTH_RATE_LIMIT=5
+MALACHI_AUTH_RATE_WINDOW_MS=120000  # 2 minutes
+MALACHI_MAX_CONN_PER_IP=50
 ```
 
 **Development/Testing**:
 ```bash
-MALACHIMQ_RATE_LIMIT_ENABLED=false
-MALACHIMQ_CONNECTION_LIMIT_ENABLED=false
+MALACHI_RATE_LIMIT_ENABLED=false
+MALACHI_CONNECTION_LIMIT_ENABLED=false
 ```
 
 ### Monitoring

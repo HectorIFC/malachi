@@ -34,7 +34,7 @@ docker run \
   --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
-  -e MALACHIMQ_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_ADMIN_PASS="your_secure_password" \
   hectorcardoso/malachi:latest
 ```
 
@@ -73,11 +73,11 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MALACHIMQ_TCP_PORT` | `4040` | TCP server port for clients |
-| `MALACHIMQ_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
+| `MALACHI_TCP_PORT` | `4040` | TCP server port for clients |
+| `MALACHI_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
-| `MALACHIMQ_ENABLE_TLS` | `false` | Enable TLS encryption |
-| `MALACHIMQ_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
+| `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
+| `MALACHI_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
 
 ### TLS Configuration
 
@@ -86,8 +86,8 @@ docker run \
   --name malachi \
   -p 4040:4040 \
   -p 4041:4041 \
-  -e MALACHIMQ_ADMIN_PASS="your_secure_password" \
-  -e MALACHIMQ_ENABLE_TLS=true \
+  -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_ENABLE_TLS=true \
   -v /path/to/certs:/app/priv/cert:ro \
   hectorcardoso/malachi:latest
 ```
@@ -127,13 +127,13 @@ The runtime can be tuned for high-concurrency channel broadcasts using environme
 
 Recommended environment variables (defaults shown):
 
-- `MALACHIMQ_CHANNEL_SEND_CONCURRENCY` (default: `5000`)
+- `MALACHI_CHANNEL_SEND_CONCURRENCY` (default: `5000`)
   - Maximum parallel sends performed by the channel broadcast. Increase for faster bulk deliveries on large machines.
 
-- `MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS` (default: `5000`)
+- `MALACHI_CHANNEL_SEND_TASK_TIMEOUT_MS` (default: `5000`)
   - Per-send task timeout in milliseconds. Tune to the characteristics of your environment.
 
-- `MALACHIMQ_SHARD_COUNT` (default: `1000`)
+- `MALACHI_SHARD_COUNT` (default: `1000`)
   - Number of shard processes used by the sharded integration test. Each shard represents `1_000_000 / SHARD_COUNT` logical subscribers when using the provided test helper.
 
 - `ERL_FLAGS` (example: `+P 2097152`)
@@ -146,9 +146,9 @@ services:
   malachi:
     image: hectorcardoso/malachi:latest
     environment:
-      - MALACHIMQ_CHANNEL_SEND_CONCURRENCY=5000
-      - MALACHIMQ_CHANNEL_SEND_TASK_TIMEOUT_MS=5000
-      - MALACHIMQ_SHARD_COUNT=1000
+      - MALACHI_CHANNEL_SEND_CONCURRENCY=5000
+      - MALACHI_CHANNEL_SEND_TASK_TIMEOUT_MS=5000
+      - MALACHI_SHARD_COUNT=1000
       - ERL_FLAGS=+P 2097152
 ```
 
@@ -190,7 +190,7 @@ Malachi uses a JSON-over-TCP protocol. All messages are newline-delimited.
 | `producer` | `producer123` | Publish only |
 | `consumer` | `consumer123` | Consume only |
 
-> ⚠️ **Security Note**: Change default credentials in production using `MALACHIMQ_DEFAULT_USERS` environment variable.
+> ⚠️ **Security Note**: Change default credentials in production using `MALACHI_DEFAULT_USERS` environment variable.
 
 ---
 

@@ -50,30 +50,30 @@ We currently do not offer a bug bounty program, but we publicly acknowledge secu
 
 ```bash
 # REQUIRED: Set strong passwords
-export MALACHIMQ_ADMIN_PASS="$(openssl rand -base64 32)"
-export MALACHIMQ_PRODUCER_PASS="$(openssl rand -base64 32)"
-export MALACHIMQ_CONSUMER_PASS="$(openssl rand -base64 32)"
+export MALACHI_ADMIN_PASS="$(openssl rand -base64 32)"
+export MALACHI_PRODUCER_PASS="$(openssl rand -base64 32)"
+export MALACHI_CONSUMER_PASS="$(openssl rand -base64 32)"
 
 # REQUIRED: Configure TLS
-export MALACHIMQ_TLS_CERTFILE=/path/to/cert.pem
-export MALACHIMQ_TLS_KEYFILE=/path/to/key.pem
+export MALACHI_TLS_CERTFILE=/path/to/cert.pem
+export MALACHI_TLS_KEYFILE=/path/to/key.pem
 
 # REQUIRED: Set dashboard credentials
-export MALACHIMQ_DASHBOARD_USER="admin"
-export MALACHIMQ_DASHBOARD_PASS="$(openssl rand -base64 24)"
+export MALACHI_DASHBOARD_USER="admin"
+export MALACHI_DASHBOARD_PASS="$(openssl rand -base64 24)"
 
 # RECOMMENDED: Enable all security features
-export MALACHIMQ_RATE_LIMIT_ENABLED=true
-export MALACHIMQ_SESSION_IP_BINDING=true
-export MALACHIMQ_AUDIT_LOG=true
-export MALACHIMQ_HSTS=true
+export MALACHI_RATE_LIMIT_ENABLED=true
+export MALACHI_SESSION_IP_BINDING=true
+export MALACHI_AUDIT_LOG=true
+export MALACHI_HSTS=true
 
 # RECOMMENDED: Configure resource limits
-export MALACHIMQ_MAX_BUFFER_SIZE=10000
-export MALACHIMQ_OVERFLOW_BEHAVIOR=reject
-export MALACHIMQ_MAX_CONN_PER_IP=50
-export MALACHIMQ_MAX_TOTAL_CONN=5000
-export MALACHIMQ_GC_THRESHOLD_MB=500
+export MALACHI_MAX_BUFFER_SIZE=10000
+export MALACHI_OVERFLOW_BEHAVIOR=reject
+export MALACHI_MAX_CONN_PER_IP=50
+export MALACHI_MAX_TOTAL_CONN=5000
+export MALACHI_GC_THRESHOLD_MB=500
 ```
 
 ### Network Security
@@ -121,7 +121,7 @@ export MALACHIMQ_GC_THRESHOLD_MB=500
 
 - **Single-Node Only:** No built-in cluster authentication (use network-level security)
 - **Volatile Messages:** Messages are stored in memory ETS tables and do not survive restarts.
-- **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHIMQ_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
+- **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHI_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
 - **No Message-Level Encryption:** Implement application-level encryption if needed
 
 ## Security Advisories

@@ -11,16 +11,16 @@ services:
       - "4040:4040"
       - "4041:4041"
     environment:
-      - MALACHIMQ_TCP_PORT=4040
-      - MALACHIMQ_DASHBOARD_PORT=4041
+      - MALACHI_TCP_PORT=4040
+      - MALACHI_DASHBOARD_PORT=4041
       - MALACHI_LOCALE=en_US
-      - MALACHIMQ_ADMIN_PASS=${MALACHIMQ_ADMIN_PASS:-admin123}
-      - MALACHIMQ_PRODUCER_PASS=${MALACHIMQ_PRODUCER_PASS:-producer123}
-      - MALACHIMQ_CONSUMER_PASS=${MALACHIMQ_CONSUMER_PASS:-consumer123}
-      - MALACHIMQ_APP_PASS=${MALACHIMQ_APP_PASS:-app123}
-      - MALACHIMQ_RATE_LIMIT_ENABLED=true
-      - MALACHIMQ_SESSION_IP_BINDING=true
-      - MALACHIMQ_AUDIT_LOG_OUTPUT=stdout
+      - MALACHI_ADMIN_PASS=${MALACHI_ADMIN_PASS:-admin123}
+      - MALACHI_PRODUCER_PASS=${MALACHI_PRODUCER_PASS:-producer123}
+      - MALACHI_CONSUMER_PASS=${MALACHI_CONSUMER_PASS:-consumer123}
+      - MALACHI_APP_PASS=${MALACHI_APP_PASS:-app123}
+      - MALACHI_RATE_LIMIT_ENABLED=true
+      - MALACHI_SESSION_IP_BINDING=true
+      - MALACHI_AUDIT_LOG_OUTPUT=stdout
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -44,11 +44,10 @@ services:
     volumes:
       - ./scripts:/app
     environment:
-      - MALACHIMQ_HOST=malachi
-      - MALACHIMQ_PORT=4040
-      - MALACHIMQ_USER=producer
-      - MALACHIMQ_PASS=${MALACHIMQ_PRODUCER_PASS:-producer123}
-      - MALACHIMQ_QUEUE=test
+      - MALACHI_HOST=malachi
+      - MALACHI_PORT=4040
+      - MALACHI_USER=producer
+      - MALACHI_PASS=${MALACHI_PRODUCER_PASS:-producer123}
       - MALACHI_LOCALE=en_US
     depends_on:
       malachi:

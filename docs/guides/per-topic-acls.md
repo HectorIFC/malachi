@@ -19,7 +19,7 @@ In **strict mode** rules 1 and 3 are the only paths: global permissions are igno
 **deny-by-default**. Only an explicit grant, or `admin`, allows anything.
 
 ```bash
-MALACHIMQ_ACL_STRICT=true
+MALACHI_ACL_STRICT=true
 ```
 
 ## Grants are allow-only

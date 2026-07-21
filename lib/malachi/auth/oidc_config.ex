@@ -8,7 +8,7 @@ defmodule Malachi.Auth.OidcConfig do
   when a required setting is missing/blank or the PEM cannot be parsed into a signer, so a half-configured
   deployment fails closed rather than trusting tokens it cannot verify.
 
-  Settings (`:malachi` app env, populated from `MALACHIMQ_OIDC_*` in `config/runtime.exs`):
+  Settings (`:malachi` app env, populated from `MALACHI_OIDC_*` in `config/runtime.exs`):
 
     * `:oidc_public_key`: the IdP signing key as a PEM string (required)
     * `:oidc_issuer`: the expected `iss` (required)

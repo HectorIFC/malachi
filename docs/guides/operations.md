@@ -7,8 +7,8 @@ left at their development values.
 
 | port | env | serves |
 |---|---|---|
-| 4040 | `MALACHIMQ_TCP_PORT` | the binary log protocol, all client traffic |
-| 4041 | `MALACHIMQ_DASHBOARD_PORT` | dashboard, health checks, metrics |
+| 4040 | `MALACHI_TCP_PORT` | the binary log protocol, all client traffic |
+| 4041 | `MALACHI_DASHBOARD_PORT` | dashboard, health checks, metrics |
 
 Only 4040 needs to be reachable by clients. Treat 4041 as an internal port: it exposes operational detail
 and user management.
@@ -51,9 +51,9 @@ Worth alerting on:
 Segments are reclaimed by age or total size:
 
 ```bash
-MALACHIMQ_RETENTION_MAX_AGE_MS=604800000     # 7 days
-MALACHIMQ_RETENTION_MAX_BYTES=10737418240    # 10 GiB per range
-MALACHIMQ_RETENTION_INTERVAL_MS=60000
+MALACHI_RETENTION_MAX_AGE_MS=604800000     # 7 days
+MALACHI_RETENTION_MAX_BYTES=10737418240    # 10 GiB per range
+MALACHI_RETENTION_INTERVAL_MS=60000
 ```
 
 **Leave a limit unset to disable it.** With both unset, segments are kept forever and no retention
@@ -66,20 +66,20 @@ range**, not per topic or per node. With both limits set a segment goes if eithe
 ## TLS
 
 ```bash
-MALACHIMQ_ENABLE_TLS=true
-MALACHIMQ_REQUIRE_TLS=true
-MALACHIMQ_TLS_CERTFILE=/etc/malachi/server.pem
-MALACHIMQ_TLS_KEYFILE=/etc/malachi/server-key.pem
-MALACHIMQ_TLS_CACERTFILE=/etc/malachi/ca.pem
-MALACHIMQ_TLS_VERIFY=verify_peer
-MALACHIMQ_TLS_VERSIONS=tlsv1.3,tlsv1.2
+MALACHI_ENABLE_TLS=true
+MALACHI_REQUIRE_TLS=true
+MALACHI_TLS_CERTFILE=/etc/malachi/server.pem
+MALACHI_TLS_KEYFILE=/etc/malachi/server-key.pem
+MALACHI_TLS_CACERTFILE=/etc/malachi/ca.pem
+MALACHI_TLS_VERIFY=verify_peer
+MALACHI_TLS_VERSIONS=tlsv1.3,tlsv1.2
 ```
 
-`MALACHIMQ_ENABLE_TLS` offers TLS; `MALACHIMQ_REQUIRE_TLS` refuses plaintext.
+`MALACHI_ENABLE_TLS` offers TLS; `MALACHI_REQUIRE_TLS` refuses plaintext.
 
 **In production both are on unless you turn them off.** `REQUIRE_TLS` defaults to true under
 `MIX_ENV=prod`, and `ENABLE_TLS` simply follows it. So the risk here is not forgetting to enable TLS, it
-is the opposite: setting `MALACHIMQ_REQUIRE_TLS=false` to get past a certificate problem and leaving it
+is the opposite: setting `MALACHI_REQUIRE_TLS=false` to get past a certificate problem and leaving it
 that way, which disables both at once. Outside production both default to off.
 
 Invalid TLS configuration **raises at boot** in production rather than starting insecurely; in dev and
@@ -89,18 +89,18 @@ test it only warns.
 
 The checks that catch the common mistakes:
 
-- [ ] **Passwords set explicitly.** Production requires `MALACHIMQ_ADMIN_PASS` and friends via environment;
+- [ ] **Passwords set explicitly.** Production requires `MALACHI_ADMIN_PASS` and friends via environment;
       no credentials ship in the base config. The dev defaults (`admin123`) exist only in `dev.exs` and
       `test.exs`.
-- [ ] **`MALACHIMQ_REQUIRE_TLS` not set to `false`.** It defaults to true in production, so the check is
+- [ ] **`MALACHI_REQUIRE_TLS` not set to `false`.** It defaults to true in production, so the check is
       that nobody disabled it while debugging certificates.
-- [ ] **Dashboard not publicly reachable**, and `MALACHIMQ_DASHBOARD_REQUIRE_ADMIN` on.
-- [ ] **`MALACHIMQ_LOG_REPLICATION_FACTOR` at least 3** if you want to survive a node loss. With 2, quorum
+- [ ] **Dashboard not publicly reachable**, and `MALACHI_DASHBOARD_REQUIRE_ADMIN` on.
+- [ ] **`MALACHI_LOG_REPLICATION_FACTOR` at least 3** if you want to survive a node loss. With 2, quorum
       is 2, so losing either replica stalls writes.
 - [ ] **Retention configured.** The default keeps everything, and the disk fills quietly.
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **`malachi_domain_violations` alerted on.**
-- [ ] If you use ACLs, **`MALACHIMQ_ACL_STRICT=true`**. Without it grants are inert and global permissions
+- [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).
 
 ## Docker

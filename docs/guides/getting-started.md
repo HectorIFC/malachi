@@ -14,7 +14,7 @@ mix deps.get
 iex -S mix        # TCP on 4040, dashboard on 4041
 ```
 
-A single node is in-memory by default. Set `MALACHIMQ_LOG_CLUSTER` / `MALACHIMQ_LOG_NODES` for a replicated,
+A single node is in-memory by default. Set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated,
 HA control plane over `ra`; the environment variables are listed in the
 [README](../../README.md) (the *Environment Variables* section).
 

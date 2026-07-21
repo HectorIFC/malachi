@@ -38,9 +38,9 @@ jobs:
           bash benchmark/run_all_baselines.sh
         env:
           MIX_ENV: dev
-          MALACHIMQ_LOGGER_LEVEL: warning
-          MALACHIMQ_RATE_LIMIT_ENABLED: 'false'
-          MALACHIMQ_CONNECTION_LIMIT_ENABLED: 'false'
+          MALACHI_LOGGER_LEVEL: warning
+          MALACHI_RATE_LIMIT_ENABLED: 'false'
+          MALACHI_CONNECTION_LIMIT_ENABLED: 'false'
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4

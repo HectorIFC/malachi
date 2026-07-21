@@ -49,9 +49,9 @@ defmodule Malachi.I18n do
     },
     tls_required_but_disabled: %{
       "pt_BR" =>
-        "═══════════════════════════════════════════════════════════════\nERRO DE SEGURANÇA: TLS é obrigatório em produção\n═══════════════════════════════════════════════════════════════\n\nConfigure certificados TLS:\n  MALACHIMQ_TLS_CERTFILE=/caminho/para/certificado.pem\n  MALACHIMQ_TLS_KEYFILE=/caminho/para/chave_privada.pem\n  MALACHIMQ_ENABLE_TLS=true\n\nOu desabilite a exigência de TLS (NÃO RECOMENDADO):\n  MALACHIMQ_REQUIRE_TLS=false\n═══════════════════════════════════════════════════════════════",
+        "═══════════════════════════════════════════════════════════════\nERRO DE SEGURANÇA: TLS é obrigatório em produção\n═══════════════════════════════════════════════════════════════\n\nConfigure certificados TLS:\n  MALACHI_TLS_CERTFILE=/caminho/para/certificado.pem\n  MALACHI_TLS_KEYFILE=/caminho/para/chave_privada.pem\n  MALACHI_ENABLE_TLS=true\n\nOu desabilite a exigência de TLS (NÃO RECOMENDADO):\n  MALACHI_REQUIRE_TLS=false\n═══════════════════════════════════════════════════════════════",
       "en_US" =>
-        "═══════════════════════════════════════════════════════════════\nSECURITY ERROR: TLS is required in production\n═══════════════════════════════════════════════════════════════\n\nConfigure TLS certificates:\n  MALACHIMQ_TLS_CERTFILE=/path/to/certificate.pem\n  MALACHIMQ_TLS_KEYFILE=/path/to/private_key.pem\n  MALACHIMQ_ENABLE_TLS=true\n\nOr disable TLS requirement (NOT RECOMMENDED):\n  MALACHIMQ_REQUIRE_TLS=false\n═══════════════════════════════════════════════════════════════"
+        "═══════════════════════════════════════════════════════════════\nSECURITY ERROR: TLS is required in production\n═══════════════════════════════════════════════════════════════\n\nConfigure TLS certificates:\n  MALACHI_TLS_CERTFILE=/path/to/certificate.pem\n  MALACHI_TLS_KEYFILE=/path/to/private_key.pem\n  MALACHI_ENABLE_TLS=true\n\nOr disable TLS requirement (NOT RECOMMENDED):\n  MALACHI_REQUIRE_TLS=false\n═══════════════════════════════════════════════════════════════"
     },
     tls_cert_file_not_found: %{
       "pt_BR" => "Arquivo de certificado TLS não encontrado: %{path}",
@@ -114,12 +114,12 @@ defmodule Malachi.I18n do
       "en_US" => "TLS versions configured: %{versions}"
     },
     tls_cert_not_configured: %{
-      "pt_BR" => "Arquivo de certificado TLS não configurado (MALACHIMQ_TLS_CERTFILE)",
-      "en_US" => "TLS certificate file not configured (MALACHIMQ_TLS_CERTFILE)"
+      "pt_BR" => "Arquivo de certificado TLS não configurado (MALACHI_TLS_CERTFILE)",
+      "en_US" => "TLS certificate file not configured (MALACHI_TLS_CERTFILE)"
     },
     tls_key_not_configured: %{
-      "pt_BR" => "Arquivo de chave privada TLS não configurado (MALACHIMQ_TLS_KEYFILE)",
-      "en_US" => "TLS private key file not configured (MALACHIMQ_TLS_KEYFILE)"
+      "pt_BR" => "Arquivo de chave privada TLS não configurado (MALACHI_TLS_KEYFILE)",
+      "en_US" => "TLS private key file not configured (MALACHI_TLS_KEYFILE)"
     },
     acceptor_started: %{
       "pt_BR" => "Acceptor #%{id} iniciado",
@@ -413,9 +413,9 @@ defmodule Malachi.I18n do
     # Config validator translations
     warning_no_admin: %{
       "pt_BR" =>
-        "╔════════════════════════════════════════════════════════════╗\n║ AVISO: Nenhum usuário admin configurado                      ║\n╠════════════════════════════════════════════════════════════╣\n║ Não será possível gerenciar usuários, desbloquear contas,   ║\n║ ou realizar ações administrativas.                           ║\n║                                                              ║\n║ Configure um usuário admin:                                  ║\n║   MALACHIMQ_ADMIN_PASS=\"<senha_forte>\"                      ║\n╚════════════════════════════════════════════════════════════╝",
+        "╔════════════════════════════════════════════════════════════╗\n║ AVISO: Nenhum usuário admin configurado                      ║\n╠════════════════════════════════════════════════════════════╣\n║ Não será possível gerenciar usuários, desbloquear contas,   ║\n║ ou realizar ações administrativas.                           ║\n║                                                              ║\n║ Configure um usuário admin:                                  ║\n║   MALACHI_ADMIN_PASS=\"<senha_forte>\"                      ║\n╚════════════════════════════════════════════════════════════╝",
       "en_US" =>
-        "╔════════════════════════════════════════════════════════════╗\n║ WARNING: No admin user configured                          ║\n╠════════════════════════════════════════════════════════════╣\n║ You will not be able to manage users, unlock accounts,    ║\n║ or perform administrative actions.                         ║\n║                                                            ║\n║ Configure an admin user:                                   ║\n║   MALACHIMQ_ADMIN_PASS=\"<strong_password>\"                 ║\n╚════════════════════════════════════════════════════════════╝"
+        "╔════════════════════════════════════════════════════════════╗\n║ WARNING: No admin user configured                          ║\n╠════════════════════════════════════════════════════════════╣\n║ You will not be able to manage users, unlock accounts,    ║\n║ or perform administrative actions.                         ║\n║                                                            ║\n║ Configure an admin user:                                   ║\n║   MALACHI_ADMIN_PASS=\"<strong_password>\"                 ║\n╚════════════════════════════════════════════════════════════╝"
     },
     warning_weak_passwords: %{
       "pt_BR" =>
@@ -465,14 +465,14 @@ defmodule Malachi.I18n do
           "Uma senha de admin aleatória foi gerada no primeiro boot. ANOTE AGORA:\n" <>
           "ela é mostrada só uma vez e não pode ser recuperada:\n\n" <>
           "    usuário: %{username}\n    senha:   %{password}\n\n" <>
-          "Defina MALACHIMQ_ADMIN_PASS para usar a sua própria e pular a geração.\n" <>
+          "Defina MALACHI_ADMIN_PASS para usar a sua própria e pular a geração.\n" <>
           "════════════════════════════════════════════════════════════════",
       "en_US" =>
         "\n════════════════════════════════════════════════════════════════\n" <>
           "A random admin password was generated on first boot. SAVE IT NOW:\n" <>
           "it is shown only once and cannot be recovered:\n\n" <>
           "    username: %{username}\n    password: %{password}\n\n" <>
-          "Set MALACHIMQ_ADMIN_PASS to provide your own and skip generation.\n" <>
+          "Set MALACHI_ADMIN_PASS to provide your own and skip generation.\n" <>
           "════════════════════════════════════════════════════════════════"
     }
   }

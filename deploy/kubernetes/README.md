@@ -13,10 +13,10 @@ Malachi's control plane is **Raft** (`ra`), which needs **stable node identities
 - **Headless Service** (`malachi-headless`, `clusterIP: None`), publishes per-pod DNS
   (`malachi-0.malachi-headless.<ns>.svc.cluster.local`) for Erlang distribution and the `ra` peer set.
   `publishNotReadyAddresses: true` lets peers resolve each other *during* cluster formation, before Ready.
-- **Static peer set** (`MALACHIMQ_LOG_NODES` = the three pod DNS names), idiomatic for a fixed-size CP
+- **Static peer set** (`MALACHI_LOG_NODES` = the three pod DNS names), idiomatic for a fixed-size CP
   cluster (this is how RabbitMQ and friends do it), and the node names match `RELEASE_NODE` exactly.
 - **libcluster, `epmd` strategy**. Connectivity only: it keeps the (already-known) peers connected over
-  Erlang distribution. It reuses `MALACHIMQ_LOG_NODES`, so no extra config and no Kubernetes-API RBAC.
+  Erlang distribution. It reuses `MALACHI_LOG_NODES`, so no extra config and no Kubernetes-API RBAC.
   (The `kubernetes` strategy is available for dynamic, autoscaling deployments, see the note below.)
 - **`podManagementPolicy: Parallel`**: the three pods start together so the Raft cluster forms with a
   quorum instead of waiting pod-by-pod.
@@ -28,9 +28,9 @@ Segment replicas should span distinct failure domains (zones). Two pieces make t
 
 1. **`topologySpreadConstraints`** on `topology.kubernetes.io/zone` spread the pods across zones.
 2. An **init container** reads each pod's node zone label (via a least-privilege `get nodes` ClusterRole)
-   and the main container folds it into `MALACHIMQ_LOG_ATTRIBUTES=zone=<zone>`. With
-   `MALACHIMQ_LOG_SPREAD_BY=zone`, placement then spreads replicas across zones, and
-   `MALACHIMQ_LOG_MIN_DOMAINS=2` requires each segment to span two zones. The policy is `soft` (best-effort,
+   and the main container folds it into `MALACHI_LOG_ATTRIBUTES=zone=<zone>`. With
+   `MALACHI_LOG_SPREAD_BY=zone`, placement then spreads replicas across zones, and
+   `MALACHI_LOG_MIN_DOMAINS=2` requires each segment to span two zones. The policy is `soft` (best-effort,
    violations are surfaced as the `malachi_domain_violations` metric); set it to `hard` to *reject* a
    produce that cannot span two zones.
 
@@ -50,7 +50,7 @@ Segment replicas should span distinct failure domains (zones). Two pieces make t
      --from-literal=app-pass="$(openssl rand -hex 16)"
    ```
 
-   The manifest also runs **inter-node distribution over mutual TLS** (`MALACHIMQ_DIST_TLS`). Provide the CA
+   The manifest also runs **inter-node distribution over mutual TLS** (`MALACHI_DIST_TLS`). Provide the CA
    + a CA-signed node cert/key and the `ssl_dist` options file via the `malachi-dist-tls` Secret, generate
    dev material with `bash scripts/generate-dist-certs.sh`, then:
 
@@ -95,15 +95,15 @@ degradation is surfaced, not hidden.
 For an autoscaling, non-fixed deployment you can swap the `epmd` strategy for Kubernetes-API discovery:
 
 ```yaml
-- name: MALACHIMQ_CLUSTER_STRATEGY
+- name: MALACHI_CLUSTER_STRATEGY
   value: kubernetes
-- name: MALACHIMQ_CLUSTER_KUBERNETES_SELECTOR
+- name: MALACHI_CLUSTER_KUBERNETES_SELECTOR
   value: app=malachi
-- name: MALACHIMQ_CLUSTER_KUBERNETES_NODE_BASENAME
+- name: MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME
   value: malachi
 ```
 
 This needs a `get/list/watch` on `pods` in the RBAC, and the discovered node names must match
 `RELEASE_NODE` (with a StatefulSet + headless service and `mode: hostname` they do). The `ra` peer set
-still comes from `MALACHIMQ_LOG_NODES`, since Raft membership is explicit, dynamic *membership* changes
+still comes from `MALACHI_LOG_NODES`, since Raft membership is explicit, dynamic *membership* changes
 ride on the rebalancing coordinator, not on discovery.

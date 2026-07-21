@@ -9,17 +9,17 @@ Confusing these is the main source of configuration mistakes:
 
 - **Node discovery** decides which BEAM nodes can see each other. That is libcluster, and it is
   connectivity only.
-- **Cluster membership** decides which nodes hold data. That is `MALACHIMQ_LOG_NODES`, an explicit list,
+- **Cluster membership** decides which nodes hold data. That is `MALACHI_LOG_NODES`, an explicit list,
   because Raft membership must be explicit.
 
 Discovery never adds a node to the data plane. A node that joins the Erlang cluster but is absent from
-`MALACHIMQ_LOG_NODES` stores nothing.
+`MALACHI_LOG_NODES` stores nothing.
 
 ```bash
-MALACHIMQ_CLUSTER_STRATEGY=gossip     # or kubernetes, epmd. Absent = single node
-MALACHIMQ_LOG_CLUSTER=true
-MALACHIMQ_LOG_NODES=malachi@10.0.0.1,malachi@10.0.0.2,malachi@10.0.0.3
-MALACHIMQ_LOG_REPLICATION_FACTOR=3
+MALACHI_CLUSTER_STRATEGY=gossip     # or kubernetes, epmd. Absent = single node
+MALACHI_LOG_CLUSTER=true
+MALACHI_LOG_NODES=malachi@10.0.0.1,malachi@10.0.0.2,malachi@10.0.0.3
+MALACHI_LOG_REPLICATION_FACTOR=3
 ```
 
 | strategy | for |
@@ -29,7 +29,7 @@ MALACHIMQ_LOG_REPLICATION_FACTOR=3
 | `epmd` | a fixed list of known hosts |
 
 For Kubernetes use a **StatefulSet**, not a Deployment: each pod needs a stable name so
-`MALACHIMQ_LOG_NODES` stays meaningful across restarts.
+`MALACHI_LOG_NODES` stays meaningful across restarts.
 
 ## What gets replicated, and how
 
@@ -48,8 +48,8 @@ durable write to no benefit: the segment already *is* the log.
 With one Raft group for all metadata, that group is a bottleneck. Vnodes shard it:
 
 ```bash
-MALACHIMQ_LOG_VNODES=8
-MALACHIMQ_LOG_VNODE_REPLICATION_FACTOR=3
+MALACHI_LOG_VNODES=8
+MALACHI_LOG_VNODE_REPLICATION_FACTOR=3
 ```
 
 Each vnode owns an arc of the hash ring and runs its own Raft group. A topic's metadata lives in exactly
@@ -87,7 +87,7 @@ response is retry, which the bundled scripts already do. See
 ### The durability caveat
 
 The ring is **gossiped cluster state, not durable**. On a full-cluster restart it reseeds from
-`MALACHIMQ_LOG_VNODES`, whose even geometry does not match a ring grown by splitting, which would orphan
+`MALACHI_LOG_VNODES`, whose even geometry does not match a ring grown by splitting, which would orphan
 the migrated metadata.
 
 So treat a reshard as **effective while the cluster is up**. This gap is pre-existing and shared with vnode
@@ -100,9 +100,9 @@ Placement is rendezvous (HRW) hashing, so adding or removing a node changes the 
 segments. Moving them is **manual by default**:
 
 ```bash
-MALACHIMQ_AUTO_REBALANCE=true
-MALACHIMQ_AUTO_REBALANCE_INTERVAL_MS=30000
-MALACHIMQ_AUTO_REBALANCE_STABILIZATION=3
+MALACHI_AUTO_REBALANCE=true
+MALACHI_AUTO_REBALANCE_INTERVAL_MS=30000
+MALACHI_AUTO_REBALANCE_STABILIZATION=3
 ```
 
 With auto-rebalancing on, the lease holder computes a plan each tick and commits it only after the plan is

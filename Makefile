@@ -53,10 +53,10 @@ docker-run:
 		--name $(APP_NAME) \
 		-p 4040:4040 \
 		-p 4041:4041 \
-		-e MALACHIMQ_ADMIN_PASS="admin_dev_pass" \
-		-e MALACHIMQ_PRODUCER_PASS="producer_dev_pass" \
-		-e MALACHIMQ_CONSUMER_PASS="consumer_dev_pass" \
-		-e MALACHIMQ_APP_PASS="app_dev_pass" \
+		-e MALACHI_ADMIN_PASS="admin_dev_pass" \
+		-e MALACHI_PRODUCER_PASS="producer_dev_pass" \
+		-e MALACHI_CONSUMER_PASS="consumer_dev_pass" \
+		-e MALACHI_APP_PASS="app_dev_pass" \
 		$(DOCKER_USERNAME)/$(APP_NAME):$(VERSION)
 
 docker-stop:

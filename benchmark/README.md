@@ -296,7 +296,7 @@ cat benchmark/results/latency_*.json | jq '.results'
 
 ```bash
 # Test with more partitions
-export MALACHIMQ_PARTITION_MULTIPLIER=200
+export MALACHI_PARTITION_MULTIPLIER=200
 ./benchmark/run_all_baselines.sh
 
 # Compare with default baseline
