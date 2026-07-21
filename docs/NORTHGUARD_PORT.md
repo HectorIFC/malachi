@@ -2146,44 +2146,51 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       NorthGuard routes requests (a broker consults its local view of the sharded metadata, the `HashRing`
       over vnodes, and forwards to the owning vnode). The slicing: **A1** routing plus forwarding · **A2**
       the coordinator on the vnode's leader · **A3** a multi-node test.
-      - ✅ **A1: roteamento do coordinator ao nó dono do vnode + encaminhamento.** Novo módulo **puro**
-        `Malachi.Consumer.CoordinatorRouter`: `location(topic, topology, this_node, leader_fn)` roteia
-        `topic → vnode` (via `HashRing`), resolve o **líder** do vnode e decide `:local | {:remote, node}`;
-        `ref/2` vira o ref de `GenServer` (`{name, node}` se remoto). Roteia por **topic** (co-loca a
-        coordenação com o vnode/metadata do topic, onde o `ranges_fun`/`active_range_ids` do coordinator
-        resolve contra o broker local). **Fail-safe para `:local`** em toda lacuna de resolução: sem topologia
-        (single-node/in-memory), ring vazio, vnode ausente do mapa, ou líder não-resolvível, verificado que
-        `:ra.members` num server inexistente **retorna `{:error, :noproc}`** (não levanta), então um vnode
-        momentaneamente indisponível degrada a local em vez de derrubar o request. Topologia estática
-        (ring + vnode→server_id) publicada **1× no boot** do control plane shardado (`with_metadata_authority`)
-        via `:persistent_term` (read lock-free; ausente = single-node → `nil` → local). O `tcp_protocol`
-        resolve o ref do coordinator **por request** (`coordinator_for/1`) nos 4 sites (subscribe/fetch/
-        stream_ack/leave) e o passa ao `LogApi`; o ref resolvido também vira o `sub.coordinator` (o `leave`
-        async do `:DOWN` encaminha ao dono). **Single-node inalterado** (resolve → `:persistent_term` miss →
-        nome local). Testado (puro, 9): topologia nil/ring vazio/vnode ausente/líder nil → local; este-nó →
-        local; outro-nó → `{:remote}`; `ref/2`; round-trip do `put_topology`/`topology`. Suíte 776 testes 0
-        falhas; credo/dialyzer/format limpos. **Limitação conhecida (resolvida no A2):** o `sub.coordinator` era
-        o ref resolvido **no subscribe** e não era atualizado nos acks → numa troca de liderança o `leave` do
-        `:DOWN` iria ao líder antigo. **Próximo: A2 (consistência de failover) → A3 (teste `:multinode`).**
-      - ✅ **A2 (parte A). Consistência de failover: refresh do coordinator no ack + guard de ownership.**
-        Fecha a limitação do A1 e endurece a janela de failover, com **membership soft** e **coordinator = líder
-        do vnode**: ambos **confirmados pela transcrição do NorthGuard no repo** (`northguard_meetup_transcript.txt`:
-        *"this coordinator is the leader of a given VNode... manages all the metadata owned by VNode"*; o Conductor
-        do Xinfra faz client-management por conexão/heartbeat, só offsets/checkpoints são duráveis). Decisão
-        **A2-A** (foco em correção; o lifecycle "rodar só no líder via `VnodeCoordinatorManager"` entra no A3, junto
-        do teste multinode que o exercita: comportamento observável é idêntico, então B é fidelidade de detalhe
-        interno só testável multi-nó). **Parte 1, refresh:** `BrokerServer.stream_ack/7` ganha o param
-        `coordinator`; o `handle_call` atualiza `sub.coordinator` (além de `sub.ranges`), então após uma troca de
-        líder o `stream_ack_member` (que já re-resolve o líder fresco no `tcp_protocol`) grava o ref novo e o
-        `leave` async do `:DOWN` acerta o **dono atual**. **Parte 2, guard:** o `GroupCoordinator` ganha o seam
-        `owns_fun` (default `fn _ -> true end`; no boot, `CoordinatorRouter.owns?/1`); `join`/`poll` rejeitam com
-        `{:error, :not_owner}` **sem** registrar quando o nó não lidera o topic (defende contra roteamento stale na
-        janela de failover: sem assignment fantasma). O `LogApi` (subscribe/fetch/stream_ack member) propaga o
-        `:not_owner` e o `tcp_protocol.subscribe` responde erro em vez de entrar em stream (cliente re-resolve e
-        re-subscreve); heartbeat/fetch **auto-curam** no próximo request (roteamento é por-request). Single-node:
-        `owns?` é sempre `:local` → nunca rejeita → inalterado. Testado: guard (poll/join → `:not_owner`; sem
-        registro fantasma; owns_fun por-topic. 3) + refresh (ack via coordinator diferente → `:DOWN` leave acerta
-        o novo: 1). Suíte 780 testes 0 falhas; credo/dialyzer/format limpos. **Próximo: A3 (validação `:multinode`).**
+      - ✅ **A1: routing the coordinator to the vnode's owning node, plus forwarding.** A new **pure**
+        `Malachi.Consumer.CoordinatorRouter` module: `location(topic, topology, this_node, leader_fn)`
+        routes `topic → vnode` (through `HashRing`), resolves the vnode's **leader** and decides
+        `:local | {:remote, node}`; `ref/2` turns that into a `GenServer` ref (`{name, node}` when remote).
+        It routes by **topic** (co-locating coordination with the topic's vnode and metadata, where the
+        coordinator's `ranges_fun`/`active_range_ids` resolves against the local broker). It **fails safe to
+        `:local`** at every resolution gap: no topology (single-node or in-memory), an empty ring, a vnode
+        absent from the map, or an unresolvable leader, having verified that `:ra.members` against a
+        nonexistent server **returns `{:error, :noproc}`** (rather than raising), so a momentarily
+        unavailable vnode degrades to local instead of failing the request. The static topology (the ring
+        plus vnode→server_id) is published **once at boot** of the sharded control plane
+        (`with_metadata_authority`) through `:persistent_term` (a lock-free read; absent means single-node,
+        so `nil`, so local). `tcp_protocol` resolves the coordinator ref **per request**
+        (`coordinator_for/1`) at all 4 sites (subscribe, fetch, stream_ack, leave) and passes it to
+        `LogApi`; the resolved ref also becomes `sub.coordinator` (so the `:DOWN`'s async `leave` forwards
+        to the owner). **Single-node is unchanged** (resolution misses `:persistent_term` and falls back to
+        the local name). Tested (pure, 9): a nil topology, an empty ring, an absent vnode and a nil leader
+        all yield local; this node yields local; another node yields `{:remote}`; plus `ref/2` and a
+        `put_topology`/`topology` round trip. Suite at 776 tests, 0 failures; credo, dialyzer and format
+        clean. **A known limitation (resolved in A2):** `sub.coordinator` was the ref resolved **at
+        subscribe** and was not refreshed on acks, so after a leadership change the `:DOWN`'s `leave` would
+        go to the old leader. **Next: A2 (failover consistency) → A3 (a `:multinode` test).**
+      - ✅ **A2 (part A). Failover consistency: refreshing the coordinator on the ack, plus an ownership
+        guard.** This closes A1's limitation and hardens the failover window, with **soft membership** and
+        **coordinator = the vnode's leader**, both **confirmed by the NorthGuard transcript in the repo**
+        (`northguard_meetup_transcript.txt`: *"this coordinator is the leader of a given VNode... manages
+        all the metadata owned by VNode"*; Xinfra's Conductor does client management by connection and
+        heartbeat, and only offsets and checkpoints are durable). Decision **A2-A** (focused on
+        correctness; the "run only on the leader through `VnodeCoordinatorManager`" lifecycle goes into A3,
+        alongside the multinode test that exercises it, since observable behaviour is identical, making B a
+        fidelity-of-internal-detail matter that is only testable multi-node). **Part 1, the refresh:**
+        `BrokerServer.stream_ack/7` gains a `coordinator` parameter, and `handle_call` updates
+        `sub.coordinator` (as well as `sub.ranges`), so after a leader change `stream_ack_member` (which
+        already re-resolves the fresh leader in `tcp_protocol`) records the new ref and the `:DOWN`'s async
+        `leave` reaches the **current owner**. **Part 2, the guard:** `GroupCoordinator` gains an
+        `owns_fun` seam (defaulting to `fn _ -> true end`; at boot, `CoordinatorRouter.owns?/1`), and
+        `join`/`poll` reject with `{:error, :not_owner}` **without** registering when this node does not
+        lead the topic (defending against stale routing in the failover window, so there is no phantom
+        assignment). `LogApi` (subscribe, fetch, stream_ack for a member) propagates the `:not_owner`, and
+        `tcp_protocol.subscribe` answers an error rather than entering a stream (the client re-resolves and
+        re-subscribes); heartbeat and fetch **self-heal** on the next request, since routing is per request.
+        Single-node: `owns?` is always `:local`, so it never rejects and nothing changes. Tested: the guard
+        (poll and join yielding `:not_owner`; no phantom registration; a per-topic `owns_fun`: 3) plus the
+        refresh (an ack through a different coordinator, so the `:DOWN` leave reaches the new one: 1). Suite
+        at 780 tests, 0 failures; credo, dialyzer and format clean. **Next: A3 (`:multinode` validation).**
       - ✅ **A3. Validação `:multinode` do roteamento (A1+A2 contra `ra` real).** Prova a máquina do A1/A2 entre nós
         BEAM reais (harness `:peer` + `:erpc`, como o `rebalance_multinode_test`): sobe 3 peers, forma o cluster
         `ra` de um vnode (quorum 2, tolera 1 falha), publica a topologia (`put_topology`) em cada nó, e verifica
