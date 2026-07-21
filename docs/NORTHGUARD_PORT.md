@@ -1714,38 +1714,41 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
   ring changes.
 - **Upgrading `place_vnodes`:** `target_n_val` and location awareness (riak_core's binring) plus
   `maxSkew`, `minDomains` and hard-versus-soft (k8s topology spread), **while keeping determinism**.
-  - ✅ **A1: rack-spread (feito).** `place_vnodes/4` ganha `place_opts`, repassado a `Placement.place/4`;
-    com `[spread: {attribute_key, node_attributes}]` as R réplicas de cada vnode caem em **racks/zonas
-    distintos** (`target_n_val`/`minDomains`), então perder um rack inteiro não leva a maioria das réplicas
-    de um vnode. Reusa o `spread` já existente (round-robin por valor de atributo, do C3a). A topologia é
-    **config estática** (`log_topology`, `"node=rack,..."`, `parse_topology/1`), idêntica em todo nó →
-    placement **determinístico**. `Application.metadata_opts` liga o spread via `vnode_place_opts/0`
-    (`:log_spread_by` + `:log_topology`). Testado: cada vnode com R=2 abrange os 2 racks; determinismo.
-  - ✅ **A2: balanceamento global de carga (`maxSkew`).** `Placement.place_balanced/4` coloca o
-    **conjunto inteiro** de vnodes com **carga limitada** (visão global, não por-vnode): cada vnode ainda
-    rankeia por HRW, mas um nó no teto (`ceil(total/nós) + max_skew - 1`) é **pulado** para o próximo, de
-    modo que nenhum nó fica sobrecarregado. Determinístico (ranking + ordem + contadores iguais em todo
-    nó). O teto é **best-effort**: o RF **nunca** é sacrificado por balanceamento, então um vnode que não
-    alcançaria `min(rf, nós)` réplicas distintas pega o nó menos-carregado mesmo acima do teto (possível
-    com `rf > 1`, onde o greedy por-vnode não empacota perfeito); com `rf = 1` o teto é **rígido**. Com
-    `max_skew` grande degrada a HRW puro (movimento mínimo). É **standalone** (não combina com o
-    `:spread` do A1: mutuamente exclusivos; A2 tem precedência). `place_vnodes/4` usa `place_balanced`
-    quando `[max_skew: n]`; `vnode_place_opts` liga via `:log_max_skew` (`MALACHIMQ_LOG_MAX_SKEW`).
-    Testado: HRW puro empilha 6 de 9 vnodes num nó, balanceado espalha 3/3/3; property do teto rígido
-    (rf=1) e de que todo vnode recebe `min(rf,nós)` distintas; determinismo; degradação a HRW com folga.
-    Resolve **carga**, não perda de dados (a segurança de rack é o A1).
-- **Rebalancing dinâmico**: quando a membership muda (nó entra/sai), redistribuir os vnodes ao vivo.
-  Escopo: **control plane** (os membros dos clusters `ra` de cada vnode); adicionar/remover membro
-  (`:ra.add_member`/`:ra.remove_member`) faz o **próprio `ra` transferir o estado** (Raft log/snapshot),
-  então não movemos dados de metadata à mão; o **data plane** (segments) já é coberto pelo *healing*
-  (1C-b). Modelo **manual** *staged → planned → committed* (riak_core; gatilho automático fica para
-  depois, por cima do mesmo motor). Decomposto em:
-  - ✅ **R1, `desired_placement` (núcleo puro).** `Malachi.Application.desired_placement/5` recomputa o placement
-    desejado sobre um conjunto de nós arbitrário (a membership **viva**, vs a config estática `:log_nodes`):
-    compõe `sharded_vnodes/2` (vnodes lógicos fixos) + `place_vnodes/4` (HRW). Determinístico e
-    **movimento mínimo**: um vnode só muda se **adotar** um nó que entrou ou **detinha** um que saiu; o
-    resto fica posto. Testado: determinismo; ao **adicionar** um nó, um vnode só muda se adota o novo nó
-    (e algum adota); ao **remover**, só muda quem o detinha (e ele some do placement); clamp a `min(rf, |nós|)`.
+  - ✅ **A1: rack spread (done).** `place_vnodes/4` gains `place_opts`, forwarded to `Placement.place/4`;
+    with `[spread: {attribute_key, node_attributes}]` each vnode's R replicas land in **distinct racks or
+    zones** (`target_n_val`/`minDomains`), so losing a whole rack does not take out a majority of any
+    vnode's replicas. It reuses the existing `spread` (round-robin by attribute value, from C3a). The
+    topology is **static config** (`log_topology`, `"node=rack,..."`, `parse_topology/1`), identical on
+    every node, which keeps placement **deterministic**. `Application.metadata_opts` wires the spread
+    through `vnode_place_opts/0` (`:log_spread_by` plus `:log_topology`). Tested: each vnode with R=2
+    spans both racks; plus determinism.
+  - ✅ **A2: global load balancing (`maxSkew`).** `Placement.place_balanced/4` places the **whole set**
+    of vnodes under a **load cap** (a global view rather than a per-vnode one): each vnode still ranks by
+    HRW, but a node at the cap (`ceil(total/nodes) + max_skew - 1`) is **skipped** for the next one, so
+    no node ends up overloaded. Deterministic (the ranking, the order and the counters are identical on
+    every node). The cap is **best-effort**: RF is **never** sacrificed for balance, so a vnode that would
+    otherwise fail to reach `min(rf, nodes)` distinct replicas takes the least-loaded node even above the
+    cap (which can happen with `rf > 1`, where the per-vnode greedy does not pack perfectly); with
+    `rf = 1` the cap is **hard**. With a large `max_skew` it degrades to plain HRW (minimal movement). It
+    is **standalone** (it does not combine with A1's `:spread`: the two are mutually exclusive, and A2
+    takes precedence). `place_vnodes/4` uses `place_balanced` when given `[max_skew: n]`;
+    `vnode_place_opts` wires it through `:log_max_skew` (`MALACHIMQ_LOG_MAX_SKEW`). Tested: plain HRW
+    piles 6 of 9 vnodes onto one node while the balanced version spreads them 3/3/3; a property for the
+    hard cap (rf=1) and for every vnode receiving `min(rf, nodes)` distinct replicas; determinism; and
+    degradation to HRW given slack. It solves **load**, not data loss (rack safety is A1).
+- **Dynamic rebalancing**: when membership changes (a node joins or leaves), redistribute the vnodes
+  live. Scope: the **control plane** (the members of each vnode's `ra` cluster); adding or removing a
+  member (`:ra.add_member`/`:ra.remove_member`) makes **`ra` itself transfer the state** (the Raft log or
+  a snapshot), so we never move metadata by hand; the **data plane** (segments) is already covered by
+  *healing* (1C-b). The model is **manual** *staged → planned → committed* (riak_core; an automatic
+  trigger comes later, on top of the same engine). Decomposed into:
+  - ✅ **R1, `desired_placement` (the pure core).** `Malachi.Application.desired_placement/5` recomputes
+    the desired placement over an arbitrary node set (the **live** membership, as opposed to the static
+    `:log_nodes` config): it composes `sharded_vnodes/2` (the fixed logical vnodes) with `place_vnodes/4`
+    (HRW). Deterministic and **minimal movement**: a vnode only changes if it **adopts** a node that
+    joined or **held** one that left; everything else stays put. Tested: determinism; on **adding** a
+    node, a vnode only changes if it adopts the new one (and some do); on **removing**, only the holders
+    change (and the node disappears from the placement); plus the clamp to `min(rf, |nodes|)`.
   - ✅ **R2: plano de rebalanceamento (núcleo puro).** `Malachi.Application.rebalance_plan/2` faz o diff do
     placement **atual** × `desired_placement` (R1) por vnode: para cada vnode cujo conjunto de nós difere,
     devolve `%{vnode_id:, add:, remove:}` (nós a entrar / a sair do cluster `ra`); vnodes já corretos são
