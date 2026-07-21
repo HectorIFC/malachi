@@ -1973,46 +1973,50 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       Config: `MALACHIMQ_SHUTDOWN_GRACE_MS`. Tested: `graceful/1` runs quiesce → sleep(drain_ms) → close
       **in order**; it skips the sleep with `drain_ms: 0`; and the default comes from config: 3 tests.
       Suite green; credo and dialyzer clean. The README gained the env var, and k8s the grace and preStop.
-    - ✅ **Consumer group coordination (G1: épico, fatiado; concluído S1–S5 + Str-1/Str-2).** Antes um grupo era
-      uma **posição única compartilhada** (todos os consumidores liam a mesma posição commitada, sem paralelismo).
-      Alvo NorthGuard/Kafka **atingido**: cada **range** do topic atribuída a **exatamente um** membro do grupo,
-      consumo paralelo, com rebalance no join/leave: **tudo server-internal e opaco** (o cliente nunca vê ranges).
-      Achado que aterrou o design: o `commit_offset` fazia `Map.put` (substituía o mapa de offsets do
-      `{group, topic}`) → virou **merge por-range** (S2). Fatiamento: **S1** núcleo de assignment (puro) · **S2**
-      commit por-range · **S3** coordinator (membership + heartbeat/session + expõe assignment) · **S4** integração
-      no servidor (fetch respeita a assignment, opaco) · **S5** protocolo wire + cliente · **Str-1/Str-2**
-      member-scoping do streaming (push server-side + wire/cliente com heartbeat). **Escopo restante (fatia própria,
-      não-G1): o coordinator é hoje um GenServer local único: o roteamento/replicação multi-nó da membership fica
-      para uma fatia de wiring de cluster.**
-      - ✅ **S1, núcleo de assignment (puro).** `Malachi.Consumer.Assignment.assign(range_ids, members)`
-        → `%{member => [range_id]}`, cada range sob **exatamente um** membro, **determinístico** (ranges
-        ordenadas em ordem canônica → um coordinator replicado/failover computa o mesmo em todo nó). Decisão
-        **1A (HRW sticky)**, mas **corrigida por medição empírica** (o memory de medir antes de decidir): a
-        opção dizia "reusa `place_balanced`", porém o property test revelou que ele **não é fortemente
-        sticky** (N pequeno: o rebalance-pro-cap move ranges de sobreviventes, 4 ranges/4 membros, remover
-        1 moveu 2 de 3 sobreviventes), contrariando a prioridade *sticky*. Troquei para **HRW puro**
-        (`Placement.place(range, members, 1)` por range → o membro top-HRW), que dá **min-reshuffle
-        estrito**: um leave move **só** as ranges do que saiu (sobreviventes mantêm **todas**), um join move
-        ranges **só** para o novo membro (existentes só perdem, nunca trocam entre si): a stickiness que
-        "HRW sticky" promete, com balanço **estatístico** (ótimo com muitas ranges, o caso NorthGuard). Ainda
-        reusa `Placement.place` (o ranking HRW). Testado (property): partição (cada range 1×), determinismo
-        sob shuffle, **sticky-on-leave** (sobreviventes mantêm tudo), **sticky-on-join** (inalterado ou o
-        novo) + edges (sem membros → `%{}`, sem ranges → membros idle, dedup). Suíte 746 testes 0 falhas;
-        credo/dialyzer limpos.
-      - ✅ **S2. Commit por-range (merge).** O `Metadata.apply({:commit_offset, group, topic, offsets})`
-        deixava de fazer `Map.put` (substituía o mapa inteiro de offsets do `{group, topic}`) e passa a
-        **`Map.update` + `Map.merge`**: mescla os offsets recebidos por-range (last-commit-wins por range).
-        Assim um membro de um grupo particionado commita **só as ranges que possui** sem apagar as posições
-        das ranges de outros membros. O pré-requisito que o S1 apontou. Backward-compatible: um consumidor
-        único que commita o mapa completo funciona igual (merge cobre tudo), e os testes existentes (que
-        commitam uma range ou a mesma 2×) passam sem mudança. Caminho único (o `DSRSM` roteia por topic pro
-        `Metadata.apply`; `merged_metadata` une topics disjuntos). Tradeoff registrado: o merge deixa keys
-        **stale** quando uma range faz split/merge (o offset da range antiga persiste), mas é **bounded**
-        pelo keyspace (máx ~2^keyspace_bits range_ids históricos) e **inócuo** na leitura (o fetch só consome
-        ranges atuais; ranges mortas são ignoradas); um prune (reusando o índice `topic_ranges`) fica como
-        otimização futura, não S2. Testado: novo teste de merge (dois membros, um commita só sua range → a do
-        outro é preservada) + os existentes (last-wins por range). Suíte 747 testes 0 falhas; credo/dialyzer
-        limpos. **Próximo: S3 (coordinator: membership + heartbeat + expõe a assignment do S1).**
+    - ✅ **Consumer group coordination (G1: an epic, sliced; S1 to S5 plus Str-1/Str-2 complete).** A group
+      used to be a **single shared position** (every consumer read the same committed position, with no
+      parallelism). The NorthGuard/Kafka target is **reached**: each of the topic's **ranges** is assigned to
+      **exactly one** group member, consumption runs in parallel, and it rebalances on join and leave, all of
+      it **server-internal and opaque** (the client never sees a range). The finding that grounded the
+      design: `commit_offset` did a `Map.put` (replacing the `{group, topic}` offset map), so it became a
+      **per-range merge** (S2). The slicing: **S1** the assignment core (pure) · **S2** per-range commit ·
+      **S3** the coordinator (membership plus heartbeat/session, exposing the assignment) · **S4** server
+      integration (fetch respects the assignment, opaquely) · **S5** the wire protocol plus the client ·
+      **Str-1/Str-2** member scoping for streaming (server-side push plus wire and client with a heartbeat).
+      **What remains (its own slice, not G1): the coordinator is currently a single local GenServer, so
+      multi-node routing and replication of the membership is left to a cluster-wiring slice.**
+      - ✅ **S1, the assignment core (pure).** `Malachi.Consumer.Assignment.assign(range_ids, members)`
+        returns `%{member => [range_id]}`, each range under **exactly one** member, **deterministically**
+        (ranges sorted into a canonical order, so a replicated coordinator computes the same thing on every
+        node after a failover). Decision **1A (sticky HRW)**, but **corrected by empirical measurement**
+        (the habit of measuring before deciding): the option said "reuse `place_balanced`", yet the property
+        test revealed it is **not strongly sticky** (at small N the rebalance-toward-the-cap moves surviving
+        members' ranges: with 4 ranges over 4 members, removing 1 moved 2 of the 3 survivors' ranges),
+        contradicting the *sticky* priority. It was switched to **plain HRW**
+        (`Placement.place(range, members, 1)` per range, taking the top-HRW member), which gives **strict
+        min-reshuffle**: a leave moves **only** the departing member's ranges (survivors keep **all** of
+        theirs), and a join moves ranges **only** to the new member (existing ones only lose, never swap
+        between themselves). That is the stickiness "sticky HRW" promises, with **statistical** balance
+        (optimal with many ranges, which is the NorthGuard case). It still reuses `Placement.place` (the HRW
+        ranking). Tested (as properties): partitioning (each range exactly once), determinism under
+        shuffling, **sticky-on-leave** (survivors keep everything), **sticky-on-join** (unchanged or the new
+        member), plus edges (no members yields `%{}`, no ranges leaves members idle, dedup). Suite at 746
+        tests, 0 failures; credo and dialyzer clean.
+      - ✅ **S2. Per-range commit (a merge).** `Metadata.apply({:commit_offset, group, topic, offsets})`
+        stopped doing a `Map.put` (which replaced the whole offset map for `{group, topic}`) and now does
+        **`Map.update` plus `Map.merge`**: it merges the received offsets per range (last-commit-wins per
+        range). That way a member of a partitioned group commits **only the ranges it owns**, without
+        erasing other members' range positions. This is the prerequisite S1 identified. Backward
+        compatible: a single consumer committing the full map behaves identically (the merge covers
+        everything), and the existing tests (which commit one range, or the same one twice) pass unchanged.
+        A single path (`DSRSM` routes by topic to `Metadata.apply`; `merged_metadata` unions disjoint
+        topics). A recorded tradeoff: the merge leaves **stale** keys when a range splits or merges (the old
+        range's offset persists), but it is **bounded** by the keyspace (at most ~2^keyspace_bits historical
+        range ids) and **harmless** on read (a fetch only consumes current ranges; dead ones are ignored); a
+        prune (reusing the `topic_ranges` index) is left as a future optimization, not S2. Tested: a new
+        merge test (two members, one commits only its range, and the other's is preserved) plus the existing
+        ones (last-wins per range). Suite at 747 tests, 0 failures; credo and dialyzer clean. **Next: S3
+        (the coordinator: membership plus heartbeat, exposing S1's assignment).**
       - ✅ **S3: coordinator de grupo (membership + heartbeat + assignment).** `Malachi.Consumer.GroupCoordinator`
         (GenServer) rastreia os membros por `{group, topic}` e atribui as ranges do topic via S1. API: `join`
         (adiciona membro → rebalance → devolve `{:ok, generation, ranges}`), `heartbeat` (renova a sessão,
