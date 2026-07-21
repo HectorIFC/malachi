@@ -1907,8 +1907,10 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         itself (merged metadata plus `spread_by` plus live `broker_attributes` plus `min_domains`), the
         violations **per topic** (`%{topic => count}` through
         `Enum.frequencies_by(&topic_of_segment/1)`; `%{}` when spread or min_domains are not configured);
-        `BrokerServer.domain_violations/1` exposes it through a call. The `dashboard` attaches the count to
-        each topic in `topics_overview` (defaulting to 0), `Prometheus.export` emits the per-topic
+        `BrokerServer` calls it (as `Broker.domain_violations/2`) while building `topics_overview`: the
+        handler resolves the merged metadata once and hands it to both that call and `Metadata.overview/1`,
+        which is why the arity-2 form exists. The count is attached to each topic (defaulting to 0);
+        `Prometheus.export` emits the per-topic
         `malachi_domain_violations` gauge (with a defensive `Map.get(.., 0)`), and the panel shows a
         `⚠ N HA` badge **only when the count exceeds 0** (high signal, no clutter). Tested:
         `Broker.domain_violations` (soft and below target yields 1; at target yields empty; unconfigured
@@ -1916,7 +1918,7 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
         absent): 4 tests. Suite at 731 tests, 0 failures; credo and dialyzer clean; the JS badge validated.
         The README gained the gauge.
     - ✅ **A Kubernetes deploy example (tying libcluster and placement into a real deploy).**
-      `deploy/kubernetes/`: a manifest (`malachi.yaml`, 8 documents) for a **3-node CP cluster** with
+      `deploy/kubernetes/`: a manifest (`malachi.yaml`, 9 documents) for a **3-node CP cluster** with
       rack-aware (zone-aware) placement, plus a README explaining the rationale. Decisions: **1A**
       discovery through **epmd (a static list of FQDNs)**, since a CP/Raft StatefulSet has **stable**
       identities (idiomatic, and the node names match `RELEASE_NODE`, so it is deterministic, which matters
@@ -1936,7 +1938,7 @@ the **algorithms and patterns are portable**: swap "gossip" for "Raft" and prese
       `PLACEMENT_POLICY=soft` (violations surface through the previous slice's gauge; a node without the
       label falls back informatively). Probes `/health` and `/ready` (from O1). No Elixir code changed (the
       node name comes through `RELEASE_*`, and `vm.args` already uses `inet_res`). Validated: the YAML
-      parses (8 documents) plus a spot check of the critical values (the env ordering with POD_NAME before
+      parses (9 documents) plus a spot check of the critical values (the env ordering with POD_NAME before
       RELEASE_NODE, the `$(VAR)` references, the collapsed command). The `kubernetes` alternative (dynamic,
       with RBAC over pods) is documented for autoscaling deploys. The main README points at it. (Not
       testable without a real k8s cluster; the config is deterministic by construction.)
