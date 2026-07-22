@@ -27,7 +27,7 @@ data independently, and a consumer can rewind.
 |---|---|
 | Run it and append your first record | [Getting started](getting-started.md) |
 | Understand topics, keys, ranges and cursors | [The log model](log-model.md) |
-| See the full architecture and design decisions | [NorthGuard port (design)](../NORTHGUARD_PORT.md) |
+| See the full architecture and design decisions | [Architecture](../ARCHITECTURE.md) |
 | Understand the auth architecture | [Auth and user management (ADR)](../AUTH_USER_MANAGEMENT.md) |
 
 ## Status

@@ -92,7 +92,7 @@ the migrated metadata.
 
 So treat a reshard as **effective while the cluster is up**. This gap is pre-existing and shared with vnode
 split; making the ring durable is tracked as follow-up in
-[NorthGuard port (design)](../NORTHGUARD_PORT.md).
+[Architecture](../ARCHITECTURE.md).
 
 ## Rebalancing
 

@@ -56,7 +56,7 @@ A client deals in three things and nothing else:
 
 Under the hood a topic is a set of dynamic **ranges** (slices of the keyspace that split as they grow),
 each a series of **segments** replicated by quorum across nodes. See
-[docs/NORTHGUARD_PORT.md](docs/NORTHGUARD_PORT.md) for the full architecture.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture.
 
 ## ⚡ Getting started (local)
 
@@ -932,7 +932,7 @@ Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
 - **Membership**: SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
 - **Client**: a compact binary protocol over TCP; topics, keys, and opaque cursors (never partitions or offsets).
 
-See [docs/NORTHGUARD_PORT.md](docs/NORTHGUARD_PORT.md) for the full design and the porting log.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 ## 📄 License
 

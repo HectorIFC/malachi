@@ -15,7 +15,7 @@ defmodule Malachi.Cluster.DSRSM do
   NorthGuard additionally shards a topic's ranges/segments by *range id* across vnodes (so a
   single hot topic spreads out). That requires cross-vnode operations and a
   globally-unique range-id scheme, so it, and **vnode split** (rebalancing, which migrates
-  metadata between vnodes): are deferred to a later increment. See `docs/NORTHGUARD_PORT.md`.
+  metadata between vnodes): are deferred to a later increment. See `docs/ARCHITECTURE.md`.
 
   ## Caller contract: `(topic_name, range_id/segment_id)` must match
 

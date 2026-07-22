@@ -73,4 +73,4 @@ a range id.
 
 Ranges splitting is one axis of scale; the **metadata** itself is the other. The control plane is sharded
 across virtual nodes (each its own Raft group) and supports online **vnode split** and **grow re-sharding**.
-See [NorthGuard port (design)](../NORTHGUARD_PORT.md) for how that works.
+See [Architecture](../ARCHITECTURE.md) for how that works.

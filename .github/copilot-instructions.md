@@ -30,8 +30,8 @@ find such references outside historical files (`CHANGELOG.md`, release notes), t
 - Streaming push uses **credit-window backpressure**: `budget = min(max, window - in_flight)`.
 - Delivery is **at-least-once**; consumers must be idempotent. There is no exactly-once mode.
 
-The guides in `docs/guides/` are the conceptual source of truth. `docs/NORTHGUARD_PORT.md` is the design
-roadmap.
+The guides in `docs/guides/` are the conceptual source of truth. `docs/ARCHITECTURE.md` is the design
+reference.
 
 ## Architecture
 

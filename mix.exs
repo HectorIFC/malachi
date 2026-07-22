@@ -54,7 +54,7 @@ defmodule Malachi.MixProject do
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
       "CHANGELOG.md": [title: "Changelog"],
-      "docs/NORTHGUARD_PORT.md": [title: "NorthGuard port (design)"],
+      "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       "SECURITY.md": [title: "Security policy"],
       "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
@@ -80,7 +80,7 @@ defmodule Malachi.MixProject do
         "docs/guides/operations.md",
         "README.md"
       ],
-      Architecture: ["docs/NORTHGUARD_PORT.md", "docs/AUTH_USER_MANAGEMENT.md"],
+      Architecture: ["docs/ARCHITECTURE.md", "docs/AUTH_USER_MANAGEMENT.md"],
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [
         "docs/RATE_LIMITING.md",

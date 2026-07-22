@@ -7,7 +7,7 @@ defmodule Malachi.Storage.SegmentStore do
   behaviour so the pure-Elixir implementation (`Malachi.Storage.ElixirStore`) can later
   be swapped for a native one (Direct I/O via a Rust NIF) *only if* profiling under real
   concurrency shows the BEAM file layer to be the bottleneck. See
-  `docs/NORTHGUARD_PORT.md`.
+  `docs/ARCHITECTURE.md`.
 
   ## Durability contract
 
