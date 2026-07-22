@@ -31,6 +31,7 @@ defmodule Malachi.MixProject do
     [
       main: "introduction",
       logo: "priv/static/logo.svg",
+      favicon: "priv/static/logo.svg",
       source_ref: "v#{@version}",
       # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
       formatters: ["html"],

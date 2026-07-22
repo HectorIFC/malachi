@@ -937,6 +937,7 @@ defmodule Malachi.Dashboard do
     <head>
       <meta charset="utf-8">
       <title>Malachi Dashboard</title>
+      <link rel="icon" type="image/svg+xml" href="/logo.svg">
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1193,6 +1194,7 @@ defmodule Malachi.Dashboard do
     <head>
       <meta charset="utf-8">
       <title>Malachi - Login</title>
+      <link rel="icon" type="image/svg+xml" href="/logo.svg">
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
