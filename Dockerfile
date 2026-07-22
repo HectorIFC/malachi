@@ -52,7 +52,9 @@ WORKDIR /app
 RUN addgroup -g 1000 malachi && \
     adduser -u 1000 -G malachi -s /bin/sh -D malachi
 
-RUN mkdir -p /app/data/mnesia && \
+# Create and own /app/data so a persistent volume mounted here inherits uid 1000 rather than root,
+# which the non-root user below needs to write the log segments and the ra state stored under it.
+RUN mkdir -p /app/data && \
     chown -R malachi:malachi /app/data
 
 COPY --from=builder --chown=malachi:malachi /app/_build/prod/rel/malachi ./
