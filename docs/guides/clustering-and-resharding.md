@@ -15,6 +15,16 @@ Confusing these is the main source of configuration mistakes:
 Discovery never adds a node to the data plane. A node that joins the Erlang cluster but is absent from
 `MALACHI_LOG_NODES` stores nothing.
 
+```mermaid
+flowchart LR
+  Disc["node discovery (libcluster): can nodes see each other?"]
+  Mem["cluster membership (MALACHI_LOG_NODES): which nodes hold data?"]
+  Disc -. "connected but not in LOG_NODES stores nothing" .-> Mem
+```
+
+> **Analogy.** Discovery is being in the building; membership is being on the payroll. Walking in the door
+> (joining the Erlang cluster) does not put you to work, only the roster (`MALACHI_LOG_NODES`) does.
+
 ```bash
 MALACHI_CLUSTER_STRATEGY=gossip     # or kubernetes, epmd. Absent = single node
 MALACHI_LOG_CLUSTER=true
@@ -43,6 +53,10 @@ Metadata is small, changes rarely and needs linearizability, which is what Raft 
 high-volume and sequential, where routing every batch through a consensus log would pay for a second
 durable write to no benefit: the segment already *is* the log.
 
+> **Analogy.** Same split as the town-hall minutes versus the warehouse: the minutes (metadata) change
+> rarely and everyone must agree; the warehouse (records) takes constant shipments and only needs a majority
+> of shelves to confirm storage. See the [two planes diagram](../ARCHITECTURE.md#replication-two-planes).
+
 ## Sharding the control plane
 
 With one Raft group for all metadata, that group is a bottleneck. Vnodes shard it:
@@ -54,6 +68,14 @@ MALACHI_LOG_VNODE_REPLICATION_FACTOR=3
 
 Each vnode owns an arc of the hash ring and runs its own Raft group. A topic's metadata lives in exactly
 one vnode, chosen by hashing.
+
+```mermaid
+flowchart LR
+  One["one Raft group for all metadata (a bottleneck)"] --> Many["vnodes: many Raft groups, each owns an arc of the ring"]
+```
+
+> **Analogy.** One clerk stamping every form is a queue that only grows. Vnodes are many clerks, each owning
+> a drawer of the filing cabinet, so requests for different topics are handled in parallel.
 
 ## Growing the shard count
 
@@ -67,11 +89,22 @@ Each added vnode is created by **one split**: the vnode owning the largest arc i
 a new Raft cluster starts, and the displaced topics' metadata migrates to it, fenced and copy-first. The
 new ring is then published and gossiped so every node routes to the new shard.
 
+```mermaid
+flowchart LR
+  R["one full range (a full shelf)"] --> R1["range 1 (first half)"]
+  R --> R2["range 2 (second half)"]
+```
+
+> **Analogy.** Splitting a range is like splitting a full shelf into two: you relabel the catalog so half
+> the keys point to a new shelf. No book is moved or recopied, only the catalog (the metadata) changes.
+
 Three properties worth knowing:
 
 - **No existing token moves.** Growth only subdivides, so no topic is relocated except those displaced by
   the one split that covers them.
-- **Splits run one at a time**, driven only by the node holding the cluster lease.
+- **Splits run one at a time**, driven only by the node holding the cluster lease. (The lease is the single
+  key to a room: only its holder may act, and a node that loses the key stops immediately, so two nodes
+  never reshard at once.)
 - **It is resumable.** The plan is a pure function of the live ring and the target, so if a reshard is
   interrupted, re-run the same `--to` and it continues from where the ring actually is.
 
@@ -109,6 +142,11 @@ With auto-rebalancing on, the lease holder computes a plan each tick and commits
 **non-empty and identical for `STABILIZATION` consecutive ticks** (default 3, so about 90 seconds). A node
 that flaps, briefly suspected then alive again, therefore never moves data: the plan changes, the counter
 resets, nothing commits.
+
+> **Analogy.** Placement is a seating rule everyone computes the same way, so when a guest arrives or leaves
+> only a few seats change, not the whole room. And before moving anyone's belongings, the host waits to be
+> sure the guest really left (the stabilization ticks), so a quick trip to the restroom does not get their
+> seat cleared.
 
 ## Next
 

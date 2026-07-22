@@ -31,6 +31,22 @@ because identity is global metadata: small, rarely written, read locally, and cr
 scales (throughput, node count) is the already-sharded data plane; extreme identity scale is an external
 IdP's problem.
 
+```mermaid
+flowchart TD
+  subgraph before["Before: node-local Mnesia (islands)"]
+    N1["node 1: its own users"]
+    N2["node 2: its own users (a user added on node 1 is missing here)"]
+  end
+  subgraph after["After: one replicated ra quorum"]
+    Q["users / ACLs / lockouts agreed by consensus, read locally on every node"]
+  end
+  before --> after
+```
+
+> **Analogy.** The old store was each node keeping its own private notebook: add a user on one node and the
+> others never heard of it. The `ra` quorum is one shared address book that every node agrees on and can
+> read from its own local copy.
+
 **Consequence:** users, ACLs, and lockouts are consistent across the cluster and survive restart and
 failover. Brute-force protection is cluster-wide (attempts on different nodes count against one limit).
 
@@ -50,7 +66,13 @@ industry norm.
 
 Authentication is pluggable behind the `Malachi.Auth.AuthProvider` contract
 (`authenticate(credentials, context) -> {:ok, %{username, permissions}}`), which separates who you are from
-what you may do: permissions always come from the internal replicated store. Three providers ship:
+what you may do: permissions always come from the internal replicated store.
+
+> **Analogy.** Authentication is the ID check at the door (who are you); authorization is the guest list
+> (what may you do). You can swap the door, password, certificate, or token, without touching the guest
+> list. See the [authentication guide](guides/authentication.md) for the flow.
+
+Three providers ship:
 
 - **Password** (`PasswordProvider`), wrapping the sessionless `Auth.verify_credentials/2`.
 - **mTLS identity** (`MtlsProvider`), mapping a peer certificate to a user through `CertIdentity` (CN or

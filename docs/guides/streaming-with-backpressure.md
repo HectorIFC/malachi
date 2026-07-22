@@ -13,13 +13,20 @@ runs out of memory. The consumer never gets to say "stop".
 Malachi makes the consumer's capacity explicit. A subscription declares a **window**: the maximum number
 of records that may be in flight, meaning pushed but not yet acked. The broker will not exceed it.
 
+```mermaid
+sequenceDiagram
+  participant B as Broker
+  participant C as Consumer (window = 100)
+  B->>C: push 100 records
+  Note over B: in_flight = 100, budget = 0, broker goes quiet
+  C->>B: ack 40 (returns 40 credit)
+  Note over B: in_flight = 60, budget = 40
+  B->>C: push 40 more
 ```
-window = 100
 
-  in_flight=0    push 100  ──────────▶  budget exhausted, broker goes quiet
-  ack 40         ◀──────────────────    in_flight=60, 40 credit returned
-  push 40        ──────────────────▶    in_flight=100 again
-```
+> **Analogy.** The window is a kitchen pass. The broker sends out up to N plates; it cannot send more until
+> you hand plates back (each `ack` returns credit). A slow consumer simply gets fewer plates, and the
+> kitchen never buries it under a pile it cannot clear.
 
 The budget for each push is exactly:
 
@@ -54,6 +61,10 @@ so encode it first. That asymmetry exists because the push path hands the subscr
 lets whoever owns the connection mint the client-facing token; the TCP acceptor does exactly this before
 putting the batch on the wire.
 
+> **Analogy.** The raw `positions` are the cloakroom's internal rack coordinates; the cursor is the ticket
+> the customer gets. Over the network you always hand out the ticket, so if you ack from Elixir you mint the
+> ticket yourself first with `encode_cursor/1`.
+
 From the shell:
 
 ```bash
@@ -66,6 +77,16 @@ node subscriber.js orders --group live --window 500
 
 1. **Returns credit.** `count` records of window space, which unblocks further pushes.
 2. **Commits durably.** The group's position advances, so a restart resumes here.
+
+```mermaid
+flowchart LR
+  Ack["stream_ack(count)"] --> Credit["returns credit -> more pushes allowed"]
+  Ack --> Commit["commits durably -> a restart resumes here"]
+```
+
+> **Analogy.** Handing a plate back to the kitchen does two things at once: it frees a slot for the next
+> plate (credit) and it tells the kitchen that order is served (commit). You cannot free the slot without
+> also marking it served, which is exactly what stops you from losing records.
 
 You cannot return credit without committing. That is what makes the window safe: the broker can only
 consider a record delivered once you have durably said you are done with it. Ack a batch before you
@@ -87,6 +108,10 @@ The window is a latency/throughput dial, not a correctness setting.
 Start at a few times the batch size you actually process at once, and raise it only if the consumer is
 demonstrably starved. The default of 100 is a reasonable place to begin.
 
+> **Analogy.** The window is a Goldilocks dial. Too small and the consumer keeps waiting on the next
+> delivery; too large and you are back to an unbounded pile that all has to be re-sent after a crash. Aim
+> for "just enough in flight to stay busy".
+
 ## Parallel streaming with members
 
 One subscriber per group reads the whole topic. To spread the load, give each process a member id:
@@ -100,6 +125,9 @@ The coordinator assigns each member a share of the topic's ranges and the broker
 stream to them. Each member carries its **own** window, so total in-flight is the sum across members.
 
 In Elixir, `subscribe_member/7` and `stream_ack_member/7` are the member-scoped equivalents.
+
+> **Analogy.** Each member is its own faucet with its own credit window; the total flow to the group is the
+> sum of the faucets. Add members to open more faucets, up to the number of ranges to hand out.
 
 ### Members must keep acking
 
@@ -116,6 +144,10 @@ node subscriber.js orders --group live --member m1 --heartbeat 10000
 If you implement your own client, this is the part most likely to bite: an idle stream that never acks
 looks exactly like a dead one.
 
+> **Analogy.** An ack is answering roll call. A member that stays silent, even if it is just idle, is
+> eventually marked absent and has its work handed to someone else. So idle members still say "here" with a
+> periodic empty ack.
+
 ## Choosing between push and poll
 
 | | poll (`fetch_group`) | push (`subscribe`) |
@@ -127,3 +159,7 @@ looks exactly like a dead one.
 
 Both commit through a consumer group, so you can move a workload from one to the other without losing
 position.
+
+> **Analogy.** Push is a newspaper subscription: it arrives at your door as it is printed. Poll is checking
+> your mailbox when you feel like it. Same news, different way of getting it, and you can switch without
+> losing your place.

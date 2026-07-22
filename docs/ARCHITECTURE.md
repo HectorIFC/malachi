@@ -42,6 +42,16 @@ On the storage critical path the pure BEAM sustains hundreds of MB/s with durabl
 tens of MB/s per broker the workload calls for, so throughput is not the bottleneck. Reproduce the
 measurement with `mix run benchmark/storage_viability.exs`.
 
+```mermaid
+flowchart LR
+  A["active segment (taking appends)"] -->|"full: by size, age, or failure"| S["sealed segment (immutable)"]
+  A -->|"a new one rolls"| A2["new active segment"]
+```
+
+> **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
+> close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks
+> never change, copying them to another node is safe.
+
 ## Metadata: DS-RSM over `ra`
 
 Metadata (topics, ranges, segments) lives in a **directory of sharded replicated state machines**:
@@ -52,6 +62,22 @@ Metadata (topics, ranges, segments) lives in a **directory of sharded replicated
 - vnodes sit on a hash ring (consistent hashing) keyed by topic name, and by range id for ranges and
   segments. A vnode's position on the ring is stable even as its Raft replicas join and leave, and a vnode
   can **split**, breaking its state into two Raft groups.
+
+```mermaid
+flowchart TB
+  subgraph ring["Hash ring (metadata sharded by topic / range id)"]
+    V1["vnode A (a Raft group)"]
+    V2["vnode B (a Raft group)"]
+    V3["vnode C (a Raft group)"]
+  end
+  V1 --> L1["coordinator = leader, does the work"]
+  V2 --> L2["coordinator = leader"]
+  V3 --> L3["coordinator = leader"]
+```
+
+> **Analogy.** Each vnode is a small committee that votes on its own slice of the metadata. The chair (the
+> leader, called the coordinator) carries out what the committee agrees on. Sharding means many small
+> committees instead of one giant meeting that everything has to wait on.
 
 The metadata state machine is `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). It is a pure
 function of its input: it never reads the wall clock, configuration, or `node()`. Anything time- or
@@ -76,12 +102,38 @@ Replication is split deliberately, because metadata and records have opposite sh
   :no_quorum}` beyond that. Routing high-volume sequential records through a consensus log would pay for a
   second durable write and gain nothing, because the segment already **is** the log.
 
+```mermaid
+flowchart LR
+  subgraph control["Control plane: metadata (over ra)"]
+    M["small, changes rarely, everyone must agree (linearizable)"]
+  end
+  subgraph data["Data plane: records (own quorum)"]
+    D["huge, constant, ack once a majority has fsynced it"]
+  end
+```
+
+> **Analogy.** The control plane is the town-hall minutes: they change rarely and every council member has
+> to agree before a line is written. The data plane is the warehouse: shipments arrive constantly, and one
+> only needs a majority of the shelves to confirm they stored it before signing off. Different jobs, so
+> different rules.
+
 ## Client protocol
 
 The wire protocol is length-framed binary, owned by `Malachi.Wire`: `<<len::32, body>>` carrying
 `<<api_key::16, correlation_id::32, payload>>`. The `correlation_id` matches each response to its request,
 so a connection pipelines without a session layer. The protocol covers the log, consumer groups,
 authentication (password, mTLS, token), and per-topic ACLs across its api_keys.
+
+```mermaid
+flowchart LR
+  L["len (32 bits): how long the frame is"] --> K["api_key (16): which operation"]
+  K --> C["correlation_id (32): the request's number"]
+  C --> P["payload: the operation's arguments"]
+```
+
+> **Analogy.** The `correlation_id` is the number you take at a bakery counter. You can place several orders
+> without waiting, and each tray comes back tagged with your number, so replies match requests even when
+> they arrive out of order.
 
 - **Metadata operations are unary** (one request, one response): create, delete, topic metadata, segment
   metadata. Any broker can act as a proxy and route to the vnode leader using the gossiped state.
@@ -100,6 +152,10 @@ tie-break). It honors a maximum skew across domains, a minimum number of distinc
 versus soft distinction for unsatisfiable constraints. Healing prefers surviving replicas, which keeps
 churn low.
 
+> **Analogy.** Placement is seating guests at a wedding: spread each family across different tables (fault
+> domains) so one mishap does not take them all out, and keep the tables evenly filled (max skew) rather
+> than crowding one. The seating rule is fixed, so every planner drawing the chart lands on the same seats.
+
 ## Key design decisions
 
 Four choices shape everything above. Each is stated with its reason and the code that implements it.
@@ -114,6 +170,9 @@ Four choices shape everything above. Each is stated with its reason and the code
    for an O(log n) floor lookup, with one entry every few kilobytes. ETS and DETS were both rejected because
    either would couple the on-disk format to BEAM structures; the format must be one a native
    implementation can reopen without speaking BEAM.
+
+   > **Analogy.** The on-disk format is written in plain handwriting any tool can read, not in a personal
+   > shorthand only the BEAM understands, so a future native (Rust) store can reopen the same files.
 
 3. **Keep and extend the binary protocol rather than sessionize it.** The `correlation_id` already provides
    the pipelining a session layer would have added, so the protocol stays `<<len::32, body>>` and grows by

@@ -35,11 +35,43 @@ defmodule Malachi.MixProject do
       source_ref: "v#{@version}",
       # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
       formatters: ["html"],
+      # Render ```mermaid fenced blocks as diagrams. GitHub renders them natively; ExDoc needs this hook.
+      before_closing_body_tag: &before_closing_body_tag/1,
       extras: extras(),
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules()
     ]
   end
+
+  # Loads Mermaid and turns the ```mermaid code blocks (which ExDoc emits as `pre code.mermaid`) into
+  # diagrams, picking a light or dark theme from the ExDoc theme in effect at load.
+  defp before_closing_body_tag(:html) do
+    # Force Mermaid's light theme and place each diagram on a white card, so it reads on the ExDoc site in
+    # both light and dark mode. This style only affects the ExDoc site; on GitHub the same fenced block
+    # renders with GitHub's own theme-aware Mermaid.
+    """
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
+    <style>.mermaid { background: #ffffff; border-radius: 8px; padding: 16px; margin: 1.5em 0; overflow-x: auto; }</style>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
+        var blocks = document.querySelectorAll("pre > code.mermaid, pre > code.language-mermaid");
+        blocks.forEach(function (code, i) {
+          var container = document.createElement("div");
+          container.className = "mermaid";
+          code.parentElement.replaceWith(container);
+          mermaid.render("mermaid-diagram-" + i, code.textContent).then(function (res) {
+            container.innerHTML = res.svg;
+          }).catch(function () {
+            container.textContent = code.textContent;
+          });
+        });
+      });
+    </script>
+    """
+  end
+
+  defp before_closing_body_tag(_), do: ""
 
   defp extras do
     [

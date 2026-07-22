@@ -19,6 +19,18 @@ Whichever one runs, it produces a **username**, and permissions come from the us
 a token never carries permissions of its own. This means you provision a user once and can change how it
 authenticates without touching what it can do.
 
+```mermaid
+flowchart LR
+  Cred["credential (password / certificate / token)"] --> Prov["a provider checks it: who are you?"]
+  Prov --> User["username"]
+  User --> Store["user store: what may this user do?"]
+  Store --> Sess["session with permissions"]
+```
+
+> **Analogy.** Authentication is the ID check at the door: it only decides who you are. Authorization is the
+> guest list: it decides what you are allowed to do once inside. Malachi lets you swap the door (password,
+> certificate, or token) without touching the guest list.
+
 ## Password
 
 The default. Users live in a replicated store backed by `ra`, and passwords are hashed with **Argon2**.
