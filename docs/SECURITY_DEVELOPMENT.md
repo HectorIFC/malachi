@@ -52,28 +52,14 @@ mix test test/comprehensive_security_test.exs
 ## Running Performance Benchmarks
 
 ```bash
-# Run all baseline benchmarks
-bash benchmark/run_all_baselines.sh
+# Storage viability against NorthGuard's targets (standalone)
+mix run benchmark/storage_viability.exs
 
-# Run individual benchmarks
-mix run benchmark/baseline_throughput.exs
-mix run benchmark/baseline_latency.exs
-mix run benchmark/baseline_memory.exs
-mix run benchmark/baseline_connections.exs
-mix run benchmark/baseline_auth.exs
-mix run benchmark/baseline_edge_cases.exs
-mix run benchmark/baseline_sustained_load.exs
-
-# Run security-specific benchmarks
-mix run benchmark/security_performance_suite.exs
-mix run benchmark/tls_performance_benchmark.exs
-mix run benchmark/rate_limiting_benchmark.exs
-mix run benchmark/validation_benchmark.exs
+# Dashboard security overhead (needs a running server: mix run --no-halt)
 mix run benchmark/dashboard_security_benchmark.exs
-
-# Compare against reference baseline (detects regressions)
-mix run benchmark/compare_baselines.exs benchmark/results/baseline_reference.json benchmark/results/baseline_LATEST.json
 ```
+
+See [benchmark/README.md](https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md) for details.
 
 ## Pre-Commit Hooks Setup
 

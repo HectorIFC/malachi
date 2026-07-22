@@ -22,12 +22,8 @@ This will:
 **Location:** `pre-commit.sh` (root of repository)
 
 **Behavior:**
-- Detects changes in `lib/malachi/` or `benchmark/`
-- If changes detected:
-  - Runs full benchmark suite (~10 minutes)
-  - Updates `baseline_reference.json`
-  - Stages the updated file automatically
-- If no changes in those directories: skips execution
+- Runs `mix format`
+- Re-stages any already-staged `.ex`/`.exs` files that were reformatted
 
 **Skip the hook:**
 ```bash
@@ -55,7 +51,7 @@ Example:
 ```yaml
 pre-commit:
   commands:
-    update-baseline:
+    format:
       run: bash pre-commit.sh
       stage_fixed: true
 ```
