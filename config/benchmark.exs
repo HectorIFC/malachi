@@ -19,7 +19,6 @@ config :malachi,
   benchmark_log_every: 1_000_000,
   spawn_concurrency: 10_000,
   send_concurrency: 10_000,
-  gc_interval_ms: 30_000,
 
   # Fast metrics collection
   metrics_snapshot_interval_ms: 5_000,

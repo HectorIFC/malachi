@@ -114,13 +114,11 @@ config :malachi,
   tcp_port: String.to_integer(System.get_env("MALACHI_TCP_PORT") || "4040"),
   dashboard_port: String.to_integer(System.get_env("MALACHI_DASHBOARD_PORT") || "4041"),
   locale: System.get_env("MALACHI_LOCALE") || "en_US",
-  partition_multiplier: String.to_integer(System.get_env("MALACHI_PARTITION_MULTIPLIER") || "100"),
   auth_timeout_ms: String.to_integer(System.get_env("MALACHI_AUTH_TIMEOUT_MS") || "10000"),
   tcp_recv_timeout: String.to_integer(System.get_env("MALACHI_TCP_RECV_TIMEOUT") || "30000"),
   tcp_send_timeout: String.to_integer(System.get_env("MALACHI_TCP_SEND_TIMEOUT") || "30000"),
   # Largest request frame the binary protocol accepts (bytes); rejected at the length prefix.
   max_frame_size: parse_int.(System.get_env("MALACHI_MAX_FRAME_SIZE"), 16_777_216),
-  gc_interval_ms: String.to_integer(System.get_env("MALACHI_GC_INTERVAL_MS") || "10000"),
   enable_tls: enable_tls,
   require_tls: require_tls,
   tls_certfile: System.get_env("MALACHI_TLS_CERTFILE"),
@@ -146,10 +144,6 @@ config :malachi,
   # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
   # permissions and denies by default. A produce/consume needs an explicit ACL grant (or :admin).
   acl_strict: System.get_env("MALACHI_ACL_STRICT") == "true",
-  default_delivery_mode: System.get_env("MALACHI_DEFAULT_DELIVERY_MODE") || "at_least_once",
-  channel_send_concurrency: String.to_integer(System.get_env("MALACHI_CHANNEL_SEND_CONCURRENCY") || "5000"),
-  channel_send_task_timeout_ms: String.to_integer(System.get_env("MALACHI_CHANNEL_SEND_TASK_TIMEOUT_MS") || "5000"),
-  shard_count: String.to_integer(System.get_env("MALACHI_SHARD_COUNT") || "1000"),
   # NorthGuard log control plane. Absent MALACHI_LOG_CLUSTER => single-node in-memory metadata
   # (the default). Set it (with the peer node names) for a replicated, HA control plane over `ra`.
   # Node/cluster names come from a trusted operator (deploy config), so String.to_atom is fine here.

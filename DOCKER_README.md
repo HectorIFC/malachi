@@ -77,7 +77,6 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 | `MALACHI_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
 | `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
-| `MALACHI_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
 | `MALACHI_LOG_DATA_DIR` | *(tmp)* | Directory for the durable log segments. Must be an absolute path on a volume; see Data Persistence. |
 | `MALACHI_RA_DATA_DIR` | *(tmp)* | Directory for the ra log (users, ACLs, lockouts). Must be an absolute path on a volume; see Data Persistence. |
 
@@ -150,37 +149,6 @@ services:
 
 volumes:
   malachi-data:
-```
-
-## Large-scale channel broadcast runtime variables
-
-The runtime can be tuned for high-concurrency channel broadcasts using environment variables. Defaults are chosen to make bulk publishing available in container images while remaining conservative for typical hosts.
-
-Recommended environment variables (defaults shown):
-
-- `MALACHI_CHANNEL_SEND_CONCURRENCY` (default: `5000`)
-  - Maximum parallel sends performed by the channel broadcast. Increase for faster bulk deliveries on large machines.
-
-- `MALACHI_CHANNEL_SEND_TASK_TIMEOUT_MS` (default: `5000`)
-  - Per-send task timeout in milliseconds. Tune to the characteristics of your environment.
-
-- `MALACHI_SHARD_COUNT` (default: `1000`)
-  - Number of shard processes used by the sharded integration test. Each shard represents `1_000_000 / SHARD_COUNT` logical subscribers when using the provided test helper.
-
-- `ERL_FLAGS` (example: `+P 2097152`)
-  - Pass Erlang VM flags like `+P` to increase process limit when running with many real processes.
-
-Example `docker-compose.yml` snippet:
-
-```yaml
-services:
-  malachi:
-    image: hectorcardoso/malachi:latest
-    environment:
-      - MALACHI_CHANNEL_SEND_CONCURRENCY=5000
-      - MALACHI_CHANNEL_SEND_TASK_TIMEOUT_MS=5000
-      - MALACHI_SHARD_COUNT=1000
-      - ERL_FLAGS=+P 2097152
 ```
 
 Notes:

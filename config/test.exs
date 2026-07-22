@@ -34,11 +34,7 @@ config :malachi,
     {"app", "app123", [:produce, :consume]}
   ]
 
-# Test-specific tuning for large-scale channel tests
 config :malachi,
-  channel_send_concurrency: 5_000,
-  channel_send_task_timeout_ms: 5_000,
-  shard_count: 1_000,
   # TLS configuration for tests (disabled by default)
   enable_tls: false,
   require_tls: false,

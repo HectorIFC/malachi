@@ -3,7 +3,6 @@ import Config
 config :malachi,
   tcp_port: 4040,
   dashboard_port: 4041,
-  partition_multiplier: 100,
   locale: "en_US",
   # Largest request frame the binary protocol will accept (bytes). A declared length beyond this is
   # rejected at the length prefix, before the body is buffered, bounding per-connection memory.
