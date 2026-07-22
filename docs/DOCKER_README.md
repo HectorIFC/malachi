@@ -100,7 +100,7 @@ docker run \
 
 In production these must be absolute paths: a relative value is rejected at boot, because it would resolve
 against the working directory and put durable data back on ephemeral storage. The bundled
-[`docker-compose.yml`](docker-compose.yml) and the Kubernetes manifest use these same paths.
+[`docker-compose.yml`](../docker-compose.yml) and the Kubernetes manifest use these same paths.
 
 ### TLS Configuration
 

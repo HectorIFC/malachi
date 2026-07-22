@@ -58,8 +58,8 @@ defmodule Malachi.MixProject do
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       "SECURITY.md": [title: "Security policy"],
       "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
-      "RATE_LIMITING.md": [title: "Rate limiting"],
-      "DOCKER_README.md": [title: "Running with Docker"],
+      "docs/RATE_LIMITING.md": [title: "Rate limiting"],
+      "docs/DOCKER_README.md": [title: "Running with Docker"],
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
       "docs/HOOKS.md": [title: "Git hooks"]
@@ -83,8 +83,8 @@ defmodule Malachi.MixProject do
       Architecture: ["docs/NORTHGUARD_PORT.md", "docs/AUTH_USER_MANAGEMENT.md"],
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [
-        "RATE_LIMITING.md",
-        "DOCKER_README.md",
+        "docs/RATE_LIMITING.md",
+        "docs/DOCKER_README.md",
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"
       ],

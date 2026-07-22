@@ -18,7 +18,7 @@ A single node is in-memory by default. Set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_
 HA control plane over `ra`; the environment variables are listed in the
 [README](../../README.md) (the *Environment Variables* section).
 
-Prefer containers? See [Running with Docker](../../DOCKER_README.md).
+Prefer containers? See [Running with Docker](../DOCKER_README.md).
 
 ## Your first records (in-process)
 

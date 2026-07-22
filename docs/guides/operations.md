@@ -105,7 +105,7 @@ The checks that catch the common mistakes:
 
 ## Docker
 
-Images are published multi-arch. See [Running with Docker](../../DOCKER_README.md) for compose files and
+Images are published multi-arch. See [Running with Docker](../DOCKER_README.md) for compose files and
 the environment matrix.
 
 ## Next
