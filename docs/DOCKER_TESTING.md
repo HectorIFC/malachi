@@ -1,144 +1,102 @@
 # Docker Build Testing Guide
 
-This document describes the comprehensive testing and validation process for Malachi Docker builds.
+How to validate a Malachi Docker image: that it has the runtime it needs, boots, and serves the log
+broker correctly. Two scripts back it, both driven by `make`.
 
 ## Overview
 
-The Docker build process includes three levels of validation:
-
-1. **Build Validation** - Verifies runtime dependencies, configuration, and basic performance
-2. **Regression Testing** - Comprehensive functional and performance tests
-3. **Full Test Suite** - Complete end-to-end testing workflow
+1. **Build validation** (`scripts/validate-docker-build.sh`) - runtime dependencies, JIT, and that the
+   container starts and the dashboard authenticates.
+2. **Regression testing** (`scripts/docker-regression-test.sh`) - the dashboard endpoints plus the log
+   produce/fetch and consumer-group workflows, over a real container.
 
 ## Prerequisites
 
 - Docker installed and running
-- `make` utility
-- `curl` and `nc` (netcat) for testing
-- `bc` for calculations (optional)
+- `make`
+- `curl` and `nc` (netcat)
+- `python3` (the scripts parse the login token with it)
 
-## Quick Start
-
-### Run All Tests
+## Quick start
 
 ```bash
-# Build the image and run all validation tests
 make docker-test-all
 ```
 
-This single command:
-1. Builds the Docker image
-2. Runs build validation checks
-3. Executes regression test suite
-4. Reports comprehensive results
+Builds the image, runs build validation, then the regression suite.
 
-## Individual Test Commands
-
-### 1. Build Validation
+## Build validation
 
 ```bash
 make docker-validate
 ```
 
-**What it tests:**
-- ✅ Runtime dependencies present (`openssl`, `libstdc++`, `ncurses-libs`, argon2 NIF)
-- ✅ ERL_FLAGS configuration (JIT enabled)
-- ✅ Service availability (TCP port 4040, Dashboard port 4041)
-- ✅ Performance benchmark (1000 consumers, 10K messages)
-- ✅ Memory usage validation (< 500MiB threshold)
+`validate-docker-build.sh` checks:
 
-**Expected output:**
-```
-Step 1: Validating runtime dependencies...
-✓ Runtime dependencies validated
+- **Runtime dependencies** present: the `argon2_nif.so` NIF and `openssl`.
+- **JIT**: `:erlang.system_info(:emu_flavor)` reports `jit`.
+- **Service comes up**: the container starts with seeded users (`MALACHI_DEFAULT_USERS`) and the dashboard
+  authenticates and answers.
 
-Step 2: Verifying ERL_FLAGS configuration...
-✓ ERL_FLAGS configuration checked
-
-Step 3: Starting container for functional tests...
-Step 4: Validating service availability...
-✓ Dashboard responding
-
-Step 5: Running performance benchmark...
-Benchmark Results:
-  Time: 2453ms
-  Messages Processed: 10000
-  Messages Acked: 10000
-  Throughput: ~4078 msg/s
-✓ Performance benchmark passed
-
-Step 6: Checking memory usage...
-Memory usage: 145.2MiB
-✓ Memory usage acceptable
-
-=== All validation checks completed ===
-```
-
-### 2. Regression Testing
+## Regression testing
 
 ```bash
 make docker-regression-test
 ```
 
-**What it tests:**
-- Dashboard HTTP endpoint (GET /)
-- Metrics endpoint JSON format (GET /metrics)
-- SSE stream endpoint (GET /stream)
-- TCP server listening on port 4040
-- Container process health
-- Queue publish/consume workflow
-- High-volume throughput (10K messages)
-- Memory stability under load (50K messages)
-- Concurrent multi-queue operations (10 queues)
-- JIT compilation status
+`docker-regression-test.sh` boots the image, logs in to the dashboard for a token, and runs:
+
+| # | Test | Checks |
+|---|------|--------|
+| 1 | Dashboard HTTP endpoint | `GET /` returns 200 |
+| 2 | Metrics endpoint returns JSON | `GET /metrics` contains `topics` |
+| 3 | SSE stream endpoint | `GET /stream` streams |
+| 4 | TCP server listening | port 4040 open |
+| 5 | Container process health | `bin/malachi pid` |
+| 6 | Log produce/fetch workflow | `create_topic`, `produce_records`, then `fetch` by opaque cursor |
+| 7 | Consumer-group resume | `fetch_group`, `commit`, resume returns empty (at-least-once) |
+| 8 | High-volume throughput | 1000 records in one produce |
+| 9 | Memory stability under load | 5000 records, memory before/after |
+| 10 | Concurrent multi-topic | 10 topics, 100 records each, all drained back |
+| 11 | JIT compilation | `emu_flavor` is `jit` |
 
 **Expected output:**
+
 ```
 Testing: Dashboard HTTP endpoint... PASS
 Testing: Metrics endpoint returns JSON... PASS
-Testing: SSE stream endpoint available... PASS
-Testing: TCP port listening... PASS
-Testing: Container process health... PASS
-Testing: Queue publish/consume workflow... PASS
-Testing: High-volume message throughput... PASS
-Testing: Memory stability under load... PASS (142.5MiB → 156.3MiB)
-Testing: Concurrent multi-queue operations... PASS
-Testing: JIT compilation enabled... PASS
-
+...
 ===================================
 Regression Test Summary
 ===================================
-Passed: 10
+Passed: 11
 Failed: 0
 ===================================
 All regression tests passed!
 ```
 
-## Manual Validation Steps
+## Manual validation
 
-### Step 1: Build the Image
+### Build the image
 
 ```bash
 make docker-build
 ```
 
-### Step 2: Verify Runtime Dependencies
+### Verify runtime dependencies
 
 ```bash
 docker run --rm --entrypoint /bin/sh hectorcardoso/malachi:latest -c "find /app/lib -name 'argon2_nif.so'"
 ```
 
-Expected: Output shows path to `argon2_nif.so`
-
-### Step 3: Test JIT Configuration
+### Check JIT
 
 ```bash
 docker run --rm hectorcardoso/malachi:latest bin/malachi eval ':erlang.system_info(:emu_flavor)'
+# Expected: jit
 ```
 
-Expected: `jit`
-
-### Step 4: Run Container and Check Logs
+### Run the container
 
 ```bash
 docker run -d --name test-malachi \
@@ -151,213 +109,84 @@ docker run -d --name test-malachi \
 docker logs -f test-malachi
 ```
 
-Expected logs:
+Expected startup logs (locale `en_US`):
+
 ```
-[info] 🚀 Iniciando Malachi...
-[info] ✓ Gerenciador de partições iniciado com 800 partições
-[info] ✓ Pool de aceitadores TCP iniciado com 8 workers
-[info] ✓ Dashboard HTTP iniciado na porta 4041
+🚀 Malachi TCP Server on port 4040 with 8 acceptors
+✅ Metrics system started
+🌐 Malachi Dashboard running at http://localhost:4041
 ```
 
-### Step 5: Test Dashboard
+### Exercise the log broker
+
+The client protocol is binary, so do not hand-write frames. Either use the reference Node client in
+[`scripts/`](https://github.com/HectorIFC/malachi/tree/main/scripts) (`producer.js`, `consumer.js`), or
+drive the in-process API through `bin/malachi rpc`, which is what the regression script does:
 
 ```bash
-curl http://localhost:4041/
-curl http://localhost:4041/metrics
-```
-
-### Step 6: Test TCP Protocol
-
-```bash
-# Using netcat to test authentication
-echo '{"action":"auth","username":"producer","password":"producer123"}' | nc localhost 4040
-```
-
-Expected response:
-```json
-{"s":"ok","token":"<session_token>"}
-```
-
-## Performance Benchmarks
-
-### Baseline Performance Metrics
-
-On a typical 8-core system:
-
-| Metric | Expected Value |
-|--------|---------------|
-| Consumer creation rate | > 1000/sec |
-| Message throughput | > 3000 msg/sec |
-| Memory per consumer | < 5 KB |
-| Container memory (idle) | < 150 MiB |
-| Container memory (under load) | < 300 MiB |
-
-### Custom Benchmark
-
-```bash
-docker exec malachi bin/malachi eval '
-  Malachi.Benchmark.spawn_consumers("bench", 10000)
-  Malachi.Benchmark.send_messages("bench", 100000)
-  :timer.sleep(5000)
-  metrics = Malachi.Metrics.get_metrics("bench")
-  IO.inspect(metrics)
+docker exec test-malachi bin/malachi rpc '
+  topic = "smoke"
+  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
+  {:ok, 1} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "k", value: "hello"}])
+  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
+  IO.inspect(Enum.map(records, & &1.value))
 '
 ```
 
 ## Troubleshooting
 
-### Validation Script Fails on Step 1 (Dependencies)
+### argon2 NIF not found
 
-**Problem:** argon2 NIF not found
+Rebuild the image; the NIF is compiled from source during the build stage:
 
-**Solution:** Rebuild the image - the argon2 NIF is compiled from source during the build stage:
 ```bash
 docker rmi hectorcardoso/malachi:latest
 make docker-build
 ```
 
-### Regression Test Timeout
+### Dashboard not responding
 
-**Problem:** Dashboard not responding after 10 attempts
-
-**Solution:** Check container logs:
 ```bash
 docker logs <container_name>
 ```
 
-Common causes:
-- Port conflict (another service using 4040/4041)
-- Insufficient memory
-- Docker daemon issues
+Common causes: a port conflict on 4040/4041, insufficient memory, or Docker daemon issues.
 
-### Low Throughput Performance
+### JIT not enabled
 
-**Problem:** Throughput < 1000 msg/s
+JIT is unavailable on some platforms/emulation. Tests treat it as a skip, not a failure. Confirm the
+platform with `docker run --rm hectorcardoso/malachi:latest uname -m`.
 
-**Possible causes:**
-1. System under heavy load
-2. JIT not enabled (check platform support)
-3. Limited CPU cores
-
-**Diagnosis:**
-```bash
-docker exec <container_name> bin/malachi eval 'Malachi.Benchmark.system_info()'
-```
-
-### Memory Usage Exceeds Threshold
-
-**Problem:** Container using > 500MiB during validation
-
-**Solutions:**
-- Reduce partition multiplier: `-e MALACHI_PARTITION_MULTIPLIER=50`
-- Check for memory leaks in application code
-- Verify garbage collection is working
-
-## CI/CD Integration
-
-### GitHub Actions Example
+## CI/CD integration
 
 ```yaml
 name: Docker Build & Test
-
 on: [push, pull_request]
-
 jobs:
   docker-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
+      - uses: actions/checkout@v4
       - name: Build Docker image
         run: make docker-build
-      
       - name: Run validation tests
         run: make docker-validate
-      
       - name: Run regression tests
         run: make docker-regression-test
-      
       - name: Cleanup
         if: always()
         run: docker system prune -f
 ```
 
-### GitLab CI Example
+## Script locations
 
-```yaml
-docker-test:
-  stage: test
-  image: docker:latest
-  services:
-    - docker:dind
-  script:
-    - make docker-build
-    - make docker-test-all
-  artifacts:
-    when: on_failure
-    paths:
-      - docker-logs/
-```
+- **Build validation:** `scripts/validate-docker-build.sh`
+- **Regression tests:** `scripts/docker-regression-test.sh`
+- **Make targets:** `Makefile` (`docker-validate`, `docker-regression-test`, `docker-test-all`)
 
-## Best Practices
-
-1. **Always run full test suite before pushing images:**
-   ```bash
-   make docker-test-all
-   ```
-
-2. **Test on target platforms if building multi-arch:**
-   ```bash
-   docker buildx build --platform linux/amd64,linux/arm64 .
-   ```
-
-3. **Validate local changes before Docker build:**
-   ```bash
-   mix test && make docker-build
-   ```
-
-4. **Monitor resource usage during tests:**
-   ```bash
-   docker stats
-   ```
-
-5. **Clean up test containers regularly:**
-   ```bash
-   docker container prune -f
-   ```
-
-## Automated Testing Workflow
-
-Recommended workflow for development:
-
-```bash
-# 1. Make code changes
-vim lib/malachi/queue.ex
-
-# 2. Test locally
-mix test
-
-# 3. Build Docker image
-make docker-build
-
-# 4. Run validation
-make docker-validate
-
-# 5. Run regression tests
-make docker-regression-test
-
-# 6. If all pass, tag and push
-docker push hectorcardoso/malachi:latest
-```
-
-## Script Locations
-
-- **Validation Script:** `scripts/validate-docker-build.sh`
-- **Regression Test:** `scripts/docker-regression-test.sh`
-- **Makefile Targets:** `Makefile`
+For multi-architecture builds, see [Multi-arch builds](MULTI_ARCH_BUILD.md).
 
 ## Support
 
-For issues or questions:
 - GitHub Issues: https://github.com/HectorIFC/malachi/issues
 - Documentation: https://hectorifc.github.io/malachi
