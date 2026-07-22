@@ -35,7 +35,6 @@ services:
       - malachi-data:/app/data
     tmpfs:
       - /tmp:rw,noexec,nosuid
-      - /var/log/malachi:rw,noexec,nosuid
     mem_limit: 512m
     cpus: 2.0
     restart: unless-stopped
