@@ -59,8 +59,6 @@ defmodule Malachi.MixProject do
       "SECURITY.md": [title: "Security policy"],
       "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
       "RATE_LIMITING.md": [title: "Rate limiting"],
-      "BACKPRESSURE_IMPLEMENTATION.md": [title: "Backpressure"],
-      "OVERFLOW_STRATEGIES.md": [title: "Overflow strategies"],
       "DOCKER_README.md": [title: "Running with Docker"],
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
@@ -86,8 +84,6 @@ defmodule Malachi.MixProject do
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [
         "RATE_LIMITING.md",
-        "BACKPRESSURE_IMPLEMENTATION.md",
-        "OVERFLOW_STRATEGIES.md",
         "DOCKER_README.md",
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"

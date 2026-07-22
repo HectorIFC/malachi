@@ -5,7 +5,7 @@
 [![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachi/latest)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/HectorIFC/malachi/blob/main/LICENSE)
 
-**Malachi** is a High-performance message system, designed for low-latency, high-throughput messaging with automatic queue partitioning across CPU cores.
+**Malachi** is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture: a CP, horizontally-scalable **log broker**. Clients speak topics, keys, and opaque cursors, never partitions or offsets, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
 
 ## Features
 
@@ -189,27 +189,21 @@ Notes:
 
 ---
 
-## TCP Protocol
+## Client protocol
 
-Malachi uses a JSON-over-TCP protocol. All messages are newline-delimited.
+Malachi speaks a length-framed **binary** protocol on the TCP port: a connection authenticates first, then
+exchanges topic, produce, fetch, commit, and subscribe frames. Positions are opaque cursors, never offsets.
+Clients do not hand-write frames.
 
-### Authentication
+Use one of the supported clients instead:
 
-```json
-{"action": "auth", "username": "producer", "password": "producer123"}
-```
+- the reference **Node CLI** in [`scripts/`](https://github.com/HectorIFC/malachi/tree/main/scripts)
+  (`producer.js`, `consumer.js`, `subscriber.js`), which reads `MALACHI_HOST`, `MALACHI_PORT`,
+  `MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`;
+- the in-process Elixir API (`Malachi.LogApi`) for embedded use.
 
-### Publish a message
-
-```json
-{"action": "publish", "queue_name": "orders", "payload": "{\"order_id\": 123}"}
-```
-
-### Subscribe to a queue
-
-```json
-{"action": "subscribe", "queue_name": "orders"}
-```
+See the [guides](https://hectorifc.github.io/malachi) for producing, consuming, consumer groups, and
+streaming with backpressure.
 
 ---
 
