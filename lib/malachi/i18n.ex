@@ -10,14 +10,10 @@ defmodule Malachi.I18n do
   ## Usage
 
       Malachi.I18n.t(:metrics_started)
-      Malachi.I18n.t(:consumers_created, count: 1000, duration: 500)
+      Malachi.I18n.t(:transport_enabled, transport: "TLS", port: 4040)
   """
 
   @translations %{
-    partition_manager_started: %{
-      "pt_BR" => "✅ PartitionManager: %{partitions} partições (%{schedulers} schedulers × %{multiplier})",
-      "en_US" => "✅ PartitionManager: %{partitions} partitions (%{schedulers} schedulers × %{multiplier})"
-    },
     tcp_server_started: %{
       "pt_BR" => "🚀 Malachi TCP Server na porta %{port} com %{acceptors} acceptors",
       "en_US" => "🚀 Malachi TCP Server on port %{port} with %{acceptors} acceptors"
@@ -29,10 +25,6 @@ defmodule Malachi.I18n do
     tls_handshake_failed: %{
       "pt_BR" => "Falha no handshake TLS: %{reason}",
       "en_US" => "TLS handshake failed: %{reason}"
-    },
-    tls_handshake_success: %{
-      "pt_BR" => "Handshake TLS bem-sucedido (versão: %{version})",
-      "en_US" => "TLS handshake successful (version: %{version})"
     },
     # TLS Validator translations
     tls_validation_started: %{
@@ -129,46 +121,6 @@ defmodule Malachi.I18n do
       "pt_BR" => "Erro no accept: %{reason}",
       "en_US" => "Accept error: %{reason}"
     },
-    creating_consumers: %{
-      "pt_BR" => "Criando %{count} consumidores...",
-      "en_US" => "Creating %{count} consumers..."
-    },
-    consumers_created_progress: %{
-      "pt_BR" => "%{count} consumidores criados...",
-      "en_US" => "%{count} consumers created..."
-    },
-    consumers_created: %{
-      "pt_BR" => "✅ %{count} consumidores criados em %{duration}ms",
-      "en_US" => "✅ %{count} consumers created in %{duration}ms"
-    },
-    consumers_rate: %{
-      "pt_BR" => "   Taxa: %{rate} consumidores/segundo",
-      "en_US" => "   Rate: %{rate} consumers/second"
-    },
-    total_memory: %{
-      "pt_BR" => "   Memória total: %{memory} MB",
-      "en_US" => "   Total memory: %{memory} MB"
-    },
-    memory_per_consumer: %{
-      "pt_BR" => "   Memória por consumidor: ~%{memory} KB",
-      "en_US" => "   Memory per consumer: ~%{memory} KB"
-    },
-    sending_messages: %{
-      "pt_BR" => "Enviando %{count} mensagens...",
-      "en_US" => "Sending %{count} messages..."
-    },
-    messages_sent: %{
-      "pt_BR" => "✅ %{count} mensagens enviadas em %{duration}ms",
-      "en_US" => "✅ %{count} messages sent in %{duration}ms"
-    },
-    messages_rate: %{
-      "pt_BR" => "   Taxa: %{rate} msgs/segundo",
-      "en_US" => "   Rate: %{rate} msgs/second"
-    },
-    processing_error: %{
-      "pt_BR" => "Erro ao processar: %{error}",
-      "en_US" => "Error processing: %{error}"
-    },
     metrics_started: %{
       "pt_BR" => "✅ Sistema de métricas iniciado",
       "en_US" => "✅ Metrics system started"
@@ -176,18 +128,6 @@ defmodule Malachi.I18n do
     dashboard_started: %{
       "pt_BR" => "🌐 Malachi Dashboard rodando em http://localhost:%{port}",
       "en_US" => "🌐 Malachi Dashboard running at http://localhost:%{port}"
-    },
-    ack_manager_started: %{
-      "pt_BR" => "✅ AckManager iniciado (timeout: %{timeout}ms)",
-      "en_US" => "✅ AckManager started (timeout: %{timeout}ms)"
-    },
-    messages_expired: %{
-      "pt_BR" => "⚠️ %{count} mensagens expiraram e foram reenfileiradas",
-      "en_US" => "⚠️ %{count} messages expired and were requeued"
-    },
-    message_expired_retry: %{
-      "pt_BR" => "Mensagem %{id} expirou (tentativa %{attempt}/%{max}), reenfileirando...",
-      "en_US" => "Message %{id} expired (attempt %{attempt}/%{max}), requeuing..."
     },
     rate_limiter_started: %{
       "pt_BR" => "✅ RateLimiter iniciado",
@@ -200,14 +140,6 @@ defmodule Malachi.I18n do
     connection_limiter_started: %{
       "pt_BR" => "✅ ConnectionLimiter iniciado",
       "en_US" => "✅ ConnectionLimiter started"
-    },
-    message_failed_dlq: %{
-      "pt_BR" => "Mensagem %{id} falhou após %{max} tentativas - movendo para DLQ",
-      "en_US" => "Message %{id} failed after %{max} attempts - moving to DLQ"
-    },
-    processed_message: %{
-      "pt_BR" => "Mensagem processada %{id}",
-      "en_US" => "Processed message %{id}"
     },
     auth_started: %{
       "pt_BR" => "✅ Sistema de autenticação iniciado",
@@ -225,10 +157,6 @@ defmodule Malachi.I18n do
       "pt_BR" => "🔒 Usuário não encontrado: '%{username}'",
       "en_US" => "🔒 User not found: '%{username}'"
     },
-    auth_required: %{
-      "pt_BR" => "🔒 Autenticação necessária",
-      "en_US" => "🔒 Authentication required"
-    },
     user_created: %{
       "pt_BR" => "👤 Usuário criado: '%{username}'",
       "en_US" => "👤 User created: '%{username}'"
@@ -245,34 +173,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "👥 %{count} usuários padrão carregados",
       "en_US" => "👥 %{count} default users loaded"
     },
-    sessions_cleaned: %{
-      "pt_BR" => "🧹 %{count} sessões expiradas removidas",
-      "en_US" => "🧹 %{count} expired sessions cleaned"
-    },
-    permission_denied: %{
-      "pt_BR" => "⛔ Permissão negada: '%{username}' -> %{action}",
-      "en_US" => "⛔ Permission denied: '%{username}' -> %{action}"
-    },
     # Security hardening translations
     account_locked: %{
       "pt_BR" => "🔒 Conta bloqueada: '%{username}' (desbloqueio em %{time_remaining_ms}ms)",
       "en_US" => "🔒 Account locked: '%{username}' (unlock in %{time_remaining_ms}ms)"
     },
-    lockout_expired: %{
-      "pt_BR" => "🔓 Bloqueio expirado para '%{username}'",
-      "en_US" => "🔓 Lockout expired for '%{username}'"
-    },
     session_hijack_attempt: %{
       "pt_BR" => "⚠️ Tentativa de sequestro de sessão detectada: '%{username}' (IP: %{ip})",
       "en_US" => "⚠️ Session hijack attempt detected: '%{username}' (IP: %{ip})"
-    },
-    suspicious_activity: %{
-      "pt_BR" => "🚨 Atividade suspeita detectada: %{details}",
-      "en_US" => "🚨 Suspicious activity detected: %{details}"
-    },
-    config_validation_failed: %{
-      "pt_BR" => "❌ Falha na validação de configuração: %{reason}",
-      "en_US" => "❌ Configuration validation failed: %{reason}"
     },
     audit_log_started: %{
       "pt_BR" => "✅ Sistema de auditoria iniciado (retenção: %{retention_days} dias)",
@@ -286,90 +194,13 @@ defmodule Malachi.I18n do
       "pt_BR" => "✅ Gerenciador de bloqueio iniciado",
       "en_US" => "✅ Lockout manager started"
     },
-    trusted_proxy_detected: %{
-      "pt_BR" => "🔄 Proxy confiável detectado: IP binding desabilitado para %{ip}",
-      "en_US" => "🔄 Trusted proxy detected: IP binding disabled for %{ip}"
-    },
-    system_info: %{
-      "pt_BR" => "ℹ️  Informações do Sistema Malachi",
-      "en_US" => "ℹ️  Malachi System Info"
-    },
-    system_schedulers: %{
-      "pt_BR" => "   Schedulers: %{schedulers}",
-      "en_US" => "   Schedulers: %{schedulers}"
-    },
-    system_processes: %{
-      "pt_BR" => "   Processos: %{processes}/%{limit}",
-      "en_US" => "   Processes: %{processes}/%{limit}"
-    },
-    system_memory: %{
-      "pt_BR" => "   Memória: %{memory} MB",
-      "en_US" => "   Memory: %{memory} MB"
-    },
-    system_ets_tables: %{
-      "pt_BR" => "   Tabelas ETS: %{tables}/%{limit}",
-      "en_US" => "   ETS Tables: %{tables}/%{limit}"
-    },
     closing_connections: %{
       "pt_BR" => "🔌 Fechando %{count} conexões ativas...",
       "en_US" => "🔌 Closing %{count} active connections..."
     },
-    connection_registry_started: %{
-      "pt_BR" => "✅ Registro de conexões iniciado",
-      "en_US" => "✅ Connection registry started"
-    },
     graceful_shutdown: %{
       "pt_BR" => "⏳ Iniciando shutdown gracioso...",
       "en_US" => "⏳ Starting graceful shutdown..."
-    },
-    channel_started: %{
-      "pt_BR" => "📢 Canal '%{channel}' iniciado",
-      "en_US" => "📢 Channel '%{channel}' started"
-    },
-    channel_subscriber_added: %{
-      "pt_BR" => "Canal '%{channel}': inscrito %{pid} adicionado (total: %{count})",
-      "en_US" => "Channel '%{channel}': subscriber %{pid} added (total: %{count})"
-    },
-    channel_subscriber_removed: %{
-      "pt_BR" => "Canal '%{channel}': inscrito %{pid} removido (total: %{count})",
-      "en_US" => "Channel '%{channel}': subscriber %{pid} removed (total: %{count})"
-    },
-    channel_subscriber_kicked: %{
-      "pt_BR" => "Canal '%{channel}': inscrito %{pid} removido forçadamente",
-      "en_US" => "Channel '%{channel}': subscriber %{pid} kicked"
-    },
-    channel_subscriber_down: %{
-      "pt_BR" => "Canal '%{channel}': inscrito %{pid} desconectou (total: %{count})",
-      "en_US" => "Channel '%{channel}': subscriber %{pid} disconnected (total: %{count})"
-    },
-    queue_config_started: %{
-      "pt_BR" => "✅ Sistema de configuração de filas iniciado",
-      "en_US" => "✅ Queue configuration system started"
-    },
-    queue_created: %{
-      "pt_BR" => "📋 Fila '%{queue}' criada com modo %{mode}",
-      "en_US" => "📋 Queue '%{queue}' created with mode %{mode}"
-    },
-    queue_created_implicitly: %{
-      "pt_BR" => "⚠️ Fila '%{queue}' criada implicitamente com modo %{mode}",
-      "en_US" => "⚠️ Queue '%{queue}' created implicitly with mode %{mode}"
-    },
-    queue_deleted: %{
-      "pt_BR" => "🗑️  Fila '%{queue}' removida",
-      "en_US" => "🗑️  Queue '%{queue}' deleted"
-    },
-    queue_config_updated: %{
-      "pt_BR" => "🔄 Configuração da fila '%{queue}' atualizada",
-      "en_US" => "🔄 Queue '%{queue}' configuration updated"
-    },
-    queue_config_force_updated: %{
-      "pt_BR" =>
-        "⚠️ Configuração da fila '%{queue}' forçada: %{excess} mensagens excedentes (max %{old_max} → %{new_max})",
-      "en_US" => "⚠️ Queue '%{queue}' configuration forced: %{excess} excess messages (max %{old_max} → %{new_max})"
-    },
-    queue_overflow_event: %{
-      "pt_BR" => "🚨 Overflow na fila '%{queue}': evento=%{event}, atual=%{current}, max=%{max}",
-      "en_US" => "🚨 Queue '%{queue}' overflow: event=%{event}, current=%{current}, max=%{max}"
     },
     # Audit log translations
     audit_log_file_enabled: %{
@@ -434,14 +265,6 @@ defmodule Malachi.I18n do
       "en_US" => "⚠️  Development mode: No admin user configured"
     },
     # Validator translations
-    validator_started: %{
-      "pt_BR" => "✅ Validador iniciado com cache ETS para nomes validados",
-      "en_US" => "✅ Validator started with ETS cache for validated names"
-    },
-    validation_error: %{
-      "pt_BR" => "Erro de validação: %{reason} - %{context}",
-      "en_US" => "Validation error: %{reason} - %{context}"
-    },
     # Atom monitor translations
     atom_monitor_started: %{
       "pt_BR" => "✅ AtomMonitor iniciado (intervalo: %{interval_ms}ms, alerta: %{warning}%, crítico: %{critical}%)",
@@ -502,8 +325,8 @@ defmodule Malachi.I18n do
       iex> Malachi.I18n.t(:metrics_started)
       "✅ Metrics system started"
 
-      iex> Malachi.I18n.t(:consumers_created, count: 1000, duration: 500)
-      "✅ 1000 consumers created in 500ms"
+      iex> Malachi.I18n.t(:transport_enabled, transport: "TLS", port: 4040)
+      "🔒 TLS transport enabled on port 4040"
   """
   @spec t(atom(), keyword()) :: String.t()
   def t(key, bindings \\ [])

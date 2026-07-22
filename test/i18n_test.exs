@@ -4,6 +4,8 @@ defmodule Malachi.I18nTest do
 
   alias Malachi.I18n
 
+  doctest Malachi.I18n
+
   setup do
     original_locale = I18n.locale()
     on_exit(fn -> I18n.set_locale(original_locale) end)
@@ -35,22 +37,6 @@ defmodule Malachi.I18nTest do
       assert I18n.t(:tls_handshake_failed, reason: "timeout") =~ "Falha no handshake TLS"
     end
 
-    test "system_info translations work" do
-      I18n.set_locale("en_US")
-      assert I18n.t(:system_info) =~ "System Info"
-      assert I18n.t(:system_schedulers, schedulers: 8) =~ "Schedulers: 8"
-      assert I18n.t(:system_processes, processes: 100, limit: 1000) =~ "Processes: 100/1000"
-      assert I18n.t(:system_memory, memory: 123.45) =~ "Memory: 123.45"
-      assert I18n.t(:system_ets_tables, tables: 50, limit: 1000) =~ "ETS Tables: 50/1000"
-
-      I18n.set_locale("pt_BR")
-      assert I18n.t(:system_info) =~ "Informações do Sistema"
-      assert I18n.t(:system_schedulers, schedulers: 8) =~ "Schedulers: 8"
-      assert I18n.t(:system_processes, processes: 100, limit: 1000) =~ "Processos: 100/1000"
-      assert I18n.t(:system_memory, memory: 123.45) =~ "Memória: 123.45"
-      assert I18n.t(:system_ets_tables, tables: 50, limit: 1000) =~ "Tabelas ETS: 50/1000"
-    end
-
     test "all translation keys are present" do
       keys = I18n.keys()
 
@@ -74,9 +60,9 @@ defmodule Malachi.I18nTest do
 
     test "translation with interpolation works" do
       I18n.set_locale("en_US")
-      result = I18n.t(:consumers_created, count: 1000, duration: 500)
-      assert result =~ "1000"
-      assert result =~ "500"
+      result = I18n.t(:transport_enabled, transport: "TLS", port: 4040)
+      assert result =~ "TLS"
+      assert result =~ "4040"
     end
   end
 end
