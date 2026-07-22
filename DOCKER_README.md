@@ -78,6 +78,30 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
 | `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
 | `MALACHI_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
+| `MALACHI_LOG_DATA_DIR` | *(tmp)* | Directory for the durable log segments. Must be an absolute path on a volume; see Data Persistence. |
+| `MALACHI_RA_DATA_DIR` | *(tmp)* | Directory for the ra log (users, ACLs, lockouts). Must be an absolute path on a volume; see Data Persistence. |
+
+### Data Persistence
+
+The broker keeps its log segments and its ra log (which holds user credentials, ACLs, and lockouts) on
+disk. **With no volume, both default to a path under `/tmp` and are lost on every restart.** Point the two
+directories at a persistent volume mounted at `/app/data`, which the image already owns:
+
+```bash
+docker run \
+  --name malachi \
+  -p 4040:4040 \
+  -p 4041:4041 \
+  -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_LOG_DATA_DIR=/app/data/log \
+  -e MALACHI_RA_DATA_DIR=/app/data/ra \
+  -v malachi-data:/app/data \
+  hectorcardoso/malachi:latest
+```
+
+In production these must be absolute paths: a relative value is rejected at boot, because it would resolve
+against the working directory and put durable data back on ephemeral storage. The bundled
+[`docker-compose.yml`](docker-compose.yml) and the Kubernetes manifest use these same paths.
 
 ### TLS Configuration
 
@@ -113,12 +137,19 @@ services:
       - "4041:4041"  # Dashboard
     environment:
       - MALACHI_LOCALE=en_US
+      - MALACHI_LOG_DATA_DIR=/app/data/log
+      - MALACHI_RA_DATA_DIR=/app/data/ra
+    volumes:
+      - malachi-data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:4041/metrics"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+volumes:
+  malachi-data:
 ```
 
 ## Large-scale channel broadcast runtime variables

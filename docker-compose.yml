@@ -21,9 +21,18 @@ services:
       - MALACHI_RATE_LIMIT_ENABLED=true
       - MALACHI_SESSION_IP_BINDING=true
       - MALACHI_AUDIT_LOG_OUTPUT=stdout
+      # Durable storage. Without these the defaults land under /tmp, which is a tmpfs (below), so every
+      # segment and the ra log (user credentials, ACLs, lockouts) would live in RAM and vanish on restart.
+      # Same paths as the Kubernetes manifest, both under the one persistent mount.
+      - MALACHI_RA_DATA_DIR=/app/data/ra
+      - MALACHI_LOG_DATA_DIR=/app/data/log
     security_opt:
       - no-new-privileges:true
+    # The root filesystem stays read-only; the named volume below is the single writable persistent path,
+    # which a durable broker requires. /tmp and the log dir are writable tmpfs and do not survive a restart.
     read_only: true
+    volumes:
+      - malachi-data:/app/data
     tmpfs:
       - /tmp:rw,noexec,nosuid
       - /var/log/malachi:rw,noexec,nosuid
@@ -55,3 +64,7 @@ services:
     command: ["node", "producer.js", "10"]
     profiles:
       - tools
+
+volumes:
+  # Persists the broker's log segments and ra state (credentials, ACLs, lockouts) across restarts.
+  malachi-data:
