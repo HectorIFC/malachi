@@ -1,579 +1,233 @@
 # Malachi - AI Coding Agent Instructions
 
-## Project Overview
+## Project overview
 
-Malachi is a High-performance message system. It provides persistent queues with ETS-backed storage, pub/sub channels with best-effort delivery, TCP/TLS server for client connections, web dashboard with SSE streaming, session-based authentication with Argon2 hashing, rate limiting, connection limiting, audit logging, input validation, backpressure control, and automatic queue partitioning across CPU cores.
+Malachi is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage
+architecture: a CP (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak
+**topics, keys, and opaque cursors**, never partitions or offsets, so the broker can split, merge, and
+restripe its storage underneath without breaking clients. The control plane is replicated by quorum (Raft
+via `ra`); cluster membership uses SWIM.
 
-**Runtime:** Elixir 1.19+ / OTP 28+ on the BEAM VM.
+It is **not** a queue/channel message system. Any mention of queues, channels, `PartitionManager`,
+`AckManager`, `QueueConfig`, or `Validator` describes a former design (MalachiMQ) that was removed. If you
+find such references outside historical files (`CHANGELOG.md`, release notes), they are stale.
+
+**Runtime:** Elixir 1.19+ / OTP 28+ on the BEAM.
+
+## The log model (read this first)
+
+- A **topic** has a **keyspace**. A record's **key** hashes to a position in that keyspace; the position
+  falls in exactly one **range** (a vnode). Records with the same key land in the same range and are
+  ordered relative to each other. Omit the key and records spread across ranges (max parallelism, no
+  ordering between them).
+- Ranges hold **segments**; a segment is an append-only sequence of **records**.
+- Clients never see a partition or an offset. Position is an **opaque cursor** (`LogApi.encode_cursor/1` /
+  `decode_cursor/1`, decoded with `binary_to_term(_, [:safe])`).
+- **Producing** returns a **count, not an offset**. That is what lets ranges split underneath.
+- **Consuming** has three shapes: carry the cursor yourself; a **consumer group** (the server commits the
+  position durably); or a **group member** (the server also assigns the member a share of the ranges and
+  rebalances on join/leave).
+- Streaming push uses **credit-window backpressure**: `budget = min(max, window - in_flight)`.
+- Delivery is **at-least-once**; consumers must be idempotent. There is no exactly-once mode.
+
+The guides in `docs/guides/` are the conceptual source of truth. `docs/NORTHGUARD_PORT.md` is the design
+roadmap.
 
 ## Architecture
 
-### Supervision Tree (`application.ex`)
+### Supervision tree (`application.ex`)
 
-The application starts 24 child processes in a `one_for_one` supervisor:
+`Malachi.Supervisor` is `one_for_one`. Startup order matters and is commented in `application.ex`:
 
 ```
 Malachi.Supervisor (one_for_one)
-├── QueueRegistry (partitioned by schedulers)
-├── ChannelRegistry (unique keys)
-├── QueueSupervisor (DynamicSupervisor, max 100k)
-├── ChannelSupervisor (DynamicSupervisor, max 100k)
-├── TaskSupervisor (max 200k children for broadcasts)
-├── PartitionManager
-├── QueueConfig
-├── Metrics
-├── AuditLog
-├── AtomMonitor
-├── MemoryMonitor
-├── Auth.LockoutManager
-├── Validator
-├── RateLimiter
-├── ConnectionLimiter
-├── Auth user store (ra-replicated cluster: UserServer/UserMachine)
-├── Auth
-├── AckManager
-├── ConnectionRegistry
+├── Cluster.Supervisor            # only if MALACHI_CLUSTER_STRATEGY is set (libcluster, connectivity only)
+├── Task.Supervisor              # large parallel broadcasts
+├── Metrics, AuditLog            # observability first
+├── AtomMonitor, MemoryMonitor
+├── RateLimiter, ConnectionLimiter
+├── ra lockout store             # LockoutServer + LockoutManager facade (+ reconciler when clustered)
+├── ra ACL store                 # AclServer (per-topic ACLs)
+├── ra user store                # UserServer (+ reconciler when clustered); precedes Auth (seeds users)
+├── Auth, ConnectionRegistry
+├── log stack (log_children/0)   # NorthGuard: metadata control plane, vnodes, replication,
+│                                 # consumer-group coordinator (node-wide, or one per led vnode when sharded)
 ├── TCPAcceptorPool → TCPAcceptors (one per core)
 └── Dashboard (HTTP server)
 ```
 
-### Core Components (`lib/malachi/`)
+`ra` is started (`start_ra!/0`) before any child that forms an ra cluster, including single-node (a
+1-member cluster is cheap). The user, ACL, and lockout stores each form an ra cluster across the configured
+nodes.
 
-#### Queue & Messaging
-- **`queue.ex`** - Per-partition queue GenServer using ETS for message storage and dispatch
-- **`channel.ex`** - Pub/Sub channels with fire-and-forget delivery; broadcasts via Task.Supervisor
-- **`partition_manager.ex`** - Distributes queues across CPU cores using `erlang:phash2`; scales with `partition_multiplier` (default 100x)
-- **`queue_config.ex`** - Runtime queue configuration: delivery mode, max consumers, buffer size, overflow strategy
-- **`consumer.ex`** - Lightweight GenServer with aggressive hibernation and off-heap message queue
-- **`ack_manager.ex`** - Tracks pending acknowledgments per queue; requeues on timeout/nack
-- **`backpressure.ex`** - Producer backpressure handling: blocks producers when buffer exceeds threshold
+### Module map (`lib/malachi/`), by concern
 
-#### Networking & Protocol
-- **`tcp_acceptor_pool.ex`** - Spawns one acceptor per CPU core
-- **`tcp_acceptor.ex`** - GenServer accepting TCP/TLS connections, hands off to protocol handler
-- **`tcp_protocol.ex`** - Newline-delimited JSON protocol parser (~37KB); handles all client actions
-- **`socket_helper.ex`** - Unified socket utilities for raw TCP and TLS transports
-- **`connection_registry.ex`** - Tracks active connections; provides `close_all/0` for graceful shutdown
+- **Log and storage:** `log.ex`, `log_api.ex`, `broker.ex`, `broker_server.ex`, `keyspace.ex`,
+  `metadata.ex`, `log/record.ex`, `log/segment.ex`, `storage/segment_store.ex`, `storage/elixir_store.ex`.
+- **Cluster and Raft** (`cluster/`): `metadata_machine`/`metadata_server`/`replicated_metadata`,
+  `dsrsm`/`replicated_dsrsm`, `replication_server`/`replica_tracker`/`catchup`, `membership`/
+  `membership_server`, `lease*` (holder/machine/server/reconciler), `placement`/`hash_ring`/`ring_topology`/
+  `topology`, `reshard_*`/`split_*`/`rebalance*`/`vnode_split`, `retention*`, `failover`/`self_healing`/
+  `heal_coordinator`, `auto_rebalancer`.
+- **Consumer groups** (`consumer/`): `group_coordinator`, `assignment`, `coordinator_router`.
+- **Auth and security** (`auth/` + top level): `auth.ex`, `audit_log.ex`, `tls_validator.ex`; per-store ra
+  trios `user_*`, `acl_*`, `lockout_*` (each `machine`/`server`/`registry`/`store`); `session_manager`,
+  `authorization`, `config_validator`, `cert_identity`; providers `password_provider`, `mtls_provider`,
+  `jwt_provider`/`jwt_validator`, `oidc_config`, `auth_provider`.
+- **Wire and networking:** `wire.ex`, `tcp_protocol.ex`, `tcp_acceptor.ex`, `tcp_acceptor_pool.ex`,
+  `socket_helper.ex`, `connection_registry.ex`, `connection_limiter.ex`, `rate_limiter.ex`.
+- **Observability:** `metrics.ex`, `telemetry.ex`, `metrics/prometheus.ex`, `telemetry/metrics_reporter.ex`.
+- **Operations:** `application.ex`, `shutdown.ex`, `memory_monitor.ex`, `atom_monitor.ex`, `i18n.ex`,
+  `config.ex`, `cli/rpc.ex`.
+- **Mix tasks** (`lib/mix/tasks/`): `malachi.user`, `malachi.acl`, `malachi.reshard`.
 
-#### Security & Authentication
-- **`auth.ex`** - User authentication with Argon2 hashing; delegates persistence to `UserStore`
-- **`auth/user_store.ex`** - Facade over the ra-replicated user cluster (`UserServer`/`UserMachine`/`UserRegistry`); writes go through the Raft log, reads from the local replica
-- **`auth/session_manager.ex`** - Session lifecycle: token generation, IP binding, user-agent binding, expiration, cleanup
-- **`auth/lockout_manager.ex`** - Account lockout after failed attempts; progressive lockout with configurable duration
-- **`auth/config_validator.ex`** - Validates auth config at startup; prevents insecure production deployments
-- **`audit_log.ex`** - JSON security event logging to file/stdout/ETS; auto-rotation by size
-- **`rate_limiter.ex`** - Token bucket rate limiting per IP per action (auth, publish, subscribe); configurable windows
-- **`connection_limiter.ex`** - Max connections per IP and total; prevents resource exhaustion
-- **`validator.ex`** - Input validation with ETS cache; XSS prevention, injection protection, name/payload/header constraints
+### The `ra` (Raft) pattern
 
-#### Monitoring & Resource Management
-- **`metrics.ex`** - ETS-based real-time counters with `decentralized_counters: true`; atomic increments
-- **`memory_monitor.ex`** - Periodic memory checks; triggers GC when threshold exceeded
-- **`atom_monitor.ex`** - Monitors atom table usage (BEAM atoms are never GC'd); warns at 70%, critical at 90%
-- **`backpressure.ex`** - Buffer utilization tracking; blocks producers at configurable threshold
+Every replicated store follows the same shape, and new ones must too:
 
-#### Web Dashboard
-- **`dashboard.ex`** - HTTP server (~48KB) serving HTML UI, JSON metrics, SSE streaming; requires auth
-- **`dashboard/security_headers.ex`** - CSP, HSTS, X-Frame-Options, X-Content-Type-Options headers
+- a **pure state machine** (`*_machine.ex`) implementing the `:ra_machine` behaviour,
+- a **server** (`*_server.ex`) that starts/forms the cluster and issues commands,
+- a stateless **facade** (`*_store.ex` / manager) the rest of the app calls.
 
-#### Utilities
-- **`i18n.ex`** - Internationalization with pattern matching; supports `en_US` and `pt_BR`
-- **`benchmark.ex`** - Built-in benchmarking: spawn consumers, send messages, system info
+Reads go through `:ra.local_query` (the local replica); writes go through consensus. **Machines must be
+deterministic:** never read the wall clock, `Application.get_env`, or `node()` inside a machine. Anything
+time- or config-dependent travels **inside the command** (the machine reads `meta.system_time` that the
+server feeds it). The ra cluster name doubles as a **fencing token**: a second `start` of the same vnode
+fails rather than duplicating.
 
-### Data Flow
+## Wire protocol (binary, framed)
 
-1. Client connects via TCP/TLS → `TCPAcceptorPool` → `TCPAcceptor`
-2. `ConnectionLimiter.check_connection/1` → enforce per-IP and total limits
-3. Client sends auth request → `RateLimiter.check_rate/3` → `Auth.authenticate/3`
-4. `LockoutManager.check_lockout/1` → prevent brute force
-5. On success: `SessionManager` creates token bound to IP
-6. Producer sends publish → `Validator.validate_*/1` → `RateLimiter.check_rate/3`
-7. `PartitionManager.get_partition/1` hashes queue name → routes to partition
-8. `Queue` checks backpressure → dispatches to waiting consumer or buffers in ETS
-9. `Consumer` processes message → sends ack/nack to `AckManager`
-10. All security events → `AuditLog.log_event/5`
+The protocol is **length-framed binary**, owned by `Malachi.Wire`. It is not newline-delimited JSON. A
+request frame is `api_key::16, correlation_id::32, payload::binary`; responses are ok/error frames keyed by
+the same `correlation_id`. `Wire` owns all `encode_*`/`decode_*`.
 
-### TCP/JSON Protocol
+A connection **authenticates first** (in `tcp_acceptor.ex`), which creates a session via
+`SessionManager`; subsequent frames are dispatched with that session (`tcp_protocol.ex`).
 
-All messages are newline-delimited JSON. Responses use `"s"` for status (`"ok"` or `"err"`).
+| api_key | Op | Permission |
+|--------:|----|------------|
+| 0 | auth (username/password) | - |
+| 12 | mTLS auth (client cert identity) | - |
+| 13 | token auth (OIDC/JWT) | - |
+| 1 | create_topic | `:produce` |
+| 2 | produce | `:produce` |
+| 3 | fetch | `:consume` |
+| 4 | commit | `:consume` |
+| 5 | subscribe (enter push/stream mode) | `:consume` |
+| 6 | stream_ack (credit back) | (gated at subscribe) |
+| 7 | leave_group | `:consume` |
+| 8-11 | create_user / delete_user / change_password / list_users | `:admin` |
+| 14-16 | grant_acl / revoke_acl / list_acls | `:admin` |
 
-**Authentication (required first):**
-```json
-{"action":"auth","username":"producer","password":"producer123"}
-→ {"s":"ok","token":"<session_token>"}
-```
+Permissions are `:produce`, `:consume`, `:admin`. Access is enforced per topic through
+`with_topic_permission/…` and `with_permission/…`; per-topic ACLs are managed with grant/revoke and stored
+in the ra ACL cluster (strict mode via `MALACHI_ACL_STRICT`).
 
-**Publish message (requires `:produce`):**
-```json
-{"action":"publish","queue_name":"orders","payload":"...","headers":{"priority":1}}
-→ {"s":"ok"}
-```
+**Transient errors a correct client retries** (do not treat as fatal):
 
-**Shorthand publish (action optional):**
-```json
-{"queue_name":"orders","payload":"..."}
-→ {"s":"ok"}
-```
+- `:migrating` - a range is being split or migrated; back off and retry (the fence lifts in ms).
+- `:not_owner` - the request reached a node that no longer owns that range after a failover/rebalance;
+  re-resolve the owner and retry.
 
-**Subscribe to queue (requires `:consume`):**
-```json
-{"action":"subscribe","queue_name":"orders"}
-→ {"s":"ok"}
-← {"queue_message":{"id":1,"payload":"...","headers":{},"timestamp":123456}}
-```
+## In-process API
 
-**Acknowledge / Negative acknowledge:**
-```json
-{"action":"ack","message_id":"123","queue_name":"orders"}
-→ {"s":"ok"}
+Server-side and tests call `Malachi.LogApi` against the running broker `Malachi.LogBroker`:
+`produce/3`, `fetch/5`, `fetch_group/5`, `commit/4`, `subscribe/…`, `create_topic/2`, plus
+`encode_cursor/1` / `decode_cursor/1`. `produce/3` takes a **list** (one round trip, one quorum ack) - batch,
+do not loop.
 
-{"action":"nack","message_id":"123","queue_name":"orders"}
-→ {"s":"ok"}
-```
+## Reference client
 
-**Queue management (requires `:admin`):**
-```json
-{"action":"create_queue","queue_name":"orders","delivery_mode":"at_least_once","max_consumers":10,"buffer_size":1000,"overflow_strategy":"drop_old"}
-→ {"s":"ok","config":{...}}
-
-{"action":"delete_queue","queue_name":"orders"}
-→ {"s":"ok"}
-
-{"action":"list_queues"}
-→ {"s":"ok","queues":[...]}
-
-{"action":"get_queue_info","queue_name":"orders"}
-→ {"s":"ok","info":{"consumers":5,"buffered":100,...}}
-```
-
-**Channel pub/sub (best-effort, no persistence):**
-```json
-{"action":"channel_publish","channel_name":"news","payload":"...","headers":{}}
-→ {"s":"ok"}
-
-{"action":"channel_subscribe","channel_name":"news"}
-→ {"s":"ok"}
-← {"channel_message":{"payload":"...","headers":{},"timestamp":123456,"channel":"news"}}
-
-{"action":"channel_unsubscribe","channel_name":"news"}
-→ {"s":"ok"}
-```
-
-**Error codes:**
-```
-invalid_credentials, permission_denied, auth_required, invalid_request,
-queue_not_found, invalid_queue_name_invalid_characters, invalid_queue_name_too_long,
-invalid_queue_name_reserved, payload_too_large, invalid_headers_too_many,
-invalid_headers_invalid_type, rate_limit_exceeded (retry_after_ms: N),
-connection_limit_exceeded, auth_locked_out (retry_after_ms: N)
-```
-
-## Developer Commands
-
-```bash
-# Development
-mix deps.get                    # Install dependencies
-mix compile                     # Compile
-mix run --no-halt               # Run locally (ports 4040/4041)
-mix test                        # Run tests
-mix format                      # Format code
-mix credo --strict              # Static analysis
-mix dialyzer                    # Type checking
-mix deps.audit                  # Security audit
-
-# Docker
-make docker-build               # Build single-arch Docker image
-make docker-buildx              # Build multi-arch (AMD64 + ARM64)
-make docker-run                 # Run container (ports 4040, 4041)
-make compose-up                 # Docker Compose
-make compose-logs               # Follow logs
-make clean                      # Clean build artifacts
-
-# Release
-MIX_ENV=prod mix deps.get && MIX_ENV=prod mix release
-
-# TLS Development
-./scripts/generate-dev-certs.sh # Generate self-signed certs in priv/cert/
-
-# Benchmarks
-make benchmark                  # Run all baselines
-mix run benchmark/baselines/baseline_throughput.exs   # Single benchmark
-```
-
-## Code Conventions
-
-### GenServer Patterns
-- Use `{:continue, :action}` for post-init work (see `consumer.ex`)
-- Return `:hibernate` from callbacks for long-idle processes
-- Use `Process.flag(:message_queue_data, :off_heap)` for consumers
-- DynamicSupervisor for dynamic workers (queues, channels)
-- Registry for process discovery with partitioned keys
-
-### ETS Usage
-- Tables are `:public` with `read_concurrency: true, write_concurrency: true`
-- Use `decentralized_counters: true` for hot tables (metrics)
-- Prefer `:ets.update_counter/4` with default tuple for atomic increments
-- Named tables for shared state (users, sessions, metrics)
-- Anonymous tables for per-queue message storage
-
-### Error Handling
-- Return tuples: `{:ok, result}` or `{:error, atom_reason}`
-- Consumer callbacks returning `:error` or `{:error, _}` trigger nack with requeue
-- Guard clauses for type safety
-- `with` expressions for chaining validations
-
-### Naming Conventions
-- **Modules**: `Malachi.PascalCase` (e.g., `Malachi.TCPProtocol`)
-- **Functions/variables**: `snake_case`
-- **Module attributes**: `@snake_case` (e.g., `@max_payload_size`)
-- **Queue process names**: `{queue_name, partition}` tuples via Registry
-- **ETS tables**: `String.to_atom("malachi_#{name}_#{partition}")` for dynamic tables
-
-### Internationalization
-- Use `Malachi.I18n.t/2` for **all** log messages
-- Translations in `i18n.ex` with both `"pt_BR"` and `"en_US"` entries
-- Template interpolation: `I18n.t(:key, binding: "value")`
-
-### Code Quality
-- Line length: **120 characters** (`.formatter.exs`)
-- Max cyclomatic complexity: **12** (`.credo.exs`)
-- Max function arity: **8**
-- Max nesting: **3 levels**
-- Test coverage: **80% minimum** (ExCoveralls)
-- `mix format --check-formatted` in CI
+`scripts/` holds a Node CLI used by the guides and docker-compose: `producer.js`, `consumer.js`,
+`subscriber.js`, `acl.js`, `user.js`, `loadtest.js`. It reads `MALACHI_HOST`, `MALACHI_PORT`,
+`MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`, `MALACHI_LOCALE` (no `MQ` in the names). `scripts/lib/cli.js`
+has the `withRetry` helper that handles `:migrating`/`:not_owner`.
 
 ## Configuration
 
-Configuration flows: `config/config.exs` → `config/runtime.exs` (env vars) → `config/test.exs` (test overrides).
+Flow: `config/config.exs` → `config/runtime.exs` (env vars, `MALACHI_*`) → `config/test.exs` (test
+overrides). **`config/runtime.exs` is the authoritative list**; it is skipped entirely under
+`config_env() == :test`. Do not add a data directory or security default unconditionally there: it would
+overwrite `config/test.exs`. Normalize on-disk directories through `Malachi.Config.data_dir/3`, which trims,
+treats blank as absent, and **rejects a relative path in production**.
 
-### Network & Protocol
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_TCP_PORT` | `4040` | TCP server port |
-| `MALACHI_DASHBOARD_PORT` | `4041` | Dashboard HTTP port |
-| `MALACHI_TCP_RECV_TIMEOUT` | `30000` | Receive timeout (ms) |
-| `MALACHI_TCP_SEND_TIMEOUT` | `30000` | Send timeout (ms) |
-| `MALACHI_PARTITION_MULTIPLIER` | `100` | Partitions per CPU core |
-| `MALACHI_SHARD_COUNT` | `1000` | Number of shards |
+Env vars group into: network/TLS (`MALACHI_TCP_PORT`, `MALACHI_ENABLE_TLS`, `MALACHI_TLS_*`,
+`MALACHI_MAX_FRAME_SIZE`); auth/sessions/lockout (`MALACHI_*_PASS`, `MALACHI_DEFAULT_USERS`,
+`MALACHI_SESSION_*`, `MALACHI_MAX_AUTH_ATTEMPTS`, `MALACHI_MTLS_*`, `MALACHI_OIDC_*`); rate and connection
+limits; the **log cluster** (`MALACHI_LOG_CLUSTER`, `MALACHI_LOG_NODES`, `MALACHI_LOG_REPLICATION_FACTOR`,
+`MALACHI_LOG_VNODES`, `MALACHI_LOG_PLACEMENT_POLICY`/`SPREAD_BY`/`TOPOLOGY`); retention
+(`MALACHI_RETENTION_*` - note `MAX_BYTES=0` is a real budget that expires every sealed segment, not
+"unlimited"; the disable value is the absent variable); rebalance/lease; audit; resource monitors; and
+`MALACHI_LOCALE` (`en_US` / `pt_BR`). Some settings **fail permissive** on a rename mismatch, e.g.
+`MALACHI_ACL_STRICT` and `MALACHI_LOG_CLUSTER`/`MALACHI_LOG_NODES`.
 
-### TLS/SSL
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
-| `MALACHI_TLS_CERTFILE` | - | Path to TLS certificate |
-| `MALACHI_TLS_KEYFILE` | - | Path to TLS private key |
-| `MALACHI_TLS_CACERTFILE` | - | Path to CA certificate (mutual TLS) |
+### Persistence
 
-### Authentication & Sessions
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_ADMIN_PASS` | `admin123` (dev) | Admin password (**required** in prod) |
-| `MALACHI_PRODUCER_PASS` | `producer123` (dev) | Producer password (**required** in prod) |
-| `MALACHI_CONSUMER_PASS` | `consumer123` (dev) | Consumer password (**required** in prod) |
-| `MALACHI_APP_PASS` | `app123` (dev) | App password (**required** in prod) |
-| `MALACHI_DEFAULT_USERS` | - | Custom users: `user:pass:perm1,perm2;...` |
-| `MALACHI_DISABLE_DEFAULT_USERS` | `false` | Disable all default users |
-| `MALACHI_SESSION_TIMEOUT_SEC` | `3600` | Session token TTL (1 hour) |
-| `MALACHI_AUTH_TIMEOUT_MS` | `10000` | Auth request timeout |
-| `MALACHI_SESSION_IP_BINDING` | `true` | Bind sessions to client IP |
-| `MALACHI_SESSION_UA_BINDING` | `false` | Bind sessions to user-agent |
-| `MALACHI_MIN_PASSWORD_LEN` | `12` | Minimum password length |
-| `MALACHI_REQUIRE_STRONG_PASSWORDS` | `false` | Enforce strong password policy |
+- Log segments live under `MALACHI_LOG_DATA_DIR`.
+- ra state (users, ACLs, lockouts, and, when the control plane is sharded, replicated metadata) lives under
+  `MALACHI_RA_DATA_DIR`.
 
-### Account Lockout
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_MAX_AUTH_ATTEMPTS` | `5` | Failed attempts before lockout |
-| `MALACHI_LOCKOUT_DURATION_MS` | `300000` | Lockout duration (5 min) |
-| `MALACHI_PROGRESSIVE_LOCKOUT` | `true` | Increase lockout on repeated failures |
+Both default to a path under the system temp dir. In production point them at a **persistent volume** with
+**absolute** paths (the deploy manifests mount `/app/data` and use `/app/data/log` and `/app/data/ra`).
 
-### Rate Limiting
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_RATE_LIMIT_ENABLED` | `true` (prod) | Enable rate limiting |
-| `MALACHI_AUTH_RATE_LIMIT` | `10` | Auth attempts per window |
-| `MALACHI_AUTH_RATE_WINDOW_MS` | `60000` | Auth rate window (1 min) |
-| `MALACHI_PUBLISH_RATE_LIMIT` | `1000` | Publishes per window |
-| `MALACHI_PUBLISH_RATE_WINDOW_MS` | `1000` | Publish rate window (1 sec) |
-| `MALACHI_SUBSCRIBE_RATE_LIMIT` | `100` | Subscribes per window |
-| `MALACHI_SUBSCRIBE_RATE_WINDOW_MS` | `60000` | Subscribe rate window (1 min) |
+## Developer commands
 
-### Connection Limiting
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_CONNECTION_LIMIT_ENABLED` | `true` (prod) | Enable connection limiting |
-| `MALACHI_MAX_CONN_PER_IP` | `100` | Max connections per IP |
-| `MALACHI_MAX_TOTAL_CONN` | `10000` | Max total connections |
-
-### Queue & Message Configuration
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_DEFAULT_DELIVERY_MODE` | `at_least_once` | Default delivery mode |
-| `MALACHI_MAX_MESSAGE_SIZE` | `1048576` | Max message size (1MB) |
-| `MALACHI_MAX_BUFFER_SIZE` | `10000` | Max messages per queue buffer |
-| `MALACHI_OVERFLOW_BEHAVIOR` | `drop_newest` | Overflow: `drop_newest`, `drop_oldest`, `reject`, `block` |
-| `MALACHI_BACKPRESSURE_THRESHOLD` | `0.8` | Buffer % to trigger backpressure |
-| `MALACHI_BLOCK_TIMEOUT_MS` | `5000` | Timeout for `block` overflow strategy |
-| `MALACHI_MAX_BLOCKED_PRODUCERS` | `1000` | Max blocked producers per queue |
-| `MALACHI_CHANNEL_SEND_CONCURRENCY` | `5000` | Concurrent channel broadcast tasks |
-
-### Dashboard
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_DASHBOARD_AUTH_ENABLED` | `true` | Require auth for dashboard |
-| `MALACHI_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission |
-| `MALACHI_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Dashboard login rate limit |
-| `MALACHI_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS |
-| `MALACHI_DASHBOARD_CORS_ORIGINS` | `["*"]` | Allowed CORS origins (comma-separated) |
-| `MALACHI_DASHBOARD_CSP` | (strict policy) | Custom Content-Security-Policy |
-| `MALACHI_HSTS_ENABLED` | `true` | Enable HSTS header |
-| `MALACHI_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
-
-### Audit Logging
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_AUDIT_LOG_OUTPUT` | `both` (prod) | Output: `file`, `stdout`, `both`, `ets_only` |
-| `MALACHI_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Log file path |
-| `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size before rotation |
-
-### Resource Monitoring
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_ATOM_CHECK_INTERVAL` | `60000` | Atom table check interval (ms) |
-| `MALACHI_ATOM_WARNING_THRESHOLD` | `0.7` | Atom table warning at 70% |
-| `MALACHI_ATOM_CRITICAL_THRESHOLD` | `0.9` | Atom table critical at 90% |
-| `MALACHI_MEMORY_CHECK_INTERVAL` | `30000` | Memory check interval (ms) |
-| `MALACHI_GC_THRESHOLD_MB` | `500` | Memory threshold for GC trigger |
-| `MALACHI_AUTO_GC` | `true` | Enable automatic garbage collection |
-| `MALACHI_MAX_DYNAMIC_QUEUES` | `10000` | Max dynamically created queues |
-| `MALACHI_MAX_DYNAMIC_CHANNELS` | `1000` | Max dynamically created channels |
-
-### Internationalization
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MALACHI_LOCALE` | `en_US` | Locale: `en_US` or `pt_BR` |
-
-## Testing
-
-Tests use ExUnit with 80% coverage threshold (ExCoveralls). Tests in `test/` mirror the source structure.
-
-### Test Organization
-- **Unit tests**: `test/*_test.exs` - One per module
-- **Integration tests**: `test/*_integration_test.exs` - End-to-end workflows
-- **Stress tests**: `test/integration/one_to_million_channel_test.exs`
-- **Security tests**: `test/security_xss_test.exs`, `test/dashboard_security_test.exs`
-
-### Test Helpers (`test/support/`)
-- **`tcp_helper.ex`** - TCP client: `connect/0`, `send_line/2`, `recv_line/1`, `authenticate/1`
-- **`dashboard_helper.ex`** - HTTP client for dashboard endpoint testing
-- **`mass_spawn_helper.ex`** - Concurrent connection spawning for load tests
-- **`test_helpers.ex`** - Common utilities
-- **`polling_helper.ex`** - Async polling utilities
-
-### Running Tests
 ```bash
-mix test                                    # All tests
-mix test test/queue_test.exs                # Single file
-mix test test/queue_test.exs:42             # Single test by line
-mix coveralls.html                          # Coverage report
-MIX_ENV=test mix test --trace               # Verbose output
+mix deps.get
+mix compile --warnings-as-errors
+mix test                        # ExUnit; multinode tests opt in with --include multinode
+mix format --check-formatted
+mix credo --strict
+mix dialyzer
+mix deps.audit
+mix docs                        # ExDoc site (published via GitHub Pages)
+
+mix malachi.user ...            # user CRUD against the running node
+mix malachi.acl ...             # per-topic ACL CRUD
+mix malachi.reshard ...         # trigger/inspect resharding
+
+make build | run | test | release
+make docker-build | docker-buildx | compose-up | compose-logs | clean
+./scripts/generate-dev-certs.sh # self-signed certs in priv/cert/
 ```
 
-### CI Matrix
-- Elixir 1.19.4 / OTP 28.1 (primary)
-- Formatting check, Credo strict, security audit, coverage upload
+## Conventions
 
-## Dashboard & Monitoring
+- **i18n:** every user-facing log message goes through `Malachi.I18n.t/2`, with `en_US` and `pt_BR`
+  entries. Interpolate with bindings: `I18n.t(:key, name: value)`.
+- **Language:** all code, comments, and documentation are in American English. The `i18n.ex` translation
+  strings are the only place other languages appear. Do not use the em-dash character (U+2014) in code,
+  docs, or commit messages; use a comma, colon, or parentheses instead.
+- **Naming:** modules `Malachi.PascalCase`; functions/vars `snake_case`; module attributes `@snake_case`.
+- **Error handling:** return `{:ok, result}` / `{:error, atom_reason}`; use `with` to chain validations;
+  guard clauses for type safety.
+- **Code quality:** 120-char lines (`.formatter.exs`); Credo strict (`.credo.exs`). Tests are
+  non-negotiable; coverage threshold is **85%** (`mix.exs`, ExCoveralls). `test/` mirrors `lib/`.
+- Pre-existing debt (Credo/Dialyzer findings unrelated to your change) goes in its **own commit**, never
+  mixed into a feature.
 
-### HTTP Endpoints (port 4041)
-| Method | Path | Purpose | Auth |
-|--------|------|---------|------|
-| `POST` | `/login` | Authenticate, returns token | Rate limited |
-| `POST` | `/logout` | Revoke session | Bearer token |
-| `GET` | `/` | Dashboard HTML UI | Bearer token (admin) |
-| `GET` | `/metrics` | JSON metrics snapshot | Bearer token |
-| `GET` | `/rate_limits` | Current rate limit state | Bearer token |
-| `GET` | `/stream` | SSE real-time metrics | Bearer token |
+## Contributing
 
-### Dashboard Authentication
-```json
-POST /login
-{"username":"admin","password":"password"}
-→ {"s":"ok","token":"eyJ..."}
+- **Branches:** `feat/<issue>-<seq>-<desc>`, `fix/<desc>`, `docs/<desc>`, `chore/<desc>`.
+- **Commits:** Conventional Commits (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`).
+- **Before committing**, all of these must pass:
+  ```bash
+  mix format --check-formatted
+  mix credo --strict
+  mix deps.audit
+  mix test
+  ```
+- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title; CHANGELOG updated
+  for version-bumping changes. `feat:` → minor, `fix:` → patch, `BREAKING CHANGE:` → major.
 
-POST /logout
-Authorization: Bearer <token>
-→ {"s":"ok"}
-```
+## Adding features
 
-### SSE Event Format (`/stream`)
-Events pushed every ~1 second:
-```json
-data: {
-  "queues": [{"queue":"orders","processed":1000,"acked":950,"buffered":50,...}],
-  "channels": [...],
-  "system": {
-    "process_count": 500,
-    "memory": {"total_mb": 128.5},
-    "security": {"failed_auth_attempts": 2, "active_sessions": 15}
-  }
-}
-```
-
-## Security Features
-
-### TLS/mTLS
-- Optional TLS 1.2/1.3 encryption for TCP connections
-- Mutual TLS with client certificate verification via `MALACHI_TLS_CACERTFILE`
-- Dev certs: `./scripts/generate-dev-certs.sh`
-
-### Rate Limiting (Token Bucket)
-- Per-IP, per-action rate limiting (auth, publish, subscribe)
-- Configurable windows and limits
-- Returns `retry_after_ms` in error responses
-
-### Connection Limiting
-- Max connections per IP (default 100)
-- Max total connections (default 10,000)
-
-### Account Lockout
-- Progressive lockout after failed auth attempts
-- Configurable max attempts (default 5) and duration (default 5 min)
-
-### Input Validation
-- Queue/channel name validation (length, characters, reserved words)
-- Payload size limits (10MB max)
-- Header count and size limits
-- XSS prevention in dashboard responses
-- ETS-cached validation results for performance
-
-### Audit Logging
-- All security events logged in JSON (auth, access, admin actions)
-- Configurable output: file, stdout, both, or ETS-only
-- Auto-rotation by file size
-
-### Session Security
-- Tokens bound to client IP by default
-- Optional user-agent binding
-- Automatic expiration and cleanup
-- Session hijack detection
-
-### Dashboard Security
-- CSP, HSTS, X-Frame-Options, X-Content-Type-Options headers
-- CORS disabled by default
-- Admin-only access to dashboard UI
-
-## Benchmarking
-
-### Benchmark Structure (`benchmark/`)
-- **Baselines**: `baseline_throughput.exs`, `baseline_latency.exs`, `baseline_auth.exs`, `baseline_connections.exs`, `baseline_memory.exs`, `baseline_sustained_load.exs`, `baseline_edge_cases.exs`
-- **Specialized**: `rate_limiting_benchmark.exs`, `validation_benchmark.exs`, `overflow_strategies_benchmark.exs`, `atom_safety_benchmark.exs`, `dashboard_security_benchmark.exs`, `blocked_producer_benchmark.exs`
-- **Utilities**: `benchmark_helpers.ex`, `percentile.ex`, `reporter.ex`, `comparator.ex`
-- **Scripts**: `run_all_baselines.sh`, `compare_baselines.exs`
-
-### Running Benchmarks
-```bash
-./benchmark/scripts/run_all_baselines.sh           # All baselines
-mix run benchmark/baselines/baseline_throughput.exs  # Single benchmark
-mix run benchmark/scripts/compare_baselines.exs      # Compare results
-```
-
-### IEx Benchmarking
-```elixir
-iex -S mix
-Malachi.Benchmark.spawn_consumers("test_queue", 10_000)
-Malachi.Benchmark.send_messages("test_queue", 100_000)
-Malachi.Benchmark.system_info()
-```
-
-## Adding New Features
-
-### New Queue Operation
-1. Add public function in `queue.ex` with `get_partition/1` routing
-2. Handle in `handle_call/cast` with proper ETS operations
-3. Add action handler in `tcp_protocol.ex` → `process_authenticated/4`
-4. Add permission check using `Auth.has_permission?/2`
-5. Add input validation in `validator.ex` if needed
-6. Add audit log event via `AuditLog.log_event/5` for admin operations
-7. Add tests in `test/queue_test.exs` and integration test
-
-### New TCP Protocol Command
-1. Add case clause in `tcp_protocol.ex` → `process_authenticated/4`
-2. Add rate limit check via `RateLimiter.check_rate/3` if applicable
-3. Validate input via `Validator.validate_*/1`
-4. Return `{"s":"ok",...}` on success or `{"s":"err","reason":"..."}` on error
-5. Add integration test using `TCPHelper`
-
-### New Metric
-1. Add `increment_*` or `record_*` function in `metrics.ex`
-2. Include in `get_metrics/1` return map
-3. Call from the appropriate module
-4. The dashboard SSE stream will include it automatically
-
-### New Translation
-1. Add key to `@translations` map in `i18n.ex` with both `"pt_BR"` and `"en_US"` values
-2. Use `I18n.t(:key, bindings)` in code
-
-### New Security Feature
-1. Implement as GenServer if stateful, or pure module if stateless
-2. Add to supervision tree in `application.ex` (order matters - see comments)
-3. Add audit log events for security-relevant actions
-4. Add environment variable configuration in `config/runtime.exs`
-5. Add tests including integration and security edge cases
-
-## Contributing Conventions
-
-### Branch Naming
-- Feature branches: `feat/<issue-number>-<sequence>-<description>` (e.g., `feat/76-8-tls-enforcement`)
-- Bug fixes: `fix/<description>`
-- Documentation: `docs/<description>`
-- Chores: `chore/<description>`
-
-### Commit Messages
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-```
-<type>: <description>
-
-Types: feat, fix, docs, test, refactor, chore, perf, ci
-Examples:
-  feat: add TLS mutual authentication support
-  fix: resolve session cleanup race condition
-  docs: update configuration reference
-```
-
-### PR Requirements
-- All tests pass (`mix test`)
-- Code formatted (`mix format --check-formatted`)
-- Credo checks pass (`mix credo --strict`)
-- Security audit clean (`mix deps.audit`)
-- PR title follows conventional commits format
-- PR description minimum 20 characters
-- CHANGELOG updated for version-bumping changes
-
-### What should I do before each commit? Execute these commands in sequence:
-```bash
-mix deps.audit # Security audit
-mix format --check-formatted # Check code formatting
-mix credo --strict # Static analysis
-mix test # Run tests
-make docker-test-all # Run tests in Docker environment
-```
-## If any of these commands fail, you should not commit.
-
-### Version Bumping
-- `feat:` → minor version bump
-- `fix:` → patch version bump
-- `[major]` in title or `BREAKING CHANGE:` in body → major version bump
-
-### ETS Table Registry
-
-| Table Name | Type | Purpose |
-|------------|------|---------|
-| `:malachi_users` | `ordered_set` | User credentials and permissions |
-| `:malachi_sessions` | `bag` | Active session tokens |
-| `:malachi_metrics` | `set` | Atomic counters (enqueued, processed, etc.) |
-| `:malachi_validated_names` | `set` | Validator cache for names |
-| `:malachi_validation_logs` | `bag` | Validation error throttling |
-| `:malachi_overflow_logs` | `bag` | Overflow event throttling |
-| `:malachi_audit_log` | `bag` | In-memory security events |
-| Per-queue anonymous tables | `bag` | Message storage per partition |
+- **New protocol op:** add the api_key and its `encode_*`/`decode_*` in `wire.ex`; add a `dispatch` (or
+  `dispatch_admin`) clause in `tcp_protocol.ex`; gate it with `with_topic_permission`/`with_permission`;
+  call the matching `LogApi` function; add integration tests over the wire.
+- **New replicated state:** follow the ra pattern (pure `*_machine`, `*_server`, stateless facade); keep the
+  machine deterministic; feed time/config through the command; form the cluster in `application.ex` before
+  the facade starts.
+- **New config:** add it to `config/runtime.exs` (not inline in the `:test` block); if it is a directory,
+  route it through `Malachi.Config.data_dir/3`; document it here and in the deploy manifests.
+- **New metric:** add to `metrics.ex`, include it in the snapshot, and the dashboard stream picks it up.
