@@ -186,7 +186,7 @@ System metrics include rate limiting section:
 
 ## Performance
 
-Benchmark results (`mix run benchmark/rate_limiting_benchmark.exs`):
+Measured rate-limiter performance:
 
 | Metric | Result | Target | Status |
 |--------|--------|--------|--------|
