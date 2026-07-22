@@ -30,7 +30,7 @@ defmodule Malachi.MixProject do
   defp docs do
     [
       main: "introduction",
-      logo: "docs/logo.jpeg",
+      logo: "priv/static/logo.svg",
       source_ref: "v#{@version}",
       # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
       formatters: ["html"],

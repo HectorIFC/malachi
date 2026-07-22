@@ -116,7 +116,7 @@ defmodule Malachi.Dashboard do
 
     # Public routes that don't require authentication (health/readiness probes never send credentials).
     is_public_route =
-      path in ["/login", "/logout", "/logo.jpeg", "/health", "/ready"] or request.method == :OPTIONS
+      path in ["/login", "/logout", "/logo.svg", "/health", "/ready"] or request.method == :OPTIONS
 
     if not auth_enabled or is_public_route do
       # Authentication disabled or public route - allow all requests
@@ -636,7 +636,7 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :GET, path: "/logout"}, headers, _client_ip, _session),
     do: serve_logout(socket, headers)
 
-  defp handle_route(socket, %{method: :GET, path: "/logo.jpeg"}, _headers, _client_ip, _session),
+  defp handle_route(socket, %{method: :GET, path: "/logo.svg"}, _headers, _client_ip, _session),
     do: serve_logo(socket)
 
   defp handle_route(socket, %{method: :OPTIONS}, headers, _client_ip, _session),
@@ -890,12 +890,12 @@ defmodule Malachi.Dashboard do
   end
 
   defp serve_logo(socket) do
-    logo_path = Path.join(:code.priv_dir(:malachi), "static/logo.jpeg")
+    logo_path = Path.join(:code.priv_dir(:malachi), "static/logo.svg")
 
     case File.read(logo_path) do
       {:ok, data} ->
         header =
-          "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: #{byte_size(data)}\r\nCache-Control: public, max-age=86400\r\n\r\n"
+          "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml; charset=utf-8\r\nContent-Length: #{byte_size(data)}\r\nCache-Control: public, max-age=86400\r\n\r\n"
 
         :gen_tcp.send(socket, [header, data])
         :gen_tcp.close(socket)
@@ -1036,7 +1036,7 @@ defmodule Malachi.Dashboard do
     </head>
     <body>
       <div class="dashboard-header">
-        <h1><img src="/logo.jpeg" alt="Malachi" style="height: 42px; vertical-align: middle; margin-right: 10px;">Malachi Dashboard</h1>
+        <h1><img src="/logo.svg" alt="Malachi" style="height: 42px; vertical-align: middle; margin-right: 10px;">Malachi Dashboard</h1>
         <a href="/logout" class="logout-btn">Logout</a>
       </div>
       <div class="card">
@@ -1285,7 +1285,7 @@ defmodule Malachi.Dashboard do
     </head>
     <body>
       <div class="login-container">
-        <h1><img src="/logo.jpeg" alt="Malachi" style="height: 48px; vertical-align: middle; margin-right: 10px;">Malachi</h1>
+        <h1><img src="/logo.svg" alt="Malachi" style="height: 48px; vertical-align: middle; margin-right: 10px;">Malachi</h1>
         <div id="error" class="error"></div>
         <form id="loginForm">
           <div class="form-group">

@@ -2371,9 +2371,9 @@ at `hectorifc.github.io/malachi`, with an API reference and guides.
   to "GitHub Actions" it would have stopped being served anyway, and it sat in the repository asserting
   the three false claims above. Two assets only it referenced went with it (`style.css`,
   `favicon.ico`), plus the `.nojekyll` that existed only for the "Pages from `docs/`" mode: on the
-  Actions path the artifact is served directly and Jekyll never runs. The `logo.jpeg` **stayed**,
+  Actions path the artifact is served directly and Jekyll never runs. The `logo.svg` **stayed**,
   because `README.md` and `mix.exs` (the ExDoc logo) use it. The dashboard does not count here: it
-  serves its own copy at `priv/static/logo.jpeg`. The demo video was not lost either: it is still in
+  serves its own copy at `priv/static/logo.svg`. The demo video was not lost either: it is still in
   `README.md`, which ships as a site extra. The only content that goes is the "How It Compares" table
   (against RabbitMQ and Redis Pub/Sub), whose queue framing was part of the error.
 

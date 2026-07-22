@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.jpeg" alt="Malachi Logo" width="200"/>
+  <img src="docs/logo.svg" alt="Malachi" width="280"/>
 </p>
 
 # Malachi
