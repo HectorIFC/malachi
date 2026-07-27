@@ -35,6 +35,13 @@ accepts a write), and a read of a child chains **cross-epoch**, draining the par
 keyspace oldest-first before the child's own records. So a key stays in one child and its history reads in
 order straight through the split, with no partition count for a client to have frozen into its assumptions.
 
+```mermaid
+flowchart LR
+  P["parent range (active)"] --> S["seal-first: parent sealed before children write"]
+  S --> C["child range (new writes)"]
+  C --> R["cross-epoch read: parent's sealed slice oldest-first, then the child"]
+```
+
 ## Storage layer
 
 Storage is a pluggable behaviour, `Malachi.Storage.SegmentStore`, so the on-disk format is decoupled from

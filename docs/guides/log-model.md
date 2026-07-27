@@ -129,6 +129,18 @@ first (oldest first), then the child's new records. The key stays in exactly one
 reads old-then-new, in order, straight through the split. See [Architecture](../ARCHITECTURE.md) for the
 split and the cross-epoch read.
 
+```mermaid
+flowchart TB
+  subgraph kafka["Kafka: raising the partition count scatters key K"]
+    KA["r1, r2 in the old partition"]
+    KB["r3 in the new partition"]
+    KA -. "two partitions, per-key order lost" .-> KB
+  end
+  subgraph malachi["Malachi: a seal-first split keeps key K one ordered stream"]
+    MA["r1, r2 in the parent (sealed)"] --> MB["r3 in the child"] --> MC["cross-epoch read: r1, r2, r3 in order"]
+  end
+```
+
 > **Analogy.** Kafka resharding is like renumbering everyone's mailbox: your old and new mail land in
 > different boxes. Here you hold a coat-check ticket, not a box number, so the cloakroom can split a rack in
 > two and the ticket still walks you through your coats in the order you left them.
