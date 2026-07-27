@@ -89,6 +89,14 @@ Every replicated store follows the same shape, and new ones must too:
 - a **server** (`*_server.ex`) that starts/forms the cluster and issues commands,
 - a stateless **facade** (`*_store.ex` / manager) the rest of the app calls.
 
+```mermaid
+flowchart LR
+  App["the rest of the app"] --> Facade["facade (*_store, stateless)"]
+  Facade --> Server["server (*_server)"]
+  Server -->|"write: command through consensus (Raft)"| Machine["machine (*_machine, pure and deterministic)"]
+  Server -->|"read: ra.local_query on the local replica"| Machine
+```
+
 Reads go through `:ra.local_query` (the local replica); writes go through consensus. **Machines must be
 deterministic:** never read the wall clock, `Application.get_env`, or `node()` inside a machine. Anything
 time- or config-dependent travels **inside the command** (the machine reads `meta.system_time` that the
