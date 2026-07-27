@@ -7,6 +7,12 @@ It is a **log, not a queue**. Producers append records to a named, ordered, repl
 from a position they carry themselves. Nothing is destroyed on read, several consumers can read the same
 data independently, and a consumer can rewind.
 
+> #### Not production-ready {: .warning}
+>
+> Malachi is under active development. Interfaces and on-disk formats can still change, it has not been
+> battle-tested at scale, and there is no stability guarantee yet. Use it to learn and experiment, not to
+> run production workloads.
+
 ## What you get
 
 - **An append-only log per topic**, durable on disk (segments with CRC-checked records, fsync before ack)
@@ -32,7 +38,9 @@ data independently, and a consumer can rewind.
 
 ## Status
 
-Malachi is under active development. The log model, the Raft-backed sharded control plane (including online
-vnode split and grow re-sharding), replication with quorum commit, self-healing, primary failover, consumer
-groups, and the security stack are implemented and covered by tests. The API reference in this site is
-generated from the source, so it always matches the code you are reading.
+Malachi is under active development and **not yet ready for production use**. The log model, the Raft-backed
+sharded control plane (including online vnode split and grow re-sharding), replication with quorum commit,
+self-healing, primary failover, consumer groups, and the security stack are implemented and covered by
+tests, but the project has not been battle-tested at scale and makes no stability or durability guarantee
+yet: treat it as software to learn from and experiment with. The API reference in this site is generated
+from the source, so it always matches the code you are reading.

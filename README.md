@@ -10,6 +10,11 @@ An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-st
 storage underneath without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
 self-healing, and rack-aware placement.
 
+> [!WARNING]
+> **Active development, not production-ready.** Malachi is a work in progress: interfaces and on-disk
+> formats can change, it has not been battle-tested at scale, and there is no stability or durability
+> guarantee yet. Use it to learn and experiment, not to run production workloads.
+
 [![CI](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml)
 [![Release](https://github.com/HectorIFC/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/release.yml)
 [![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachi?label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachi)
