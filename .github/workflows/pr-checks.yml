@@ -2,7 +2,8 @@ name: PR Checks
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `edited` so the title/description checks re-run when the PR body or title is updated, not only on a push.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 jobs:
   pr-validation:
@@ -17,8 +18,10 @@ jobs:
           fetch-depth: 0
       
       - name: 🔍 Check PR title follows conventional commits
+        # PR title is untrusted input: pass it through env, never interpolate it into the shell source.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
           echo "PR Title: $PR_TITLE"
           
           # Check if title follows conventional commits
@@ -35,9 +38,10 @@ jobs:
           fi
       
       - name: 🔍 Check PR has description
+        # PR body is untrusted input: pass it through env, never interpolate it into the shell source.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_BODY="${{ github.event.pull_request.body }}"
-          
           if [ -z "$PR_BODY" ] || [ "$PR_BODY" = "null" ]; then
             echo "❌ PR must have a description"
             exit 1
@@ -52,10 +56,11 @@ jobs:
           echo "✅ PR has a valid description"
       
       - name: 🔍 Check for breaking changes
+        # PR title/body are untrusted input: pass them through env, never interpolate into the shell source.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_BODY="${{ github.event.pull_request.body }}"
-          
           # Check if PR indicates breaking changes
           if echo "$PR_TITLE" | grep -qi "breaking\|major"; then
             echo "⚠️  This PR contains BREAKING CHANGES"
