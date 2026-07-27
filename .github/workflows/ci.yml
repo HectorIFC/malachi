@@ -125,10 +125,7 @@ jobs:
             -e MALACHI_CONFIG_ENV=test \
             -e MALACHI_TCP_PORT=4040 \
             -e MALACHI_DASHBOARD_PORT=4041 \
-            -e MALACHI_ADMIN_PASS="$ADMIN_PASS" \
-            -e MALACHI_PRODUCER_PASS="$PRODUCER_PASS" \
-            -e MALACHI_CONSUMER_PASS="$CONSUMER_PASS" \
-            -e MALACHI_APP_PASS="$APP_PASS" \
+            -e MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume" \
             -e MALACHI_REQUIRE_TLS=false \
             -p 4040:4040 \
             -p 4041:4041 \
