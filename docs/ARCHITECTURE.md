@@ -232,10 +232,30 @@ on the same pattern for coordinating shards: a single elected coordinator, fence
 
 ## Dependencies
 
-| Need | Library | Notes |
-|---|---|---|
-| Raft (control plane) | [`ra`](https://github.com/rabbitmq/ra) | RabbitMQ's production Raft |
-| Property testing | [`stream_data`](https://github.com/whatyouhide/stream_data) | stateful models of the log and state machine |
-| SWIM / gossip membership | [`partisan`](https://github.com/lasp-lang/partisan) | a candidate for the membership layer |
-| Native NIF (future store) | [`rustler`](https://github.com/rusterlium/rustler) | memory-safe Rust NIFs with dirty schedulers |
-| Native sparse index (future store) | [`erlang-rocksdb`](https://github.com/emqx/erlang-rocksdb) | RocksDB binding |
+### In use
+
+The libraries the broker actually depends on (see `mix.exs` for the pinned versions):
+
+| Library | Role |
+|---|---|
+| [`ra`](https://github.com/rabbitmq/ra) | Raft: the control plane and the replicated user, ACL, and lockout stores |
+| [`libcluster`](https://github.com/bitwalker/libcluster) | node discovery for Erlang distribution, opt-in via `MALACHI_CLUSTER_STRATEGY` |
+| [`jason`](https://github.com/michalmuskala/jason) | JSON, for the dashboard responses and the audit log |
+| [`joken`](https://github.com/joken-elixir/joken) | JWT/JWS validation for the OIDC auth provider |
+| [`argon2_elixir`](https://github.com/riverrun/argon2_elixir) | password hashing |
+| [`inet_cidr`](https://github.com/Cobenian/inet_cidr) | CIDR parsing for trusted-proxy ranges |
+| [`telemetry`](https://github.com/beam-telemetry/telemetry) | telemetry events on the hot paths |
+| [`opentelemetry`](https://github.com/open-telemetry/opentelemetry-erlang) | tracing (exporter off by default) |
+| [`stream_data`](https://github.com/whatyouhide/stream_data) | property-based stateful tests (dev/test only) |
+
+### Candidate libraries (not dependencies today)
+
+These are **not** in `mix.exs` and nothing uses them. They are the libraries a future increment would reach
+for, recorded here so the design intent is not lost. Membership today is a home-grown SWIM
+(`Malachi.Cluster.Membership`), and the segment store is pure Elixir.
+
+| Library | Would be for |
+|---|---|
+| [`partisan`](https://github.com/lasp-lang/partisan) | replacing the home-grown SWIM membership layer |
+| [`rustler`](https://github.com/rusterlium/rustler) | a native (Rust NIF) segment store, if profiling ever justifies one |
+| [`erlang-rocksdb`](https://github.com/emqx/erlang-rocksdb) | the sparse index of that native store |
