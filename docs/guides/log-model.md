@@ -111,6 +111,28 @@ a range id.
 > drawers. So rely on order only for the same key, never across keys. Durability is a majority of clerks
 > signing the receipt before you are told it is stored.
 
+### Same-key ordering survives resharding (the departure from Kafka)
+
+Order for a single key holds even when the topic is resharded, which is where Malachi differs from Kafka.
+
+A key hashes to a fixed position, so every record for that key lands in the same range, and the range's
+single primary appends them in the order it receives them. That is the same per-key guarantee Kafka gives
+per partition, **but Kafka qualifies it with "as long as the partition count does not change"**: its
+client-visible partition is `hash(key) mod partitions`, so raising the partition count moves the key to a
+different partition. Its new records go there while its old records stay behind, and the per-key order
+breaks.
+
+Malachi never exposes a partition or an offset, only the opaque cursor, so it has no such caveat. A range
+split is a metadata operation with a **seal-first fence**: the parent range is sealed before either child
+takes a write. A reader of that key then drains the parent's sealed records for its slice of the keyspace
+first (oldest first), then the child's new records. The key stays in exactly one child, and its history
+reads old-then-new, in order, straight through the split. See [Architecture](../ARCHITECTURE.md) for the
+split and the cross-epoch read.
+
+> **Analogy.** Kafka resharding is like renumbering everyone's mailbox: your old and new mail land in
+> different boxes. Here you hold a coat-check ticket, not a box number, so the cloakroom can split a rack in
+> two and the ticket still walks you through your coats in the order you left them.
+
 ## Where this is going
 
 Ranges splitting is one axis of scale; the **metadata** itself is the other. The control plane is sharded
