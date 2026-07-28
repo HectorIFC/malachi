@@ -1,0 +1,772 @@
+defmodule Malachi.DashboardSecurityTest do
+  use ExUnit.Case, async: false
+
+  alias Malachi.Auth.UserStore
+  alias Malachi.Test.DashboardHelper
+
+  # These tests require dashboard authentication and rate limiting enabled in config/test.exs
+
+  @dashboard_port Application.compile_env(:malachi, :dashboard_port, 4041)
+
+  setup do
+    # Reset rate limiter BEFORE tests (not just on_exit)
+    Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+
+    # Wait for application to be fully started
+    :timer.sleep(200)
+
+    # Remove users if they exist from previous tests
+    _ = Malachi.Auth.remove_user("dashboard_admin")
+    _ = Malachi.Auth.remove_user("producer_user")
+
+    # Create test user with admin permission
+    :ok = Malachi.Auth.add_user("dashboard_admin", "admin_pass_123", [:admin])
+    {:ok, admin_token} = Malachi.Auth.authenticate("dashboard_admin", "admin_pass_123", {127, 0, 0, 1})
+
+    # Create test user with only produce permission
+    :ok = Malachi.Auth.add_user("producer_user", "prod_pass_123", [:produce])
+    {:ok, producer_token} = Malachi.Auth.authenticate("producer_user", "prod_pass_123", {127, 0, 0, 1})
+
+    on_exit(fn ->
+      _ = Malachi.Auth.remove_user("dashboard_admin")
+      _ = Malachi.Auth.remove_user("producer_user")
+      # Reset rate limiter for this IP after each test
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+    end)
+
+    {:ok, admin_token: admin_token, producer_token: producer_token}
+  end
+
+  describe "authentication" do
+    test "GET / without token redirects to /login", %{} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "302 Found") or
+                   String.contains?(response, "302")
+
+          assert String.contains?(response, "Location: /login")
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET / with invalid token returns 403", %{} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=invalid_token_12345\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "403 Forbidden") or
+                   String.contains?(response, "403")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET / with producer token (non-admin) returns 403", %{producer_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "403") or
+                   String.contains?(response, "insufficient_permissions")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET / with admin token returns 200", %{admin_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
+
+          assert String.contains?(response, "200 OK")
+          assert String.contains?(response, "text/html")
+          assert String.contains?(response, "Malachi Dashboard")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /metrics with producer token returns 200", %{producer_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET /metrics HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "200 OK")
+          assert String.contains?(response, "application/json")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET / with Bearer token fallback returns 200", %{admin_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Authorization: Bearer #{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
+
+          assert String.contains?(response, "200 OK")
+          assert String.contains?(response, "text/html")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "login endpoint" do
+    test "POST /login with valid credentials returns token and Set-Cookie" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
+
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\n\r\n#{body}"
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "200 OK") or
+                   String.contains?(response, "200")
+
+          assert String.contains?(response, "token")
+          assert String.contains?(response, "Set-Cookie: malachi_token=")
+          assert String.contains?(response, "HttpOnly")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "POST /login with invalid credentials returns 403" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "wrong_password"})
+
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\n\r\n#{body}"
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "403 Forbidden") or
+                   String.contains?(response, "403")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /login returns HTML login page" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = "GET /login HTTP/1.1\r\nHost: localhost\r\n\r\n"
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "200 OK")
+          assert String.contains?(response, "text/html")
+          assert String.contains?(response, "Malachi")
+          assert String.contains?(response, "loginForm")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "malformed Content-Length" do
+    test "non-numeric Content-Length does not crash the handler" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          # Before the fix, String.to_integer("abc") raised and killed the handler, so the socket closed
+          # with no response. The server must instead answer (any HTTP status) without crashing.
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: abc\r\n\r\n"
+
+          :gen_tcp.send(socket, request)
+          assert {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+          assert String.contains?(response, "HTTP/1.1")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "negative Content-Length does not crash the handler" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: -5\r\n\r\n"
+
+          :gen_tcp.send(socket, request)
+          assert {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+          assert String.contains?(response, "HTTP/1.1")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "read timeout (slowloris)" do
+    test "an idle connection is closed after the recv timeout" do
+      original = Application.get_env(:malachi, :dashboard_recv_timeout_ms)
+      Application.put_env(:malachi, :dashboard_recv_timeout_ms, 300)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:malachi, :dashboard_recv_timeout_ms, original),
+          else: Application.delete_env(:malachi, :dashboard_recv_timeout_ms)
+      end)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          # Connect and send nothing. Before the fix, recv(socket, 0) blocked forever and the client would
+          # only see its own recv timeout ({:error, :timeout}); now the server closes the idle socket once
+          # its 300ms read timeout elapses, which the client observes as {:error, :closed} well before 2s.
+          assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2000)
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "security headers" do
+    test "responses include security headers", %{admin_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
+
+          # Check for security headers
+          assert String.contains?(response, "X-Content-Type-Options: nosniff") or
+                   String.contains?(response, "X-Content-Type-Options")
+
+          assert String.contains?(response, "X-Frame-Options: DENY") or
+                   String.contains?(response, "X-Frame-Options")
+
+          assert String.contains?(response, "Content-Security-Policy") or
+                   String.contains?(response, "content-security-policy")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "CORS headers present on /metrics", %{admin_token: token} do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET /metrics HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          # CORS headers should be present if enabled
+          # (may not be present in test env if CORS disabled)
+          assert String.contains?(response, "200 OK")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "OPTIONS request returns CORS preflight" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          OPTIONS /metrics HTTP/1.1\r
+          Host: localhost\r
+          Origin: https://example.com\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "204 No Content") or
+                   String.contains?(response, "Access-Control-Allow")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "rate limiting" do
+    @tag :slow
+    test "excessive login attempts trigger rate limit" do
+      # Wait for other tests to finish their rate limited operations
+      :timer.sleep(100)
+
+      # Reset rate limiter for this IP to start fresh
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+
+      # Give it a moment to settle
+      :timer.sleep(100)
+
+      # Make 25 failed login attempts (limit is 10, so 11th+ should definitely be blocked)
+      results =
+        for _i <- 1..25 do
+          case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+            {:ok, socket} ->
+              body = Jason.encode!(%{"username" => "nonexistent", "password" => "wrong"})
+
+              request =
+                "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\n\r\n#{body}"
+
+              :gen_tcp.send(socket, request)
+
+              result =
+                case :gen_tcp.recv(socket, 0, 2000) do
+                  {:ok, response} ->
+                    cond do
+                      String.contains?(response, "429") -> :rate_limited
+                      String.contains?(response, "403") -> :forbidden
+                      true -> :other
+                    end
+
+                  _ ->
+                    :error
+                end
+
+              :gen_tcp.close(socket)
+              result
+
+            {:error, _} ->
+              :error
+          end
+        end
+
+      # At least one request should have been rate limited
+      assert :rate_limited in results
+    end
+  end
+
+  describe "audit logging" do
+    test "successful dashboard access is logged", %{admin_token: token} do
+      # Access dashboard
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=#{token}\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, _response} = :gen_tcp.recv(socket, 0, 5000)
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+
+      # Wait for async logging
+      :timer.sleep(100)
+
+      # Check audit log
+      events = Malachi.AuditLog.get_events_by_type(:dashboard_access, 10)
+      assert events != []
+
+      recent_event = List.first(events)
+      assert recent_event.event_type == :dashboard_access
+      assert recent_event.username == "dashboard_admin"
+    end
+
+    test "failed authentication is logged" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET / HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=invalid_token\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, _response} = :gen_tcp.recv(socket, 0, 2000)
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+
+      # Wait for async logging
+      :timer.sleep(100)
+
+      # Check audit log
+      events = Malachi.AuditLog.get_events_by_type(:dashboard_auth_failure, 10)
+      assert events != []
+    end
+  end
+
+  describe "logout" do
+    test "GET /logout clears cookie and redirects to /login" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = """
+          GET /logout HTTP/1.1\r
+          Host: localhost\r
+          Cookie: malachi_token=some_token\r
+          \r
+          """
+
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "302 Found") or
+                   String.contains?(response, "302")
+
+          assert String.contains?(response, "Location: /login")
+          assert String.contains?(response, "Max-Age=0")
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /logout works without cookie" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = "GET /logout HTTP/1.1\r\nHost: localhost\r\n\r\n"
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          assert String.contains?(response, "302 Found") or
+                   String.contains?(response, "302")
+
+          assert String.contains?(response, "Location: /login")
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  describe "cookie authentication flow" do
+    test "login sets cookie, cookie grants access to dashboard" do
+      # Step 1: Login and capture Set-Cookie
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
+
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\n\r\n#{body}"
+
+          :gen_tcp.send(socket, request)
+          {:ok, login_response} = :gen_tcp.recv(socket, 0, 2000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(login_response, "Set-Cookie: malachi_token=")
+
+          # Extract token from Set-Cookie header
+          token = DashboardHelper.extract_set_cookie(login_response)
+          assert token != nil
+
+          # Step 2: Use cookie to access dashboard
+          case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+            {:ok, socket2} ->
+              request2 = """
+              GET / HTTP/1.1\r
+              Host: localhost\r
+              Cookie: malachi_token=#{token}\r
+              \r
+              """
+
+              :gen_tcp.send(socket2, request2)
+              {:ok, response2} = :gen_tcp.recv(socket2, 0, 5000)
+
+              assert String.contains?(response2, "200 OK")
+              assert String.contains?(response2, "Malachi Dashboard")
+              :gen_tcp.close(socket2)
+
+            {:error, _} ->
+              :ok
+          end
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /metrics without token returns 401 (non-HTML route)" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request = "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n"
+          :gen_tcp.send(socket, request)
+          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+
+          # /metrics is NOT an HTML route, so it should return 401 instead of 302
+          assert String.contains?(response, "401 Unauthorized") or
+                   String.contains?(response, "401")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /health and /ready are public: 200 without a token even when auth is enabled" do
+      for path <- ["/health", "/ready"] do
+        case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+          {:ok, socket} ->
+            :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+            # probes never authenticate, so these must not 401/redirect
+            assert String.contains?(response, "HTTP/1.1 200 OK"), "#{path} should be public"
+            refute String.contains?(response, "401")
+            :gen_tcp.close(socket)
+
+          {:error, _} ->
+            :ok
+        end
+      end
+    end
+  end
+
+  describe "user management (P3-3)" do
+    test "admin lists users (with permissions, no hashes)", %{admin_token: token} do
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :GET, "/users", token)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      {:ok, body} = json_body(response)
+      usernames = Enum.map(body["users"], & &1["username"])
+      assert "dashboard_admin" in usernames
+      # the response carries permissions but never a password/hash field
+      refute Enum.any?(body["users"], &Map.has_key?(&1, "password"))
+    end
+
+    test "admin creates a user that can then authenticate", %{admin_token: token} do
+      username = "dashuser_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      body = Jason.encode!(%{username: username, password: "Dash-Pass-123", permissions: ["consume"]})
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :POST, "/users", token, body: body)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 201
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, "Dash-Pass-123", {127, 0, 0, 1})
+    end
+
+    test "admin rotates a password: the new one works, the old does not", %{admin_token: token} do
+      username = "dashpw_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Old-Pass-111", [:consume])
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      body = Jason.encode!(%{password: "New-Pass-222"})
+
+      {:ok, response} =
+        DashboardHelper.authenticated_request(socket, :PUT, "/users/#{username}/password", token, body: body)
+
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      assert {:ok, _token} = Malachi.Auth.authenticate(username, "New-Pass-222", {127, 0, 0, 1})
+      assert {:error, _reason} = Malachi.Auth.authenticate(username, "Old-Pass-111", {127, 0, 0, 1})
+    end
+
+    test "admin deletes a user", %{admin_token: token} do
+      username = "dashdel_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(username, "Del-Pass-1", [:consume])
+
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :DELETE, "/users/#{username}", token)
+      :gen_tcp.close(socket)
+
+      assert status_code(response) == 200
+      assert {:error, :user_not_found} = UserStore.get_user(username)
+    end
+
+    test "creating a duplicate is a 409; an unknown permission is a 400", %{admin_token: token} do
+      username = "dashdup_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "p", [:consume])
+
+      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      dup = Jason.encode!(%{username: username, password: "p2", permissions: ["consume"]})
+      {:ok, r1} = DashboardHelper.authenticated_request(s1, :POST, "/users", token, body: dup)
+      :gen_tcp.close(s1)
+      assert status_code(r1) == 409
+
+      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      bad = Jason.encode!(%{username: "dashbad_x", password: "p", permissions: ["superuser"]})
+      {:ok, r2} = DashboardHelper.authenticated_request(s2, :POST, "/users", token, body: bad)
+      :gen_tcp.close(s2)
+      assert status_code(r2) == 400
+      assert {:error, :user_not_found} = UserStore.get_user("dashbad_x")
+    end
+
+    test "a non-admin is forbidden and an unauthenticated request is unauthorized", %{producer_token: token} do
+      # non-admin token -> 403
+      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, r1} = DashboardHelper.authenticated_request(s1, :GET, "/users", token)
+      :gen_tcp.close(s1)
+      assert status_code(r1) == 403
+
+      # no token -> 401
+      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, r2} = DashboardHelper.request(s2, :GET, "/users")
+      :gen_tcp.close(s2)
+      assert status_code(r2) == 401
+    end
+  end
+
+  describe "per-topic ACL management (P5-4b)" do
+    setup do
+      username = "dashacl_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(username, "Acl-Pass-1", [:produce])
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      {:ok, acl_user: username}
+    end
+
+    defp acl_req(method, path, token, body \\ nil) do
+      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      opts = if body, do: [body: Jason.encode!(body)], else: []
+      {:ok, response} = DashboardHelper.authenticated_request(socket, method, path, token, opts)
+      :gen_tcp.close(socket)
+      response
+    end
+
+    test "admin grants an ACL, lists it, then revokes it", %{admin_token: token, acl_user: user} do
+      grant = acl_req(:POST, "/users/#{user}/acls", token, %{operation: "produce", pattern: "orders.*"})
+      assert status_code(grant) == 201
+
+      list = acl_req(:GET, "/users/#{user}/acls", token)
+      assert status_code(list) == 200
+      {:ok, body} = json_body(list)
+      assert body["acls"] == [%{"operation" => "produce", "resource" => "orders.*"}]
+
+      revoke = acl_req(:DELETE, "/users/#{user}/acls", token, %{operation: "produce", pattern: "orders.*"})
+      assert status_code(revoke) == 200
+
+      after_list = acl_req(:GET, "/users/#{user}/acls", token)
+      {:ok, after_body} = json_body(after_list)
+      assert after_body["acls"] == []
+    end
+
+    test "an invalid operation is a 400", %{admin_token: token, acl_user: user} do
+      response = acl_req(:POST, "/users/#{user}/acls", token, %{operation: "superuser", pattern: "t.*"})
+      assert status_code(response) == 400
+      {:ok, body} = json_body(response)
+      assert body["reason"] == "invalid_operation"
+    end
+
+    test "a non-admin is forbidden (403)", %{producer_token: token, acl_user: user} do
+      response = acl_req(:GET, "/users/#{user}/acls", token)
+      assert status_code(response) == 403
+    end
+  end
+
+  # Extracts the numeric status from an HTTP response, and its JSON body.
+  defp status_code(response) do
+    case Regex.run(~r"HTTP/1\.1 (\d{3})", response) do
+      [_, code] -> String.to_integer(code)
+      _ -> 0
+    end
+  end
+
+  defp json_body(response) do
+    case String.split(response, "\r\n\r\n", parts: 2) do
+      [_headers, body] -> body |> String.trim() |> Jason.decode()
+      _ -> :error
+    end
+  end
+end

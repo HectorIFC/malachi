@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Malachi">
+  <defs>
+    <clipPath id="malachi-tile">
+      <rect width="64" height="64" rx="14"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#malachi-tile)">
+    <rect width="64" height="64" fill="#0a0e27"/>
+    <!-- M monogram, single geometric weight -->
+    <path d="M17 46 V18 L32 38 L47 18 V46"
+          fill="none" stroke="#00d9ff" stroke-width="8"
+          stroke-linejoin="miter" stroke-linecap="butt"/>
+    <!-- log-segment slices: navy gaps that cut the M into stacked records -->
+    <g fill="#0a0e27">
+      <rect x="10" y="21.4" width="44" height="2.6"/>
+      <rect x="10" y="27.9" width="44" height="2.6"/>
+      <rect x="10" y="34.4" width="44" height="2.6"/>
+      <rect x="10" y="40.9" width="44" height="2.6"/>
+    </g>
+  </g>
+</svg>

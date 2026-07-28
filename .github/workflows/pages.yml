@@ -1,0 +1,86 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Permissions are scoped per job rather than here, so the build never holds the Pages credentials: it
+# runs third-party code (mix deps.get pulls Hex packages, and the actions themselves), and only the
+# deploy job needs to mint an OIDC token.
+
+# One deploy at a time. cancel-in-progress stays false on purpose: cancelling a run that is already
+# uploading would leave the site half-published, and a superseded build is cheap to let finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    # ex_doc lives in the dev deps, and the site embeds @moduledoc from a dev build.
+    env:
+      MIX_ENV: dev
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      - name: 📦 Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-docs-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-docs-
+
+      - name: 🔨 Install dependencies
+        run: mix deps.get
+
+      # Same gate the CI quality job applies, so a broken reference fails here rather than shipping a
+      # page with a dead link.
+      - name: 📝 Generate documentation
+        run: mix docs --warnings-as-errors
+
+      - name: ⚙️ Configure Pages
+        uses: actions/configure-pages@v5
+
+      # doc/ is the ex_doc default output (mix.exs sets no :output) and is gitignored, so it only ever
+      # exists as a build artifact.
+      - name: 📤 Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: doc/
+
+  deploy:
+    name: Deploy to Pages
+    runs-on: ubuntu-latest
+    needs: build
+
+    # Only this job publishes, so only this job carries the credentials. It checks out nothing, so it
+    # does not need contents either.
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

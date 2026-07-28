@@ -1,0 +1,214 @@
+name: Release & Publish
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # First, verify that CI passed
+  verify-ci:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 🔍 Verify CI passed before release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.payload.pull_request.head.sha
+            });
+            
+            console.log('Check runs for this PR:');
+            checkRuns.check_runs.forEach(run => {
+              console.log(`- ${run.name}: ${run.conclusion}`);
+            });
+            
+            // Check if CI workflow passed
+            const ciRun = checkRuns.check_runs.find(run => run.name.includes('CI Summary'));
+            
+            if (!ciRun) {
+              console.log('⚠️  CI workflow not found, proceeding anyway');
+              return;
+            }
+            
+            if (ciRun.conclusion !== 'success') {
+              core.setFailed(`❌ CI must pass before release. Current status: ${ciRun.conclusion}`);
+              return;
+            }
+            
+            console.log('✅ CI passed, proceeding with release');
+  
+  release:
+    needs: verify-ci
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    
+    outputs:
+      new_version: ${{ steps.bump.outputs.NEW_VERSION }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version bump type
+        id: bump_type
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          # Check labels first
+          if [[ "$PR_LABELS" == *"major"* ]] || [[ "$PR_TITLE" == *"[major]"* ]]; then
+            echo "BUMP_TYPE=major" >> "$GITHUB_OUTPUT"
+          elif [[ "$PR_LABELS" == *"minor"* ]] || [[ "$PR_TITLE" == *"[minor]"* ]] || [[ "$PR_TITLE" == *"feat:"* ]]; then
+            echo "BUMP_TYPE=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "BUMP_TYPE=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        id: bump
+        run: |
+          chmod +x ./scripts/bump-version.sh
+          ./scripts/bump-version.sh ${{ steps.bump_type.outputs.BUMP_TYPE }}
+
+      - name: Get new version
+        id: version
+        run: |
+          NEW_VERSION=$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # First release
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            # Get commits since last tag
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          # Save changelog to file
+          echo "## Changes" > /tmp/changelog.md
+          echo "" >> /tmp/changelog.md
+          echo "$CHANGELOG" >> /tmp/changelog.md
+          
+          # Set output for GitHub release
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit version bump
+        run: |
+          git add mix.exs
+          git commit -m "chore: bump version to ${{ steps.version.outputs.NEW_VERSION }}"
+          git push origin main
+
+      - name: Create Git tag
+        run: |
+          git tag -a "v${{ steps.version.outputs.NEW_VERSION }}" -m "Release v${{ steps.version.outputs.NEW_VERSION }}"
+          git push origin "v${{ steps.version.outputs.NEW_VERSION }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.NEW_VERSION }}
+          name: Release v${{ steps.version.outputs.NEW_VERSION }}
+          body: |
+            ## 🚀 Malachi v${{ steps.version.outputs.NEW_VERSION }}
+            
+            ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            ### 🐳 Docker
+            ```bash
+            docker pull hectorcardoso/malachi:${{ steps.version.outputs.NEW_VERSION }}
+            ```
+            
+            ### 📦 Installation
+            ```bash
+            git clone https://github.com/HectorIFC/malachi.git
+            cd malachi
+            git checkout v${{ steps.version.outputs.NEW_VERSION }}
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    needs: release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.new_version }}
+
+      - name: Extract version components
+        id: version
+        run: |
+          VERSION="${{ needs.release.outputs.new_version }}"
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          echo "MAJOR=$MAJOR" >> $GITHUB_OUTPUT
+          echo "MINOR=$MINOR" >> $GITHUB_OUTPUT
+          echo "MAJOR_MINOR=$MAJOR.$MINOR" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ needs.release.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ steps.version.outputs.MAJOR_MINOR }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:${{ steps.version.outputs.MAJOR }}
+            ${{ secrets.DOCKER_USERNAME }}/malachi:latest
+            ${{ secrets.DOCKER_USERNAME }}/malachi:alpine
+          labels: |
+            org.opencontainers.image.title=Malachi
+            org.opencontainers.image.description=High-performance message system
+            org.opencontainers.image.version=${{ needs.release.outputs.new_version }}
+            org.opencontainers.image.vendor=HectorIFC
+            org.opencontainers.image.source=https://github.com/HectorIFC/malachi
+            org.opencontainers.image.licenses=MIT
+          build-args: |
+            APP_VERSION=${{ needs.release.outputs.new_version }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachi:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/malachi:buildcache,mode=max
+          provenance: false

@@ -1,0 +1,12 @@
+## Erlang VM Arguments
+## Generated for Malachi release
+
+## Use Erlang's built-in DNS resolver instead of OS resolver
+## This ensures consistent DNS behavior across Alpine/Debian/any OS
+## and prepares for future clustering (node discovery, epmd)
+## Same approach used by RabbitMQ for Alpine compatibility
+-kernel inet_dns_resolver inet_res
+
+## Name and cookie will be set at runtime when clustering is enabled
+## -sname malachi
+## -setcookie malachi_secret

@@ -1,0 +1,12 @@
+[
+  ignored: ["Traversal.FileModule"],
+  skip: false,
+  verbose: false,
+  private: false,
+  router: "",
+  exit_on: :low,
+  format: "txt",
+  out: "",
+  threshold: :low,
+  ignored_files: []
+]

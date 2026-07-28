@@ -1,0 +1,16 @@
+{
+  "name": "malachi-nodejs-client",
+  "version": "2.0.0",
+  "description": "Reference Node.js client for Malachi over the binary log protocol",
+  "main": "lib/client.js",
+  "scripts": {
+    "produce": "node producer.js",
+    "consume": "node consumer.js",
+    "subscribe": "node subscriber.js",
+    "loadtest": "node loadtest.js",
+    "demo": "bash streaming-demo.sh"
+  },
+  "keywords": ["malachi", "log", "streaming", "northguard", "client"],
+  "author": "",
+  "license": "MIT"
+}
