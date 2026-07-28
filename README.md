@@ -44,9 +44,11 @@ Support us with a monthly donation and help us continue our activities. [[Become
 
 ## Demo
 
-Watch Malachi in action:
+A new demo video is on the way. This section will host it once it is ready.
 
-[![Malachi Demo](https://img.youtube.com/vi/hn26zgRoOUI/0.jpg)](https://www.youtube.com/watch?v=hn26zgRoOUI)
+<!-- New demo video goes here. Replace this comment with the embed, e.g.:
+[![Malachi Demo](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=VIDEO_ID) -->
+
 
 ## 🧭 The model (a log, not a queue)
 

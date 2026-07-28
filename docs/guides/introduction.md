@@ -13,6 +13,12 @@ data independently, and a consumer can rewind.
 > battle-tested at scale, and there is no stability guarantee yet. Use it to learn and experiment, not to
 > run production workloads.
 
+## Demo
+
+A new demo video is on the way. This section will host it once it is ready.
+
+<!-- New demo video goes here. Replace this comment with the embed once the video is published. -->
+
 ## What you get
 
 - **An append-only log per topic**, durable on disk (segments with CRC-checked records, fsync before ack)
