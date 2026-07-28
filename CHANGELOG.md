@@ -149,11 +149,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Docker**: Migrated from Alpine to Debian Bookworm slim base image
-  - Switched from musl libc to glibc for better production stability
-  - Improved compatibility with native extensions and NIFs
-  - Added proper locale support (en_US.UTF-8)
-  - Better debugging capabilities in production
 - **Docker**: Added OCI labels, HEALTHCHECK instruction, and security hardening documentation
 - **Authentication**: Replaced SHA-256 password hashing with Argon2 (BREAKING)
   - Existing password hashes must be regenerated after upgrade
