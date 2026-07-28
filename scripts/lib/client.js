@@ -70,6 +70,10 @@ class MalachiClient {
       socket.once('connect', () => {
         socket.on('data', (chunk) => this._onData(chunk));
         socket.on('close', () => this._onClose());
+        // Swap the connect-phase reject for a persistent error handler: after connect, an ECONNRESET/EPIPE
+        // on a socket with no 'error' listener is rethrown by Node as an uncaught exception, killing the CLI.
+        socket.removeListener('error', reject);
+        socket.on('error', (err) => this._onError(err));
         resolve();
       });
       socket.once('error', reject);
@@ -78,8 +82,19 @@ class MalachiClient {
   }
 
   _onClose() {
+    this._failAll(new MalachiError('connection closed by server'));
+  }
+
+  // A post-connect socket error surfaces the real reason to in-flight work. The 'close' that always follows
+  // then runs _onClose, which is a no-op because _failAll already drained the maps.
+  _onError(err) {
+    this._failAll(new MalachiError(err.message));
+  }
+
+  // Fails every pending request and notifies every subscription, then clears both maps. Idempotent: a second
+  // call (error followed by close) finds the maps empty. A deliberate close() sets `closed` and skips this.
+  _failAll(err) {
     if (this.closed) return;
-    const err = new MalachiError('connection closed by server');
     for (const { reject, timer } of this.pending.values()) {
       clearTimeout(timer);
       reject(err);
