@@ -315,7 +315,7 @@ spec:
         - name: dist-tls
           secret:
             secretName: malachi-dist-tls
-            defaultMode: 0400
+            defaultMode: 0440
   volumeClaimTemplates:
     - metadata:
         name: data
