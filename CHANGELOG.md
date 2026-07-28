@@ -133,8 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP messaging server
 - Authentication system
 - Web dashboard
-- Multiple queue support
-- ACK Manager for delivery guarantee
 - Internationalization support (i18n)
 - Docker and Docker Compose
 - Initial documentation
