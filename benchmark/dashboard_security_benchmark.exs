@@ -8,7 +8,9 @@
 # Acceptance criteria: < 25% latency increase
 
 Mix.install([
-  {:benchee, "~> 1.0"}
+  # benchee 1.1+ for reduction_time; Benchee.Formatters.HTML lives in the separate benchee_html package.
+  {:benchee, "~> 1.1"},
+  {:benchee_html, "~> 1.0"}
 ])
 
 defmodule DashboardSecurityBenchmark do
