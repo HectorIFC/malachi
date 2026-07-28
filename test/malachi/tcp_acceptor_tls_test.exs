@@ -6,6 +6,40 @@ defmodule Malachi.TCPAcceptorTLSTest do
 
   alias Malachi.Wire
 
+  # A throwaway self-signed server cert/key generated per run. The dist certs under priv/dist_cert are
+  # gitignored (a private key is never committed), so they are absent in CI; generating here keeps the test
+  # self-contained. openssl ships on the CI image and is what the project's own cert scripts use.
+  setup do
+    dir = Path.join(System.tmp_dir!(), "malachi_tls_test_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    certfile = Path.join(dir, "cert.pem")
+    keyfile = Path.join(dir, "key.pem")
+
+    {_out, 0} =
+      System.cmd(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          keyfile,
+          "-out",
+          certfile,
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost"
+        ],
+        stderr_to_stdout: true
+      )
+
+    on_exit(fn -> File.rm_rf!(dir) end)
+    {:ok, certfile: certfile, keyfile: keyfile}
+  end
+
   defp free_port do
     {:ok, s} = :gen_tcp.listen(0, [:binary, active: false])
     {:ok, port} = :inet.port(s)
@@ -13,14 +47,14 @@ defmodule Malachi.TCPAcceptorTLSTest do
     port
   end
 
-  defp ssl_listen_opts do
+  defp ssl_listen_opts(certfile, keyfile) do
     [
       :binary,
       packet: 0,
       active: false,
       reuseaddr: true,
-      certfile: ~c"priv/dist_cert/node.crt",
-      keyfile: ~c"priv/dist_cert/node.key",
+      certfile: String.to_charlist(certfile),
+      keyfile: String.to_charlist(keyfile),
       versions: [:"tlsv1.3", :"tlsv1.2"]
     ]
   end
@@ -38,12 +72,12 @@ defmodule Malachi.TCPAcceptorTLSTest do
     end
   end
 
-  test "TLS handshake completes in the connection process and the server serves the client" do
+  test "TLS handshake completes in the connection process and the server serves the client", ctx do
     # Keep this IP's auth rate limit clear so the bogus-credentials attempt below reaches authentication.
     Malachi.RateLimiter.reset_bucket("127.0.0.1", :auth)
 
     port = free_port()
-    {:ok, acceptor} = Malachi.TCPAcceptor.start_link({port, ssl_listen_opts(), 1, :ssl})
+    {:ok, acceptor} = Malachi.TCPAcceptor.start_link({port, ssl_listen_opts(ctx.certfile, ctx.keyfile), 1, :ssl})
     on_exit(fn -> if Process.alive?(acceptor), do: GenServer.stop(acceptor) end)
 
     # let the acceptor enter its accept loop
