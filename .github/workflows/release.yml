@@ -69,17 +69,17 @@ jobs:
 
       - name: Determine version bump type
         id: bump_type
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_LABELS="${{ join(github.event.pull_request.labels.*.name, ',') }}"
-          
           # Check labels first
           if [[ "$PR_LABELS" == *"major"* ]] || [[ "$PR_TITLE" == *"[major]"* ]]; then
-            echo "BUMP_TYPE=major" >> $GITHUB_OUTPUT
+            echo "BUMP_TYPE=major" >> "$GITHUB_OUTPUT"
           elif [[ "$PR_LABELS" == *"minor"* ]] || [[ "$PR_TITLE" == *"[minor]"* ]] || [[ "$PR_TITLE" == *"feat:"* ]]; then
-            echo "BUMP_TYPE=minor" >> $GITHUB_OUTPUT
+            echo "BUMP_TYPE=minor" >> "$GITHUB_OUTPUT"
           else
-            echo "BUMP_TYPE=patch" >> $GITHUB_OUTPUT
+            echo "BUMP_TYPE=patch" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Bump version
