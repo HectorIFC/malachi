@@ -104,10 +104,23 @@ defmodule Malachi.Cluster.MetadataServer do
     match?({:ok, _members, ^server_id}, :ra.members(server_id))
   end
 
-  @doc "Stops and deletes the vnode's Raft cluster (removing its on-disk state)."
-  @spec delete(cluster_name()) :: :ok
-  def delete(cluster_name) do
-    :ra.delete_cluster([{cluster_name, node()}])
-    :ok
+  @doc """
+  Stops and deletes the vnode's Raft cluster (removing its on-disk state). Prefer passing a `server_id`
+  addressing a **real member** (as `start/2` returns and the cluster callers already hold), so a vnode
+  placed on a subset of nodes is deleted through a node that actually hosts it: `:ra` finds the leader from
+  there and propagates the deletion to every member. A bare `cluster_name` is accepted as
+  `{cluster_name, node()}` for the single-node case (tests, local setups). Returns `{:error, reason}` when
+  the deletion cannot be committed, instead of reporting `:ok` regardless.
+  """
+  @spec delete(server_id() | cluster_name()) :: :ok | {:error, term()}
+  def delete({_cluster_name, _node} = server_id) do
+    case :ra.delete_cluster([server_id]) do
+      {:ok, _leader} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def delete(cluster_name) when is_atom(cluster_name) do
+    delete({cluster_name, node()})
   end
 end

@@ -123,7 +123,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   there, just not yet moved back. Idempotent: safe to re-run.
   """
   @spec abort_split(t(), vnode_id(), MetadataServer.server_id()) :: :ok | {:error, :incomplete}
-  def abort_split(%__MODULE__{} = state, new_vnode_id, new_server_id) do
+  def abort_split(%__MODULE__{} = state, _new_vnode_id, new_server_id) do
     roll_back(state, new_server_id)
 
     # delete the orphan new vnode only once it is confirmed empty, deleting one that still holds topics
@@ -131,7 +131,8 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     # (loadable on a possibly-remote leader) and test emptiness locally.
     case MetadataServer.query(new_server_id, &Function.identity/1) do
       {:ok, meta} when map_size(meta.topics) == 0 ->
-        MetadataServer.delete(new_vnode_id)
+        # Best-effort cleanup of the now-empty orphan cluster; the rollback itself already succeeded.
+        _ = MetadataServer.delete(new_server_id)
         :ok
 
       _still_populated_or_unreachable ->
@@ -196,7 +197,8 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc "Stops and deletes every vnode's Raft cluster (removing on-disk state)."
   @spec delete(t()) :: :ok
   def delete(%__MODULE__{} = state) do
-    Enum.each(state.vnodes, fn {vnode_id, _server_id} -> MetadataServer.delete(vnode_id) end)
+    # Best-effort teardown: delete every vnode through its real member, ignoring individual failures.
+    Enum.each(state.vnodes, fn {_vnode_id, server_id} -> MetadataServer.delete(server_id) end)
     :ok
   end
 

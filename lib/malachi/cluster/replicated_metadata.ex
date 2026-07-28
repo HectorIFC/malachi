@@ -75,6 +75,6 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   end
 
   @doc "Stops and deletes the underlying Raft cluster (removing its on-disk state)."
-  @spec delete(t()) :: :ok
-  def delete(%__MODULE__{server_id: {cluster_name, _node}}), do: MetadataServer.delete(cluster_name)
+  @spec delete(t()) :: :ok | {:error, term()}
+  def delete(%__MODULE__{server_id: server_id}), do: MetadataServer.delete(server_id)
 end

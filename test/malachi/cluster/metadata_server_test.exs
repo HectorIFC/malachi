@@ -30,6 +30,21 @@ defmodule Malachi.Cluster.MetadataServerTest do
     assert Enum.sort(Enum.map(active, & &1.id)) == Enum.sort([left_id, right_id])
   end
 
+  test "delete of a running cluster returns :ok and removes it" do
+    name = :"vnode_del_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = MetadataServer.start(name)
+
+    assert MetadataServer.delete(server_id) == :ok
+    refute MetadataServer.ready?(server_id)
+  end
+
+  test "delete propagates a failure instead of always reporting :ok" do
+    # Nothing was ever started under this name, so :ra cannot reach a member and the deletion fails.
+    # The old delete/1 hardcoded :ok and hid this.
+    missing = {:"vnode_missing_#{System.unique_integer([:positive])}", node()}
+    assert {:error, _reason} = MetadataServer.delete(missing)
+  end
+
   test "a rejected command returns the machine's error reply" do
     server_id = start_cluster()
     assert {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
