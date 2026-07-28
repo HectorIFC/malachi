@@ -19,9 +19,10 @@ defmodule Malachi.ConnectionRegistry do
   """
   def register(pid, socket, transport) do
     ip = get_peer_address(socket, transport)
-    :ets.insert(@table, {pid, socket, transport, System.monotonic_time(:millisecond), ip, :unknown, nil})
-    Process.monitor(pid)
-    :ok
+    entry = {pid, socket, transport, System.monotonic_time(:millisecond), ip, :unknown, nil}
+    # Register through the GenServer so Process.monitor/1 runs in the registry process, not the caller.
+    # Otherwise the :DOWN would be delivered to the connection handler and the entry would never be pruned.
+    GenServer.call(__MODULE__, {:register, entry})
   end
 
   @doc """
@@ -255,6 +256,13 @@ defmodule Malachi.ConnectionRegistry do
     ])
 
     {:ok, %{}}
+  end
+
+  @impl true
+  def handle_call({:register, {pid, _, _, _, _, _, _} = entry}, _from, state) do
+    :ets.insert(@table, entry)
+    Process.monitor(pid)
+    {:reply, :ok, state}
   end
 
   @impl true

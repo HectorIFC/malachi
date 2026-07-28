@@ -424,31 +424,22 @@ defmodule Malachi.ConnectionRegistryTest do
       assert is_integer(initial_count)
     end
 
-    test "handles DOWN messages", %{socket: socket} do
-      test_pid = self()
-
-      pid =
-        spawn(fn ->
-          send(test_pid, :started)
-
-          receive do
-            :exit -> :ok
-          end
-        end)
-
-      receive do
-        :started -> :ok
-      end
+    test "prunes a dead connection's entry (monitor runs in the registry)", %{socket: socket} do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
 
       Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
-      initial_count = Malachi.ConnectionRegistry.count()
+      assert [{^pid, _, _, _, _, _, _}] = :ets.lookup(:malachi_connections, pid)
 
-      send(pid, :exit)
-      :timer.sleep(100)
+      # Monitor the pid from the test too, so we can wait until it is actually dead before checking.
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
 
-      final_count = Malachi.ConnectionRegistry.count()
-      # Count should be less or equal (process was cleaned up)
-      assert final_count <= initial_count
+      # A synchronous round-trip forces the registry to drain its mailbox, including the :DOWN that the
+      # registry's own monitor received when the pid died. If the monitor had stayed in the caller, this
+      # :DOWN would never reach the registry and the entry below would remain.
+      _ = :sys.get_state(Malachi.ConnectionRegistry)
+      assert :ets.lookup(:malachi_connections, pid) == []
     end
   end
 
