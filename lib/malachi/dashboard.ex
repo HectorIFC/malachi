@@ -54,11 +54,18 @@ defmodule Malachi.Dashboard do
     end
   end
 
+  # Per-read timeout for the request line and headers. Without it, :gen_tcp.recv/2 blocks forever, so a
+  # client that connects and sends nothing (or dribbles headers one byte at a time) pins a process and a
+  # socket indefinitely (slowloris). Configurable so it can be tuned (and driven low in tests).
+  defp recv_timeout do
+    Application.get_env(:malachi, :dashboard_recv_timeout_ms, 5_000)
+  end
+
   defp handle_http(socket) do
     # Get client IP for logging and authentication
     {:ok, {client_ip, _port}} = :inet.peername(socket)
 
-    case :gen_tcp.recv(socket, 0) do
+    case :gen_tcp.recv(socket, 0, recv_timeout()) do
       {:ok, {:http_request, method, {:abs_path, path}, _version}} ->
         headers = parse_headers(socket, %{})
         path_string = to_string(path)
@@ -77,7 +84,7 @@ defmodule Malachi.Dashboard do
   end
 
   defp parse_headers(socket, headers_map) do
-    case :gen_tcp.recv(socket, 0) do
+    case :gen_tcp.recv(socket, 0, recv_timeout()) do
       {:ok, :http_eoh} ->
         headers_map
 

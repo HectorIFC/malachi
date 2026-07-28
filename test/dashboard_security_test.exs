@@ -278,6 +278,31 @@ defmodule Malachi.DashboardSecurityTest do
     end
   end
 
+  describe "read timeout (slowloris)" do
+    test "an idle connection is closed after the recv timeout" do
+      original = Application.get_env(:malachi, :dashboard_recv_timeout_ms)
+      Application.put_env(:malachi, :dashboard_recv_timeout_ms, 300)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:malachi, :dashboard_recv_timeout_ms, original),
+          else: Application.delete_env(:malachi, :dashboard_recv_timeout_ms)
+      end)
+
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          # Connect and send nothing. Before the fix, recv(socket, 0) blocked forever and the client would
+          # only see its own recv timeout ({:error, :timeout}); now the server closes the idle socket once
+          # its 300ms read timeout elapses, which the client observes as {:error, :closed} well before 2s.
+          assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2000)
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
   describe "security headers" do
     test "responses include security headers", %{admin_token: token} do
       case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
