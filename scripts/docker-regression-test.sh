@@ -37,11 +37,11 @@ run_test() {
     echo -n "Testing: $test_name... "
     if eval "$test_command" > /dev/null 2>&1; then
         echo -e "${GREEN}PASS${NC}"
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
         return 0
     else
         echo -e "${RED}FAIL${NC}"
-        ((TESTS_FAILED++))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         return 1
     fi
 }
@@ -113,10 +113,10 @@ WORKFLOW_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
 
 if [ "$WORKFLOW_RESULT" = "PASS" ]; then
     echo -e "${GREEN}PASS${NC}"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "${RED}FAIL${NC} (got: $WORKFLOW_RESULT)"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 # Test 6.5: Consumer group resume workflow (fetch by group -> commit -> resume empty, at-least-once)
 echo -n "Testing: Consumer group resume workflow... "
@@ -133,10 +133,10 @@ GROUP_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
 
 if [ "$GROUP_RESULT" = "PASS" ]; then
     echo -e "${GREEN}PASS${NC}"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "${RED}FAIL${NC} (got: $GROUP_RESULT)"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 # Test 7: High-volume throughput
 echo -n "Testing: High-volume message throughput... "
@@ -150,10 +150,10 @@ THROUGHPUT_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
 
 if echo "$THROUGHPUT_TEST" | grep -q "^PASS"; then
     echo -e "${GREEN}PASS${NC}"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "${RED}FAIL${NC} (result: $THROUGHPUT_TEST)"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Test 8: Memory stability under load
@@ -169,7 +169,7 @@ docker exec "$CONTAINER_NAME" bin/malachi rpc '
 sleep 2
 FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
 echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
-((TESTS_PASSED++))
+TESTS_PASSED=$((TESTS_PASSED + 1))
 
 # Test 9: Concurrent multi-topic operations
 echo -n "Testing: Concurrent multi-topic operations... "
@@ -198,10 +198,10 @@ CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachi rpc '
 
 if [ "$CONCURRENT_TEST" = "PASS" ]; then
     echo -e "${GREEN}PASS${NC}"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "${RED}FAIL${NC}"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Test 10: JIT compilation active
@@ -209,7 +209,7 @@ echo -n "Testing: JIT compilation enabled... "
 JIT_STATUS=$(docker exec "$CONTAINER_NAME" bin/malachi rpc ':erlang.system_info(:emu_flavor)' 2>&1 | grep -o 'jit' || echo "nojit")
 if [ "$JIT_STATUS" = "jit" ]; then
     echo -e "${GREEN}PASS${NC}"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "${YELLOW}SKIP${NC} (JIT not detected, this is OK for some platforms)"
 fi
