@@ -20,49 +20,10 @@ defmodule DashboardSecurityBenchmark do
     IO.puts("\n🔒 Dashboard Security Performance Benchmark\n")
     IO.puts("Measuring overhead of authentication and security features...\n")
 
-    # Setup: Create test user and get token
-    {:ok, _} = :gen_tcp.connect({127, 0, 0, 1}, 4040, [:binary, active: false], 5000)
-    |> case do
-      {:ok, socket} ->
-        # Authenticate to get token
-        auth_request = Jason.encode!(%{
-          action: "auth",
-          username: "producer",
-          password: "producer123"
-        }) <> "\n"
-        
-        :gen_tcp.send(socket, auth_request)
-        {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
-        
-        auth_data = Jason.decode!(String.trim(response))
-        token = auth_data["token"]
-        :gen_tcp.close(socket)
-        {:ok, token}
-      
-      {:error, _} ->
-        IO.puts("⚠️  Malachi TCP server not running on port 4040")
-        IO.puts("Start the server with: mix run --no-halt")
-        System.halt(1)
-    end
-
-    token = case :gen_tcp.connect({127, 0, 0, 1}, 4040, [:binary, active: false], 5000) do
-      {:ok, socket} ->
-        auth_request = Jason.encode!(%{
-          action: "auth",
-          username: "producer",
-          password: "producer123"
-        }) <> "\n"
-        
-        :gen_tcp.send(socket, auth_request)
-        {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
-        auth_data = Jason.decode!(String.trim(response))
-        :gen_tcp.close(socket)
-        auth_data["token"]
-      
-      {:error, _} ->
-        IO.puts("⚠️  Could not connect to Malachi")
-        System.halt(1)
-    end
+    # Setup: obtain a dashboard token via the dashboard's own /login (HTTP), not the broker's binary
+    # protocol. The broker on port 4040 speaks the length-framed Malachi.Wire protocol, so newline-delimited
+    # JSON to it never worked; the token is only used for the dashboard HTTP requests below anyway.
+    token = fetch_dashboard_token()
 
     Benchee.run(
       %{
@@ -187,6 +148,47 @@ defmodule DashboardSecurityBenchmark do
         :ok
       
       {:error, _} -> :error
+    end
+  end
+
+  # Logs in through the dashboard's HTTP /login and returns the session token from the JSON response.
+  defp fetch_dashboard_token do
+    case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 5000) do
+      {:ok, socket} ->
+        body = Jason.encode!(%{username: "producer", password: "producer123"})
+
+        request =
+          "POST /login HTTP/1.1\r\n" <>
+            "Host: localhost\r\n" <>
+            "Content-Type: application/json\r\n" <>
+            "Content-Length: #{byte_size(body)}\r\n\r\n" <> body
+
+        :gen_tcp.send(socket, request)
+        {:ok, response} = :gen_tcp.recv(socket, 0, 5000)
+        :gen_tcp.close(socket)
+
+        case extract_json_body(response) do
+          {:ok, %{"token" => token}} when is_binary(token) ->
+            token
+
+          _ ->
+            IO.puts("⚠️  Dashboard login failed on port #{@dashboard_port} (user 'producer'). Response:")
+            IO.puts(response)
+            System.halt(1)
+        end
+
+      {:error, _} ->
+        IO.puts("⚠️  Could not reach the Malachi dashboard on port #{@dashboard_port}")
+        IO.puts("Start the server with: mix run --no-halt")
+        System.halt(1)
+    end
+  end
+
+  # Splits an HTTP response at the blank line and JSON-decodes the body.
+  defp extract_json_body(response) do
+    case String.split(response, "\r\n\r\n", parts: 2) do
+      [_headers, body] -> Jason.decode(body)
+      _ -> {:error, :no_body}
     end
   end
 
