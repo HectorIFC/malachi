@@ -467,6 +467,24 @@ defmodule Malachi.AuditLog do
     %{state | buffer: [event_json | state.buffer], buffer_size: state.buffer_size + 1}
   end
 
+  # Encodes an event to JSON without ever raising. `metadata` is caller-supplied and may hold a term Jason
+  # cannot encode (tuple, pid, reference, struct without an encoder); a raising Jason.encode!/1 here would
+  # kill the GenServer, discard the whole buffer, and take the audit trail offline. On failure, retry with
+  # the metadata inspected; if even that fails (some other field became non-encodable), inspect the whole
+  # event, which is always encodable, so the logger stays up.
+  defp safe_encode(event) do
+    case Jason.encode(event) do
+      {:ok, json} ->
+        json
+
+      {:error, _} ->
+        case Jason.encode(%{event | metadata: inspect(event.metadata)}) do
+          {:ok, json} -> json
+          {:error, _} -> Jason.encode!(%{event: inspect(event)})
+        end
+    end
+  end
+
   defp flush_buffer(%{buffer: []} = state), do: state
 
   defp flush_buffer(state) do
@@ -475,7 +493,7 @@ defmodule Malachi.AuditLog do
     # Write to stdout if enabled
     if state.output_mode in [:stdout, :both] do
       Enum.each(events, fn event ->
-        json = Jason.encode!(event)
+        json = safe_encode(event)
         Logger.info("[AUDIT] #{json}")
       end)
     end
@@ -496,7 +514,7 @@ defmodule Malachi.AuditLog do
     case :file.position(file_handle, :eof) do
       {:ok, current_position} ->
         # Calculate size of events to write
-        events_data = Enum.map_join(events, "\n", &Jason.encode!/1) <> "\n"
+        events_data = Enum.map_join(events, "\n", &safe_encode/1) <> "\n"
         events_size = byte_size(events_data)
 
         if current_position + events_size > max_size_bytes do
@@ -512,7 +530,7 @@ defmodule Malachi.AuditLog do
 
       {:error, _} ->
         # File handle is invalid/terminated, write directly to file
-        events_data = Enum.map_join(events, "\n", &Jason.encode!/1) <> "\n"
+        events_data = Enum.map_join(events, "\n", &safe_encode/1) <> "\n"
         File.write!(file_path, events_data, [:append])
         nil
     end

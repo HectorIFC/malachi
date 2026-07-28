@@ -391,5 +391,34 @@ defmodule Malachi.AuditLogIntegrationTest do
       assert event["event_type"] == "dashboard_auth_failure"
       assert event["metadata"]["reason"] == "invalid_credentials"
     end
+
+    test "survives non-JSON-encodable metadata and still writes the event" do
+      Application.put_env(:malachi, :audit_log_output, :file)
+      Application.put_env(:malachi, :audit_log_file, @test_log_file)
+
+      pid = restart_audit_log()
+
+      # A tuple is not JSON-encodable, so a raising Jason.encode!/1 during flush would crash the logger and
+      # take the audit trail offline. safe_encode/1 must keep it up and still record the event.
+      Malachi.AuditLog.log_event(
+        :dashboard_auth_failure,
+        %{username: "resilient_user", ip: {127, 0, 0, 1}},
+        "auth",
+        :failure,
+        %{reason: {:error, :timeout}}
+      )
+
+      # flush/0 drains the pending cast and writes synchronously.
+      Malachi.AuditLog.flush()
+
+      # The logger did not crash and get restarted: it is still the very same process.
+      assert Process.whereis(Malachi.AuditLog) == pid
+      assert Process.alive?(pid)
+
+      # The event was recorded, with the offending metadata inspected rather than dropped.
+      content = File.read!(@test_log_file)
+      assert String.contains?(content, "resilient_user")
+      assert String.contains?(content, ":timeout")
+    end
   end
 end
