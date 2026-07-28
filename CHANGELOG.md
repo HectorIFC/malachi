@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Entries below this one are historical and keep the `MALACHIMQ_*` names they shipped with.
   - This also unifies the two prefixes that had been coexisting: the Node client scripts already read
     `MALACHI_HOST`, `MALACHI_PORT`, `MALACHI_USER`, `MALACHI_PASS`.
+- **Docker**: Added OCI labels, HEALTHCHECK instruction, and security hardening documentation
+- **Authentication**: Replaced SHA-256 password hashing with Argon2 (BREAKING)
+  - Existing password hashes must be regenerated after upgrade
+- **Pre-commit hooks**: Added Gitleaks for secret detection, large file warnings, private key detection
 
 ### Fixed
 
@@ -146,13 +150,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TLS/SSL support for TCP server (optional, configurable)
 - Socket abstraction layer for transport-agnostic operations
 - Development certificate generation script
-
-### Changed
-
-- **Docker**: Added OCI labels, HEALTHCHECK instruction, and security hardening documentation
-- **Authentication**: Replaced SHA-256 password hashing with Argon2 (BREAKING)
-  - Existing password hashes must be regenerated after upgrade
-- **Pre-commit hooks**: Added Gitleaks for secret detection, large file warnings, private key detection
+- Initial implementation of Malachi
+- TCP messaging server
+- Authentication system
+- Web dashboard
+- Multiple queue support
+- ACK Manager for delivery guarantee
+- Internationalization support (i18n)
+- Docker and Docker Compose
+- Initial documentation
 
 ### Security
 
@@ -268,14 +274,3 @@ Validation errors now return detailed error codes in English (not internationali
 - `invalid_headers_key_too_long`
 - `invalid_headers_value_too_long`
 - `invalid_headers_invalid_type`
-
-### Added
-- Initial implementation of Malachi
-- TCP messaging server
-- Authentication system
-- Web dashboard
-- Multiple queue support
-- ACK Manager for delivery guarantee
-- Internationalization support (i18n)
-- Docker and Docker Compose
-- Initial documentation
