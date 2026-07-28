@@ -240,6 +240,44 @@ defmodule Malachi.DashboardSecurityTest do
     end
   end
 
+  describe "malformed Content-Length" do
+    test "non-numeric Content-Length does not crash the handler" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          # Before the fix, String.to_integer("abc") raised and killed the handler, so the socket closed
+          # with no response. The server must instead answer (any HTTP status) without crashing.
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: abc\r\n\r\n"
+
+          :gen_tcp.send(socket, request)
+          assert {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+          assert String.contains?(response, "HTTP/1.1")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "negative Content-Length does not crash the handler" do
+      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          request =
+            "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: -5\r\n\r\n"
+
+          :gen_tcp.send(socket, request)
+          assert {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+          assert String.contains?(response, "HTTP/1.1")
+
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
   describe "security headers" do
     test "responses include security headers", %{admin_token: token} do
       case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do

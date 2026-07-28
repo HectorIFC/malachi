@@ -569,12 +569,22 @@ defmodule Malachi.Dashboard do
     send_json(socket, status, %{"s" => "err", "reason" => to_string(reason)})
   end
 
+  # A single request body is capped at 1 MiB. The dashboard only ever receives small JSON payloads (login,
+  # user, ACL), so anything larger is malformed or hostile and is not read.
+  @max_body_bytes 1_048_576
+
   # Reads the request body (bounded by Content-Length) and JSON-decodes it: `{:ok, map}` or `{:error, _}`.
   defp read_json_body(socket, headers) do
-    content_length = Map.get(headers, "content-length", "0") |> String.to_integer()
+    # Parse Content-Length defensively: String.to_integer/1 raises on any non-numeric or negative value,
+    # which would kill the handler and leave the socket open. Treat a malformed length as no body.
+    content_length =
+      case Integer.parse(Map.get(headers, "content-length", "0")) do
+        {n, ""} when n >= 0 -> n
+        _ -> 0
+      end
 
     body =
-      if content_length > 0 do
+      if content_length > 0 and content_length <= @max_body_bytes do
         :inet.setopts(socket, packet: :raw)
 
         case :gen_tcp.recv(socket, content_length, 5000) do
