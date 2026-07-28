@@ -56,7 +56,7 @@ jobs:
         run: mix docs --warnings-as-errors
 
       - name: ⚙️ Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # doc/ is the ex_doc default output (mix.exs sets no :output) and is gitignored, so it only ever
       # exists as a build artifact.
