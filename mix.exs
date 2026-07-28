@@ -222,7 +222,7 @@ defmodule Malachi.MixProject do
       {:ex_doc, "~> 0.39.3", only: :dev, runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.13.0", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5.0", only: :dev, runtime: false},
       {:benchee_html, "~> 1.0", only: :dev, runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}
