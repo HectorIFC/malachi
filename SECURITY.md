@@ -58,19 +58,19 @@ export MALACHI_CONSUMER_PASS="$(openssl rand -base64 32)"
 export MALACHI_TLS_CERTFILE=/path/to/cert.pem
 export MALACHI_TLS_KEYFILE=/path/to/key.pem
 
-# REQUIRED: Set dashboard credentials
-export MALACHI_DASHBOARD_USER="admin"
-export MALACHI_DASHBOARD_PASS="$(openssl rand -base64 24)"
+# Dashboard: authentication is on by default and admin is required for the HTML
+# pages. It reuses the system users above (log in as admin); there is no separate
+# dashboard credential. Keep both enabled in production.
+export MALACHI_DASHBOARD_AUTH_ENABLED=true
+export MALACHI_DASHBOARD_REQUIRE_ADMIN=true
 
 # RECOMMENDED: Enable all security features
 export MALACHI_RATE_LIMIT_ENABLED=true
 export MALACHI_SESSION_IP_BINDING=true
-export MALACHI_AUDIT_LOG=true
-export MALACHI_HSTS=true
+export MALACHI_AUDIT_LOG_OUTPUT=both
+export MALACHI_HSTS_ENABLED=true
 
-# RECOMMENDED: Configure resource limits
-export MALACHI_MAX_BUFFER_SIZE=10000
-export MALACHI_OVERFLOW_BEHAVIOR=reject
+# RECOMMENDED: Configure connection and memory limits
 export MALACHI_MAX_CONN_PER_IP=50
 export MALACHI_MAX_TOTAL_CONN=5000
 export MALACHI_GC_THRESHOLD_MB=500
@@ -103,26 +103,24 @@ export MALACHI_GC_THRESHOLD_MB=500
 - Trusted proxy support with configurable CIDR ranges
 - Password strength requirements (configurable minimum length)
 - Configuration validation at startup
-- Input validation and sanitization (queue/channel names, payloads, headers)
+- Input validation and sanitization (topic names, payloads, headers)
 - XSS, SQL injection, path traversal, command injection, CRLF injection protection
 - Message size limits (10MB max payload)
-- Queue buffer limits with backpressure and overflow strategies
+- Credit-window flow control (backpressure) on streaming reads
 - Comprehensive audit logging (JSON format, file rotation, multiple output modes)
 - Security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy)
 - CORS with origin whitelisting
 - Memory monitoring with automatic GC triggers
 - Atom exhaustion prevention (BEAM atom table monitoring)
-- Dynamic queue/channel creation limits
 - Automated security CI/CD pipeline (Gitleaks, Trivy, Sobelow)
 - Comprehensive security test suite (attack simulation, fuzzing, OWASP alignment)
 - Pre-commit hooks (Gitleaks secret detection, private key detection)
 
 ## Known Security Limitations
 
-- **Single-Node Only:** No built-in cluster authentication (use network-level security)
-- **Volatile Messages:** Messages are stored in memory ETS tables and do not survive restarts.
+- **Inter-node authentication:** Nodes trust each other through the Erlang distribution cookie (`$RELEASE_COOKIE`). For authenticated, encrypted node-to-node traffic, enable mutual-TLS distribution (see `rel/dist_tls.conf.example` and `MALACHI_DIST_TLS_OPTFILE`) and keep the cookie secret.
 - **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHI_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
-- **No Message-Level Encryption:** Implement application-level encryption if needed
+- **No at-rest encryption:** Records are protected in transit by TLS, but the on-disk log is stored in plaintext (the record CRC guards integrity, not confidentiality). Add application-level encryption if you need encryption at rest.
 
 ## Security Advisories
 
