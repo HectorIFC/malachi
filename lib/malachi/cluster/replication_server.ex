@@ -29,6 +29,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   use GenServer
 
+  require Logger
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Cluster.Catchup
@@ -198,7 +199,7 @@ defmodule Malachi.Cluster.ReplicationServer do
         # Behind on the active segment (a new replica from base, or one that missed batches): kick
         # off a background catch-up from the primary and skip this batch (it commits via the
         # up-to-date replicas). We rejoin on a later batch as the catch-up converges on the head.
-        {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, source)}
+        {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, base, source)}
 
       true ->
         {:reply, {:error, :out_of_sync}, state}
@@ -320,12 +321,12 @@ defmodule Malachi.Cluster.ReplicationServer do
   # source has past our current end. Monitored so the in-progress flag is cleared on completion or
   # crash; the offset check in `follow` keeps concurrent appends safe, so a racing produce just
   # makes the catch-up abort and the next gap re-trigger.
-  defp trigger_catchup(state, segment_id, source) do
+  defp trigger_catchup(state, segment_id, base, source) do
     if MapSet.member?(state.catching_up, segment_id) do
       state
     else
       target = state.ref
-      {_pid, monitor_ref} = spawn_monitor(fn -> run_catchup(target, source, segment_id) end)
+      {_pid, monitor_ref} = spawn_monitor(fn -> run_catchup(target, source, segment_id, base) end)
 
       %{
         state
@@ -335,15 +336,29 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  defp run_catchup(target, source, segment_id) do
-    from = current_end(target, segment_id)
-    to = current_end(source, segment_id)
-    if to > from, do: Catchup.run(target, source, segment_id, from, to)
+  defp run_catchup(target, source, segment_id, base) do
+    from = current_end(target, segment_id, base)
+    to = current_end(source, segment_id, base)
+
+    if to > from do
+      case Catchup.run(target, source, segment_id, from, to) do
+        {:ok, _offset} ->
+          :ok
+
+        {:error, reason} ->
+          # A failed catch-up leaves the replica behind; the offset check in `follow` re-triggers it on
+          # the next fan-out. Log it so a persistently failing catch-up is visible rather than silent.
+          Logger.warning("catch-up for #{inspect(segment_id)} (#{from}..#{to}) failed: #{inspect(reason)}")
+      end
+    end
   end
 
-  defp current_end(ref, segment_id) do
+  # `base` is the segment's range-relative first offset, used as the fallback when `ref` holds none of the
+  # segment yet (a brand-new or far-behind replica). Falling back to 0 here would make Catchup.run read the
+  # source below its real base and fail with :out_of_range for any non-zero-base segment.
+  defp current_end(ref, segment_id, base) do
     case end_offset(ref, segment_id) do
-      :empty -> 0
+      :empty -> base
       offset -> offset
     end
   end

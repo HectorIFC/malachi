@@ -196,6 +196,28 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert read_values(name, evil_segment) == ["a", "b"]
   end
 
+  test "a follower that never held a non-zero-base segment is caught up from its base offset" do
+    [primary, behind, other] = full = [start_broker(), start_broker(), start_broker()]
+
+    # this segment starts at range-relative offset 100; `behind` is excluded from the first batches
+    assert {:ok, 101} =
+             ReplicationServer.replicate(primary, @segment, [primary, other], 100, records(["a", "b"]))
+
+    assert {:ok, 103} =
+             ReplicationServer.replicate(primary, @segment, [primary, other], 100, records(["c", "d"]))
+
+    # `behind` holds nothing of this segment yet
+    assert ReplicationServer.end_offset(behind, @segment) == :empty
+
+    # the next fan-out reaches `behind` past its (empty) end → it triggers a background catch-up, which
+    # must start from the segment's base_offset (100), not 0; the write still commits via primary + other
+    assert {:ok, 105} =
+             ReplicationServer.replicate(primary, @segment, full, 100, records(["e", "f"]))
+
+    # `behind` backfills the whole segment from base 100 and converges on the head
+    assert eventually(fn -> read_values(behind, @segment, 100) == ~w(a b c d e f) end)
+  end
+
   defp eventually(check, remaining_ms \\ 2_000) do
     cond do
       check.() -> true
