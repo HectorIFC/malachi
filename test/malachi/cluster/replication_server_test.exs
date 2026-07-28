@@ -171,6 +171,31 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert eventually(fn -> read_values(c, @segment) == ~w(w x y z p q) end)
   end
 
+  test "a path-unsafe topic in a replicated segment id cannot escape the base directory" do
+    name = :"repl_#{System.unique_integer([:positive])}"
+    base = Path.join(System.tmp_dir!(), "malachi_repl_pt_#{System.unique_integer([:positive])}")
+    # A topic carrying a single-level path traversal, as a compromised peer could send over replication.
+    # The escape target lands next to `base` under the (writable) tmp dir, so without the fix it would be
+    # created there; unique-suffix it to avoid colliding with other tests.
+    evil_topic = "../evil_#{System.unique_integer([:positive])}"
+    evil_segment = {{evil_topic, 0}, 0}
+    escaped = Path.expand(Path.join(base, "#{evil_topic}-r0-s0"))
+
+    on_exit(fn ->
+      File.rm_rf!(base)
+      File.rm_rf!(escaped)
+    end)
+
+    start_supervised!({ReplicationServer, name: name, directory: base}, id: name)
+
+    assert {:ok, 1} = ReplicationServer.replicate(name, evil_segment, [name], 0, records(["a", "b"]))
+
+    # The segment must not be written at the traversal target outside `base`.
+    refute File.exists?(escaped)
+    # It is still stored and readable, just under a safe encoded directory inside `base`.
+    assert read_values(name, evil_segment) == ["a", "b"]
+  end
+
   defp eventually(check, remaining_ms \\ 2_000) do
     cond do
       check.() -> true

@@ -370,13 +370,28 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   defp put_log(state, segment_id, log), do: put_in(state.logs[segment_id], log)
 
-  # A readable directory for the broker's {{topic, range_seq}, seg_seq} ids, with a safe,
-  # collision-free fallback for any other term.
-  defp segment_directory(base, {{topic, range_seq}, seg_seq}) do
-    Path.join(base, "#{topic}-r#{range_seq}-s#{seg_seq}")
+  # A readable directory for the broker's {{topic, range_seq}, seg_seq} ids, with a safe, collision-free
+  # fallback for any other term. segment_ids arrive over inter-node replication, so the topic is not
+  # trusted here even though Metadata.valid_topic_name?/1 screens locally created topics: a path-unsafe
+  # topic (or a non-integer seq) falls through to the Base64 encoding, keeping the directory inside `base`.
+  defp segment_directory(base, {{topic, range_seq}, seg_seq} = segment_id)
+       when is_integer(range_seq) and is_integer(seg_seq) do
+    if safe_path_segment?(topic) do
+      Path.join(base, "#{topic}-r#{range_seq}-s#{seg_seq}")
+    else
+      encoded_segment_directory(base, segment_id)
+    end
   end
 
-  defp segment_directory(base, segment_id) do
+  defp segment_directory(base, segment_id), do: encoded_segment_directory(base, segment_id)
+
+  defp encoded_segment_directory(base, segment_id) do
     Path.join(base, Base.url_encode64(:erlang.term_to_binary(segment_id), padding: false))
+  end
+
+  # Mirrors the allowlist in Metadata.valid_topic_name?/1 as a defense-in-depth check where the path is
+  # built, since segment_ids can arrive from other nodes.
+  defp safe_path_segment?(topic) do
+    is_binary(topic) and topic not in ["", ".", ".."] and topic =~ ~r/\A[A-Za-z0-9._-]+\z/
   end
 end
