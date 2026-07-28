@@ -3,11 +3,12 @@ defmodule Malachi.TCPAcceptor do
   One acceptor of the `Malachi.TCPAcceptorPool`: a `GenServer` that owns a listen socket on a port and
   accepts client connections in a loop, one at a time.
 
-  Each accepted connection is completed. A TLS handshake for `:ssl` (recording the negotiated version
-  and success/failure metrics), or the raw socket for `:gen_tcp`, and handed to a fresh process that
-  runs `Malachi.TCPProtocol` for that client. The accept loop self-schedules with an idle backoff: the
-  poll timeout grows as consecutive accepts time out (capped at 30s), so an idle server does not
-  busy-wait. Several acceptors share the same port (`reuseport`), spreading accepts across schedulers.
+  Each accepted connection is handed to a fresh process that runs `Malachi.TCPProtocol` for that client.
+  For `:ssl` that process performs the TLS handshake (recording the negotiated version and success/failure
+  metrics) with a dedicated `:tls_handshake_timeout_ms`, so a slow or malicious peer cannot stall the
+  accept loop; for `:gen_tcp` the raw socket is used as-is. The accept loop self-schedules with an idle
+  backoff: the poll timeout grows as consecutive accepts time out (capped at 30s), so an idle server does
+  not busy-wait. Several acceptors share the same port (`reuseport`), spreading accepts across schedulers.
   """
   use GenServer
   require Logger
@@ -60,10 +61,10 @@ defmodule Malachi.TCPAcceptor do
 
     case accept_result do
       {:ok, client} ->
-        case establish_client_socket(client, transport, timeout) do
-          nil -> :ok
-          client_socket -> hand_off_client(client_socket, transport)
-        end
+        # Hand the raw (not-yet-handshaken) socket to a fresh process and go back to accepting at once.
+        # The TLS handshake then runs in that process, so a slow or malicious peer cannot stall this
+        # acceptor for the whole handshake.
+        hand_off_client(client, transport)
 
         send(self(), :accept)
         {:noreply, %{state | connections: state.connections + 1, idle_count: 0}}
@@ -80,13 +81,14 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Completes the accepted client socket. For TLS, performs the handshake (recording success/failure
-  # metrics and the negotiated version) and returns the TLS socket, or nil when the handshake fails;
-  # for plain TCP, returns the accepted socket as-is.
-  defp establish_client_socket(client, :gen_tcp, _timeout), do: client
+  # Completes the accepted client socket, in the connection process (not the acceptor). For TLS, performs
+  # the handshake with the dedicated handshake timeout (recording success/failure metrics and the
+  # negotiated version) and returns the TLS socket, or nil when the handshake fails; for plain TCP,
+  # returns the accepted socket as-is.
+  defp establish_client_socket(client, :gen_tcp), do: client
 
-  defp establish_client_socket(client, :ssl, timeout) do
-    case :ssl.handshake(client, timeout) do
+  defp establish_client_socket(client, :ssl) do
+    case :ssl.handshake(client, tls_handshake_timeout()) do
       {:ok, tls_socket} ->
         Malachi.Metrics.increment_tls_handshake_success()
         record_negotiated_tls_version(tls_socket)
@@ -108,26 +110,35 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Hands the connected client socket to a fresh process, transferring socket ownership to it and then
-  # signaling that the transfer is complete so it can start serving.
-  defp hand_off_client(client_socket, transport) do
+  # Hands the raw accepted socket to a fresh process, transferring socket ownership to it and then
+  # signaling that the transfer is complete. That process performs the TLS handshake (for `:ssl`) and
+  # serves the client, so neither the handshake nor request handling runs in the acceptor.
+  defp hand_off_client(client, transport) do
     pid =
       spawn(fn ->
         # Wait for socket ownership transfer before proceeding
         receive do
-          :socket_ready -> handle_client(client_socket, transport)
+          :socket_ready ->
+            case establish_client_socket(client, transport) do
+              nil -> :ok
+              client_socket -> handle_client(client_socket, transport)
+            end
         after
           5000 -> :timeout
         end
       end)
 
     case transport do
-      :ssl -> :ssl.controlling_process(client_socket, pid)
-      :gen_tcp -> :gen_tcp.controlling_process(client_socket, pid)
+      :ssl -> :ssl.controlling_process(client, pid)
+      :gen_tcp -> :gen_tcp.controlling_process(client, pid)
     end
 
     send(pid, :socket_ready)
   end
+
+  # Budget for the TLS handshake, run in the connection process. Dedicated (not the accept idle-backoff,
+  # which is inverted: long when idle, short when busy) so a stalled handshake is bounded regardless of load.
+  defp tls_handshake_timeout, do: Application.get_env(:malachi, :tls_handshake_timeout_ms, 5_000)
 
   defp handle_client(socket, transport) do
     # Extract client IP address
