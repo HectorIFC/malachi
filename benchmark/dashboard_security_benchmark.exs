@@ -7,11 +7,8 @@
 #
 # Acceptance criteria: < 25% latency increase
 
-Mix.install([
-  # benchee 1.1+ for reduction_time; Benchee.Formatters.HTML lives in the separate benchee_html package.
-  {:benchee, "~> 1.1"},
-  {:benchee_html, "~> 1.0"}
-])
+# Run with `mix run benchmark/dashboard_security_benchmark.exs`: benchee and benchee_html come from the
+# project's dev deps in mix.exs. (No Mix.install here: it raises inside an active Mix project.)
 
 defmodule DashboardSecurityBenchmark do
   @dashboard_port 4041
