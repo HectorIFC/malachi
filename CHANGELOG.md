@@ -7,29 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **BREAKING: environment variables renamed from `MALACHIMQ_*` to `MALACHI_*`**, following the project's
-  rename from MalachiMQ to Malachi. Every variable keeps its name and meaning apart from the prefix, so
-  `MALACHIMQ_LOG_NODES` becomes `MALACHI_LOG_NODES`, and so on for all 129 of them.
-  - **There is no fallback**: an old `MALACHIMQ_*` variable is simply ignored, and most settings then take
-    their default. Two are worth checking before you upgrade: `MALACHI_ACL_STRICT` silently reverts to
-    permissive (global permissions act as a wildcard again) and `MALACHI_LOG_CLUSTER` /
-    `MALACHI_LOG_NODES` degrade to a single-node in-memory control plane.
-  - Entries below this one are historical and keep the `MALACHIMQ_*` names they shipped with.
-  - This also unifies the two prefixes that had been coexisting: the Node client scripts already read
-    `MALACHI_HOST`, `MALACHI_PORT`, `MALACHI_USER`, `MALACHI_PASS`.
-- **Docker**: Added OCI labels, HEALTHCHECK instruction, and security hardening documentation
-- **Authentication**: Replaced SHA-256 password hashing with Argon2 (BREAKING)
-  - Existing password hashes must be regenerated after upgrade
-- **Pre-commit hooks**: Added Gitleaks for secret detection, large file warnings, private key detection
-
-### Fixed
-
-- **`docker-compose.yml`: the `producer` service could not reach the broker.** It set `MALACHIMQ_HOST`,
-  `MALACHIMQ_PORT`, `MALACHIMQ_USER` and `MALACHIMQ_PASS`, but the Node client reads those names without
-  the `MQ`, so all four were ignored and the container fell back to `localhost:4040`. The rename makes
-  them match. Also dropped `MALACHIMQ_QUEUE`, dead since the queue model was removed.
+> Historical entries in this section keep the `MALACHIMQ_*` variable names they shipped with; the
+> current variables are `MALACHI_*` (the rename is the first item under Changed).
 
 ### Added
 
@@ -159,6 +138,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internationalization support (i18n)
 - Docker and Docker Compose
 - Initial documentation
+
+### Changed
+
+- **BREAKING: environment variables renamed from `MALACHIMQ_*` to `MALACHI_*`**, following the project's
+  rename from MalachiMQ to Malachi. Every variable keeps its name and meaning apart from the prefix, so
+  `MALACHIMQ_LOG_NODES` becomes `MALACHI_LOG_NODES`, and so on for all 129 of them.
+  - **There is no fallback**: an old `MALACHIMQ_*` variable is simply ignored, and most settings then take
+    their default. Two are worth checking before you upgrade: `MALACHI_ACL_STRICT` silently reverts to
+    permissive (global permissions act as a wildcard again) and `MALACHI_LOG_CLUSTER` /
+    `MALACHI_LOG_NODES` degrade to a single-node in-memory control plane.
+  - This also unifies the two prefixes that had been coexisting: the Node client scripts already read
+    `MALACHI_HOST`, `MALACHI_PORT`, `MALACHI_USER`, `MALACHI_PASS`.
+- **Docker**: Added OCI labels, HEALTHCHECK instruction, and security hardening documentation
+- **Authentication**: Replaced SHA-256 password hashing with Argon2 (BREAKING)
+  - Existing password hashes must be regenerated after upgrade
+- **Pre-commit hooks**: Added Gitleaks for secret detection, large file warnings, private key detection
+
+### Fixed
+
+- **`docker-compose.yml`: the `producer` service could not reach the broker.** It set `MALACHIMQ_HOST`,
+  `MALACHIMQ_PORT`, `MALACHIMQ_USER` and `MALACHIMQ_PASS`, but the Node client reads those names without
+  the `MQ`, so all four were ignored and the container fell back to `localhost:4040`. The rename makes
+  them match. Also dropped `MALACHIMQ_QUEUE`, dead since the queue model was removed.
 
 ### Security
 
