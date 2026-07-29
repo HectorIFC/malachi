@@ -9,8 +9,6 @@ on:
 permissions:
   contents: write
   packages: write
-  # Needed to trigger the Pages workflow (workflow_dispatch) after the version bump.
-  actions: write
 
 jobs:
   # First, verify that CI passed
@@ -53,7 +51,12 @@ jobs:
     needs: verify-ci
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    
+    # Scoped here (not workflow-wide) so only this job holds write: it pushes the bump/tag/release
+    # (contents) and dispatches the Pages workflow (actions). Job permissions replace the top-level set.
+    permissions:
+      contents: write
+      actions: write
+
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
       
