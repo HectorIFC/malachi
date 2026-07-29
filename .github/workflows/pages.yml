@@ -53,8 +53,8 @@ jobs:
           # cache miss when every dep downloads at once). Fail only if all attempts fail.
           for i in 1 2 3; do
             mix deps.get && exit 0
-            echo "mix deps.get failed (attempt $i/3), retrying in 5s..."
-            sleep 5
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
           done
           exit 1
 
