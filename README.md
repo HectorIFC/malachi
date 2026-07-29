@@ -829,10 +829,10 @@ After cloning the repository, run the setup script to install git hooks:
 
 This will:
 - Install [Lefthook](https://github.com/evilmartians/lefthook) (git hooks manager)
-- Configure pre-commit hook to automatically update performance baselines
+- Configure a pre-commit hook that runs `mix format`
 - Ensure all developers have consistent git hooks
 
-The pre-commit hook runs benchmarks (~10 minutes) when you modify files in `lib/malachi/` or `benchmark/`. To skip: `git commit --no-verify`
+The pre-commit hook runs `mix format` and re-stages any `.ex`/`.exs` files it reformats. To skip: `git commit --no-verify`
 
 ### Run Locally
 
