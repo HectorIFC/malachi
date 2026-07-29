@@ -53,15 +53,19 @@ defmodule Malachi.MixProject do
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
     <style>.mermaid { background: #ffffff; border-radius: 8px; padding: 16px; margin: 1.5em 0; overflow-x: auto; }</style>
     <script>
+      // Monotonic counter for render ids: mermaid derives the SVG's internal element ids from the id passed
+      // to render(), so it must be globally unique across every call (a timestamp could repeat within the
+      // same millisecond across rapid swup passes); a plain incrementing counter never repeats.
+      var mermaidRenderSeq = 0;
       function renderMermaidDiagrams() {
         if (typeof mermaid === "undefined") return;
         mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
         var blocks = document.querySelectorAll("pre > code.mermaid, pre > code.language-mermaid");
-        blocks.forEach(function (code, i) {
+        blocks.forEach(function (code) {
           var container = document.createElement("div");
           container.className = "mermaid";
           code.parentElement.replaceWith(container);
-          mermaid.render("mermaid-diagram-" + Date.now() + "-" + i, code.textContent).then(function (res) {
+          mermaid.render("mermaid-diagram-" + (mermaidRenderSeq++), code.textContent).then(function (res) {
             container.innerHTML = res.svg;
           }).catch(function () {
             container.textContent = code.textContent;
