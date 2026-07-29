@@ -45,7 +45,15 @@ jobs:
             ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
       
       - name: 🔨 Install dependencies
-        run: mix deps.get
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       
       - name: 🔍 Check unused dependencies
         run: mix deps.unlock --check-unused
@@ -247,7 +255,15 @@ jobs:
             ${{ runner.os }}-mix-quality-
       
       - name: 🔨 Install dependencies
-        run: mix deps.get
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       
       - name: 📏 Check code complexity
         run: |

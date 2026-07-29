@@ -43,7 +43,15 @@ jobs:
             ${{ runner.os }}-mix-bench-
 
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+          done
+          exit 1
 
       # storage_viability measures the local pure-Elixir file I/O hot path against NorthGuard's storage
       # targets. It writes under /tmp and cleans up after itself, so it needs no running server. Use
