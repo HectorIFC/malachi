@@ -7,7 +7,7 @@
 # grows linearly (O(n)): the tax every produce/consume paid before, and why it mattered as a broker
 # accumulates topics and (via retention) sealed segments.
 #
-# Run: mix run bench/metadata_index_bench.exs
+# Run: mix run benchmark/metadata_index_bench.exs
 
 defmodule MetadataIndexBench do
   alias Malachi.Metadata
