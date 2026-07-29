@@ -13,7 +13,7 @@ data independently, and a consumer can rewind.
 > battle-tested at scale, and there is no stability guarantee yet. Use it to learn and experiment, not to
 > run production workloads.
 
-## ...
+## Brief explanation
 
 <iframe width="560" height="315" src="https://www.youtube.com/embed/u1a_Kxs1yeE?si=qRkTPMTerwWkatA9" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
