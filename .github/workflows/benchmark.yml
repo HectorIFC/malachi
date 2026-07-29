@@ -46,6 +46,8 @@ jobs:
         run: mix deps.get
 
       # storage_viability measures the local pure-Elixir file I/O hot path against NorthGuard's storage
-      # targets. It writes under /tmp and cleans up after itself, so it needs no running server.
+      # targets. It writes under /tmp and cleans up after itself, so it needs no running server. Use
+      # --no-start so Malachi.Application (prod config validation + the supervision tree) is not booted;
+      # the script only needs :crypto (loaded on demand) and file I/O.
       - name: Run storage viability benchmark
-        run: mix run benchmark/storage_viability.exs
+        run: mix run --no-start benchmark/storage_viability.exs
