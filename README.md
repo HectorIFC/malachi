@@ -42,12 +42,9 @@ Support us with a monthly donation and help us continue our activities. [[Become
 
 ---
 
-## Demo
+## Introduction
 
-A new demo video is on the way. This section will host it once it is ready.
-
-<!-- New demo video goes here. Replace this comment with the embed, e.g.:
-[![Malachi Demo](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=VIDEO_ID) -->
+[![Malachi demo](https://img.youtube.com/vi/u1a_Kxs1yeE/0.jpg)](https://youtu.be/u1a_Kxs1yeE)
 
 
 ## 🧭 The model (a log, not a queue)
@@ -829,10 +826,10 @@ After cloning the repository, run the setup script to install git hooks:
 
 This will:
 - Install [Lefthook](https://github.com/evilmartians/lefthook) (git hooks manager)
-- Configure pre-commit hook to automatically update performance baselines
+- Configure a pre-commit hook that runs `mix format`
 - Ensure all developers have consistent git hooks
 
-The pre-commit hook runs benchmarks (~10 minutes) when you modify files in `lib/malachi/` or `benchmark/`. To skip: `git commit --no-verify`
+The pre-commit hook runs `mix format` and re-stages any `.ex`/`.exs` files it reformats. To skip: `git commit --no-verify`
 
 ### Run Locally
 
