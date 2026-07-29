@@ -53,20 +53,27 @@ defmodule Malachi.MixProject do
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
     <style>.mermaid { background: #ffffff; border-radius: 8px; padding: 16px; margin: 1.5em 0; overflow-x: auto; }</style>
     <script>
-      document.addEventListener("DOMContentLoaded", function () {
+      function renderMermaidDiagrams() {
+        if (typeof mermaid === "undefined") return;
         mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
         var blocks = document.querySelectorAll("pre > code.mermaid, pre > code.language-mermaid");
         blocks.forEach(function (code, i) {
           var container = document.createElement("div");
           container.className = "mermaid";
           code.parentElement.replaceWith(container);
-          mermaid.render("mermaid-diagram-" + i, code.textContent).then(function (res) {
+          mermaid.render("mermaid-diagram-" + Date.now() + "-" + i, code.textContent).then(function (res) {
             container.innerHTML = res.svg;
           }).catch(function () {
             container.textContent = code.textContent;
           });
         });
-      });
+      }
+      // First (full) load renders on DOMContentLoaded. ExDoc navigates with swup (SPA-style), which swaps
+      // the page in without a reload, so DOMContentLoaded does not fire on internal navigation (Next Page,
+      // sidebar links); swup dispatches a `swup:page:view` DOM event there, so render on that too. The
+      // second pass is a no-op once the code blocks have already been turned into `div.mermaid`.
+      document.addEventListener("DOMContentLoaded", renderMermaidDiagrams);
+      document.addEventListener("swup:page:view", renderMermaidDiagrams);
     </script>
     """
   end
