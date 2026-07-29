@@ -9,6 +9,8 @@ on:
 permissions:
   contents: write
   packages: write
+  # Needed to trigger the Pages workflow (workflow_dispatch) after the version bump.
+  actions: write
 
 jobs:
   # First, verify that CI passed
@@ -155,6 +157,15 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The version bump was pushed to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do not
+      # trigger workflows, so the Pages build never rebuilds the docs for the new version. workflow_dispatch
+      # is exempt from that rule, so dispatch the Pages workflow here; it checks out main (now bumped) and
+      # republishes the site with the new version.
+      - name: Rebuild the documentation site for the new version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --ref main
 
   docker:
     needs: release
