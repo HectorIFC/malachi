@@ -35,7 +35,7 @@ jobs:
           otp-version: ${{ matrix.otp }}
       
       - name: 📦 Cache dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: |
             deps
@@ -237,7 +237,7 @@ jobs:
           otp-version: '28.1'
       
       - name: 📦 Cache dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: |
             deps
