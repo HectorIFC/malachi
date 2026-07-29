@@ -21,6 +21,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        # No later step does authenticated git, and this job then runs repo code (deps + the benchmark),
+        # so do not leave the GitHub token in the local git config.
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
