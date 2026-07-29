@@ -51,7 +51,12 @@ jobs:
     needs: verify-ci
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    
+    # Scoped here (not workflow-wide) so only this job holds write: it pushes the bump/tag/release
+    # (contents) and dispatches the Pages workflow (actions). Job permissions replace the top-level set.
+    permissions:
+      contents: write
+      actions: write
+
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
       
@@ -155,6 +160,15 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The version bump was pushed to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do not
+      # trigger workflows, so the Pages build never rebuilds the docs for the new version. workflow_dispatch
+      # is exempt from that rule, so dispatch the Pages workflow here; it checks out main (now bumped) and
+      # republishes the site with the new version.
+      - name: Rebuild the documentation site for the new version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --ref main
 
   docker:
     needs: release

@@ -38,7 +38,15 @@ jobs:
           restore-keys: ${{ runner.os }}-mix-security-
 
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
 
       - name: Run Sobelow
         run: |
@@ -74,7 +82,15 @@ jobs:
           restore-keys: ${{ runner.os }}-mix-security-
 
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
 
       - name: Check for vulnerable dependencies
         run: mix deps.audit
