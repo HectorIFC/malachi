@@ -72,7 +72,7 @@ MALACHI_MAX_TOTAL_CONN=10000
 - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
 **Key Functions**:
-- `check_limit/3` - Validate request against limit (< 1µs latency)
+- `check_limit/3` - Validate request against limit
 - `reset_bucket/2` - Manual bucket reset
 - `get_top_blocked/2` - Dashboard statistics
 - `get_stats/0` - System-wide statistics
@@ -108,20 +108,23 @@ end
 
 ### Error Responses
 
-When rate limited:
+The two client surfaces report a rate limit differently.
+
+**TCP wire protocol.** The broker answers with a binary error frame built by
+`Wire.encode_error(correlation_id, reason)`, where `reason` is an atom serialized as a string. The rate
+limiter computes a `retry_after_ms` internally, but the wire error carries only the reason, so a TCP client
+does not receive that value. When rate limited the reason is `rate_limit_exceeded`; when a connection cap
+is hit it is `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total cap), sent
+just before the socket is closed.
+
+**Dashboard HTTP.** The dashboard replies with `HTTP/1.1 429 Too Many Requests`, a `Retry-After` header in
+seconds, and a JSON body:
+
 ```json
 {
   "s": "err",
   "reason": "rate_limit_exceeded",
   "retry_after_ms": 58432
-}
-```
-
-When connection limit exceeded:
-```json
-{
-  "s": "err",
-  "reason": "connection_limit_exceeded"
 }
 ```
 
@@ -184,92 +187,69 @@ System metrics include rate limiting section:
 }
 ```
 
-## Performance
-
-Measured rate-limiter performance:
-
-| Metric | Result | Target | Status |
-|--------|--------|--------|--------|
-| **Latency (avg)** | 1.04µs | <10µs | ✅ PASS |
-| **Latency (P99)** | 1.0µs | - | ✅ |
-| **Memory per bucket** | 154 bytes | <1KB | ✅ PASS |
-| **Throughput degradation** | 16% | <5% | ⚠️ |
-| **Concurrent throughput** | ~850K checks/s | - | ✅ |
-
-**Notes**:
-- Throughput degradation is higher than target but acceptable for security feature
-- Actual production impact likely lower as checks are async
-- Cleanup has zero impact (non-blocking background task)
-
 ## Testing
 
 ### Unit Tests
 
 ```bash
-# RateLimiter tests (14 tests)
+# RateLimiter tests
 mix test test/rate_limiter_test.exs
 
-# ConnectionLimiter tests (16 tests)
+# ConnectionLimiter tests
 mix test test/connection_limiter_test.exs
 ```
 
 **Coverage**:
 - Token bucket refill logic
-- Concurrent access patterns
+- Concurrent access patterns (the heavy ones are tagged `@tag :concurrent`)
 - Different identifiers/actions independence
 - Cleanup and expiration
 - Statistics and top blocked queries
 - Process monitoring and cleanup
-
-### Integration Tests
-
-```bash
-# Full integration tests (skipped by default)
-mix test test/rate_limiting_integration_test.exs --include skip
-```
-
-**Scenarios**:
-- Excessive auth attempts → rate limited
-- Publish burst → first N succeed, rest blocked
-- Subscribe spam → blocked after limit
-- Connection flood → rejected at accept
-- Metrics tracking validation
+- Excessive auth attempts, publish bursts, and subscribe spam are blocked past the limit
+- Connection floods are rejected at accept, and metrics track every block
 
 ### Running All Tests
 
 ```bash
-# Exclude concurrent and skip tags
-mix test --exclude concurrent --exclude skip
-
-# Expected: 303 tests, 0 failures (10 excluded)
+mix test
 ```
 
 ## Implementation Details
 
 ### State Map Pattern
 
-TCP acceptor refactored to use state maps for clean IP propagation:
+The TCP acceptor threads a state map so the client IP propagates cleanly:
 
 ```elixir
 %{
   socket: socket,
   transport: transport,
   client_ip: client_ip,    # Extracted on connection
-  session: session,
-  subscribed: false,
+  session: nil,            # Filled in once the client authenticates
   buffer: ""
 }
 ```
 
 ### IP Extraction
 
-Supports both IPv4 and IPv6:
+The transport (`:ssl` or `:gen_tcp`) selects the peername lookup, and both IPv4 and IPv6 addresses are
+formatted:
 
 ```elixir
-defp get_client_ip(socket, :ssl) do
-  case :ssl.peername(socket) do
-    {:ok, {address, _port}} -> format_ip(address)
-    {:error, _} -> "unknown"
+defp get_client_ip(socket, transport) do
+  case transport do
+    :ssl ->
+      case :ssl.peername(socket) do
+        {:ok, {address, _port}} -> format_ip(address)
+        {:error, _} -> "unknown"
+      end
+
+    :gen_tcp ->
+      case :inet.peername(socket) do
+        {:ok, {address, _port}} -> format_ip(address)
+        {:error, _} -> "unknown"
+      end
   end
 end
 
