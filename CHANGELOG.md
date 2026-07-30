@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-29
+
+- Use a monotonic counter for mermaid render ids (the previous value could repeat within a millisecond).
+
+## [0.7.2] - 2026-07-29
+
+- Render mermaid diagrams on ExDoc swup navigation, not just on a full page load.
+
+## [0.7.1] - 2026-07-29
+
+- Fix mermaid node labels that rendered as an Unsupported markdown error.
+
+## [0.7.0] - 2026-07-29
+
+- Unify the benchmarks under `benchmark/` and drop the separate `bench/` directory.
+- Add a Demo section with the embedded demo video to the README and the docs site.
+- Fix the stale pre-commit hook description in the README.
+
+## [0.6.2] - 2026-07-29
+
+- Retry `mix deps.get` in CI to tolerate transient Hex registry failures.
+- Rebuild the docs site after a release bumps the version.
+- Scope `actions: write` to the release job and drop the sleep after the final retry.
+
+## [0.6.1] - 2026-07-29
+
+- Use the real Docker Hub credentials in the release workflow.
+- Add a Performance Benchmarks workflow that runs on every branch.
+- Harden the benchmark workflow: no persisted git credentials, run with `mix run --no-start`.
+
+## [0.6.0] - 2026-07-28
+
 > Historical entries in this section keep the `MALACHIMQ_*` variable names they shipped with; the
 > current variables are `MALACHI_*` (the rename is the first item under Changed).
 
