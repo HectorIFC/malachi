@@ -144,7 +144,7 @@ services:
       - malachi-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4041/metrics"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4041/health"]
       interval: 30s
       timeout: 10s
       retries: 3
