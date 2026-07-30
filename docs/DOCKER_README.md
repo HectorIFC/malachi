@@ -197,13 +197,17 @@ Set `MALACHI_DISABLE_DEFAULT_USERS=true` to seed no users and manage them entire
 
 ## Health Check
 
-The dashboard exposes a `/metrics` endpoint for health checks:
+The dashboard exposes two public probe endpoints (no authentication, so a probe never sends credentials):
+
+- `/health` - liveness: returns `200 {"status":"ok"}` once the HTTP server is up.
+- `/ready` - readiness: returns `200 {"status":"ready"}` when the log broker is running, else `503`.
 
 ```bash
-curl http://localhost:4041/metrics
+wget -q -O - http://localhost:4041/health
 ```
 
-Returns JSON with queue statistics and system metrics.
+The bundled image health check probes `/health` with `wget`; `/metrics` is authenticated and not a health
+endpoint.
 
 ---
 
