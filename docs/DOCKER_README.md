@@ -9,10 +9,10 @@
 
 ## Features
 
-- 🚀 **High Performance** - ETS-based storage with automatic partitioning
+- 🚀 **Append-only log on disk** - CRC-checked segments, sharded into ranges the broker restripes online
 - 🔐 **TLS/SSL Support** - Secure connections with certificate-based auth
 - 📊 **Real-time Dashboard** - Built-in web UI with live metrics
-- 🔄 **Acknowledgment System** - Reliable message delivery with ack/nack
+- 🔄 **Consumer groups and streaming** - Server-committed positions, plus server-push with credit-based flow control
 - 🌐 **Multi-language Support** - i18n support (en_US, pt_BR)
 - 🐳 **Production Ready** - Alpine-based image for minimal attack surface
 - 🏗️ **Multi-Architecture** - Supports AMD64 and ARM64 (Apple Silicon, AWS Graviton)
@@ -77,6 +77,7 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 | `MALACHI_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
 | `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
+| `MALACHI_ADMIN_PASS` | *(generated)* | Admin password; if unset, a random one is generated and logged on first boot. Without a persistent ra volume, this happens again on every restart. See Users and credentials. |
 | `MALACHI_LOG_DATA_DIR` | *(tmp)* | Directory for the durable log segments. Must be an absolute path on a volume; see Data Persistence. |
 | `MALACHI_RA_DATA_DIR` | *(tmp)* | Directory for the ra log (users, ACLs, lockouts). Must be an absolute path on a volume; see Data Persistence. |
 
@@ -100,7 +101,8 @@ docker run \
 
 In production these must be absolute paths: a relative value is rejected at boot, because it would resolve
 against the working directory and put durable data back on ephemeral storage. The bundled
-[`docker-compose.yml`](../docker-compose.yml) and the Kubernetes manifest use these same paths.
+[`docker-compose.yml`](https://github.com/HectorIFC/malachi/blob/main/docker-compose.yml) and the
+Kubernetes manifest use these same paths.
 
 ### TLS Configuration
 
@@ -151,9 +153,7 @@ volumes:
   malachi-data:
 ```
 
-Notes:
-- Increasing `+P` only raises the process limit, ensure the host has sufficient RAM.
-- These defaults are safe for test and development; tune conservatively for production.
+> These compose defaults are fine for test and development; tune them conservatively for production.
 
 ---
 
@@ -175,15 +175,23 @@ streaming with backpressure.
 
 ---
 
-## Default Users
+## Users and credentials
 
-| Username | Password | Permissions |
-|----------|----------|-------------|
-| `admin` | `admin123` | Full access |
-| `producer` | `producer123` | Publish only |
-| `consumer` | `consumer123` | Consume only |
+The image runs in production mode, which ships **no hardcoded passwords**. On first boot, when
+`MALACHI_ADMIN_PASS` is not set, the broker generates a random `admin` password and logs it once, so read
+the container logs to retrieve it. The generated user lives in the `ra` store, so without a persistent
+`MALACHI_RA_DATA_DIR` volume (see Data Persistence) the `admin` user is gone on the next restart and a new
+random password is generated and logged again. Set credentials explicitly with either:
 
-> ⚠️ **Security Note**: Change default credentials in production using `MALACHI_DEFAULT_USERS` environment variable.
+- per-user env vars: `MALACHI_ADMIN_PASS`, `MALACHI_PRODUCER_PASS`, `MALACHI_CONSUMER_PASS`,
+  `MALACHI_APP_PASS`. A user is seeded only when its password is set; `producer` gets `produce`, `consumer`
+  gets `consume`, and `app` gets both.
+- or a full list via `MALACHI_DEFAULT_USERS` in the form `user:pass:perm,perm;user2:...`.
+
+Set `MALACHI_DISABLE_DEFAULT_USERS=true` to seed no users and manage them entirely through the API.
+
+> ⚠️ The `admin123` / `producer123` / `consumer123` credentials exist only in the dev and test configs,
+> never in this production image.
 
 ---
 

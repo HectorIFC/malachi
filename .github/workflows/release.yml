@@ -228,3 +228,18 @@ jobs:
           cache-from: type=registry,ref=${{ env.DOCKER_USERNAME }}/malachi:buildcache
           cache-to: type=registry,ref=${{ env.DOCKER_USERNAME }}/malachi:buildcache,mode=max
           provenance: false
+
+      # Publish the Docker Hub overview (the repository description) from docs/DOCKER_README.md, so the Hub
+      # page stays in sync with the repo on every release instead of showing No overview available.
+      # continue-on-error: the image is already built and pushed above, so a failure here (for example a
+      # Docker Hub API hiccup, or a DOCKERHUB_TOKEN without write scope on the repo metadata) must not fail
+      # the release; it only leaves the overview stale, which is visible in the step log.
+      - name: Update Docker Hub description
+        continue-on-error: true
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKER_USERNAME }}/malachi
+          short-description: "Open-source Elixir reimplementation of LinkedIn NorthGuard: a CP, horizontally-scalable log broker"
+          readme-filepath: ./docs/DOCKER_README.md
