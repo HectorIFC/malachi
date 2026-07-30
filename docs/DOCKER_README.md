@@ -77,7 +77,7 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 | `MALACHI_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
 | `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
-| `MALACHI_ADMIN_PASS` | *(generated)* | Admin password; if unset, a random one is generated and logged on first boot. See Users and credentials. |
+| `MALACHI_ADMIN_PASS` | *(generated)* | Admin password; if unset, a random one is generated and logged on first boot. Without a persistent ra volume, this happens again on every restart. See Users and credentials. |
 | `MALACHI_LOG_DATA_DIR` | *(tmp)* | Directory for the durable log segments. Must be an absolute path on a volume; see Data Persistence. |
 | `MALACHI_RA_DATA_DIR` | *(tmp)* | Directory for the ra log (users, ACLs, lockouts). Must be an absolute path on a volume; see Data Persistence. |
 
@@ -179,7 +179,9 @@ streaming with backpressure.
 
 The image runs in production mode, which ships **no hardcoded passwords**. On first boot, when
 `MALACHI_ADMIN_PASS` is not set, the broker generates a random `admin` password and logs it once, so read
-the container logs to retrieve it. Set credentials explicitly with either:
+the container logs to retrieve it. The generated user lives in the `ra` store, so without a persistent
+`MALACHI_RA_DATA_DIR` volume (see Data Persistence) the `admin` user is gone on the next restart and a new
+random password is generated and logged again. Set credentials explicitly with either:
 
 - per-user env vars: `MALACHI_ADMIN_PASS`, `MALACHI_PRODUCER_PASS`, `MALACHI_CONSUMER_PASS`,
   `MALACHI_APP_PASS`. A user is seeded only when its password is set; `producer` gets `produce`, `consumer`

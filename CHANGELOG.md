@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.2] - 2026-07-29
 
-- Render mermaid diagrams on ExDoc swup navigation, not just on a full page load.
+- Render mermaid diagrams on ExDoc swup navigation, not just on a full-page load.
 
 ## [0.7.1] - 2026-07-29
 
