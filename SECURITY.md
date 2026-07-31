@@ -136,7 +136,9 @@ Current assessments:
   `HEALTHCHECK`, against the fixed literal URL `http://localhost:4041/health`; no attacker-controlled input
   reaches `wget`, so the vector cannot be triggered. Alpine has published no fixed busybox version on any
   branch, so the package cannot be upgraded to remediate. Docker Scout can consume the VEX file with
-  `docker scout cves --vex-location .vex <image>`.
+  `docker scout cves --vex-location .vex hectorcardoso/malachi:latest`. The VEX product PURL is qualified
+  with the `latest` tag, which Scout matches against; for reliable matching across every published tag or a
+  specific digest, attach this VEX to the image as an in-toto attestation during the release build.
 
 ## Security Advisories
 

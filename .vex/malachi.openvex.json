@@ -13,7 +13,7 @@
       },
       "products": [
         {
-          "@id": "pkg:docker/hectorcardoso/malachi",
+          "@id": "pkg:docker/hectorcardoso/malachi@latest",
           "subcomponents": [
             { "@id": "pkg:apk/alpine/busybox@1.37.0-r14" }
           ]
