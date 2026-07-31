@@ -122,6 +122,24 @@ export MALACHI_GC_THRESHOLD_MB=500
 - **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHI_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
 - **No at-rest encryption:** Records are protected in transit by TLS, but the on-disk log is stored in plaintext (the record CRC guards integrity, not confidentiality). Add application-level encryption if you need encryption at rest.
 
+## Container Image Vulnerabilities
+
+Scanners (Docker Scout, Trivy) report vulnerabilities in the base image packages, not only in Malachi's own
+code. Where a reported CVE is not exploitable in this image, the assessment is recorded as a machine-readable
+[OpenVEX statement](.vex/malachi.openvex.json) so scanners and auditors can see why, rather than the image
+being degraded to silence the alert.
+
+Current assessments:
+
+- **CVE-2025-60876** (BusyBox `wget`, medium): **not affected.** The flaw is HTTP header injection when
+  `wget` is handed an attacker-controlled URL. The image runs busybox `wget` only in the Docker
+  `HEALTHCHECK`, against the fixed literal URL `http://localhost:4041/health`; no attacker-controlled input
+  reaches `wget`, so the vector cannot be triggered. Alpine has published no fixed busybox version on any
+  branch, so the package cannot be upgraded to remediate. Docker Scout can consume the VEX file with
+  `docker scout cves --vex-location .vex hectorcardoso/malachi:latest`. The VEX product PURL is qualified
+  with the `latest` tag, which Scout matches against; for reliable matching across every published tag or a
+  specific digest, attach this VEX to the image as an in-toto attestation during the release build.
+
 ## Security Advisories
 
 Security advisories are published at:
