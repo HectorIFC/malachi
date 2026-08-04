@@ -64,7 +64,7 @@ each a series of **segments** replicated by quorum across nodes. See
 
 ## ⚡ Getting started (local)
 
-Requires Elixir `~> 1.19` / OTP 26+.
+Requires Elixir `~> 1.19` / OTP 28+.
 
 ```bash
 git clone https://github.com/HectorIFC/malachi.git
@@ -95,9 +95,10 @@ Enum.map(records, & &1.value)        #=> ["hello", "world"]
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
-Single-node is in-memory by default; set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated,
-HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#client-protocol)
-on port 4040.
+A single node writes its segments to disk under a temp directory by default, so point
+`MALACHI_LOG_DATA_DIR` and `MALACHI_RA_DATA_DIR` at a real volume to keep data across restarts; set
+`MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated, HA control plane over `ra`. Over the network,
+external clients speak the [binary protocol](#client-protocol) on port 4040.
 
 ### Node discovery (libcluster)
 
@@ -163,7 +164,7 @@ See [Multi-Architecture Build Guide](docs/MULTI_ARCH_BUILD.md) for detailed inst
 
 ## 🛡️ Security Features
 
-Malachi v0.5.0 includes comprehensive security hardening:
+Malachi ships with security hardening on by default:
 
 - **TLS 1.2/1.3 Enforcement** - Required by default in production with certificate validation at startup
 - **Argon2 Password Hashing** - Industry-standard password hashing replacing SHA-256
@@ -432,13 +433,10 @@ client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates th
 `-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster: the handshake rejects it. The
 [Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
 
-## 🔐 Dashboard Security (v0.5.0+)
+## 🔐 Dashboard Security
 
-### ⚠️ BREAKING CHANGE
-
-**Dashboard authentication is now ENABLED BY DEFAULT in production.**
-
-The web dashboard (port 4041) now requires authentication to prevent unauthorized access. This change enhances security but requires configuration updates for existing deployments.
+The web dashboard (port 4041) requires authentication in production, so an unauthenticated client cannot
+reach it. Set `MALACHI_DASHBOARD_AUTH_ENABLED=false` only for local development.
 
 ### Required Configuration
 
@@ -814,7 +812,8 @@ remain exact). `--help` lists every flag.
 - Elixir 1.19+
 - Erlang/OTP 28+
 
-**Note**: While Malachi is optimized for Elixir 1.19+ and OTP 28+, it may work with earlier versions (1.16+/OTP 26+) but is not officially tested or supported.
+**Note**: `mix.exs` requires `~> 1.19`, so earlier Elixir versions do not compile. OTP 28 is what CI and the
+Docker image build against; older OTP releases are not tested or supported.
 
 ### Initial Setup
 
