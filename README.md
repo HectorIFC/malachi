@@ -1034,4 +1034,4 @@ This project uses [SEMVER](https://semver.org/) with automated releases.
 - **Minor**: New features → Add `minor` label or use `feat:` prefix
 - **Major**: Breaking changes → Add `major` label or use `[major]` in title
 
-See [the changelog](CHANGELOG.md) for details.
+See the [GitHub Releases](https://github.com/HectorIFC/malachi/releases) for the per-version change history.

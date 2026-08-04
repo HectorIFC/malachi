@@ -33,13 +33,6 @@ else
     echo "❌ .github/workflows/release.yml not found"
 fi
 
-# Check if CHANGELOG exists
-if [ -f "CHANGELOG.md" ]; then
-    echo "✅ CHANGELOG.md"
-else
-    echo "⚠️  CHANGELOG.md not found"
-fi
-
 # Check Makefile for dynamic version
 if grep -q 'VERSION ?= $(shell grep' Makefile 2>/dev/null; then
     echo "✅ Makefile with dynamic version"

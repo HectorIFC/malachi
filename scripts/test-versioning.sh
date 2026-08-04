@@ -81,7 +81,7 @@ echo ""
 
 # Test documentation
 echo "6️⃣  Testing: ${YELLOW}Documentation${NC}"
-docs=("docs/VERSIONING.md" ".github/QUICKSTART.md" "CHANGELOG.md" ".github/LABELS.md")
+docs=("docs/VERSIONING.md" ".github/QUICKSTART.md" ".github/LABELS.md")
 for doc in "${docs[@]}"; do
     if [ -f "$doc" ]; then
         echo "   ${GREEN}✓${NC} ${doc}"
