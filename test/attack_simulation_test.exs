@@ -221,6 +221,85 @@ defmodule Malachi.AttackSimulationTest do
     end
   end
 
+  describe "user-agent binding (enabled)" do
+    setup do
+      original = Application.get_env(:malachi, :session_ua_binding, false)
+      Application.put_env(:malachi, :session_ua_binding, true)
+      on_exit(fn -> Application.put_env(:malachi, :session_ua_binding, original) end)
+      :ok
+    end
+
+    test "validates a session from the original user agent", %{victim: victim} do
+      ip = {192, 168, 1, 1}
+      ua = "Mozilla/5.0 (original)"
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", ip, ua)
+
+      # Same IP and same UA should succeed
+      assert {:ok, session_data} = SessionManager.validate_session(token, ip, ua)
+      assert session_data.username == victim
+    end
+
+    test "detects a different user agent as a hijack", %{victim: victim} do
+      ip = {192, 168, 1, 1}
+      original_ua = "Mozilla/5.0 (original)"
+      attacker_ua = "curl/8.0"
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", ip, original_ua)
+
+      # Same IP but a different UA is rejected when ua binding is on
+      assert {:error, :session_hijack_attempt} =
+               SessionManager.validate_session(token, ip, attacker_ua)
+    end
+
+    test "the original user agent still works after a mismatch", %{victim: victim} do
+      ip = {192, 168, 1, 1}
+      original_ua = "Mozilla/5.0 (original)"
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", ip, original_ua)
+
+      {:error, :session_hijack_attempt} =
+        SessionManager.validate_session(token, ip, "curl/8.0")
+
+      assert {:ok, session_data} = SessionManager.validate_session(token, ip, original_ua)
+      assert session_data.username == victim
+    end
+
+    test "user-agent binding still applies behind a trusted proxy", %{victim: victim} do
+      # A trusted proxy disables IP binding (the source IP is the proxy's), so the UA is the only hijack
+      # signal left. It must still be enforced.
+      original_ranges = Application.get_env(:malachi, :trusted_proxy_ranges, [])
+      Application.put_env(:malachi, :trusted_proxy_ranges, ["10.0.0.0/8"])
+      on_exit(fn -> Application.put_env(:malachi, :trusted_proxy_ranges, original_ranges) end)
+
+      ua = "Mozilla/5.0 (original)"
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", {10, 0, 0, 5}, ua)
+
+      # IP binding is exempt (proxy), but a different UA is still rejected, even from another proxy IP.
+      assert {:error, :session_hijack_attempt} =
+               SessionManager.validate_session(token, {10, 0, 0, 99}, "curl/8.0")
+
+      # The original UA validates from a different IP in the trusted range (IP binding exempt).
+      assert {:ok, session_data} = SessionManager.validate_session(token, {10, 0, 0, 99}, ua)
+      assert session_data.username == victim
+    end
+  end
+
+  describe "user-agent binding (disabled, the default)" do
+    setup do
+      original = Application.get_env(:malachi, :session_ua_binding, false)
+      Application.put_env(:malachi, :session_ua_binding, false)
+      on_exit(fn -> Application.put_env(:malachi, :session_ua_binding, original) end)
+      :ok
+    end
+
+    test "a different user agent is allowed when ua binding is off", %{victim: victim} do
+      ip = {192, 168, 1, 1}
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", ip, "Mozilla/5.0 (original)")
+
+      # UA binding off: only the IP is enforced, so a different UA still validates
+      assert {:ok, session_data} = SessionManager.validate_session(token, ip, "curl/8.0")
+      assert session_data.username == victim
+    end
+  end
+
   describe "session fixation and replay" do
     test "logout permanently invalidates token", %{victim: victim} do
       {:ok, token} = Auth.authenticate(victim, "strong_password_1!")

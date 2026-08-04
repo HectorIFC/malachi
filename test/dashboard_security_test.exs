@@ -755,6 +755,49 @@ defmodule Malachi.DashboardSecurityTest do
     end
   end
 
+  # End-to-end coverage that the User-Agent is actually read from the HTTP headers and threaded into the
+  # session binding (the unit tests in attack_simulation_test.exs pass the UA directly to SessionManager).
+  describe "user-agent binding (end-to-end)" do
+    setup do
+      original = Application.get_env(:malachi, :session_ua_binding, false)
+      Application.put_env(:malachi, :session_ua_binding, true)
+      on_exit(fn -> Application.put_env(:malachi, :session_ua_binding, original) end)
+      :ok
+    end
+
+    test "a token used with a different User-Agent than login is rejected", %{admin_token: token} do
+      case DashboardHelper.connect() do
+        {:ok, socket} ->
+          # The setup token was minted with an empty User-Agent; a request carrying one mismatches, so ua
+          # binding rejects it (403) before the permission check runs.
+          {:ok, response} =
+            DashboardHelper.authenticated_request(socket, :GET, "/metrics", token,
+              headers: %{"User-Agent" => "Mozilla/5.0 (attacker)"}
+            )
+
+          assert status_code(response) == 403
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "a token used with the same (empty) User-Agent is accepted", %{admin_token: token} do
+      case DashboardHelper.connect() do
+        {:ok, socket} ->
+          # No User-Agent header resolves to "", matching the token's stored "", so validation passes.
+          {:ok, response} = DashboardHelper.authenticated_request(socket, :GET, "/metrics", token)
+
+          assert status_code(response) == 200
+          :gen_tcp.close(socket)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
   # Extracts the numeric status from an HTTP response, and its JSON body.
   defp status_code(response) do
     case Regex.run(~r"HTTP/1\.1 (\d{3})", response) do

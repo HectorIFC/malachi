@@ -187,12 +187,17 @@ defmodule Malachi.Dashboard do
   defp authenticate_request(headers, client_ip, path) do
     # Try Cookie first (browser navigation + EventSource), then Authorization header (API/curl)
     token = extract_token_from_cookie(headers) || extract_bearer_token(headers)
+    user_agent = extract_user_agent(headers)
 
     case token do
       nil -> {:error, :authentication_required}
-      token_value -> validate_token_with_rate_limit(token_value, client_ip, path)
+      token_value -> validate_token_with_rate_limit(token_value, client_ip, path, user_agent)
     end
   end
+
+  # The User-Agent is compared against the one captured at login only when session_ua_binding is enabled
+  # (opt-in). Missing header -> "", which still binds consistently (login and validation both see "").
+  defp extract_user_agent(headers), do: Map.get(headers, "user-agent", "")
 
   defp extract_token_from_cookie(headers) do
     case Map.get(headers, "cookie") do
@@ -218,7 +223,7 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp validate_token_with_rate_limit(token, client_ip, path) do
+  defp validate_token_with_rate_limit(token, client_ip, path, user_agent) do
     # Check rate limit before validating token (prevent brute force)
     rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
     rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
@@ -231,7 +236,7 @@ defmodule Malachi.Dashboard do
          }) do
       :ok ->
         # Validate token
-        case Auth.validate_token(token, client_ip) do
+        case Auth.validate_token(token, client_ip, user_agent) do
           {:ok, session_data} ->
             # Check permissions based on path
             if has_required_permission?(session_data.permissions, path) do
@@ -405,7 +410,7 @@ defmodule Malachi.Dashboard do
              }) do
           :ok ->
             # Authenticate
-            case Auth.authenticate(username, password, client_ip) do
+            case Auth.authenticate(username, password, client_ip, extract_user_agent(headers)) do
               {:ok, token} ->
                 Metrics.increment_dashboard_auth_success()
 
