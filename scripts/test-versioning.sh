@@ -79,23 +79,11 @@ else
 fi
 echo ""
 
-# Test documentation
-echo "6️⃣  Testing: ${YELLOW}Documentation${NC}"
-docs=("docs/VERSIONING.md" ".github/QUICKSTART.md" ".github/LABELS.md")
-for doc in "${docs[@]}"; do
-    if [ -f "$doc" ]; then
-        echo "   ${GREEN}✓${NC} ${doc}"
-    else
-        echo "   ${RED}✗${NC} ${doc} (not found)"
-    fi
-done
-echo ""
-
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "${GREEN}✨ Tests Completed!${NC}"
 echo ""
 echo "Next steps:"
 echo "  1. Configure secrets on GitHub"
-echo "  2. Create labels with: ./scripts/create-github-labels.sh"
+echo "  2. Create the patch, minor and major labels on GitHub"
 echo "  3. Commit and merge to main"
 echo ""
