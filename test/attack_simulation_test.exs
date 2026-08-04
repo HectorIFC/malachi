@@ -280,6 +280,30 @@ defmodule Malachi.AttackSimulationTest do
       assert {:ok, session_data} = SessionManager.validate_session(token, {10, 0, 0, 99}, ua)
       assert session_data.username == victim
     end
+
+    test "a user-agent-only mismatch records mismatch: [:user_agent] in the audit event", %{victim: victim} do
+      ip = {192, 168, 1, 1}
+      {:ok, token} = Auth.authenticate(victim, "strong_password_1!", ip, "Mozilla/5.0 (original)")
+      token_prefix = String.slice(token, 0, 8)
+
+      # Same IP, different UA: the only mismatch dimension is the User-Agent.
+      {:error, :session_hijack_attempt} = SessionManager.validate_session(token, ip, "curl/8.0")
+
+      Process.sleep(100)
+      Malachi.AuditLog.flush()
+      events = Malachi.AuditLog.get_events(50)
+
+      event =
+        Enum.find(events, fn e ->
+          e.event_type == :session_hijack_attempt and e.metadata[:token_prefix] == token_prefix
+        end)
+
+      assert event, "expected a session_hijack_attempt event for this token"
+      # Operators alert off this field, so its contents are part of the contract.
+      assert event.metadata[:mismatch] == [:user_agent]
+      # A UA-only mismatch has request_ip == session_ip; alerting must not assume the IP changed.
+      assert event.metadata[:request_ip] == event.metadata[:session_ip]
+    end
   end
 
   describe "user-agent binding (disabled, the default)" do

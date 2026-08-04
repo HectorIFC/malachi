@@ -72,7 +72,9 @@ export MALACHI_HSTS_ENABLED=true
 
 # OPTIONAL: also pin each dashboard session to the User-Agent seen at login. Off by default: a UA is
 # spoofable and changes on browser updates, so it is a weaker signal than the IP and can invalidate
-# legitimate sessions. Enable only where clients have a stable User-Agent.
+# legitimate sessions. Enable only where clients have a stable User-Agent. Note it only protects sessions
+# whose login carried a non-empty User-Agent (browsers always send one); a session created without the
+# header binds to "", so an attacker who also omits the header is not blocked by this check.
 export MALACHI_SESSION_UA_BINDING=true
 
 # RECOMMENDED: Configure connection and memory limits

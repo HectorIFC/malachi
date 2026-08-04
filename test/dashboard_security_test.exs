@@ -796,6 +796,46 @@ defmodule Malachi.DashboardSecurityTest do
           :ok
       end
     end
+
+    test "the login captures the User-Agent, so a later request with a different UA is rejected" do
+      # This proves the login side reads the UA from the HTTP headers (not just the validation side): the
+      # token is minted over HTTP with a User-Agent, so a hardcoded "" at login would make this fail.
+      case DashboardHelper.connect() do
+        {:ok, login_socket} ->
+          body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
+
+          {:ok, login_resp} =
+            DashboardHelper.request(login_socket, :POST, "/login",
+              body: body,
+              headers: %{"User-Agent" => "AgentX/1.0"}
+            )
+
+          :gen_tcp.close(login_socket)
+          token = DashboardHelper.extract_set_cookie(login_resp)
+          assert is_binary(token) and token != ""
+
+          # Same UA as the login is accepted.
+          {:ok, s1} = DashboardHelper.connect()
+
+          {:ok, ok_resp} =
+            DashboardHelper.authenticated_request(s1, :GET, "/metrics", token, headers: %{"User-Agent" => "AgentX/1.0"})
+
+          assert status_code(ok_resp) == 200
+          :gen_tcp.close(s1)
+
+          # A different UA than the login is rejected, proving the login-captured UA is what is enforced.
+          {:ok, s2} = DashboardHelper.connect()
+
+          {:ok, bad_resp} =
+            DashboardHelper.authenticated_request(s2, :GET, "/metrics", token, headers: %{"User-Agent" => "AgentY/2.0"})
+
+          assert status_code(bad_resp) == 403
+          :gen_tcp.close(s2)
+
+        {:error, _} ->
+          :ok
+      end
+    end
   end
 
   # Extracts the numeric status from an HTTP response, and its JSON body.
