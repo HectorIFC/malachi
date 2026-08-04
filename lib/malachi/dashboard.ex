@@ -89,13 +89,11 @@ defmodule Malachi.Dashboard do
         headers_map
 
       {:ok, {:http_header, _, header_name, _, value}} ->
-        # Convert header name to lowercase string
+        # The decoder returns a well-known header name as an atom (`:Cookie`, `:"User-Agent"`, and note the
+        # hyphen: there is no `:Content_Type` form) and anything outside its table, such as `Origin`, as a
+        # binary or charlist. Normalizing every shape to a lowercase string gives one key format to look up.
         key =
           case header_name do
-            :Authorization -> "authorization"
-            :Origin -> "origin"
-            :Content_Type -> "content-type"
-            :Content_Length -> "content-length"
             atom when is_atom(atom) -> atom |> to_string() |> String.downcase()
             string when is_binary(string) -> String.downcase(string)
             charlist when is_list(charlist) -> charlist |> to_string() |> String.downcase()

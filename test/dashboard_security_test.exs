@@ -358,7 +358,20 @@ defmodule Malachi.DashboardSecurityTest do
       end
     end
 
-    test "OPTIONS request returns CORS preflight" do
+    test "OPTIONS preflight echoes the whitelisted Origin" do
+      # Asserting the echoed value (rather than just that some Access-Control header exists) is what pins the
+      # "origin" header key: Origin is the one header the HTTP decoder does not hand back as an atom, so it
+      # is the only coverage of the binary/charlist branch of the header-name normalization.
+      original_enabled = Application.get_env(:malachi, :dashboard_cors_enabled, false)
+      original_origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://example.com"])
+
+      on_exit(fn ->
+        Application.put_env(:malachi, :dashboard_cors_enabled, original_enabled)
+        Application.put_env(:malachi, :dashboard_cors_origins, original_origins)
+      end)
+
       case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
         {:ok, socket} ->
           request = """
@@ -371,8 +384,9 @@ defmodule Malachi.DashboardSecurityTest do
           :gen_tcp.send(socket, request)
           {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
 
-          assert String.contains?(response, "204 No Content") or
-                   String.contains?(response, "Access-Control-Allow")
+          assert String.contains?(response, "204 No Content")
+          # Case-insensitive: the header name casing is an implementation detail of the responder.
+          assert String.downcase(response) =~ "access-control-allow-origin: https://example.com"
 
           :gen_tcp.close(socket)
 
