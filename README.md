@@ -167,7 +167,7 @@ Malachi v0.5.0 includes comprehensive security hardening:
 
 - **TLS 1.2/1.3 Enforcement** - Required by default in production with certificate validation at startup
 - **Argon2 Password Hashing** - Industry-standard password hashing replacing SHA-256
-- **Rate Limiting** - Token bucket algorithm for auth, publish, and subscribe operations
+- **Rate Limiting** - Token bucket limiting on authentication (TCP and dashboard login), keyed by IP
 - **Connection Controls** - Per-IP and global connection limits to prevent DoS
 - **Input Validation** - Topic name allowlist (path-traversal safe), a configurable frame-size cap, and malformed-frame handling at the connection boundary
 - **Streaming Backpressure** - credit-window flow control on push subscriptions (a slow consumer applies backpressure instead of overflowing)
