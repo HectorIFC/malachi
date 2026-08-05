@@ -70,6 +70,13 @@ export MALACHI_SESSION_IP_BINDING=true
 export MALACHI_AUDIT_LOG_OUTPUT=both
 export MALACHI_HSTS_ENABLED=true
 
+# OPTIONAL: also pin each dashboard session to the User-Agent seen at login. Off by default: a UA is
+# spoofable and changes on browser updates, so it is a weaker signal than the IP and can invalidate
+# legitimate sessions. Enable only where clients have a stable User-Agent. Note it only protects sessions
+# whose login carried a non-empty User-Agent (browsers always send one); a session created without the
+# header binds to "", so an attacker who also omits the header is not blocked by this check.
+export MALACHI_SESSION_UA_BINDING=true
+
 # RECOMMENDED: Configure connection and memory limits
 export MALACHI_MAX_CONN_PER_IP=50
 export MALACHI_MAX_TOTAL_CONN=5000
@@ -100,6 +107,7 @@ export MALACHI_GC_THRESHOLD_MB=500
 - Per-IP and global connection limiting
 - Progressive account lockout after failed attempts
 - Session IP binding for hijack prevention
+- Session User-Agent binding for hijack prevention (opt-in)
 - Trusted proxy support with configurable CIDR ranges
 - Password strength requirements (configurable minimum length)
 - Configuration validation at startup

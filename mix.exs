@@ -96,7 +96,6 @@ defmodule Malachi.MixProject do
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
-      "CHANGELOG.md": [title: "Changelog"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       "SECURITY.md": [title: "Security policy"],
@@ -131,7 +130,7 @@ defmodule Malachi.MixProject do
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"
       ],
-      Development: ["docs/HOOKS.md", "CHANGELOG.md"]
+      Development: ["docs/HOOKS.md"]
     ]
   end
 

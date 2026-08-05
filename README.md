@@ -64,7 +64,7 @@ each a series of **segments** replicated by quorum across nodes. See
 
 ## ⚡ Getting started (local)
 
-Requires Elixir `~> 1.19` / OTP 26+.
+Requires Elixir `~> 1.19` / OTP 28+.
 
 ```bash
 git clone https://github.com/HectorIFC/malachi.git
@@ -95,9 +95,10 @@ Enum.map(records, & &1.value)        #=> ["hello", "world"]
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
-Single-node is in-memory by default; set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated,
-HA control plane over `ra`. Over the network, external clients speak the [binary protocol](#client-protocol)
-on port 4040.
+A single node writes its segments to disk under a temp directory by default, so point
+`MALACHI_LOG_DATA_DIR` and `MALACHI_RA_DATA_DIR` at a real volume to keep data across restarts; set
+`MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated, HA control plane over `ra`. Over the network,
+external clients speak the [binary protocol](#client-protocol) on port 4040.
 
 ### Node discovery (libcluster)
 
@@ -163,11 +164,11 @@ See [Multi-Architecture Build Guide](docs/MULTI_ARCH_BUILD.md) for detailed inst
 
 ## 🛡️ Security Features
 
-Malachi v0.5.0 includes comprehensive security hardening:
+Malachi ships with security hardening on by default:
 
 - **TLS 1.2/1.3 Enforcement** - Required by default in production with certificate validation at startup
 - **Argon2 Password Hashing** - Industry-standard password hashing replacing SHA-256
-- **Rate Limiting** - Token bucket algorithm for auth, publish, and subscribe operations
+- **Rate Limiting** - Token bucket limiting on authentication (TCP and dashboard login), keyed by IP
 - **Connection Controls** - Per-IP and global connection limits to prevent DoS
 - **Input Validation** - Topic name allowlist (path-traversal safe), a configurable frame-size cap, and malformed-frame handling at the connection boundary
 - **Streaming Backpressure** - credit-window flow control on push subscriptions (a slow consumer applies backpressure instead of overflowing)
@@ -432,13 +433,10 @@ client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates th
 `-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster: the handshake rejects it. The
 [Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
 
-## 🔐 Dashboard Security (v0.5.0+)
+## 🔐 Dashboard Security
 
-### ⚠️ BREAKING CHANGE
-
-**Dashboard authentication is now ENABLED BY DEFAULT in production.**
-
-The web dashboard (port 4041) now requires authentication to prevent unauthorized access. This change enhances security but requires configuration updates for existing deployments.
+The web dashboard (port 4041) requires authentication in production, so an unauthenticated client cannot
+reach it. Set `MALACHI_DASHBOARD_AUTH_ENABLED=false` only for local development.
 
 ### Required Configuration
 
@@ -547,6 +545,22 @@ docker run \
   -e MALACHI_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com" \
   hectorcardoso/malachi:latest
 ```
+
+With an explicit list, the request's own `Origin` is echoed back when it is on the list, and nothing is sent
+when it is not: `Access-Control-Allow-Origin` carries a single origin, never the whole list. The default `*`
+answers every origin. The `OPTIONS` preflight applies the same rules, so it never advertises access the real
+request would be denied.
+
+Only `/metrics` and `/stream` are cross-origin endpoints, and a preflight for any other path is refused. Note
+what that does and does not buy: CORS decides whether a browser lets a page **read** a response, not what
+reaches the server. Refusing the preflight blocks the cross-origin requests that need one (a custom header, a
+JSON content type), but a CORS-simple request still arrives and is processed, with its response unreadable to
+the caller. What keeps such a request unprivileged is the session cookie being `SameSite=Strict`, so it is not
+sent cross-origin at all.
+
+Credentials are never part of a cross-origin exchange here: no `Access-Control-Allow-Credentials` is sent, so
+a cross-origin caller authenticates with a `Bearer` token. That also makes `/stream` same-origin only, since
+an `EventSource` cannot set headers.
 
 ## 🔍 Audit Logging
 
@@ -814,7 +828,8 @@ remain exact). `--help` lists every flag.
 - Elixir 1.19+
 - Erlang/OTP 28+
 
-**Note**: While Malachi is optimized for Elixir 1.19+ and OTP 28+, it may work with earlier versions (1.16+/OTP 26+) but is not officially tested or supported.
+**Note**: `mix.exs` requires `~> 1.19`, so earlier Elixir versions do not compile. OTP 28 is what CI and the
+Docker image build against; older OTP releases are not tested or supported.
 
 ### Initial Setup
 
@@ -1034,4 +1049,4 @@ This project uses [SEMVER](https://semver.org/) with automated releases.
 - **Minor**: New features → Add `minor` label or use `feat:` prefix
 - **Major**: Breaking changes → Add `major` label or use `[major]` in title
 
-See [the changelog](CHANGELOG.md) for details.
+See the [GitHub Releases](https://github.com/HectorIFC/malachi/releases) for the per-version change history.
