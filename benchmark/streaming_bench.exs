@@ -11,7 +11,7 @@
 # Metrics per run: wall time & throughput, total reductions (CPU), and the PEAK subscriber mailbox
 # (message_queue_len): the memory/backpressure signal that separates windowing from raw push.
 #
-# Run: mix run bench/streaming_bench.exs
+# Run: mix run benchmark/streaming_bench.exs
 
 defmodule StreamBench do
   @total 200_000

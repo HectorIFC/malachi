@@ -5,7 +5,7 @@
 # and CPU (reductions). This is the SYSTEM baseline the streaming alternatives are judged against; it is
 # a standalone script and does not touch lib/.
 #
-# Run: mix run bench/throughput_1m.exs
+# Run: mix run benchmark/throughput_1m.exs
 
 defmodule Bench1M do
   alias Malachi.BrokerServer

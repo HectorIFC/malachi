@@ -5,7 +5,7 @@
 # reductions. Records are paged (1000/page) like the real protocol. base64 inflates the payload ~33% and
 # JSON adds parse/quote overhead; the binary frame is what a NorthGuard/Kafka-style protocol would use.
 #
-# Run: mix run bench/protocol_bench.exs
+# Run: mix run benchmark/protocol_bench.exs
 
 defmodule ProtoBench do
   alias Malachi.Log.Record
