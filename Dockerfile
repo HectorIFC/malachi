@@ -35,8 +35,7 @@ RUN apk add --no-cache \
         libstdc++ \
         libgcc \
         ncurses-libs \
-        ca-certificates \
-        curl
+        ca-certificates
 
 # Copy OpenSSL libraries from builder to ensure binary compatibility with crypto.so
 # The elixir:1.19-otp-28-alpine image has crypto.so compiled against a specific OpenSSL version
@@ -67,8 +66,11 @@ ENV MALACHI_LOCALE=en_US
 
 EXPOSE 4040 4041
 
+# Uses busybox wget (bundled in the Alpine base) instead of curl, so the image does not ship the curl
+# package and its CVEs just for a liveness probe. -q silences output, -O /dev/null discards the body, and a
+# non-2xx response or a refused connection makes wget exit non-zero, which marks the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -sf http://localhost:4041/login > /dev/null || exit 1
+  CMD wget -q -O /dev/null http://localhost:4041/health || exit 1
 
 # Security hardening recommendations:
 #   docker run --security-opt=no-new-privileges:true \

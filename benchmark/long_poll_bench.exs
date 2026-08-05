@@ -5,7 +5,7 @@
 # numbers reflect the architectural difference, not a full TCP path. The per-wakeup "re-consume"
 # work (reading one log page) is the SAME in both, so the signal is the notification mechanism.
 #
-# Run: mix run bench/long_poll_bench.exs
+# Run: mix run benchmark/long_poll_bench.exs
 #
 # Metrics, for W ∈ {1, 10, 100, 1000} consumers waiting on one topic:
 #   * wakeup_total_us: from the start of a produce until ALL W waiters hold the new data
