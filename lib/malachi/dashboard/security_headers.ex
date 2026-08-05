@@ -30,7 +30,7 @@ defmodule Malachi.Dashboard.SecurityHeaders do
       iex> SecurityHeaders.add_security_headers(response, "/")
       "HTTP/1.1 200 OK\\r\\nX-Frame-Options: DENY\\r\\nContent-Type: text/html\\r\\n\\r\\n<html>..."
   """
-  def add_security_headers(response, request_path) do
+  def add_security_headers(response, request_path, request_origin \\ nil) do
     base_headers = [
       {"x-content-type-options", "nosniff"},
       {"x-frame-options", "DENY"},
@@ -40,7 +40,7 @@ defmodule Malachi.Dashboard.SecurityHeaders do
 
     csp_header = build_csp_header()
     hsts_header = build_hsts_header()
-    cors_headers = build_cors_headers(request_path)
+    cors_headers = build_cors_headers(request_path, request_origin)
 
     all_headers = base_headers ++ csp_header ++ hsts_header ++ cors_headers
 
@@ -99,34 +99,65 @@ defmodule Malachi.Dashboard.SecurityHeaders do
   @doc """
   Builds CORS headers for API endpoints.
 
-  CORS is only enabled for `/metrics` and `/stream` endpoints when explicitly
-  configured. Supports whitelisted origins.
+  CORS is only enabled for `/metrics` and `/stream` endpoints when explicitly configured. With the default
+  wildcard whitelist every origin gets `*`; with an explicit whitelist the request's own `Origin` is echoed
+  back, and only when it is listed, since `Access-Control-Allow-Origin` accepts a single origin. An origin
+  outside the whitelist (or a request with no `Origin`) gets no allow header, which the browser reads as not
+  allowed, but still gets `Vary: origin` so a cache cannot reuse that denial for a whitelisted origin.
+
+  Returns a list of `{name, value}` tuples, empty when CORS does not apply at all. `Malachi.Dashboard` uses
+  it for both the real responses and the `OPTIONS` preflight, so a preflight can never advertise a permission
+  the actual request would not receive.
 
   ## Configuration
 
       export MALACHI_DASHBOARD_CORS_ENABLED=true
       export MALACHI_DASHBOARD_CORS_ORIGINS="https://app.example.com,https://admin.example.com"
   """
-  def build_cors_headers(request_path) do
-    # CORS only for API endpoints
-    if request_path in ["/metrics", "/stream"] do
-      cors_enabled = Application.get_env(:malachi, :dashboard_cors_enabled, false)
+  def build_cors_headers(request_path, request_origin \\ nil) do
+    # CORS only for API endpoints, and only when turned on
+    if request_path in ["/metrics", "/stream"] and
+         Application.get_env(:malachi, :dashboard_cors_enabled, false) do
+      origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
 
-      if cors_enabled do
-        origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
-        origin = if "*" in origins, do: "*", else: Enum.join(origins, ", ")
-
-        [
-          {"access-control-allow-origin", origin},
-          {"access-control-allow-methods", "GET, OPTIONS"},
-          {"access-control-allow-headers", "Authorization, Content-Type"},
-          {"access-control-max-age", "86400"}
-        ]
-      else
-        []
-      end
+      cors_headers_for(origins, allowed_origin(origins, request_origin))
     else
       []
+    end
+  end
+
+  defp cors_headers_for(origins, allowed) do
+    # Under a wildcard every origin gets the same answer, so the response does not vary. Under an explicit
+    # whitelist it does, and `Vary` has to be there even when the origin is refused: otherwise a cache can
+    # store the header-less denial and later replay it to a whitelisted origin.
+    vary = if "*" in origins, do: [], else: [{"vary", "origin"}]
+
+    allow =
+      case allowed do
+        nil ->
+          []
+
+        origin ->
+          [
+            {"access-control-allow-origin", origin},
+            {"access-control-allow-methods", "GET, OPTIONS"},
+            {"access-control-allow-headers", "Authorization, Content-Type"},
+            {"access-control-max-age", "86400"}
+          ]
+      end
+
+    allow ++ vary
+  end
+
+  # A wildcard whitelist answers "*" to everyone. Otherwise the request's own Origin is echoed back, and only
+  # when it is whitelisted: `Access-Control-Allow-Origin` takes a single origin, so listing several of them
+  # (the previous behavior) produced a header browsers reject, which silently broke a multi-origin whitelist.
+  # nil means not allowed: no Origin on the request, or one outside the list.
+  defp allowed_origin(origins, request_origin) do
+    cond do
+      "*" in origins -> "*"
+      request_origin in origins -> request_origin
+      true -> nil
     end
   end
 

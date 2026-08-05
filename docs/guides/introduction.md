@@ -13,11 +13,9 @@ data independently, and a consumer can rewind.
 > battle-tested at scale, and there is no stability guarantee yet. Use it to learn and experiment, not to
 > run production workloads.
 
-## Demo
+## Brief explanation
 
-A new demo video is on the way. This section will host it once it is ready.
-
-<!-- New demo video goes here. Replace this comment with the embed once the video is published. -->
+<iframe width="560" height="315" src="https://www.youtube.com/embed/u1a_Kxs1yeE?si=qRkTPMTerwWkatA9" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
 ## What you get
 

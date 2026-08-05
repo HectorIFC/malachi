@@ -51,7 +51,12 @@ jobs:
     needs: verify-ci
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    
+    # Scoped here (not workflow-wide) so only this job holds write: it pushes the bump/tag/release
+    # (contents) and dispatches the Pages workflow (actions). Job permissions replace the top-level set.
+    permissions:
+      contents: write
+      actions: write
+
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
       
@@ -156,6 +161,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The version bump was pushed to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do not
+      # trigger workflows, so the Pages build never rebuilds the docs for the new version. workflow_dispatch
+      # is exempt from that rule, so dispatch the Pages workflow here; it checks out main (now bumped) and
+      # republishes the site with the new version.
+      - name: Rebuild the documentation site for the new version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --ref main
+
   docker:
     needs: release
     runs-on: ubuntu-latest
@@ -214,3 +228,18 @@ jobs:
           cache-from: type=registry,ref=${{ env.DOCKER_USERNAME }}/malachi:buildcache
           cache-to: type=registry,ref=${{ env.DOCKER_USERNAME }}/malachi:buildcache,mode=max
           provenance: false
+
+      # Publish the Docker Hub overview (the repository description) from docs/DOCKER_README.md, so the Hub
+      # page stays in sync with the repo on every release instead of showing No overview available.
+      # continue-on-error: the image is already built and pushed above, so a failure here (for example a
+      # Docker Hub API hiccup, or a DOCKERHUB_TOKEN without write scope on the repo metadata) must not fail
+      # the release; it only leaves the overview stale, which is visible in the step log.
+      - name: Update Docker Hub description
+        continue-on-error: true
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKER_USERNAME }}/malachi
+          short-description: "Open-source Elixir reimplementation of LinkedIn NorthGuard: a CP, horizontally-scalable log broker"
+          readme-filepath: ./docs/DOCKER_README.md

@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.6.1"
+  @version "0.7.7"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -53,20 +53,31 @@ defmodule Malachi.MixProject do
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
     <style>.mermaid { background: #ffffff; border-radius: 8px; padding: 16px; margin: 1.5em 0; overflow-x: auto; }</style>
     <script>
-      document.addEventListener("DOMContentLoaded", function () {
+      // Monotonic counter for render ids: mermaid derives the SVG's internal element ids from the id passed
+      // to render(), so it must be globally unique across every call (a timestamp could repeat within the
+      // same millisecond across rapid swup passes); a plain incrementing counter never repeats.
+      var mermaidRenderSeq = 0;
+      function renderMermaidDiagrams() {
+        if (typeof mermaid === "undefined") return;
         mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
         var blocks = document.querySelectorAll("pre > code.mermaid, pre > code.language-mermaid");
-        blocks.forEach(function (code, i) {
+        blocks.forEach(function (code) {
           var container = document.createElement("div");
           container.className = "mermaid";
           code.parentElement.replaceWith(container);
-          mermaid.render("mermaid-diagram-" + i, code.textContent).then(function (res) {
+          mermaid.render("mermaid-diagram-" + (mermaidRenderSeq++), code.textContent).then(function (res) {
             container.innerHTML = res.svg;
           }).catch(function () {
             container.textContent = code.textContent;
           });
         });
-      });
+      }
+      // First (full) load renders on DOMContentLoaded. ExDoc navigates with swup (SPA-style), which swaps
+      // the page in without a reload, so DOMContentLoaded does not fire on internal navigation (Next Page,
+      // sidebar links); swup dispatches a `swup:page:view` DOM event there, so render on that too. The
+      // second pass is a no-op once the code blocks have already been turned into `div.mermaid`.
+      document.addEventListener("DOMContentLoaded", renderMermaidDiagrams);
+      document.addEventListener("swup:page:view", renderMermaidDiagrams);
     </script>
     """
   end
@@ -85,7 +96,6 @@ defmodule Malachi.MixProject do
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
-      "CHANGELOG.md": [title: "Changelog"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       "SECURITY.md": [title: "Security policy"],
@@ -120,7 +130,7 @@ defmodule Malachi.MixProject do
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"
       ],
-      Development: ["docs/HOOKS.md", "CHANGELOG.md"]
+      Development: ["docs/HOOKS.md"]
     ]
   end
 
