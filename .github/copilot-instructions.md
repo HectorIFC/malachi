@@ -10,7 +10,7 @@ via `ra`); cluster membership uses SWIM.
 
 It is **not** a queue/channel message system. Any mention of queues, channels, `PartitionManager`,
 `AckManager`, `QueueConfig`, or `Validator` describes a former design (MalachiMQ) that was removed. If you
-find such references outside historical files (`CHANGELOG.md`, release notes), they are stale.
+find such references outside historical release notes, they are stale.
 
 **Runtime:** Elixir 1.19+ / OTP 28+ on the BEAM.
 
@@ -225,8 +225,10 @@ make docker-build | docker-buildx | compose-up | compose-logs | clean
   mix deps.audit
   mix test
   ```
-- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title; CHANGELOG updated
-  for version-bumping changes. `feat:` → minor, `fix:` → patch, `BREAKING CHANGE:` → major.
+- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title. Release bump: a
+  `feat:` title or a `[minor]`/`minor` label → minor; `[major]` in the title or a `major` label → major;
+  anything else → patch. `release.yml` reads the title and the labels, not the PR body, so `BREAKING
+  CHANGE:` in the body does not bump the version.
 
 ## Adding features
 
