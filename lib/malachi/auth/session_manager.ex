@@ -13,7 +13,7 @@ defmodule Malachi.Auth.SessionManager do
 
   - `session_timeout_seconds` - Session expiration time (default: 3600 = 1 hour)
   - `session_ip_binding` - Enables IP binding (default: true)
-  - `session_ua_binding` - Enables User-Agent binding (default: false, not implemented)
+  - `session_ua_binding` - Enables User-Agent binding (default: false)
   - `trusted_proxy_ranges` - List of CIDR ranges for trusted proxies (default: `[]`, nothing is trusted)
 
   ## Trusted Proxies
@@ -48,7 +48,7 @@ defmodule Malachi.Auth.SessionManager do
   - `username` - Username
   - `permissions` - List of permissions (`:admin`, `:produce`, `:consume`)
   - `client_ip` - Client IP address (tuple)
-  - `user_agent` - User-Agent string (not implemented, always "")
+  - `user_agent` - User-Agent string stored on the session (compared on validation when session_ua_binding is on)
 
   ## Returns
 
@@ -102,14 +102,14 @@ defmodule Malachi.Auth.SessionManager do
   Checks:
   - Token exists
   - Session has not expired
-  - IP binding (if enabled and not trusted proxy)
-  - User-Agent binding (if enabled, not implemented)
+  - IP binding (if enabled and not behind a trusted proxy)
+  - User-Agent binding (if session_ua_binding is enabled; applies even behind a trusted proxy)
 
   ## Parameters
 
   - `token` - Session token
   - `client_ip` - Current client IP
-  - `user_agent` - Current User-Agent (not implemented)
+  - `user_agent` - Current request User-Agent (compared when session_ua_binding is on)
 
   ## Returns
 
@@ -128,15 +128,17 @@ defmodule Malachi.Auth.SessionManager do
   Two consequences for anyone reading `Malachi.Metrics`, which exposes these as separate counters:
 
   - The audit counters are **not disjoint**. Summing them does not give a count of failed validations.
-  - `:session_hijack_attempt` counts *a token presented from an unexpected IP*, not *a live session
-    stolen*. Ordinary timeouts behind a changing NAT reach it, so alert thresholds should be set against
-    that broader meaning.
+  - `:session_hijack_attempt` counts *a token presented with a binding that does not match* (an unexpected
+    IP, or a different User-Agent when session_ua_binding is on), not *a live session stolen*. The event
+    metadata's `mismatch` field lists which dimension(s) differed. Ordinary timeouts behind a changing NAT
+    reach it, so alert thresholds should be set against that broader meaning.
   """
   def validate_session(token, client_ip, user_agent \\ "") do
     case :ets.lookup(@table_sessions, token) do
       [{^token, session_data}] ->
         now = System.system_time(:second)
-        binding_ok? = valid_client_binding?(session_data, client_ip, user_agent)
+        mismatches = binding_mismatches(session_data, client_ip, user_agent)
+        binding_ok? = mismatches == []
 
         cond do
           session_data.expires_at < now ->
@@ -146,7 +148,7 @@ defmodule Malachi.Auth.SessionManager do
             # it expired would otherwise leave no theft signal at all. Record the mismatch, but still
             # answer :session_expired: that is the accurate reason, and it keeps a legitimate client whose
             # IP moved (NAT, mobile) from being told it looks like an attacker.
-            maybe_log_hijack_attempt(binding_ok?, session_data, token, client_ip)
+            maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
 
             Malachi.AuditLog.log_event(
               :session_expired,
@@ -159,7 +161,7 @@ defmodule Malachi.Auth.SessionManager do
             {:error, :session_expired}
 
           not binding_ok? ->
-            maybe_log_hijack_attempt(binding_ok?, session_data, token, client_ip)
+            maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
             {:error, :session_hijack_attempt}
 
           true ->
@@ -317,9 +319,9 @@ defmodule Malachi.Auth.SessionManager do
   # Records a client-binding mismatch, as an operator-facing warning and as an audit event. Takes the
   # already-computed verdict so both the expiry and the binding branch of `validate_session/3` can call it
   # without evaluating the binding twice, and so an expired-and-moved token still raises the theft signal.
-  defp maybe_log_hijack_attempt(true = _binding_ok?, _session_data, _token, _client_ip), do: :ok
+  defp maybe_log_hijack_attempt([], _session_data, _token, _client_ip), do: :ok
 
-  defp maybe_log_hijack_attempt(false = _binding_ok?, session_data, token, client_ip) do
+  defp maybe_log_hijack_attempt(mismatches, session_data, token, client_ip) when is_list(mismatches) do
     token_prefix = String.slice(token, 0, 8)
 
     Logger.warning(
@@ -327,6 +329,7 @@ defmodule Malachi.Auth.SessionManager do
       username: session_data.username,
       session_ip: format_ip(session_data.ip),
       request_ip: format_ip(client_ip),
+      mismatch: mismatches,
       token_prefix: token_prefix
     )
 
@@ -338,37 +341,32 @@ defmodule Malachi.Auth.SessionManager do
       %{
         session_ip: format_ip(session_data.ip),
         request_ip: format_ip(client_ip),
+        # Which binding(s) differed: [:ip], [:user_agent], or both. A UA-only mismatch has request_ip ==
+        # session_ip, so alerting must key off this rather than assuming the IP changed.
+        mismatch: mismatches,
         token_prefix: token_prefix
       }
     )
   end
 
-  defp valid_client_binding?(session_data, client_ip, _user_agent) do
+  # The binding dimensions that do not match: a subset of [:ip, :user_agent] (empty means the request is
+  # consistent with the session). The IP is checked only when session_ip_binding is on and the session was
+  # not created behind a trusted proxy (a shared proxy egress IP is not a useful binding). The User-Agent is
+  # checked only when session_ua_binding is on (opt-in), independent of the trusted-proxy exemption: a proxy
+  # rewrites the source IP, not the User-Agent, so UA binding is precisely the signal left for sessions
+  # behind a shared proxy. UA binding is off by default: a UA is spoofable and changes on a browser update,
+  # so it is a weaker signal than the IP.
+  defp binding_mismatches(session_data, client_ip, user_agent) do
     ip_binding = Application.get_env(:malachi, :session_ip_binding, true)
     ua_binding = Application.get_env(:malachi, :session_ua_binding, false)
+    ip_exempt = Map.get(session_data, :ip_binding_disabled, false)
 
-    # A session created behind a trusted proxy has binding switched off, so it always passes
-    if Map.get(session_data, :ip_binding_disabled, false) do
-      true
-    else
-      ip_valid =
-        if ip_binding do
-          session_data.ip == client_ip
-        else
-          true
-        end
+    ip_mismatch? = ip_binding and not ip_exempt and session_data.ip != client_ip
+    ua_mismatch? = ua_binding and session_data.user_agent != user_agent
 
-      # User-Agent binding is not implemented, so this arm always passes
-      ua_valid =
-        if ua_binding do
-          # Future implementation: session_data.user_agent == user_agent
-          true
-        else
-          true
-        end
-
-      ip_valid and ua_valid
-    end
+    [{:ip, ip_mismatch?}, {:user_agent, ua_mismatch?}]
+    |> Enum.filter(fn {_dim, mismatch?} -> mismatch? end)
+    |> Enum.map(fn {dim, _mismatch?} -> dim end)
   end
 
   defp trusted_proxy?(ip) do

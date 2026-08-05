@@ -70,6 +70,13 @@ export MALACHI_SESSION_IP_BINDING=true
 export MALACHI_AUDIT_LOG_OUTPUT=both
 export MALACHI_HSTS_ENABLED=true
 
+# OPTIONAL: also pin each dashboard session to the User-Agent seen at login. Off by default: a UA is
+# spoofable and changes on browser updates, so it is a weaker signal than the IP and can invalidate
+# legitimate sessions. Enable only where clients have a stable User-Agent. Note it only protects sessions
+# whose login carried a non-empty User-Agent (browsers always send one); a session created without the
+# header binds to "", so an attacker who also omits the header is not blocked by this check.
+export MALACHI_SESSION_UA_BINDING=true
+
 # RECOMMENDED: Configure connection and memory limits
 export MALACHI_MAX_CONN_PER_IP=50
 export MALACHI_MAX_TOTAL_CONN=5000
@@ -100,6 +107,7 @@ export MALACHI_GC_THRESHOLD_MB=500
 - Per-IP and global connection limiting
 - Progressive account lockout after failed attempts
 - Session IP binding for hijack prevention
+- Session User-Agent binding for hijack prevention (opt-in)
 - Trusted proxy support with configurable CIDR ranges
 - Password strength requirements (configurable minimum length)
 - Configuration validation at startup
@@ -121,6 +129,24 @@ export MALACHI_GC_THRESHOLD_MB=500
 - **Inter-node authentication:** Nodes trust each other through the Erlang distribution cookie (`$RELEASE_COOKIE`). For authenticated, encrypted node-to-node traffic, enable mutual-TLS distribution (see `rel/dist_tls.conf.example` and `MALACHI_DIST_TLS_OPTFILE`) and keep the cookie secret.
 - **Persistent Users:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. Secure the ra data directory (`MALACHI_RA_DATA_DIR`) with restricted file permissions (e.g., `chmod 700`).
 - **No at-rest encryption:** Records are protected in transit by TLS, but the on-disk log is stored in plaintext (the record CRC guards integrity, not confidentiality). Add application-level encryption if you need encryption at rest.
+
+## Container Image Vulnerabilities
+
+Scanners (Docker Scout, Trivy) report vulnerabilities in the base image packages, not only in Malachi's own
+code. Where a reported CVE is not exploitable in this image, the assessment is recorded as a machine-readable
+[OpenVEX statement](.vex/malachi.openvex.json) so scanners and auditors can see why, rather than the image
+being degraded to silence the alert.
+
+Current assessments:
+
+- **CVE-2025-60876** (BusyBox `wget`, medium): **not affected.** The flaw is HTTP header injection when
+  `wget` is handed an attacker-controlled URL. The image runs busybox `wget` only in the Docker
+  `HEALTHCHECK`, against the fixed literal URL `http://localhost:4041/health`; no attacker-controlled input
+  reaches `wget`, so the vector cannot be triggered. Alpine has published no fixed busybox version on any
+  branch, so the package cannot be upgraded to remediate. Docker Scout can consume the VEX file with
+  `docker scout cves --vex-location .vex hectorcardoso/malachi:latest`. The VEX product PURL is qualified
+  with the `latest` tag, which Scout matches against; for reliable matching across every published tag or a
+  specific digest, attach this VEX to the image as an in-toto attestation during the release build.
 
 ## Security Advisories
 

@@ -89,13 +89,11 @@ defmodule Malachi.Dashboard do
         headers_map
 
       {:ok, {:http_header, _, header_name, _, value}} ->
-        # Convert header name to lowercase string
+        # The decoder returns a well-known header name as an atom (`:Cookie`, `:"User-Agent"`, and note the
+        # hyphen: there is no `:Content_Type` form) and anything outside its table, such as `Origin`, as a
+        # binary or charlist. Normalizing every shape to a lowercase string gives one key format to look up.
         key =
           case header_name do
-            :Authorization -> "authorization"
-            :Origin -> "origin"
-            :Content_Type -> "content-type"
-            :Content_Length -> "content-length"
             atom when is_atom(atom) -> atom |> to_string() |> String.downcase()
             string when is_binary(string) -> String.downcase(string)
             charlist when is_list(charlist) -> charlist |> to_string() |> String.downcase()
@@ -147,10 +145,10 @@ defmodule Malachi.Dashboard do
 
         {:error, :authentication_required} ->
           # For HTML page routes, redirect to login page instead of returning JSON 401
-          if html_route?(path) do
+          if html_route?(path, extract_origin(headers)) do
             send_redirect_to_login(socket)
           else
-            send_auth_required(socket, path)
+            send_auth_required(socket, path, extract_origin(headers))
           end
 
         {:error, :rate_limit_exceeded, retry_after_ms} ->
@@ -164,7 +162,7 @@ defmodule Malachi.Dashboard do
             %{path: request.path, retry_after_ms: retry_after_ms}
           )
 
-          send_rate_limited(socket, retry_after_ms)
+          send_rate_limited(socket, retry_after_ms, path, extract_origin(headers))
 
         {:error, reason} ->
           Metrics.increment_dashboard_auth_failed()
@@ -177,22 +175,54 @@ defmodule Malachi.Dashboard do
             %{path: request.path, reason: reason}
           )
 
-          send_forbidden(socket, reason)
+          send_auth_failure(socket, reason, path, extract_origin(headers))
       end
     end
   end
 
-  defp html_route?(path), do: path in ["/", "/stream"]
+  defp send_auth_failure(socket, reason, path, request_origin) do
+    if stale_session?(reason) and html_route?(path, request_origin) do
+      # The browser keeps replaying the very cookie that fails, so a bare 403 on a page route strands the
+      # user there with no way back to the login form. This happens to legitimate users: IP binding is on by
+      # default and a changed address (mobile, a rotating NAT) reads as a hijack, as does a browser updating
+      # its User-Agent when UA binding is enabled. Clear the cookie and send them to log in again, exactly as
+      # logout does.
+      send_clearing_redirect(socket)
+    else
+      send_forbidden(socket, reason, path, request_origin)
+    end
+  end
+
+  # A session that no longer validates, as opposed to a valid session that simply lacks a permission.
+  defp stale_session?(reason), do: reason in [:session_expired, :session_hijack_attempt, :invalid_session]
+
+  # Redirecting to the HTML login page only helps a browser navigating to a page. The two page routes are
+  # GET, and a browser omits Origin on a same-origin GET navigation or EventSource, so "no Origin" is a
+  # sound proxy for "this navigation can follow the redirect" while these routes stay GET-only. A request
+  # that does carry an Origin is a cross-origin fetch or EventSource, which cannot follow a redirect into an
+  # HTML page: answer those with the JSON 401 instead, so the caller sees why it failed rather than an
+  # opaque error. This makes the failure legible, not the flow possible: a cross-origin session is not
+  # supported at all, since the cookie is SameSite=Strict and no Access-Control-Allow-Credentials is sent.
+  # Cross-origin /metrics works with a Bearer token.
+  defp html_route?(path, request_origin), do: is_nil(request_origin) and path in ["/", "/stream"]
 
   defp authenticate_request(headers, client_ip, path) do
     # Try Cookie first (browser navigation + EventSource), then Authorization header (API/curl)
     token = extract_token_from_cookie(headers) || extract_bearer_token(headers)
+    user_agent = extract_user_agent(headers)
 
     case token do
       nil -> {:error, :authentication_required}
-      token_value -> validate_token_with_rate_limit(token_value, client_ip, path)
+      token_value -> validate_token_with_rate_limit(token_value, client_ip, path, user_agent)
     end
   end
+
+  # The User-Agent is compared against the one captured at login only when session_ua_binding is enabled
+  # (opt-in). Missing header -> "", which still binds consistently (login and validation both see "").
+  defp extract_user_agent(headers), do: Map.get(headers, "user-agent", "")
+
+  # nil (no Origin header) is not a cross-origin request, so it never matches a whitelist entry.
+  defp extract_origin(headers), do: Map.get(headers, "origin")
 
   defp extract_token_from_cookie(headers) do
     case Map.get(headers, "cookie") do
@@ -218,7 +248,7 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp validate_token_with_rate_limit(token, client_ip, path) do
+  defp validate_token_with_rate_limit(token, client_ip, path, user_agent) do
     # Check rate limit before validating token (prevent brute force)
     rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
     rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
@@ -231,7 +261,7 @@ defmodule Malachi.Dashboard do
          }) do
       :ok ->
         # Validate token
-        case Auth.validate_token(token, client_ip) do
+        case Auth.validate_token(token, client_ip, user_agent) do
           {:ok, session_data} ->
             # Check permissions based on path
             if has_required_permission?(session_data.permissions, path) do
@@ -286,21 +316,43 @@ defmodule Malachi.Dashboard do
   defp format_ip_for_rate_limit(ip) when is_binary(ip), do: ip
   defp format_ip_for_rate_limit(_), do: "unknown"
 
+  # The two redirects to the login form. Both carry the usual security headers (CSP, HSTS, frame and
+  # sniffing guards): the synthetic /login path passed to add_security_headers keeps CORS out, since these
+  # only ever answer a same-origin navigation. The plain one is for an unauthenticated browser; the cookie
+  # clearing one is for logout and for the stale-session path (where it stands in for the 403 that route
+  # used to return), so an unusable token is expired rather than replayed.
   defp send_redirect_to_login(socket) do
-    response = "HTTP/1.1 302 Found\r\nLocation: /login\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
+    send_login_redirect(
+      socket,
+      "HTTP/1.1 302 Found\r\nLocation: /login\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
+    )
+  end
 
-    :gen_tcp.send(socket, response)
+  defp send_clearing_redirect(socket) do
+    send_login_redirect(socket, redirect_clearing_cookie())
+  end
+
+  defp send_login_redirect(socket, base_response) do
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(base_response, "/login"))
     :gen_tcp.close(socket)
+  end
+
+  defp redirect_clearing_cookie do
+    "HTTP/1.1 302 Found\r\nLocation: /login\r\nSet-Cookie: malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0#{secure_cookie_flag()}\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
+  end
+
+  # "; Secure" only under TLS, so the cookie is not marked Secure on a plain-HTTP dev server (where the
+  # browser would then silently drop it). Shared by the login cookie and the cookie-clearing redirects, so a
+  # change to the Secure policy cannot make them disagree.
+  defp secure_cookie_flag do
+    if Application.get_env(:malachi, :enable_tls), do: "; Secure", else: ""
   end
 
   defp send_login_success(socket, token) do
     response_body = Jason.encode!(%{"s" => "ok", "token" => token})
 
-    secure_flag =
-      if Application.get_env(:malachi, :enable_tls), do: "; Secure", else: ""
-
     cookie_header =
-      "Set-Cookie: malachi_token=#{token}; HttpOnly; Path=/; SameSite=Strict#{secure_flag}"
+      "Set-Cookie: malachi_token=#{token}; HttpOnly; Path=/; SameSite=Strict#{secure_cookie_flag()}"
 
     response = """
     HTTP/1.1 200 OK\r
@@ -318,7 +370,10 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
-  defp send_auth_required(socket, path) do
+  # The three error responses below carry the request path and Origin so a cross-origin caller can actually
+  # read the failure: without the CORS headers the browser turns a 401/403/429 on /metrics or /stream into an
+  # opaque network error. The login path is not a CORS endpoint, so its callers keep the synthetic defaults.
+  defp send_auth_required(socket, path, request_origin) do
     body = Jason.encode!(%{"s" => "err", "reason" => "authentication_required"})
 
     response = """
@@ -331,13 +386,13 @@ defmodule Malachi.Dashboard do
     """
 
     response_with_headers =
-      SecurityHeaders.add_security_headers(response, path)
+      SecurityHeaders.add_security_headers(response, path, request_origin)
 
     :gen_tcp.send(socket, response_with_headers)
     :gen_tcp.close(socket)
   end
 
-  defp send_forbidden(socket, reason) do
+  defp send_forbidden(socket, reason, path \\ "/forbidden", request_origin \\ nil) do
     body = Jason.encode!(%{"s" => "err", "reason" => to_string(reason)})
 
     response = """
@@ -349,13 +404,13 @@ defmodule Malachi.Dashboard do
     """
 
     response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/forbidden")
+      SecurityHeaders.add_security_headers(response, path, request_origin)
 
     :gen_tcp.send(socket, response_with_headers)
     :gen_tcp.close(socket)
   end
 
-  defp send_rate_limited(socket, retry_after_ms) do
+  defp send_rate_limited(socket, retry_after_ms, path \\ "/rate_limited", request_origin \\ nil) do
     body = Jason.encode!(%{"s" => "err", "reason" => "rate_limit_exceeded", "retry_after_ms" => retry_after_ms})
 
     response = """
@@ -368,24 +423,20 @@ defmodule Malachi.Dashboard do
     """
 
     response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/rate_limited")
+      SecurityHeaders.add_security_headers(response, path, request_origin)
 
     :gen_tcp.send(socket, response_with_headers)
     :gen_tcp.close(socket)
   end
 
-  defp serve_cors_preflight(socket, headers) do
-    origin = Map.get(headers, "origin", "*")
+  # The preflight answers from the same builder the real responses use, so it can never advertise a
+  # permission the actual request would not get. No headers back (CORS disabled, a non-CORS path, or an
+  # origin outside the whitelist) means a bare 204, which the browser reads as not allowed.
+  defp serve_cors_preflight(socket, headers, path) do
+    cors_headers = SecurityHeaders.build_cors_headers(path, extract_origin(headers))
 
-    response = """
-    HTTP/1.1 204 No Content\r
-    Access-Control-Allow-Origin: #{origin}\r
-    Access-Control-Allow-Methods: GET, POST, OPTIONS\r
-    Access-Control-Allow-Headers: Authorization, Content-Type\r
-    Access-Control-Max-Age: 86400\r
-    Content-Length: 0\r
-    \r
-    """
+    response =
+      SecurityHeaders.prepend_headers("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", cors_headers)
 
     :gen_tcp.send(socket, response)
     :gen_tcp.close(socket)
@@ -405,7 +456,7 @@ defmodule Malachi.Dashboard do
              }) do
           :ok ->
             # Authenticate
-            case Auth.authenticate(username, password, client_ip) do
+            case Auth.authenticate(username, password, client_ip, extract_user_agent(headers)) do
               {:ok, token} ->
                 Metrics.increment_dashboard_auth_success()
 
@@ -638,14 +689,15 @@ defmodule Malachi.Dashboard do
   # /metrics serves the Prometheus text exposition to a scraper (Accept: text/plain/openmetrics) and the
   # JSON dashboard payload otherwise: same auth (any authenticated user), one conventional path.
   defp handle_route(socket, %{method: :GET, path: "/metrics"}, headers, _client_ip, _session) do
-    if prometheus_scrape?(headers), do: serve_prometheus(socket), else: serve_metrics(socket)
+    origin = extract_origin(headers)
+    if prometheus_scrape?(headers), do: serve_prometheus(socket, origin), else: serve_metrics(socket, origin)
   end
 
   defp handle_route(socket, %{method: :GET, path: "/topic"} = request, _headers, _client_ip, _session),
     do: serve_topic_detail(socket, request.query)
 
-  defp handle_route(socket, %{method: :GET, path: "/stream"}, _headers, _client_ip, _session),
-    do: serve_sse(socket)
+  defp handle_route(socket, %{method: :GET, path: "/stream"}, headers, _client_ip, _session),
+    do: serve_sse(socket, extract_origin(headers))
 
   defp handle_route(socket, %{method: :GET, path: "/rate_limits"}, _headers, _client_ip, _session),
     do: serve_rate_limits(socket)
@@ -656,8 +708,8 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :GET, path: "/logo.svg"}, _headers, _client_ip, _session),
     do: serve_logo(socket)
 
-  defp handle_route(socket, %{method: :OPTIONS}, headers, _client_ip, _session),
-    do: serve_cors_preflight(socket, headers)
+  defp handle_route(socket, %{method: :OPTIONS, path: path}, headers, _client_ip, _session),
+    do: serve_cors_preflight(socket, headers, path)
 
   # Admin user management (P3): gated to :admin by the auth stage above.
   defp handle_route(socket, %{method: :GET, path: "/users"}, _headers, _client_ip, _session),
@@ -718,8 +770,8 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp serve_metrics(socket) do
-    serve_json(socket, "/metrics", dashboard_metrics())
+  defp serve_metrics(socket, request_origin) do
+    serve_json(socket, "/metrics", dashboard_metrics(), request_origin)
   end
 
   # True when the caller wants the Prometheus exposition format rather than the JSON dashboard payload.
@@ -728,7 +780,7 @@ defmodule Malachi.Dashboard do
     String.contains?(accept, "text/plain") or String.contains?(accept, "openmetrics")
   end
 
-  defp serve_prometheus(socket) do
+  defp serve_prometheus(socket, request_origin) do
     text =
       Prometheus.export(Metrics.get_system_metrics(), topics_overview())
       |> IO.iodata_to_binary()
@@ -742,7 +794,7 @@ defmodule Malachi.Dashboard do
     #{text}
     """
 
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/metrics"))
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/metrics", request_origin))
     :gen_tcp.close(socket)
   end
 
@@ -767,7 +819,7 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp serve_json(socket, route, data) do
+  defp serve_json(socket, route, data, request_origin \\ nil) do
     json = Jason.encode!(data)
 
     response = """
@@ -779,7 +831,7 @@ defmodule Malachi.Dashboard do
     #{json}
     """
 
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route))
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route, request_origin))
     :gen_tcp.close(socket)
   end
 
@@ -811,7 +863,7 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
-  defp serve_sse(socket) do
+  defp serve_sse(socket, request_origin) do
     response = """
     HTTP/1.1 200 OK\r
     Content-Type: text/event-stream\r
@@ -821,7 +873,7 @@ defmodule Malachi.Dashboard do
     """
 
     response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/stream")
+      SecurityHeaders.add_security_headers(response, "/stream", request_origin)
 
     :gen_tcp.send(socket, response_with_headers)
     :inet.setopts(socket, packet: :raw)
@@ -896,14 +948,7 @@ defmodule Malachi.Dashboard do
       token -> Auth.logout(token)
     end
 
-    secure_flag =
-      if Application.get_env(:malachi, :enable_tls), do: "; Secure", else: ""
-
-    response =
-      "HTTP/1.1 302 Found\r\nLocation: /login\r\nSet-Cookie: malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0#{secure_flag}\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
-
-    :gen_tcp.send(socket, response)
-    :gen_tcp.close(socket)
+    send_clearing_redirect(socket)
   end
 
   defp serve_logo(socket) do
