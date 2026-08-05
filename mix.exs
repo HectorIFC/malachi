@@ -220,7 +220,7 @@ defmodule Malachi.MixProject do
       {:opentelemetry_api, "~> 1.4"},
       {:opentelemetry, "~> 1.5"},
       # Raft (RabbitMQ's): replicates the Metadata state machine (DS-RSM vnodes)
-      {:ra, "~> 2.16"},
+      {:ra, "~> 3.1"},
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
       # MALACHI_CLUSTER_STRATEGY (gossip/kubernetes/epmd). Absent => single-node, no distribution.
       {:libcluster, "~> 3.5"},
