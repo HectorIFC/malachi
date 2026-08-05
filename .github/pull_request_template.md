@@ -37,4 +37,4 @@
 - Use label `patch`, `minor` or `major` on the PR
 - Or include `[major]`, `[minor]` in the title
 - By default, it will be `patch` (0.0.1)
-- See [VERSIONING.md](docs/VERSIONING.md) for details
+- See the [Versioning section in the README](https://github.com/HectorIFC/malachi#-versioning) for details

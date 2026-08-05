@@ -29,17 +29,16 @@ defmodule Malachi.Auth do
   - `password` - Password to verify
   - `client_ip` - Client IP address (tuple) for session binding and audit logging
   """
-  def authenticate(username, password, client_ip) do
-    result = do_authenticate(username, password, client_ip)
+  def authenticate(username, password, client_ip, user_agent \\ "") do
+    result = do_authenticate(username, password, client_ip, user_agent)
     Telemetry.auth(if match?({:ok, _}, result), do: :ok, else: :error)
     result
   end
 
-  defp do_authenticate(username, password, client_ip) do
+  defp do_authenticate(username, password, client_ip, user_agent) do
     case verify_credentials(username, password) do
       {:ok, permissions} ->
-        # user_agent not implemented
-        {:ok, token} = SessionManager.create_session(username, permissions, client_ip, "")
+        {:ok, token} = SessionManager.create_session(username, permissions, client_ip, user_agent)
 
         Logger.info(I18n.t(:auth_success, username: username))
         Malachi.AuditLog.log_event(:auth_success, %{username: username, ip: client_ip}, "authenticate", :success, %{})
@@ -121,8 +120,8 @@ defmodule Malachi.Auth do
   - `token` - Session token to validate
   - `client_ip` - Current client IP address for binding verification
   """
-  def validate_token(token, client_ip) do
-    case SessionManager.validate_session(token, client_ip, "") do
+  def validate_token(token, client_ip, user_agent \\ "") do
+    case SessionManager.validate_session(token, client_ip, user_agent) do
       {:ok, session_data} ->
         {:ok, %{username: session_data.username, permissions: session_data.permissions}}
 
