@@ -1,0 +1,27 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/HectorIFC/malachi/blob/main/.vex/malachi.openvex.json",
+  "author": "HectorIFC",
+  "role": "Project maintainer",
+  "timestamp": "2026-07-30T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2025-60876",
+        "description": "BusyBox wget accepts raw CR (0x0D)/LF (0x0A) and other C0 control bytes in the HTTP request-target, allowing the request line to be split and attacker-controlled headers to be injected when wget is given an attacker-controlled URL."
+      },
+      "products": [
+        {
+          "@id": "pkg:docker/hectorcardoso/malachi@latest",
+          "subcomponents": [
+            { "@id": "pkg:apk/alpine/busybox@1.37.0-r14" }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "The vulnerable component is the BusyBox wget applet. The Malachi image invokes busybox wget in exactly one place, the Docker HEALTHCHECK, with a fixed literal URL (http://localhost:4041/health). That request-target is a compile-time constant pointing at the container's own loopback interface; no external or attacker-controlled input ever reaches wget's URL parsing, so the header-injection vector cannot be triggered. The bin/malachi launcher is an sh script and does not call wget. Alpine has published no fixed busybox version on any branch (3.21, 3.22, edge), so the package cannot be upgraded to remediate; this statement records the assessment that the image is not affected."
+    }
+  ]
+}
