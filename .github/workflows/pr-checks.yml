@@ -64,21 +64,10 @@ jobs:
           # Check if PR indicates breaking changes
           if echo "$PR_TITLE" | grep -qi "breaking\|major"; then
             echo "⚠️  This PR contains BREAKING CHANGES"
-            echo "Make sure CHANGELOG.md is updated with breaking changes section"
           fi
           
           if echo "$PR_BODY" | grep -qi "breaking"; then
             echo "⚠️  Breaking changes mentioned in PR body"
-          fi
-      
-      - name: 📝 Check CHANGELOG is updated
-        run: |
-          if git diff --name-only origin/main...HEAD | grep -q "CHANGELOG.md"; then
-            echo "✅ CHANGELOG.md has been updated"
-          else
-            echo "⚠️  CHANGELOG.md was not updated"
-            echo "Consider adding an entry to CHANGELOG.md"
-            # Don't fail, just warn
           fi
       
       - name: 📏 Check diff size
