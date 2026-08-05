@@ -50,6 +50,8 @@ defmodule Malachi.DashboardSecurityTest do
                    String.contains?(response, "302")
 
           assert String.contains?(response, "Location: /login")
+          # The redirect must still carry the security headers every response gets.
+          assert String.downcase(response) =~ "x-frame-options: deny"
           :gen_tcp.close(socket)
 
         {:error, _} ->
@@ -782,6 +784,7 @@ defmodule Malachi.DashboardSecurityTest do
 
           assert String.contains?(response, "Location: /login")
           assert String.contains?(response, "Max-Age=0")
+          assert String.downcase(response) =~ "x-frame-options: deny"
           :gen_tcp.close(socket)
 
         {:error, _} ->

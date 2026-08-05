@@ -187,7 +187,7 @@ defmodule Malachi.Dashboard do
       # default and a changed address (mobile, a rotating NAT) reads as a hijack, as does a browser updating
       # its User-Agent when UA binding is enabled. Clear the cookie and send them to log in again, exactly as
       # logout does.
-      send_stale_session_redirect(socket)
+      send_clearing_redirect(socket)
     else
       send_forbidden(socket, reason, path, request_origin)
     end
@@ -316,25 +316,27 @@ defmodule Malachi.Dashboard do
   defp format_ip_for_rate_limit(ip) when is_binary(ip), do: ip
   defp format_ip_for_rate_limit(_), do: "unknown"
 
+  # The two redirects to the login form. Both carry the usual security headers (CSP, HSTS, frame and
+  # sniffing guards): the synthetic /login path passed to add_security_headers keeps CORS out, since these
+  # only ever answer a same-origin navigation. The plain one is for an unauthenticated browser; the cookie
+  # clearing one is for logout and for the stale-session path (where it stands in for the 403 that route
+  # used to return), so an unusable token is expired rather than replayed.
   defp send_redirect_to_login(socket) do
-    response = "HTTP/1.1 302 Found\r\nLocation: /login\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
+    send_login_redirect(
+      socket,
+      "HTTP/1.1 302 Found\r\nLocation: /login\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
+    )
+  end
 
-    :gen_tcp.send(socket, response)
+  defp send_clearing_redirect(socket) do
+    send_login_redirect(socket, redirect_clearing_cookie())
+  end
+
+  defp send_login_redirect(socket, base_response) do
+    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(base_response, "/login"))
     :gen_tcp.close(socket)
   end
 
-  defp send_stale_session_redirect(socket) do
-    # This redirect stands in for the 403 this path used to return, so it has to carry the same security
-    # headers (CSP, HSTS, frame and sniffing guards). The synthetic path keeps CORS out of it: the redirect
-    # only happens for a same-origin navigation.
-    response = SecurityHeaders.add_security_headers(redirect_clearing_cookie(), "/login")
-
-    :gen_tcp.send(socket, response)
-    :gen_tcp.close(socket)
-  end
-
-  # Redirect to the login form and drop the session cookie. Shared by logout and by the stale-session path,
-  # so both expire the cookie the same way.
   defp redirect_clearing_cookie do
     "HTTP/1.1 302 Found\r\nLocation: /login\r\nSet-Cookie: malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0#{secure_cookie_flag()}\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
   end
@@ -946,8 +948,7 @@ defmodule Malachi.Dashboard do
       token -> Auth.logout(token)
     end
 
-    :gen_tcp.send(socket, redirect_clearing_cookie())
-    :gen_tcp.close(socket)
+    send_clearing_redirect(socket)
   end
 
   defp serve_logo(socket) do
