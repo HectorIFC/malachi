@@ -61,9 +61,9 @@ Three ways to track position, in increasing order of what the server does for yo
 
 ```mermaid
 flowchart TD
-  A["1. Carry the cursor: you track the position, you do everything"]
-  B["2. Consumer group: the server tracks the position for you"]
-  C["3. Group member: the server also splits the work across members"]
+  A["(1) Carry the cursor: you track the position, you do everything"]
+  B["(2) Consumer group: the server tracks the position for you"]
+  C["(3) Group member: the server also splits the work across members"]
   A --> B --> C
 ```
 

@@ -2,7 +2,7 @@ defmodule Malachi.Wire do
   @moduledoc """
   The binary wire protocol for the NorthGuard log client (B1): a length-prefixed, request/response
   framing that replaces the JSON+base64 line protocol (measured ~29% fewer bytes and 9-17x less
-  serialization CPU in `bench/protocol_bench.exs`).
+  serialization CPU in `benchmark/protocol_bench.exs`).
 
       Frame:     <<len::32, body::binary-size(len)>>
       Request:   <<api_key::16, correlation_id::32, payload::binary>>

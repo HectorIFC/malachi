@@ -33,13 +33,6 @@ else
     echo "❌ .github/workflows/release.yml not found"
 fi
 
-# Check if CHANGELOG exists
-if [ -f "CHANGELOG.md" ]; then
-    echo "✅ CHANGELOG.md"
-else
-    echo "⚠️  CHANGELOG.md not found"
-fi
-
 # Check Makefile for dynamic version
 if grep -q 'VERSION ?= $(shell grep' Makefile 2>/dev/null; then
     echo "✅ Makefile with dynamic version"
@@ -56,9 +49,8 @@ echo ""
 
 # Check for GitHub secrets (can't actually check, just remind)
 echo "🔐 Reminder: Configure secrets on GitHub:"
-echo "   - DOCKER_USERNAME"
-echo "   - DOCKER_PASSWORD"
+echo "   - DOCKERHUB_TOKEN (the Docker Hub access token used to push the image)"
 echo ""
 
 echo "✨ Versioning system configured!"
-echo "📖 See docs/VERSIONING.md for more details"
+echo "📖 See the Versioning section in README.md for more details"
