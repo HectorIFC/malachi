@@ -2,6 +2,7 @@ defmodule Malachi.DashboardSecurityTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Auth.UserStore
+  alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.Test.DashboardHelper
 
   # These tests require dashboard authentication and rate limiting enabled in config/test.exs
@@ -56,27 +57,22 @@ defmodule Malachi.DashboardSecurityTest do
       end
     end
 
-    test "GET / with invalid token returns 403", %{} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
-        {:ok, socket} ->
-          request = """
-          GET / HTTP/1.1\r
-          Host: localhost\r
-          Cookie: malachi_token=invalid_token_12345\r
-          \r
-          """
+    test "GET / with invalid token redirects to login and clears the cookie", %{} do
+      {:ok, socket} = DashboardHelper.connect()
 
-          :gen_tcp.send(socket, request)
-          {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+      {:ok, response} =
+        DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachi_token=invalid_token_12345"})
 
-          assert String.contains?(response, "403 Forbidden") or
-                   String.contains?(response, "403")
+      # Access is refused either way. On a page route the refusal sends the user to the login form and
+      # expires the bad cookie, instead of leaving the browser replaying it against a JSON 403.
+      refute String.contains?(response, "200 OK")
+      assert String.contains?(response, "302 Found")
+      assert String.contains?(response, "Location: /login")
+      assert String.downcase(response) =~ "set-cookie: malachi_token=;"
+      # The redirect replaced a 403 that carried the security headers, so it must carry them too.
+      assert String.downcase(response) =~ "x-frame-options: deny"
 
-          :gen_tcp.close(socket)
-
-        {:error, _} ->
-          :ok
-      end
+      :gen_tcp.close(socket)
     end
 
     test "GET / with producer token (non-admin) returns 403", %{producer_token: token} do
@@ -393,6 +389,268 @@ defmodule Malachi.DashboardSecurityTest do
         {:error, _} ->
           :ok
       end
+    end
+  end
+
+  describe "stale session on a page route" do
+    test "a rejected session clears the cookie and redirects instead of stranding the user on a 403" do
+      {:ok, socket} = DashboardHelper.connect()
+
+      # A token the server does not know is the same shape of failure a legitimate user hits when session
+      # binding rejects them (a changed IP, or a changed User-Agent with UA binding on). On a page route the
+      # browser would otherwise keep replaying the bad cookie against a JSON 403 forever.
+      {:ok, response} =
+        DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachi_token=not_a_real_token"})
+
+      assert status_code(response) == 302
+      assert String.contains?(response, "Location: /login")
+      assert String.downcase(response) =~ "set-cookie: malachi_token=;"
+      assert String.contains?(response, "Max-Age=0")
+      :gen_tcp.close(socket)
+    end
+
+    test "a valid session lacking permission still gets a 403 and keeps its cookie", %{producer_token: token} do
+      {:ok, socket} = DashboardHelper.connect()
+
+      # /users is admin-only. The session is fine, so this is a permission failure, not a stale session: it
+      # must not log the user out.
+      {:ok, response} = DashboardHelper.authenticated_request(socket, :GET, "/users", token)
+
+      assert status_code(response) == 403
+      refute String.downcase(response) =~ "set-cookie: malachi_token=;"
+      :gen_tcp.close(socket)
+    end
+  end
+
+  # CORS is off by default, so each test sets exactly the configuration it exercises. The preflight must
+  # agree with what a real request would get: it answers from the same builder.
+  describe "CORS preflight" do
+    setup do
+      original_enabled = Application.get_env(:malachi, :dashboard_cors_enabled, false)
+      original_origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
+
+      on_exit(fn ->
+        Application.put_env(:malachi, :dashboard_cors_enabled, original_enabled)
+        Application.put_env(:malachi, :dashboard_cors_origins, original_origins)
+      end)
+
+      :ok
+    end
+
+    test "sends no CORS headers when CORS is disabled" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, false)
+
+      response = preflight_response("/metrics", "https://example.com")
+
+      assert String.contains?(response, "204 No Content")
+      refute String.downcase(response) =~ "access-control-allow-origin"
+    end
+
+    test "echoes a whitelisted origin and varies on it" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://a.example", "https://b.example"])
+
+      lower = String.downcase(preflight_response("/metrics", "https://b.example"))
+
+      assert lower =~ "access-control-allow-origin: https://b.example"
+      # Exactly the requesting origin, never the whole whitelist joined into one invalid header.
+      refute lower =~ "https://a.example"
+      assert lower =~ "vary: origin"
+    end
+
+    test "refuses an origin outside the whitelist but still varies" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://allowed.example"])
+
+      lower = String.downcase(preflight_response("/metrics", "https://evil.example"))
+
+      assert lower =~ "204 no content"
+      refute lower =~ "access-control-allow-origin"
+      # Without Vary a cache could replay this denial to the whitelisted origin.
+      assert lower =~ "vary: origin"
+    end
+
+    test "answers the wildcard when the whitelist is *" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["*"])
+
+      lower = String.downcase(preflight_response("/metrics", "https://anything.example"))
+
+      assert lower =~ "access-control-allow-origin: *"
+      refute lower =~ "vary: origin"
+    end
+
+    test "sends no CORS headers on a non-CORS path even when enabled" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://example.com"])
+
+      response = preflight_response("/", "https://example.com")
+
+      assert String.contains?(response, "204 No Content")
+      refute String.downcase(response) =~ "access-control-allow-origin"
+    end
+  end
+
+  # The preflight is only half the contract: the real response has to carry the same CORS headers, including
+  # on an error, or the browser turns the failure into an opaque network error the caller cannot inspect.
+  describe "CORS on real responses" do
+    setup do
+      original_enabled = Application.get_env(:malachi, :dashboard_cors_enabled, false)
+      original_origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://app.example"])
+
+      on_exit(fn ->
+        Application.put_env(:malachi, :dashboard_cors_enabled, original_enabled)
+        Application.put_env(:malachi, :dashboard_cors_origins, original_origins)
+      end)
+
+      :ok
+    end
+
+    test "an authenticated GET /metrics echoes the whitelisted origin", %{admin_token: token} do
+      {:ok, socket} = DashboardHelper.connect()
+
+      {:ok, response} =
+        DashboardHelper.authenticated_request(socket, :GET, "/metrics", token,
+          headers: %{"Origin" => "https://app.example"}
+        )
+
+      assert status_code(response) == 200
+      assert String.downcase(response) =~ "access-control-allow-origin: https://app.example"
+      :gen_tcp.close(socket)
+    end
+
+    test "a 401 on /metrics still carries the CORS headers" do
+      {:ok, socket} = DashboardHelper.connect()
+
+      # No credentials, so this is the authentication_required path. It must stay readable cross-origin.
+      {:ok, response} =
+        DashboardHelper.request(socket, :GET, "/metrics", headers: %{"Origin" => "https://app.example"})
+
+      assert status_code(response) == 401
+      assert String.downcase(response) =~ "access-control-allow-origin: https://app.example"
+      :gen_tcp.close(socket)
+    end
+
+    test "an unauthenticated cross-origin /stream gets a readable 401, not a redirect" do
+      {:ok, socket} = DashboardHelper.connect()
+
+      # /stream is an HTML route for same-origin navigation (302 to the login page), but a cross-origin
+      # EventSource cannot follow that into an HTML page, so it must get the JSON 401 with CORS headers.
+      {:ok, response} =
+        DashboardHelper.request(socket, :GET, "/stream", headers: %{"Origin" => "https://app.example"})
+
+      assert status_code(response) == 401
+      assert String.downcase(response) =~ "access-control-allow-origin: https://app.example"
+      :gen_tcp.close(socket)
+    end
+
+    test "an unauthenticated same-origin /stream still redirects to the login page" do
+      {:ok, socket} = DashboardHelper.connect()
+
+      # No Origin header means a same-origin navigation, which keeps the redirect.
+      {:ok, response} = DashboardHelper.request(socket, :GET, "/stream")
+
+      assert status_code(response) == 302
+      assert String.contains?(response, "Location: /login")
+      :gen_tcp.close(socket)
+    end
+
+    @tag :slow
+    test "a 429 on /metrics still carries the CORS headers" do
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+
+      # The dashboard auth limit is 10 per minute per IP, so a burst of token validations trips it. The 429
+      # has to stay readable cross-origin for the same reason the 401 does.
+      rate_limited =
+        Enum.reduce_while(1..20, nil, fn _i, _acc ->
+          {:ok, socket} = DashboardHelper.connect()
+
+          {:ok, response} =
+            DashboardHelper.authenticated_request(socket, :GET, "/metrics", "bogus_token",
+              headers: %{"Origin" => "https://app.example"}
+            )
+
+          :gen_tcp.close(socket)
+
+          if status_code(response) == 429, do: {:halt, response}, else: {:cont, nil}
+        end)
+
+      assert rate_limited, "expected the dashboard auth rate limit to trip within 20 requests"
+      assert String.downcase(rate_limited) =~ "access-control-allow-origin: https://app.example"
+    end
+
+    test "a response to a non-whitelisted origin carries no CORS headers", %{admin_token: token} do
+      {:ok, socket} = DashboardHelper.connect()
+
+      {:ok, response} =
+        DashboardHelper.authenticated_request(socket, :GET, "/metrics", token,
+          headers: %{"Origin" => "https://evil.example"}
+        )
+
+      assert status_code(response) == 200
+      refute String.downcase(response) =~ "access-control-allow-origin"
+      :gen_tcp.close(socket)
+    end
+  end
+
+  describe "SecurityHeaders.build_cors_headers/2" do
+    setup do
+      original_enabled = Application.get_env(:malachi, :dashboard_cors_enabled, false)
+      original_origins = Application.get_env(:malachi, :dashboard_cors_origins, ["*"])
+      Application.put_env(:malachi, :dashboard_cors_enabled, true)
+
+      on_exit(fn ->
+        Application.put_env(:malachi, :dashboard_cors_enabled, original_enabled)
+        Application.put_env(:malachi, :dashboard_cors_origins, original_origins)
+      end)
+
+      :ok
+    end
+
+    test "a multi-origin whitelist answers the requesting origin, not the joined list" do
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://a.example", "https://b.example"])
+
+      headers = SecurityHeaders.build_cors_headers("/metrics", "https://a.example")
+
+      assert {"access-control-allow-origin", "https://a.example"} in headers
+      assert {"vary", "origin"} in headers
+    end
+
+    test "an origin outside the whitelist gets no allow header, only Vary" do
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://a.example"])
+
+      # Vary alone: the response depends on Origin even when refused, so a cache must not reuse it.
+      assert SecurityHeaders.build_cors_headers("/metrics", "https://evil.example") == [{"vary", "origin"}]
+    end
+
+    test "a request with no Origin gets no allow header, only Vary" do
+      Application.put_env(:malachi, :dashboard_cors_origins, ["https://a.example"])
+
+      assert SecurityHeaders.build_cors_headers("/metrics", nil) == [{"vary", "origin"}]
+    end
+
+    test "the wildcard whitelist answers * and does not vary" do
+      Application.put_env(:malachi, :dashboard_cors_origins, ["*"])
+
+      headers = SecurityHeaders.build_cors_headers("/metrics", "https://anything.example")
+
+      assert {"access-control-allow-origin", "*"} in headers
+      refute Enum.any?(headers, fn {name, _value} -> name == "vary" end)
+    end
+
+    test "a path outside /metrics and /stream gets no headers" do
+      Application.put_env(:malachi, :dashboard_cors_origins, ["*"])
+
+      assert SecurityHeaders.build_cors_headers("/", "https://a.example") == []
+    end
+
+    test "CORS disabled beats any whitelist" do
+      Application.put_env(:malachi, :dashboard_cors_enabled, false)
+      Application.put_env(:malachi, :dashboard_cors_origins, ["*"])
+
+      assert SecurityHeaders.build_cors_headers("/metrics", "https://a.example") == []
     end
   end
 
@@ -850,6 +1108,18 @@ defmodule Malachi.DashboardSecurityTest do
           :ok
       end
     end
+  end
+
+  # Sends an OPTIONS preflight for `path` carrying `origin` and returns the raw response. Deliberately
+  # strict: the dashboard runs for this suite, so a connect or recv failure is a real failure, not a reason
+  # to skip the assertions and report green.
+  defp preflight_response(path, origin) do
+    {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000)
+    :gen_tcp.send(socket, "OPTIONS #{path} HTTP/1.1\r\nHost: localhost\r\nOrigin: #{origin}\r\n\r\n")
+    {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
+    :gen_tcp.close(socket)
+
+    response
   end
 
   # Extracts the numeric status from an HTTP response, and its JSON body.

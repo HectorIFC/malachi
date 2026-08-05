@@ -546,6 +546,22 @@ docker run \
   hectorcardoso/malachi:latest
 ```
 
+With an explicit list, the request's own `Origin` is echoed back when it is on the list, and nothing is sent
+when it is not: `Access-Control-Allow-Origin` carries a single origin, never the whole list. The default `*`
+answers every origin. The `OPTIONS` preflight applies the same rules, so it never advertises access the real
+request would be denied.
+
+Only `/metrics` and `/stream` are cross-origin endpoints, and a preflight for any other path is refused. Note
+what that does and does not buy: CORS decides whether a browser lets a page **read** a response, not what
+reaches the server. Refusing the preflight blocks the cross-origin requests that need one (a custom header, a
+JSON content type), but a CORS-simple request still arrives and is processed, with its response unreadable to
+the caller. What keeps such a request unprivileged is the session cookie being `SameSite=Strict`, so it is not
+sent cross-origin at all.
+
+Credentials are never part of a cross-origin exchange here: no `Access-Control-Allow-Credentials` is sent, so
+a cross-origin caller authenticates with a `Bearer` token. That also makes `/stream` same-origin only, since
+an `EventSource` cannot set headers.
+
 ## 🔍 Audit Logging
 
 Malachi includes comprehensive audit logging for security-relevant events.
