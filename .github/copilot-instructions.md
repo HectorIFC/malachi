@@ -225,8 +225,10 @@ make docker-build | docker-buildx | compose-up | compose-logs | clean
   mix deps.audit
   mix test
   ```
-- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title. `feat:` → minor,
-  `fix:` → patch, `BREAKING CHANGE:` → major.
+- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title. Release bump: a
+  `feat:` title or a `[minor]`/`minor` label → minor; `[major]` in the title or a `major` label → major;
+  anything else → patch. `release.yml` reads the title and the labels, not the PR body, so `BREAKING
+  CHANGE:` in the body does not bump the version.
 
 ## Adding features
 
