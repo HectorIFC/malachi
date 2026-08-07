@@ -17,7 +17,7 @@ self-healing, and rack-aware placement.
 
 [![CI](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml)
 [![Release](https://github.com/HectorIFC/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/release.yml)
-[![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachi?label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachi)
+[![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachi?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachi.svg)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![Security](https://github.com/HectorIFC/malachi/actions/workflows/security.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
