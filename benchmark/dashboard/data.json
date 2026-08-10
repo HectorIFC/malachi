@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "timestamp": "2026-08-10T05:33:08.565Z",
+    "command": "/Users/hectorcardoso/malachi/scripts/loadtest.js --scenario produce --connections 8 --duration 6 --record-size 256 --batch 10 --json",
+    "git_ref": "8f9c463-dirty",
+    "git_ref_date": "2026-08-09T22:22:45-03:00",
+    "malachi_version": "0.7.8",
+    "hardware": {
+      "cpu": "Apple M1",
+      "cores": 8,
+      "memory_bytes": 8589934592,
+      "os": "darwin 25.5.0"
+    }
+  },
+  "scenario": "produce",
+  "mode": "closed-loop",
+  "connections": 8,
+  "duration_s": 6.003,
+  "topic": "loadtest_1786339981978",
+  "target_rate_per_s": null,
+  "saturated": null,
+  "operations": 15501,
+  "ops_per_s": 2582,
+  "records": 155010,
+  "records_per_s": 25821,
+  "bytes": 39682560,
+  "mb_per_s": 6.61,
+  "errors": 0,
+  "latency_ms": {
+    "coordinated_omission_corrected": false,
+    "min": 1.22,
+    "mean": 3.1,
+    "stddev": 1.56,
+    "p50": 2.82,
+    "p90": 4.75,
+    "p95": 5.3,
+    "p99": 7.5,
+    "p99_9": 12.58,
+    "p99_99": 33.15,
+    "max": 33.87,
+    "count": 15501
+  }
+}

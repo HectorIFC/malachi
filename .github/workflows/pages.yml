@@ -63,6 +63,11 @@ jobs:
       - name: 📝 Generate documentation
         run: mix docs --warnings-as-errors
 
+      # Ship the static benchmark results page alongside the docs, at /benchmarks/. It is a self-contained
+      # bundle (index.html + data.json), so a plain copy into the upload root is all it needs.
+      - name: 📊 Add benchmark results page
+        run: cp -r benchmark/dashboard doc/benchmarks
+
       - name: ⚙️ Configure Pages
         uses: actions/configure-pages@v5
 
