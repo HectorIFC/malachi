@@ -33,10 +33,12 @@ defmodule Malachi.Wire do
     * reuses or renumbers an `api_key` that already shipped, or
     * changes how `error_code` or its reason string is encoded.
 
-  Evolve the protocol **additively** instead: a new operation takes the next free `api_key` number, and a
-  new field is appended at the end of an existing payload (older clients stop reading before it). Never
-  modify a shipped frame in place. This mirrors the discipline the Apache Iggy project keeps around its
-  own binary protocol: extend, do not rewrite.
+  Evolve the protocol **additively** instead: every new operation, and every extension of an existing one,
+  takes the next free `api_key` number. Appending a field to an existing payload is **not** compatible here,
+  because the decoders match a payload to its exact end (`{value, <<>>} = take_str(rest)`): trailing bytes
+  raise a `MatchError` rather than being ignored, so an old peer cannot skip a field a newer one appended. A
+  shipped frame is therefore frozen; a change means a new key. This mirrors the discipline the Apache Iggy
+  project keeps around its own binary protocol: extend, do not rewrite.
   """
 
   alias Malachi.Log.Record

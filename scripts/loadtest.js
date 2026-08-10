@@ -26,8 +26,8 @@
  */
 
 const { performance } = require('perf_hooks');
-const { MalachiClient } = require('./lib/client');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { MalachiClient, isMigrating, isNotOwner } = require('./lib/client');
+const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -176,6 +176,11 @@ function recordBytes(records) {
 
 // ---- ops (one unit of work; return { records, bytes }) ----
 
+// During a vnode split the topic is briefly fenced (:migrating) or routed to a stale owner (:not_owner);
+// both are transient (the fence lifts and the ring settles), so retry them out of the measured op rather
+// than counting a reshard blip as a benchmark error, matching what producer.js/consumer.js do.
+const transient = (err) => isMigrating(err) || isNotOwner(err);
+
 function produceOp(opts) {
   const value = makeValue(opts.recordSize);
   let seq = 0;
@@ -184,14 +189,17 @@ function produceOp(opts) {
       seq += 1;
       return { key: `key-${seq % opts.keys}`, value };
     });
-    const n = await client.produce(opts.topic, batch);
+    const n = await withRetry(() => client.produce(opts.topic, batch), transient);
     return { records: n, bytes: value.length * batch.length };
   };
 }
 
 function fetchOp(opts) {
   return async (client, ctx) => {
-    const { records, cursor } = await client.fetch(opts.topic, { cursor: ctx.cursor, max: opts.max });
+    const { records, cursor } = await withRetry(
+      () => client.fetch(opts.topic, { cursor: ctx.cursor, max: opts.max }),
+      transient,
+    );
     // Drained: rewind to the start so the worker keeps generating fetch load against the backlog.
     ctx.cursor = records.length === 0 ? null : cursor;
     return { records: records.length, bytes: recordBytes(records) };
@@ -324,7 +332,7 @@ async function prepopulate(topic, count, recordSize, keys) {
   while (done < count) {
     const n = Math.min(CHUNK, count - done);
     const batch = Array.from({ length: n }, (_, i) => ({ key: `key-${(done + i) % keys}`, value }));
-    await client.produce(topic, batch);
+    await withRetry(() => client.produce(topic, batch), transient);
     done += n;
   }
   client.close();
@@ -364,7 +372,7 @@ function buildMeta() {
   const cpus = os.cpus();
   return {
     timestamp: new Date().toISOString(),
-    command: process.argv.slice(1).join(' '),
+    command: [path.relative(REPO_ROOT, process.argv[1]), ...process.argv.slice(2)].join(' '),
     git_ref: ref ? (dirty ? `${ref}-dirty` : ref) : null,
     git_ref_date: git(['show', '-s', '--format=%cI', 'HEAD']),
     malachi_version: malachiVersion(),
