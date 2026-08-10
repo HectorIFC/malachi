@@ -1,6 +1,8 @@
 defmodule Malachi.BrokerServerTest do
   use ExUnit.Case, async: true
 
+  import Malachi.Test.PollingHelper
+
   alias Malachi.Broker
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
@@ -183,17 +185,7 @@ defmodule Malachi.BrokerServerTest do
           brokers_refresh_interval: 5
         )
 
-      assert wait_until(fn -> :sys.get_state(server).broker.broker_attributes == attributes end)
-    end
-  end
-
-  defp wait_until(check, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
-
-    cond do
-      check.() -> true
-      System.monotonic_time(:millisecond) > deadline -> false
-      true -> Process.sleep(2) && wait_until(check, deadline)
+      wait_until!(fn -> :sys.get_state(server).broker.broker_attributes == attributes end)
     end
   end
 
