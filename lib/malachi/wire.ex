@@ -18,6 +18,25 @@ defmodule Malachi.Wire do
   (`decode_request/1`, `decode_produce_req/1`, …) assume a **well-formed** body and raise on a malformed
   one. A frame body comes from an untrusted client, so B1b must decode inside a `try` and answer an error
   (or close) on a raise: keeping the malformed-input handling at the connection boundary, not in the codec.
+
+  ## Stability and compatibility
+
+  This framing is the compatibility contract with every client: the Node CLI, the Elixir client, and any
+  future SDK. Two things are **stable** and must stay so: the byte layout of each frame above, and the
+  `api_key` numbers (currently 0..16, `@auth` through `@list_acls`). Clients are compiled against them, so
+  a running cluster and its clients agree on the wire only as long as both hold.
+
+  A change is **breaking** (every deployed client must update in lockstep, so it cannot ship in a normal
+  release) when it:
+
+    * changes the layout or meaning of an existing `api_key`'s request or response payload,
+    * reuses or renumbers an `api_key` that already shipped, or
+    * changes how `error_code` or its reason string is encoded.
+
+  Evolve the protocol **additively** instead: a new operation takes the next free `api_key` number, and a
+  new field is appended at the end of an existing payload (older clients stop reading before it). Never
+  modify a shipped frame in place. This mirrors the discipline the Apache Iggy project keeps around its
+  own binary protocol: extend, do not rewrite.
   """
 
   alias Malachi.Log.Record
