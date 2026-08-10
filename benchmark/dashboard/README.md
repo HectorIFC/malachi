@@ -10,7 +10,10 @@ The Pages workflow copies this directory into the published docs at `benchmarks/
 ## Regenerate `data.json`
 
 `data.json` is one run of `scripts/loadtest.js --json` (its `meta` block already records the command, git ref,
-version, and hardware, so the result is self-describing). To refresh it, start a server and capture a run:
+version, and hardware, so the result is self-describing). Regenerate it from a committed (clean) tree so the
+recorded `git_ref` is a real commit, not `<sha>-dirty`. Write to a temp file and move it into place:
+redirecting straight onto the tracked `data.json` truncates it first, which `git status` then reports as a
+dirty tree. Start a server and capture a run:
 
 ```bash
 # one terminal
@@ -18,8 +21,8 @@ MIX_ENV=dev mix run --no-halt
 
 # another terminal
 MALACHI_USER=admin MALACHI_PASS=admin123 \
-  node scripts/loadtest.js --scenario produce --connections 8 --duration 6 --batch 10 --json \
-  > benchmark/dashboard/data.json
+  node scripts/loadtest.js --scenario produce --connections 8 --duration 6 --record-size 256 --batch 10 --json \
+  > /tmp/data.json && mv /tmp/data.json benchmark/dashboard/data.json
 ```
 
 Any scenario works (`produce`, `fetch`, `mixed`); `stream` reports throughput only (no latency block), so the
