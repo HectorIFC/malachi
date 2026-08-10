@@ -1,0 +1,157 @@
+name: Benchmark dashboard
+
+# Manual only: regenerating the published sample is a deliberate act, not something that should run on every
+# push (the numbers are machine-dependent, so an automatic run would churn benchmark/dashboard/data.json with
+# meaningless diffs). Running it here, on a known CI runner, gives a stable environment instead of whatever
+# laptop happened to capture the last sample, and it opens a PR so the fresh numbers still get a human look
+# before they reach main (where pages.yml republishes the dashboard).
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Load-test scenario
+        type: choice
+        default: produce
+        options: [produce, fetch, mixed]
+      connections:
+        description: Concurrent connections
+        default: '8'
+      duration:
+        description: Duration in seconds
+        default: '6'
+      record_size:
+        description: Record size in bytes
+        default: '256'
+      batch:
+        description: Records per batch
+        default: '10'
+
+# The job pushes a branch and opens a PR, so it needs write on both. Checkout runs with
+# persist-credentials: false, so the write token is never left in the local git config while the load test
+# (repo code) runs; the push authenticates explicitly with the token, and gh pr create uses GH_TOKEN.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regenerate:
+    name: Regenerate data.json
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: dev
+      # Dev-mode users (see the weak-password warning the server logs); the load test authenticates with them.
+      MALACHI_USER: admin
+      MALACHI_PASS: admin123
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        # Do not persist the write token in the local git config: the load test (repo code) runs after this,
+        # and the push step below authenticates explicitly instead.
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      - name: 🟢 Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-dashboard-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-dashboard-
+
+      - name: 🔨 Install dependencies
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch (transient, and worse on a
+          # cache miss when every dep downloads at once). Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && break
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+            if [ "$i" -eq 3 ]; then exit 1; fi
+          done
+          mix compile
+
+      # Boot, wait, load-test, and tear down in ONE step: a process backgrounded in one step is killed before
+      # the next runs, so the server must live and die inside the same shell. Writing the result to a temp file
+      # outside the repo keeps the working tree clean while the load test runs, so buildMeta records a real
+      # commit SHA (not "<sha>-dirty"); the file is moved into place only afterwards.
+      - name: 📊 Regenerate data.json
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          CONNECTIONS: ${{ inputs.connections }}
+          DURATION: ${{ inputs.duration }}
+          RECORD_SIZE: ${{ inputs.record_size }}
+          BATCH: ${{ inputs.batch }}
+        run: |
+          set -euo pipefail
+          mix run --no-halt &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=false
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/localhost/4040) 2>/dev/null; then
+              echo "server ready after ${i}s"
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then echo "server did not open :4040 in time"; exit 1; fi
+
+          node scripts/loadtest.js \
+            --scenario "$SCENARIO" \
+            --connections "$CONNECTIONS" \
+            --duration "$DURATION" \
+            --record-size "$RECORD_SIZE" \
+            --batch "$BATCH" \
+            --json > /tmp/data.json
+          mv /tmp/data.json benchmark/dashboard/data.json
+
+          node -e 'const d=require("./benchmark/dashboard/data.json"); console.log("meta:", d.meta.command, "|", d.meta.git_ref, "|", d.records_per_s + " rec/s")'
+
+      - name: 🔀 Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCENARIO: ${{ inputs.scenario }}
+          CONNECTIONS: ${{ inputs.connections }}
+          DURATION: ${{ inputs.duration }}
+          RECORD_SIZE: ${{ inputs.record_size }}
+          BATCH: ${{ inputs.batch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- benchmark/dashboard/data.json; then
+            echo "data.json is unchanged; nothing to open"
+            exit 0
+          fi
+
+          ref="$(node -e 'process.stdout.write(require("./benchmark/dashboard/data.json").meta.git_ref)')"
+          branch="bench/dashboard-data-${ref}-${GITHUB_RUN_ID}"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git add benchmark/dashboard/data.json
+          git commit -m "chore(bench): refresh dashboard sample from CI (${ref})"
+          # persist-credentials: false left no push auth in git config, so push with the token explicitly.
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore(bench): refresh dashboard sample from CI (${ref})" \
+            --body "Regenerated \`benchmark/dashboard/data.json\` on the CI runner (a stable environment, unlike an ad-hoc laptop capture). Scenario \`${SCENARIO}\`, connections ${CONNECTIONS}, duration ${DURATION}s, record-size ${RECORD_SIZE}, batch ${BATCH}. Merging republishes the dashboard via pages.yml."

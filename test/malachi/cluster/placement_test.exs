@@ -118,6 +118,24 @@ defmodule Malachi.Cluster.PlacementTest do
       end
     end
 
+    property "minimum reshuffle: adding one broker changes at most one chosen replica (the new one)" do
+      check all(
+              brokers <- uniq_list_of(broker(), min_length: 1, max_length: 8),
+              rf <- integer(1..6),
+              segment_id <- segment_id()
+            ) do
+        {:ok, before} = Placement.place(segment_id, brokers, rf)
+
+        # a broker id outside the current set: broker() draws 1..100, so one past the max is always new
+        new = Enum.max(brokers) + 1
+        {:ok, after_add} = Placement.place(segment_id, [new | brokers], rf)
+
+        # HRW only lets the new broker bump an existing replica out; it never reshuffles the survivors
+        assert after_add -- before == [] or after_add -- before == [new]
+        assert length(before -- after_add) <= 1
+      end
+    end
+
     property "heal/3 reaches a fully-replicated fixpoint in one pass" do
       check all(
               all_brokers <- uniq_list_of(broker(), min_length: 1, max_length: 6),

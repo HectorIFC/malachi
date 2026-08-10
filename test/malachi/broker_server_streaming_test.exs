@@ -3,6 +3,8 @@ defmodule Malachi.BrokerServerStreamingTest do
   # the subscriber, receiving {:log_records, ...} into its own mailbox).
   use ExUnit.Case, async: false
 
+  import Malachi.Test.PollingHelper
+
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Consumer.GroupCoordinator
@@ -89,11 +91,11 @@ defmodule Malachi.BrokerServerStreamingTest do
         receive do: (:never -> :ok)
       end)
 
-    wait_until(fn -> length(subscribers(broker)) == 1 end)
+    wait_until!(fn -> length(subscribers(broker)) == 1 end)
     Process.exit(sub, :kill)
     assert_receive {:DOWN, ^ref, :process, _pid, _reason}
 
-    wait_until(fn -> subscribers(broker) == [] end)
+    wait_until!(fn -> subscribers(broker) == [] end)
   end
 
   defp subscribers(broker), do: Map.get(:sys.get_state(broker).subscribers, "t", [])
@@ -103,16 +105,6 @@ defmodule Malachi.BrokerServerStreamingTest do
       _ -> flush()
     after
       0 -> :ok
-    end
-  end
-
-  defp wait_until(fun, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 1_000
-
-    cond do
-      fun.() -> :ok
-      System.monotonic_time(:millisecond) > deadline -> flunk("condition not met in time")
-      true -> Process.sleep(5) && wait_until(fun, deadline)
     end
   end
 
@@ -177,11 +169,11 @@ defmodule Malachi.BrokerServerStreamingTest do
         Process.sleep(:infinity)
       end)
 
-    wait_until(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord, "g", "t", :m1)) end)
+    wait_until!(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord, "g", "t", :m1)) end)
 
     Process.exit(pid, :kill)
     # the broker's :DOWN spawns an async task to leave the group; the member eventually disappears
-    wait_until(fn -> GroupCoordinator.assignment(coord, "g", "t", :m1) == {:error, :unknown_member} end)
+    wait_until!(fn -> GroupCoordinator.assignment(coord, "g", "t", :m1) == {:error, :unknown_member} end)
   end
 
   test "a member ack refreshes the subscriber's coordinator so the :DOWN leave targets the current owner",
@@ -202,10 +194,10 @@ defmodule Malachi.BrokerServerStreamingTest do
 
     assert_receive :acked, 2_000
     # the ack registered the member on the new owner (coord2)
-    wait_until(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord2, "g", "t", :m1)) end)
+    wait_until!(fn -> match?({:ok, _, _}, GroupCoordinator.assignment(coord2, "g", "t", :m1)) end)
 
     Process.exit(pid, :kill)
     # the leave must follow the refreshed ref to coord2 (not the stale coord1), so m1 leaves coord2
-    wait_until(fn -> GroupCoordinator.assignment(coord2, "g", "t", :m1) == {:error, :unknown_member} end)
+    wait_until!(fn -> GroupCoordinator.assignment(coord2, "g", "t", :m1) == {:error, :unknown_member} end)
   end
 end

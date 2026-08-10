@@ -22,68 +22,139 @@
  *   node loadtest.js --scenario mixed --connections 20 --record-size 512 --keys 1000
  *
  * Common flags: --topic, --batch, --record-size, --keys, --max, --window, --prepopulate, --warmup,
- *   --samples (reservoir size), --json. Default credentials: app / app123 (produce + consume).
+ *   --json (emits reproduce metadata). Default credentials: app / app123 (produce + consume).
  */
 
 const { performance } = require('perf_hooks');
-const { MalachiClient } = require('./lib/client');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { MalachiClient, isMigrating, isNotOwner } = require('./lib/client');
+const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+const { execFileSync } = require('child_process');
 
 const SCENARIOS = ['produce', 'fetch', 'stream', 'mixed'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Exact count/sum/min/max plus a bounded reservoir for percentiles: the reservoir keeps memory flat on
-// long runs, while min/max stay exact (a reservoir would clip the tail). Latency is in milliseconds.
+// A compact HDR-style log-linear histogram for accurate tail percentiles (P99.9 / P99.99) with bounded
+// memory and no sampling error, unlike a reservoir (which under-represents the deep tail). Values are
+// recorded as integer microseconds. The lowest region (< subBucketCount us) is linear with 1us resolution;
+// above it, each power-of-two octave is split into subBucketCount linear slots, giving ~(1/subBucketCount)
+// relative precision everywhere. Buckets are stored sparsely in a Map, so only touched buckets cost memory.
+class Histogram {
+  constructor(subBucketBits = 7) {
+    this.subBucketBits = subBucketBits;
+    this.subBucketCount = 1 << subBucketBits; // 128 slots per octave => ~0.8% relative precision
+    this.counts = new Map(); // bucketIndex -> count
+    this.total = 0;
+  }
+
+  // The bucket index a value falls in. Below subBucketCount: linear (index === value). Above: the octave
+  // (floor(log2 v)) times subBucketCount, plus the linear slot within it. slotWidth = octave/subBucketCount
+  // is always an integer power of two >= 1, so the arithmetic stays exact.
+  _index(v) {
+    if (v < this.subBucketCount) return v;
+    const magnitude = 31 - Math.clz32(v); // floor(log2 v); v assumed < 2^31 us (~35 min)
+    const octave = 1 << magnitude;
+    const slotWidth = octave >>> this.subBucketBits;
+    const sub = ((v - octave) / slotWidth) | 0;
+    return this.subBucketCount + (magnitude - this.subBucketBits) * this.subBucketCount + sub;
+  }
+
+  // The representative value (bucket midpoint, in us) for a bucket index, used for percentile output.
+  _value(index) {
+    if (index < this.subBucketCount) return index;
+    const rel = index - this.subBucketCount;
+    const magnitude = this.subBucketBits + Math.floor(rel / this.subBucketCount);
+    const sub = rel % this.subBucketCount;
+    const octave = 1 << magnitude;
+    const slotWidth = octave >>> this.subBucketBits;
+    return octave + sub * slotWidth + slotWidth / 2;
+  }
+
+  record(us) {
+    const v = us < 1 ? 1 : us; // 1us floor (a sub-us latency still counts as the smallest bucket)
+    const i = this._index(v);
+    this.counts.set(i, (this.counts.get(i) || 0) + 1);
+    this.total += 1;
+  }
+
+  // Nearest-rank percentiles (matching the previous ceil-based rank), returned as { p: valueUs }.
+  percentiles(ps) {
+    const out = {};
+    if (this.total === 0) {
+      for (const p of ps) out[p] = 0;
+      return out;
+    }
+    const keys = [...this.counts.keys()].sort((a, b) => a - b);
+    const sortedPs = [...ps].sort((a, b) => a - b);
+    const targets = sortedPs.map((p) => Math.max(1, Math.ceil((p / 100) * this.total)));
+    let cum = 0;
+    let ti = 0;
+    for (const k of keys) {
+      cum += this.counts.get(k);
+      while (ti < sortedPs.length && cum >= targets[ti]) {
+        out[sortedPs[ti]] = this._value(k);
+        ti += 1;
+      }
+      if (ti >= sortedPs.length) break;
+    }
+    while (ti < sortedPs.length) {
+      out[sortedPs[ti]] = this._value(keys[keys.length - 1]);
+      ti += 1;
+    }
+    return out;
+  }
+}
+
+// Latency stats: exact count/min/max, Welford's online variance for a numerically stable stddev, and the
+// HDR-style histogram above for accurate percentiles (including the deep tail). Latency is in milliseconds;
+// the histogram records microseconds so sub-millisecond tails keep their resolution.
 class Stats {
-  constructor(maxSamples) {
+  constructor() {
     this.count = 0;
-    this.sum = 0;
+    this.mean_ = 0; // Welford running mean (ms)
+    this.m2 = 0; // Welford sum of squared deltas
     this.min = Infinity;
     this.max = -Infinity;
     this.errors = 0;
     this.records = 0;
     this.bytes = 0;
-    this.samples = [];
-    this.maxSamples = maxSamples;
-    this.seen = 0;
+    this.hist = new Histogram();
     this.saturated = false; // set by openLoop when in-flight hits the cap (server can't sustain the rate)
   }
 
   record(latencyMs, records, bytes) {
     this.count += 1;
-    this.sum += latencyMs;
+    const delta = latencyMs - this.mean_;
+    this.mean_ += delta / this.count;
+    this.m2 += delta * (latencyMs - this.mean_);
     this.records += records;
     this.bytes += bytes;
     if (latencyMs < this.min) this.min = latencyMs;
     if (latencyMs > this.max) this.max = latencyMs;
-
-    // Reservoir sampling (Vitter's Algorithm R): every observed latency has an equal chance of being kept.
-    this.seen += 1;
-    if (this.samples.length < this.maxSamples) {
-      this.samples.push(latencyMs);
-    } else {
-      const j = Math.floor(Math.random() * this.seen);
-      if (j < this.maxSamples) this.samples[j] = latencyMs;
-    }
+    this.hist.record(Math.round(latencyMs * 1000)); // ms -> us
   }
 
   error() {
     this.errors += 1;
   }
 
+  // { p: latencyMs } for each requested percentile.
   percentiles(ps) {
-    const sorted = this.samples.slice().sort((a, b) => a - b);
-    const at = (p) => {
-      if (sorted.length === 0) return 0;
-      const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
-      return sorted[Math.max(0, idx)];
-    };
-    return Object.fromEntries(ps.map((p) => [p, at(p)]));
+    const us = this.hist.percentiles(ps);
+    const out = {};
+    for (const p of ps) out[p] = us[p] / 1000; // us -> ms
+    return out;
   }
 
   mean() {
-    return this.count === 0 ? 0 : this.sum / this.count;
+    return this.mean_;
+  }
+
+  stddev() {
+    return this.count > 1 ? Math.sqrt(this.m2 / this.count) : 0;
   }
 }
 
@@ -105,6 +176,11 @@ function recordBytes(records) {
 
 // ---- ops (one unit of work; return { records, bytes }) ----
 
+// During a vnode split the topic is briefly fenced (:migrating) or routed to a stale owner (:not_owner);
+// both are transient (the fence lifts and the ring settles), so retry them out of the measured op rather
+// than counting a reshard blip as a benchmark error, matching what producer.js/consumer.js do.
+const transient = (err) => isMigrating(err) || isNotOwner(err);
+
 function produceOp(opts) {
   const value = makeValue(opts.recordSize);
   let seq = 0;
@@ -113,14 +189,17 @@ function produceOp(opts) {
       seq += 1;
       return { key: `key-${seq % opts.keys}`, value };
     });
-    const n = await client.produce(opts.topic, batch);
+    const n = await withRetry(() => client.produce(opts.topic, batch), transient);
     return { records: n, bytes: value.length * batch.length };
   };
 }
 
 function fetchOp(opts) {
   return async (client, ctx) => {
-    const { records, cursor } = await client.fetch(opts.topic, { cursor: ctx.cursor, max: opts.max });
+    const { records, cursor } = await withRetry(
+      () => client.fetch(opts.topic, { cursor: ctx.cursor, max: opts.max }),
+      transient,
+    );
     // Drained: rewind to the start so the worker keeps generating fetch load against the backlog.
     ctx.cursor = records.length === 0 ? null : cursor;
     return { records: records.length, bytes: recordBytes(records) };
@@ -253,18 +332,104 @@ async function prepopulate(topic, count, recordSize, keys) {
   while (done < count) {
     const n = Math.min(CHUNK, count - done);
     const batch = Array.from({ length: n }, (_, i) => ({ key: `key-${(done + i) % keys}`, value }));
-    await client.produce(topic, batch);
+    await withRetry(() => client.produce(topic, batch), transient);
     done += n;
   }
   client.close();
   console.log(colors.gray(`   prepopulated ${done} records`));
 }
 
+// ---- reproduce metadata ----
+
+const REPO_ROOT = path.join(__dirname, '..');
+
+// execFileSync (no shell) with a fixed argument array: git output never flows through a shell.
+function git(args) {
+  try {
+    return execFileSync('git', args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return null;
+  }
+}
+
+function malachiVersion() {
+  try {
+    const mix = fs.readFileSync(path.join(REPO_ROOT, 'mix.exs'), 'utf8');
+    const m = mix.match(/@version\s+"([^"]+)"/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Everything needed to reproduce a run: the exact command, the source revision, and the machine. Mirrors
+// the Server/Client Information the Iggy dashboard captures, so a stored result stands on its own.
+function buildMeta() {
+  const ref = git(['rev-parse', '--short', 'HEAD']);
+  const dirty = (git(['status', '--porcelain']) || '').length > 0;
+  const cpus = os.cpus();
+  return {
+    timestamp: new Date().toISOString(),
+    command: [path.relative(REPO_ROOT, process.argv[1]), ...process.argv.slice(2)].join(' '),
+    git_ref: ref ? (dirty ? `${ref}-dirty` : ref) : null,
+    git_ref_date: git(['show', '-s', '--format=%cI', 'HEAD']),
+    malachi_version: malachiVersion(),
+    hardware: {
+      cpu: cpus[0] ? cpus[0].model : null,
+      cores: cpus.length,
+      memory_bytes: os.totalmem(),
+      os: `${os.platform()} ${os.release()}`,
+    },
+  };
+}
+
+// Offline check that the histogram's percentiles (including the deep tail) match a brute-force sorted
+// reference within one bucket's precision. Runs without a server: `node loadtest.js --self-test`.
+function selfTest() {
+  const h = new Histogram();
+  const ref = [];
+  let seed = 123456789;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  // Heavy-tailed: most latencies small, rare spikes into the hundreds of ms, so P99.9/P99.99 are exercised.
+  const N = 2_000_000;
+  for (let i = 0; i < N; i++) {
+    const us = Math.max(1, Math.round(200 + Math.pow(rand(), 8) * 500_000));
+    h.record(us);
+    ref.push(us);
+  }
+  ref.sort((a, b) => a - b);
+  const nearestRank = (p) => ref[Math.min(ref.length - 1, Math.ceil((p / 100) * ref.length) - 1)];
+
+  const ps = [50, 90, 95, 99, 99.9, 99.99];
+  const got = h.percentiles(ps);
+  let ok = true;
+  for (const p of ps) {
+    const expected = nearestRank(p);
+    const actual = got[p];
+    const tol = expected / h.subBucketCount + 2; // one bucket width at that value, plus the 1us floor
+    const pass = Math.abs(actual - expected) <= tol;
+    ok = ok && pass;
+    console.log(
+      `  P${p}: expected ~${expected}us  got ${actual}us  (tol +-${Math.round(tol)}us)  ${pass ? 'OK' : 'FAIL'}`
+    );
+  }
+  const mono = ps.every((p, i) => i === 0 || got[p] >= got[ps[i - 1]]);
+  console.log(`  monotonic: ${mono ? 'OK' : 'FAIL'}`);
+  ok = ok && mono;
+  console.log(ok ? '\nself-test PASSED' : '\nself-test FAILED');
+  process.exit(ok ? 0 : 1);
+}
+
 // ---- reporting ----
 
 function report(scenario, opts, elapsedMs, stats) {
   const secs = elapsedMs / 1000;
-  const p = stats.percentiles([50, 90, 95, 99]);
+  const p = stats.percentiles([50, 90, 95, 99, 99.9, 99.99]);
   const streaming = scenario === 'stream';
   const openLoopMode = opts.rate > 0 && !streaming;
 
@@ -272,6 +437,7 @@ function report(scenario, opts, elapsedMs, stats) {
     console.log(
       JSON.stringify(
         {
+          meta: buildMeta(),
           scenario,
           mode: openLoopMode ? 'open-loop' : streaming ? 'stream' : 'closed-loop',
           connections: opts.connections,
@@ -292,12 +458,15 @@ function report(scenario, opts, elapsedMs, stats) {
                 coordinated_omission_corrected: openLoopMode,
                 min: round(stats.min),
                 mean: round(stats.mean()),
+                stddev: round(stats.stddev()),
                 p50: round(p[50]),
                 p90: round(p[90]),
                 p95: round(p[95]),
                 p99: round(p[99]),
+                p99_9: round(p[99.9]),
+                p99_99: round(p[99.99]),
                 max: round(stats.max),
-                samples: stats.samples.length,
+                count: stats.count,
               },
         },
         null,
@@ -330,9 +499,12 @@ function report(scenario, opts, elapsedMs, stats) {
   if (!streaming) {
     console.log(colors.bold('Latency (ms)') + (openLoopMode ? colors.gray(', coordinated-omission-corrected') : ''));
     console.log(
-      `   min ${round(stats.min)}  mean ${round(stats.mean())}  p50 ${round(p[50])}  ` +
-        `p90 ${round(p[90])}  p95 ${round(p[95])}  p99 ${round(p[99])}  max ${round(stats.max)}` +
-        colors.gray(`   (${stats.samples.length} samples)`)
+      `   min ${round(stats.min)}  mean ${round(stats.mean())}  stddev ${round(stats.stddev())}  max ${round(stats.max)}` +
+        colors.gray(`   (${stats.count} ops)`)
+    );
+    console.log(
+      `   p50 ${round(p[50])}  p90 ${round(p[90])}  p95 ${round(p[95])}  ` +
+        `p99 ${round(p[99])}  p99.9 ${round(p[99.9])}  p99.99 ${round(p[99.99])}`
     );
   } else {
     console.log(colors.gray('Latency: n/a for server-push streaming (throughput-only)'));
@@ -367,8 +539,9 @@ ${colors.yellow('Options')}
   --window <n>       Streaming credit window (default 100)
   --prepopulate <n>  Records to append before fetch/stream/mixed (default 10000 for those)
   --warmup <s>       Warmup seconds excluded from stats (default 0)
-  --samples <n>      Latency reservoir size (default 100000)
-  --json             Emit the report as JSON
+  --samples <n>      Deprecated, ignored (percentiles now use an exact histogram, not a sample)
+  --json             Emit the report as JSON (with a reproduce-metadata block)
+  --self-test        Validate the latency histogram offline (no server) and exit
   -h, --help         Show this help
 
 ${colors.yellow('Environment')}
@@ -377,6 +550,8 @@ ${colors.yellow('Environment')}
 }
 
 async function main() {
+  if (process.argv.includes('--self-test')) return selfTest();
+
   const valueFlags = [
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
@@ -431,7 +606,7 @@ async function main() {
     clients = await Promise.all(Array.from({ length: opts.connections }, connect));
 
     if (opts.warmup > 0) {
-      const warmStats = new Stats(opts.samples);
+      const warmStats = new Stats();
       await runScenario(scenario, clients, opts, opts.warmup * 1000, warmStats);
       if (!opts.json) console.log(colors.gray(`   warmup done (${warmStats.count} ops discarded)`));
       // Reconnect: the streaming subscription can only be ended by closing the socket (there is no
@@ -441,7 +616,7 @@ async function main() {
       clients = await Promise.all(Array.from({ length: opts.connections }, connect));
     }
 
-    const stats = new Stats(opts.samples);
+    const stats = new Stats();
     const start = performance.now();
     await runScenario(scenario, clients, opts, opts.duration * 1000, stats);
     const elapsed = performance.now() - start;

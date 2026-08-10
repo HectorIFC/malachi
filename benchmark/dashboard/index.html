@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Malachi benchmark results</title>
+    <style>
+      :root {
+        --bg: #f7f7f8;
+        --panel: #ffffff;
+        --border: #e4e4e7;
+        --text: #18181b;
+        --muted: #71717a;
+        --accent: #f59e0b;
+        --accent-soft: rgba(245, 158, 11, 0.14);
+        --grid: #ebebef;
+      }
+      :root:not([data-theme="light"]) {
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #0b0c0e;
+          --panel: #141518;
+          --border: #26272b;
+          --text: #f4f4f5;
+          --muted: #9ca3af;
+          --accent: #f59e0b;
+          --accent-soft: rgba(245, 158, 11, 0.16);
+          --grid: #222327;
+          color-scheme: dark;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 960px; margin: 0 auto; padding: 40px 20px 64px; }
+      header h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.01em; }
+      header .sub { color: var(--muted); font-size: 14px; }
+      .accent { color: var(--accent); }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      .headline { margin: 28px 0 8px; }
+      .headline .num { font-size: 56px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
+      .headline .unit { font-size: 20px; color: var(--accent); font-weight: 700; margin-left: 6px; }
+      .headline .cap { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+      .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0 8px; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+      .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .card .v { font-size: 24px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
+      .card .v small { font-size: 13px; color: var(--muted); font-weight: 500; }
+
+      section { margin-top: 36px; }
+      section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 14px; }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+      figure { margin: 0; overflow-x: auto; }
+      svg text { fill: var(--muted); font-size: 11px; }
+
+      dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; margin: 0; }
+      dl.meta dt { color: var(--muted); font-size: 13px; }
+      dl.meta dd { margin: 0; font-size: 13px; word-break: break-word; }
+      dl.meta dd.cmd { background: var(--accent-soft); border-radius: 6px; padding: 6px 8px; }
+
+      footer { margin-top: 40px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+      a { color: var(--accent); }
+      .err { color: #ef4444; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Malachi <span class="accent">benchmark results</span></h1>
+        <div class="sub" id="subtitle">Loading...</div>
+      </header>
+
+      <div class="headline">
+        <div><span class="num" id="hl-num">--</span><span class="unit" id="hl-unit"></span></div>
+        <div class="cap" id="hl-cap"></div>
+      </div>
+
+      <div class="cards" id="cards"></div>
+
+      <section>
+        <h2>Latency percentiles (ms)</h2>
+        <div class="panel"><figure id="chart"></figure></div>
+      </section>
+
+      <section>
+        <h2>Reproduce</h2>
+        <div class="panel"><dl class="meta" id="meta"></dl></div>
+      </section>
+
+      <footer id="footer"></footer>
+    </div>
+
+    <script>
+      const PCTLS = [
+        ["p50", "P50"],
+        ["p90", "P90"],
+        ["p95", "P95"],
+        ["p99", "P99"],
+        ["p99_9", "P99.9"],
+        ["p99_99", "P99.99"],
+      ];
+
+      const fmt = (n, d = 0) =>
+        Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      const el = (tag, attrs = {}, kids = []) => {
+        const NS = tag === "svg" || attrs._svg ? "http://www.w3.org/2000/svg" : null;
+        const node = NS ? document.createElementNS(NS, tag) : document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === "_svg" || k === "text") continue;
+          node.setAttribute(k, v);
+        }
+        if (attrs.text != null) node.textContent = attrs.text;
+        for (const kid of kids) node.appendChild(kid);
+        return node;
+      };
+      const svgEl = (tag, attrs = {}, kids = []) => el(tag, { ...attrs, _svg: true }, kids);
+
+      function card(k, v, sub) {
+        return el("div", { class: "card" }, [
+          el("div", { class: "k", text: k }),
+          el("div", { class: "v" }, sub ? [document.createTextNode(v + " "), el("small", { text: sub })] : [document.createTextNode(v)]),
+        ]);
+      }
+
+      function drawChart(latency) {
+        const W = 720,
+          H = 300,
+          pad = { l: 48, r: 20, t: 16, b: 34 };
+        const pts = PCTLS.map(([key]) => latency[key] ?? 0);
+        const maxY = Math.max(...pts) * 1.1 || 1;
+        const iw = W - pad.l - pad.r,
+          ih = H - pad.t - pad.b;
+        const x = (i) => pad.l + (PCTLS.length === 1 ? iw / 2 : (i / (PCTLS.length - 1)) * iw);
+        const y = (v) => pad.t + ih - (v / maxY) * ih;
+
+        const svg = svgEl("svg", {
+          viewBox: `0 0 ${W} ${H}`,
+          width: "100%",
+          height: "auto",
+          role: "img",
+          "aria-label": "Latency percentiles from P50 to P99.99, in milliseconds",
+        });
+
+        // Y gridlines + labels
+        const ticks = 4;
+        for (let t = 0; t <= ticks; t++) {
+          const val = (maxY / ticks) * t;
+          const gy = y(val);
+          svg.appendChild(svgEl("line", { x1: pad.l, y1: gy, x2: W - pad.r, y2: gy, stroke: "var(--grid)", "stroke-width": 1 }));
+          svg.appendChild(svgEl("text", { x: pad.l - 8, y: gy + 3, "text-anchor": "end", text: val.toFixed(val < 10 ? 1 : 0) }));
+        }
+        // Area + line
+        const line = pts.map((v, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(v)}`).join(" ");
+        const area = `${line} L${x(pts.length - 1)},${y(0)} L${x(0)},${y(0)} Z`;
+        svg.appendChild(svgEl("path", { d: area, fill: "var(--accent-soft)" }));
+        svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "var(--accent)", "stroke-width": 2.5, "stroke-linejoin": "round" }));
+        // Dots + x labels + value labels
+        pts.forEach((v, i) => {
+          svg.appendChild(svgEl("circle", { cx: x(i), cy: y(v), r: 3.5, fill: "var(--accent)" }));
+          svg.appendChild(svgEl("text", { x: x(i), y: H - pad.b + 18, "text-anchor": "middle", text: PCTLS[i][1] }));
+          svg.appendChild(svgEl("text", { x: x(i), y: y(v) - 8, "text-anchor": "middle", fill: "var(--text)", text: fmt(v, 2) }));
+        });
+        document.getElementById("chart").appendChild(svg);
+      }
+
+      function render(d) {
+        const lat = d.latency_ms || {};
+        document.getElementById("subtitle").textContent =
+          `${d.scenario} (${d.mode}) - ${d.connections} connections - ${d.meta?.hardware?.cpu ?? "unknown CPU"}`;
+
+        document.getElementById("hl-num").textContent = fmt(d.records_per_s);
+        document.getElementById("hl-unit").textContent = "records/s";
+        document.getElementById("hl-cap").textContent =
+          `${fmt(d.mb_per_s, 2)} MB/s over ${fmt(d.duration_s, 1)}s - ${fmt(d.records)} records, ${d.errors} errors`;
+
+        const cards = document.getElementById("cards");
+        cards.appendChild(card("Ops/s", fmt(d.ops_per_s)));
+        if (lat.p50 != null) cards.appendChild(card("P50 latency", fmt(lat.p50, 2), "ms"));
+        if (lat.p99 != null) cards.appendChild(card("P99 latency", fmt(lat.p99, 2), "ms"));
+        if (lat.p99_99 != null) cards.appendChild(card("P99.99 latency", fmt(lat.p99_99, 2), "ms"));
+        if (lat.stddev != null) cards.appendChild(card("Std dev", fmt(lat.stddev, 2), "ms"));
+
+        if (lat.p50 != null) drawChart(lat);
+        else document.getElementById("chart").innerHTML = '<span class="k">No latency for this scenario</span>';
+
+        const m = d.meta || {};
+        const hw = m.hardware || {};
+        const rows = [
+          ["Command", el("dd", { class: "cmd mono", text: m.command || "n/a" })],
+          ["Git ref", el("dd", { class: "mono", text: `${m.git_ref || "n/a"}${m.git_ref_date ? " (" + m.git_ref_date + ")" : ""}` })],
+          ["Version", el("dd", { text: m.malachi_version || "n/a" })],
+          ["Hardware", el("dd", { text: `${hw.cpu || "?"} - ${hw.cores || "?"} cores - ${hw.memory_bytes ? fmt(hw.memory_bytes / 1e9, 1) + " GB" : "?"} - ${hw.os || "?"}` })],
+          ["Run at", el("dd", { text: m.timestamp || "n/a" })],
+        ];
+        const meta = document.getElementById("meta");
+        for (const [k, dd] of rows) {
+          meta.appendChild(el("dt", { text: k }));
+          meta.appendChild(dd);
+        }
+
+        document.getElementById("footer").innerHTML =
+          'Example run generated by <code>scripts/loadtest.js --json</code>. Absolute numbers reflect the machine above, not a tuned server. See the ' +
+          '<a href="https://github.com/HectorIFC/malachi/tree/main/benchmark">benchmark suite</a>.';
+      }
+
+      fetch("./data.json")
+        .then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then(render)
+        .catch((e) => {
+          // textContent (via el's `text:`), not innerHTML: e.message can carry HTML fragments from a parse error.
+          const subtitle = document.getElementById("subtitle");
+          subtitle.textContent = "";
+          subtitle.appendChild(
+            el("span", { class: "err", text: `Could not load data.json (${e.message}). Serve this directory over HTTP.` }),
+          );
+        });
+    </script>
+  </body>
+</html>
