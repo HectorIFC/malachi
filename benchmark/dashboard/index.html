@@ -142,7 +142,13 @@
         const x = (i) => pad.l + (PCTLS.length === 1 ? iw / 2 : (i / (PCTLS.length - 1)) * iw);
         const y = (v) => pad.t + ih - (v / maxY) * ih;
 
-        const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: "auto", role: "img" });
+        const svg = svgEl("svg", {
+          viewBox: `0 0 ${W} ${H}`,
+          width: "100%",
+          height: "auto",
+          role: "img",
+          "aria-label": "Latency percentiles from P50 to P99.99, in milliseconds",
+        });
 
         // Y gridlines + labels
         const ticks = 4;
@@ -213,8 +219,12 @@
         })
         .then(render)
         .catch((e) => {
-          document.getElementById("subtitle").innerHTML =
-            '<span class="err">Could not load data.json (' + e.message + "). Serve this directory over HTTP.</span>";
+          // textContent (via el's `text:`), not innerHTML: e.message can carry HTML fragments from a parse error.
+          const subtitle = document.getElementById("subtitle");
+          subtitle.textContent = "";
+          subtitle.appendChild(
+            el("span", { class: "err", text: `Could not load data.json (${e.message}). Serve this directory over HTTP.` }),
+          );
         });
     </script>
   </body>

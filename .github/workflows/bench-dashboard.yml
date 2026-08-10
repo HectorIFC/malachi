@@ -26,8 +26,9 @@ on:
         description: Records per batch
         default: '10'
 
-# The job pushes a branch and opens a PR, so it needs write on both. It does run repo code (the load test)
-# with the token in git config; that code is in-repo and trusted, and the branch it pushes is reviewed as a PR.
+# The job pushes a branch and opens a PR, so it needs write on both. Checkout runs with
+# persist-credentials: false, so the write token is never left in the local git config while the load test
+# (repo code) runs; the push authenticates explicitly with the token, and gh pr create uses GH_TOKEN.
 permissions:
   contents: write
   pull-requests: write
@@ -46,6 +47,10 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        # Do not persist the write token in the local git config: the load test (repo code) runs after this,
+        # and the push step below authenticates explicitly instead.
+        with:
+          persist-credentials: false
 
       - name: 🔧 Set up Elixir
         uses: erlef/setup-beam@v1
@@ -142,7 +147,8 @@ jobs:
           git checkout -b "$branch"
           git add benchmark/dashboard/data.json
           git commit -m "chore(bench): refresh dashboard sample from CI (${ref})"
-          git push origin "$branch"
+          # persist-credentials: false left no push auth in git config, so push with the token explicitly.
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
 
           gh pr create \
             --base main \
