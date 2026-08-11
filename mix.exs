@@ -49,10 +49,11 @@ defmodule Malachi.MixProject do
       # `mix docs` runs the strict build (a broken ref fails the build) and then stages the standalone
       # benchmark dashboard at doc/benchmarks, so /benchmarks/ ships with the site and the sidebar link
       # resolves both locally and on GitHub Pages. rm_rf before cp_r keeps it idempotent across re-runs
-      # (`cp -r` into an existing dir would nest a second copy). The `--warnings-as-errors` gate lives here,
-      # not in the CI step: Mix passes an alias's CLI args only to the last command, so it would otherwise
-      # reach the copy function instead of the docs task. Referencing `docs` here does not recurse (this is
-      # the documented Mix idiom, e.g. `clean: ["clean", &fun/1]`).
+      # (`cp -r` into an existing dir would nest a second copy). Baking `--warnings-as-errors` into the
+      # alias makes a plain `mix docs` strict everywhere (local and CI), so neither has to pass the flag and
+      # local output matches CI. Overriding `docs` here does not recurse: Mix runs the underlying docs task
+      # (forwarding any CLI args to it) and then the copy function (the documented idiom, e.g.
+      # `test: ["test", &fun/1]`).
       docs: ["docs --warnings-as-errors", &copy_benchmarks/1]
     ]
   end
