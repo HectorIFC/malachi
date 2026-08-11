@@ -16,6 +16,7 @@ defmodule Malachi.MixProject do
       package: package(),
       source_url: @source_url,
       docs: docs(),
+      aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
       elixirc_paths: elixirc_paths(Mix.env()),
       # `:mix` is a build-time app, so it is not in the default PLT; the `Mix.Tasks.*` admin task references
@@ -41,6 +42,25 @@ defmodule Malachi.MixProject do
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules()
     ]
+  end
+
+  defp aliases do
+    [
+      # `mix docs` runs the strict build (a broken ref fails the build) and then stages the standalone
+      # benchmark dashboard at doc/benchmarks, so /benchmarks/ ships with the site and the sidebar link
+      # resolves both locally and on GitHub Pages. rm_rf before cp_r keeps it idempotent across re-runs
+      # (`cp -r` into an existing dir would nest a second copy). Baking `--warnings-as-errors` into the
+      # alias makes a plain `mix docs` strict everywhere (local and CI), so neither has to pass the flag and
+      # local output matches CI. Overriding `docs` here does not recurse: Mix runs the underlying docs task
+      # (forwarding any CLI args to it) and then the copy function (the documented idiom, e.g.
+      # `test: ["test", &fun/1]`).
+      docs: ["docs --warnings-as-errors", &copy_benchmarks/1]
+    ]
+  end
+
+  defp copy_benchmarks(_args) do
+    File.rm_rf!("doc/benchmarks")
+    File.cp_r!("benchmark/dashboard", "doc/benchmarks")
   end
 
   # Loads Mermaid and turns the ```mermaid code blocks (which ExDoc emits as `pre code.mermaid`) into
@@ -104,7 +124,12 @@ defmodule Malachi.MixProject do
       "docs/DOCKER_README.md": [title: "Running with Docker"],
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
-      "docs/HOOKS.md": [title: "Git hooks"]
+      "docs/HOOKS.md": [title: "Git hooks"],
+      # External link (ExDoc :url extra -> URLNode): the benchmark dashboard is a standalone static page
+      # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
+      # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
+      # full-page navigation (an in-site `.html` would be hijacked and break, since the page has no swup root).
+      "Benchmark results": [url: "benchmarks/"]
     ]
   end
 
@@ -130,6 +155,9 @@ defmodule Malachi.MixProject do
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"
       ],
+      # The pattern is the URL itself, not a file path: for a URLNode, Config.match_extra compares the
+      # group pattern against the node's url (`path == string`).
+      Benchmarks: ["benchmarks/"],
       Development: ["docs/HOOKS.md"]
     ]
   end

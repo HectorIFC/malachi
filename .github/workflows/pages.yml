@@ -58,15 +58,11 @@ jobs:
           done
           exit 1
 
-      # Same gate the CI quality job applies, so a broken reference fails here rather than shipping a
-      # page with a dead link.
+      # The `docs` mix alias runs the strict build (`--warnings-as-errors`, so a broken reference fails here
+      # rather than shipping a page with a dead link) and then stages the static benchmark results page at
+      # /benchmarks/. Both live in the alias (mix.exs) so local `mix docs` and CI produce the same site.
       - name: 📝 Generate documentation
-        run: mix docs --warnings-as-errors
-
-      # Ship the static benchmark results page alongside the docs, at /benchmarks/. It is a self-contained
-      # bundle (index.html + data.json), so a plain copy into the upload root is all it needs.
-      - name: 📊 Add benchmark results page
-        run: cp -r benchmark/dashboard doc/benchmarks
+        run: mix docs
 
       - name: ⚙️ Configure Pages
         uses: actions/configure-pages@v5
