@@ -59,7 +59,7 @@ defmodule Malachi.BrokerServer do
     * `:group_commit` - when true, produce buffers its batch and defers the client reply to the next
       flush so concurrent producers coalesce into one fsync (default from app env; only active at
       rf=1). See the moduledoc.
-    * `:group_commit_interval_ms` - group-commit flush period in ms (default 10, or app env).
+    * `:group_commit_interval_ms` - group-commit flush period in ms (default 5, or app env).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
@@ -233,7 +233,7 @@ defmodule Malachi.BrokerServer do
     {group_commit_flag, opts} = Keyword.pop(opts, :group_commit, Application.get_env(:malachi, :group_commit, false))
 
     {gc_interval, opts} =
-      Keyword.pop(opts, :group_commit_interval_ms, Application.get_env(:malachi, :group_commit_interval_ms, 10))
+      Keyword.pop(opts, :group_commit_interval_ms, Application.get_env(:malachi, :group_commit_interval_ms, 5))
 
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)

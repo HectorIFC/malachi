@@ -173,7 +173,10 @@ config :malachi,
   # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
   # default; only active on a single-node (rf=1) broker, which is where it applies today.
   group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
-  group_commit_interval_ms: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_INTERVAL_MS"), 10),
+  # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
+  # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
+  # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.
+  group_commit_interval_ms: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_INTERVAL_MS"), 5),
   # Control-plane shards. 1 (default) => a single ra cluster holds all metadata. >1 (with a clustered
   # control plane) shards the metadata across that many vnodes, each its own ra cluster routed by
   # topic, so metadata mutations scale past one Raft group.
