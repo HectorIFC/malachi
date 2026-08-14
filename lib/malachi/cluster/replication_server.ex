@@ -96,6 +96,28 @@ defmodule Malachi.Cluster.ReplicationServer do
     :exit, _reason -> {:error, :unreachable}
   end
 
+  @doc """
+  Group-commit append: buffers `records` for `segment_id` on the primary WITHOUT fsyncing, returning
+  `{:ok, last_offset}` as soon as they are in the buffer. Durability comes from a later `flush/1`,
+  which coalesces the fsyncs of many appends into one. Single-broker (rf=1) only: it does no follower
+  fan-out, so the caller must use `replicate/5` when the replica set has followers. Same offset and
+  return contract as `replicate/5`, so the two are interchangeable as the broker's write function.
+  """
+  @spec append(term(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
+          {:ok, non_neg_integer()} | {:error, :not_primary | :empty | :empty_replica_set | term()}
+  def append(primary, segment_id, replica_set, base_offset, records) do
+    GenServer.call(primary, {:append, segment_id, replica_set, base_offset, records})
+  end
+
+  @doc """
+  Fsyncs every segment on this server that has buffered (un-synced) records, making all prior
+  `append/5`s durable in one pass. Returns `:ok`. This is the flush half of group commit.
+  """
+  @spec flush(term()) :: :ok
+  def flush(ref) do
+    GenServer.call(ref, :flush)
+  end
+
   @doc "Reads up to `max_records` records of `segment_id` stored on this server, from `offset`."
   @spec read(term(), term(), non_neg_integer(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()]} | :eof | {:error, term()}
@@ -183,6 +205,38 @@ defmodule Malachi.Cluster.ReplicationServer do
     after
       Ctx.detach(token)
     end
+  end
+
+  def handle_call({:append, _segment_id, _replica_set, _base_offset, []}, _from, state) do
+    {:reply, {:error, :empty}, state}
+  end
+
+  def handle_call({:append, _segment_id, [], _base_offset, _records}, _from, state) do
+    {:reply, {:error, :empty_replica_set}, state}
+  end
+
+  def handle_call({:append, segment_id, replica_set, base_offset, records}, _from, state) do
+    # Buffer only, no fsync (that is `:flush`). Single-broker: the primary is the sole replica, so there
+    # is no follower fan-out here; the broker routes multi-replica sets through `:replicate` instead.
+    if hd(replica_set) == state.ref do
+      {state, log} = fetch_or_open(state, segment_id, base_offset)
+
+      case Log.append(log, records) do
+        {:ok, log, _first, last} -> {:reply, {:ok, last}, put_log(state, segment_id, log)}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :not_primary}, state}
+    end
+  end
+
+  def handle_call(:flush, _from, state) do
+    logs =
+      Map.new(state.logs, fn {segment_id, log} ->
+        if Log.pending?(log), do: {segment_id, elem(Log.sync(log), 1)}, else: {segment_id, log}
+      end)
+
+    {:reply, :ok, %{state | logs: logs}}
   end
 
   def handle_call({:follow, segment_id, base, expected_first, records, source}, _from, state) do

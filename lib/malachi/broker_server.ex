@@ -5,9 +5,12 @@ defmodule Malachi.BrokerServer do
   access. It wires the broker's injected effect functions to the replication server:
   `produce` replicates through it and `read`/`stream_history` read segments from it.
 
-  Writes are durable on return: each batch is fsynced on a quorum by the replication server
-  before it commits, so there is no buffering and no time-based flush, `sync/1` is a no-op kept
-  for API compatibility.
+  Writes are durable on return: by default each batch is fsynced on a quorum by the replication
+  server before it commits, so there is no buffering. With group commit enabled (`:group_commit`,
+  single-node rf=1), a produce instead buffers its batch and the client reply is deferred until the
+  next time-based flush (~`:group_commit_interval_ms`), so many concurrent producers coalesce into
+  one fsync; the reply is still returned only once the batch is durable. Either way `sync/1` is a
+  no-op kept for API compatibility.
 
   The `Broker` (and the layers it composes) are pure immutable values; routing all mutations
   through this single process is what makes concurrent producers/consumers safe.
@@ -53,6 +56,10 @@ defmodule Malachi.BrokerServer do
     * `:metadata_nodes` - the nodes the metadata Raft cluster spans (default `[node()]`); several
       nodes make the control plane HA (the metadata survives losing a member).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
+    * `:group_commit` - when true, produce buffers its batch and defers the client reply to the next
+      flush so concurrent producers coalesce into one fsync (default from app env; only active at
+      rf=1). See the moduledoc.
+    * `:group_commit_interval_ms` - group-commit flush period in ms (default 10, or app env).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
@@ -223,6 +230,11 @@ defmodule Malachi.BrokerServer do
   def init({directory, opts}) do
     {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
     {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
+    {group_commit_flag, opts} = Keyword.pop(opts, :group_commit, Application.get_env(:malachi, :group_commit, false))
+
+    {gc_interval, opts} =
+      Keyword.pop(opts, :group_commit_interval_ms, Application.get_env(:malachi, :group_commit_interval_ms, 10))
+
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
     {spread_by, opts} = Keyword.pop(opts, :spread_by)
@@ -276,7 +288,15 @@ defmodule Malachi.BrokerServer do
       # Streaming subscribers (B2): `%{topic => [subscriber]}`. A subscriber is pushed records as they
       # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
       # commit the group's position. See `wake_subscribers/2` / `push_subscriber/2`.
-      subscribers: %{}
+      subscribers: %{},
+      # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
+      # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
+      # one fsync. Gated on rf=1 (the append path does no follower fan-out). `pending_produce` holds the
+      # parked callers; `gc_timer` is the scheduled flush (nil when none is pending).
+      group_commit: group_commit_flag and replication_factor == 1,
+      gc_interval: gc_interval,
+      pending_produce: [],
+      gc_timer: nil
     }
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
@@ -297,22 +317,20 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:produce, topic, records, ctx}, _from, state) do
+  def handle_call({:produce, topic, records, ctx}, from, state) do
     # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
     # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
     token = Ctx.attach(ctx)
 
     try do
       Tracer.with_span "malachi.broker.produce" do
-        {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
         Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => length(records)})
 
-        state =
-          %{state | broker: broker}
-          |> wake_waiters(topic, reply)
-          |> wake_subscribers(topic, reply)
-
-        {:reply, reply, state}
+        if state.group_commit do
+          produce_grouped(from, topic, records, state)
+        else
+          produce_sync(topic, records, state)
+        end
       end
     after
       Ctx.detach(token)
@@ -527,6 +545,28 @@ defmodule Malachi.BrokerServer do
     {:noreply, reconcile_metadata(state)}
   end
 
+  # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
+  # reply to each caller and wake its topic's long-poll consumers and subscribers, so consumers only ever
+  # observe durable data. `broker.brokers` is the set of local pipelines a segment can live on (one for
+  # rf=1, or several when striping), so flushing all of them covers wherever the buffered batches landed.
+  def handle_info(:group_flush, state) do
+    Enum.each(state.broker.brokers, &ReplicationServer.flush/1)
+
+    pending = Enum.reverse(state.pending_produce)
+    base = %{state | pending_produce: [], gc_timer: nil}
+
+    state =
+      Enum.reduce(pending, base, fn waiter, st ->
+        GenServer.reply(waiter.from, waiter.reply)
+
+        st
+        |> wake_waiters(waiter.topic, waiter.reply)
+        |> wake_subscribers(waiter.topic, waiter.reply)
+      end)
+
+    {:noreply, state}
+  end
+
   @impl true
   def handle_continue(:reconcile, state) do
     {:noreply, reconcile_metadata(state)}
@@ -616,6 +656,42 @@ defmodule Malachi.BrokerServer do
 
   # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
   # drop) the ones that now have data, leaving the rest parked until their timeout.
+  # Synchronous produce (group commit off): replicate the batch through `replicate/5`, which fsyncs on a
+  # quorum before returning, then reply and wake consumers. The historical default; unchanged behaviour.
+  defp produce_sync(topic, records, state) do
+    {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
+
+    state =
+      %{state | broker: broker}
+      |> wake_waiters(topic, reply)
+      |> wake_subscribers(topic, reply)
+
+    {:reply, reply, state}
+  end
+
+  # Group-commit produce: `append/5` buffers the batch (no fsync) and reserves offsets exactly as the sync
+  # path does, so the routing/offset code is shared; the client reply is parked until the next
+  # `:group_flush` makes it durable. A routing/append error (bad topic, unroutable key) is returned now,
+  # not parked, since nothing was buffered.
+  defp produce_grouped(from, topic, records, state) do
+    case Broker.produce(state.broker, topic, records, &ReplicationServer.append/5) do
+      {broker, {:ok, _placements} = reply} ->
+        waiter = %{from: from, reply: reply, topic: topic}
+        state = %{state | broker: broker, pending_produce: [waiter | state.pending_produce]}
+        {:noreply, ensure_flush_timer(state)}
+
+      {broker, {:error, _reason} = error} ->
+        {:reply, error, %{state | broker: broker}}
+    end
+  end
+
+  # Schedules the next flush only when none is already pending, so a burst of produces shares one timer.
+  defp ensure_flush_timer(%{gc_timer: nil} = state) do
+    %{state | gc_timer: Process.send_after(self(), :group_flush, state.gc_interval)}
+  end
+
+  defp ensure_flush_timer(state), do: state
+
   defp wake_waiters(state, _topic, {:error, _reason}), do: state
 
   defp wake_waiters(state, topic, {:ok, _placements}) do

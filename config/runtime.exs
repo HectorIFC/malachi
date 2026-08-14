@@ -168,6 +168,12 @@ config :malachi,
   },
   # Replicas per segment when clustered (clamped to the node count by the broker). Default 3.
   log_replication_factor: String.to_integer(System.get_env("MALACHI_LOG_REPLICATION_FACTOR") || "3"),
+  # Group commit (NorthGuard fps-store style): when true, a produce buffers its batch and its client
+  # reply is deferred until the next flush, so concurrent producers coalesce into one fsync. Trades a
+  # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
+  # default; only active on a single-node (rf=1) broker, which is where it applies today.
+  group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
+  group_commit_interval_ms: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_INTERVAL_MS"), 10),
   # Control-plane shards. 1 (default) => a single ra cluster holds all metadata. >1 (with a clustered
   # control plane) shards the metadata across that many vnodes, each its own ra cluster routed by
   # topic, so metadata mutations scale past one Raft group.
