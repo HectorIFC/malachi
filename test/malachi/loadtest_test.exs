@@ -1,0 +1,110 @@
+defmodule Malachi.LoadtestTest do
+  # Integration cases drive the real TCP server (started by the app in test_helper). Not async: they open
+  # many sockets and share the one server.
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureIO
+
+  alias Malachi.Loadtest
+  alias Malachi.Loadtest.Histogram
+
+  @port Application.compile_env(:malachi, :tcp_port, 4040)
+
+  # Runs a load test quietly and returns its report, capturing the printed summary.
+  defp run(opts) do
+    opts = Keyword.merge([port: @port, user: "admin", pass: "admin123", warmup: 0, duration: 1], opts)
+    capture_io(fn -> Process.put(:report, Loadtest.run(opts)) end)
+    Process.get(:report)
+  end
+
+  defp topic(name), do: "lt_#{name}_#{System.unique_integer([:positive])}"
+
+  describe "Histogram" do
+    test "records samples and reports monotonic percentiles" do
+      h = Histogram.new()
+      assert Histogram.count(h) == 0
+      assert Histogram.percentile(h, 50) == 0.0
+
+      # 1000 samples at ~1000us and 10 at ~100_000us: p50 near 1ms, p99.99 out in the tail
+      for _ <- 1..1000, do: Histogram.record(h, 1000)
+      for _ <- 1..10, do: Histogram.record(h, 100_000)
+
+      assert Histogram.count(h) == 1010
+      p50 = Histogram.percentile(h, 50)
+      p99 = Histogram.percentile(h, 99)
+      p100 = Histogram.percentile(h, 100)
+
+      assert p50 >= 900 and p50 <= 1100, "p50 #{p50} should be ~1000us"
+      assert p99 >= p50, "percentiles must be monotonic"
+      assert p100 >= 90_000, "the tail must reflect the 100ms samples"
+    end
+
+    test "clamps non-positive and huge latencies without crashing" do
+      h = Histogram.new()
+      Histogram.record(h, 0)
+      Histogram.record(h, -5)
+      Histogram.record(h, 1_000_000_000)
+      assert Histogram.count(h) == 3
+    end
+  end
+
+  describe "produce" do
+    test "produces durably with zero errors, records == ops * batch" do
+      t = topic("produce")
+      r = run(scenario: :produce, connections: 4, batch: 5, topic: t)
+
+      assert r.errors == 0
+      assert r.ops > 0
+      assert r.records == r.ops * 5
+      assert r.records_per_s > 0
+    end
+
+    test "pipelining keeps zero errors and still produces" do
+      t = topic("pipe")
+      r = run(scenario: :produce, connections: 4, batch: 5, pipeline: 8, topic: t)
+      assert r.errors == 0
+      assert r.records == r.ops * 5
+    end
+  end
+
+  describe "read scenarios" do
+    test "fetch reads back a prepopulated backlog" do
+      t = topic("fetch")
+      r = run(scenario: :fetch, connections: 4, batch: 10, prepopulate: 200, max: 50, topic: t)
+      assert r.errors == 0
+      assert r.records > 0, "fetch should read the prepopulated records"
+    end
+
+    test "mixed runs produce and fetch together without errors" do
+      t = topic("mixed")
+      r = run(scenario: :mixed, connections: 4, batch: 10, prepopulate: 200, topic: t)
+      assert r.errors == 0
+      assert r.ops > 0
+    end
+
+    test "stream receives pushes from the backlog without errors" do
+      t = topic("stream")
+      r = run(scenario: :stream, connections: 4, prepopulate: 200, window: 50, max: 25, topic: t)
+      assert r.errors == 0
+      assert r.records > 0, "stream should receive pushed records"
+    end
+  end
+
+  describe "control-plane scenarios" do
+    test "user create/delete cycle runs to a valid report" do
+      r = run(scenario: :user, connections: 2, topic: topic("user"))
+      assert is_integer(r.ops) and r.ops >= 0
+    end
+
+    test "acl grant/revoke cycle runs to a valid report" do
+      r = run(scenario: :acl, connections: 2, topic: topic("acl"))
+      assert is_integer(r.ops) and r.ops >= 0
+    end
+  end
+
+  test "token auth path: a bad token is rejected (the auth failure surfaces, not a silent hang)" do
+    # The harness issues no tokens, so we can only exercise rejection: a bad token fails the setup auth,
+    # which surfaces as a raised error rather than hanging. catch_error covers the MatchError/exit either way.
+    assert catch_error(run(scenario: :produce, connections: 1, token: "not-a-real-token", topic: topic("tok")))
+  end
+end
