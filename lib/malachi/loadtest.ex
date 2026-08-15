@@ -102,12 +102,20 @@ defmodule Malachi.Loadtest do
       # shard) actually spreads load across shards. Connection `i` uses topic `rem(i, topics)`.
       topics: max(1, Keyword.get(opts, :topics, 1)),
       json: Keyword.get(opts, :json, false),
-      conn_opts: Keyword.take(opts, [:host, :port, :user, :pass, :token, :tls, :cacert, :cert, :key])
+      # `--host` accepts a comma-separated list (a cluster): connection `i` targets `hosts[rem(i, n)]`,
+      # spreading the load across every node's broker mailbox. A single host keeps today's behavior.
+      hosts: opts |> Keyword.get(:host, "127.0.0.1") |> String.split(",", trim: true) |> Enum.map(&String.trim/1),
+      conn_opts: Keyword.take(opts, [:port, :user, :pass, :token, :tls, :cacert, :cert, :key])
     }
   end
 
+  # The connection options for worker `index`: the shared opts plus its round-robin host.
+  defp conn_opts_for(cfg, index) do
+    [{:host, Enum.at(cfg.hosts, rem(index, length(cfg.hosts)))} | cfg.conn_opts]
+  end
+
   defp setup(cfg) do
-    {:ok, admin} = connect_auth(cfg.conn_opts)
+    {:ok, admin} = connect_auth(conn_opts_for(cfg, 0))
 
     admin =
       Enum.reduce(topic_names(cfg), admin, fn topic, conn ->
@@ -152,17 +160,19 @@ defmodule Malachi.Loadtest do
   # --- worker ---
 
   defp worker(parent, index, cfg, ops, hist) do
-    {:ok, conn} = connect_auth(cfg.conn_opts)
+    conn_opts = conn_opts_for(cfg, index)
+    {:ok, conn} = connect_auth(conn_opts)
     ctx = build_ctx(cfg, index)
     send(parent, {:ready, self()})
     {warmup_end, measure_end} = receive(do: ({:go, w, e} -> {w, e}))
 
+    # conn_opts carries this worker's host, so a reconnect goes back to the same node.
     m = %{
       ops: ops,
       hist: hist,
       warmup_end: warmup_end,
       measure_end: measure_end,
-      conn_opts: cfg.conn_opts,
+      conn_opts: conn_opts,
       pipeline: cfg.pipeline
     }
 

@@ -70,6 +70,17 @@ defmodule Malachi.LoadtestTest do
       assert r.records == r.ops * 5
     end
 
+    test "a comma-separated host list round-robins connections and produces cleanly" do
+      # Both hosts resolve to the same test server, so this proves the multi-host path (parse, per-worker
+      # host pick, reconnect opts) end to end without needing a real second node.
+      t = topic("multihost")
+      r = run(scenario: :produce, connections: 4, batch: 5, host: "127.0.0.1, 127.0.0.1", topic: t)
+
+      assert r.errors == 0
+      assert r.dropped == 0
+      assert r.records == r.ops * 5
+    end
+
     test "fanning out over multiple topics produces to all of them without errors" do
       t = topic("fanout")
       r = run(scenario: :produce, connections: 6, batch: 5, topics: 3, topic: t)

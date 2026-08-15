@@ -20,7 +20,8 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--prepopulate` records to seed before fetch/stream/mixed (10000 for those)
     * `--topic` (auto), `--topics` distinct topics to fan out over (1); N > 1 spreads load across
       data-plane shards
-    * `--host` (127.0.0.1), `--port` (4040)
+    * `--host` (127.0.0.1); accepts a comma-separated list for a cluster (connections round-robin
+      across the hosts), `--port` (4040)
     * auth: `--user` (admin) `--pass` (admin123), or `--token`, or `--tls`/`--cacert`/`--cert`/`--key`
     * `--json` emit the report as JSON
   """
