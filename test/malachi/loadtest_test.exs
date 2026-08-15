@@ -69,6 +69,21 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
       assert r.records == r.ops * 5
     end
+
+    test "fanning out over multiple topics produces to all of them without errors" do
+      t = topic("fanout")
+      r = run(scenario: :produce, connections: 6, batch: 5, topics: 3, topic: t)
+
+      assert r.errors == 0
+      assert r.dropped == 0
+      assert r.records == r.ops * 5
+
+      # every fanned-out topic was created and got records (each is independently consumable)
+      for i <- 0..2 do
+        {records, _next} = Malachi.BrokerServer.consume(Malachi.LogBroker, "#{t}_#{i}", %{}, 1000, 0)
+        assert records != [], "topic #{t}_#{i} should have received records"
+      end
+    end
   end
 
   describe "read scenarios" do

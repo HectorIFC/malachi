@@ -97,6 +97,10 @@ defmodule Malachi.Loadtest do
       window: Keyword.get(opts, :window, 100),
       prepopulate: Keyword.get(opts, :prepopulate, if(backlog?, do: 10_000, else: 0)),
       topic: Keyword.get(opts, :topic) || "loadtest_#{System.system_time(:millisecond)}",
+      # Number of distinct topics to spread the connections over. 1 (default) keeps every connection on one
+      # topic; N > 1 fans out `<topic>_0..<topic>_(N-1)`, so data-plane sharding (which pins a topic to a
+      # shard) actually spreads load across shards. Connection `i` uses topic `rem(i, topics)`.
+      topics: max(1, Keyword.get(opts, :topics, 1)),
       json: Keyword.get(opts, :json, false),
       conn_opts: Keyword.take(opts, [:host, :port, :user, :pass, :token, :tls, :cacert, :cert, :key])
     }
@@ -104,10 +108,22 @@ defmodule Malachi.Loadtest do
 
   defp setup(cfg) do
     {:ok, admin} = connect_auth(cfg.conn_opts)
-    admin = create_topic(admin, cfg.topic)
-    admin = prepopulate(admin, cfg)
+
+    admin =
+      Enum.reduce(topic_names(cfg), admin, fn topic, conn ->
+        conn |> create_topic(topic) |> prepopulate(cfg, topic)
+      end)
+
     Conn.close(admin)
   end
+
+  # All topic names the run uses: the base topic for `topics: 1`, else `<base>_0..<base>_(topics-1)`.
+  defp topic_names(%{topic: base, topics: 1}), do: [base]
+  defp topic_names(%{topic: base, topics: n}), do: for(i <- 0..(n - 1), do: "#{base}_#{i}")
+
+  # The topic connection `index` drives (round-robin over the topic set), so connections spread evenly.
+  defp topic_for(%{topic: base, topics: 1}, _index), do: base
+  defp topic_for(%{topic: base, topics: n}, index), do: "#{base}_#{rem(index, n)}"
 
   defp connect_auth(conn_opts) do
     with {:ok, conn} <- Conn.connect(conn_opts), do: Conn.authenticate(conn, conn_opts)
@@ -119,12 +135,12 @@ defmodule Malachi.Loadtest do
     conn
   end
 
-  defp prepopulate(conn, %{prepopulate: n}) when n <= 0, do: conn
+  defp prepopulate(conn, %{prepopulate: n}, _topic) when n <= 0, do: conn
 
-  defp prepopulate(conn, cfg) do
+  defp prepopulate(conn, cfg, topic) do
     value = :binary.copy("x", cfg.record_size)
     batch = for i <- 1..cfg.batch, do: %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
-    payload = Wire.encode_produce_req(cfg.topic, batch)
+    payload = Wire.encode_produce_req(topic, batch)
 
     Enum.reduce(1..div(cfg.prepopulate, cfg.batch), {conn, 2}, fn _, {conn, corr} ->
       {:ok, _code, _resp, conn} = Conn.request(conn, Wire.produce_key(), corr, payload)
@@ -159,7 +175,8 @@ defmodule Malachi.Loadtest do
   # Per-connection context. produce pre-encodes its payload once (zero per-op encoding); the others carry
   # the mutable state the closed loop threads (fetch/stream cursor, admin op counter).
   defp build_ctx(cfg, index) do
-    base = %{topic: cfg.topic, batch: cfg.batch, max: cfg.max, window: cfg.window}
+    topic = topic_for(cfg, index)
+    base = %{topic: topic, batch: cfg.batch, max: cfg.max, window: cfg.window}
 
     case scenario_for(cfg.scenario, index) do
       :produce ->
@@ -170,7 +187,7 @@ defmodule Malachi.Loadtest do
             %Record{value: value, key: "k#{rem(index * cfg.batch + i, cfg.keys)}", timestamp: 0, headers: []}
           end
 
-        Map.put(base, :op, {:produce, Wire.encode_produce_req(cfg.topic, records)})
+        Map.put(base, :op, {:produce, Wire.encode_produce_req(topic, records)})
 
       :fetch ->
         Map.put(base, :op, {:fetch, %{group: "grp_#{index}", member: "mem_#{index}", cursor: nil}})

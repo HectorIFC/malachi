@@ -173,6 +173,10 @@ config :malachi,
   # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
   # default; only active on a single-node (rf=1) broker, which is where it applies today.
   group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
+  # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
+  # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
+  # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.
+  data_shards: parse_int.(System.get_env("MALACHI_DATA_SHARDS"), 1),
   # Eager-flush threshold (records): flush as soon as this many produce records are parked, so each fsync
   # and each reply stays bounded and a produce never waits long enough to time out, even on a slow disk.
   group_commit_flush_max_records: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS"), 8_000),

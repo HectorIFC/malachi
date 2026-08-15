@@ -18,7 +18,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--pipeline` in-flight requests per connection, produce only (1 = closed-loop)
     * `--max` records per fetch/push (100), `--window` stream credit (100)
     * `--prepopulate` records to seed before fetch/stream/mixed (10000 for those)
-    * `--topic` (auto), `--host` (127.0.0.1), `--port` (4040)
+    * `--topic` (auto), `--topics` distinct topics to fan out over (1); N > 1 spreads load across
+      data-plane shards
+    * `--host` (127.0.0.1), `--port` (4040)
     * auth: `--user` (admin) `--pass` (admin123), or `--token`, or `--tls`/`--cacert`/`--cert`/`--key`
     * `--json` emit the report as JSON
   """
@@ -40,6 +42,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     window: :integer,
     prepopulate: :integer,
     topic: :string,
+    topics: :integer,
     host: :string,
     port: :integer,
     user: :string,

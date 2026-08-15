@@ -13,6 +13,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Auth.Authorization
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
   alias Malachi.Wire
 
@@ -68,9 +69,9 @@ defmodule Malachi.TCPProtocol do
       # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
       # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
       if member != nil and group != nil do
-        LogApi.stream_ack_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, cursor, count)
+        LogApi.stream_ack_member(broker_for(topic), coordinator_for(topic), topic, group, member, cursor, count)
       else
-        LogApi.stream_ack(Malachi.LogBroker, topic, group, cursor, count)
+        LogApi.stream_ack(broker_for(topic), topic, group, cursor, count)
       end
 
       :ok
@@ -125,9 +126,9 @@ defmodule Malachi.TCPProtocol do
       # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
       result =
         if member != nil and group != nil do
-          LogApi.subscribe_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, window, max)
+          LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
         else
-          LogApi.subscribe(Malachi.LogBroker, topic, group, window, max)
+          LogApi.subscribe(broker_for(topic), topic, group, window, max)
         end
 
       # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
@@ -143,7 +144,7 @@ defmodule Malachi.TCPProtocol do
     {topic, _keyspace_bits} = Wire.decode_create_topic_req(payload)
 
     with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      ok_or_error(correlation_id, LogApi.create_topic(Malachi.LogBroker, topic), <<>>)
+      ok_or_error(correlation_id, LogApi.create_topic(broker_for(topic), topic), <<>>)
     end)
   end
 
@@ -151,7 +152,7 @@ defmodule Malachi.TCPProtocol do
     {topic, records} = Wire.decode_produce_req(payload)
 
     with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      case LogApi.produce_records(Malachi.LogBroker, topic, records) do
+      case LogApi.produce_records(broker_for(topic), topic, records) do
         {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
         {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
       end
@@ -170,17 +171,17 @@ defmodule Malachi.TCPProtocol do
           # a consumer-group member: the server scopes the fetch to the member's assigned ranges and
           # returns records + an opaque cursor (the client never sees a range id)
           member != nil and group != nil ->
-            LogApi.fetch_member(Malachi.LogBroker, coordinator_for(topic), topic, group, member, max, wait_ms)
+            LogApi.fetch_member(broker_for(topic), coordinator_for(topic), topic, group, member, max, wait_ms)
 
           # an explicit cursor (client-managed paging) takes precedence over a group resume
           cursor != nil ->
-            LogApi.fetch(Malachi.LogBroker, topic, cursor, max, wait_ms)
+            LogApi.fetch(broker_for(topic), topic, cursor, max, wait_ms)
 
           group != nil ->
-            LogApi.fetch_group(Malachi.LogBroker, topic, group, max, wait_ms)
+            LogApi.fetch_group(broker_for(topic), topic, group, max, wait_ms)
 
           true ->
-            LogApi.fetch(Malachi.LogBroker, topic, :start, max, wait_ms)
+            LogApi.fetch(broker_for(topic), topic, :start, max, wait_ms)
         end
 
       case result do
@@ -197,7 +198,7 @@ defmodule Malachi.TCPProtocol do
     {topic, group, cursor} = Wire.decode_commit_req(payload)
 
     with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      ok_or_error(correlation_id, LogApi.commit(Malachi.LogBroker, topic, group, cursor), <<>>)
+      ok_or_error(correlation_id, LogApi.commit(broker_for(topic), topic, group, cursor), <<>>)
     end)
   end
 
@@ -279,6 +280,11 @@ defmodule Malachi.TCPProtocol do
   # The consumer-group coordinator for a topic runs on the node owning the topic's vnode; resolve the
   # ref (the local name, or `{name, owner_node}` to forward) per request. Single-node → the local name.
   defp coordinator_for(topic), do: CoordinatorRouter.resolve(@coordinator_name, topic)
+
+  # The BrokerServer shard that owns `topic`. With the default single shard this is always
+  # `Malachi.LogBroker`, so this is a pure no-op; with MALACHI_DATA_SHARDS > 1 it pins the topic to its
+  # shard so every operation for it lands on the same broker.
+  defp broker_for(topic), do: DataPlaneRouter.shard_for(topic)
 
   # Runs `fun` (which returns a response frame) only if the session holds `permission`; otherwise a
   # permission-denied error frame.

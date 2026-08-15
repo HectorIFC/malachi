@@ -22,6 +22,9 @@ services:
       MALACHI_DASHBOARD_PORT: "4041"
       MALACHI_GROUP_COMMIT: "true"
       MALACHI_GROUP_COMMIT_INTERVAL_MS: "2"
+      # Data-plane shards (single-node measurement mode): 1 = one broker, N = N independent broker shards
+      # with produce routed by hash(topic). Swept by benchmark/docker-shards.sh to measure the ceiling lift.
+      MALACHI_DATA_SHARDS: "${DATA_SHARDS:-1}"
       # Admission limits off so the sweep is not capped (they gate connections/auth, not the produce path).
       MALACHI_RATE_LIMIT_ENABLED: "false"
       MALACHI_CONNECTION_LIMIT_ENABLED: "false"
