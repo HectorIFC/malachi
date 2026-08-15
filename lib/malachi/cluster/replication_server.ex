@@ -164,8 +164,16 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @impl true
   def init(opts) do
-    # When unregistered, the server's reference is its own pid (set in replica sets by the caller).
-    ref = Keyword.get(opts, :name) || self()
+    # When unregistered, the server's reference is its own pid (set in replica sets by the caller). A
+    # registered server's ref is `{name, node()}`: replica sets built for a cluster carry `{name, node}`
+    # tuples (see `Malachi.Application.broker_refs/1`), and a bare-atom ref would never equal them, so
+    # the primary check would reject every clustered produce with `:not_primary`.
+    ref =
+      case Keyword.get(opts, :name) do
+        nil -> self()
+        name -> {name, node()}
+      end
+
     directory = Keyword.fetch!(opts, :directory)
     File.mkdir_p!(directory)
 
@@ -193,6 +201,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   def handle_call({:replicate, segment_id, replica_set, base_offset, records, ctx}, _from, state) do
     token = Ctx.attach(ctx)
+    replica_set = Enum.map(replica_set, &canonical_ref/1)
 
     try do
       Tracer.with_span "malachi.replication.commit" do
@@ -218,6 +227,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   def handle_call({:append, segment_id, replica_set, base_offset, records}, _from, state) do
     # Buffer only, no fsync (that is `:flush`). Single-broker: the primary is the sole replica, so there
     # is no follower fan-out here; the broker routes multi-replica sets through `:replicate` instead.
+    replica_set = Enum.map(replica_set, &canonical_ref/1)
+
     if hd(replica_set) == state.ref do
       {state, log} = fetch_or_open(state, segment_id, base_offset)
 
@@ -375,6 +386,12 @@ defmodule Malachi.Cluster.ReplicationServer do
   # source has past our current end. Monitored so the in-progress flag is cleared on completion or
   # crash; the offset check in `follow` keeps concurrent appends safe, so a racing produce just
   # makes the catch-up abort and the next gap re-trigger.
+  # Normalizes a replica ref for comparison with `state.ref`: a bare atom names a locally registered
+  # server (single-node deployments and tests), so it is equivalent to `{name, node()}`; pids and
+  # `{name, node}` tuples (cluster replica sets) pass through unchanged.
+  defp canonical_ref(ref) when is_atom(ref), do: {ref, node()}
+  defp canonical_ref(ref), do: ref
+
   defp trigger_catchup(state, segment_id, base, source) do
     if MapSet.member?(state.catching_up, segment_id) do
       state

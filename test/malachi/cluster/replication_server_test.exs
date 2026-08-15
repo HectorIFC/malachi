@@ -34,6 +34,30 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  test "cluster-shaped {name, node} replica refs are accepted as primary (regression)" do
+    # A clustered broker builds replica sets as `{name, node}` tuples (Application.broker_refs/1). The
+    # server's own ref must match that shape, or every clustered produce dies with :not_primary, which
+    # is exactly what happened before refs were canonicalized: a registered server kept a bare-atom ref
+    # that never equaled the tuple, so this append (and so every produce on a real cluster) failed.
+    name = start_broker()
+    tuple_set = [{name, node()}]
+
+    assert {:ok, 0} = ReplicationServer.append({name, node()}, @segment, tuple_set, 0, records(["a"]))
+    assert {:ok, 1} = ReplicationServer.replicate({name, node()}, @segment, tuple_set, 1, records(["b"]))
+    assert read_values(name, @segment) == ["a", "b"]
+  end
+
+  test "atom and {name, node} refs are interchangeable in one replica set" do
+    # Single-node callers use bare atoms, cluster callers use tuples; both name the same server, so a
+    # mixed set must behave identically (the atom is canonicalized to {name, node()} on receipt).
+    [primary, follower] = [start_broker(), start_broker()]
+    mixed_set = [{primary, node()}, follower]
+
+    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, mixed_set, 0, records(["a", "b"]))
+    assert read_values(primary, @segment) == ["a", "b"]
+    assert read_values(follower, @segment) == ["a", "b"]
+  end
+
   test "delete removes a stored segment's data and is idempotent" do
     ref = start_broker()
     assert {:ok, 1} = ReplicationServer.replicate(ref, @segment, [ref], 0, records(["a", "b"]))
