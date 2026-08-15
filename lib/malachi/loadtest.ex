@@ -20,6 +20,7 @@ defmodule Malachi.Loadtest do
   @ops 1
   @records 2
   @errors 3
+  @dropped 4
 
   # Metrics + measurement window, bundled so the per-op loops take a single context rather than four args.
   @typep m :: %{ops: :counters.counters_ref(), hist: term(), warmup_end: integer(), measure_end: integer()}
@@ -33,7 +34,7 @@ defmodule Malachi.Loadtest do
     cfg = normalize(opts)
     setup(cfg)
 
-    ops = :counters.new(3, [:write_concurrency])
+    ops = :counters.new(4, [:write_concurrency])
     hist = Histogram.new()
     parent = self()
 
@@ -179,7 +180,7 @@ defmodule Malachi.Loadtest do
       record(m, status, mono_us() - t0, now >= m.warmup_end)
 
       case status do
-        :halt -> conn
+        :halt -> drop(m, conn)
         _ -> closed_loop(conn, ctx, m, corr + 1)
       end
     end
@@ -222,7 +223,7 @@ defmodule Malachi.Loadtest do
         pipe_loop(conn, ctx, m, inflight, next)
 
       {:error, _reason} ->
-        conn
+        drop(m, conn)
     end
   end
 
@@ -257,7 +258,7 @@ defmodule Malachi.Loadtest do
     else
       case Conn.recv_frame(conn, remaining) do
         {:ok, body, conn} -> handle_push(conn, ctx, s, m, Wire.decode_response(body))
-        {:error, _reason} -> conn
+        {:error, _reason} -> drop(m, conn)
       end
     end
   end
@@ -353,6 +354,13 @@ defmodule Malachi.Loadtest do
 
   defp record(m, :error, _dt, true), do: :counters.add(m.ops, @errors, 1)
 
+  # A worker that aborts on a transport error (a dropped/closed connection): count it so a run where the
+  # server drops connections under load reports `dropped=N` instead of a silent zero.
+  defp drop(m, conn) do
+    :counters.add(m.ops, @dropped, 1)
+    conn
+  end
+
   # stream pushes count as one op per page plus its records.
   defp record_push(m, n) do
     :counters.add(m.ops, @ops, 1)
@@ -366,6 +374,7 @@ defmodule Malachi.Loadtest do
     op_count = :counters.get(ops, @ops)
     records = :counters.get(ops, @records)
     errors = :counters.get(ops, @errors)
+    dropped = :counters.get(ops, @dropped)
     secs = cfg.duration
 
     %{
@@ -376,6 +385,7 @@ defmodule Malachi.Loadtest do
       ops: op_count,
       records: records,
       errors: errors,
+      dropped: dropped,
       ops_per_s: round(op_count / secs),
       records_per_s: round(records / secs),
       mb_per_s: Float.round(records * cfg.record_size / 1_048_576 / secs, 2),
@@ -385,7 +395,10 @@ defmodule Malachi.Loadtest do
 
   defp ms(hist, p), do: Float.round(Histogram.percentile(hist, p) / 1000, 2)
 
-  defp print(%{json: true}, report), do: IO.puts(json(report))
+  defp print(%{json: true}, report) do
+    IO.puts(json(report))
+    warn_if_empty(report)
+  end
 
   defp print(_cfg, r) do
     l = r.latency_ms
@@ -393,16 +406,35 @@ defmodule Malachi.Loadtest do
     IO.puts("""
 
     #{r.scenario} (#{r.connections} conns, pipeline #{r.pipeline}) over #{r.duration_s}s
-      #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s  errors=#{r.errors}
+      #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s  errors=#{r.errors}  dropped=#{r.dropped}
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}
     """)
+
+    warn_if_empty(r)
   end
+
+  # A run that recorded nothing is not "server idle": name the likely cause so it is never a silent zero.
+  defp warn_if_empty(%{ops: 0} = r) do
+    cause =
+      if r.dropped > 0 do
+        "#{r.dropped} connection(s) dropped under load (the server likely timed out the produce call)"
+      else
+        "per-op latency likely exceeds warmup + duration"
+      end
+
+    IO.puts(
+      :stderr,
+      "warning: no op completed in the measured window (#{cause}); lower --connections/--batch or raise --duration"
+    )
+  end
+
+  defp warn_if_empty(_r), do: :ok
 
   defp json(r) do
     l = r.latency_ms
 
     ~s({"scenario":"#{r.scenario}","connections":#{r.connections},"pipeline":#{r.pipeline},) <>
-      ~s("duration_s":#{r.duration_s},"ops":#{r.ops},"records":#{r.records},"errors":#{r.errors},) <>
+      ~s("duration_s":#{r.duration_s},"ops":#{r.ops},"records":#{r.records},"errors":#{r.errors},"dropped":#{r.dropped},) <>
       ~s("ops_per_s":#{r.ops_per_s},"records_per_s":#{r.records_per_s},"mb_per_s":#{r.mb_per_s},) <>
       ~s("latency_ms":{"p50":#{l.p50},"p99":#{l.p99},"p99_9":#{l.p99_9},"p99_99":#{l.p99_99}}})
   end

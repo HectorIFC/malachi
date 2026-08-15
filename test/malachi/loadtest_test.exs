@@ -54,6 +54,7 @@ defmodule Malachi.LoadtestTest do
       r = run(scenario: :produce, connections: 4, batch: 5, topic: t)
 
       assert r.errors == 0
+      assert r.dropped == 0
       assert r.ops > 0
       assert r.records == r.ops * 5
       assert r.records_per_s > 0
