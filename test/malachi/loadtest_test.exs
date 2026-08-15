@@ -7,6 +7,7 @@ defmodule Malachi.LoadtestTest do
 
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Histogram
+  alias Malachi.Wire
 
   @port Application.compile_env(:malachi, :tcp_port, 4040)
 
@@ -55,6 +56,8 @@ defmodule Malachi.LoadtestTest do
 
       assert r.errors == 0
       assert r.dropped == 0
+      assert r.overloaded == 0
+      assert r.reconnects == 0
       assert r.ops > 0
       assert r.records == r.ops * 5
       assert r.records_per_s > 0
@@ -108,4 +111,67 @@ defmodule Malachi.LoadtestTest do
     # which surfaces as a raised error rather than hanging. catch_error covers the MatchError/exit either way.
     assert catch_error(run(scenario: :produce, connections: 1, token: "not-a-real-token", topic: topic("tok")))
   end
+
+  describe "resilience" do
+    # A minimal wire server (packet: 4 matches the client's length-prefixed framing) that acks auth and
+    # create_topic, and drops the connection on the first produce it ever sees to force a reconnect, then
+    # serves produces normally. Proves the worker reconnects and keeps going instead of aborting.
+    test "a worker reconnects after its connection drops and keeps producing" do
+      seen = :ets.new(:fake_produces, [:public, :set])
+      :ets.insert(seen, {:produces, 0})
+
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: 4, active: false, reuseaddr: true])
+      {:ok, port} = :inet.port(listen)
+      spawn(fn -> fake_accept(listen, seen) end)
+
+      r =
+        run(port: port, host: "127.0.0.1", scenario: :produce, connections: 1, batch: 5, prepopulate: 0, topic: "recon")
+
+      :gen_tcp.close(listen)
+
+      assert r.dropped >= 1, "the forced drop should be counted"
+      assert r.reconnects >= 1, "the worker should reconnect and continue, not abort"
+      assert r.errors == 0
+      assert r.ops > 0, "after reconnecting the worker should complete produces"
+    end
+  end
+
+  # --- fake wire server (resilience test) ---
+
+  defp fake_accept(listen, seen) do
+    case :gen_tcp.accept(listen) do
+      {:ok, sock} ->
+        spawn(fn -> fake_serve(sock, seen) end)
+        fake_accept(listen, seen)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  defp fake_serve(sock, seen) do
+    case :gen_tcp.recv(sock, 0) do
+      {:ok, <<api_key::16, corr::32, _payload::binary>>} ->
+        cond do
+          api_key == Wire.produce_key() and :ets.update_counter(seen, :produces, 1) == 1 ->
+            # First produce anywhere: drop the connection to force the worker to reconnect.
+            :gen_tcp.close(sock)
+
+          api_key == Wire.produce_key() ->
+            :gen_tcp.send(sock, ok_body(corr, <<5::32>>))
+            fake_serve(sock, seen)
+
+          true ->
+            # auth / create_topic / anything else: ack so setup and re-auth succeed.
+            :gen_tcp.send(sock, ok_body(corr, <<>>))
+            fake_serve(sock, seen)
+        end
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  # An unframed ok-response body; packet: 4 on the listen socket prepends the length prefix.
+  defp ok_body(corr, payload), do: <<corr::32, Wire.ok_code()::16, payload::binary>>
 end

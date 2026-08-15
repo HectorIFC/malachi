@@ -5,9 +5,11 @@ defmodule Malachi.Loadtest do
   and control-plane (user/acl) load against a running Malachi server, measuring throughput and latency.
 
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
-  lock-free: an `:counters` array for ops/records/errors and a `Malachi.Loadtest.Histogram` for latency.
-  A worker connects and authenticates, waits at a barrier so all connections start together, runs its
-  scenario for `warmup + duration`, and records only during the measured window.
+  lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
+  server-shed `overloaded` produces, and reconnects) and a `Malachi.Loadtest.Histogram` for latency. A
+  worker connects and authenticates, waits at a barrier so all connections start together, runs its
+  scenario for `warmup + duration`, and records only during the measured window. It is resilient: a shed
+  produce backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
   """
 
   alias Malachi.Loadtest.Conn
@@ -21,9 +23,27 @@ defmodule Malachi.Loadtest do
   @records 2
   @errors 3
   @dropped 4
+  @overloaded 5
+  @reconnects 6
+  @counters 6
 
-  # Metrics + measurement window, bundled so the per-op loops take a single context rather than four args.
-  @typep m :: %{ops: :counters.counters_ref(), hist: term(), warmup_end: integer(), measure_end: integer()}
+  # Backpressure: on an `:overloaded` shed the worker backs off briefly and keeps going; on a dropped
+  # connection it reconnects with a short backoff, capped so a server that is truly down stops the worker
+  # instead of spinning.
+  @overloaded_backoff_ms 5
+  @reconnect_backoff_ms 20
+  @max_reconnect_tries 10
+
+  # Metrics + measurement window + the bits needed to reconnect/re-prime (conn_opts, pipeline), bundled so
+  # the per-op loops take a single context rather than many args.
+  @typep m :: %{
+           ops: :counters.counters_ref(),
+           hist: term(),
+           warmup_end: integer(),
+           measure_end: integer(),
+           conn_opts: keyword(),
+           pipeline: pos_integer()
+         }
 
   @doc """
   Runs a load test and returns the report map. See the moduledoc / the `mix malachi.loadtest` task for
@@ -34,7 +54,7 @@ defmodule Malachi.Loadtest do
     cfg = normalize(opts)
     setup(cfg)
 
-    ops = :counters.new(4, [:write_concurrency])
+    ops = :counters.new(@counters, [:write_concurrency])
     hist = Histogram.new()
     parent = self()
 
@@ -83,14 +103,14 @@ defmodule Malachi.Loadtest do
   end
 
   defp setup(cfg) do
-    {:ok, admin} = connect_auth(cfg)
+    {:ok, admin} = connect_auth(cfg.conn_opts)
     admin = create_topic(admin, cfg.topic)
     admin = prepopulate(admin, cfg)
     Conn.close(admin)
   end
 
-  defp connect_auth(cfg) do
-    with {:ok, conn} <- Conn.connect(cfg.conn_opts), do: Conn.authenticate(conn, cfg.conn_opts)
+  defp connect_auth(conn_opts) do
+    with {:ok, conn} <- Conn.connect(conn_opts), do: Conn.authenticate(conn, conn_opts)
   end
 
   # keyspace_bits 8 (server default); ignore already-exists so re-runs work.
@@ -116,11 +136,19 @@ defmodule Malachi.Loadtest do
   # --- worker ---
 
   defp worker(parent, index, cfg, ops, hist) do
-    {:ok, conn} = connect_auth(cfg)
+    {:ok, conn} = connect_auth(cfg.conn_opts)
     ctx = build_ctx(cfg, index)
     send(parent, {:ready, self()})
     {warmup_end, measure_end} = receive(do: ({:go, w, e} -> {w, e}))
-    m = %{ops: ops, hist: hist, warmup_end: warmup_end, measure_end: measure_end}
+
+    m = %{
+      ops: ops,
+      hist: hist,
+      warmup_end: warmup_end,
+      measure_end: measure_end,
+      conn_opts: cfg.conn_opts,
+      pipeline: cfg.pipeline
+    }
 
     conn = drive(cfg, conn, ctx, m)
 
@@ -164,7 +192,7 @@ defmodule Malachi.Loadtest do
 
   @spec drive(map(), Conn.t(), map(), m()) :: Conn.t()
   defp drive(_cfg, conn, %{op: {:stream, s}} = ctx, m), do: stream_loop(conn, ctx, s, m)
-  defp drive(cfg, conn, %{op: {:produce, _}} = ctx, m) when cfg.pipeline > 1, do: pipelined(cfg, conn, ctx, m)
+  defp drive(cfg, conn, %{op: {:produce, _}} = ctx, m) when cfg.pipeline > 1, do: pipelined(conn, ctx, m)
   defp drive(_cfg, conn, ctx, m), do: closed_loop(conn, ctx, m, 2)
 
   # --- closed loop (threads ctx so fetch/admin state advances) ---
@@ -177,20 +205,33 @@ defmodule Malachi.Loadtest do
     else
       t0 = mono_us()
       {status, conn, ctx} = do_op(ctx, conn, corr)
-      record(m, status, mono_us() - t0, now >= m.warmup_end)
+      measuring = now >= m.warmup_end
 
       case status do
-        :halt -> drop(m, conn)
-        _ -> closed_loop(conn, ctx, m, corr + 1)
+        # The server shed this produce (backpressure): back off briefly and keep the connection.
+        :overloaded ->
+          shed(m, measuring)
+          closed_loop(conn, ctx, m, corr + 1)
+
+        # Transport error: the connection dropped. Reconnect and keep going within the window.
+        :halt ->
+          case after_drop(m) do
+            {:ok, conn} -> closed_loop(conn, ctx, m, corr + 1)
+            :give_up -> conn
+          end
+
+        _ ->
+          record(m, status, mono_us() - t0, measuring)
+          closed_loop(conn, ctx, m, corr + 1)
       end
     end
   end
 
   # --- pipelined loop (produce only; W in flight per connection) ---
 
-  defp pipelined(cfg, conn, ctx, m) do
+  defp pipelined(conn, ctx, m) do
     {conn, inflight, next} =
-      Enum.reduce(1..cfg.pipeline, {conn, %{}, 2}, fn _, {conn, inflight, corr} ->
+      Enum.reduce(1..m.pipeline, {conn, %{}, 2}, fn _, {conn, inflight, corr} ->
         case send_produce(ctx, conn, corr) do
           {:ok, conn} -> {conn, Map.put(inflight, corr, mono_us()), corr + 1}
           {:error, conn} -> {conn, inflight, corr}
@@ -207,8 +248,11 @@ defmodule Malachi.Loadtest do
       {:ok, body, conn} ->
         {corr, code, resp} = Wire.decode_response(body)
         now = mono_ms()
+        measuring = now >= m.warmup_end
         {t0, inflight} = Map.pop(inflight, corr)
-        if t0, do: record(m, produce_status(code, resp), mono_us() - t0, now >= m.warmup_end)
+        status = produce_status(code, resp)
+        if status == :overloaded, do: shed(m, measuring)
+        if t0 && status != :overloaded, do: record(m, status, mono_us() - t0, measuring)
 
         {conn, inflight, next} =
           if now < m.measure_end do
@@ -222,8 +266,12 @@ defmodule Malachi.Loadtest do
 
         pipe_loop(conn, ctx, m, inflight, next)
 
+      # The connection dropped: reconnect and re-prime the pipeline within the window.
       {:error, _reason} ->
-        drop(m, conn)
+        case after_drop(m) do
+          {:ok, conn} -> pipelined(conn, ctx, m)
+          :give_up -> conn
+        end
     end
   end
 
@@ -257,8 +305,15 @@ defmodule Malachi.Loadtest do
       conn
     else
       case Conn.recv_frame(conn, remaining) do
-        {:ok, body, conn} -> handle_push(conn, ctx, s, m, Wire.decode_response(body))
-        {:error, _reason} -> drop(m, conn)
+        {:ok, body, conn} ->
+          handle_push(conn, ctx, s, m, Wire.decode_response(body))
+
+        # The connection dropped: reconnect and re-subscribe within the window.
+        {:error, _reason} ->
+          case after_drop(m) do
+            {:ok, conn} -> stream_loop(conn, ctx, s, m)
+            :give_up -> conn
+          end
       end
     end
   end
@@ -279,7 +334,7 @@ defmodule Malachi.Loadtest do
   defp do_op(%{op: {:produce, payload}} = ctx, conn, corr) do
     case Conn.request(conn, Wire.produce_key(), corr, payload) do
       {:ok, 0, <<count::32>>, conn} -> {{:ok, count}, conn, ctx}
-      {:ok, _code, _resp, conn} -> {:error, conn, ctx}
+      {:ok, _code, resp, conn} -> {error_status(resp), conn, ctx}
       {:error, _reason} -> {:halt, conn, ctx}
     end
   end
@@ -339,12 +394,17 @@ defmodule Malachi.Loadtest do
 
   # Produce response payload is `<<count::32>>`; count it as records (pipelined path).
   defp produce_status(0, <<count::32>>), do: {:ok, count}
-  defp produce_status(_code, _resp), do: :error
+  defp produce_status(_code, resp), do: error_status(resp)
+
+  # An error response is either the server's backpressure shed (`:overloaded`, a light event the worker
+  # backs off on) or a genuine error (`:error`).
+  defp error_status(resp) do
+    if Wire.decode_error_reason(resp) == "overloaded", do: :overloaded, else: :error
+  end
 
   # --- recording ---
 
   defp record(_m, _status, _dt, false), do: :ok
-  defp record(_m, :halt, _dt, _), do: :ok
 
   defp record(m, {:ok, n}, dt, true) do
     :counters.add(m.ops, @ops, 1)
@@ -354,11 +414,44 @@ defmodule Malachi.Loadtest do
 
   defp record(m, :error, _dt, true), do: :counters.add(m.ops, @errors, 1)
 
-  # A worker that aborts on a transport error (a dropped/closed connection): count it so a run where the
-  # server drops connections under load reports `dropped=N` instead of a silent zero.
-  defp drop(m, conn) do
+  # The server shed a produce under backpressure: count it (during the measured window) and back off
+  # briefly so the worker does not immediately re-flood the overloaded broker.
+  defp shed(m, measuring) do
+    if measuring, do: :counters.add(m.ops, @overloaded, 1)
+    Process.sleep(@overloaded_backoff_ms)
+  end
+
+  # A transport error dropped the connection. Count the drop (always visible, an event not a rate) and try
+  # to recover: `{:ok, conn}` with a fresh authenticated connection to continue on, or `:give_up` when the
+  # server is down (retry cap hit) or the window has closed.
+  defp after_drop(m) do
     :counters.add(m.ops, @dropped, 1)
-    conn
+
+    case reconnect(m, 0) do
+      {:ok, conn} ->
+        :counters.add(m.ops, @reconnects, 1)
+        {:ok, conn}
+
+      :give_up ->
+        :give_up
+    end
+  end
+
+  defp reconnect(m, tries) do
+    cond do
+      mono_ms() >= m.measure_end -> :give_up
+      tries >= @max_reconnect_tries -> :give_up
+      true -> reconnect_attempt(m, tries)
+    end
+  end
+
+  defp reconnect_attempt(m, tries) do
+    Process.sleep(@reconnect_backoff_ms)
+
+    case connect_auth(m.conn_opts) do
+      {:ok, conn} -> {:ok, conn}
+      {:error, _} -> reconnect(m, tries + 1)
+    end
   end
 
   # stream pushes count as one op per page plus its records.
@@ -375,6 +468,8 @@ defmodule Malachi.Loadtest do
     records = :counters.get(ops, @records)
     errors = :counters.get(ops, @errors)
     dropped = :counters.get(ops, @dropped)
+    overloaded = :counters.get(ops, @overloaded)
+    reconnects = :counters.get(ops, @reconnects)
     secs = cfg.duration
 
     %{
@@ -386,6 +481,8 @@ defmodule Malachi.Loadtest do
       records: records,
       errors: errors,
       dropped: dropped,
+      overloaded: overloaded,
+      reconnects: reconnects,
       ops_per_s: round(op_count / secs),
       records_per_s: round(records / secs),
       mb_per_s: Float.round(records * cfg.record_size / 1_048_576 / secs, 2),
@@ -406,7 +503,8 @@ defmodule Malachi.Loadtest do
     IO.puts("""
 
     #{r.scenario} (#{r.connections} conns, pipeline #{r.pipeline}) over #{r.duration_s}s
-      #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s  errors=#{r.errors}  dropped=#{r.dropped}
+      #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s
+      errors=#{r.errors}  dropped=#{r.dropped}  overloaded=#{r.overloaded}  reconnects=#{r.reconnects}
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}
     """)
 
@@ -434,7 +532,8 @@ defmodule Malachi.Loadtest do
     l = r.latency_ms
 
     ~s({"scenario":"#{r.scenario}","connections":#{r.connections},"pipeline":#{r.pipeline},) <>
-      ~s("duration_s":#{r.duration_s},"ops":#{r.ops},"records":#{r.records},"errors":#{r.errors},"dropped":#{r.dropped},) <>
+      ~s("duration_s":#{r.duration_s},"ops":#{r.ops},"records":#{r.records},"errors":#{r.errors},) <>
+      ~s("dropped":#{r.dropped},"overloaded":#{r.overloaded},"reconnects":#{r.reconnects},) <>
       ~s("ops_per_s":#{r.ops_per_s},"records_per_s":#{r.records_per_s},"mb_per_s":#{r.mb_per_s},) <>
       ~s("latency_ms":{"p50":#{l.p50},"p99":#{l.p99},"p99_9":#{l.p99_9},"p99_99":#{l.p99_99}}})
   end

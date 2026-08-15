@@ -45,7 +45,8 @@ defmodule Malachi.GroupCommitTest do
 
   # Boots an independent group-commit broker (its own ReplicationServer, dir, and topic) and registers
   # cleanup. `opts`: :interval (flush ms, default 10), :group_commit (default true), :repl_opts (e.g. a
-  # custom :store). Returns the broker pid.
+  # custom :store), :flush_max_records (eager-flush threshold, default 8000), :max_inflight (overload
+  # valve, default 200000). Returns the broker pid.
   defp start_broker(opts \\ []) do
     tag = System.unique_integer([:positive])
     base = Path.join(System.tmp_dir!(), "gc_test_#{tag}")
@@ -61,7 +62,9 @@ defmodule Malachi.GroupCommitTest do
       BrokerServer.start_link(Path.join(base, "broker"),
         brokers: [repl],
         group_commit: Keyword.get(opts, :group_commit, true),
-        group_commit_interval_ms: Keyword.get(opts, :interval, 10)
+        group_commit_interval_ms: Keyword.get(opts, :interval, 10),
+        group_commit_flush_max_records: Keyword.get(opts, :flush_max_records, 8_000),
+        group_commit_max_inflight: Keyword.get(opts, :max_inflight, 200_000)
       )
 
     on_exit(fn ->
@@ -149,5 +152,63 @@ defmodule Malachi.GroupCommitTest do
     {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
     {:ok, _} = BrokerServer.produce(broker, "t", batch(7))
     assert length(consume_all(broker, "t")) == 7
+  end
+
+  test "past the inflight cap, produces are shed with :overloaded and the broker survives" do
+    # A tiny cap (20 records) and a long window so the burst parks without an interval flush clearing it;
+    # a huge eager threshold so the cap, not the eager flush, is what trips. The first couple of produces
+    # park (filling the cap); the rest are shed. The broker must stay alive and still commit the parked
+    # ones once the window elapses.
+    broker = start_broker(interval: 500, flush_max_records: 1_000_000, max_inflight: 20)
+    {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+
+    producers = 40
+
+    results =
+      1..producers
+      |> Task.async_stream(fn _ -> BrokerServer.produce(broker, "t", batch(10)) end,
+        max_concurrency: producers,
+        timeout: 10_000
+      )
+      |> Enum.map(fn {:ok, r} -> r end)
+
+    shed = Enum.count(results, &match?({:error, :overloaded}, &1))
+    committed = Enum.count(results, &match?({:ok, _}, &1))
+
+    assert shed > 0, "expected some produces to be shed with :overloaded, saw none"
+    assert committed > 0, "expected the parked produces to still commit"
+    assert shed + committed == producers, "every produce is either shed or committed, never dropped"
+    assert Process.alive?(broker), "the broker must survive backpressure, not crash"
+    assert length(consume_all(broker, "t")) == committed * 10
+  end
+
+  test "normal load is never shed as :overloaded (no false positives)" do
+    # 50 concurrent produces of 10 records = 500, far under the default 200k cap: all must commit cleanly.
+    broker = start_broker(interval: 20)
+    {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+
+    results =
+      1..50
+      |> Task.async_stream(fn _ -> BrokerServer.produce(broker, "t", batch(10)) end,
+        max_concurrency: 50,
+        timeout: 10_000
+      )
+      |> Enum.map(fn {:ok, r} -> r end)
+
+    assert Enum.all?(results, &match?({:ok, _}, &1)), "no produce should be shed under normal load"
+    assert length(consume_all(broker, "t")) == 500
+  end
+
+  test "eager flush returns a large produce without waiting for the interval timer" do
+    # A very long interval but a low eager threshold: a produce at/over the threshold must flush right away
+    # rather than blocking the caller for the full interval. If the eager path were missing, this call
+    # would take ~the interval; we assert it returns well under it.
+    broker = start_broker(interval: 5_000, flush_max_records: 10)
+    {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+
+    {elapsed_us, {:ok, _}} = :timer.tc(fn -> BrokerServer.produce(broker, "t", batch(20)) end)
+
+    assert elapsed_us < 1_000_000, "eager flush should return in well under the 5s interval, took #{elapsed_us}us"
+    assert length(consume_all(broker, "t")) == 20
   end
 end

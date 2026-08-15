@@ -173,6 +173,12 @@ config :malachi,
   # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
   # default; only active on a single-node (rf=1) broker, which is where it applies today.
   group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
+  # Eager-flush threshold (records): flush as soon as this many produce records are parked, so each fsync
+  # and each reply stays bounded and a produce never waits long enough to time out, even on a slow disk.
+  group_commit_flush_max_records: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS"), 8_000),
+  # Backpressure valve (records): past this many parked records the broker sheds new produces with an
+  # `:overloaded` error instead of letting them queue until the caller times out and the connection drops.
+  group_commit_max_inflight: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_MAX_INFLIGHT"), 200_000),
   # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
   # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
   # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.
