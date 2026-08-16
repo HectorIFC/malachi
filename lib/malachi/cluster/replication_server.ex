@@ -9,14 +9,20 @@ defmodule Malachi.Cluster.ReplicationServer do
   in-process for tests and over distributed Erlang in production). A segment's `replica_set` (from
   `Malachi.Cluster.Placement`) is a list of those references; the first is the primary.
 
-  On `replicate/5` the primary appends the batch to its local copy, fans out to the followers
-  concurrently, and feeds each ack into a `Malachi.Cluster.ReplicaTracker` to compute the commit
-  offset. A segment's log opens at the segment's `base_offset` (its first range-relative offset),
-  so the offsets of a range's segments are contiguous rather than restarting at zero per segment.
-  The call returns `{:ok, last_offset}` once a quorum (the primary plus enough followers) has the
-  batch. Tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers - or `{:error, :no_quorum}`
-  otherwise. Both the primary and the followers `fsync` before counting toward the quorum, so
-  "committed" means "durable on a majority".
+  On `replicate/5` the primary appends the batch durably to its local copy, then PUSHES it to the
+  followers as pipelined replica-appends (the NorthGuard replication protocol): the caller is parked
+  and the pushes go out as casts from the primary's own loop, up to `:replication_window` unacked
+  batches per segment, so the loop never blocks waiting on a follower (a synchronous fan-out let
+  primaries on different nodes block each other's loops in a circular wait). Casting from one fixed
+  process gives per-follower FIFO, so the appends arrive in offset order with no extra coordination.
+  Each push carries the segment's commit progress; each follower ack carries the follower's durable
+  end offset and feeds a `Malachi.Cluster.ReplicaTracker`. A segment's log opens at the segment's
+  `base_offset` (its first range-relative offset), so the offsets of a range's segments are
+  contiguous rather than restarting at zero per segment. The parked call is replied `{:ok, last}`
+  as soon as a quorum (the primary plus enough followers) has the batch durably, tolerating up to
+  ⌊(N-1)/2⌋ slow or unreachable followers, or `{:error, :no_quorum}` when the quorum does not close
+  within the follow timeout. Both the primary and the followers `fsync` before counting toward the
+  quorum, so "committed" means "durable on a majority".
 
   Scope: the active segment's happy path with quorum tolerance, plus **automatic catch-up** of a
   follower that is behind: when the primary's fan-out reaches a follower whose end is below the
@@ -39,6 +45,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias OpenTelemetry.Ctx
 
   @follow_timeout 5_000
+  # Max unacked replica-append batches in flight per segment (the NorthGuard replication window; static
+  # in this slice, a follower-advertised dynamic window is a later protocol evolution).
+  @default_replication_window 32
+
+  @typep batch :: %{ref: reference(), from: GenServer.from(), last: non_neg_integer(), count: pos_integer()}
 
   @typep state :: %{
            ref: term(),
@@ -47,7 +58,12 @@ defmodule Malachi.Cluster.ReplicationServer do
            logs: %{term() => Log.t()},
            trackers: %{term() => ReplicaTracker.t()},
            catching_up: MapSet.t(),
-           catchup_monitors: %{reference() => term()}
+           catchup_monitors: %{reference() => term()},
+           follow_timeout: pos_integer(),
+           replication_window: pos_integer(),
+           inflight: %{term() => [batch()]},
+           pending: %{term() => :queue.queue()},
+           committed: %{term() => non_neg_integer()}
          }
 
   @doc """
@@ -57,6 +73,8 @@ defmodule Malachi.Cluster.ReplicationServer do
     * `:name` (optional) - the broker reference this server is registered under and known by in
       replica sets. When omitted, the server is unregistered and its reference is its pid.
     * `:directory` (required) - where replicated segment logs are stored.
+    * `:follow_timeout` - ms a parked replicate waits for its quorum before `:no_quorum` (default 5000).
+    * `:replication_window` - max unacked replica-append batches in flight per segment (default 32).
     * any remaining options are forwarded to each segment's `Malachi.Log`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -180,11 +198,19 @@ defmodule Malachi.Cluster.ReplicationServer do
     state = %{
       ref: ref,
       directory: directory,
-      log_opts: Keyword.drop(opts, [:name, :directory]),
+      log_opts: Keyword.drop(opts, [:name, :directory, :follow_timeout, :replication_window]),
       logs: %{},
       trackers: %{},
       catching_up: MapSet.new(),
-      catchup_monitors: %{}
+      catchup_monitors: %{},
+      # Pipelined replication (NorthGuard style). `inflight` holds the pushed-but-unresolved batches per
+      # segment in offset order, each with its parked caller; `pending` queues batches past the window;
+      # `committed` is the per-segment commit progress pushed to followers with each replica append.
+      follow_timeout: Keyword.get(opts, :follow_timeout, @follow_timeout),
+      replication_window: Keyword.get(opts, :replication_window, @default_replication_window),
+      inflight: %{},
+      pending: %{},
+      committed: %{}
     }
 
     {:ok, state}
@@ -199,14 +225,16 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, {:error, :empty_replica_set}, state}
   end
 
-  def handle_call({:replicate, segment_id, replica_set, base_offset, records, ctx}, _from, state) do
+  def handle_call({:replicate, segment_id, replica_set, base_offset, records, ctx}, from, state) do
     token = Ctx.attach(ctx)
     replica_set = Enum.map(replica_set, &canonical_ref/1)
 
     try do
+      # The span covers the primary's local durable append; the follower fan-out completes
+      # asynchronously (see the :replica_ack handler), so it is not inside this span.
       Tracer.with_span "malachi.replication.commit" do
         if hd(replica_set) == state.ref do
-          do_replicate(state, segment_id, replica_set, base_offset, records)
+          do_replicate(state, from, segment_id, replica_set, base_offset, records)
         else
           {:reply, {:error, :not_primary}, state}
         end
@@ -302,7 +330,79 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, reply, state}
   end
 
+  # Follower side of the pipelined push: append durably and ack the primary with the durable end
+  # offset (the NorthGuard replica ack). Pushes from one primary arrive in offset order (per-pair
+  # FIFO), so a mismatch means this replica is genuinely behind (or ahead via catch-up), not reordered.
   @impl true
+  def handle_cast({:replica_append, segment_id, base, expected_first, records, _committed, source}, state) do
+    {state, log} = fetch_or_open(state, segment_id, base)
+
+    cond do
+      log.next_offset == expected_first ->
+        {log, _first, last} = append_durably(log, records)
+        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, last}})
+        {:noreply, put_log(state, segment_id, log)}
+
+      log.next_offset > expected_first ->
+        # Already have this batch (a background catch-up overtook the push stream). The durable end is
+        # still an honest cumulative ack, so report it rather than staying silent.
+        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, log.next_offset - 1}})
+        {:noreply, state}
+
+      true ->
+        # Behind (a new replica from base, or missed batches): nack and pull from the primary in the
+        # background; this batch commits via the up-to-date replicas and we rejoin on a later one.
+        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, :out_of_sync}})
+        {:noreply, trigger_catchup(state, segment_id, base, source)}
+    end
+  end
+
+  # Primary side: fold a follower's durable-offset ack into the tracker and complete every parked
+  # batch the quorum now covers. Errors (out_of_sync, and stale acks from a replica no longer in the
+  # set) do not count toward the quorum, mirroring the old synchronous gather.
+  def handle_cast({:replica_ack, segment_id, follower, {:ok, offset}}, state) do
+    with tracker when tracker != nil <- Map.get(state.trackers, segment_id),
+         {:ok, tracker} <- ReplicaTracker.ack(tracker, follower, offset) do
+      state = put_in(state.trackers[segment_id], tracker)
+      {:noreply, resolve_batches(state, segment_id)}
+    else
+      _stale -> {:noreply, state}
+    end
+  end
+
+  def handle_cast({:replica_ack, _segment_id, _follower, {:error, _reason}}, state) do
+    {:noreply, state}
+  end
+
+  # A parked batch whose quorum never closed within the follow timeout: give its caller the same
+  # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
+  @impl true
+  def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
+    inflight = Map.get(state.inflight, segment_id, [])
+    queue = Map.get(state.pending, segment_id, :queue.new())
+
+    case Enum.split_with(inflight, &(&1.ref == batch_ref)) do
+      {[batch], rest} ->
+        GenServer.reply(batch.from, {:error, :no_quorum})
+        Telemetry.replication_commit(batch.count, :no_quorum)
+        state = put_in(state.inflight[segment_id], rest)
+        {:noreply, drain_pending(state, segment_id)}
+
+      {[], _} ->
+        queued = :queue.to_list(queue)
+
+        case Enum.split_with(queued, fn {batch, _push} -> batch.ref == batch_ref end) do
+          {[{batch, _push}], rest} ->
+            GenServer.reply(batch.from, {:error, :no_quorum})
+            Telemetry.replication_commit(batch.count, :no_quorum)
+            {:noreply, put_in(state.pending[segment_id], :queue.from_list(rest))}
+
+          {[], _} ->
+            {:noreply, state}
+        end
+    end
+  end
+
   def handle_info({:DOWN, monitor_ref, :process, _pid, _reason}, state) do
     case Map.pop(state.catchup_monitors, monitor_ref) do
       {nil, _monitors} ->
@@ -321,11 +421,16 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   # --- internals ---
 
-  @spec do_replicate(state(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
-          {:reply, {:ok, non_neg_integer()} | {:error, :no_quorum}, state()}
-  defp do_replicate(state, segment_id, replica_set, base_offset, records) do
-    # Distinct replicas, and never the primary itself among the followers, otherwise the server
-    # would synchronously call itself (deadlock). The ack math also assumes distinct replicas.
+  # Pipelined replication (NorthGuard style). The primary appends durably, acks itself in the tracker,
+  # and, with followers, PARKS the caller and pushes the batch to every follower as a cast from this
+  # loop, without ever blocking on them. Waiting synchronously here (the previous design) let primaries
+  # on different nodes block each other's loops in a circular wait: with several cross-node primaries
+  # even light traffic deadlocked until every call timed out.
+  @spec do_replicate(state(), GenServer.from(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
+          {:reply, {:ok, non_neg_integer()} | {:error, :no_quorum}, state()} | {:noreply, state()}
+  defp do_replicate(state, from, segment_id, replica_set, base_offset, records) do
+    # Distinct replicas, and never the primary itself among the followers. The ack math also assumes
+    # distinct replicas.
     replica_set = Enum.uniq(replica_set)
     followers = replica_set -- [state.ref]
 
@@ -335,20 +440,86 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     tracker = tracker_for(state, segment_id, replica_set)
     {:ok, tracker} = ReplicaTracker.ack(tracker, state.ref, last)
+    state = put_in(state.trackers[segment_id], tracker)
 
-    tracker =
-      followers
-      |> gather_acks(segment_id, base_offset, first, records, state.ref)
-      |> Enum.reduce(tracker, fn {follower, offset}, acc ->
-        {:ok, acc} = ReplicaTracker.ack(acc, follower, offset)
-        acc
+    if followers == [] do
+      reply = if ReplicaTracker.committed?(tracker, last), do: {:ok, last}, else: {:error, :no_quorum}
+      Telemetry.replication_commit(length(records), if(match?({:ok, _}, reply), do: :ok, else: :no_quorum))
+      {:reply, reply, state}
+    else
+      batch = %{ref: make_ref(), from: from, last: last, count: length(records)}
+      # The no-quorum timer arms at park time (not push time), so a caller queued behind a full window
+      # still gets its reply well before its own call timeout.
+      Process.send_after(self(), {:replicate_timeout, segment_id, batch.ref}, state.follow_timeout)
+
+      push =
+        {followers,
+         {:replica_append, segment_id, base_offset, first, records, committed_of(state, segment_id), state.ref}}
+
+      {:noreply, park_batch(state, segment_id, batch, push)}
+    end
+  end
+
+  # Parks a batch: pushes it right away when the segment's window has room, otherwise queues it FIFO.
+  # The local append already assigned its offsets under this serial loop, so draining in FIFO order
+  # preserves the follower-side expected_first chain.
+  defp park_batch(state, segment_id, batch, push) do
+    if length(Map.get(state.inflight, segment_id, [])) < state.replication_window do
+      do_push(push)
+      update_in(state.inflight[segment_id], &((&1 || []) ++ [batch]))
+    else
+      update_in(state.pending[segment_id], &:queue.in({batch, push}, &1 || :queue.new()))
+    end
+  end
+
+  # Casting from the primary's own loop (never from a helper process) is what guarantees per-follower
+  # FIFO: Erlang orders messages between a fixed pair of processes, so the appends arrive in offset
+  # order and pipelining needs no per-batch synchronization.
+  defp do_push({followers, message}), do: Enum.each(followers, &GenServer.cast(&1, message))
+
+  # Replies (in offset order) every inflight batch whose last offset the quorum now covers, then
+  # refills the window from the pending queue. committed?/2 is monotone in the offset, so the walk can
+  # stop at the first uncovered batch.
+  defp resolve_batches(state, segment_id) do
+    tracker = Map.fetch!(state.trackers, segment_id)
+    inflight = Map.get(state.inflight, segment_id, [])
+    {done, still} = Enum.split_while(inflight, &ReplicaTracker.committed?(tracker, &1.last))
+
+    state =
+      Enum.reduce(done, state, fn batch, acc ->
+        GenServer.reply(batch.from, {:ok, batch.last})
+        Telemetry.replication_commit(batch.count, :ok)
+        %{acc | committed: Map.put(acc.committed, segment_id, batch.last)}
       end)
 
-    state = put_in(state.trackers[segment_id], tracker)
-    reply = if ReplicaTracker.committed?(tracker, last), do: {:ok, last}, else: {:error, :no_quorum}
-    Telemetry.replication_commit(length(records), if(match?({:ok, _}, reply), do: :ok, else: :no_quorum))
-    {:reply, reply, state}
+    state = put_in(state.inflight[segment_id], still)
+    drain_pending(state, segment_id)
   end
+
+  # Pushes queued batches while the window has room.
+  defp drain_pending(state, segment_id) do
+    inflight = Map.get(state.inflight, segment_id, [])
+    queue = Map.get(state.pending, segment_id, :queue.new())
+
+    if length(inflight) < state.replication_window do
+      case :queue.out(queue) do
+        {{:value, {batch, push}}, rest} ->
+          do_push(push)
+
+          state
+          |> put_in([Access.key(:inflight), segment_id], inflight ++ [batch])
+          |> put_in([Access.key(:pending), segment_id], rest)
+          |> drain_pending(segment_id)
+
+        {:empty, _} ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp committed_of(state, segment_id), do: Map.get(state.committed, segment_id, -1)
 
   # Reuses the segment's tracker (so acks accumulate across batches), rebuilding it if the replica
   # set changed.
@@ -357,29 +528,6 @@ defmodule Malachi.Cluster.ReplicationServer do
       %ReplicaTracker{replica_set: ^replica_set} = tracker -> tracker
       _ -> ReplicaTracker.new(replica_set)
     end
-  end
-
-  # Calls each follower concurrently, passing `primary` as the catch-up source so a behind follower
-  # can self-heal. Keeps only those that durably stored the batch; a slow, unreachable, or
-  # out-of-sync follower is dropped (it does not count toward the quorum).
-  defp gather_acks(followers, segment_id, base, expected_first, records, primary) do
-    followers
-    |> Task.async_stream(
-      fn follower ->
-        try do
-          {follower,
-           GenServer.call(follower, {:follow, segment_id, base, expected_first, records, primary}, @follow_timeout)}
-        catch
-          :exit, _ -> {follower, {:error, :unreachable}}
-        end
-      end,
-      timeout: @follow_timeout + 1_000,
-      on_timeout: :kill_task
-    )
-    |> Enum.flat_map(fn
-      {:ok, {follower, {:ok, offset}}} -> [{follower, offset}]
-      _ -> []
-    end)
   end
 
   # Starts one background catch-up per segment (deduped via `catching_up`): it pulls everything the
