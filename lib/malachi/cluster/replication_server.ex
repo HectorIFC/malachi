@@ -52,7 +52,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   # count and size triggers already live in the store, this is the time one).
   @default_gc_interval_ms 10
 
-  @typep batch :: %{ref: reference(), from: GenServer.from(), last: non_neg_integer(), count: pos_integer()}
+  @typep reply_target :: {:call, GenServer.from()} | {:notify, pid(), term()}
+  @typep batch :: %{ref: reference(), reply: reply_target(), last: non_neg_integer(), count: pos_integer()}
 
   @typep state :: %{
            ref: term(),
@@ -122,6 +123,22 @@ defmodule Malachi.Cluster.ReplicationServer do
   catch
     # A dead/unreachable primary must not crash the caller; surface it as an error to handle.
     :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Fire-and-forget variant of `replicate/5` for a frontend that must never block its loop on
+  replication (the NorthGuard end-to-end pipelined produce): same semantics and quorum rules, but the
+  result is DELIVERED as a message `{:replicate_result, tag, {:ok, last} | {:error, reason}}` to
+  `notify_pid` instead of a call reply. The caller owns retry/timeout policy for a lost cast (an
+  unreachable primary never answers), typically with its own safety timer.
+  """
+  @spec replicate_async(term(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()], pid(), term()) :: :ok
+  def replicate_async(primary, segment_id, replica_set, base_offset, records, notify_pid, tag) do
+    # Same trace propagation as replicate/5: the broker produce span becomes this commit's parent.
+    GenServer.cast(
+      primary,
+      {:replicate_async, segment_id, replica_set, base_offset, records, {notify_pid, tag}, Ctx.get_current()}
+    )
   end
 
   @doc """
@@ -260,7 +277,10 @@ defmodule Malachi.Cluster.ReplicationServer do
       # asynchronously (see the :replica_ack handler), so it is not inside this span.
       Tracer.with_span "malachi.replication.commit" do
         if hd(replica_set) == state.ref do
-          do_replicate(state, from, segment_id, replica_set, base_offset, records)
+          case do_replicate(state, {:call, from}, segment_id, replica_set, base_offset, records) do
+            {:done, result, state} -> {:reply, result, state}
+            {:parked, state} -> {:noreply, state}
+          end
         else
           {:reply, {:error, :not_primary}, state}
         end
@@ -356,10 +376,50 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, reply, state}
   end
 
+  # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
+  # :replicate call, but completions are DELIVERED as messages to the notify target.
+  @impl true
+  def handle_cast({:replicate_async, _segment_id, _replica_set, _base_offset, records, notify, _ctx}, state)
+      when records == [] do
+    notify_result(notify, {:error, :empty})
+    {:noreply, state}
+  end
+
+  def handle_cast({:replicate_async, _segment_id, [], _base_offset, _records, notify, _ctx}, state) do
+    notify_result(notify, {:error, :empty_replica_set})
+    {:noreply, state}
+  end
+
+  def handle_cast({:replicate_async, segment_id, replica_set, base_offset, records, {pid, tag} = notify, ctx}, state) do
+    token = Ctx.attach(ctx)
+    replica_set = Enum.map(replica_set, &canonical_ref/1)
+
+    try do
+      # As in the call path, the span covers the primary's local durable append; the fan-out completes
+      # asynchronously.
+      Tracer.with_span "malachi.replication.commit" do
+        if hd(replica_set) == state.ref do
+          case do_replicate(state, {:notify, pid, tag}, segment_id, replica_set, base_offset, records) do
+            {:done, result, state} ->
+              notify_result(notify, result)
+              {:noreply, state}
+
+            {:parked, state} ->
+              {:noreply, state}
+          end
+        else
+          notify_result(notify, {:error, :not_primary})
+          {:noreply, state}
+        end
+      end
+    after
+      Ctx.detach(token)
+    end
+  end
+
   # Follower side of the pipelined push: append durably and ack the primary with the durable end
   # offset (the NorthGuard replica ack). Pushes from one primary arrive in offset order (per-pair
   # FIFO), so a mismatch means this replica is genuinely behind (or ahead via catch-up), not reordered.
-  @impl true
   def handle_cast({:replica_append, segment_id, base, expected_first, records, _committed, source}, state) do
     {state, log} = fetch_or_open(state, segment_id, base)
 
@@ -455,7 +515,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     case Enum.split_with(inflight, &(&1.ref == batch_ref)) do
       {[batch], rest} ->
-        GenServer.reply(batch.from, {:error, :no_quorum})
+        reply_batch(batch, {:error, :no_quorum})
         Telemetry.replication_commit(batch.count, :no_quorum)
         state = put_in(state.inflight[segment_id], rest)
         {:noreply, drain_pending(state, segment_id)}
@@ -465,7 +525,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
         case Enum.split_with(queued, fn {batch, _push} -> batch.ref == batch_ref end) do
           {[{batch, _push}], rest} ->
-            GenServer.reply(batch.from, {:error, :no_quorum})
+            reply_batch(batch, {:error, :no_quorum})
             Telemetry.replication_commit(batch.count, :no_quorum)
             {:noreply, put_in(state.pending[segment_id], :queue.from_list(rest))}
 
@@ -498,23 +558,23 @@ defmodule Malachi.Cluster.ReplicationServer do
   # loop, without ever blocking on them. Waiting synchronously here (the previous design) let primaries
   # on different nodes block each other's loops in a circular wait: with several cross-node primaries
   # even light traffic deadlocked until every call timed out.
-  @spec do_replicate(state(), GenServer.from(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
-          {:reply, {:ok, non_neg_integer()} | {:error, :no_quorum}, state()} | {:noreply, state()}
-  defp do_replicate(state, from, segment_id, replica_set, base_offset, records) do
+  @spec do_replicate(state(), reply_target(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
+          {:done, {:ok, non_neg_integer()} | {:error, term()}, state()} | {:parked, state()}
+  defp do_replicate(state, reply_target, segment_id, replica_set, base_offset, records) do
     # Distinct replicas, and never the primary itself among the followers. The ack math also assumes
     # distinct replicas.
     replica_set = Enum.uniq(replica_set)
     followers = replica_set -- [state.ref]
 
     if state.group_commit do
-      do_replicate_grouped(state, from, segment_id, replica_set, followers, base_offset, records)
+      do_replicate_grouped(state, reply_target, segment_id, replica_set, followers, base_offset, records)
     else
-      do_replicate_durable(state, from, segment_id, replica_set, followers, base_offset, records)
+      do_replicate_durable(state, reply_target, segment_id, replica_set, followers, base_offset, records)
     end
   end
 
   # Per-batch durability: append + fsync locally, self-ack, push. The original semantics.
-  defp do_replicate_durable(state, from, segment_id, replica_set, followers, base_offset, records) do
+  defp do_replicate_durable(state, reply_target, segment_id, replica_set, followers, base_offset, records) do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {log, first, last} = append_durably(log, records)
     state = put_log(state, segment_id, log)
@@ -526,9 +586,9 @@ defmodule Malachi.Cluster.ReplicationServer do
     if followers == [] do
       reply = if ReplicaTracker.committed?(tracker, last), do: {:ok, last}, else: {:error, :no_quorum}
       Telemetry.replication_commit(length(records), if(match?({:ok, _}, reply), do: :ok, else: :no_quorum))
-      {:reply, reply, state}
+      {:done, reply, state}
     else
-      {:noreply, park_and_push(state, from, segment_id, base_offset, first, last, followers, records)}
+      {:parked, park_and_push(state, reply_target, segment_id, base_offset, first, last, followers, records)}
     end
   end
 
@@ -537,7 +597,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   # defer the primary's own tracker ack to the next :gc_flush tick, when one fsync covers every batch
   # buffered since the last. The caller parks even with no followers: a reply must never precede local
   # durability.
-  defp do_replicate_grouped(state, from, segment_id, replica_set, followers, base_offset, records) do
+  defp do_replicate_grouped(state, reply_target, segment_id, replica_set, followers, base_offset, records) do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
 
     case Log.append(log, records) do
@@ -547,19 +607,19 @@ defmodule Malachi.Cluster.ReplicationServer do
         state = put_in(state.trackers[segment_id], tracker_for(state, segment_id, replica_set))
 
         state
-        |> park_and_push(from, segment_id, base_offset, first, last, followers, records)
+        |> park_and_push(reply_target, segment_id, base_offset, first, last, followers, records)
         |> ensure_gc_timer()
-        |> then(&{:noreply, &1})
+        |> then(&{:parked, &1})
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:done, {:error, reason}, state}
     end
   end
 
   # Parks the caller's batch and pushes it to the followers (with none it still parks; the batch then
   # resolves once the deferred local durable ack covers it, on the next flush).
-  defp park_and_push(state, from, segment_id, base_offset, first, last, followers, records) do
-    batch = %{ref: make_ref(), from: from, last: last, count: length(records)}
+  defp park_and_push(state, reply_target, segment_id, base_offset, first, last, followers, records) do
+    batch = %{ref: make_ref(), reply: reply_target, last: last, count: length(records)}
     # The no-quorum timer arms at park time (not push time), so a caller queued behind a full window
     # still gets its reply well before its own call timeout.
     Process.send_after(self(), {:replicate_timeout, segment_id, batch.ref}, state.follow_timeout)
@@ -570,6 +630,13 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     park_batch(state, segment_id, batch, push)
   end
+
+  # Completes a parked batch toward whoever is waiting: a synchronous caller (GenServer.reply) or an
+  # async notify target (a plain message, the fire-and-forget produce path).
+  defp reply_batch(%{reply: {:call, from}}, result), do: GenServer.reply(from, result)
+  defp reply_batch(%{reply: {:notify, pid, tag}}, result), do: send(pid, {:replicate_result, tag, result})
+
+  defp notify_result({pid, tag}, result), do: send(pid, {:replicate_result, tag, result})
 
   # Parks a batch: pushes it right away when the segment's window has room, otherwise queues it FIFO.
   # The local append already assigned its offsets under this serial loop, so draining in FIFO order
@@ -598,7 +665,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     state =
       Enum.reduce(done, state, fn batch, acc ->
-        GenServer.reply(batch.from, {:ok, batch.last})
+        reply_batch(batch, {:ok, batch.last})
         Telemetry.replication_commit(batch.count, :ok)
         %{acc | committed: Map.put(acc.committed, segment_id, batch.last)}
       end)

@@ -8,6 +8,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.ReplicatedDSRSM
+  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -136,6 +137,53 @@ defmodule Malachi.BrokerServerTest do
       |> Enum.each(fn task -> assert {:ok, _placements} = Task.await(task) end)
 
       assert server |> read_all(root_id) |> length() == 50
+    end
+  end
+
+  describe "async produce (non-blocking frontend)" do
+    # The non-group-commit produce path plans in the loop, fires replication as casts, and replies from
+    # the results, so the broker loop never blocks on replication. These prove the reply semantics hold.
+
+    defp start_repl(directory, index) do
+      name = :"bsrv_repl_#{System.unique_integer([:positive])}_#{index}"
+      {:ok, _} = ReplicationServer.start_link(name: name, directory: Path.join(directory, "r#{index}"))
+      name
+    end
+
+    test "concurrent rf=3 produces all commit and read back consistently", %{tmp_dir: directory} do
+      repls = for index <- 1..3, do: start_repl(directory, index)
+      server = start(Path.join(directory, "broker"), brokers: repls, replication_factor: 3)
+      {:ok, root_id} = BrokerServer.create_topic(server, "events", 4)
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn i -> BrokerServer.produce(server, "events", [record("v#{i}", "k#{i}")]) end,
+          max_concurrency: 20,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert server |> read_all(root_id) |> length() == 20
+    end
+
+    test "unreachable replicas fail the produce gracefully and the broker survives", %{tmp_dir: directory} do
+      # Replica refs that were never registered: the replication casts vanish, so the produce must
+      # complete via a real error (no_quorum from the primary's timer, replication_timeout from the
+      # broker's safety timer, or unreachable), never by crashing the caller or the broker.
+      live = start_repl(directory, 1)
+      dead1 = :"bsrv_dead_#{System.unique_integer([:positive])}"
+      dead2 = :"bsrv_dead_#{System.unique_integer([:positive])}"
+      server = start(Path.join(directory, "broker"), brokers: [live, dead1, dead2], replication_factor: 3)
+      {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+
+      assert {:error, reason} = BrokerServer.produce(server, "events", [record("v", "k")])
+      assert reason in [:no_quorum, :replication_timeout, :unreachable]
+      assert Process.alive?(server), "the broker must survive replication failure"
+
+      # And it still serves other topics afterwards.
+      assert {:ok, _} = BrokerServer.create_topic(server, "healthy", 4)
     end
   end
 

@@ -175,6 +175,91 @@ defmodule Malachi.Broker do
     end
   end
 
+  @typedoc "One replication call a planned produce still owes: everything `replicate_fun` would get, plus the expected offsets."
+  @type dispatch :: %{
+          primary: term(),
+          segment_id: term(),
+          replica_set: [Metadata.broker()],
+          base_offset: non_neg_integer(),
+          records: [Record.t()],
+          first: non_neg_integer(),
+          last: non_neg_integer()
+        }
+
+  @doc """
+  Like `produce/4`, but PLANS the replication instead of executing it: routes each record to its range,
+  opens segments as needed, commits the offsets optimistically, and returns the replication dispatches
+  for the caller to execute (typically asynchronously, so a broker frontend never blocks its loop on
+  replication). Returns `{broker, {:ok, placements, dispatches}}` or `{broker, {:error, reason}}`; on
+  error NOTHING was dispatched, so the original broker is returned untouched (stronger atomicity than
+  the executing variant, which may have committed earlier groups).
+
+  Committing before durability is what makes the frontend non-blocking, and it is safe because clients
+  never see offsets (positions travel in opaque cursors): a dispatch that later fails burns its
+  offsets, the client gets the error and retries, and the local counters stay in lockstep with the
+  primary's log, which appended the batch even when its quorum did not close.
+  """
+  @spec produce_plan(t(), Metadata.topic_name(), [Record.t()]) ::
+          {t(), {:ok, placements(), [dispatch()]} | {:error, term()}}
+  def produce_plan(%__MODULE__{} = broker, topic, records) when is_list(records) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
+      nil ->
+        {broker, {:error, :no_such_topic}}
+
+      topic_meta ->
+        active_ranges = DSRSM.active_ranges_of_topic(broker.dsrsm, topic)
+
+        case group_by_owning_range(records, active_ranges, topic_meta.keyspace_size) do
+          {:error, _reason} = error -> {broker, error}
+          {:ok, grouped} -> plan_groups(broker, grouped)
+        end
+    end
+  end
+
+  defp plan_groups(original, grouped) do
+    result =
+      Enum.reduce_while(grouped, {original, %{}, []}, fn {range_id, reversed_records},
+                                                         {broker, placements, dispatches} ->
+        records = Enum.reverse(reversed_records)
+
+        case plan_group(broker, range_id, records, placements, dispatches) do
+          {:ok, broker, placements, dispatches} -> {:cont, {broker, placements, dispatches}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      # Nothing was executed yet, so a failed plan rolls the WHOLE produce back to the original broker.
+      {:error, reason} -> {original, {:error, reason}}
+      {broker, placements, dispatches} -> {broker, {:ok, placements, Enum.reverse(dispatches)}}
+    end
+  end
+
+  defp plan_group(broker, range_id, records, placements, dispatches) do
+    case ensure_segment(broker, range_id) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, opened, segment} ->
+        first = next_offset(opened, range_id)
+        count = length(records)
+        last = first + count - 1
+        committed = commit_batch(opened, range_id, count, batch_bytes(records))
+
+        dispatch = %{
+          primary: primary(segment),
+          segment_id: segment.id,
+          replica_set: segment.replica_set,
+          base_offset: segment.start_offset,
+          records: records,
+          first: first,
+          last: last
+        }
+
+        {:ok, committed, Map.put(placements, range_id, {first, last}), [dispatch | dispatches]}
+    end
+  end
+
   @doc """
   Reads up to `max_records` records from `range_id` starting at `offset`, from the owning
   segment's primary via `read_fun`. Returns `:eof` past the range's end (or if nothing was
