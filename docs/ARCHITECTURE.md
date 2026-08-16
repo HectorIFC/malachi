@@ -112,10 +112,16 @@ Replication is split deliberately, because metadata and records have opposite sh
 - The **control plane** (metadata) runs over `ra`. Metadata is small, changes rarely, and needs
   linearizability, which is exactly Raft's strength.
 - The **data plane** (records in segments) does **not** go through `ra`. `Malachi.Cluster.ReplicationServer`
-  ships each batch from the primary to the followers and acknowledges the write only once a quorum has
-  `fsync`ed it, tolerating up to ⌊(N-1)/2⌋ slow or unreachable followers and returning `{:error,
-  :no_quorum}` beyond that. Routing high-volume sequential records through a consensus log would pay for a
-  second durable write and gain nothing, because the segment already **is** the log.
+  ships each batch from the primary to the followers as pipelined, windowed replica-appends and
+  acknowledges the write only once a quorum has `fsync`ed it, tolerating up to ⌊(N-1)/2⌋ slow or
+  unreachable followers and returning `{:error, :no_quorum}` beyond that. Routing high-volume sequential
+  records through a consensus log would pay for a second durable write and gain nothing, because the
+  segment already **is** the log. Fsyncs can be coalesced (group commit, the NorthGuard triggers of
+  10ms/20k records/10MB) at two independent levels: broker-level for rf=1 (`MALACHI_GROUP_COMMIT`) and
+  replication-level for rf>1 (`MALACHI_REPLICATION_GROUP_COMMIT`, default off because it only pays when
+  many producers share hot ranges on fsync-bound disks; see the
+  [clustering guide](guides/clustering-and-resharding.md#durability-and-group-commit) for the decision
+  rule with examples).
 
 ```mermaid
 flowchart LR

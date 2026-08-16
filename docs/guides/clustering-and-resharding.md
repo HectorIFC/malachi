@@ -57,6 +57,52 @@ durable write to no benefit: the segment already *is* the log.
 > rarely and everyone must agree; the warehouse (records) takes constant shipments and only needs a majority
 > of shelves to confirm storage. See the [two planes diagram](../ARCHITECTURE.md#replication-two-planes).
 
+## Durability and group commit
+
+The baseline is simple and strict: **every produce is fsynced before its ack**. On a single node (rf=1)
+that is one fsync on one disk; replicated (rf>1) it is a quorum of replicas each fsyncing before the
+ack. You never get an ack for data that only lives in memory.
+
+The cost of that strictness is one fsync per produce, and at high concurrency the disk serializes on
+them. **Group commit** is the classic fix: park the concurrent produces briefly, fsync once, then ack
+them all; NorthGuard runs this way in production, fsyncing on all replicas every 10ms, 20k records, or
+10MB. Malachi implements it as **two independent knobs, one per path**, because the two paths have
+different economics:
+
+```bash
+# rf=1 (single node): broker-level group commit. Recommended for throughput workloads.
+MALACHI_GROUP_COMMIT=true
+MALACHI_GROUP_COMMIT_INTERVAL_MS=5        # flush period; also the ~latency each produce pays
+
+# rf>1 (replicated): replication-level group commit. Default OFF; read below before enabling.
+MALACHI_REPLICATION_GROUP_COMMIT=true
+```
+
+With `MALACHI_GROUP_COMMIT=true` on rf=1, concurrent produces coalesce into one fsync per interval and
+the reply still only comes after their batch is durable. Measured on a saturated node it multiplies
+small-batch throughput several times over for ~the interval of added latency. Turn it on unless your
+workload is latency-critical single-digit-milliseconds.
+
+With `MALACHI_REPLICATION_GROUP_COMMIT=true` on rf>1, the same coalescing happens on **every replica**:
+the primary buffers and pushes immediately, each follower buffers too, and on each flush tick every
+replica does one fsync covering all batches since the last tick, then acks cumulatively; the produce
+ack still waits for a durable quorum. This is exactly the NorthGuard model, and whether it helps
+**depends on the shape of your load**, which is why it defaults to off:
+
+- **Turn it ON when many producers hammer the same ranges on fsync-bound disks.** Example: hundreds of
+  producers writing to a handful of hot topics, storage where fsync costs milliseconds (HDDs, network
+  volumes, dense SSDs under queue pressure). Dozens of batches land on each range per tick, so each
+  replica pays one fsync for all of them instead of one each: that multiplication is the win, and it is
+  the fleet regime NorthGuard built for.
+- **Leave it OFF when load spreads thin across many ranges.** Example: a microservices fleet writing to
+  hundreds of topics with a few producers each on NVMe. Each range sees ~1 batch per tick, so there is
+  nothing to coalesce: every produce just waits for the tick and throughput drops. Measured on exactly
+  that shape: a 3-node rf=3 cluster went from 114k rec/s (per-batch fsync) to 65k with coalescing on.
+
+Rule of thumb: enable it when **batches per range per interval is well above 1** and fsync latency is a
+real cost on your disks; verify by watching produce p50 against throughput after flipping it. The two
+knobs are deliberately decoupled so the rf=1 win never drags the replicated path along with it.
+
 ## Sharding the control plane
 
 With one Raft group for all metadata, that group is a bottleneck. Vnodes shard it:

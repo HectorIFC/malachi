@@ -159,6 +159,96 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
+  # count), so a test can prove that group commit coalesces them. Kept local to this file with its own
+  # table: sharing a global counter with other test modules would couple async tests through mutable
+  # global state.
+  defmodule CountingStore do
+    @behaviour Malachi.Storage.SegmentStore
+    alias Malachi.Storage.ElixirStore
+
+    @impl true
+    def sync(handle) do
+      if ElixirStore.pending?(handle), do: :ets.update_counter(:repl_gc_syncs, :n, 1)
+      ElixirStore.sync(handle)
+    end
+
+    @impl true
+    def open(dir, id, opts), do: ElixirStore.open(dir, id, opts)
+    @impl true
+    def recover(dir, id, opts), do: ElixirStore.recover(dir, id, opts)
+    @impl true
+    def open_read(dir, id, opts), do: ElixirStore.open_read(dir, id, opts)
+    @impl true
+    def append(handle, records), do: ElixirStore.append(handle, records)
+    @impl true
+    def read(handle, offset, max), do: ElixirStore.read(handle, offset, max)
+    @impl true
+    def seal(handle), do: ElixirStore.seal(handle)
+    @impl true
+    def next_offset(handle), do: ElixirStore.next_offset(handle)
+    @impl true
+    def sealed?(handle), do: ElixirStore.sealed?(handle)
+    @impl true
+    def pending?(handle), do: ElixirStore.pending?(handle)
+    @impl true
+    def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
+    @impl true
+    def close(handle), do: ElixirStore.close(handle)
+  end
+
+  describe "group commit under replication" do
+    test "grouped replicate commits durably on every replica and coalesces fsyncs" do
+      :ets.new(:repl_gc_syncs, [:named_table, :public, :set])
+      :ets.insert(:repl_gc_syncs, {:n, 0})
+
+      gc = [group_commit: true, group_commit_interval_ms: 40, store: CountingStore]
+      [primary, f1, f2] = replica_set = [start_broker(gc), start_broker(gc), start_broker(gc)]
+
+      results =
+        1..30
+        |> Task.async_stream(
+          fn i -> ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["g#{i}"])) end,
+          max_concurrency: 30,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      primary_values = read_values(primary, @segment)
+      assert length(primary_values) == 30
+      assert read_values(f1, @segment) == primary_values
+      assert read_values(f2, @segment) == primary_values
+
+      # The point: 30 batches across 3 replicas is 90 per-batch fsyncs without coalescing; with the
+      # burst landing in a couple of flush ticks it must be far fewer. Allow slack for tick straddling.
+      [{:n, fsyncs}] = :ets.lookup(:repl_gc_syncs, :n)
+      assert fsyncs > 0
+      assert fsyncs <= 18, "expected coalesced fsyncs, saw #{fsyncs} for 30 batches x 3 replicas"
+    end
+
+    test "the reply waits for the flush (never precedes durability), including with no followers" do
+      primary = start_broker(group_commit: true, group_commit_interval_ms: 100)
+
+      t0 = System.monotonic_time(:millisecond)
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["solo"]))
+      elapsed = System.monotonic_time(:millisecond) - t0
+
+      assert elapsed >= 50, "replied in #{elapsed}ms, before the ~100ms flush tick could have fsynced"
+      assert read_values(primary, @segment) == ["solo"]
+    end
+
+    test "no_quorum still fails fast under group commit when a majority is dead" do
+      primary = start_broker(group_commit: true, group_commit_interval_ms: 20, follow_timeout: 300)
+      dead1 = :"dead_#{System.unique_integer([:positive])}"
+      dead2 = :"dead_#{System.unique_integer([:positive])}"
+
+      assert {:error, :no_quorum} =
+               ReplicationServer.replicate(primary, @segment, [primary, dead1, dead2], 0, records(["x"]))
+    end
+  end
+
   test "delete removes a stored segment's data and is idempotent" do
     ref = start_broker()
     assert {:ok, 1} = ReplicationServer.replicate(ref, @segment, [ref], 0, records(["a", "b"]))

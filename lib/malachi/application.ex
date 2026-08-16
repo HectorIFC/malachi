@@ -597,7 +597,19 @@ defmodule Malachi.Application do
     %{
       id: Malachi.LogReplication,
       start:
-        {Malachi.Cluster.ReplicationServer, :start_link, [[name: Malachi.LogReplication, directory: log_data_dir()]]}
+        {Malachi.Cluster.ReplicationServer, :start_link,
+         [
+           [
+             name: Malachi.LogReplication,
+             directory: log_data_dir(),
+             # Group commit under replication (NorthGuard: fsync on every replica coalesced by
+             # time/count/size before the produce ack). Its own knob, default off: it pays under many
+             # producers per range on fsync-bound disks and costs reply latency otherwise, so it is an
+             # explicit operator choice, decoupled from the rf=1 broker-level group commit.
+             group_commit: Application.get_env(:malachi, :replication_group_commit, false),
+             group_commit_interval_ms: Application.get_env(:malachi, :group_commit_interval_ms, 10)
+           ]
+         ]}
     }
   end
 

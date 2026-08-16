@@ -173,6 +173,12 @@ config :malachi,
   # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
   # default; only active on a single-node (rf=1) broker, which is where it applies today.
   group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
+  # Group commit on the REPLICATED path (rf > 1): fsync coalescing on primary and followers with the
+  # ack still waiting for a durable quorum (NorthGuard: fsync on all replicas every 10ms/20k/10MB).
+  # Separate knob, default off: it pays when many producers hit the same range on fsync-bound disks,
+  # and costs reply latency otherwise (measured: on loads spread thin across many segments it lowers
+  # throughput, so it must be an explicit operator choice, not coupled to the rf=1 knob above).
+  replication_group_commit: System.get_env("MALACHI_REPLICATION_GROUP_COMMIT") == "true",
   # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
   # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
   # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.

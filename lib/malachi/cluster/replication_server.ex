@@ -48,6 +48,9 @@ defmodule Malachi.Cluster.ReplicationServer do
   # Max unacked replica-append batches in flight per segment (the NorthGuard replication window; static
   # in this slice, a follower-advertised dynamic window is a later protocol evolution).
   @default_replication_window 32
+  # Group-commit time trigger under replication (NorthGuard fsyncs every 10ms / 20k records / 10MB; the
+  # count and size triggers already live in the store, this is the time one).
+  @default_gc_interval_ms 10
 
   @typep batch :: %{ref: reference(), from: GenServer.from(), last: non_neg_integer(), count: pos_integer()}
 
@@ -63,7 +66,11 @@ defmodule Malachi.Cluster.ReplicationServer do
            replication_window: pos_integer(),
            inflight: %{term() => [batch()]},
            pending: %{term() => :queue.queue()},
-           committed: %{term() => non_neg_integer()}
+           committed: %{term() => non_neg_integer()},
+           group_commit: boolean(),
+           gc_interval: pos_integer(),
+           gc_timer: reference() | nil,
+           pending_acks: %{{term(), term()} => non_neg_integer()}
          }
 
   @doc """
@@ -75,6 +82,9 @@ defmodule Malachi.Cluster.ReplicationServer do
     * `:directory` (required) - where replicated segment logs are stored.
     * `:follow_timeout` - ms a parked replicate waits for its quorum before `:no_quorum` (default 5000).
     * `:replication_window` - max unacked replica-append batches in flight per segment (default 32).
+    * `:group_commit` - coalesce fsyncs under replication (NorthGuard: fsync on every replica by
+      time/count/size triggers, before the produce ack). Default false (fsync per batch).
+    * `:group_commit_interval_ms` - the time trigger for that coalescing (default 10).
     * any remaining options are forwarded to each segment's `Malachi.Log`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -198,7 +208,15 @@ defmodule Malachi.Cluster.ReplicationServer do
     state = %{
       ref: ref,
       directory: directory,
-      log_opts: Keyword.drop(opts, [:name, :directory, :follow_timeout, :replication_window]),
+      log_opts:
+        Keyword.drop(opts, [
+          :name,
+          :directory,
+          :follow_timeout,
+          :replication_window,
+          :group_commit,
+          :group_commit_interval_ms
+        ]),
       logs: %{},
       trackers: %{},
       catching_up: MapSet.new(),
@@ -210,7 +228,15 @@ defmodule Malachi.Cluster.ReplicationServer do
       replication_window: Keyword.get(opts, :replication_window, @default_replication_window),
       inflight: %{},
       pending: %{},
-      committed: %{}
+      committed: %{},
+      # Group commit under replication (NorthGuard: fsync on every replica, coalesced by time/count/size,
+      # before the produce ack). With it on, appends buffer, the primary defers its own tracker ack and
+      # each follower defers its cumulative durable ack to the next `:gc_flush` tick (`gc_interval`),
+      # so many batches share one fsync per replica while the reply still waits for a durable quorum.
+      group_commit: Keyword.get(opts, :group_commit, false),
+      gc_interval: Keyword.get(opts, :group_commit_interval_ms, @default_gc_interval_ms),
+      gc_timer: nil,
+      pending_acks: %{}
     }
 
     {:ok, state}
@@ -338,16 +364,30 @@ defmodule Malachi.Cluster.ReplicationServer do
     {state, log} = fetch_or_open(state, segment_id, base)
 
     cond do
+      log.next_offset == expected_first and state.group_commit ->
+        # Group commit on the follower: buffer the append and defer the durable ack to the next flush
+        # tick, so one fsync (and one cumulative ack per primary) covers every batch since the last.
+        {:ok, log, _first, last} = Log.append(log, records)
+        state = put_log(state, segment_id, log)
+        state = %{state | pending_acks: Map.put(state.pending_acks, {segment_id, source}, last)}
+        {:noreply, ensure_gc_timer(state)}
+
       log.next_offset == expected_first ->
         {log, _first, last} = append_durably(log, records)
         GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, last}})
         {:noreply, put_log(state, segment_id, log)}
 
       log.next_offset > expected_first ->
-        # Already have this batch (a background catch-up overtook the push stream). The durable end is
-        # still an honest cumulative ack, so report it rather than staying silent.
-        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, log.next_offset - 1}})
-        {:noreply, state}
+        # Already have this batch (a background catch-up overtook the push stream). Under group commit
+        # recent buffered records may not be durable yet, so defer the cumulative ack to the flush;
+        # otherwise the durable end is an honest immediate ack.
+        if state.group_commit do
+          state = %{state | pending_acks: Map.put(state.pending_acks, {segment_id, source}, log.next_offset - 1)}
+          {:noreply, ensure_gc_timer(state)}
+        else
+          GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, log.next_offset - 1}})
+          {:noreply, state}
+        end
 
       true ->
         # Behind (a new replica from base, or missed batches): nack and pull from the primary in the
@@ -374,9 +414,41 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:noreply, state}
   end
 
+  # The group-commit flush tick: one fsync per replica covers every batch buffered since the last tick.
+  # As the PRIMARY, self-ack the now-durable end of every segment with parked batches and resolve them;
+  # as a FOLLOWER, send one cumulative durable ack per (segment, primary). Both roles run here because a
+  # server is usually primary for some segments and follower for others at once.
+  @impl true
+  def handle_info(:gc_flush, state) do
+    state = %{state | gc_timer: nil}
+
+    logs =
+      Map.new(state.logs, fn {segment_id, log} ->
+        if Log.pending?(log), do: {segment_id, elem(Log.sync(log), 1)}, else: {segment_id, log}
+      end)
+
+    state = %{state | logs: logs}
+
+    # Follower role: everything appended is durable now, so release the deferred cumulative acks.
+    Enum.each(state.pending_acks, fn {{segment_id, source}, last} ->
+      GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, last}})
+    end)
+
+    state = %{state | pending_acks: %{}}
+
+    # Primary role: fold the local durable end into each parked segment's tracker and resolve.
+    state =
+      state.inflight
+      |> Map.keys()
+      |> Enum.concat(Map.keys(state.pending))
+      |> Enum.uniq()
+      |> Enum.reduce(state, &self_ack_durable_end/2)
+
+    {:noreply, state}
+  end
+
   # A parked batch whose quorum never closed within the follow timeout: give its caller the same
   # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
-  @impl true
   def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
     inflight = Map.get(state.inflight, segment_id, [])
     queue = Map.get(state.pending, segment_id, :queue.new())
@@ -434,6 +506,15 @@ defmodule Malachi.Cluster.ReplicationServer do
     replica_set = Enum.uniq(replica_set)
     followers = replica_set -- [state.ref]
 
+    if state.group_commit do
+      do_replicate_grouped(state, from, segment_id, replica_set, followers, base_offset, records)
+    else
+      do_replicate_durable(state, from, segment_id, replica_set, followers, base_offset, records)
+    end
+  end
+
+  # Per-batch durability: append + fsync locally, self-ack, push. The original semantics.
+  defp do_replicate_durable(state, from, segment_id, replica_set, followers, base_offset, records) do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {log, first, last} = append_durably(log, records)
     state = put_log(state, segment_id, log)
@@ -447,17 +528,47 @@ defmodule Malachi.Cluster.ReplicationServer do
       Telemetry.replication_commit(length(records), if(match?({:ok, _}, reply), do: :ok, else: :no_quorum))
       {:reply, reply, state}
     else
-      batch = %{ref: make_ref(), from: from, last: last, count: length(records)}
-      # The no-quorum timer arms at park time (not push time), so a caller queued behind a full window
-      # still gets its reply well before its own call timeout.
-      Process.send_after(self(), {:replicate_timeout, segment_id, batch.ref}, state.follow_timeout)
-
-      push =
-        {followers,
-         {:replica_append, segment_id, base_offset, first, records, committed_of(state, segment_id), state.ref}}
-
-      {:noreply, park_batch(state, segment_id, batch, push)}
+      {:noreply, park_and_push(state, from, segment_id, base_offset, first, last, followers, records)}
     end
+  end
+
+  # Group commit (NorthGuard: fsync on every replica coalesced by time/count/size, before the produce
+  # ack): append WITHOUT fsync (the store's count/size triggers may still fire) and push right away, but
+  # defer the primary's own tracker ack to the next :gc_flush tick, when one fsync covers every batch
+  # buffered since the last. The caller parks even with no followers: a reply must never precede local
+  # durability.
+  defp do_replicate_grouped(state, from, segment_id, replica_set, followers, base_offset, records) do
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
+
+    case Log.append(log, records) do
+      {:ok, log, first, last} ->
+        state = put_log(state, segment_id, log)
+        # Ensure the tracker exists now, so a follower ack arriving before our first flush still lands.
+        state = put_in(state.trackers[segment_id], tracker_for(state, segment_id, replica_set))
+
+        state
+        |> park_and_push(from, segment_id, base_offset, first, last, followers, records)
+        |> ensure_gc_timer()
+        |> then(&{:noreply, &1})
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Parks the caller's batch and pushes it to the followers (with none it still parks; the batch then
+  # resolves once the deferred local durable ack covers it, on the next flush).
+  defp park_and_push(state, from, segment_id, base_offset, first, last, followers, records) do
+    batch = %{ref: make_ref(), from: from, last: last, count: length(records)}
+    # The no-quorum timer arms at park time (not push time), so a caller queued behind a full window
+    # still gets its reply well before its own call timeout.
+    Process.send_after(self(), {:replicate_timeout, segment_id, batch.ref}, state.follow_timeout)
+
+    push =
+      {followers,
+       {:replica_append, segment_id, base_offset, first, records, committed_of(state, segment_id), state.ref}}
+
+    park_batch(state, segment_id, batch, push)
   end
 
   # Parks a batch: pushes it right away when the segment's window has room, otherwise queues it FIFO.
@@ -520,6 +631,29 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   defp committed_of(state, segment_id), do: Map.get(state.committed, segment_id, -1)
+
+  # Schedules the next group-commit flush only when none is pending, so a burst shares one timer.
+  defp ensure_gc_timer(%{gc_timer: nil} = state) do
+    %{state | gc_timer: Process.send_after(self(), :gc_flush, state.gc_interval)}
+  end
+
+  defp ensure_gc_timer(state), do: state
+
+  # After a flush, acks the local (now durable) end of `segment_id` into its tracker and resolves the
+  # parked batches it covers. Skips segments whose log is gone (deleted) or empty.
+  defp self_ack_durable_end(segment_id, state) do
+    with {:ok, log} <- Map.fetch(state.logs, segment_id),
+         durable_end = log.next_offset - 1,
+         true <- durable_end >= 0,
+         tracker when tracker != nil <- Map.get(state.trackers, segment_id),
+         {:ok, tracker} <- ReplicaTracker.ack(tracker, state.ref, durable_end) do
+      state
+      |> put_in([Access.key(:trackers), segment_id], tracker)
+      |> resolve_batches(segment_id)
+    else
+      _skip -> state
+    end
+  end
 
   # Reuses the segment's tracker (so acks accumulate across batches), rebuilding it if the replica
   # set changed.
