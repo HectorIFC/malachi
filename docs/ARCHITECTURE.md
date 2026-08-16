@@ -153,7 +153,10 @@ flowchart LR
 - **Metadata operations are unary** (one request, one response): create, delete, topic metadata, segment
   metadata. Any broker can act as a proxy and route to the vnode leader using the gossiped state.
 - **Data operations are streaming** (produce, consume, replication) with pipelining and windowing for flow
-  control. Consumes can use `:file.sendfile`.
+  control. Consumes can use `:file.sendfile`: the on-disk record frame is the on-wire frame precisely so a
+  fetch can ship raw segment bytes kernel-to-socket. That zero-copy path is designed for but **not yet
+  implemented** (consumes today read, decode, and re-encode through the BEAM), so every published
+  throughput number predates it; produce is unaffected, read-side numbers have headroom.
 
 ## Placement and policies
 
