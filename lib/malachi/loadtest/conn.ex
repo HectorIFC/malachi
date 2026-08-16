@@ -34,15 +34,22 @@ defmodule Malachi.Loadtest.Conn do
         {:error, _} = err -> err
       end
     else
-      case :gen_tcp.connect(host, port, [:binary, packet: 0, active: false], @recv_timeout) do
+      case :gen_tcp.connect(host, port, socket_opts(), @recv_timeout) do
         {:ok, socket} -> {:ok, %__MODULE__{transport: :gen_tcp, socket: socket}}
         {:error, _} = err -> err
       end
     end
   end
 
+  # Mirrors the server's listen options (tcp_acceptor_pool): nodelay so Nagle never delays a small
+  # request frame behind an unacked send (a closed-loop round trip is exactly that shape), and 32k
+  # send/receive buffers to match the server's.
+  defp socket_opts do
+    [:binary, packet: 0, active: false, nodelay: true, sndbuf: 32_768, recbuf: 32_768]
+  end
+
   defp ssl_opts(opts) do
-    base = [:binary, packet: 0, active: false]
+    base = socket_opts()
 
     verify =
       case Keyword.get(opts, :cacert) do
