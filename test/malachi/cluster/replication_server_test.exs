@@ -28,9 +28,11 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a", "b"]))
 
-    # every replica (primary included) durably stored the same records at the same offsets
+    # Every replica (primary included) stores the same records at the same offsets. The reply comes on
+    # QUORUM durability (2 of 3), so the third replica may still be applying: wait for convergence.
     for ref <- [primary, f1, f2] do
-      assert read_values(ref, @segment) == ["a", "b"]
+      assert eventually(fn -> read_values(ref, @segment) == ["a", "b"] end),
+             "#{inspect(ref)} should converge, got #{inspect(read_values(ref, @segment))}"
     end
   end
 
@@ -108,10 +110,15 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
       # 30 records landed contiguously (offsets 0..29) and identically on all three replicas: the
       # per-pair FIFO push preserves the expected_first chain even with a full window of batches.
+      # Replies come on quorum (2 of 3), so the non-quorum replica may still be applying: converge.
       primary_values = read_values(primary, @segment)
       assert length(primary_values) == 30
-      assert read_values(f1, @segment) == primary_values
-      assert read_values(f2, @segment) == primary_values
+
+      assert eventually(fn -> read_values(f1, @segment) == primary_values end),
+             "f1 should converge to the primary, got #{inspect(read_values(f1, @segment))}"
+
+      assert eventually(fn -> read_values(f2, @segment) == primary_values end),
+             "f2 should converge to the primary, got #{inspect(read_values(f2, @segment))}"
     end
 
     test "a window of one (degenerate pipelining) still commits everything in order" do
@@ -246,8 +253,16 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
       primary_values = read_values(primary, @segment)
       assert length(primary_values) == 30
-      assert read_values(f1, @segment) == primary_values
-      assert read_values(f2, @segment) == primary_values
+
+      # The reply arrives on QUORUM durability (primary + one follower), so the other follower may
+      # still hold everything in its group-commit buffer until its own flush tick fires, and buffered
+      # records are not readable (read clamps to the flushed end). Wait for both to converge instead
+      # of racing the second follower's tick, which is exactly what flaked on slower CI scheduling.
+      assert eventually(fn -> read_values(f1, @segment) == primary_values end),
+             "f1 should converge to the primary, got #{inspect(read_values(f1, @segment))}"
+
+      assert eventually(fn -> read_values(f2, @segment) == primary_values end),
+             "f2 should converge to the primary, got #{inspect(read_values(f2, @segment))}"
 
       # The point: 30 batches across 3 replicas is 90 per-batch fsyncs without coalescing; with the
       # burst landing in a couple of flush ticks it must be far fewer. Allow slack for tick straddling.
