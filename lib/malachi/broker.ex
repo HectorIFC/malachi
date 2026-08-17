@@ -527,7 +527,29 @@ defmodule Malachi.Broker do
   end
 
   # Groups records by the active range that owns each key, or errors if any key is uncovered.
+  #
+  # Fast path: a topic with exactly ONE active range covering the whole keyspace (every topic starts
+  # this way, and it is the dominant shape under load) needs no per-record work at all: every key lands
+  # in that range, so the hash + linear range scan + map update per record are skipped. Under a
+  # produce-heavy profile that per-record routing was about a third of the broker's CPU (eprof:
+  # owning_range_id, Keyspace.position_of, find_value). The group's records are stored reversed, the
+  # same shape the scanning path builds and the callers re-reverse.
+  # An empty produce groups to nothing (and so places nothing), on every path.
+  defp group_by_owning_range([], _active_ranges, _keyspace_size), do: {:ok, %{}}
+
+  defp group_by_owning_range(records, [range] = active_ranges, keyspace_size) do
+    if range.key_start == 0 and range.key_end == keyspace_size do
+      {:ok, %{range.id => Enum.reverse(records)}}
+    else
+      scan_by_owning_range(records, active_ranges, keyspace_size)
+    end
+  end
+
   defp group_by_owning_range(records, active_ranges, keyspace_size) do
+    scan_by_owning_range(records, active_ranges, keyspace_size)
+  end
+
+  defp scan_by_owning_range(records, active_ranges, keyspace_size) do
     Enum.reduce_while(records, {:ok, %{}}, fn record, {:ok, groups} ->
       case owning_range_id(active_ranges, keyspace_size, record.key) do
         nil -> {:halt, {:error, {:unroutable, record.key}}}

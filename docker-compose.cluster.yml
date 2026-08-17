@@ -29,8 +29,12 @@ x-malachi-node: &malachi-node
   # form the group and go healthy.
   restart: on-failure
   environment: &malachi-env
-    # Three nodes share the 4-core cpuset: 2 schedulers each keeps oversubscription mild (6 on 4).
-    ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 2:2}"
+    # Opportunistic schedulers, measured better than a hard 2-per-node cap: with +S 2:2 a node whose
+    # placement got more primaries saturated its 2 schedulers while its peers idled (208/133/86
+    # percent CPU); +S 4:4 lets the hot node borrow shared cores and evened all three out for +15
+    # percent aggregate. Mild oversubscription (12 schedulers on the shared cpuset) is fine, the BEAM
+    # yields between them.
+    ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
     MALACHI_TCP_PORT: "4040"
     MALACHI_DASHBOARD_PORT: "4041"
     MALACHI_CLUSTER_STRATEGY: "epmd"
