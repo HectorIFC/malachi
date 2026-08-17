@@ -9,10 +9,12 @@ Each script is a standalone `mix run` script (it boots the project's deps, and m
 not touch `lib/`). Results, where written, go to `results/` (gitignored except `.gitkeep`).
 
 > **Note on zero-copy:** every throughput number in this suite was measured WITHOUT the zero-copy
-> consume optimization. The design allows `:file.sendfile` on the fetch path (the on-disk record
-> frame is the on-wire frame, see `docs/ARCHITECTURE.md`), but it is not implemented yet: consumes
-> currently read, decode, and re-encode through the BEAM. Produce numbers are unaffected (zero-copy
-> only applies to reads); consume/fetch/stream numbers have headroom once sendfile lands.
+> consume optimization. `:file.sendfile` on the fetch path is a future optimization, not implemented:
+> the wire ships records in a compact offset-less encoding distinct from the on-disk frame (see
+> `docs/ARCHITECTURE.md`), so consumes read, decode, and re-encode through the BEAM, and sendfile
+> would first require aligning the fetch encoding with the on-disk frame. Produce numbers are
+> unaffected (zero-copy only applies to reads); consume/fetch/stream numbers have headroom once it
+> lands.
 
 ## Mechanism investigations
 

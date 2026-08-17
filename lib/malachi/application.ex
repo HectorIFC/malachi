@@ -206,10 +206,12 @@ defmodule Malachi.Application do
     end
   end
 
-  # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which
-  # owns a local ReplicationServer. Clustered: start `ra`, plus a named ReplicationServer (this node's
-  # data-plane broker) and the BrokerServer wired to every node's ReplicationServer with a replication
-  # factor. The ReplicationServer must precede the BrokerServer (the latter references it).
+  # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a
+  # local ReplicationServer, or N independent broker shards when MALACHI_DATA_SHARDS > 1 (the
+  # measurement mode, see Malachi.DataPlaneRouter). Clustered: start `ra`, plus a named
+  # ReplicationServer (this node's data-plane broker) and the BrokerServer wired to every node's
+  # ReplicationServer with a replication factor. The ReplicationServer must precede the BrokerServer
+  # (the latter references it).
   defp log_children do
     cluster = Application.get_env(:malachi, :log_cluster)
     nodes = configured_nodes()
@@ -830,8 +832,8 @@ defmodule Malachi.Application do
 
   @doc """
   The `count` vnodes (`{cluster_name, token}`) of a sharded control plane, named from `base` and
-  spread evenly over the 32-bit ring. Each vnode is its own ra cluster (D-b-1: single-node per vnode;
-  HA per vnode comes later). Pure.
+  spread evenly over the 32-bit ring. Each vnode is its own ra cluster; `place_vnodes/4` assigns each
+  one `:log_vnode_replication_factor` member nodes (HA per vnode). Pure.
   """
   @spec sharded_vnodes(atom(), pos_integer()) :: [{atom(), non_neg_integer()}]
   def sharded_vnodes(base, count) when is_integer(count) and count > 0 do

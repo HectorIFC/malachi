@@ -30,7 +30,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   and rejoins the quorum on a later batch. This covers both a follower that missed some batches and
   a **brand-new replica** that joins an active segment: it opens at the segment's `base`, sees the
   gap, backfills, and converges on the moving head as later fan-outs re-trigger. Sealed-segment
-  re-replication (see `Malachi.Cluster.SelfHealing`) and primary failover are later/other slices.
+  re-replication and primary failover live in their own modules (`Malachi.Cluster.SelfHealing` driven
+  by the heal coordinator, and `Malachi.Cluster.Failover`), not here.
   """
 
   use GenServer
