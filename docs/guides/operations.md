@@ -62,6 +62,7 @@ MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :ov
 # rf>1 (replicated), replication-level. Default OFF: enable only for hot-range, fsync-bound
 # workloads (many producers per range); on thin-spread loads it lowers throughput.
 MALACHI_REPLICATION_GROUP_COMMIT=false
+MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
 ```
 
 ## Retention

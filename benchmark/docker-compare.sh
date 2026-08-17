@@ -16,8 +16,11 @@
 # Usage: benchmark/docker-compare.sh   (override the window with DUR=.. WARM=.. if you raise the tmpfs size)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 COMPOSE="docker compose -f docker-compose.bench.yml"
+# Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 DUR="${DUR:-4}"
 WARM="${WARM:-1}"
 
@@ -37,8 +40,8 @@ matrix() { # label SRV_CPUSET LT_CPUSET
     # Fresh server per case: --force-recreate replaces the container, so its tmpfs (the RAM data disk)
     # starts empty. Without this, data accumulates across cases and fills the 1g tmpfs, and later cases
     # fail on a full disk.
-    if ! $COMPOSE up -d --wait --force-recreate malachi >/tmp/dc_up.log 2>&1; then
-      echo "  server did not come up healthy; see /tmp/dc_up.log"; cat /tmp/dc_up.log
+    if ! $COMPOSE up -d --wait --force-recreate malachi >"$WORK/up.log" 2>&1; then
+      echo "  server did not come up healthy; log follows:"; cat "$WORK/up.log"
       $COMPOSE down >/dev/null 2>&1
       return 1
     fi

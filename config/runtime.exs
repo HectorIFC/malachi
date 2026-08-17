@@ -179,6 +179,9 @@ config :malachi,
   # and costs reply latency otherwise (measured: on loads spread thin across many segments it lowers
   # throughput, so it must be an explicit operator choice, not coupled to the rf=1 knob above).
   replication_group_commit: System.get_env("MALACHI_REPLICATION_GROUP_COMMIT") == "true",
+  # The replicated path's flush period, decoupled from the rf=1 knob above so tuning a single node
+  # never silently retunes every replica's fsync cadence. Default 10ms (the NorthGuard time trigger).
+  replication_group_commit_interval_ms: parse_int.(System.get_env("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS"), 10),
   # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
   # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
   # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.

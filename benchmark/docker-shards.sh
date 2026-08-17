@@ -16,8 +16,11 @@
 #
 # Usage: benchmark/docker-shards.sh      (override with DUR=.. WARM=.. SHARDS="1 2 4")
 set -uo pipefail
-cd "$(cd "$(dirname "$0")/.." && pwd)"
+cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 COMPOSE="docker compose -f docker-compose.bench.yml"
+# Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 DUR="${DUR:-2}"
 WARM="${WARM:-1}"
 SHARDS="${SHARDS:-1 2 4}"
@@ -32,8 +35,8 @@ printf -- "--------------------------------------------------------------------\
 
 for n in $SHARDS; do
   # Fresh server per shard count: recreate the container so its tmpfs (RAM data disk) starts empty.
-  if ! DATA_SHARDS="$n" $COMPOSE up -d --wait --force-recreate malachi >/tmp/ds_up.log 2>&1; then
-    echo "  server did not come up healthy (DATA_SHARDS=$n); see /tmp/ds_up.log"; cat /tmp/ds_up.log
+  if ! DATA_SHARDS="$n" $COMPOSE up -d --wait --force-recreate malachi >"$WORK/up.log" 2>&1; then
+    echo "  server did not come up healthy (DATA_SHARDS=$n); log follows:"; cat "$WORK/up.log"
     DATA_SHARDS="$n" $COMPOSE down >/dev/null 2>&1
     continue
   fi

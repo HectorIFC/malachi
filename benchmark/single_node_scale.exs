@@ -27,11 +27,6 @@ defmodule ScaleBench do
   defp pctl(sorted, p),
     do: Enum.at(sorted, max(0, min(length(sorted) - 1, round(p / 100 * (length(sorted) - 1)))))
 
-  defp median(list) do
-    sorted = Enum.sort(list)
-    pctl(sorted, 50)
-  end
-
   # One independent pipeline: its own ReplicationServer (named, own dir), its own BrokerServer (by pid, so
   # no name collision), and its own topic. Each broker keeps in-memory metadata, so the shards share
   # nothing but the disk and the schedulers, which is exactly what production shards would contend on.
@@ -87,8 +82,9 @@ defmodule ScaleBench do
     wall_s = wall_us / 1_000_000
     agg = round(total / wall_s)
     disk = pipes |> Enum.map(&dir_bytes(&1.dir)) |> Enum.sum()
-    p50s = Enum.map(all_lats, &pctl(&1, 50))
-    p99s = Enum.map(all_lats, &pctl(&1, 99))
+    # True aggregate percentiles over every observed batch (a median of per-pipeline medians and a max
+    # of per-pipeline p99s are neither).
+    merged = all_lats |> List.flatten() |> Enum.sort()
 
     # Stop the broker first (it holds the ReplicationServer ref), then the ReplicationServer, which the
     # broker did not own because we passed an external `brokers:` set.
@@ -105,8 +101,8 @@ defmodule ScaleBench do
       per: round(agg / n),
       eff: nil,
       wall_s: Float.round(wall_s, 2),
-      p50_ms: Float.round(median(p50s) / 1000, 2),
-      p99_ms: Float.round(Enum.max(p99s) / 1000, 2),
+      p50_ms: Float.round(pctl(merged, 50) / 1000, 2),
+      p99_ms: Float.round(pctl(merged, 99) / 1000, 2),
       mb_s: Float.round(mb(disk) / wall_s, 1)
     }
   end
@@ -154,14 +150,16 @@ defmodule ScaleBench do
 
     IO.puts("\n" <> String.duplicate("=", 74))
 
+    # Report only what this sweep measured: the result applies to this host and configuration, and a
+    # miss through the swept N range is not proof of a plateau or of what the next lever is.
     case crossed do
       nil ->
-        IO.puts("Did NOT reach 1M rec/s aggregate up to N=#{List.last(@ns)}: sharding alone plateaus; the")
-        IO.puts("lever is group commit / fewer fsyncs, not more pipelines.")
+        IO.puts("Did NOT reach 1M rec/s aggregate within the swept range (N up to #{List.last(@ns)})")
+        IO.puts("on this host/configuration. See the per-N table above for where the curve bends.")
 
       r ->
-        IO.puts("Crossed 1M rec/s aggregate at N=#{r.n} (#{r.agg} rec/s, #{trunc(r.eff)}% per-pipe efficiency).")
-        IO.puts("Single-node >1M is feasible via data-plane sharding on this hardware.")
+        IO.puts("Crossed 1M rec/s aggregate at N=#{r.n} (#{r.agg} rec/s, #{trunc(r.eff)}% per-pipe efficiency)")
+        IO.puts("on this host/configuration.")
     end
 
     IO.puts(String.duplicate("=", 74))

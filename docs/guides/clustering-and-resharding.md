@@ -76,7 +76,11 @@ MALACHI_GROUP_COMMIT_INTERVAL_MS=5        # flush period; also the ~latency each
 
 # rf>1 (replicated): replication-level group commit. Default OFF; read below before enabling.
 MALACHI_REPLICATION_GROUP_COMMIT=true
+MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10   # its own flush period, decoupled from the rf=1 one
 ```
+
+The two intervals are deliberately separate knobs: tuning the single-node flush period never silently
+retunes every replica's fsync cadence, and vice versa.
 
 With `MALACHI_GROUP_COMMIT=true` on rf=1, concurrent produces coalesce into one fsync per interval and
 the reply still only comes after their batch is durable. Measured on a saturated node it multiplies

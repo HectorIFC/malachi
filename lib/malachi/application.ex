@@ -226,7 +226,7 @@ defmodule Malachi.Application do
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
         # precede the broker that references it. Data-plane sharding is single-node only; warn and ignore.
         if DataPlaneRouter.shard_count() > 1 do
-          Logger.warning("MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard")
+          Logger.warning(I18n.t(:data_shards_ignored_clustered))
         end
 
         [
@@ -609,7 +609,9 @@ defmodule Malachi.Application do
              # producers per range on fsync-bound disks and costs reply latency otherwise, so it is an
              # explicit operator choice, decoupled from the rf=1 broker-level group commit.
              group_commit: Application.get_env(:malachi, :replication_group_commit, false),
-             group_commit_interval_ms: Application.get_env(:malachi, :group_commit_interval_ms, 10)
+             # Own interval knob too: tuning the rf=1 flush period must never silently retune every
+             # replica's fsync cadence.
+             group_commit_interval_ms: Application.get_env(:malachi, :replication_group_commit_interval_ms, 10)
            ]
          ]}
     }

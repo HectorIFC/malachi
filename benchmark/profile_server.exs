@@ -62,12 +62,22 @@ defmodule ProfileServer do
     eprof = sample_eprof(2_000)
     util = Task.await(util_task, 10_000)
 
-    {out, _status} = Task.await(client, (@warmup_s + @duration_s + 60) * 1000)
+    {out, status} = Task.await(client, (@warmup_s + @duration_s + 60) * 1000)
+
+    # A failed or reportless client means the profile sampled an idle or partially loaded VM: any
+    # verdict from it would be garbage, so refuse to classify instead of printing a false conclusion.
+    client_json = out |> String.split("\n") |> Enum.find(&String.starts_with?(String.trim(&1), "{"))
+
+    if status != 0 or client_json == nil do
+      IO.puts("\nclient failed (exit #{status}); output tail:\n#{String.slice(out, -400, 400)}")
+      IO.puts("\n== verdict ==\n  NONE: the load client failed, so the samples do not reflect steady-state load")
+      exit({:shutdown, 1})
+    end
 
     print_msacc(msacc_stats)
     print_utilization(util)
     print_eprof(eprof)
-    print_client(out)
+    IO.puts("\n== client report ==\n  #{client_json}")
     classify(msacc_stats, util)
   end
 
@@ -149,11 +159,6 @@ defmodule ProfileServer do
     out |> String.split("\n") |> Enum.take(-18) |> Enum.each(&IO.puts("  " <> &1))
   end
 
-  defp print_client(out) do
-    json = out |> String.split("\n") |> Enum.find(&String.starts_with?(String.trim(&1), "{"))
-    IO.puts("\n== client report ==\n  #{json || "(no json; client output tail: #{String.slice(out, -300, 300)})"}")
-  end
-
   # --- classification ---
 
   defp classify(stats, util) do
@@ -170,10 +175,14 @@ defmodule ProfileServer do
     emu_pct = emu / max(total, 1) * 100
     port_pct = prt / max(total, 1) * 100
     sleep_pct = slp / max(total, 1) * 100
+    dirty_io_pct = dirty_io_busy_pct(stats)
     busy = (for({:total, frac, _} <- util, do: frac) |> List.first() || 0.0) * 100
 
     verdict =
       cond do
+        # Fsync pressure lands on the dirty IO schedulers, where regular schedulers can look idle:
+        # check it FIRST or a filesystem-bound server reads as "not saturated".
+        dirty_io_pct > 50 -> "filesystem-bound: dirty IO schedulers busy (fsync pressure dominates)"
         busy > 75 and emu_pct > port_pct -> "CPU-bound: schedulers busy executing code; see eprof for the hot path"
         busy > 75 -> "network-bound: schedulers busy but mostly in port (socket driver) work"
         port_pct > emu_pct and sleep_pct < 50 -> "network-leaning: port work dominates the non-idle time"
@@ -182,6 +191,19 @@ defmodule ProfileServer do
       end
 
     IO.puts("\n== verdict ==\n  #{verdict}")
+  end
+
+  # Fraction of dirty IO scheduler time NOT spent sleeping: the fsync/file-IO pressure signal.
+  defp dirty_io_busy_pct(stats) do
+    {busy, total} =
+      stats
+      |> Enum.filter(&(&1.type == :dirty_io_scheduler))
+      |> Enum.reduce({0, 0}, fn thread, {b, t} ->
+        thread_total = Enum.sum(Map.values(thread.counters))
+        {b + thread_total - Map.get(thread.counters, :sleep, 0), t + thread_total}
+      end)
+
+    busy / max(total, 1) * 100
   end
 end
 

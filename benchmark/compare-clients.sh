@@ -9,22 +9,25 @@
 set -uo pipefail
 ulimit -n 16384 2>/dev/null || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 export MALACHI_USER="${MALACHI_USER:-admin}" MALACHI_PASS="${MALACHI_PASS:-admin123}" MALACHI_PORT="${MALACHI_PORT:-4040}"
 export MALACHI_RATE_LIMIT_ENABLED=false MALACHI_CONNECTION_LIMIT_ENABLED=false
 export MALACHI_GROUP_COMMIT=true MALACHI_GROUP_COMMIT_INTERVAL_MS="${MALACHI_GROUP_COMMIT_INTERVAL_MS:-2}"
 TMP="${TMPDIR:-/tmp}"
 DUR="${DUR:-8}"
+# Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
+WORK="$(mktemp -d)"
+SERVER_LOG="$WORK/server.log"
 
 rm -rf "$TMP/malachi_log" "$TMP/malachi_ra"
-MIX_ENV=dev mix run --no-halt >/tmp/compare_server.log 2>&1 &
+MIX_ENV=dev mix run --no-halt >"$SERVER_LOG" 2>&1 &
 SERVER=$!
-trap 'kill "$SERVER" 2>/dev/null' EXIT
+trap 'kill "$SERVER" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 for _ in $(seq 1 60); do
-  node -e 'const n=require("net");const s=n.connect(4040,"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),1000)' 2>/dev/null && break
-  kill -0 "$SERVER" 2>/dev/null || { echo "server died"; tail -15 /tmp/compare_server.log; exit 1; }
+  node -e 'const n=require("net");const s=n.connect(process.env.MALACHI_PORT||4040,"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),1000)' 2>/dev/null && break
+  kill -0 "$SERVER" 2>/dev/null || { echo "server died"; tail -15 "$SERVER_LOG"; exit 1; }
   sleep 1
 done
 sleep 1.5

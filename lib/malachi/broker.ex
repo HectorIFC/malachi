@@ -175,7 +175,10 @@ defmodule Malachi.Broker do
     end
   end
 
-  @typedoc "One replication call a planned produce still owes: everything `replicate_fun` would get, plus the range and expected offsets."
+  @typedoc """
+  One replication call a planned produce still owes: everything `replicate_fun` would get, plus the
+  range and expected offsets.
+  """
   @type dispatch :: %{
           range_id: Metadata.range_id(),
           primary: term(),

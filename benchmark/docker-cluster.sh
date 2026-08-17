@@ -14,8 +14,11 @@
 #
 # Usage: benchmark/docker-cluster.sh   (override DUR/WARM/CONNS/TOPICS/BATCH/RFS via env)
 set -uo pipefail
-cd "$(cd "$(dirname "$0")/.." && pwd)"
+cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 COMPOSE="docker compose -f docker-compose.cluster.yml"
+# Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 DUR="${DUR:-4}"
 # Cluster warmup must cover cross-node metadata propagation: a topic created via one node reaches the
 # other nodes' caches on the periodic refresh (~1s), so a 1s warmup leaks no_such_topic transients into
@@ -46,7 +49,7 @@ wait_healthy() {
 }
 
 for rf in $RFS; do
-  RF="$rf" $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >/tmp/cl_up.log 2>&1
+  RF="$rf" $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >"$WORK/up.log" 2>&1
 
   if ! wait_healthy; then
     echo "  cluster did not converge to healthy (RF=$rf); node 1 log tail:"
@@ -56,7 +59,7 @@ for rf in $RFS; do
   fi
 
   # Snapshot CPU% of every container mid-window (background; the run below takes warmup+duration secs).
-  ( sleep $((WARM + DUR / 2)); docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > /tmp/cl_stats.txt 2>/dev/null ) &
+  ( sleep $((WARM + DUR / 2)); docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > "$WORK/stats.txt" 2>/dev/null ) &
   stats_pid=$!
 
   json=$(RF="$rf" $COMPOSE run --rm loadtest \
@@ -75,8 +78,8 @@ for rf in $RFS; do
     | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv')
   [ "$err" != "0" ] && drop="$drop(err=$err)"
   printf "%-4s | %10s %8s %8s %8s %8s %8s\n" "$rf" "$recs" "$p50" "$p99" "$drop" "$over" "$recon"
-  if [ -s /tmp/cl_stats.txt ]; then
-    echo "     mid-window CPU: $(tr '\n' ' ' < /tmp/cl_stats.txt)"
+  if [ -s "$WORK/stats.txt" ]; then
+    echo "     mid-window CPU: $(tr '\n' ' ' < "$WORK/stats.txt")"
   fi
 done
 
