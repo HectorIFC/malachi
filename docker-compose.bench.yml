@@ -1,0 +1,55 @@
+# Benchmark compose (separate from the production docker-compose.yml): a group-commit server and the Elixir
+# load generator in two containers, pinned to distinct cores via `cpuset` so the client cannot starve the
+# server of CPU. Both use the one dev image (benchmark/Dockerfile.loadtest): the server runs it as
+# `mix run --no-halt` (dev, so the prod strong-password validator does not apply and admin/admin123 works),
+# the client runs its `mix malachi.loadtest` entrypoint. Run `benchmark/docker-compare.sh`.
+#
+# The Docker VM must have >= 8 CPUs (Docker Desktop > Settings > Resources) for the 4-7 / 0-3 split; adjust
+# SRV_CPUSET / LT_CPUSET otherwise.
+
+services:
+  malachi:
+    build:
+      context: .
+      dockerfile: benchmark/Dockerfile.loadtest
+    container_name: malachi-bench
+    cpuset: "${SRV_CPUSET:-4,5,6,7}"
+    entrypoint: ["mix", "run", "--no-halt"]
+    environment:
+      # Match the scheduler count to the pinned cores: the BEAM can otherwise oversubscribe under a cpuset.
+      ERL_FLAGS: "+S 4:4"
+      MALACHI_TCP_PORT: "4040"
+      MALACHI_DASHBOARD_PORT: "4041"
+      MALACHI_GROUP_COMMIT: "true"
+      MALACHI_GROUP_COMMIT_INTERVAL_MS: "2"
+      # Data-plane shards (single-node measurement mode): 1 = one broker, N = N independent broker shards
+      # with produce routed by hash(topic). Swept by benchmark/docker-shards.sh to measure the ceiling lift.
+      MALACHI_DATA_SHARDS: "${DATA_SHARDS:-1}"
+      # Admission limits off so the sweep is not capped (they gate connections/auth, not the produce path).
+      MALACHI_RATE_LIMIT_ENABLED: "false"
+      MALACHI_CONNECTION_LIMIT_ENABLED: "false"
+      # Data on tmpfs (RAM) so fsync cost is identical in the separated and co-located runs.
+      MALACHI_LOG_DATA_DIR: "/tmp/malachi_log"
+      MALACHI_RA_DATA_DIR: "/tmp/malachi_ra"
+    tmpfs:
+      - /tmp:rw,size=1g
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 25s
+
+  loadtest:
+    build:
+      context: .
+      dockerfile: benchmark/Dockerfile.loadtest
+    cpuset: "${LT_CPUSET:-0,1,2,3}"
+    environment:
+      ERL_FLAGS: "+S 4:4"
+    depends_on:
+      malachi:
+        condition: service_healthy
+    # Overridden per run by `docker compose run --rm loadtest <flags>`; default for a plain `up`.
+    command: ["--host", "malachi", "--scenario", "produce", "--connections", "256", "--batch", "10", "--duration", "10", "--json"]

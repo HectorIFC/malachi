@@ -1,0 +1,21 @@
+# Dev-mode image that runs `mix malachi.loadtest`. The shipped malachi image is a prod `mix release`, which
+# has no `mix` or source, so the load generator needs its own image. It copies only the source it compiles
+# (mix files, config, lib), never the host `_build`/`deps` (wrong arch), mirroring the release Dockerfile.
+FROM elixir:1.19-otp-28-alpine
+
+WORKDIR /app
+# build-base/git so NIF deps (argon2_elixir, etc.) compile, same as the release builder.
+RUN apk add --no-cache git build-base
+RUN mix local.hex --force && mix local.rebar --force
+
+ENV MIX_ENV=dev
+
+COPY mix.exs mix.lock ./
+RUN mix deps.get
+
+COPY config config
+COPY lib lib
+RUN mix compile
+
+# Args after this (e.g. --host malachi --scenario produce ...) are the load-test flags.
+ENTRYPOINT ["mix", "malachi.loadtest"]

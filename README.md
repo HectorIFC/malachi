@@ -821,6 +821,12 @@ node scripts/loadtest.js --scenario mixed --connections 20 --record-size 512 --j
 Latency is stored in a bounded reservoir (percentiles stay representative on long runs while min/max
 remain exact). `--help` lists every flag.
 
+> **Note on zero-copy:** all throughput numbers published for Malachi so far were measured WITHOUT
+> the zero-copy consume optimization (`:file.sendfile` on the fetch path is a planned future
+> optimization, not yet implemented; it would first require aligning the wire fetch encoding with the
+> on-disk frame, see `benchmark/README.md`). Produce numbers are unaffected; read-side numbers have
+> headroom once it lands.
+
 ## 🛠️ Development
 
 ### Prerequisites

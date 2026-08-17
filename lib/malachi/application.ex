@@ -36,6 +36,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.TLSValidator
@@ -205,10 +206,12 @@ defmodule Malachi.Application do
     end
   end
 
-  # The log stack's supervised children. Single-node (no :log_cluster): just the BrokerServer, which
-  # owns a local ReplicationServer. Clustered: start `ra`, plus a named ReplicationServer (this node's
-  # data-plane broker) and the BrokerServer wired to every node's ReplicationServer with a replication
-  # factor. The ReplicationServer must precede the BrokerServer (the latter references it).
+  # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a
+  # local ReplicationServer, or N independent broker shards when MALACHI_DATA_SHARDS > 1 (the
+  # measurement mode, see Malachi.DataPlaneRouter). Clustered: start `ra`, plus a named
+  # ReplicationServer (this node's data-plane broker) and the BrokerServer wired to every node's
+  # ReplicationServer with a replication factor. The ReplicationServer must precede the BrokerServer
+  # (the latter references it).
   defp log_children do
     cluster = Application.get_env(:malachi, :log_cluster)
     nodes = configured_nodes()
@@ -221,10 +224,20 @@ defmodule Malachi.Application do
       if cluster do
         # `ra` is already started in `start/2` (the user store needs it unconditionally).
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
-        # precede the broker that references it.
-        [membership_child(nodes, vnodes), replication_child(), log_broker_child(cluster, nodes)]
+        # precede the broker that references it. Data-plane sharding is single-node only; warn and ignore.
+        if DataPlaneRouter.shard_count() > 1 do
+          Logger.warning(I18n.t(:data_shards_ignored_clustered))
+        end
+
+        [
+          membership_child(nodes, vnodes),
+          replication_child(),
+          log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir())
+        ]
       else
-        [log_broker_child(nil, nodes)]
+        # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
+        # own name and isolated data dir. With one shard this is exactly the historical single child.
+        for {name, dir} <- DataPlaneRouter.shards(log_data_dir()), do: log_broker_child(nil, nodes, name, dir)
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
@@ -586,7 +599,21 @@ defmodule Malachi.Application do
     %{
       id: Malachi.LogReplication,
       start:
-        {Malachi.Cluster.ReplicationServer, :start_link, [[name: Malachi.LogReplication, directory: log_data_dir()]]}
+        {Malachi.Cluster.ReplicationServer, :start_link,
+         [
+           [
+             name: Malachi.LogReplication,
+             directory: log_data_dir(),
+             # Group commit under replication (NorthGuard: fsync on every replica coalesced by
+             # time/count/size before the produce ack). Its own knob, default off: it pays under many
+             # producers per range on fsync-bound disks and costs reply latency otherwise, so it is an
+             # explicit operator choice, decoupled from the rf=1 broker-level group commit.
+             group_commit: Application.get_env(:malachi, :replication_group_commit, false),
+             # Own interval knob too: tuning the rf=1 flush period must never silently retune every
+             # replica's fsync cadence.
+             group_commit_interval_ms: Application.get_env(:malachi, :replication_group_commit_interval_ms, 10)
+           ]
+         ]}
     }
   end
 
@@ -699,9 +726,9 @@ defmodule Malachi.Application do
   # The per-vnode leader gate: true only while this node leads the vnode's ra group.
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
-  defp log_broker_child(cluster, nodes) do
-    opts = [name: Malachi.LogBroker] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
-    %{id: Malachi.LogBroker, start: {Malachi.BrokerServer, :start_link, [log_data_dir(), opts]}}
+  defp log_broker_child(cluster, nodes, name, dir) do
+    opts = [name: name] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    %{id: name, start: {Malachi.BrokerServer, :start_link, [dir, opts]}}
   end
 
   # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is
@@ -807,8 +834,8 @@ defmodule Malachi.Application do
 
   @doc """
   The `count` vnodes (`{cluster_name, token}`) of a sharded control plane, named from `base` and
-  spread evenly over the 32-bit ring. Each vnode is its own ra cluster (D-b-1: single-node per vnode;
-  HA per vnode comes later). Pure.
+  spread evenly over the 32-bit ring. Each vnode is its own ra cluster; `place_vnodes/4` assigns each
+  one `:log_vnode_replication_factor` member nodes (HA per vnode). Pure.
   """
   @spec sharded_vnodes(atom(), pos_integer()) :: [{atom(), non_neg_integer()}]
   def sharded_vnodes(base, count) when is_integer(count) and count > 0 do

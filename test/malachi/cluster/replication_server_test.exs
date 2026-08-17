@@ -6,11 +6,11 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   @segment {{"events", 0}, 0}
 
-  defp start_broker do
+  defp start_broker(opts \\ []) do
     name = :"repl_#{System.unique_integer([:positive])}"
     directory = Path.join(System.tmp_dir!(), "malachi_repl_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    start_supervised!({ReplicationServer, name: name, directory: directory}, id: name)
+    start_supervised!({ReplicationServer, [name: name, directory: directory] ++ opts}, id: name)
     name
   end
 
@@ -28,9 +28,267 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a", "b"]))
 
-    # every replica (primary included) durably stored the same records at the same offsets
+    # Every replica (primary included) stores the same records at the same offsets. The reply comes on
+    # QUORUM durability (2 of 3), so the third replica may still be applying: wait for convergence.
     for ref <- [primary, f1, f2] do
-      assert read_values(ref, @segment) == ["a", "b"]
+      assert eventually(fn -> read_values(ref, @segment) == ["a", "b"] end),
+             "#{inspect(ref)} should converge, got #{inspect(read_values(ref, @segment))}"
+    end
+  end
+
+  test "cluster-shaped {name, node} replica refs are accepted as primary (regression)" do
+    # A clustered broker builds replica sets as `{name, node}` tuples (Application.broker_refs/1). The
+    # server's own ref must match that shape, or every clustered produce dies with :not_primary, which
+    # is exactly what happened before refs were canonicalized: a registered server kept a bare-atom ref
+    # that never equaled the tuple, so this append (and so every produce on a real cluster) failed.
+    name = start_broker()
+    tuple_set = [{name, node()}]
+
+    assert {:ok, 0} = ReplicationServer.append({name, node()}, @segment, tuple_set, 0, records(["a"]))
+    assert {:ok, 1} = ReplicationServer.replicate({name, node()}, @segment, tuple_set, 1, records(["b"]))
+    assert read_values(name, @segment) == ["a", "b"]
+  end
+
+  test "atom and {name, node} refs are interchangeable in one replica set" do
+    # Single-node callers use bare atoms, cluster callers use tuples; both name the same server, so a
+    # mixed set must behave identically (the atom is canonicalized to {name, node()} on receipt).
+    [primary, follower] = [start_broker(), start_broker()]
+    mixed_set = [{primary, node()}, follower]
+
+    assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, mixed_set, 0, records(["a", "b"]))
+    assert read_values(primary, @segment) == ["a", "b"]
+    assert read_values(follower, @segment) == ["a", "b"]
+  end
+
+  describe "pipelined fan-out" do
+    @sa {{"deadlock_a", 0}, 0}
+    @sb {{"deadlock_b", 0}, 0}
+
+    test "mutual primaries never deadlock (regression: circular follower waits)" do
+      # A is primary of one segment with B as follower, and B is primary of another with A as
+      # follower. Under the old synchronous fan-out each primary's loop blocked waiting on the other's
+      # :follow, a circular wait that stalled every batch to its 5s timeout. With the pipelined push
+      # the loops never block, so a burst in both directions completes orders of magnitude faster.
+      [a, b] = [start_broker(), start_broker()]
+
+      t0 = System.monotonic_time(:millisecond)
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn i ->
+            if rem(i, 2) == 0 do
+              ReplicationServer.replicate(a, @sa, [a, b], 0, records(["a#{i}"]))
+            else
+              ReplicationServer.replicate(b, @sb, [b, a], 0, records(["b#{i}"]))
+            end
+          end,
+          max_concurrency: 20,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      elapsed = System.monotonic_time(:millisecond) - t0
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)), "every cross-primary batch must commit"
+      assert elapsed < 2_000, "cross-primary replication took #{elapsed}ms; the loops are blocking again"
+    end
+
+    test "concurrent batches to one segment stay contiguous and ordered on every replica" do
+      [primary, f1, f2] = replica_set = [start_broker(), start_broker(), start_broker()]
+
+      results =
+        1..30
+        |> Task.async_stream(
+          fn i -> ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["v#{i}"])) end,
+          max_concurrency: 30,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      # 30 records landed contiguously (offsets 0..29) and identically on all three replicas: the
+      # per-pair FIFO push preserves the expected_first chain even with a full window of batches.
+      # Replies come on quorum (2 of 3), so the non-quorum replica may still be applying: converge.
+      primary_values = read_values(primary, @segment)
+      assert length(primary_values) == 30
+
+      assert eventually(fn -> read_values(f1, @segment) == primary_values end),
+             "f1 should converge to the primary, got #{inspect(read_values(f1, @segment))}"
+
+      assert eventually(fn -> read_values(f2, @segment) == primary_values end),
+             "f2 should converge to the primary, got #{inspect(read_values(f2, @segment))}"
+    end
+
+    test "a window of one (degenerate pipelining) still commits everything in order" do
+      [primary, follower] = [start_broker(replication_window: 1), start_broker()]
+
+      for i <- 1..10 do
+        assert {:ok, _} = ReplicationServer.replicate(primary, @segment, [primary, follower], 0, records(["w#{i}"]))
+      end
+
+      assert read_values(follower, @segment) == for(i <- 1..10, do: "w#{i}")
+    end
+
+    test "a committed batch cancels its no-quorum timer (no stale timeout messages)" do
+      # Trace the primary's received messages: after a batch commits normally, its follow_timeout
+      # timer must have been cancelled, so no {:replicate_timeout, ...} ever arrives. Before the
+      # cancel, every committed batch fired a stale message that walked the inflight and pending
+      # structures for nothing.
+      primary = start_broker(follow_timeout: 150)
+      follower = start_broker()
+      pid = Process.whereis(primary)
+
+      # No untrace cleanup needed: trace flags are cleared automatically when the traced process exits
+      # (and the supervised server dies with the test).
+      :erlang.trace(pid, true, [:receive])
+
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary, follower], 0, records(["a"]))
+
+      # Give a stale timer (150ms) ample time to fire if it was not cancelled.
+      Process.sleep(300)
+
+      stale =
+        receive do
+          {:trace, ^pid, :receive, {:replicate_timeout, _, _} = msg} -> msg
+        after
+          0 -> nil
+        end
+
+      assert stale == nil, "committed batch left a stale timeout: #{inspect(stale)}"
+    end
+
+    test "quorum holds with one dead follower, fails without a majority" do
+      # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives. A short
+      # follow_timeout keeps the no-quorum case fast.
+      primary = start_broker(follow_timeout: 300)
+      live = start_broker()
+      dead1 = :"dead_#{System.unique_integer([:positive])}"
+      dead2 = :"dead_#{System.unique_integer([:positive])}"
+
+      # 2 of 3 durable (primary + live): committed.
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary, live, dead1], 0, records(["a"]))
+
+      # 1 of 3 durable (primary only): the batch times out with no_quorum.
+      seg2 = {{"quorumless", 0}, 0}
+
+      assert {:error, :no_quorum} =
+               ReplicationServer.replicate(primary, seg2, [primary, dead1, dead2], 0, records(["b"]))
+    end
+
+    test "a behind follower nacks (does not fake quorum) and catches up in the background" do
+      [primary, live] = [start_broker(), start_broker()]
+      behind = start_broker()
+
+      # Seed the primary and the live follower past offset 0 while `behind` misses the batches.
+      assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, [primary, live], 0, records(["a", "b"]))
+
+      # Now include `behind`: it nacks (out_of_sync) and pulls from the primary in the background; the
+      # batch still commits via primary + live (2 of 3).
+      assert {:ok, 2} = ReplicationServer.replicate(primary, @segment, [primary, live, behind], 0, records(["c"]))
+
+      # The catch-up converges: eventually the behind replica has the full history.
+      assert eventually(fn -> read_values(behind, @segment) == ["a", "b", "c"] end),
+             "behind replica should backfill to a/b/c, got #{inspect(read_values(behind, @segment))}"
+    end
+  end
+
+  # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
+  # count), so a test can prove that group commit coalesces them. Kept local to this file with its own
+  # table: sharing a global counter with other test modules would couple async tests through mutable
+  # global state.
+  defmodule CountingStore do
+    @behaviour Malachi.Storage.SegmentStore
+    alias Malachi.Storage.ElixirStore
+
+    @impl true
+    def sync(handle) do
+      if ElixirStore.pending?(handle), do: :ets.update_counter(:repl_gc_syncs, :n, 1)
+      ElixirStore.sync(handle)
+    end
+
+    @impl true
+    def open(dir, id, opts), do: ElixirStore.open(dir, id, opts)
+    @impl true
+    def recover(dir, id, opts), do: ElixirStore.recover(dir, id, opts)
+    @impl true
+    def open_read(dir, id, opts), do: ElixirStore.open_read(dir, id, opts)
+    @impl true
+    def append(handle, records), do: ElixirStore.append(handle, records)
+    @impl true
+    def read(handle, offset, max), do: ElixirStore.read(handle, offset, max)
+    @impl true
+    def seal(handle), do: ElixirStore.seal(handle)
+    @impl true
+    def next_offset(handle), do: ElixirStore.next_offset(handle)
+    @impl true
+    def sealed?(handle), do: ElixirStore.sealed?(handle)
+    @impl true
+    def pending?(handle), do: ElixirStore.pending?(handle)
+    @impl true
+    def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
+    @impl true
+    def close(handle), do: ElixirStore.close(handle)
+  end
+
+  describe "group commit under replication" do
+    test "grouped replicate commits durably on every replica and coalesces fsyncs" do
+      :ets.new(:repl_gc_syncs, [:named_table, :public, :set])
+      :ets.insert(:repl_gc_syncs, {:n, 0})
+
+      gc = [group_commit: true, group_commit_interval_ms: 40, store: CountingStore]
+      [primary, f1, f2] = replica_set = [start_broker(gc), start_broker(gc), start_broker(gc)]
+
+      results =
+        1..30
+        |> Task.async_stream(
+          fn i -> ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["g#{i}"])) end,
+          max_concurrency: 30,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      primary_values = read_values(primary, @segment)
+      assert length(primary_values) == 30
+
+      # The reply arrives on QUORUM durability (primary + one follower), so the other follower may
+      # still hold everything in its group-commit buffer until its own flush tick fires, and buffered
+      # records are not readable (read clamps to the flushed end). Wait for both to converge instead
+      # of racing the second follower's tick, which is exactly what flaked on slower CI scheduling.
+      assert eventually(fn -> read_values(f1, @segment) == primary_values end),
+             "f1 should converge to the primary, got #{inspect(read_values(f1, @segment))}"
+
+      assert eventually(fn -> read_values(f2, @segment) == primary_values end),
+             "f2 should converge to the primary, got #{inspect(read_values(f2, @segment))}"
+
+      # The point: 30 batches across 3 replicas is 90 per-batch fsyncs without coalescing; with the
+      # burst landing in a couple of flush ticks it must be far fewer. Allow slack for tick straddling.
+      [{:n, fsyncs}] = :ets.lookup(:repl_gc_syncs, :n)
+      assert fsyncs > 0
+      assert fsyncs <= 18, "expected coalesced fsyncs, saw #{fsyncs} for 30 batches x 3 replicas"
+    end
+
+    test "the reply waits for the flush (never precedes durability), including with no followers" do
+      primary = start_broker(group_commit: true, group_commit_interval_ms: 100)
+
+      t0 = System.monotonic_time(:millisecond)
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["solo"]))
+      elapsed = System.monotonic_time(:millisecond) - t0
+
+      assert elapsed >= 50, "replied in #{elapsed}ms, before the ~100ms flush tick could have fsynced"
+      assert read_values(primary, @segment) == ["solo"]
+    end
+
+    test "no_quorum still fails fast under group commit when a majority is dead" do
+      primary = start_broker(group_commit: true, group_commit_interval_ms: 20, follow_timeout: 300)
+      dead1 = :"dead_#{System.unique_integer([:positive])}"
+      dead2 = :"dead_#{System.unique_integer([:positive])}"
+
+      assert {:error, :no_quorum} =
+               ReplicationServer.replicate(primary, @segment, [primary, dead1, dead2], 0, records(["x"]))
     end
   end
 

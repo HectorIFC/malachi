@@ -5,9 +5,22 @@ defmodule Malachi.BrokerServer do
   access. It wires the broker's injected effect functions to the replication server:
   `produce` replicates through it and `read`/`stream_history` read segments from it.
 
-  Writes are durable on return: each batch is fsynced on a quorum by the replication server
-  before it commits, so there is no buffering and no time-based flush, `sync/1` is a no-op kept
-  for API compatibility.
+  Writes are durable on return: by default each batch is fsynced on a quorum by the replication
+  server before it commits, so there is no buffering. With group commit enabled (`:group_commit`,
+  single-node rf=1), a produce instead buffers its batch and the client reply is deferred until the
+  next time-based flush (~`:group_commit_interval_ms`), so many concurrent producers coalesce into
+  one fsync; the reply is still returned only once the batch is durable. Under group commit the flush
+  is also triggered early once `:group_commit_flush_max_records` are parked (so each fsync, and so each
+  reply, stays bounded and a produce never waits long enough to time out), and beyond
+  `:group_commit_max_inflight` parked records new produces are shed with `{:error, :overloaded}` rather
+  than dropped. Either way `sync/1` is a no-op kept for API compatibility.
+
+  On the replicated (non-group-commit) path the produce is NON-BLOCKING for this server's loop (the
+  NorthGuard end-to-end pipelined shape): the loop plans the produce (routing, segment opening,
+  optimistic offset commit), fires the replication dispatches as casts, parks the caller, and replies
+  from the replication results, waking consumers only after every dispatch is quorum-durable. So the
+  node accepts the next produce while earlier ones replicate, instead of one produce per replication
+  round trip.
 
   The `Broker` (and the layers it composes) are pure immutable values; routing all mutations
   through this single process is what makes concurrent producers/consumers safe.
@@ -17,6 +30,7 @@ defmodule Malachi.BrokerServer do
 
   use GenServer
 
+  require Logger
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
@@ -29,10 +43,17 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.I18n
   alias Malachi.Metadata
   alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
+  # Produce call timeout: must exceed every server-side completion path (replication no_quorum ~5s,
+  # the async-produce safety timer at 6s), so callers get a real error reply, never a call exit.
+  @produce_call_timeout 10_000
+  # Safety net for an async produce whose replication result never arrives (e.g. the cast to a dead
+  # primary was silently dropped): reply an error instead of leaving the caller to time out.
+  @async_produce_timeout 6_000
 
   # --- client API ---
 
@@ -53,6 +74,14 @@ defmodule Malachi.BrokerServer do
     * `:metadata_nodes` - the nodes the metadata Raft cluster spans (default `[node()]`); several
       nodes make the control plane HA (the metadata survives losing a member).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
+    * `:group_commit` - when true, produce buffers its batch and defers the client reply to the next
+      flush so concurrent producers coalesce into one fsync (default from app env; only active at
+      rf=1). See the moduledoc.
+    * `:group_commit_interval_ms` - group-commit flush period in ms (default 5, or app env).
+    * `:group_commit_flush_max_records` - flush eagerly once this many records are parked, bounding the
+      per-flush fsync (default 8000, or app env).
+    * `:group_commit_max_inflight` - past this many parked records, shed produces with `:overloaded`
+      instead of dropping the connection (default 200000, or app env).
     * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
@@ -78,7 +107,9 @@ defmodule Malachi.BrokerServer do
   def produce(server, topic, records) do
     # Carry the caller's trace context (the LogApi produce span) into the broker process so the
     # server-side work becomes a child span (cross-process propagation, O5b).
-    GenServer.call(server, {:produce, topic, records, Ctx.get_current()})
+    # The timeout leaves room for the server-side completion paths (replication no_quorum at ~5s and
+    # the async-produce safety timer) to reply with a real error before the call ever exits.
+    GenServer.call(server, {:produce, topic, records, Ctx.get_current()}, @produce_call_timeout)
   end
 
   @doc "Reads up to `max_records` committed records from a range, starting at `offset`."
@@ -223,6 +254,21 @@ defmodule Malachi.BrokerServer do
   def init({directory, opts}) do
     {segment_max_bytes, opts} = Keyword.pop(opts, :segment_max_bytes)
     {replication_factor, opts} = Keyword.pop(opts, :replication_factor, 1)
+    {group_commit_flag, opts} = Keyword.pop(opts, :group_commit, Application.get_env(:malachi, :group_commit, false))
+
+    {gc_interval, opts} =
+      Keyword.pop(opts, :group_commit_interval_ms, Application.get_env(:malachi, :group_commit_interval_ms, 5))
+
+    {flush_max_records, opts} =
+      Keyword.pop(
+        opts,
+        :group_commit_flush_max_records,
+        Application.get_env(:malachi, :group_commit_flush_max_records, 8_000)
+      )
+
+    {max_inflight_records, opts} =
+      Keyword.pop(opts, :group_commit_max_inflight, Application.get_env(:malachi, :group_commit_max_inflight, 200_000))
+
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
     {spread_by, opts} = Keyword.pop(opts, :spread_by)
@@ -276,7 +322,27 @@ defmodule Malachi.BrokerServer do
       # Streaming subscribers (B2): `%{topic => [subscriber]}`. A subscriber is pushed records as they
       # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
       # commit the group's position. See `wake_subscribers/2` / `push_subscriber/2`.
-      subscribers: %{}
+      subscribers: %{},
+      # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
+      # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
+      # one fsync. Gated on rf=1 (the append path does no follower fan-out). `pending_produce` holds the
+      # parked callers; `gc_timer` is the scheduled flush (nil when none is pending).
+      group_commit: group_commit_flag and replication_factor == 1,
+      gc_interval: gc_interval,
+      pending_produce: [],
+      # sum of the record counts of the parked (not-yet-flushed) produces; drives the eager flush and the
+      # overload valve, reset on every flush.
+      pending_records: 0,
+      # eager-flush threshold: flush as soon as this many records are parked, so a single fsync (and so the
+      # reply latency) stays bounded and a produce never waits long enough to time out, even on a slow disk.
+      flush_max_records: flush_max_records,
+      # backpressure valve: past this many parked records the broker sheds new produces with `:overloaded`
+      # (graceful) instead of letting them queue until the caller's call times out and drops the connection.
+      max_inflight_records: max_inflight_records,
+      gc_timer: nil,
+      # In-flight async produces (the non-group-commit path): ref => the parked caller, its computed
+      # placements, how many replication dispatches are still owed, and the safety timer.
+      async_produces: %{}
     }
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
@@ -297,22 +363,20 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:produce, topic, records, ctx}, _from, state) do
+  def handle_call({:produce, topic, records, ctx}, from, state) do
     # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
     # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
     token = Ctx.attach(ctx)
 
     try do
       Tracer.with_span "malachi.broker.produce" do
-        {broker, reply} = Broker.produce(state.broker, topic, records, &ReplicationServer.replicate/5)
         Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => length(records)})
 
-        state =
-          %{state | broker: broker}
-          |> wake_waiters(topic, reply)
-          |> wake_subscribers(topic, reply)
-
-        {:reply, reply, state}
+        if state.group_commit do
+          produce_grouped(from, topic, records, state)
+        else
+          produce_async(from, topic, records, state)
+        end
       end
     after
       Ctx.detach(token)
@@ -482,7 +546,47 @@ defmodule Malachi.BrokerServer do
     {:noreply, %{state | broker: broker, metadata_refresh: metadata_refresh, bootstrap: bootstrap}}
   end
 
+  # Completes one dispatch of an async produce. The tag carries the expected last offset, so a primary
+  # whose log disagrees with our bookkeeping surfaces as the same offset_mismatch the executing path
+  # reported. Consumers are only woken once every dispatch committed (they must not observe data that
+  # is not yet quorum-durable).
   @impl true
+  def handle_info({:replicate_result, {ref, dispatch}, result}, state) do
+    case Map.get(state.async_produces, ref) do
+      # Already completed (a failure replied early, or the safety timer fired): ignore the straggler.
+      nil ->
+        {:noreply, state}
+
+      pending ->
+        case result do
+          {:ok, actual} ->
+            # The range's primary serializes appends and assigns the REAL offsets (the NorthGuard
+            # invariant). When several broker frontends interleave on one range, the primary-assigned
+            # end can differ from this frontend's precomputed one; the frontend ADOPTS the primary's
+            # truth (placements and local counter follow it) instead of failing the produce. That is
+            # what lets any node accept a produce for any range with no client-side routing.
+            {state, pending} = adopt_result(state, pending, dispatch, actual)
+
+            if pending.remaining == 1 do
+              {:noreply, finish_async_produce(state, ref, pending, {:ok, pending.placements})}
+            else
+              pending = %{pending | remaining: pending.remaining - 1}
+              {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
+            end
+
+          {:error, reason} ->
+            {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
+        end
+    end
+  end
+
+  def handle_info({:produce_timeout, ref}, state) do
+    case Map.get(state.async_produces, ref) do
+      nil -> {:noreply, state}
+      pending -> {:noreply, finish_async_produce(state, ref, pending, {:error, :replication_timeout})}
+    end
+  end
+
   def handle_info({:longpoll_timeout, ref}, state) do
     case Enum.split_with(state.waiters, &(&1.ref == ref)) do
       {[waiter], rest} ->
@@ -525,6 +629,55 @@ defmodule Malachi.BrokerServer do
 
   def handle_info(:reconcile, state) do
     {:noreply, reconcile_metadata(state)}
+  end
+
+  # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
+  # reply to each caller and wake its topic's long-poll consumers and subscribers, so consumers only ever
+  # observe durable data. `broker.brokers` is the set of local pipelines a segment can live on (one for
+  # rf=1, or several when striping), so flushing all of them covers wherever the buffered batches landed.
+  def handle_info(:group_flush, state) do
+    {:noreply, do_flush(state)}
+  end
+
+  # Fsyncs every pipeline, replies to the parked producers (now durable), wakes each topic's consumers, and
+  # resets the group-commit accumulators. Used by both the interval timer and the eager (size-triggered)
+  # path; cancels any pending timer so an eager flush leaves no stale one queued (a stale `:group_flush`
+  # that still arrives just re-runs this on empty pending, a no-op).
+  defp do_flush(state) do
+    # A dead or stuck pipeline must not crash this server: flush/1 is a call with a 5s timeout, so a
+    # single bad pipeline would otherwise take down the broker and every parked producer with it.
+    # Every pipeline is still attempted (the healthy ones make their buffers durable), but waiters are
+    # only acked when ALL of them flushed: an ack must never precede a confirmed fsync. On any failure
+    # the whole parked cycle is replied an error and the clients retry.
+    flushed_ok? =
+      Enum.reduce(state.broker.brokers, true, fn pipeline, ok? ->
+        try do
+          ReplicationServer.flush(pipeline)
+          ok?
+        catch
+          :exit, reason ->
+            Logger.warning(I18n.t(:group_flush_failed, pipeline: inspect(pipeline), reason: inspect(reason)))
+            false
+        end
+      end)
+
+    if state.gc_timer, do: Process.cancel_timer(state.gc_timer)
+
+    pending = Enum.reverse(state.pending_produce)
+    base = %{state | pending_produce: [], pending_records: 0, gc_timer: nil}
+
+    if flushed_ok? do
+      Enum.reduce(pending, base, fn waiter, st ->
+        GenServer.reply(waiter.from, waiter.reply)
+
+        st
+        |> wake_waiters(waiter.topic, waiter.reply)
+        |> wake_subscribers(waiter.topic, waiter.reply)
+      end)
+    else
+      Enum.each(pending, &GenServer.reply(&1.from, {:error, :flush_failed}))
+      base
+    end
   end
 
   @impl true
@@ -616,6 +769,110 @@ defmodule Malachi.BrokerServer do
 
   # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
   # drop) the ones that now have data, leaving the rest parked until their timeout.
+  # Synchronous produce (group commit off): replicate the batch through `replicate/5`, which fsyncs on a
+  # quorum before returning, then reply and wake consumers. The historical default; unchanged behaviour.
+  # Non-blocking produce (the NorthGuard end-to-end pipelined shape): plan the produce in this loop
+  # (routing, segment opening, optimistic offset commit), fire the replication dispatches as casts, park
+  # the caller, and reply from the `:replicate_result` messages. The loop is free for the next produce
+  # while replication runs, so a node's throughput is no longer one produce per replication round trip.
+  defp produce_async(from, topic, records, state) do
+    case Broker.produce_plan(state.broker, topic, records) do
+      {broker, {:ok, placements, []}} ->
+        # Nothing to replicate (an empty batch): complete immediately.
+        {:reply, {:ok, placements}, %{state | broker: broker}}
+
+      {broker, {:ok, placements, dispatches}} ->
+        ref = make_ref()
+
+        Enum.each(dispatches, fn d ->
+          tag = {ref, %{range_id: d.range_id, last: d.last, count: d.count}}
+
+          ReplicationServer.replicate_async(
+            d.primary,
+            d.segment_id,
+            d.replica_set,
+            d.base_offset,
+            d.records,
+            self(),
+            tag
+          )
+        end)
+
+        timer = Process.send_after(self(), {:produce_timeout, ref}, @async_produce_timeout)
+
+        pending = %{from: from, topic: topic, placements: placements, remaining: length(dispatches), timer: timer}
+        {:noreply, %{state | broker: broker, async_produces: Map.put(state.async_produces, ref, pending)}}
+
+      {broker, {:error, _reason} = error} ->
+        {:reply, error, %{state | broker: broker}}
+    end
+  end
+
+  # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
+  # is a no-op; when frontends interleaved, the batch's placement becomes the actual contiguous span
+  # `[actual - count + 1, actual]` and the local counter jumps forward to the primary's end.
+  defp adopt_result(state, pending, %{range_id: range_id, last: expected, count: count}, actual) do
+    if actual == expected do
+      {state, pending}
+    else
+      placements = Map.put(pending.placements, range_id, {actual - count + 1, actual})
+      state = %{state | broker: Broker.adopt_offsets(state.broker, range_id, actual)}
+      {state, %{pending | placements: placements}}
+    end
+  end
+
+  defp finish_async_produce(state, ref, pending, reply) do
+    Process.cancel_timer(pending.timer)
+    GenServer.reply(pending.from, reply)
+
+    %{state | async_produces: Map.delete(state.async_produces, ref)}
+    |> wake_waiters(pending.topic, reply)
+    |> wake_subscribers(pending.topic, reply)
+  end
+
+  # Group-commit produce: `append/5` buffers the batch (no fsync) and reserves offsets exactly as the sync
+  # path does, so the routing/offset code is shared; the client reply is parked until the next
+  # `:group_flush` makes it durable. A routing/append error (bad topic, unroutable key) is returned now,
+  # not parked, since nothing was buffered.
+  defp produce_grouped(from, topic, records, state) do
+    if state.pending_records >= state.max_inflight_records do
+      # Backpressure: shed load gracefully. Replying now (fast) keeps the caller's produce call from timing
+      # out and crashing its connection; the client sees an `:overloaded` error and backs off.
+      {:reply, {:error, :overloaded}, state}
+    else
+      case Broker.produce(state.broker, topic, records, &ReplicationServer.append/5) do
+        {broker, {:ok, _placements} = reply} ->
+          waiter = %{from: from, reply: reply, topic: topic}
+          pending_records = state.pending_records + length(records)
+
+          state = %{
+            state
+            | broker: broker,
+              pending_produce: [waiter | state.pending_produce],
+              pending_records: pending_records
+          }
+
+          # Flush eagerly once enough is parked so each fsync (and so each reply) stays bounded; otherwise
+          # let the interval timer fire.
+          if pending_records >= state.flush_max_records do
+            {:noreply, do_flush(state)}
+          else
+            {:noreply, ensure_flush_timer(state)}
+          end
+
+        {broker, {:error, _reason} = error} ->
+          {:reply, error, %{state | broker: broker}}
+      end
+    end
+  end
+
+  # Schedules the next flush only when none is already pending, so a burst of produces shares one timer.
+  defp ensure_flush_timer(%{gc_timer: nil} = state) do
+    %{state | gc_timer: Process.send_after(self(), :group_flush, state.gc_interval)}
+  end
+
+  defp ensure_flush_timer(state), do: state
+
   defp wake_waiters(state, _topic, {:error, _reason}), do: state
 
   defp wake_waiters(state, topic, {:ok, _placements}) do

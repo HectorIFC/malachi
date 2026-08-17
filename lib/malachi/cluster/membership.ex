@@ -2,7 +2,8 @@ defmodule Malachi.Cluster.Membership do
   @moduledoc """
   The **pure** state of SWIM-style cluster membership: who is `:alive`, `:suspect`, or `:dead`,
   with per-member **incarnation** numbers. No processes, timers, or network: this is the
-  deterministic core that the failure detector and gossip transport (later slices) drive.
+  deterministic core that the failure detector and gossip transport
+  (`Malachi.Cluster.MembershipServer`) drive.
 
   Each member owns its incarnation: only that member raises its own, to **refute** a false
   suspicion. An update is `{member, status, incarnation}`, and merging updates is a join on the

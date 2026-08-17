@@ -173,6 +173,13 @@ defmodule Malachi.Wire do
     token
   end
 
+  @doc "Decodes an error response payload (see `encode_error/2`) back to its reason string."
+  @spec decode_error_reason(binary()) :: String.t() | nil
+  def decode_error_reason(payload) do
+    {reason, <<>>} = take_str(payload)
+    reason
+  end
+
   def encode_create_topic_req(topic, keyspace_bits), do: <<put_str(topic)::binary, keyspace_bits::8>>
 
   def decode_create_topic_req(payload) do

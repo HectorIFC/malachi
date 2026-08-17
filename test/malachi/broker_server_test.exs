@@ -8,6 +8,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.ReplicatedDSRSM
+  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -136,6 +137,97 @@ defmodule Malachi.BrokerServerTest do
       |> Enum.each(fn task -> assert {:ok, _placements} = Task.await(task) end)
 
       assert server |> read_all(root_id) |> length() == 50
+    end
+  end
+
+  describe "async produce (non-blocking frontend)" do
+    # The non-group-commit produce path plans in the loop, fires replication as casts, and replies from
+    # the results, so the broker loop never blocks on replication. These prove the reply semantics hold.
+
+    defp start_repl(directory, index) do
+      name = :"bsrv_repl_#{System.unique_integer([:positive])}_#{index}"
+      {:ok, _} = ReplicationServer.start_link(name: name, directory: Path.join(directory, "r#{index}"))
+      name
+    end
+
+    test "concurrent rf=3 produces all commit and read back consistently", %{tmp_dir: directory} do
+      repls = for index <- 1..3, do: start_repl(directory, index)
+      server = start(Path.join(directory, "broker"), brokers: repls, replication_factor: 3)
+      {:ok, root_id} = BrokerServer.create_topic(server, "events", 4)
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn i -> BrokerServer.produce(server, "events", [record("v#{i}", "k#{i}")]) end,
+          max_concurrency: 20,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert server |> read_all(root_id) |> length() == 20
+    end
+
+    test "two frontends interleaving on one range both succeed by adopting primary-assigned offsets",
+         %{tmp_dir: directory} do
+      # The cluster scenario reproduced locally: two BrokerServer frontends share one ReplicationServer
+      # (the range's primary). Their in-memory metadata is separate but segment ids are deterministic,
+      # so both address the same segment and their precomputed offsets interleave. Before offset
+      # adoption ~half of these produces died with offset_mismatch; now the primary's assignment is
+      # the truth and every produce must succeed.
+      repl = start_repl(directory, 1)
+      front_a = start(Path.join(directory, "a"), brokers: [repl])
+      front_b = start(Path.join(directory, "b"), brokers: [repl])
+      {:ok, root_id} = BrokerServer.create_topic(front_a, "events", 4)
+      {:ok, ^root_id} = BrokerServer.create_topic(front_b, "events", 4)
+
+      results =
+        1..40
+        |> Task.async_stream(
+          fn i ->
+            front = if rem(i, 2) == 0, do: front_a, else: front_b
+            BrokerServer.produce(front, "events", [record("v#{i}", "k#{i}")])
+          end,
+          max_concurrency: 40,
+          timeout: 15_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)),
+             "every interleaved produce must succeed, got: #{inspect(Enum.filter(results, &match?({:error, _}, &1)))}"
+
+      # All 40 records landed contiguously on the shared primary (either frontend can read them).
+      values = front_a |> read_all(root_id) |> Enum.map(& &1.value)
+      assert length(values) == 40
+      assert Enum.sort(values) == Enum.sort(for i <- 1..40, do: "v#{i}")
+
+      # And each produce's placement points at its own records: the offsets the reply reported hold
+      # exactly the produced value on the primary. (Read via the producing frontend: a frontend's read
+      # horizon is its local counter, so the other frontend only sees this offset after its own next
+      # produce/refresh, a pre-existing visibility bound, not an adoption artifact.)
+      {:ok, placements} = BrokerServer.produce(front_b, "events", [record("probe", "kp")])
+      [{first, last}] = Map.values(placements)
+      assert first == last
+      {:ok, [probe]} = BrokerServer.read(front_b, root_id, first, 1)
+      assert probe.value == "probe"
+    end
+
+    test "unreachable replicas fail the produce gracefully and the broker survives", %{tmp_dir: directory} do
+      # Replica refs that were never registered: the replication casts vanish, so the produce must
+      # complete via a real error (no_quorum from the primary's timer, replication_timeout from the
+      # broker's safety timer, or unreachable), never by crashing the caller or the broker.
+      live = start_repl(directory, 1)
+      dead1 = :"bsrv_dead_#{System.unique_integer([:positive])}"
+      dead2 = :"bsrv_dead_#{System.unique_integer([:positive])}"
+      server = start(Path.join(directory, "broker"), brokers: [live, dead1, dead2], replication_factor: 3)
+      {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+
+      assert {:error, reason} = BrokerServer.produce(server, "events", [record("v", "k")])
+      assert reason in [:no_quorum, :replication_timeout, :unreachable]
+      assert Process.alive?(server), "the broker must survive replication failure"
+
+      # And it still serves other topics afterwards.
+      assert {:ok, _} = BrokerServer.create_topic(server, "healthy", 4)
     end
   end
 

@@ -46,6 +46,25 @@ Worth alerting on:
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so
   set thresholds against that broader meaning. See `Malachi.Auth.SessionManager`.
 
+## Durability tuning (group commit)
+
+Every produce is fsynced before its ack; group commit coalesces those fsyncs. Two independent knobs,
+one per path (the [clustering guide](clustering-and-resharding.md#durability-and-group-commit) explains
+the decision rule with examples):
+
+```bash
+# rf=1 (single node), broker-level. Recommended on for throughput workloads.
+MALACHI_GROUP_COMMIT=true
+MALACHI_GROUP_COMMIT_INTERVAL_MS=5           # flush period; ~the latency each produce pays
+MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS=8000  # eager flush: bound each fsync even on slow disks
+MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :overloaded past this
+
+# rf>1 (replicated), replication-level. Default OFF: enable only for hot-range, fsync-bound
+# workloads (many producers per range); on thin-spread loads it lowers throughput.
+MALACHI_REPLICATION_GROUP_COMMIT=false
+MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
+```
+
 ## Retention
 
 Segments are reclaimed by age or total size:

@@ -175,6 +175,111 @@ defmodule Malachi.Broker do
     end
   end
 
+  @typedoc """
+  One replication call a planned produce still owes: everything `replicate_fun` would get, plus the
+  range and expected offsets.
+  """
+  @type dispatch :: %{
+          range_id: Metadata.range_id(),
+          primary: term(),
+          segment_id: term(),
+          replica_set: [Metadata.broker()],
+          base_offset: non_neg_integer(),
+          records: [Record.t()],
+          first: non_neg_integer(),
+          last: non_neg_integer(),
+          count: pos_integer()
+        }
+
+  @doc """
+  Like `produce/4`, but PLANS the replication instead of executing it: routes each record to its range,
+  opens segments as needed, commits the offsets optimistically, and returns the replication dispatches
+  for the caller to execute (typically asynchronously, so a broker frontend never blocks its loop on
+  replication). Returns `{broker, {:ok, placements, dispatches}}` or `{broker, {:error, reason}}`; on
+  error NOTHING was dispatched, so the original broker is returned untouched (stronger atomicity than
+  the executing variant, which may have committed earlier groups).
+
+  Committing before durability is what makes the frontend non-blocking, and it is safe because clients
+  never see offsets (positions travel in opaque cursors): a dispatch that later fails burns its
+  offsets, the client gets the error and retries, and the local counters stay in lockstep with the
+  primary's log, which appended the batch even when its quorum did not close.
+  """
+  @spec produce_plan(t(), Metadata.topic_name(), [Record.t()]) ::
+          {t(), {:ok, placements(), [dispatch()]} | {:error, term()}}
+  def produce_plan(%__MODULE__{} = broker, topic, records) when is_list(records) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
+      nil ->
+        {broker, {:error, :no_such_topic}}
+
+      topic_meta ->
+        active_ranges = DSRSM.active_ranges_of_topic(broker.dsrsm, topic)
+
+        case group_by_owning_range(records, active_ranges, topic_meta.keyspace_size) do
+          {:error, _reason} = error -> {broker, error}
+          {:ok, grouped} -> plan_groups(broker, grouped)
+        end
+    end
+  end
+
+  defp plan_groups(original, grouped) do
+    result =
+      Enum.reduce_while(grouped, {original, %{}, []}, fn {range_id, reversed_records},
+                                                         {broker, placements, dispatches} ->
+        records = Enum.reverse(reversed_records)
+
+        case plan_group(broker, range_id, records, placements, dispatches) do
+          {:ok, broker, placements, dispatches} -> {:cont, {broker, placements, dispatches}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      # Nothing was executed yet, so a failed plan rolls the WHOLE produce back to the original broker.
+      {:error, reason} -> {original, {:error, reason}}
+      {broker, placements, dispatches} -> {broker, {:ok, placements, Enum.reverse(dispatches)}}
+    end
+  end
+
+  @doc """
+  Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping. The range's
+  primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so when several
+  broker frontends produce to the same range their interleaving makes a frontend's precomputed offsets
+  diverge from what the primary assigned; the frontend then adopts the primary's truth instead of
+  failing. The counter only moves forward (`max`), so this frontend's own in-flight batches keep their
+  reservations; a later collision just adopts again.
+  """
+  @spec adopt_offsets(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def adopt_offsets(%__MODULE__{} = broker, range_id, actual_last) do
+    %{broker | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1))}
+  end
+
+  defp plan_group(broker, range_id, records, placements, dispatches) do
+    case ensure_segment(broker, range_id) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, opened, segment} ->
+        first = next_offset(opened, range_id)
+        count = length(records)
+        last = first + count - 1
+        committed = commit_batch(opened, range_id, count, batch_bytes(records))
+
+        dispatch = %{
+          range_id: range_id,
+          primary: primary(segment),
+          segment_id: segment.id,
+          replica_set: segment.replica_set,
+          base_offset: segment.start_offset,
+          records: records,
+          first: first,
+          last: last,
+          count: count
+        }
+
+        {:ok, committed, Map.put(placements, range_id, {first, last}), [dispatch | dispatches]}
+    end
+  end
+
   @doc """
   Reads up to `max_records` records from `range_id` starting at `offset`, from the owning
   segment's primary via `read_fun`. Returns `:eof` past the range's end (or if nothing was
@@ -425,7 +530,36 @@ defmodule Malachi.Broker do
   end
 
   # Groups records by the active range that owns each key, or errors if any key is uncovered.
+  #
+  # Fast path: a topic with exactly ONE active range covering the whole keyspace (every topic starts
+  # this way, and it is the dominant shape under load) needs no per-record work at all: every key lands
+  # in that range, so the hash + linear range scan + map update per record are skipped. Under a
+  # produce-heavy profile that per-record routing was about a third of the broker's CPU (eprof:
+  # owning_range_id, Keyspace.position_of, find_value). The group's records are stored reversed, the
+  # same shape the scanning path builds and the callers re-reverse.
+  # An empty produce groups to nothing (and so places nothing), on every path.
+  defp group_by_owning_range([], _active_ranges, _keyspace_size), do: {:ok, %{}}
+
+  defp group_by_owning_range(records, [range] = active_ranges, keyspace_size) do
+    if range.key_start == 0 and range.key_end == keyspace_size do
+      {:ok, %{range.id => Enum.reverse(records)}}
+    else
+      scan_by_owning_range(records, active_ranges, keyspace_size)
+    end
+  end
+
   defp group_by_owning_range(records, active_ranges, keyspace_size) do
+    scan_by_owning_range(records, active_ranges, keyspace_size)
+  end
+
+  # The linear per-record range scan below is DELIBERATE, not an oversight. Measured (compiled):
+  # 33/48/56/72/105 ns per record for 1/2/4/8/16 active ranges, under 1 percent of one core at the
+  # current peak rates, and the single-range fast path above already skips it for the dominant shape.
+  # An O(1) buddy-block router was prototyped (a `{block_size, block_start} => range_id` map probed
+  # once per distinct block size; buddy partitions have few sizes) and measured 67.5 ns per record:
+  # it only beats the scan from R >= 16 active ranges. Revisit if split-heavy topics ever run with
+  # R >= 16 under high produce load; until then the scan is simpler and just as fast.
+  defp scan_by_owning_range(records, active_ranges, keyspace_size) do
     Enum.reduce_while(records, {:ok, %{}}, fn record, {:ok, groups} ->
       case owning_range_id(active_ranges, keyspace_size, record.key) do
         nil -> {:halt, {:error, {:unroutable, record.key}}}
@@ -477,11 +611,19 @@ defmodule Malachi.Broker do
         committed = commit_batch(opened, range_id, count, batch_bytes(records))
         {:cont, {committed, Map.put(placements, range_id, {first, last})}}
 
+      # Another frontend interleaved on this range: the primary serializes appends and assigned
+      # different offsets (the NorthGuard invariant: the primary owns the truth). Adopt them: this
+      # batch occupies the actual contiguous span, and the local counter follows the primary.
+      {:ok, actual} ->
+        committed =
+          opened
+          |> commit_batch(range_id, count, batch_bytes(records))
+          |> adopt_offsets(range_id, actual)
+
+        {:cont, {committed, Map.put(placements, range_id, {actual - count + 1, actual})}}
+
       # On failure, discard the just-opened segment by returning the pre-open broker (immutable
       # value = free rollback), so a failed produce leaves no phantom segment and a retry re-places.
-      {:ok, other} ->
-        {:halt, {:error, {:offset_mismatch, expected: last, got: other}, broker}}
-
       {:error, reason} ->
         {:halt, {:error, reason, broker}}
     end
@@ -495,10 +637,49 @@ defmodule Malachi.Broker do
         {:ok, broker, segment}
 
       :error ->
-        case open_segment(broker, range_id, next_offset(broker, range_id)) do
-          {:ok, broker} -> {:ok, broker, Map.fetch!(broker.segments, range_id)}
-          {:error, reason} -> {:error, reason}
+        # Another frontend may have already registered this range's active segment in the shared
+        # metadata: adopt it instead of racing a duplicate registration (which the metadata rejects
+        # with :segment_exists, and which used to fail every produce from the losing frontends).
+        case adopt_active_segment(broker, range_id) do
+          {:ok, broker, segment} ->
+            {:ok, broker, segment}
+
+          :none ->
+            case open_segment(broker, range_id, next_offset(broker, range_id)) do
+              {:ok, broker} -> {:ok, broker, Map.fetch!(broker.segments, range_id)}
+              {:error, reason} -> {:error, reason}
+            end
         end
+    end
+  end
+
+  # Adopts the range's active segment from the (shared) metadata into the local cache: id, replica set
+  # and start offset come from the registrant; the byte/record tallies restart at zero (they only steer
+  # this frontend's seal pressure). The seq counter jumps past the adopted id so a later local roll
+  # never reuses it, and the offset counter jumps to at least the segment's start (the primary-assigned
+  # results correct it further on the first produce).
+  defp adopt_active_segment(broker, range_id) do
+    active_meta =
+      broker.dsrsm
+      |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+      |> Enum.find(&(&1.state == :active))
+
+    case active_meta do
+      nil ->
+        :none
+
+      meta ->
+        active = %{id: meta.id, start_offset: meta.start_offset, records: 0, bytes: 0, replica_set: meta.replica_set}
+        {_range, seq} = meta.id
+
+        broker = %{
+          broker
+          | segments: Map.put(broker.segments, range_id, active),
+            segment_seq: Map.update(broker.segment_seq, range_id, seq + 1, &max(&1, seq + 1)),
+            offsets: Map.update(broker.offsets, range_id, meta.start_offset, &max(&1, meta.start_offset))
+        }
+
+        {:ok, broker, active}
     end
   end
 
@@ -532,6 +713,17 @@ defmodule Malachi.Broker do
         }
 
         {:ok, broker}
+
+      {dsrsm, {:error, :segment_exists}} ->
+        # Lost the registration race to another frontend. The returned metadata may already carry the
+        # winner's segment: adopt it and carry on; when it is still stale, surface the error and let
+        # the next produce adopt after the periodic metadata refresh.
+        broker = %{broker | dsrsm: dsrsm}
+
+        case adopt_active_segment(broker, range_id) do
+          {:ok, broker, _segment} -> {:ok, broker}
+          :none -> {:error, :segment_exists}
+        end
 
       {_dsrsm, {:error, reason}} ->
         {:error, reason}
