@@ -549,7 +549,7 @@ defmodule Malachi.BrokerServer do
   # reported. Consumers are only woken once every dispatch committed (they must not observe data that
   # is not yet quorum-durable).
   @impl true
-  def handle_info({:replicate_result, {ref, expected_last}, result}, state) do
+  def handle_info({:replicate_result, {ref, dispatch}, result}, state) do
     case Map.get(state.async_produces, ref) do
       # Already completed (a failure replied early, or the safety timer fired): ignore the straggler.
       nil ->
@@ -557,22 +557,20 @@ defmodule Malachi.BrokerServer do
 
       pending ->
         case result do
-          {:ok, last} when last == expected_last ->
+          {:ok, actual} ->
+            # The range's primary serializes appends and assigns the REAL offsets (the NorthGuard
+            # invariant). When several broker frontends interleave on one range, the primary-assigned
+            # end can differ from this frontend's precomputed one; the frontend ADOPTS the primary's
+            # truth (placements and local counter follow it) instead of failing the produce. That is
+            # what lets any node accept a produce for any range with no client-side routing.
+            {state, pending} = adopt_result(state, pending, dispatch, actual)
+
             if pending.remaining == 1 do
               {:noreply, finish_async_produce(state, ref, pending, {:ok, pending.placements})}
             else
               pending = %{pending | remaining: pending.remaining - 1}
               {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
             end
-
-          {:ok, other} ->
-            {:noreply,
-             finish_async_produce(
-               state,
-               ref,
-               pending,
-               {:error, {:offset_mismatch, expected: expected_last, got: other}}
-             )}
 
           {:error, reason} ->
             {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
@@ -764,6 +762,8 @@ defmodule Malachi.BrokerServer do
         ref = make_ref()
 
         Enum.each(dispatches, fn d ->
+          tag = {ref, %{range_id: d.range_id, last: d.last, count: d.count}}
+
           ReplicationServer.replicate_async(
             d.primary,
             d.segment_id,
@@ -771,7 +771,7 @@ defmodule Malachi.BrokerServer do
             d.base_offset,
             d.records,
             self(),
-            {ref, d.last}
+            tag
           )
         end)
 
@@ -782,6 +782,19 @@ defmodule Malachi.BrokerServer do
 
       {broker, {:error, _reason} = error} ->
         {:reply, error, %{state | broker: broker}}
+    end
+  end
+
+  # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
+  # is a no-op; when frontends interleaved, the batch's placement becomes the actual contiguous span
+  # `[actual - count + 1, actual]` and the local counter jumps forward to the primary's end.
+  defp adopt_result(state, pending, %{range_id: range_id, last: expected, count: count}, actual) do
+    if actual == expected do
+      {state, pending}
+    else
+      placements = Map.put(pending.placements, range_id, {actual - count + 1, actual})
+      state = %{state | broker: Broker.adopt_offsets(state.broker, range_id, actual)}
+      {state, %{pending | placements: placements}}
     end
   end
 

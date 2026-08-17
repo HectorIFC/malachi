@@ -175,15 +175,17 @@ defmodule Malachi.Broker do
     end
   end
 
-  @typedoc "One replication call a planned produce still owes: everything `replicate_fun` would get, plus the expected offsets."
+  @typedoc "One replication call a planned produce still owes: everything `replicate_fun` would get, plus the range and expected offsets."
   @type dispatch :: %{
+          range_id: Metadata.range_id(),
           primary: term(),
           segment_id: term(),
           replica_set: [Metadata.broker()],
           base_offset: non_neg_integer(),
           records: [Record.t()],
           first: non_neg_integer(),
-          last: non_neg_integer()
+          last: non_neg_integer(),
+          count: pos_integer()
         }
 
   @doc """
@@ -235,6 +237,19 @@ defmodule Malachi.Broker do
     end
   end
 
+  @doc """
+  Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping. The range's
+  primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so when several
+  broker frontends produce to the same range their interleaving makes a frontend's precomputed offsets
+  diverge from what the primary assigned; the frontend then adopts the primary's truth instead of
+  failing. The counter only moves forward (`max`), so this frontend's own in-flight batches keep their
+  reservations; a later collision just adopts again.
+  """
+  @spec adopt_offsets(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def adopt_offsets(%__MODULE__{} = broker, range_id, actual_last) do
+    %{broker | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1))}
+  end
+
   defp plan_group(broker, range_id, records, placements, dispatches) do
     case ensure_segment(broker, range_id) do
       {:error, reason} ->
@@ -247,13 +262,15 @@ defmodule Malachi.Broker do
         committed = commit_batch(opened, range_id, count, batch_bytes(records))
 
         dispatch = %{
+          range_id: range_id,
           primary: primary(segment),
           segment_id: segment.id,
           replica_set: segment.replica_set,
           base_offset: segment.start_offset,
           records: records,
           first: first,
-          last: last
+          last: last,
+          count: count
         }
 
         {:ok, committed, Map.put(placements, range_id, {first, last}), [dispatch | dispatches]}
@@ -562,11 +579,19 @@ defmodule Malachi.Broker do
         committed = commit_batch(opened, range_id, count, batch_bytes(records))
         {:cont, {committed, Map.put(placements, range_id, {first, last})}}
 
+      # Another frontend interleaved on this range: the primary serializes appends and assigned
+      # different offsets (the NorthGuard invariant: the primary owns the truth). Adopt them: this
+      # batch occupies the actual contiguous span, and the local counter follows the primary.
+      {:ok, actual} ->
+        committed =
+          opened
+          |> commit_batch(range_id, count, batch_bytes(records))
+          |> adopt_offsets(range_id, actual)
+
+        {:cont, {committed, Map.put(placements, range_id, {actual - count + 1, actual})}}
+
       # On failure, discard the just-opened segment by returning the pre-open broker (immutable
       # value = free rollback), so a failed produce leaves no phantom segment and a retry re-places.
-      {:ok, other} ->
-        {:halt, {:error, {:offset_mismatch, expected: last, got: other}, broker}}
-
       {:error, reason} ->
         {:halt, {:error, reason, broker}}
     end
@@ -580,10 +605,49 @@ defmodule Malachi.Broker do
         {:ok, broker, segment}
 
       :error ->
-        case open_segment(broker, range_id, next_offset(broker, range_id)) do
-          {:ok, broker} -> {:ok, broker, Map.fetch!(broker.segments, range_id)}
-          {:error, reason} -> {:error, reason}
+        # Another frontend may have already registered this range's active segment in the shared
+        # metadata: adopt it instead of racing a duplicate registration (which the metadata rejects
+        # with :segment_exists, and which used to fail every produce from the losing frontends).
+        case adopt_active_segment(broker, range_id) do
+          {:ok, broker, segment} ->
+            {:ok, broker, segment}
+
+          :none ->
+            case open_segment(broker, range_id, next_offset(broker, range_id)) do
+              {:ok, broker} -> {:ok, broker, Map.fetch!(broker.segments, range_id)}
+              {:error, reason} -> {:error, reason}
+            end
         end
+    end
+  end
+
+  # Adopts the range's active segment from the (shared) metadata into the local cache: id, replica set
+  # and start offset come from the registrant; the byte/record tallies restart at zero (they only steer
+  # this frontend's seal pressure). The seq counter jumps past the adopted id so a later local roll
+  # never reuses it, and the offset counter jumps to at least the segment's start (the primary-assigned
+  # results correct it further on the first produce).
+  defp adopt_active_segment(broker, range_id) do
+    active_meta =
+      broker.dsrsm
+      |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+      |> Enum.find(&(&1.state == :active))
+
+    case active_meta do
+      nil ->
+        :none
+
+      meta ->
+        active = %{id: meta.id, start_offset: meta.start_offset, records: 0, bytes: 0, replica_set: meta.replica_set}
+        {_range, seq} = meta.id
+
+        broker = %{
+          broker
+          | segments: Map.put(broker.segments, range_id, active),
+            segment_seq: Map.update(broker.segment_seq, range_id, seq + 1, &max(&1, seq + 1)),
+            offsets: Map.update(broker.offsets, range_id, meta.start_offset, &max(&1, meta.start_offset))
+        }
+
+        {:ok, broker, active}
     end
   end
 
@@ -617,6 +681,17 @@ defmodule Malachi.Broker do
         }
 
         {:ok, broker}
+
+      {dsrsm, {:error, :segment_exists}} ->
+        # Lost the registration race to another frontend. The returned metadata may already carry the
+        # winner's segment: adopt it and carry on; when it is still stale, surface the error and let
+        # the next produce adopt after the periodic metadata refresh.
+        broker = %{broker | dsrsm: dsrsm}
+
+        case adopt_active_segment(broker, range_id) do
+          {:ok, broker, _segment} -> {:ok, broker}
+          :none -> {:error, :segment_exists}
+        end
 
       {_dsrsm, {:error, reason}} ->
         {:error, reason}
