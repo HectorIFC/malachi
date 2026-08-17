@@ -6,6 +6,7 @@ defmodule Malachi.LoadtestTest do
   import ExUnit.CaptureIO
 
   alias Malachi.Loadtest
+  alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Histogram
   alias Malachi.Wire
 
@@ -129,6 +130,40 @@ defmodule Malachi.LoadtestTest do
     test "acl grant/revoke cycle runs to a valid report" do
       r = run(scenario: :acl, connections: 2, topic: topic("acl"))
       assert is_integer(r.ops) and r.ops >= 0
+    end
+  end
+
+  describe "option validation and edge cases" do
+    test "zero or negative counts are rejected up front with a named error" do
+      assert_raise ArgumentError, ~r/connections must be a positive integer/, fn ->
+        Loadtest.run(connections: 0)
+      end
+
+      assert_raise ArgumentError, ~r/duration must be a positive integer/, fn ->
+        Loadtest.run(duration: 0)
+      end
+
+      assert_raise ArgumentError, ~r/batch must be a positive integer/, fn ->
+        Loadtest.run(batch: -1)
+      end
+
+      assert_raise ArgumentError, ~r/warmup must be a non-negative integer/, fn ->
+        Loadtest.run(warmup: -1)
+      end
+    end
+
+    test "prepopulate smaller than batch seeds nothing instead of sending spurious batches" do
+      # 1..0 without an explicit step enumerates DOWN and used to send two batches; the //1 step keeps
+      # the range empty, so the fetch finds a genuinely empty backlog.
+      t = topic("tinyprep")
+      r = run(scenario: :fetch, connections: 2, batch: 10, prepopulate: 5, max: 50, topic: t)
+      assert r.errors == 0
+      assert r.records == 0, "a 5-record prepopulate with batch 10 must seed nothing, read #{r.records}"
+    end
+
+    test "a cert without a key (and the reverse) is a named error before connecting" do
+      assert {:error, :cert_requires_key} = Conn.connect(tls: true, cert: "client.pem")
+      assert {:error, :cert_requires_key} = Conn.connect(tls: true, key: "client-key.pem")
     end
   end
 

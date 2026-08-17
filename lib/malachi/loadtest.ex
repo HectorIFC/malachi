@@ -86,12 +86,12 @@ defmodule Malachi.Loadtest do
 
     %{
       scenario: scenario,
-      connections: Keyword.get(opts, :connections, 128),
-      duration: Keyword.get(opts, :duration, 10),
-      warmup: Keyword.get(opts, :warmup, 2),
-      batch: Keyword.get(opts, :batch, 10),
-      record_size: Keyword.get(opts, :record_size, 256),
-      keys: Keyword.get(opts, :keys, 1000),
+      connections: positive!(opts, :connections, 128),
+      duration: positive!(opts, :duration, 10),
+      warmup: non_negative!(opts, :warmup, 2),
+      batch: positive!(opts, :batch, 10),
+      record_size: positive!(opts, :record_size, 256),
+      keys: positive!(opts, :keys, 1000),
       pipeline: max(1, Keyword.get(opts, :pipeline, 1)),
       max: Keyword.get(opts, :max, 100),
       window: Keyword.get(opts, :window, 100),
@@ -112,6 +112,22 @@ defmodule Malachi.Loadtest do
   # The connection options for worker `index`: the shared opts plus its round-robin host.
   defp conn_opts_for(cfg, index) do
     [{:host, Enum.at(cfg.hosts, rem(index, length(cfg.hosts)))} | cfg.conn_opts]
+  end
+
+  # A zero or negative count would fail late and confusingly (an ArithmeticError after the whole run,
+  # or an instantly-empty measurement): reject it up front with a named error instead.
+  defp positive!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 -> value
+      value -> raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
+    end
+  end
+
+  defp non_negative!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      value -> raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
+    end
   end
 
   defp setup(cfg) do
@@ -150,7 +166,9 @@ defmodule Malachi.Loadtest do
     batch = for i <- 1..cfg.batch, do: %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
     payload = Wire.encode_produce_req(topic, batch)
 
-    Enum.reduce(1..div(cfg.prepopulate, cfg.batch), {conn, 2}, fn _, {conn, corr} ->
+    # //1 keeps the range empty when prepopulate < batch (1..0 without a step enumerates DOWN and
+    # would send two spurious batches).
+    Enum.reduce(1..div(cfg.prepopulate, cfg.batch)//1, {conn, 2}, fn _, {conn, corr} ->
       {:ok, _code, _resp, conn} = Conn.request(conn, Wire.produce_key(), corr, payload)
       {conn, corr + 1}
     end)
@@ -257,15 +275,28 @@ defmodule Malachi.Loadtest do
   # --- pipelined loop (produce only; W in flight per connection) ---
 
   defp pipelined(conn, ctx, m) do
-    {conn, inflight, next} =
-      Enum.reduce(1..m.pipeline, {conn, %{}, 2}, fn _, {conn, inflight, corr} ->
+    result =
+      Enum.reduce_while(1..m.pipeline, {conn, %{}, 2}, fn _, {conn, inflight, corr} ->
         case send_produce(ctx, conn, corr) do
-          {:ok, conn} -> {conn, Map.put(inflight, corr, mono_us()), corr + 1}
-          {:error, conn} -> {conn, inflight, corr}
+          {:ok, conn} -> {:cont, {conn, Map.put(inflight, corr, mono_us()), corr + 1}}
+          {:error, conn} -> {:halt, {:send_failed, conn}}
         end
       end)
 
-    pipe_loop(conn, ctx, m, inflight, next)
+    case result do
+      # A send error is a broken socket, the same as a recv error: count the drop and reconnect,
+      # instead of silently draining the pipeline and ending the worker early with no drop recorded.
+      {:send_failed, conn} -> reconnect_pipelined(conn, ctx, m)
+      {conn, inflight, next} -> pipe_loop(conn, ctx, m, inflight, next)
+    end
+  end
+
+  # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe.
+  defp reconnect_pipelined(dead_conn, ctx, m) do
+    case after_drop(m) do
+      {:ok, conn} -> pipelined(conn, ctx, m)
+      :give_up -> dead_conn
+    end
   end
 
   defp pipe_loop(conn, _ctx, _m, inflight, _next) when map_size(inflight) == 0, do: conn
@@ -281,24 +312,23 @@ defmodule Malachi.Loadtest do
         if status == :overloaded, do: shed(m, measuring)
         if t0 && status != :overloaded, do: record(m, status, mono_us() - t0, measuring)
 
-        {conn, inflight, next} =
+        refill =
           if now < m.measure_end do
-            case send_produce(ctx, conn, next) do
-              {:ok, conn} -> {conn, Map.put(inflight, next, mono_us()), next + 1}
-              {:error, conn} -> {conn, inflight, next}
-            end
+            send_produce(ctx, conn, next)
           else
-            {conn, inflight, next}
+            {:idle, conn}
           end
 
-        pipe_loop(conn, ctx, m, inflight, next)
+        case refill do
+          {:ok, conn} -> pipe_loop(conn, ctx, m, Map.put(inflight, next, mono_us()), next + 1)
+          {:idle, conn} -> pipe_loop(conn, ctx, m, inflight, next)
+          # Broken socket on send: same treatment as a recv error below.
+          {:error, conn} -> reconnect_pipelined(conn, ctx, m)
+        end
 
       # The connection dropped: reconnect and re-prime the pipeline within the window.
       {:error, _reason} ->
-        case after_drop(m) do
-          {:ok, conn} -> pipelined(conn, ctx, m)
-          :give_up -> conn
-        end
+        reconnect_pipelined(conn, ctx, m)
     end
   end
 
@@ -482,10 +512,12 @@ defmodule Malachi.Loadtest do
   end
 
   # stream pushes count as one op per page plus its records.
+  # No latency sample: a server push carries no client-side start timestamp, and recording 0 made
+  # every stream run report p50=0.0 as if it measured sub-microsecond latency. Stream latency is
+  # simply not measured client-side; the histogram stays honest (empty).
   defp record_push(m, n) do
     :counters.add(m.ops, @ops, 1)
     :counters.add(m.ops, @records, n)
-    Histogram.record(m.hist, 0)
   end
 
   # --- report ---

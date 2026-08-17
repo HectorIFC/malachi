@@ -29,9 +29,17 @@ defmodule Malachi.Loadtest.Conn do
     if Keyword.get(opts, :tls, false) do
       {:ok, _} = Application.ensure_all_started(:ssl)
 
-      case :ssl.connect(host, port, ssl_opts(opts), @recv_timeout) do
-        {:ok, socket} -> {:ok, %__MODULE__{transport: :ssl, socket: socket}}
-        {:error, _} = err -> err
+      # A half-configured mTLS pair (cert without key, or the reverse) would reach :ssl.connect as
+      # `keyfile: nil` and fail with a cryptic option error on OTP 28; name the mistake instead.
+      case {Keyword.get(opts, :cert), Keyword.get(opts, :key)} do
+        {cert, key} when (is_binary(cert) and is_nil(key)) or (is_nil(cert) and is_binary(key)) ->
+          {:error, :cert_requires_key}
+
+        _pair ->
+          case :ssl.connect(host, port, ssl_opts(opts), @recv_timeout) do
+            {:ok, socket} -> {:ok, %__MODULE__{transport: :ssl, socket: socket}}
+            {:error, _} = err -> err
+          end
       end
     else
       case :gen_tcp.connect(host, port, socket_opts(), @recv_timeout) do
