@@ -30,6 +30,7 @@ defmodule Malachi.BrokerServer do
 
   use GenServer
 
+  require Logger
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
@@ -42,6 +43,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.I18n
   alias Malachi.Metadata
   alias OpenTelemetry.Ctx
 
@@ -642,19 +644,40 @@ defmodule Malachi.BrokerServer do
   # path; cancels any pending timer so an eager flush leaves no stale one queued (a stale `:group_flush`
   # that still arrives just re-runs this on empty pending, a no-op).
   defp do_flush(state) do
-    Enum.each(state.broker.brokers, &ReplicationServer.flush/1)
+    # A dead or stuck pipeline must not crash this server: flush/1 is a call with a 5s timeout, so a
+    # single bad pipeline would otherwise take down the broker and every parked producer with it.
+    # Every pipeline is still attempted (the healthy ones make their buffers durable), but waiters are
+    # only acked when ALL of them flushed: an ack must never precede a confirmed fsync. On any failure
+    # the whole parked cycle is replied an error and the clients retry.
+    flushed_ok? =
+      Enum.reduce(state.broker.brokers, true, fn pipeline, ok? ->
+        try do
+          ReplicationServer.flush(pipeline)
+          ok?
+        catch
+          :exit, reason ->
+            Logger.warning(I18n.t(:group_flush_failed, pipeline: inspect(pipeline), reason: inspect(reason)))
+            false
+        end
+      end)
+
     if state.gc_timer, do: Process.cancel_timer(state.gc_timer)
 
     pending = Enum.reverse(state.pending_produce)
     base = %{state | pending_produce: [], pending_records: 0, gc_timer: nil}
 
-    Enum.reduce(pending, base, fn waiter, st ->
-      GenServer.reply(waiter.from, waiter.reply)
+    if flushed_ok? do
+      Enum.reduce(pending, base, fn waiter, st ->
+        GenServer.reply(waiter.from, waiter.reply)
 
-      st
-      |> wake_waiters(waiter.topic, waiter.reply)
-      |> wake_subscribers(waiter.topic, waiter.reply)
-    end)
+        st
+        |> wake_waiters(waiter.topic, waiter.reply)
+        |> wake_subscribers(waiter.topic, waiter.reply)
+      end)
+    else
+      Enum.each(pending, &GenServer.reply(&1.from, {:error, :flush_failed}))
+      base
+    end
   end
 
   @impl true

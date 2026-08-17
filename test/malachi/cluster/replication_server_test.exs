@@ -124,6 +124,34 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert read_values(follower, @segment) == for(i <- 1..10, do: "w#{i}")
     end
 
+    test "a committed batch cancels its no-quorum timer (no stale timeout messages)" do
+      # Trace the primary's received messages: after a batch commits normally, its follow_timeout
+      # timer must have been cancelled, so no {:replicate_timeout, ...} ever arrives. Before the
+      # cancel, every committed batch fired a stale message that walked the inflight and pending
+      # structures for nothing.
+      primary = start_broker(follow_timeout: 150)
+      follower = start_broker()
+      pid = Process.whereis(primary)
+
+      # No untrace cleanup needed: trace flags are cleared automatically when the traced process exits
+      # (and the supervised server dies with the test).
+      :erlang.trace(pid, true, [:receive])
+
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary, follower], 0, records(["a"]))
+
+      # Give a stale timer (150ms) ample time to fire if it was not cancelled.
+      Process.sleep(300)
+
+      stale =
+        receive do
+          {:trace, ^pid, :receive, {:replicate_timeout, _, _} = msg} -> msg
+        after
+          0 -> nil
+        end
+
+      assert stale == nil, "committed batch left a stale timeout: #{inspect(stale)}"
+    end
+
     test "quorum holds with one dead follower, fails without a majority" do
       # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives. A short
       # follow_timeout keeps the no-quorum case fast.

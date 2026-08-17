@@ -202,6 +202,10 @@ defmodule Malachi.I18n do
       "pt_BR" => "⏳ Iniciando shutdown gracioso...",
       "en_US" => "⏳ Starting graceful shutdown..."
     },
+    group_flush_failed: %{
+      "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
+      "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"
+    },
     # Audit log translations
     audit_log_file_enabled: %{
       "pt_BR" => "Saída de auditoria em arquivo habilitada: %{path} (max: %{max_mb}MB)",

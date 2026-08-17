@@ -54,7 +54,13 @@ defmodule Malachi.Cluster.ReplicationServer do
   @default_gc_interval_ms 10
 
   @typep reply_target :: {:call, GenServer.from()} | {:notify, pid(), term()}
-  @typep batch :: %{ref: reference(), reply: reply_target(), last: non_neg_integer(), count: pos_integer()}
+  @typep batch :: %{
+           ref: reference(),
+           reply: reply_target(),
+           last: non_neg_integer(),
+           count: pos_integer(),
+           timer: reference()
+         }
 
   @typep state :: %{
            ref: term(),
@@ -620,10 +626,13 @@ defmodule Malachi.Cluster.ReplicationServer do
   # Parks the caller's batch and pushes it to the followers (with none it still parks; the batch then
   # resolves once the deferred local durable ack covers it, on the next flush).
   defp park_and_push(state, reply_target, segment_id, base_offset, first, last, followers, records) do
-    batch = %{ref: make_ref(), reply: reply_target, last: last, count: length(records)}
+    ref = make_ref()
     # The no-quorum timer arms at park time (not push time), so a caller queued behind a full window
-    # still gets its reply well before its own call timeout.
-    Process.send_after(self(), {:replicate_timeout, segment_id, batch.ref}, state.follow_timeout)
+    # still gets its reply well before its own call timeout. Its reference travels in the batch so a
+    # normal resolution cancels it; otherwise every committed batch would still fire a stale timeout
+    # message follow_timeout later, each one walking the inflight list and the pending queue for nothing.
+    timer = Process.send_after(self(), {:replicate_timeout, segment_id, ref}, state.follow_timeout)
+    batch = %{ref: ref, reply: reply_target, last: last, count: length(records), timer: timer}
 
     push =
       {followers,
@@ -666,6 +675,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
     state =
       Enum.reduce(done, state, fn batch, acc ->
+        Process.cancel_timer(batch.timer)
         reply_batch(batch, {:ok, batch.last})
         Telemetry.replication_commit(batch.count, :ok)
         %{acc | committed: Map.put(acc.committed, segment_id, batch.last)}

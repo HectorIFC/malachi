@@ -147,6 +147,51 @@ defmodule Malachi.GroupCommitTest do
     assert {:error, :no_such_topic} = BrokerServer.produce(broker, "missing", batch(1))
   end
 
+  test "a dead pipeline fails the flush cycle with an error, without killing the broker" do
+    # Park producers behind a long flush interval, kill the replication pipeline, then force the
+    # flush: every parked producer must get {:error, :flush_failed} (never an ack without a confirmed
+    # fsync), and the broker must survive the pipeline's death instead of crashing on the flush call.
+    tag = System.unique_integer([:positive])
+    base = Path.join(System.tmp_dir!(), "gc_dead_#{tag}")
+    File.rm_rf!(base)
+    repl = :"gc_dead_repl_#{tag}"
+    {:ok, repl_pid} = ReplicationServer.start_link(name: repl, directory: Path.join(base, "repl"))
+
+    {:ok, broker} =
+      BrokerServer.start_link(Path.join(base, "broker"),
+        brokers: [repl],
+        group_commit: true,
+        group_commit_interval_ms: 60_000
+      )
+
+    on_exit(fn ->
+      if Process.alive?(broker), do: GenServer.stop(broker)
+      File.rm_rf!(base)
+    end)
+
+    {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+
+    tasks = for _ <- 1..3, do: Task.async(fn -> BrokerServer.produce(broker, "t", batch(2)) end)
+    # Wait until all three are parked, then kill the pipeline and force the flush.
+    wait_until(fn -> length(:sys.get_state(broker).pending_produce) == 3 end)
+    GenServer.stop(repl_pid)
+    send(broker, :group_flush)
+
+    for task <- tasks do
+      assert {:error, :flush_failed} = Task.await(task, 5_000)
+    end
+
+    assert Process.alive?(broker), "the broker must survive a dead pipeline during flush"
+  end
+
+  defp wait_until(fun, tries \\ 200) do
+    cond do
+      fun.() -> :ok
+      tries == 0 -> flunk("condition never became true")
+      true -> Process.sleep(5) && wait_until(fun, tries - 1)
+    end
+  end
+
   test "with group commit off, produce and consume still work (flag gates cleanly)" do
     broker = start_broker(group_commit: false)
     {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
