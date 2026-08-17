@@ -50,17 +50,25 @@ matrix() { # label SRV_CPUSET LT_CPUSET
             --host malachi --scenario produce --connections "$2" --batch "$1" \
             --duration "$DUR" --warmup "$WARM" --record-size 256 --json 2>/dev/null | node -e "$READ_JSON")
     printf "  batch=%-4s conns=%-4s  %s\n" "$1" "$2" "$out"
+    # A caseless client (crash, no JSON) must fail the run, not blend into the matrix as a blank row.
+    case "$out" in *"(no json)"*) FAILED=1 ;; esac
   done
 
   $COMPOSE down >/dev/null 2>&1
 }
 
+FAILED=0
+
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
 
-matrix "SEPARATED " "4,5,6,7" "0,1,2,3"
+matrix "SEPARATED " "4,5,6,7" "0,1,2,3" || FAILED=1
 echo
-matrix "CO-LOCATED" "0,1,2,3,4,5,6,7" "0,1,2,3,4,5,6,7"
+matrix "CO-LOCATED" "0,1,2,3,4,5,6,7" "0,1,2,3,4,5,6,7" || FAILED=1
 
 echo
+if [ "$FAILED" != "0" ]; then
+  echo "done, WITH FAILED CASES (see the (no json) rows above)"
+  exit 1
+fi
 echo "done"

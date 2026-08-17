@@ -29,6 +29,7 @@ BATCH="${BATCH:-100}"
 TOPICS="${TOPICS:-64}"
 RFS="${RFS:-1 3}"
 export SRV_CPUSET="${SRV_CPUSET:-4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1,2,3}"
+FAILED=0
 
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
@@ -55,6 +56,7 @@ for rf in $RFS; do
     echo "  cluster did not converge to healthy (RF=$rf); node 1 log tail:"
     RF="$rf" $COMPOSE logs --tail 25 malachi1 2>&1 | tail -25
     RF="$rf" $COMPOSE down >/dev/null 2>&1
+    FAILED=1
     continue
   fi
 
@@ -72,7 +74,8 @@ for rf in $RFS; do
   RF="$rf" $COMPOSE down >/dev/null 2>&1
 
   if [ -z "$json" ]; then
-    printf "%-4s | %s\n" "$rf" "(no json)"; continue
+    # A caseless client must fail the run, not blend in as a blank row.
+    printf "%-4s | %s\n" "$rf" "(no json)"; FAILED=1; continue
   fi
   read -r recs p50 p99 err drop over recon < <(echo "$json" \
     | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv')
@@ -84,4 +87,8 @@ for rf in $RFS; do
 done
 
 echo
+if [ "$FAILED" != "0" ]; then
+  echo "done, WITH FAILED CASES (see above)"
+  exit 1
+fi
 echo "done (target: 1M rec/s aggregate at RF=1; the three servers share SRV_CPUSET=$SRV_CPUSET)"

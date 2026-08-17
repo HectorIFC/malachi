@@ -26,6 +26,7 @@ WARM="${WARM:-1}"
 SHARDS="${SHARDS:-1 2 4}"
 TOPICS="${TOPICS:-64}"
 export SRV_CPUSET="4,5,6,7" LT_CPUSET="0,1,2,3"
+FAILED=0
 
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
@@ -38,6 +39,7 @@ for n in $SHARDS; do
   if ! DATA_SHARDS="$n" $COMPOSE up -d --wait --force-recreate malachi >"$WORK/up.log" 2>&1; then
     echo "  server did not come up healthy (DATA_SHARDS=$n); log follows:"; cat "$WORK/up.log"
     DATA_SHARDS="$n" $COMPOSE down >/dev/null 2>&1
+    FAILED=1
     continue
   fi
 
@@ -49,11 +51,16 @@ for n in $SHARDS; do
   DATA_SHARDS="$n" $COMPOSE down >/dev/null 2>&1
 
   if [ -z "$json" ]; then
-    printf "%-8s | %s\n" "$n" "(no json)"; continue
+    # A caseless client must fail the run, not blend in as a blank row.
+    printf "%-8s | %s\n" "$n" "(no json)"; FAILED=1; continue
   fi
   read -r recs errs drop over recon < <(echo "$json" | jq -r '[.records_per_s,.errors,.dropped,.overloaded,.reconnects]|@tsv')
   printf "%-8s | %10s %8s %8s %10s %10s\n" "$n" "$recs" "$errs" "$drop" "$over" "$recon"
 done
 
 echo
+if [ "$FAILED" != "0" ]; then
+  echo "done, WITH FAILED CASES (see above)"
+  exit 1
+fi
 echo "done (rec/s should rise toward N x the 1-shard baseline until it plateaus at N=cores)"
