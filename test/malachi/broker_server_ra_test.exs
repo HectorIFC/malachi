@@ -47,6 +47,36 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(control)
   end
 
+  test "a restarted broker serves reads of pre-restart data (range state recovery)" do
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    repl = start_replication()
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    :ok = BrokerServer.stop(first)
+
+    # A fresh broker over the SAME metadata cluster and replication server, the restart shape the
+    # chaos harness exercises. Before range-state recovery its empty offsets map clamped every read
+    # to :eof at offset 0, so durable pre-restart data was unreadable until the next produce.
+    {:ok, second} = BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster)
+
+    {:ok, records} = BrokerServer.read(second, root, 0, 100)
+    assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
+
+    # The consume/fetch path (what the chaos verify uses) works too.
+    {consumed, _next} = BrokerServer.consume(second, "events", %{}, 100, 0)
+    assert length(consumed) == 5
+
+    # And producing continues cleanly after the restart (recovered offsets + segment seq floor).
+    {:ok, _} = BrokerServer.produce(second, "events", [Record.new("v6", key: "k6")])
+    {:ok, all} = BrokerServer.read(second, root, 0, 100)
+    assert length(all) == 6
+
+    :ok = BrokerServer.stop(second)
+  end
+
   test "a rejected control-plane command surfaces the Raft machine error" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)

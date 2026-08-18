@@ -65,6 +65,22 @@ MALACHI_REPLICATION_GROUP_COMMIT=false
 MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
 ```
 
+## Chaos certification
+
+`scripts/docker-chaos-test.sh` runs the certification drill on a local 3-node RF=3 Docker cluster:
+synthetic traffic flows while a node is power-pulled (SIGKILL), partitioned off the network, stalled
+(SIGSTOP, sockets open but mute), and finally every node is rolling-restarted. Three invariants must
+hold or the script exits nonzero:
+
+1. **No acknowledged write is ever lost.** A checker produces sequential values through the whole
+   window, retrying through the faults, and records only the confirmed ones; at the end every one of
+   them must read back (rf=3 quorum durability).
+2. **The cluster reconverges** to 3/3 healthy after every event.
+3. **Availability recovers**: errors during an event are expected, and a clean produce+fetch must
+   pass once the chaos ends.
+
+Run it before releases or after touching replication, failover, or membership code.
+
 ## Retention
 
 Segments are reclaimed by age or total size:
