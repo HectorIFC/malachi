@@ -159,6 +159,45 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert stale == nil, "committed batch left a stale timeout: #{inspect(stale)}"
     end
 
+    test "an ack arriving after the no-quorum timeout does not answer the batch a second time" do
+      # The mirror of the test above, and the other half of the exactly-once invariant: there, an
+      # ack cancels the timer; here the timer wins and the ack arrives late. A parked batch must be
+      # answered EXACTLY once, so the late ack must find the batch gone and reply nothing. This is
+      # the interleaving the Concuerror spike targeted and could not explore (see
+      # docs/ARCHITECTURE.md), so it is pinned deterministically instead: a stub follower that
+      # never acks on its own lets the timeout fire first, and the ack is then injected by hand.
+      primary = start_broker(follow_timeout: 20)
+      silent_follower = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(silent_follower, :kill) end)
+
+      :ok =
+        ReplicationServer.replicate_async(
+          primary,
+          @segment,
+          [primary, silent_follower],
+          0,
+          records(["a"]),
+          self(),
+          :late
+        )
+
+      assert_receive {:replicate_result, :late, {:error, :no_quorum}}, 1_000
+
+      # The follower's ack, delayed past the timeout (its offset is the batch's last).
+      GenServer.cast(primary, {:replica_ack, @segment, silent_follower, {:ok, 0}})
+
+      refute_receive {:replicate_result, :late, _second}, 200
+
+      # Not a vacuous pass: the late ack really was processed (the tracker recorded the follower's
+      # offset), so the silence above is the timeout handler having consumed the batch, not the ack
+      # being discarded as unknown.
+      tracker = :sys.get_state(Process.whereis(primary)).trackers[@segment]
+      assert tracker.match[silent_follower] == 0
+
+      # The server is still healthy after the stale ack: it keeps serving new batches.
+      assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, [primary], 1, records(["b"]))
+    end
+
     test "quorum holds with one dead follower, fails without a majority" do
       # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives. A short
       # follow_timeout keeps the no-quorum case fast.

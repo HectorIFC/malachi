@@ -83,3 +83,6 @@ lefthook-local.yml
 *.txt
 *.pdf
 *.mp4
+
+# Concuerror checkout and escript (built on demand by scripts/concuerror-setup.sh, not a dep)
+/.concuerror/

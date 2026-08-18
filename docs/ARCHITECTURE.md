@@ -236,8 +236,22 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   fail-fast bad config is pushed to one node and rolled back (the node must crash-loop without ever
   going healthy, the surviving two must keep serving quorum writes, and the rollback must restore
   3/3), on top of the acked-durability and reconvergence invariants.
-- **`Concuerror`** for concurrency checking at limited scale: not yet attempted; the pending piece of
-  this pillar.
+- **`Concuerror`** for systematic interleaving exploration: **attempted and blocked by the tool**,
+  with the spike kept as the reproducible record (`scripts/concuerror-setup.sh`,
+  `scripts/concuerror.sh`, `test/concuerror/replicate_race.ex`). What the spike established, in
+  order: Concuerror builds and runs on our OTP (its own CI matrix stops at OTP 23, so this was not
+  a given); it drives Elixir and OTP code, including a `GenServer` with the exact park, ack and
+  `Process.send_after`/`cancel_timer` race we wanted to check; but it cannot run the scenario that
+  matters, because `Malachi.Cluster.ReplicationServer` is disk-backed by design (its init creates
+  the data directory, log recovery scans it) and Concuerror's `file_server_2` emulation does not
+  implement `read_file_info`. `--non_racing_system file_server_2` does not help: the request type
+  is simply unimplemented. Unblocking it needs either a Concuerror release that supports the
+  request, or a filesystem-free seam through the storage layer (the `SegmentStore` behaviour is
+  injectable, but directory creation and segment discovery still go straight to the filesystem),
+  which is a production refactor driven purely by a verification tool and not worth it today. The
+  invariant the scenario targets, that a parked batch is answered exactly once, is covered by unit
+  tests for each path separately (ack cancels the timer; a fired timer finds the batch gone), just
+  not by systematic interleaving.
 
 ## Prior art
 
