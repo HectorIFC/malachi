@@ -373,6 +373,18 @@ defmodule Malachi.MetadataTest do
       {state, _} = create_topic(Metadata.new(), "events", 4)
       assert Metadata.topic_detail(state, "nope") == nil
     end
+
+    test "exposes segment ownership as JSON-safe strings: primary is the replica set's head" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      replicas = [{Malachi.LogReplication, :malachi@node1}, {Malachi.LogReplication, :malachi@node2}]
+      {state, :ok} = apply!(state, {:register_segment, root, "s1", replicas, 0})
+
+      assert %{ranges: ranges} = Metadata.topic_detail(state, "events")
+      assert [segment] = ranges |> Enum.flat_map(& &1.segments)
+      # {name, node} collapses to the node string, the identity an operator maps to a host
+      assert segment.primary == "malachi@node1"
+      assert segment.replica_set == ["malachi@node1", "malachi@node2"]
+    end
   end
 
   describe "secondary index under migration (extract/insert)" do

@@ -222,6 +222,14 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   synthetic traffic while a node is SIGKILLed, partitioned, SIGSTOPped, and rolling-restarted; the
   harness certifies that no acknowledged write is ever lost, that the cluster reconverges after every
   event, and that availability recovers. See the operations guide.
+- **Storage fault injection** (the "different types of corruption" scenarios): delivered as
+  `scripts/docker-storage-chaos.sh`. Follower segment copies are corrupted mid-file, truncated, and
+  deleted outright; the harness certifies the same invariants plus physical reconvergence
+  (byte-identical copies across the nodes), exercising CRC-clamped recovery, write-path catch-up,
+  and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. Two deliberate limits, both
+  tracked as roadmap items: **in-place corruption of a sealed copy that keeps its byte size** is
+  invisible until a CRC scrub pass exists, and **damage to a primary copy** needs seal-on-failure
+  (NorthGuard seals the segment and moves producers to a new one when a replica fails).
 - **`Concuerror`** for concurrency checking at limited scale: not yet attempted; the pending piece of
   this pillar.
 

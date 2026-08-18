@@ -216,6 +216,31 @@ defmodule Malachi.Cluster.ReplicationServer do
     GenServer.call(ref, {:end_offset, segment_id}, timeout)
   end
 
+  @doc """
+  The on-disk byte size this server stores for `segment_id`: the sum of its segment files' sizes,
+  read without opening the log (no descriptors, no state change), so it is cheap enough to poll.
+  0 when nothing is stored. The first stage of the sealed-copy integrity probe
+  (`Malachi.Cluster.SelfHealing`): a **sealed** segment whose stored bytes fall short of the
+  metadata's sealed `byte_size` has lost data on this replica. Only meaningful for sealed segments;
+  an active segment's file legitimately trails its in-memory log by the unflushed buffer.
+  """
+  @spec stored_bytes(term(), term(), timeout()) :: non_neg_integer()
+  def stored_bytes(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:stored_bytes, segment_id}, timeout)
+  end
+
+  @doc """
+  The durable end offset this server holds for `segment_id`, recovering the log from disk when it
+  is not open yet. Unlike `end_offset/3` (which answers `:empty` for a segment that exists on disk
+  but has not been touched since this server booted), this gives the true resume point after a
+  restart, which is what a repair needs as its copy start. `base_offset` seats a missing or empty
+  log at the segment's base.
+  """
+  @spec durable_end(term(), term(), non_neg_integer(), timeout()) :: non_neg_integer()
+  def durable_end(ref, segment_id, base_offset, timeout \\ 5_000) do
+    GenServer.call(ref, {:durable_end, segment_id, base_offset}, timeout)
+  end
+
   # --- GenServer ---
 
   @impl true
@@ -358,8 +383,25 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   def handle_call({:read, segment_id, offset, max_records}, _from, state) do
     case Map.fetch(state.logs, segment_id) do
-      :error -> {:reply, :eof, state}
-      {:ok, log} -> {:reply, Log.read(log, offset, max_records), state}
+      {:ok, log} ->
+        {:reply, Log.read(log, offset, max_records), state}
+
+      :error ->
+        # Cold read: a restarted server holds durable segments nothing has opened yet, and only the
+        # append path used to open them, so every pre-restart record answered :eof until some write
+        # happened to touch its segment (the storage-chaos harness read 0 of 4592 acked records off
+        # a fully healthy cluster this way). Recover from disk when files exist; reading a segment
+        # this server never stored stays :eof and must not create an empty log as a side effect.
+        directory = segment_directory(state.directory, segment_id)
+
+        if Path.wildcard(Path.join(directory, "*.log")) == [] do
+          {:reply, :eof, state}
+        else
+          # The base offset opt only seats an EMPTY log; with files present recover derives the
+          # true offsets from them, so 0 here is inert.
+          {state, log} = fetch_or_open(state, segment_id, 0)
+          {:reply, Log.read(log, offset, max_records), state}
+        end
     end
   end
 
@@ -385,6 +427,27 @@ defmodule Malachi.Cluster.ReplicationServer do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:stored_bytes, segment_id}, _from, state) do
+    bytes =
+      state.directory
+      |> segment_directory(segment_id)
+      |> Path.join("*.log")
+      |> Path.wildcard()
+      |> Enum.reduce(0, fn path, sum ->
+        case File.stat(path) do
+          {:ok, %{size: size}} -> sum + size
+          {:error, _reason} -> sum
+        end
+      end)
+
+    {:reply, bytes, state}
+  end
+
+  def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
+    {:reply, log.next_offset, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the

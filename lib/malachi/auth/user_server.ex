@@ -18,6 +18,7 @@ defmodule Malachi.Auth.UserServer do
 
   alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserRegistry
+  alias Malachi.Cluster.RaResume
 
   @system :default
 
@@ -31,6 +32,16 @@ defmodule Malachi.Auth.UserServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
+    # Resume-first (see Malachi.Cluster.RaResume): forming over a member this node has ever started
+    # would register a fresh empty uid and resurrect an amnesiac member, losing the replicated
+    # auth state the same way the storage-chaos harness caught the metadata control plane wiped.
+    case RaResume.resume_or(@system, {cluster_name, node()}, fn -> form(cluster_name, nodes) end) do
+      :ok -> {:ok, {cluster_name, member_node(nodes)}}
+      other -> other
+    end
+  end
+
+  defp form(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, UserMachine, %{}}
 
@@ -67,9 +78,15 @@ defmodule Malachi.Auth.UserServer do
   # Best-effort: starts the local user server so it (re)joins the cluster. Any error (already started, or the
   # cluster not yet formed) is ignored: reconcile is idempotent and the caller retries.
   defp ensure_local_server(cluster_name, nodes) do
-    server_ids = Enum.map(nodes, &{cluster_name, &1})
-    machine = {:module, UserMachine, %{}}
-    _ = :ra.start_server(@system, cluster_name, {cluster_name, node()}, machine, server_ids)
+    # Resume-first here too: :ra.start_server registers a fresh empty uid just like start_cluster,
+    # so a self-join over a member this node once hosted must restart it, never re-create it.
+    _ =
+      RaResume.resume_or(@system, {cluster_name, node()}, fn ->
+        server_ids = Enum.map(nodes, &{cluster_name, &1})
+        machine = {:module, UserMachine, %{}}
+        :ra.start_server(@system, cluster_name, {cluster_name, node()}, machine, server_ids)
+      end)
+
     :ok
   end
 

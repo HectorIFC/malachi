@@ -56,7 +56,7 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
       )
 
     # all four alive: nothing to heal
-    assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: []}
+    assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
 
     # kill a broker that actually hosts segments (HRW excludes one broker per segment, so a fixed
     # broker is not guaranteed to host any) and drop it from the live set

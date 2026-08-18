@@ -52,6 +52,9 @@ x-malachi-node: &malachi-node
     # remounted EMPTY on container restart, and durability-through-restart is exactly what it tests.
     MALACHI_LOG_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_log"
     MALACHI_RA_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_ra"
+    # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
+    # a small value so segments seal (and become repairable sealed copies) within its window.
+    MALACHI_SEGMENT_MAX_BYTES: "${MALACHI_SEGMENT_MAX_BYTES:-}"
   tmpfs:
     - /tmp:rw,size=1g
   mem_limit: 2g

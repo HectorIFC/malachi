@@ -9,9 +9,15 @@
 # test: an acknowledged write survives any single-node kill, partition, or stall (rf=3 quorum
 # durability). Exit 0 on success, 1 with a summary of missing values otherwise.
 #
+# topology mode: queries the dashboard's /topic drill-down and prints one SEGMENT line per segment
+# with its range/seq (which name the on-disk directory), state, primary and replica set. The
+# storage-chaos harness uses it to pick a FOLLOWER copy to damage: primary damage is seal-on-failure
+# territory (a separate roadmap item), while follower copies must self-repair.
+#
 # Usage (run inside the cluster network or anywhere that reaches the hosts):
-#   mix run --no-start scripts/chaos_checker.exs produce host1,host2,host3 topic duration_s acked_file
-#   mix run --no-start scripts/chaos_checker.exs verify  host1,host2,host3 topic acked_file
+#   mix run --no-start scripts/chaos_checker.exs produce  host1,host2,host3 topic duration_s acked_file
+#   mix run --no-start scripts/chaos_checker.exs verify   host1,host2,host3 topic acked_file
+#   mix run --no-start scripts/chaos_checker.exs topology host1,host2,host3 topic
 
 defmodule ChaosChecker do
   alias Malachi.Loadtest.Conn
@@ -50,9 +56,29 @@ defmodule ChaosChecker do
     end
   end
 
+  def main(["topology", hosts, topic]) do
+    {:ok, _apps} = Application.ensure_all_started(:inets)
+
+    case topology(parse_hosts(hosts), topic) do
+      {:ok, ranges} ->
+        for range <- ranges, segment <- range["segments"] do
+          IO.puts(
+            "SEGMENT range=#{range["seq"]} seq=#{segment["seq"]} state=#{segment["state"]} " <>
+              "start=#{segment["start_offset"]} primary=#{segment["primary"]} " <>
+              "replicas=#{Enum.join(segment["replica_set"], ",")}"
+          )
+        end
+
+      {:error, reason} ->
+        IO.puts("topology failed: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
   def main(_argv) do
-    IO.puts("usage: chaos_checker.exs produce <hosts> <topic> <duration_s> <acked_file>")
-    IO.puts("       chaos_checker.exs verify  <hosts> <topic> <acked_file>")
+    IO.puts("usage: chaos_checker.exs produce  <hosts> <topic> <duration_s> <acked_file>")
+    IO.puts("       chaos_checker.exs verify   <hosts> <topic> <acked_file>")
+    IO.puts("       chaos_checker.exs topology <hosts> <topic>")
     System.halt(2)
   end
 
@@ -111,6 +137,33 @@ defmodule ChaosChecker do
       other ->
         IO.puts("fetch failed: #{inspect(other)}")
         System.halt(1)
+    end
+  end
+
+  # --- topology (dashboard HTTP) ---
+
+  # Logs into the first reachable node's dashboard and fetches the topic drill-down. Plain :httpc
+  # (the dashboard speaks HTTP/1.1 on 4041); the Bearer token comes from POST /login, the same
+  # credentials the wire connection uses.
+  defp topology([], _topic), do: {:error, :no_reachable_dashboard}
+
+  defp topology([host | rest], topic) do
+    base = "http://#{host}:4041"
+    login_body = Jason.encode!(%{username: "admin", password: "admin123"})
+    http_opts = [timeout: 5_000]
+    opts = [body_format: :binary]
+
+    with {:ok, {{_http, 200, _msg}, _hdrs, login}} <-
+           :httpc.request(:post, {~c"#{base}/login", [], ~c"application/json", login_body}, http_opts, opts),
+         {:ok, %{"token" => token}} <- Jason.decode(login),
+         auth = [{~c"authorization", ~c"Bearer #{token}"}],
+         {:ok, {{_http2, 200, _msg2}, _hdrs2, detail}} <-
+           :httpc.request(:get, {~c"#{base}/topic?name=#{topic}", auth}, http_opts, opts),
+         {:ok, %{"ranges" => ranges}} <- Jason.decode(detail) do
+      {:ok, ranges}
+    else
+      _error when rest != [] -> topology(rest, topic)
+      error -> {:error, error}
     end
   end
 

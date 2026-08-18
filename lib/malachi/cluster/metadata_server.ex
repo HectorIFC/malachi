@@ -10,6 +10,7 @@ defmodule Malachi.Cluster.MetadataServer do
   """
 
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.RaResume
   alias Malachi.Metadata
 
   @system :default
@@ -27,26 +28,22 @@ defmodule Malachi.Cluster.MetadataServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
+    # Resume-first (see Malachi.Cluster.RaResume): forming over a member this node has ever started
+    # would register a fresh empty uid and resurrect an amnesiac member, the control-plane wipe the
+    # storage-chaos harness caught.
+    case RaResume.resume_or(@system, {cluster_name, node()}, fn -> form(cluster_name, nodes) end) do
+      :ok -> {:ok, {cluster_name, member_node(nodes)}}
+      other -> other
+    end
+  end
+
+  defp form(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, MetadataMachine, %{}}
 
     case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} ->
-        {:ok, {cluster_name, member_node(nodes)}}
-
-      {:error, _reason} ->
-        # The cluster already exists: either its members are running (a broker restart within a live
-        # node, e.g. supervision), or this node restarted and its member has PERSISTED ra state that
-        # must be resumed, not re-formed (start_cluster refuses both shapes). Bring the local member
-        # back and reuse the cluster; without this, a node restarted after a power loss crash-looped
-        # at boot forever, which is exactly what the chaos harness caught.
-        local = {cluster_name, node()}
-
-        case :ra.restart_server(@system, local) do
-          :ok -> {:ok, {cluster_name, member_node(nodes)}}
-          {:error, {:already_started, _pid}} -> {:ok, {cluster_name, member_node(nodes)}}
-          {:error, reason} -> {:error, reason}
-        end
+      {:ok, _started, _not_started} -> {:ok, {cluster_name, member_node(nodes)}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
