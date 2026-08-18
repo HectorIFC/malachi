@@ -37,13 +37,17 @@ x-malachi-node: &malachi-node
     ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
     MALACHI_TCP_PORT: "4040"
     MALACHI_DASHBOARD_PORT: "4041"
-    MALACHI_CLUSTER_STRATEGY: "epmd"
+    # Parameterized (default epmd) so the config-deploy chaos drill can push a config that fails
+    # fast at boot (runtime.exs raises on an unknown strategy) to a single node and roll it back.
+    MALACHI_CLUSTER_STRATEGY: "${MALACHI_CLUSTER_STRATEGY:-epmd}"
     MALACHI_LOG_CLUSTER: "malachi_log"
     MALACHI_LOG_NODES: "malachi@malachi1,malachi@malachi2,malachi@malachi3"
     MALACHI_LOG_VNODES: "1"
     MALACHI_LOG_REPLICATION_FACTOR: "${RF:-1}"
     MALACHI_GROUP_COMMIT: "true"
-    MALACHI_GROUP_COMMIT_INTERVAL_MS: "2"
+    # Parameterized (default 2, the benchmark tuning) so the config-deploy chaos drill has a
+    # harmless setting to roll across the nodes while verifying availability between steps.
+    MALACHI_GROUP_COMMIT_INTERVAL_MS: "${MALACHI_GROUP_COMMIT_INTERVAL_MS:-2}"
     # Admission limits off so the sweep is not capped (they gate connections/auth, not the produce path).
     MALACHI_RATE_LIMIT_ENABLED: "false"
     MALACHI_CONNECTION_LIMIT_ENABLED: "false"

@@ -230,6 +230,12 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   tracked as roadmap items: **in-place corruption of a sealed copy that keeps its byte size** is
   invisible until a CRC scrub pass exists, and **damage to a primary copy** needs seal-on-failure
   (NorthGuard seals the segment and moves producers to a new one when a replica fails).
+- **Config-deployment certification** (the "deployments... and even config deployments" scenarios):
+  delivered as `scripts/docker-config-chaos.sh`. A harmless config change is rolled node by node
+  under traffic (availability must hold between steps and the new value must take effect), and a
+  fail-fast bad config is pushed to one node and rolled back (the node must crash-loop without ever
+  going healthy, the surviving two must keep serving quorum writes, and the rollback must restore
+  3/3), on top of the acked-durability and reconvergence invariants.
 - **`Concuerror`** for concurrency checking at limited scale: not yet attempted; the pending piece of
   this pillar.
 

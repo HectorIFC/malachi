@@ -99,6 +99,14 @@ size (bit rot) needs the CRC scrub pass (also roadmap). The run sets `MALACHI_SE
 low so segments seal within the window; the same knob is available for any deployment that wants
 smaller roll sizes.
 
+`scripts/docker-config-chaos.sh` certifies config deployments, the way this repo deploys them (one
+image, config via env): a harmless setting is rolled across the nodes one at a time, requiring the
+checker's acks to keep flowing between every step and the new value to be effective on all three
+nodes at the end; then a config that fails fast at boot is pushed to a single node, which must
+crash-loop and never go healthy while the other two keep serving quorum writes, and rolling the
+env back must bring it home to 3/3. The same closing invariants apply: no acknowledged write lost,
+full reconvergence, clean produce+fetch after the chaos.
+
 ## Retention
 
 Segments are reclaimed by age or total size:
