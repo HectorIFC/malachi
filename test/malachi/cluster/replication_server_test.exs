@@ -194,6 +194,27 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  test "a replica restarted over its persisted directory recovers instead of crashing" do
+    # After a power-loss restart the segment files are already on disk; the first append used to blow
+    # up the server with an :already_exists MatchError (Log.open creating over existing files), which
+    # crash-looped the whole replication server on a restarted node, exactly what the chaos harness
+    # caught. With recover, the replica resumes at its durable end and keeps serving.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_restart_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_restart_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # The restarted replica accepts appends continuing its durable end (this crashed before the fix)
+    # and still serves the pre-restart records.
+    assert {:ok, 2} = ReplicationServer.replicate(name, @segment, [name], 0, records(["c"]))
+    assert read_values(name, @segment) == ["a", "b", "c"]
+  end
+
   # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
   # count), so a test can prove that group commit coalesces them. Kept local to this file with its own
   # table: sharing a global counter with other test modules would couple async tests through mutable

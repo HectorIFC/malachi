@@ -214,10 +214,16 @@ Four choices shape everything above. Each is stated with its reason and the code
 NorthGuard leans on **deterministic simulation** (a single-threaded cluster and clients with swappable
 time, network, disk, and RNG, replaying failures exactly) as a reliability pillar. That is essentially
 unfeasible on the BEAM, whose scheduler is preemptive and multicore and outside our control. This is a real
-downgrade in guarantees, and it is accepted explicitly. The substitutes are property-based stateful testing
-of the log model and the state machine (`stream_data`), `Concuerror` for concurrency checking at limited
-scale, Jepsen-style tests for distributed consistency, and fault injection for network partitions and
-storage chaos.
+downgrade in guarantees, and it is accepted explicitly. The substitutes, and their delivery status:
+
+- **Property-based stateful testing** of the log model and the state machine (`stream_data`): delivered.
+- **Fault injection with a Jepsen-style acked-durability check**: delivered as the chaos certification
+  harness (`scripts/docker-chaos-test.sh` + `scripts/chaos_checker.exs`). A 3-node RF=3 cluster takes
+  synthetic traffic while a node is SIGKILLed, partitioned, SIGSTOPped, and rolling-restarted; the
+  harness certifies that no acknowledged write is ever lost, that the cluster reconverges after every
+  event, and that availability recovers. See the operations guide.
+- **`Concuerror`** for concurrency checking at limited scale: not yet attempted; the pending piece of
+  this pillar.
 
 ## Prior art
 

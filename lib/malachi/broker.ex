@@ -241,6 +241,22 @@ defmodule Malachi.Broker do
   end
 
   @doc """
+  Seeds a range's recovered bookkeeping after a restart: the next offset to hand out and the floor for
+  the segment sequence counter. The in-memory `offsets`/`segment_seq` maps start empty on boot, and
+  without seeding every read of pre-restart data would clamp to `:eof` at offset 0 even though the
+  records are durable on disk and the metadata survived (the failure the chaos harness caught).
+  Both merges are monotone (`max`), so re-seeding never rewinds live state.
+  """
+  @spec seed_range_state(t(), Metadata.range_id(), non_neg_integer(), non_neg_integer()) :: t()
+  def seed_range_state(%__MODULE__{} = broker, range_id, next_offset, min_seq) do
+    %{
+      broker
+      | offsets: Map.update(broker.offsets, range_id, next_offset, &max(&1, next_offset)),
+        segment_seq: Map.update(broker.segment_seq, range_id, min_seq, &max(&1, min_seq))
+    }
+  end
+
+  @doc """
   Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping. The range's
   primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so when several
   broker frontends produce to the same range their interleaving makes a frontend's precomputed offsets

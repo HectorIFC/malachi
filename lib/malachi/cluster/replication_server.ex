@@ -206,10 +206,14 @@ defmodule Malachi.Cluster.ReplicationServer do
     GenServer.call(ref, {:follow, segment_id, expected_first, expected_first, records, nil})
   end
 
-  @doc "This server's next offset for `segment_id`, or `:empty` if it stores none of it yet."
-  @spec end_offset(term(), term()) :: non_neg_integer() | :empty
-  def end_offset(ref, segment_id) do
-    GenServer.call(ref, {:end_offset, segment_id})
+  @doc """
+  This server's next offset for `segment_id`, or `:empty` if it stores none of it yet. `timeout`
+  bounds the call: pollers (the broker's periodic range-state refresh) pass a short one so an
+  unreachable replica cannot block their loop for the default five seconds.
+  """
+  @spec end_offset(term(), term(), timeout()) :: non_neg_integer() | :empty
+  def end_offset(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:end_offset, segment_id}, timeout)
   end
 
   # --- GenServer ---
@@ -802,8 +806,12 @@ defmodule Malachi.Cluster.ReplicationServer do
         {state, log}
 
       :error ->
+        # recover, not open: after a restart the segment's files may already exist on disk (a durable
+        # replica), and a blind open would crash the first append with :already_exists. recover resumes
+        # at the true durable end (a push past it nacks out_of_sync and catch-up backfills the gap) and
+        # falls back to a fresh open when the directory is empty.
         opts = [base_offset: base_offset] ++ state.log_opts
-        {:ok, log} = Log.open(segment_directory(state.directory, segment_id), opts)
+        {:ok, log} = Log.recover(segment_directory(state.directory, segment_id), opts)
         {put_log(state, segment_id, log), log}
     end
   end
