@@ -63,6 +63,10 @@ MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :ov
 # workloads (many producers per range); on thin-spread loads it lowers throughput.
 MALACHI_REPLICATION_GROUP_COMMIT=false
 MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
+
+# Active-segment roll size (bytes); unset keeps the 64MB default. Smaller segments seal (and become
+# independently replicable/repairable units) sooner, at the cost of more metadata churn.
+MALACHI_SEGMENT_MAX_BYTES=67108864
 ```
 
 ## Chaos certification
@@ -80,6 +84,20 @@ hold or the script exits nonzero:
    pass once the chaos ends.
 
 Run it before releases or after touching replication, failover, or membership code.
+
+`scripts/docker-storage-chaos.sh` extends the drill to storage faults, injected with the target
+node stopped: a follower's segment copy suffers a torn write (cut short with a garbage partial
+frame appended: recovery clamps at the last CRC-valid frame and catch-up or the healing pass
+repairs the tail), a gross truncation to half, and a sealed-segment directory deleted outright.
+The deletion exercises the self-healing **integrity probe**: metadata still says the segment has
+all its replicas, so only a physical check (on-disk bytes vs the sealed byte size, run each healing
+pass) can spot the silent under-replication and re-backfill the copy. On top of the three
+invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
+file must end byte-identical across the three nodes. Damage always targets follower copies;
+primary damage is seal-on-failure territory (roadmap), and in-place corruption that keeps the byte
+size (bit rot) needs the CRC scrub pass (also roadmap). The run sets `MALACHI_SEGMENT_MAX_BYTES`
+low so segments seal within the window; the same knob is available for any deployment that wants
+smaller roll sizes.
 
 ## Retention
 

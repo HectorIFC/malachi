@@ -215,6 +215,55 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert read_values(name, @segment) == ["a", "b", "c"]
   end
 
+  test "a restarted replica serves COLD reads of its durable segments (no append needed first)" do
+    # The storage-chaos harness read 0 of 4592 acked records off a healthy cluster: the read
+    # handler only served segments already open in memory, and only the append path opened them,
+    # so after a restart every pre-restart record answered :eof until some write touched its
+    # segment. A read must recover from disk on its own.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_cold_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_cold_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # first interaction is a READ, not an append
+    assert read_values(name, @segment) == ["a", "b"]
+
+    # a segment this server never stored still answers :eof, without creating files as a side effect
+    unknown = {{"cold_none", 0}, 0}
+    assert ReplicationServer.read(name, unknown, 0, 10) == :eof
+    assert ReplicationServer.stored_bytes(name, unknown) == 0
+  end
+
+  test "stored_bytes reads the on-disk size without opening; durable_end recovers where end_offset cannot" do
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_probe_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_probe_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # nothing stored yet: both probes answer the empty shape
+    assert ReplicationServer.stored_bytes(name, @segment) == 0
+
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    bytes = ReplicationServer.stored_bytes(name, @segment)
+    assert bytes > 0
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # the restarted server has not opened the segment: end_offset says :empty (its documented
+    # contract), stored_bytes still sees the durable files, and durable_end recovers the true end,
+    # which is exactly the gap the sealed-copy integrity probe needs closed
+    assert ReplicationServer.end_offset(name, @segment) == :empty
+    assert ReplicationServer.stored_bytes(name, @segment) == bytes
+    assert ReplicationServer.durable_end(name, @segment, 0) == 2
+  end
+
   # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
   # count), so a test can prove that group commit coalesces them. Kept local to this file with its own
   # table: sharing a global counter with other test modules would couple async tests through mutable

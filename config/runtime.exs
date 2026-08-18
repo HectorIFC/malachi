@@ -182,6 +182,11 @@ config :malachi,
   # The replicated path's flush period, decoupled from the rf=1 knob above so tuning a single node
   # never silently retunes every replica's fsync cadence. Default 10ms (the NorthGuard time trigger).
   replication_group_commit_interval_ms: parse_int.(System.get_env("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS"), 10),
+  # Active-segment roll size (bytes): the broker seals the active segment once it reaches this many
+  # encoded bytes. Unset => the library default (64MB). Smaller values seal faster, which shortens the
+  # replication unit and is what the storage-chaos harness uses to exercise sealed-segment recovery
+  # within its window; production setups normally leave this at the default.
+  segment_max_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_MAX_BYTES"), nil),
   # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
   # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
   # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.

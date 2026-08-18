@@ -507,8 +507,27 @@ defmodule Malachi.Metadata do
   end
 
   defp segment_detail(segment) do
-    Map.take(segment, [:state, :start_offset, :length, :byte_size, :sealed_at])
+    segment
+    |> Map.take([:state, :start_offset, :length, :byte_size, :sealed_at])
+    |> Map.put(:seq, segment_seq(segment.id))
+    |> Map.put(:primary, segment.replica_set |> List.first() |> broker_ref_string())
+    |> Map.put(:replica_set, Enum.map(segment.replica_set, &broker_ref_string/1))
   end
+
+  # The segment's sequence within its range (the broker's `{range_id, seq}` id shape), which with the
+  # range's seq names the segment's on-disk directory; `nil` for foreign id shapes.
+  defp segment_seq({_range_id, seq}) when is_integer(seq), do: seq
+  defp segment_seq(_id), do: nil
+
+  # JSON-safe display form of a replica reference. The primary is the replica set's head (the same
+  # convention the broker and replication servers use), so exposing the set exposes ownership: an
+  # operator (or the chaos harness) can see which node serves a segment. `{name, node}` collapses to
+  # the node, which is what identifies a broker to an operator; pids and bare atoms are single-node
+  # shapes where ownership is trivially local.
+  defp broker_ref_string(nil), do: nil
+  defp broker_ref_string({_name, node}) when is_atom(node), do: Atom.to_string(node)
+  defp broker_ref_string(ref) when is_atom(ref), do: Atom.to_string(ref)
+  defp broker_ref_string(ref), do: inspect(ref)
 
   defp groups_of_topic(state, topic_name) do
     state.committed_offsets

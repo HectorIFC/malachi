@@ -727,8 +727,17 @@ defmodule Malachi.Application do
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
   defp log_broker_child(cluster, nodes, name, dir) do
-    opts = [name: name] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    opts = [name: name] ++ segment_opts() ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
     %{id: name, start: {Malachi.BrokerServer, :start_link, [dir, opts]}}
+  end
+
+  # Only forwarded when configured (MALACHI_SEGMENT_MAX_BYTES), so an unset knob keeps the
+  # library default rather than overriding it with nil.
+  defp segment_opts do
+    case Application.get_env(:malachi, :segment_max_bytes) do
+      nil -> []
+      bytes -> [segment_max_bytes: bytes]
+    end
   end
 
   # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is
