@@ -98,4 +98,15 @@ defmodule Malachi.Storage.SegmentStore do
   @callback verify(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
               {:ok, %{records: non_neg_integer(), bytes: non_neg_integer()}}
               | {:error, %{position: non_neg_integer(), reason: atom(), file: Path.t()} | :enoent}
+
+  @doc """
+  Rewrites the segment's index from the segment itself, replacing whatever was there.
+
+  This is the repair for a damaged index, and it needs no replica: the index is **derived** from the
+  records, so a node can always rebuild its own from the segment it already holds, unlike a damaged
+  segment, which has to be refetched from a peer. Only call it on a segment whose records verify, or
+  the rebuilt index will faithfully describe the damage.
+  """
+  @callback rebuild_index(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
+              :ok | {:error, term()}
 end

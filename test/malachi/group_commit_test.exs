@@ -45,6 +45,8 @@ defmodule Malachi.GroupCommitTest do
     def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
     @impl true
     def integrity(handle), do: ElixirStore.integrity(handle)
+    @impl true
+    def rebuild_index(dir, id, opts), do: ElixirStore.rebuild_index(dir, id, opts)
   end
 
   # Boots an independent group-commit broker (its own ReplicationServer, dir, and topic) and registers

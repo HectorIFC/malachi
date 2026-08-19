@@ -245,13 +245,32 @@ defmodule Malachi.Cluster.Scrubber do
     state = %{state | damaged: MapSet.put(state.damaged, segment.id)}
     acc = %{acc | damaged: [{segment.id, verdict} | acc.damaged]}
 
-    repair(segment, acc, state)
+    repair(segment, verdict, acc, state)
+  end
+
+  # A damaged sparse index is repaired without leaving the node and without touching the segment: the
+  # index is DERIVED from the records, so nothing original was lost and no replica can offer anything
+  # this node does not already hold. That makes it the one damage shape with no peer, no demotion and
+  # no deletion, which is also why it must never be confused with damage to the segment itself.
+  defp repair(segment, %{reason: :bad_index}, acc, state), do: rebuild_index(segment, acc, state)
+  defp repair(segment, _segment_damage, acc, state), do: repair_from_peer(segment, acc, state)
+
+  defp rebuild_index(segment, acc, state) do
+    directory = Layout.segment_directory(state.directory, segment.id)
+
+    case Log.rebuild_index(directory) do
+      :ok ->
+        {%{acc | repaired: [segment.id | acc.repaired]}, forget_damage(state, segment.id)}
+
+      {:error, reason} ->
+        {%{acc | unrepairable: [{segment.id, {:rebuild_index, reason}} | acc.unrepairable]}, state}
+    end
   end
 
   # The repair is a distributed operation (a peer scan, a control-plane command and a cross-node
   # copy), which is why it gets a span while the local scan does not: this is where the latency and
   # the failure modes are worth tracing.
-  defp repair(segment, acc, state) do
+  defp repair_from_peer(segment, acc, state) do
     Tracer.with_span "malachi.scrub.repair" do
       Tracer.set_attributes(%{
         "malachi.segment" => inspect(segment.id),

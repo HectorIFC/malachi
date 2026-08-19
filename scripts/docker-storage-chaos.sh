@@ -20,6 +20,10 @@
 #                    records before the damage and nothing after, silently. Only the integrity
 #                    scrub (Malachi.Cluster.Scrubber, checksum verification) catches it, and it
 #                    must repair the copy from an intact replica.
+#   i. rotted index- corrupt a follower's sparse-index sidecar (.idx), not its records. The index is
+#                    DERIVED data, so the repair must be local: rebuilt from the segment, without
+#                    consulting a peer and without touching the .log. Reads stay whole throughout,
+#                    because a read that does not find what the index promised rescans the segment.
 #
 # Invariants certified on top of the fatia-1 set (acked durability, convergence, clean produce):
 #   4. The damaged copies physically reconverge: byte-identical segment files across all 3 nodes.
@@ -32,6 +36,9 @@ export RF=3
 export MALACHI_DATA_ROOT=/data
 # Small segments so the checker's own traffic seals segments (repairable sealed copies) in-window.
 export MALACHI_SEGMENT_MAX_BYTES="${MALACHI_SEGMENT_MAX_BYTES:-4096}"
+# And a tiny INTERNAL roll, so each segment's log rolls and writes its sparse-index sidecar. With the
+# library default (1GB / 1h) a run of seconds has no `.idx` at all and event i would be vacuous.
+export MALACHI_LOG_ROLL_MAX_BYTES="${MALACHI_LOG_ROLL_MAX_BYTES:-2048}"
 # The scrub at production cadence revisits a segment about weekly, which no test window can wait
 # for, so the drill runs it aggressively: the point is to certify that it detects and repairs, not
 # to measure its pace (that is benchmark/docker-scrub.sh).
@@ -87,13 +94,17 @@ damage_follower() {
   wait_healthy || fail "cluster did not reconverge after restarting $follower"
 }
 
-# Waits until the damaged dir's *.log md5s match between the damaged follower and the primary.
+# Waits until the damaged dir's files matching $2 (default the segment's *.log) have the same md5s on
+# the damaged follower and on the primary. Replicas hold identical bytes for both the records and the
+# derived index, so byte equality is the honest check for "repaired" either way.
 wait_copy_repaired() {
+  glob="${2:-*.log}"
+
   for _ in $(seq 1 12); do
-    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/*.log 2>/dev/null | sort" | awk '{print $1}')
-    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.log 2>/dev/null | sort" | awk '{print $1}')
+    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/$glob 2>/dev/null | sort" | awk '{print $1}')
+    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/$glob 2>/dev/null | sort" | awk '{print $1}')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
-      echo "copy repaired: follower matches primary byte for byte"
+      echo "copy repaired: follower matches primary byte for byte ($glob)"
       return 0
     fi
     sleep 5
@@ -126,6 +137,23 @@ say "event h: bit rot inside a follower's sealed copy, keeping the file's exact 
 if damage_follower sealed 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=32 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
   echo "bit rot injected (size unchanged) and node restarted; waiting for the scrub to repair"
   wait_copy_repaired "rotted sealed copy was not repaired by the integrity scrub"
+fi
+
+say "event i: corrupt a follower's sparse-index sidecar, leaving its records untouched"
+# The .idx is derived from the records, so this must be repaired WITHOUT a peer and without touching
+# the .log: the scrub rebuilds it from the segment the node already holds. The records' md5 is captured
+# before and after to prove the segment itself was never rewritten.
+if damage_follower sealed 'f=$(ls $dir/*.idx 2>/dev/null | head -1); [ -n "$f" ] || { echo "no sidecar in $dir"; exit 1; }; before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=8 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
+  logs_before=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.log | sort")
+  echo "index corrupted (records untouched) and node restarted; waiting for the scrub to rebuild it"
+  wait_copy_repaired "rotted sparse index was not rebuilt by the integrity scrub" '*.idx'
+
+  logs_after=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.log | sort")
+  if [ "$logs_before" = "$logs_after" ]; then
+    echo "records untouched by the index repair, as they must be"
+  else
+    fail "repairing the index rewrote the segment's records"
+  fi
 fi
 
 close_window

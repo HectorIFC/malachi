@@ -194,6 +194,13 @@ config :malachi,
   # per-tick count, to verify a large dataset more often.
   scrub_interval_ms: parse_int.(System.get_env("MALACHI_SCRUB_INTERVAL_MS"), 60_000),
   scrub_segments_per_tick: parse_int.(System.get_env("MALACHI_SCRUB_SEGMENTS_PER_TICK"), 1),
+  # Internal roll of a segment's own log: when its file reaches this many bytes or this age, the store
+  # seals that file (writing the sparse-index sidecar) and opens the next one inside the same segment
+  # directory. Distinct from MALACHI_SEGMENT_MAX_BYTES below, which is the broker sealing a SEGMENT in
+  # the control plane. Unset keeps the library defaults (1GB / 1h); the storage-chaos drill sets them
+  # tiny so sidecars exist within a test window.
+  log_roll_max_bytes: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_BYTES"), nil),
+  log_roll_max_age_ms: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_AGE_MS"), nil),
   # Active-segment roll size (bytes): the broker seals the active segment once it reaches this many
   # encoded bytes. Unset => the library default (64MB). Smaller values seal faster, which shortens the
   # replication unit and is what the storage-chaos harness uses to exercise sealed-segment recovery

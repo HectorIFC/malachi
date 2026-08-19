@@ -28,8 +28,8 @@ defmodule Malachi.Cluster.SelfHealing do
   the sealed `byte_size` is then opened for its exact durable end
   (`Malachi.Cluster.ReplicationServer.durable_end/4`) and re-backfilled from an intact replica via
   `Malachi.Cluster.Catchup`, resuming at the truncation point rather than recopying the segment.
-  In-place corruption that keeps the byte size is out of this probe's reach; detecting it needs a
-  CRC scrub pass (an explicit roadmap item, see docs/ARCHITECTURE.md).
+  In-place corruption that keeps the byte size is out of this probe's reach by construction, since it
+  compares sizes: that is what `Malachi.Cluster.Scrubber` verifies checksums for.
   """
 
   alias Malachi.Cluster.Catchup
@@ -151,8 +151,8 @@ defmodule Malachi.Cluster.SelfHealing do
          {:ok, ^expected_end} <- Catchup.run(replica, source, segment.id, from, expected_end, opts) do
       %{acc | repaired: [{segment.id, replica} | acc.repaired]}
     else
-      # Offsets complete but bytes short: not a truncation Catchup can mend; leave it to the scrub
-      # roadmap item rather than recopying blindly.
+      # Offsets complete but bytes short: not a truncation Catchup can mend; leave it to the scrub,
+      # which verifies checksums and repairs from an intact replica, rather than recopying blindly.
       false -> %{acc | failed: [{segment.id, {:integrity_suspect, replica}} | acc.failed]}
       {:ok, reached} -> %{acc | failed: [{segment.id, {:incomplete_source, reached}} | acc.failed]}
       {:error, reason} -> %{acc | failed: [{segment.id, reason} | acc.failed]}

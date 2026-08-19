@@ -211,6 +211,14 @@ Four choices shape everything above. Each is stated with its reason and the code
    > **Analogy.** The on-disk format is written in plain handwriting any tool can read, not in a personal
    > shorthand only the BEAM understands, so a future native (Rust) store can reopen the same files.
 
+   The sidecar carries no checksum of its own, and it does not need one, because nothing is allowed to
+   depend on it being right: a read that starts where the index points and does not find what it asked
+   for simply rescans the segment from the beginning, which is exactly what an absent index does. The
+   scrub verifies the sidecar as well (every entry must land on a real frame carrying the offset it
+   claims) and repairs it **locally**, by rebuilding it from the segment. That is the difference between
+   derived data and the records themselves: a damaged segment has to be refetched from a replica, while a
+   damaged index never left home.
+
 3. **Keep and extend the binary protocol rather than sessionize it.** The `correlation_id` already provides
    the pipelining a session layer would have added, so the protocol stays `<<len::32, body>>` and grows by
    adding api_keys. See `Malachi.Wire`.

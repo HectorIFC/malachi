@@ -25,6 +25,8 @@ defmodule Malachi.Storage.ElixirStore do
 
   @default_index_interval 4096
   @read_window_bytes 262_144
+  # One persisted sparse-index entry: `<<offset::64, position::64>>` (see persist_index/1).
+  @index_entry_bytes 16
   # NorthGuard flushes a batch once it reaches ~10MB or ~20k records.
   @default_flush_bytes 10_485_760
   @default_flush_count 20_000
@@ -205,12 +207,67 @@ defmodule Malachi.Storage.ElixirStore do
 
       try do
         {record_count, valid_bytes, halt} = check_scan(file_descriptor)
-        verdict(path, record_count, valid_bytes, halt)
+
+        # Frames first: with the segment itself damaged the sidecar's verdict is moot, and rebuilding
+        # an index over damaged frames would only bake the damage in.
+        with {:ok, counts} <- verdict(path, record_count, valid_bytes, halt) do
+          verify_index(segment, file_descriptor, valid_bytes, counts)
+        end
       after
         :file.close(file_descriptor)
       end
     else
       {:error, :enoent}
+    end
+  end
+
+  # The sparse index sidecar has no checksum of its own and is trusted by every sealed read, so the
+  # scrub checks it too: each entry must point at the start of a real frame whose record carries the
+  # offset the entry claims. An absent sidecar is not damage (reads simply scan from the start), and
+  # a rotted one is repairable locally by `rebuild_index/3`, since the index is derived from the
+  # segment and never holds anything the segment does not.
+  defp verify_index(segment, file_descriptor, valid_bytes, counts) do
+    index_path = Segment.index_path(segment)
+
+    case File.read(index_path) do
+      {:ok, binary} ->
+        entries = parse_index(binary, [])
+        expected_entries = div(byte_size(binary), @index_entry_bytes)
+
+        cond do
+          length(entries) < expected_entries ->
+            {:error, index_damage(index_path, valid_bytes, :trailing_bytes)}
+
+          bad = Enum.find(entries, &bad_index_entry?(&1, file_descriptor, valid_bytes)) ->
+            {:error, index_damage(index_path, elem(bad, 1), :entry)}
+
+          true ->
+            {:ok, counts}
+        end
+
+      {:error, :enoent} ->
+        {:ok, counts}
+
+      {:error, reason} ->
+        {:error, index_damage(index_path, 0, reason)}
+    end
+  end
+
+  defp index_damage(index_path, position, detail) do
+    %{position: position, reason: :bad_index, unreadable_bytes: 0, file: index_path, detail: detail}
+  end
+
+  # An entry is good when a frame starts exactly at its position and that frame's record carries the
+  # entry's offset. Reading one frame header plus a bounded window is enough: a frame that needs more
+  # than the window is decoded as incomplete, which is itself a mismatch worth reporting.
+  defp bad_index_entry?({offset, position}, file_descriptor, valid_bytes) do
+    if position < 0 or position >= valid_bytes do
+      true
+    else
+      case :file.pread(file_descriptor, position, @read_window_bytes) do
+        {:ok, chunk} -> not match?({:ok, %Record{offset: ^offset}, _size, _rest}, Record.decode_one(chunk))
+        :eof -> true
+      end
     end
   end
 
@@ -254,6 +311,26 @@ defmodule Malachi.Storage.ElixirStore do
 
       {:error, reason} ->
         {record_count, valid_bytes, {:error, reason}}
+    end
+  end
+
+  @impl true
+  def rebuild_index(directory, segment_id, opts \\ []) do
+    segment = Segment.new(segment_id, directory, opts)
+    path = Segment.path(segment)
+
+    if File.exists?(path) do
+      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+
+      try do
+        {_record_count, _valid_bytes, entries, _halt} = scan_segment(file_descriptor, index_interval)
+        write_index(Segment.index_path(segment), entries)
+      after
+        :file.close(file_descriptor)
+      end
+    else
+      {:error, :enoent}
     end
   end
 
@@ -428,8 +505,32 @@ defmodule Malachi.Storage.ElixirStore do
   # --- reading ---
 
   defp do_read(store, target_offset, max_records) do
-    start_position = floor_position(store.index, target_offset)
-    collect(store, target_offset, max_records, start_position, <<>>, [])
+    case floor_position(store.index, target_offset) do
+      0 -> collect(store, target_offset, max_records, 0, <<>>, [])
+      start_position -> read_from_hint(store, target_offset, max_records, start_position)
+    end
+  end
+
+  # The sparse index is a HINT, and it comes from a sidecar file with no checksum of its own, so a
+  # rotted entry must never change what a read returns. Two ways it can lie, both silent:
+  #
+  #   * it points inside a frame, so decoding fails from the first byte and the read comes back empty,
+  #     which the broker reads as "this source is drained": the consumer stalls there forever;
+  #   * it points at a real frame boundary but PAST the target, so the read skips the records in
+  #     between and nobody notices.
+  #
+  # Both show up in the result, so they are caught by looking at it rather than by validating the
+  # index up front: an empty page, or a first record already past what was asked for. Either way the
+  # read is redone from the start of the segment, which is what an absent index does anyway. The
+  # happy path pays nothing; a lying index costs one rescan and still answers correctly.
+  defp read_from_hint(store, target_offset, max_records, start_position) do
+    case collect(store, target_offset, max_records, start_position, <<>>, []) do
+      [%Record{offset: offset} | _rest] = records when offset <= target_offset ->
+        records
+
+      _empty_or_past_the_target ->
+        collect(store, target_offset, max_records, 0, <<>>, [])
+    end
   end
 
   # `remaining_records` is a decreasing counter so we never call `length/1` per record
@@ -578,12 +679,16 @@ defmodule Malachi.Storage.ElixirStore do
   end
 
   defp persist_index(store) do
+    write_index(Segment.index_path(store.segment), :array.to_list(store.index))
+  end
+
+  defp write_index(path, entries) do
     binary =
-      for {offset, position} <- :array.to_list(store.index), into: <<>> do
+      for {offset, position} <- entries, into: <<>> do
         <<offset::64, position::64>>
       end
 
-    File.write(Segment.index_path(store.segment), binary)
+    File.write(path, binary)
   end
 
   defp load_index_file(path) do

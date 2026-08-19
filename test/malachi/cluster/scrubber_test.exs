@@ -168,6 +168,46 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert Scrubber.verify_segment(scrubber, @segment) |> elem(0) == :ok
   end
 
+  test "rebuilds a rotted index locally: no peer, no demote, no delete" do
+    # The sparse index is DERIVED from the records, so nothing original is lost when it rots and no
+    # replica can offer anything this node does not already hold. Treating it like a damaged segment
+    # would mean deleting a perfectly good copy and refetching it over the network for nothing.
+    {replica, directory} = start_replica()
+    values = ["a", "b", "c", "d"]
+    metadata = sealed_everywhere([replica], values)
+
+    # force the log to roll internally, which is what writes the sidecar (seal/1 persists it)
+    segment_directory = Layout.segment_directory(directory, @segment)
+    {:ok, log} = Malachi.Log.recover(segment_directory, base_offset: 0)
+    {:ok, _log} = Malachi.Log.roll(log)
+    [index_path] = Path.wildcard(Path.join(segment_directory, "*.idx"))
+    pristine = File.read!(index_path)
+
+    <<byte, rest::binary>> = pristine
+    File.write!(index_path, <<Bitwise.bxor(byte, 0xFF), rest::binary>>)
+
+    test_process = self()
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: replica,
+        directory: directory,
+        peer_scrubber: fn _node -> send(test_process, :asked_a_peer) end,
+        apply_command: fn command -> send(test_process, {:command, command}) end
+      )
+
+    result = Scrubber.scrub_now(scrubber)
+
+    assert [{@segment, %{reason: :bad_index}}] = result.damaged
+    assert result.repaired == [@segment]
+    assert File.read!(index_path) == pristine, "the index is rebuilt to what the seal wrote"
+
+    refute_received :asked_a_peer
+    refute_received {:command, _any}
+    assert read_values(replica) == values
+  end
+
   test "demotes itself before repairing, so reads leave the damaged copy first" do
     {damaged_replica, damaged_directory} = start_replica()
     {peer_replica, peer_directory} = start_replica()

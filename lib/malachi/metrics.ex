@@ -258,6 +258,7 @@ defmodule Malachi.Metrics do
         integrity_bad_magic: get_counter({:integrity_failure, :bad_magic}),
         integrity_incomplete: get_counter({:integrity_failure, :incomplete}),
         integrity_short_copy: get_counter({:integrity_failure, :short_copy}),
+        integrity_bad_index: get_counter({:integrity_failure, :bad_index}),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
         scrub_segments_repaired: get_counter(:scrub_segments_repaired)
       },

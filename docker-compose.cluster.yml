@@ -59,6 +59,11 @@ x-malachi-node: &malachi-node
     # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
     # a small value so segments seal (and become repairable sealed copies) within its window.
     MALACHI_SEGMENT_MAX_BYTES: "${MALACHI_SEGMENT_MAX_BYTES:-}"
+    # Internal roll of each segment's own log, which is what writes the sparse-index sidecar. Unset
+    # keeps the library defaults (1GB / 1h), so a benchmark never rolls; the storage-chaos drill sets
+    # them tiny, because otherwise no `.idx` exists in a test window and its integrity is untestable.
+    MALACHI_LOG_ROLL_MAX_BYTES: "${MALACHI_LOG_ROLL_MAX_BYTES:-}"
+    MALACHI_LOG_ROLL_MAX_AGE_MS: "${MALACHI_LOG_ROLL_MAX_AGE_MS:-}"
     # Integrity scrub. Unset keeps the production defaults (enabled, one segment a minute); the
     # storage-chaos drill turns the cadence way up so a repair happens inside a test window, and
     # benchmark/docker-scrub.sh sweeps these to measure what the scrub costs under load.

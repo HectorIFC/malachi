@@ -644,6 +644,20 @@ defmodule Malachi.Application do
     end
   end
 
+  # Thresholds for a segment log's INTERNAL roll, forwarded to each segment as `Malachi.Log` options.
+  # Only passed when set, so an unset knob keeps the library defaults (1GB / 1h) rather than overriding
+  # them with nil. Rolling is what writes the sparse-index sidecar (the store persists it on seal), so
+  # lowering these is also how a test window gets sidecars to exercise at all.
+  defp log_roll_opts do
+    [max_bytes: :log_roll_max_bytes, max_age_ms: :log_roll_max_age_ms]
+    |> Enum.flat_map(fn {option, key} ->
+      case Application.get_env(:malachi, key) do
+        nil -> []
+        value -> [{option, value}]
+      end
+    end)
+  end
+
   defp replication_child do
     %{
       id: Malachi.LogReplication,
@@ -661,7 +675,7 @@ defmodule Malachi.Application do
              # Own interval knob too: tuning the rf=1 flush period must never silently retune every
              # replica's fsync cadence.
              group_commit_interval_ms: Application.get_env(:malachi, :replication_group_commit_interval_ms, 10)
-           ]
+           ] ++ log_roll_opts()
          ]}
     }
   end
@@ -776,7 +790,12 @@ defmodule Malachi.Application do
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
   defp log_broker_child(cluster, nodes, name, dir) do
-    opts = [name: name] ++ segment_opts() ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    # log_roll_opts reaches the single-node broker too: without an external broker set it starts its own
+    # replication server, and the roll thresholds are what make sidecars exist there as well.
+    opts =
+      [name: name] ++
+        segment_opts() ++ log_roll_opts() ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+
     %{id: name, start: {Malachi.BrokerServer, :start_link, [dir, opts]}}
   end
 

@@ -88,7 +88,8 @@ defmodule Malachi.Metrics.Prometheus do
           {[reason: "bad_crc"], ops.integrity_bad_crc},
           {[reason: "bad_magic"], ops.integrity_bad_magic},
           {[reason: "incomplete"], ops.integrity_incomplete},
-          {[reason: "short_copy"], ops.integrity_short_copy}
+          {[reason: "short_copy"], ops.integrity_short_copy},
+          {[reason: "bad_index"], ops.integrity_bad_index}
         ]
       ),
       metric(

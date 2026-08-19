@@ -210,6 +210,35 @@ defmodule Malachi.Log do
     end
   end
 
+  @doc """
+  Rebuilds the sparse index of every segment in `directory` from the segments themselves.
+
+  The repair for a damaged index: it is derived data, so no replica is involved, unlike a damaged
+  segment. Only call it after `verify/2` reports the records intact, or the rebuilt index will
+  faithfully describe the damage. An absent index file is not an error to begin with (reads just
+  scan from the start of the segment), so a rebuild simply puts the fast path back.
+  """
+  @spec rebuild_index(Path.t(), keyword()) :: :ok | {:error, term()}
+  def rebuild_index(directory, opts \\ []) do
+    store = Keyword.get(opts, :store, @default_store)
+    segment_opts = Keyword.drop(opts, [:base_offset, :store])
+
+    case base_offsets_in(directory) do
+      [] ->
+        {:error, :enoent}
+
+      base_offsets ->
+        Enum.reduce_while(base_offsets, :ok, fn base_offset, :ok ->
+          opts = [base_offset: base_offset] ++ segment_opts
+
+          case store.rebuild_index(directory, segment_id_for(base_offset), opts) do
+            :ok -> {:cont, :ok}
+            {:error, _reason} = error -> {:halt, error}
+          end
+        end)
+    end
+  end
+
   # --- internals ---
 
   defp base_offsets_in(directory) do

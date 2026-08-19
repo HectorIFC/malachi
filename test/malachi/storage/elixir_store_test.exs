@@ -307,6 +307,96 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "a damaged sparse index never changes what a read returns" do
+    # The sidecar has no checksum of its own and every sealed read trusts its byte positions, so a
+    # rotted entry used to reproduce exactly the silent failure the record CRCs exist to prevent: the
+    # read comes back empty (or short) and the broker reads that as a drained source.
+    setup %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+      %{store: store, values: for(i <- 0..9, do: "v#{i}")}
+    end
+
+    defp open_sealed(directory, store) do
+      {:ok, reader} =
+        ElixirStore.open_read(directory, "segment-0", record_count: store.segment.record_count, base_offset: 0)
+
+      reader
+    end
+
+    defp write_index(path, entries) do
+      File.write!(path, for({offset, position} <- entries, into: <<>>, do: <<offset::64, position::64>>))
+    end
+
+    test "an entry pointing INSIDE a frame still reads every record", %{tmp_dir: directory} = context do
+      # the shape that returned an empty page: decoding starts mid-frame and fails on the first byte
+      write_index(Segment.index_path(context.store.segment), [
+        {5, frame_position(Segment.path(context.store.segment), 5) + 3}
+      ])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      assert {:ok, [record]} = ElixirStore.read(reader, 5, 1)
+      assert record.value == "v5"
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "an entry pointing PAST the target does not skip records", %{tmp_dir: directory} = context do
+      # a valid frame boundary, just the wrong one: the read would silently start after the target
+      path = Segment.path(context.store.segment)
+      write_index(Segment.index_path(context.store.segment), [{0, frame_position(path, 7)}])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "an entry past the end of the file is harmless", %{tmp_dir: directory} = context do
+      path = Segment.path(context.store.segment)
+      write_index(Segment.index_path(context.store.segment), [{0, File.stat!(path).size * 4}])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "no index at all still reads correctly (it is only a hint)", %{tmp_dir: directory} = context do
+      File.rm!(Segment.index_path(context.store.segment))
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 3, 100)
+      assert Enum.map(records, & &1.value) == Enum.drop(context.values, 3)
+      :ok = ElixirStore.close(reader)
+    end
+
+    property "any single-byte corruption of the index leaves reads identical", context do
+      %{tmp_dir: directory, store: store, values: values} = context
+      index_path = Segment.index_path(store.segment)
+      pristine = File.read!(index_path)
+
+      check all(
+              position <- StreamData.integer(0..(byte_size(pristine) - 1)),
+              target <- StreamData.integer(0..9),
+              max_runs: 50
+            ) do
+        corrupt_byte_at(index_path, position)
+
+        reader = open_sealed(directory, store)
+        result = ElixirStore.read(reader, target, 100)
+        :ok = ElixirStore.close(reader)
+
+        assert {:ok, records} = result
+        assert Enum.map(records, & &1.value) == Enum.drop(values, target)
+
+        File.write!(index_path, pristine)
+      end
+    end
+  end
+
   describe "verify/3" do
     test "reports an intact segment with its record and byte counts", %{tmp_dir: directory} do
       {:ok, store} = seed_frames(directory, 0..4)
@@ -370,6 +460,55 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
     test "verifying a segment that is not stored here is :enoent, not a failure", %{tmp_dir: directory} do
       assert ElixirStore.verify(directory, "segment-0") == {:error, :enoent}
+    end
+
+    test "an absent index is not damage: it is only a hint", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..3)
+      :ok = ElixirStore.close(store)
+      refute File.exists?(Segment.index_path(store.segment))
+
+      assert {:ok, %{records: 4}} = ElixirStore.verify(directory, "segment-0")
+    end
+
+    test "a rotted index entry is reported as :bad_index", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      corrupt_byte_at(index_path, byte_size(File.read!(index_path)) - 1)
+
+      assert {:error, %{reason: :bad_index, file: ^index_path}} =
+               ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
+    test "damage to the records is reported before the index is even considered", %{tmp_dir: directory} do
+      # An index rebuilt over damaged records would faithfully describe the damage, so the segment's
+      # own verdict has to come first.
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      corrupt_payload_byte(Segment.path(store.segment), 4)
+      corrupt_byte_at(Segment.index_path(store.segment), 0)
+
+      assert {:error, %{reason: :bad_crc}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
+    test "rebuild_index writes an index the reads can trust again", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      pristine = File.read!(index_path)
+      corrupt_byte_at(index_path, 8)
+      assert {:error, %{reason: :bad_index}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+
+      assert :ok = ElixirStore.rebuild_index(directory, "segment-0", index_interval: 1)
+
+      assert {:ok, %{records: 10}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+      assert File.read!(index_path) == pristine, "a rebuild reproduces the index the seal wrote"
     end
 
     property "no single-byte corruption anywhere in a segment goes undetected" do

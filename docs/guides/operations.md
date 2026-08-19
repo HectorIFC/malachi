@@ -152,10 +152,10 @@ all its replicas, so only a physical check (on-disk bytes vs the sealed byte siz
 pass) can spot the silent under-replication and re-backfill the copy. On top of the three
 invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
 file must end byte-identical across the three nodes. Damage always targets follower copies;
-primary damage is seal-on-failure territory (roadmap), and in-place corruption that keeps the byte
-size (bit rot) needs the CRC scrub pass (also roadmap). The run sets `MALACHI_SEGMENT_MAX_BYTES`
-low so segments seal within the window; the same knob is available for any deployment that wants
-smaller roll sizes.
+primary damage is seal-on-failure territory (roadmap). In-place corruption that keeps the byte size
+(bit rot) and a rotted sparse index are covered too, by the integrity scrub described above. The run
+sets `MALACHI_SEGMENT_MAX_BYTES` and `MALACHI_LOG_ROLL_MAX_BYTES` low so segments seal and roll
+within the window; both knobs are available to any deployment that wants smaller roll sizes.
 
 `scripts/docker-config-chaos.sh` certifies config deployments, the way this repo deploys them (one
 image, config via env): a harmless setting is rolled across the nodes one at a time, requiring the
