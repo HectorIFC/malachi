@@ -238,7 +238,11 @@ defmodule Malachi.Application do
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
-        for {name, dir} <- DataPlaneRouter.shards(log_data_dir()), do: log_broker_child(nil, nodes, name, dir)
+        # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
+        # the scrubber asks for its replication server.
+        Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
+          [log_broker_child(nil, nodes, name, dir) | scrubber_children(name, dir)]
+        end)
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
@@ -597,21 +601,44 @@ defmodule Malachi.Application do
   end
 
   # The scrub runs on EVERY node, not just the leader: only a node can read its own disk, and a
-  # damaged copy is a per-copy fact. It also belongs here rather than with the coordinators, which are
-  # dropped wholesale in the sharded control plane (see coordinator_children/2).
+  # damaged copy is a per-copy fact. It also belongs beside the data plane rather than with the
+  # coordinators, which are dropped wholesale in the sharded control plane (coordinator_children/2).
+  # Clustered: one scrubber over the node's named replication server.
   defp scrubber_children do
+    scrubber_child(
+      Malachi.LogScrubber,
+      fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+      {Malachi.LogReplication, node()},
+      log_data_dir()
+    )
+  end
+
+  # Single-node: the broker owns an unnamed replication server per shard, so each shard gets its own
+  # scrubber over its own data directory. Repair needs a replica and there is none here, so the scrub
+  # detects and alarms rather than fixing; that is still the difference between knowing and not
+  # knowing that data at rest went bad.
+  defp scrubber_children(broker_name, directory) do
+    scrubber_child(
+      :"#{broker_name}Scrubber",
+      fn -> BrokerServer.metadata(broker_name) end,
+      fn -> BrokerServer.replication_ref(broker_name) end,
+      directory
+    )
+  end
+
+  defp scrubber_child(name, metadata_source, local_ref, directory) do
     if Application.get_env(:malachi, :scrub_enabled, true) do
       opts = [
-        name: Malachi.LogScrubber,
-        metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
-        local_ref: {Malachi.LogReplication, node()},
-        directory: log_data_dir(),
+        name: name,
+        metadata_source: metadata_source,
+        local_ref: local_ref,
+        directory: directory,
         apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
         interval: Application.get_env(:malachi, :scrub_interval_ms, 60_000),
         segments_per_tick: Application.get_env(:malachi, :scrub_segments_per_tick, 1)
       ]
 
-      [%{id: Malachi.LogScrubber, start: {Scrubber, :start_link, [opts]}}]
+      [%{id: name, start: {Scrubber, :start_link, [opts]}}]
     else
       []
     end

@@ -95,19 +95,37 @@ MALACHI_SCRUB_SEGMENTS_PER_TICK=1    # segments verified per pass
 
 A full cycle takes `sealed segments on the node x interval / segments per tick`. With the defaults
 and 64MB segments a node verifies about 90GB a day, so 10k sealed segments are revisited roughly
-weekly, the usual period for disk scrubbing. One pass costs a single segment scan, measured at 24
-to 86ms of one core for 64MB. Raise the interval on a slow or busy disk; lower it (or raise the
-per-tick count) to cover a large dataset more often.
+weekly, the usual period for disk scrubbing. Raise the interval on a slow or busy disk; lower it
+(or raise the per-tick count) to cover a large dataset more often.
+
+**What it costs.** The scan itself was measured directly at 740 MB/s (64-byte records) to 2.7 GB/s
+(1KB records) on one core, so a 64MB segment costs 24 to 86ms of a core, and the shipped cadence
+works out to under 0.15% of one core and about 1 MB/s of reads. End to end the effect is smaller
+than a benchmark can resolve: on the 3-node Docker cluster (`benchmark/docker-scrub.sh`, which
+interleaves the cases so ordering cannot bias them) both the default cadence and one three thousand
+times faster landed inside the machine's run-to-run spread of roughly 15%. Re-run that sweep on
+real hardware before raising the rate a lot, and note the honest caveat: those runs had the whole
+dataset in page cache, so the scrub was reading RAM. On a node whose data dwarfs its memory the
+scan is real disk I/O and competes with the write path.
 
 **On detection**, the node asks the segment's other replicas to verify their own copies. Only when
 one of them confirms an intact copy does the repair proceed: if this node is the segment's primary
 it first moves itself to the end of the replica set, so reads go to an intact replica immediately,
 and only then is the local copy deleted and refetched, then verified again. If **no** replica
 verifies, nothing is deleted and the failure is logged loudly: a partially readable copy is worth
-more than no copy. Watch `malachi_storage_integrity_failures_total{reason}` and the
-`[:malachi, :storage, :scrub]` telemetry event (steady passes with `damaged: 0` are what healthy
-looks like; no events at all means the scrub is not running). A repair is traced as
-`malachi.scrub.repair`.
+more than no copy. A repair is traced as `malachi.scrub.repair`.
+
+Two series to watch, and they answer different questions.
+`malachi_storage_integrity_failures_total{reason}` says whether anything is damaged, and
+`malachi_storage_scrub_segments_total{result}` says whether the scrub is even running: a `verified`
+total that stops advancing means the checking stopped, which the failure counter alone can never
+tell you, since it reads zero both when all is well and when nothing is looking.
+
+A single-node deployment scrubs too, and there the distinction matters more: with no replica there
+is nothing to repair from, so every finding lands in the unrepairable path with a loud log. That is
+still the difference between knowing and not knowing that data at rest went bad, and because
+recovery no longer truncates a damaged sealed segment, the frames after the damage are still on
+disk for a manual salvage.
 
 ## Chaos certification
 

@@ -82,6 +82,51 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert Scrubber.damaged(scrubber) == []
   end
 
+  test "addresses a peer's scrubber by the name this one is registered under" do
+    # Every node runs this worker under the same registered name, so a peer is reachable at that name
+    # on its node. Hardcoding the module name instead is what made the first cluster run fail to
+    # repair: the supervisor registers it as Malachi.LogScrubber, every peer lookup hit a dead name,
+    # and each repair concluded there was no intact copy anywhere. The unit tests missed it because
+    # they all injected the seam, so the default was never exercised.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a"])
+    name = :"scrub_named_#{System.unique_integer([:positive])}"
+
+    start_scrubber(
+      name: name,
+      metadata_source: fn -> metadata end,
+      local_ref: replica,
+      directory: directory
+    )
+
+    peer_scrubber = :sys.get_state(Process.whereis(name)).peer_scrubber
+    assert peer_scrubber.(:malachi@other) == {name, :malachi@other}
+  end
+
+  test "resolves the local reference per pass, so a restarted broker's new server is still scrubbed" do
+    # A single-node broker owns an UNNAMED replication server, so its reference is a pid that a
+    # broker restart replaces. Capturing it once at init would leave the scrub matching nothing (the
+    # metadata's replica sets name the new process), and it would fail silently: every pass would
+    # verify zero segments and report a clean bill of health.
+    {first_replica, directory} = start_replica()
+    metadata = sealed_everywhere([first_replica], ["a", "b"])
+    current = :atomics.new(1, [])
+    :atomics.put(current, 1, 0)
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: fn -> if :atomics.get(current, 1) == 0, do: first_replica, else: :stale_ref end,
+        directory: directory
+      )
+
+    assert %{verified: [@segment]} = Scrubber.scrub_now(scrubber)
+
+    # the reference changed under the scrubber: the next pass must ask again, not reuse the old one
+    :atomics.put(current, 1, 1)
+    assert %{verified: []} = Scrubber.scrub_now(scrubber)
+  end
+
   test "repairs a rotted copy from an intact peer, and reads return every record again" do
     # The acceptance test for the whole feature. Before it, a rotted sealed copy answered reads with
     # the records BEFORE the damage and nothing after, with no error: the consumer stalls there or

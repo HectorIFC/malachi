@@ -15,8 +15,11 @@
 #   g. file loss   - delete a follower's SEALED segment directory. The self-healing integrity
 #                    probe must detect the silent under-replication and re-backfill the copy
 #                    (metadata still says RF=3, so only a physical probe sees it).
-# In-place corruption that KEEPS the byte size (bit rot) is deliberately not an event: detecting
-# it needs the CRC scrub pass, an explicit roadmap item (see docs/ARCHITECTURE.md).
+#   h. bit rot     - flip bytes INSIDE a follower's sealed copy, keeping the file's exact size. No
+#                    size probe can see this one: the copy looks perfect and answers reads with the
+#                    records before the damage and nothing after, silently. Only the integrity
+#                    scrub (Malachi.Cluster.Scrubber, checksum verification) catches it, and it
+#                    must repair the copy from an intact replica.
 #
 # Invariants certified on top of the fatia-1 set (acked durability, convergence, clean produce):
 #   4. The damaged copies physically reconverge: byte-identical segment files across all 3 nodes.
@@ -29,6 +32,11 @@ export RF=3
 export MALACHI_DATA_ROOT=/data
 # Small segments so the checker's own traffic seals segments (repairable sealed copies) in-window.
 export MALACHI_SEGMENT_MAX_BYTES="${MALACHI_SEGMENT_MAX_BYTES:-4096}"
+# The scrub at production cadence revisits a segment about weekly, which no test window can wait
+# for, so the drill runs it aggressively: the point is to certify that it detects and repairs, not
+# to measure its pace (that is benchmark/docker-scrub.sh).
+export MALACHI_SCRUB_INTERVAL_MS="${MALACHI_SCRUB_INTERVAL_MS:-2000}"
+export MALACHI_SCRUB_SEGMENTS_PER_TICK="${MALACHI_SCRUB_SEGMENTS_PER_TICK:-200}"
 CHECKER_WINDOW_S="${CHECKER_WINDOW_S:-150}"
 CHAOS_TOPIC=chaos_acked
 source "$(dirname "$0")/chaos_lib.sh"
@@ -110,6 +118,14 @@ say "event g: delete a follower's sealed-segment directory, then restart it"
 if damage_follower sealed 'rm -rf $dir'; then
   echo "sealed copy deleted and node restarted; waiting for the integrity probe to re-backfill"
   wait_copy_repaired "lost sealed copy was not re-backfilled (silent under-replication)"
+fi
+
+say "event h: bit rot inside a follower's sealed copy, keeping the file's exact size"
+# dd with conv=notrunc overwrites in place: the file keeps its length and its size probe stays
+# happy, so nothing but a checksum scan can tell this copy from a good one.
+if damage_follower sealed 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=32 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
+  echo "bit rot injected (size unchanged) and node restarted; waiting for the scrub to repair"
+  wait_copy_repaired "rotted sealed copy was not repaired by the integrity scrub"
 fi
 
 close_window

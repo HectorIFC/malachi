@@ -87,7 +87,17 @@ defmodule Malachi.Metrics.Prometheus do
         [
           {[reason: "bad_crc"], ops.integrity_bad_crc},
           {[reason: "bad_magic"], ops.integrity_bad_magic},
-          {[reason: "incomplete"], ops.integrity_incomplete}
+          {[reason: "incomplete"], ops.integrity_incomplete},
+          {[reason: "short_copy"], ops.integrity_short_copy}
+        ]
+      ),
+      metric(
+        "malachi_storage_scrub_segments_total",
+        :counter,
+        "Segments the integrity scrub has processed (a total that stops advancing means it stopped)",
+        [
+          {[result: "verified"], ops.scrub_segments_verified},
+          {[result: "repaired"], ops.scrub_segments_repaired}
         ]
       ),
       topic_metrics(topics)

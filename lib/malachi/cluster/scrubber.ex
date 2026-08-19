@@ -39,11 +39,15 @@ defmodule Malachi.Cluster.Scrubber do
   ## Options
 
     * `:metadata_source` - `(-> Malachi.Metadata.t())`, the current metadata (required);
-    * `:local_ref` - this node's replication server reference (required);
+    * `:local_ref` - this node's replication server reference, or a `(-> ref)` resolved per pass
+      (required). A single-node broker owns an unnamed replication server, so its reference is a pid
+      that a broker restart replaces: passing a function keeps the scrub from silently matching
+      nothing after such a restart;
     * `:directory` - the data directory whose segments are scrubbed (required);
     * `:apply_command` - `(Metadata.command() -> any)`, applies the demote command (required);
-    * `:peer_scrubber` - `(node() -> GenServer.server())`, how to reach a peer's scrubber
-      (default `{__MODULE__, node}`);
+    * `:peer_scrubber` - `(node() -> GenServer.server())`, how to reach a peer's scrubber. Defaults
+      to this process's own registered name on that node, since every node runs the same worker
+      under the same name;
     * `:interval` - ms between ticks (default 60s);
     * `:segments_per_tick` - segments verified per tick (default 1). With the default 64MB segment
       size a full cycle takes `segments * interval / segments_per_tick`, so a node holding 10k
@@ -82,7 +86,12 @@ defmodule Malachi.Cluster.Scrubber do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     {gen_server_opts, opts} = Keyword.split(opts, [:name])
-    GenServer.start_link(__MODULE__, opts, gen_server_opts)
+    # The registered name is ALSO handed to init: a peer's scrubber is addressed by the same name on
+    # its node, so deriving that from the name this node registered under keeps the two from
+    # drifting. Hardcoding the module name here instead is what made the first cluster run fail to
+    # repair: the supervisor registers it as Malachi.LogScrubber, every peer lookup hit a dead name,
+    # and every repair concluded there was no intact copy anywhere.
+    GenServer.start_link(__MODULE__, Keyword.merge(opts, gen_server_opts), gen_server_opts)
   end
 
   @doc "Runs one pass synchronously and returns its result, for tests and manual triggers."
@@ -109,19 +118,23 @@ defmodule Malachi.Cluster.Scrubber do
 
   @impl true
   def init(opts) do
+    registered_name = Keyword.get(opts, :name, __MODULE__)
+
     state = %{
       metadata_source: Keyword.fetch!(opts, :metadata_source),
       local_ref: Keyword.fetch!(opts, :local_ref),
       directory: Keyword.fetch!(opts, :directory),
       apply_command: Keyword.fetch!(opts, :apply_command),
-      peer_scrubber: Keyword.get(opts, :peer_scrubber, &{__MODULE__, &1}),
+      peer_scrubber: Keyword.get(opts, :peer_scrubber, &{registered_name, &1}),
       interval: Keyword.get(opts, :interval, @default_interval),
       segments_per_tick: max(1, Keyword.get(opts, :segments_per_tick, @default_segments_per_tick)),
       on_result: Keyword.get(opts, :on_result, &log_result/1),
       # Segments still to visit in this cycle; refilled from the metadata when it empties, so every
       # sealed copy is revisited on a fixed period instead of the walk restarting from the top.
       pending: [],
-      damaged: MapSet.new()
+      damaged: MapSet.new(),
+      # The reference resolved for the pass currently running (see `:local_ref`).
+      resolved_ref: nil
     }
 
     schedule(state)
@@ -151,7 +164,11 @@ defmodule Malachi.Cluster.Scrubber do
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 
+  defp resolve_ref(local_ref) when is_function(local_ref, 0), do: local_ref.()
+  defp resolve_ref(local_ref), do: local_ref
+
   defp run(state) do
+    state = %{state | resolved_ref: resolve_ref(state.local_ref)}
     {segments, state} = take_segments(state)
 
     {result, state} =
@@ -183,7 +200,7 @@ defmodule Malachi.Cluster.Scrubber do
   defp sealed_segments_here(state) do
     state.metadata_source.().segments
     |> Map.values()
-    |> Enum.filter(&(&1.state == :sealed and state.local_ref in &1.replica_set))
+    |> Enum.filter(&(&1.state == :sealed and state.resolved_ref in &1.replica_set))
     |> Enum.sort_by(& &1.id)
   end
 
@@ -256,7 +273,7 @@ defmodule Malachi.Cluster.Scrubber do
   # An unreachable or damaged peer is simply not a source.
   defp intact_peer(segment, state) do
     segment.replica_set
-    |> Enum.reject(&(&1 == state.local_ref))
+    |> Enum.reject(&(&1 == state.resolved_ref))
     |> Enum.find(fn replica -> match?({:ok, _counts}, peer_verify(state, replica, segment.id)) end)
   end
 
@@ -272,8 +289,8 @@ defmodule Malachi.Cluster.Scrubber do
     state = demote_if_primary(segment, state)
     to_offset = segment.start_offset + (segment.length || 0)
 
-    with :ok <- ReplicationServer.delete(state.local_ref, segment.id),
-         {:ok, ^to_offset} <- Catchup.run(state.local_ref, peer, segment.id, segment.start_offset, to_offset),
+    with :ok <- ReplicationServer.delete(state.resolved_ref, segment.id),
+         {:ok, ^to_offset} <- Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset),
          {:ok, _counts} <- verify(state, segment.id) do
       Tracer.set_attributes(%{"malachi.repair" => "ok"})
       {%{acc | repaired: [segment.id | acc.repaired]}, forget_damage(state, segment.id)}
@@ -288,13 +305,16 @@ defmodule Malachi.Cluster.Scrubber do
   # out of the read path before it is deleted and refetched. The set itself is unchanged, so the
   # segment is never under-replicated by the repair.
   defp demote_if_primary(segment, state) do
+    others = Enum.reject(segment.replica_set, &(&1 == state.resolved_ref))
+
     case segment.replica_set do
-      [primary | _rest] when primary == state.local_ref ->
-        others = Enum.reject(segment.replica_set, &(&1 == state.local_ref))
-        _ = state.apply_command.({:set_segment_replicas, segment.id, others ++ [state.local_ref]})
+      # Only worth a control-plane command when there is somewhere else for reads to go: at rf=1 the
+      # demoted set would be the same single-element list.
+      [primary | _rest] when primary == state.resolved_ref and others != [] ->
+        _ = state.apply_command.({:set_segment_replicas, segment.id, others ++ [state.resolved_ref]})
         state
 
-      _not_primary ->
+      _not_primary_or_alone ->
         state
     end
   end

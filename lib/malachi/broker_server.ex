@@ -178,6 +178,17 @@ defmodule Malachi.BrokerServer do
   def metadata(server), do: GenServer.call(server, :metadata)
 
   @doc """
+  The `Malachi.Cluster.ReplicationServer` this broker owns, or `nil` when it was given an external
+  broker set (the clustered shape, where the replication server is supervised and named separately).
+
+  A single-node broker starts its own, unnamed, so this is the only way to name it as a replica: the
+  integrity scrub needs it to tell which stored segments are its own. Ask per use rather than caching
+  it, since a broker restart replaces the process.
+  """
+  @spec replication_ref(GenServer.server()) :: pid() | nil
+  def replication_ref(server), do: GenServer.call(server, :replication_ref)
+
+  @doc """
   The per-topic overview (`Malachi.Metadata.overview/1`) annotated with each topic's failure-domain
   violation count (`Malachi.Broker.domain_violations/2`), computed from a single merged-metadata view.
   """
@@ -448,6 +459,10 @@ defmodule Malachi.BrokerServer do
 
   def handle_call(:metadata, _from, state) do
     {:reply, Broker.metadata(state.broker), state}
+  end
+
+  def handle_call(:replication_ref, _from, state) do
+    {:reply, state.replication, state}
   end
 
   def handle_call(:topics_overview, _from, state) do

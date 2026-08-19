@@ -34,7 +34,10 @@ defmodule Malachi.Metrics.PrometheusTest do
         replication_no_quorum: 1,
         integrity_bad_crc: 2,
         integrity_bad_magic: 0,
-        integrity_incomplete: 1
+        integrity_incomplete: 1,
+        integrity_short_copy: 0,
+        scrub_segments_verified: 4200,
+        scrub_segments_repaired: 3
       }
     }
   end
@@ -74,6 +77,8 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_replication_commits_total{result="no_quorum"} 1)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_crc"} 2)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="incomplete"} 1)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="verified"} 4200)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="repaired"} 3)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

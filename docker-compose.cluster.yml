@@ -59,6 +59,12 @@ x-malachi-node: &malachi-node
     # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
     # a small value so segments seal (and become repairable sealed copies) within its window.
     MALACHI_SEGMENT_MAX_BYTES: "${MALACHI_SEGMENT_MAX_BYTES:-}"
+    # Integrity scrub. Unset keeps the production defaults (enabled, one segment a minute); the
+    # storage-chaos drill turns the cadence way up so a repair happens inside a test window, and
+    # benchmark/docker-scrub.sh sweeps these to measure what the scrub costs under load.
+    MALACHI_SCRUB_ENABLED: "${MALACHI_SCRUB_ENABLED:-true}"
+    MALACHI_SCRUB_INTERVAL_MS: "${MALACHI_SCRUB_INTERVAL_MS:-}"
+    MALACHI_SCRUB_SEGMENTS_PER_TICK: "${MALACHI_SCRUB_SEGMENTS_PER_TICK:-}"
   tmpfs:
     - /tmp:rw,size=1g
   mem_limit: 2g

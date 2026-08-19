@@ -80,6 +80,17 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records one integrity scrub pass: how many segments it verified and how many it repaired. A total
+  that stops advancing is how an operator sees that the scrub itself has stopped, which the failure
+  counters alone cannot show (they stay at zero both when all is well and when nothing is checking).
+  """
+  def record_scrub_pass(verified, repaired) do
+    :ets.update_counter(@metrics_table, :scrub_segments_verified, {2, verified}, {:scrub_segments_verified, 0})
+    :ets.update_counter(@metrics_table, :scrub_segments_repaired, {2, repaired}, {:scrub_segments_repaired, 0})
+    :ok
+  end
+
+  @doc """
   Increment failed authentication attempt counter.
   """
   def increment_failed_auth_attempt do
@@ -245,7 +256,10 @@ defmodule Malachi.Metrics do
         replication_no_quorum: get_counter({:replication_result, :no_quorum}),
         integrity_bad_crc: get_counter({:integrity_failure, :bad_crc}),
         integrity_bad_magic: get_counter({:integrity_failure, :bad_magic}),
-        integrity_incomplete: get_counter({:integrity_failure, :incomplete})
+        integrity_incomplete: get_counter({:integrity_failure, :incomplete}),
+        integrity_short_copy: get_counter({:integrity_failure, :short_copy}),
+        scrub_segments_verified: get_counter(:scrub_segments_verified),
+        scrub_segments_repaired: get_counter(:scrub_segments_repaired)
       },
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()
