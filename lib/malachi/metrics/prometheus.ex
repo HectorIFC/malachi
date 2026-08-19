@@ -80,6 +80,16 @@ defmodule Malachi.Metrics.Prometheus do
         {[result: "ok"], ops.replication_ok},
         {[result: "no_quorum"], ops.replication_no_quorum}
       ]),
+      metric(
+        "malachi_storage_integrity_failures_total",
+        :counter,
+        "Segments that failed checksum verification, by reason (non-zero means data at rest is damaged)",
+        [
+          {[reason: "bad_crc"], ops.integrity_bad_crc},
+          {[reason: "bad_magic"], ops.integrity_bad_magic},
+          {[reason: "incomplete"], ops.integrity_incomplete}
+        ]
+      ),
       topic_metrics(topics)
     ]
   end

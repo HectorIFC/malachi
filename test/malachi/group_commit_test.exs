@@ -41,6 +41,10 @@ defmodule Malachi.GroupCommitTest do
     def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
     @impl true
     def close(handle), do: ElixirStore.close(handle)
+    @impl true
+    def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
+    @impl true
+    def integrity(handle), do: ElixirStore.integrity(handle)
   end
 
   # Boots an independent group-commit broker (its own ReplicationServer, dir, and topic) and registers

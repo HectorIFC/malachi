@@ -69,6 +69,17 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records a segment that failed checksum verification, by `reason` (`:bad_crc`, `:bad_magic`,
+  `:incomplete`). Non-zero means data at rest is damaged somewhere on this node, which is otherwise
+  a silent condition: a damaged copy serves short reads without any error.
+  """
+  def record_integrity_failure(reason) do
+    key = {:integrity_failure, reason}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
+  @doc """
   Increment failed authentication attempt counter.
   """
   def increment_failed_auth_attempt do
@@ -231,7 +242,10 @@ defmodule Malachi.Metrics do
         auth_ok: get_counter({:auth_result, :ok}),
         auth_error: get_counter({:auth_result, :error}),
         replication_ok: get_counter({:replication_result, :ok}),
-        replication_no_quorum: get_counter({:replication_result, :no_quorum})
+        replication_no_quorum: get_counter({:replication_result, :no_quorum}),
+        integrity_bad_crc: get_counter({:integrity_failure, :bad_crc}),
+        integrity_bad_magic: get_counter({:integrity_failure, :bad_magic}),
+        integrity_incomplete: get_counter({:integrity_failure, :incomplete})
       },
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()

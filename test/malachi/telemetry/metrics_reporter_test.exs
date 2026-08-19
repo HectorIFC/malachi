@@ -28,4 +28,16 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.replication_ok == before.replication_ok + 1
     assert ops.replication_no_quorum == before.replication_no_quorum + 1
   end
+
+  test "an integrity failure increments the counter for its reason" do
+    before = Metrics.get_system_metrics().operations
+    verdict = %{reason: :bad_crc, position: 128, unreadable_bytes: 64, sealed?: true}
+
+    Telemetry.storage_integrity(verdict, {{"events", 0}, 0}, :recover)
+
+    ops = Metrics.get_system_metrics().operations
+    assert ops.integrity_bad_crc == before.integrity_bad_crc + 1
+    assert ops.integrity_bad_magic == before.integrity_bad_magic
+    assert ops.integrity_incomplete == before.integrity_incomplete
+  end
 end

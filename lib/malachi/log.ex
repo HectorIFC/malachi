@@ -39,7 +39,8 @@ defmodule Malachi.Log do
           active: term() | nil,
           active_base_offset: non_neg_integer() | nil,
           next_offset: non_neg_integer(),
-          segment_opts: keyword()
+          segment_opts: keyword(),
+          integrity: :ok | map()
         }
 
   defstruct directory: nil,
@@ -48,7 +49,12 @@ defmodule Malachi.Log do
             active: nil,
             active_base_offset: nil,
             next_offset: 0,
-            segment_opts: []
+            segment_opts: [],
+            # What recovery concluded about the ONE segment it scanned (the last/active one), carried
+            # here because a sealed handle is closed immediately below and the verdict would be lost
+            # with it. `verify/2` is the whole-directory answer; this is the free one, computed by a
+            # scan that had to happen anyway.
+            integrity: :ok
 
   @doc """
   Opens a fresh, empty log in `directory`.
@@ -81,12 +87,7 @@ defmodule Malachi.Log do
     store = Keyword.get(opts, :store, @default_store)
     segment_opts = Keyword.drop(opts, [:base_offset, :store])
 
-    base_offsets =
-      directory
-      |> Path.join("*.log")
-      |> Path.wildcard()
-      |> Enum.map(&base_offset_from_path/1)
-      |> Enum.sort()
+    base_offsets = base_offsets_in(directory)
 
     if base_offsets == [] do
       open(directory, opts)
@@ -170,7 +171,54 @@ defmodule Malachi.Log do
     :ok
   end
 
+  @doc """
+  Verifies every segment file in `directory` **read-only**, checking each record's checksum, and
+  aggregates the result. Unlike `recover/2` it opens nothing for writing, repairs nothing, and
+  trusts nothing by filename: this is what a background scrub uses to catch corruption at rest in
+  segments that are sealed and therefore never re-scanned by the normal open path.
+
+  Returns `{:ok, %{records: n, bytes: b, files: k}}` when every file is intact, `{:error, details}`
+  for the first damaged file (with its path, byte position and reason), or `{:error, :enoent}` when
+  the directory holds no segment files at all (nothing stored here, or retention removed it).
+
+  ## Options
+    * `:store` - `SegmentStore` implementation (default `Malachi.Storage.ElixirStore`)
+  """
+  @spec verify(Path.t(), keyword()) ::
+          {:ok, %{records: non_neg_integer(), bytes: non_neg_integer(), files: non_neg_integer()}}
+          | {:error, map() | :enoent}
+  def verify(directory, opts \\ []) do
+    store = Keyword.get(opts, :store, @default_store)
+    segment_opts = Keyword.drop(opts, [:base_offset, :store])
+
+    case base_offsets_in(directory) do
+      [] ->
+        {:error, :enoent}
+
+      base_offsets ->
+        Enum.reduce_while(base_offsets, {:ok, %{records: 0, bytes: 0, files: 0}}, fn base_offset, {:ok, totals} ->
+          case store.verify(directory, segment_id_for(base_offset), [base_offset: base_offset] ++ segment_opts) do
+            {:ok, %{records: records, bytes: bytes}} ->
+              {:cont,
+               {:ok,
+                %{totals | records: totals.records + records, bytes: totals.bytes + bytes, files: totals.files + 1}}}
+
+            {:error, _details} = error ->
+              {:halt, error}
+          end
+        end)
+    end
+  end
+
   # --- internals ---
+
+  defp base_offsets_in(directory) do
+    directory
+    |> Path.join("*.log")
+    |> Path.wildcard()
+    |> Enum.map(&base_offset_from_path/1)
+    |> Enum.sort()
+  end
 
   defp recover_with_segments(directory, store, segment_opts, base_offsets) do
     last_base_offset = List.last(base_offsets)
@@ -184,7 +232,8 @@ defmodule Malachi.Log do
       directory: directory,
       store: store,
       segment_opts: segment_opts,
-      next_offset: next_offset
+      next_offset: next_offset,
+      integrity: store.integrity(handle)
     }
 
     if store.sealed?(handle) do

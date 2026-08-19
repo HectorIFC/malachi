@@ -65,6 +65,17 @@ defmodule Malachi.Storage.SegmentStore do
   @doc "Whether the segment is sealed (immutable)."
   @callback sealed?(handle()) :: boolean()
 
+  @doc """
+  What the last scan of this segment concluded: `:ok`, or a map describing the first damage found,
+  with at least `:reason`, `:position` and `:unreadable_bytes`. Only `recover/3` scans, so handles
+  from `open/3` and `open_read/3` answer `:ok`.
+
+  This exists because the recovery scan already knows a segment is damaged, and a store must not
+  decide what to do about it: the caller (`Malachi.Cluster.ReplicationServer`) owns the segment id
+  and the deployment context, so it is the one that logs and emits the telemetry.
+  """
+  @callback integrity(handle()) :: :ok | map()
+
   @doc "Whether the segment has buffered records not yet flushed (an explicit `sync/1` is due)."
   @callback pending?(handle()) :: boolean()
 
@@ -73,4 +84,18 @@ defmodule Malachi.Storage.SegmentStore do
 
   @doc "Closes the segment's file handle."
   @callback close(handle()) :: :ok
+
+  @doc """
+  Verifies a stored segment's integrity **read-only**, without opening it for writing and without
+  ever repairing or truncating it: every frame's checksum is checked and the scan must consume the
+  file exactly. Used by the background scrub (`Malachi.Cluster.Scrubber`) to catch corruption at
+  rest, which is invisible to the byte-size probe when the damage keeps the file's length.
+
+  Returns `{:ok, %{records: n, bytes: b}}` for an intact segment, `{:error, %{position: byte,
+  reason: reason, file: path}}` for the first damaged frame, or `{:error, :enoent}` when the
+  segment is not stored here (a segment deleted by retention mid-scan is not a failure).
+  """
+  @callback verify(directory :: Path.t(), segment_id :: term(), opts :: keyword()) ::
+              {:ok, %{records: non_neg_integer(), bytes: non_neg_integer()}}
+              | {:error, %{position: non_neg_integer(), reason: atom(), file: Path.t()} | :enoent}
 end

@@ -178,6 +178,45 @@ defmodule Malachi.LogTest do
     end
   end
 
+  describe "verify/2" do
+    test "verifies every segment file in the directory, across rolls", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
+      :ok = Log.close(log)
+
+      files = directory |> Path.join("*.log") |> Path.wildcard() |> length()
+      assert files > 1, "this fixture is meant to roll into several segments"
+
+      assert {:ok, %{records: 10, files: ^files, bytes: bytes}} = Log.verify(directory)
+      assert bytes > 0
+    end
+
+    test "reports the first damaged file, and damage in a SEALED segment is not skipped",
+         %{tmp_dir: directory} do
+      # The hole this closes: recover/2 scans only the last segment and trusts every sealed one by
+      # filename, so bit rot in a sealed file is invisible to the normal open path.
+      {:ok, log} = open(directory)
+      log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
+      :ok = Log.close(log)
+
+      [first_file | _] = directory |> Path.join("*.log") |> Path.wildcard() |> Enum.sort()
+      {pairs, _valid} = Record.decode_all(File.read!(first_file))
+      {_record, position} = hd(pairs)
+      <<head::binary-size(position + 12), byte, tail::binary>> = File.read!(first_file)
+      File.write!(first_file, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
+
+      assert {:error, %{reason: :bad_crc, file: ^first_file}} = Log.verify(directory)
+
+      # recover/2 still opens the log happily: the sealed file is never re-scanned
+      assert {:ok, _recovered} = Log.recover(directory)
+    end
+
+    test "an empty or missing directory is :enoent, not a failure", %{tmp_dir: directory} do
+      assert Log.verify(directory) == {:error, :enoent}
+      assert Log.verify(Path.join(directory, "nope")) == {:error, :enoent}
+    end
+  end
+
   describe "segment naming" do
     test "segment files are named by zero-padded base offset", %{tmp_dir: directory} do
       {:ok, log} = Log.open(directory)

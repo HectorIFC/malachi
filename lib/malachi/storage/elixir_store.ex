@@ -48,7 +48,20 @@ defmodule Malachi.Storage.ElixirStore do
           index_interval: pos_integer(),
           last_indexed_position: integer(),
           flush_bytes: pos_integer(),
-          flush_count: pos_integer()
+          flush_count: pos_integer(),
+          integrity: :ok | integrity_verdict()
+        }
+
+  @typedoc """
+  What the last scan of this segment concluded: `:ok`, or the first damage it hit, with the byte
+  position and how much of the file could not be read. Only `recover/3` scans, so a freshly opened
+  or read-only handle is `:ok` by construction.
+  """
+  @type integrity_verdict :: %{
+          reason: atom(),
+          position: non_neg_integer(),
+          unreadable_bytes: non_neg_integer(),
+          sealed?: boolean()
         }
 
   defstruct [
@@ -63,7 +76,8 @@ defmodule Malachi.Storage.ElixirStore do
     index_interval: @default_index_interval,
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes,
-    flush_count: @default_flush_count
+    flush_count: @default_flush_count,
+    integrity: :ok
   ]
 
   @impl true
@@ -105,16 +119,23 @@ defmodule Malachi.Storage.ElixirStore do
 
       # Scan the file in bounded chunks (never loading it whole), counting records and
       # building the sparse index. `valid_bytes` is where valid frames end.
-      {record_count, valid_bytes, index_entries} = scan_segment(file_descriptor, index_interval)
-
-      # Drop any partial/corrupt trailing bytes from a crash mid-write.
-      if valid_bytes < File.stat!(path).size do
-        {:ok, _} = :file.position(file_descriptor, valid_bytes)
-        :ok = :file.truncate(file_descriptor)
-      end
+      {record_count, valid_bytes, index_entries, halt} = scan_segment(file_descriptor, index_interval)
 
       base_offset = segment.base_offset
       sealed? = File.exists?(Segment.seal_marker_path(segment))
+      integrity = integrity_verdict(path, valid_bytes, halt, sealed?)
+
+      # Drop any partial/corrupt trailing bytes from a crash mid-write, but ONLY while the segment
+      # is still active: that is the crash-recovery case, where the bytes past the last valid frame
+      # were never acked. A SEALED segment is immutable and was fully durable when it was sealed, so
+      # a short scan there means corruption at rest, and truncating would destroy the valid frames
+      # that follow the damaged one, which are precisely what a peer replica can no longer help
+      # recover at rf=1. The copy still serves only its valid prefix (reads are bounded by
+      # `write_position`), and `Malachi.Log.verify/2` plus the scrub report it for repair.
+      if valid_bytes < File.stat!(path).size and not sealed? do
+        {:ok, _} = :file.position(file_descriptor, valid_bytes)
+        :ok = :file.truncate(file_descriptor)
+      end
 
       segment = %Segment{
         segment
@@ -136,10 +157,84 @@ defmodule Malachi.Storage.ElixirStore do
          index_interval: index_interval,
          last_indexed_position: last_indexed_position(index, index_interval),
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
-         flush_count: Keyword.get(opts, :flush_count, @default_flush_count)
+         flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
+         integrity: integrity
        }}
     else
       {:error, :enoent}
+    end
+  end
+
+  # What the recovery scan concluded, for the caller to report (this module never logs). A scan that
+  # consumed the file exactly is clean; anything else is described so the warning can name the byte
+  # position and how much of the file is unreadable. For an active segment those trailing bytes were
+  # just truncated away (a crash mid-write); for a sealed one they are still on disk, unreadable.
+  defp integrity_verdict(path, valid_bytes, halt, sealed?) do
+    unreadable_bytes = File.stat!(path).size - valid_bytes
+
+    case halt do
+      :eof when unreadable_bytes == 0 ->
+        :ok
+
+      :eof ->
+        %{reason: :incomplete, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+
+      {:error, reason} ->
+        %{reason: reason, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+    end
+  end
+
+  @impl true
+  def verify(directory, segment_id, opts \\ []) do
+    segment = Segment.new(segment_id, directory, opts)
+    path = Segment.path(segment)
+
+    if File.exists?(path) do
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+
+      try do
+        {record_count, valid_bytes, halt} = check_scan(file_descriptor)
+        verdict(path, record_count, valid_bytes, halt)
+      after
+        :file.close(file_descriptor)
+      end
+    else
+      {:error, :enoent}
+    end
+  end
+
+  # A clean scan must consume the file EXACTLY: `halt == :eof` with valid frames ending short of the
+  # file size means the tail is a partial frame, which for a sealed segment is damage just like a
+  # checksum mismatch (an active segment's torn tail is normal and is handled by `recover/3`).
+  defp verdict(path, record_count, valid_bytes, halt) do
+    file_size = File.stat!(path).size
+
+    case halt do
+      :eof when valid_bytes == file_size -> {:ok, %{records: record_count, bytes: valid_bytes}}
+      :eof -> {:error, %{position: valid_bytes, reason: :incomplete, file: path}}
+      {:error, reason} -> {:error, %{position: valid_bytes, reason: reason, file: path}}
+    end
+  end
+
+  # The verification scan. Deliberately separate from `do_scan/7`: this one uses
+  # `Malachi.Log.Record.check_one/1`, which verifies the checksum without building a record struct,
+  # and it keeps no sparse index. A scrub walks whole segments just to confirm their checksums, so
+  # the per-record allocation `do_scan/7` needs for recovery would dominate its cost.
+  defp check_scan(file_descriptor), do: do_check(file_descriptor, 0, <<>>, 0)
+
+  defp do_check(file_descriptor, valid_bytes, carry, record_count) do
+    case Record.check_one(carry) do
+      {:ok, frame_size, rest} ->
+        do_check(file_descriptor, valid_bytes + frame_size, rest, record_count + 1)
+
+      :incomplete ->
+        case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
+          {:ok, chunk} -> do_check(file_descriptor, valid_bytes, carry <> chunk, record_count)
+          :eof -> {record_count, valid_bytes, :eof}
+        end
+
+      {:error, reason} ->
+        {record_count, valid_bytes, {:error, reason}}
     end
   end
 
@@ -300,6 +395,9 @@ defmodule Malachi.Storage.ElixirStore do
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
 
   @impl true
+  def integrity(%__MODULE__{integrity: integrity}), do: integrity
+
+  @impl true
   def pending?(%__MODULE__{pending_count: pending_count}), do: pending_count > 0
 
   @impl true
@@ -399,9 +497,12 @@ defmodule Malachi.Storage.ElixirStore do
     end)
   end
 
-  # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries}
-  # where `entries` is the ascending sparse index and `valid_bytes` is the end of the last
-  # valid frame (the safe truncation point after a crash). Never loads the whole file.
+  # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries, halt}
+  # where `entries` is the ascending sparse index, `valid_bytes` is the end of the last valid frame
+  # (the safe truncation point after a crash), and `halt` says WHY the scan stopped: `:eof` (clean
+  # end of file) or `{:error, reason}` from `Malachi.Log.Record`. Recovery ignores `halt` and simply
+  # truncates; verification needs it to tell a torn tail from bit rot, and to report the offending
+  # byte position. Never loads the whole file.
   defp scan_segment(file_descriptor, index_interval) do
     do_scan(file_descriptor, index_interval, 0, <<>>, 0, -index_interval, [])
   end
@@ -442,11 +543,11 @@ defmodule Malachi.Storage.ElixirStore do
             )
 
           :eof ->
-            {record_count, valid_bytes, Enum.reverse(entries)}
+            {record_count, valid_bytes, Enum.reverse(entries), :eof}
         end
 
-      {:error, _reason} ->
-        {record_count, valid_bytes, Enum.reverse(entries)}
+      {:error, reason} ->
+        {record_count, valid_bytes, Enum.reverse(entries), {:error, reason}}
     end
   end
 

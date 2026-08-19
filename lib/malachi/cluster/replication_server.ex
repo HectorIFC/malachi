@@ -42,6 +42,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Log
+  alias Malachi.Storage.Layout
   alias Malachi.Telemetry
   alias OpenTelemetry.Ctx
 
@@ -875,7 +876,40 @@ defmodule Malachi.Cluster.ReplicationServer do
         # falls back to a fresh open when the directory is empty.
         opts = [base_offset: base_offset] ++ state.log_opts
         {:ok, log} = Log.recover(segment_directory(state.directory, segment_id), opts)
+        report_integrity(log.integrity, segment_id)
         {put_log(state, segment_id, log), log}
+    end
+  end
+
+  # Recovery already scanned the segment, so it knows whether the bytes on disk are intact. Reporting
+  # that here, at the one place a segment is opened, is what makes damage visible the moment a node
+  # touches it: the background scrub verifies every segment eventually, but on its own slow cadence,
+  # so without this a node could serve a damaged copy for days without a word. Fires once per segment
+  # (the log is cached afterwards), so it cannot spam.
+  defp report_integrity(:ok, _segment_id), do: :ok
+
+  defp report_integrity(verdict, segment_id) do
+    Telemetry.storage_integrity(verdict, segment_id, :recover)
+
+    message =
+      "segment #{inspect(segment_id)} failed verification at byte #{verdict.position} " <>
+        "(#{verdict.reason}, #{verdict.unreadable_bytes} bytes unreadable)"
+
+    cond do
+      # Immutable and fully durable when it was sealed, so a short scan is corruption at rest. The
+      # copy now serves only its valid prefix and needs repair from a peer.
+      verdict.sealed? ->
+        Logger.warning(message <> ": sealed segment, this copy needs repair from an intact replica")
+
+      # A torn frame at the end of an active segment is ordinary crash recovery: those bytes were
+      # never acked. Worth a line because it quantifies what the crash cost, not an alarm.
+      verdict.reason == :incomplete ->
+        Logger.info("segment #{inspect(segment_id)} dropped #{verdict.unreadable_bytes} bytes of a partial write")
+
+      # A full frame that fails its checksum was written completely and is wrong: rot or a bug, not
+      # a torn write, even though the segment is still active.
+      true ->
+        Logger.warning(message <> ": active segment, damage past a complete frame")
     end
   end
 
@@ -887,28 +921,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   defp put_log(state, segment_id, log), do: put_in(state.logs[segment_id], log)
 
-  # A readable directory for the broker's {{topic, range_seq}, seg_seq} ids, with a safe, collision-free
-  # fallback for any other term. segment_ids arrive over inter-node replication, so the topic is not
-  # trusted here even though Metadata.valid_topic_name?/1 screens locally created topics: a path-unsafe
-  # topic (or a non-integer seq) falls through to the Base64 encoding, keeping the directory inside `base`.
-  defp segment_directory(base, {{topic, range_seq}, seg_seq} = segment_id)
-       when is_integer(range_seq) and is_integer(seg_seq) do
-    if safe_path_segment?(topic) do
-      Path.join(base, "#{topic}-r#{range_seq}-s#{seg_seq}")
-    else
-      encoded_segment_directory(base, segment_id)
-    end
-  end
-
-  defp segment_directory(base, segment_id), do: encoded_segment_directory(base, segment_id)
-
-  defp encoded_segment_directory(base, segment_id) do
-    Path.join(base, Base.url_encode64(:erlang.term_to_binary(segment_id), padding: false))
-  end
-
-  # Mirrors the allowlist in Metadata.valid_topic_name?/1 as a defense-in-depth check where the path is
-  # built, since segment_ids can arrive from other nodes.
-  defp safe_path_segment?(topic) do
-    is_binary(topic) and topic not in ["", ".", ".."] and topic =~ ~r/\A[A-Za-z0-9._-]+\z/
-  end
+  # The on-disk mapping lives in Malachi.Storage.Layout: the scrubber reads the same directories to
+  # verify their checksums, and a second copy of this rule could drift from the writer's.
+  defp segment_directory(base, segment_id), do: Layout.segment_directory(base, segment_id)
 end

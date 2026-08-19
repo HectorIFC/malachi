@@ -41,6 +41,13 @@ Worth alerting on:
 - **`malachi_domain_violations`**: segments that cannot meet their placement spread requirement. Non-zero
   means replicas are concentrating where they should not be, which is a real availability risk that is
   otherwise silent.
+- **`malachi_storage_integrity_failures_total{reason}`**: a stored segment failed checksum verification.
+  Non-zero means data at rest is damaged on that node, and the condition is otherwise invisible: a
+  damaged copy serves short reads with no error, so a consumer either stalls at the damaged offset or
+  silently skips the rest of that segment. `reason="incomplete"` on an active segment is ordinary crash
+  recovery (a partial tail that was never acked); on a sealed segment any reason means corruption at
+  rest, and that copy needs to be rebuilt from an intact replica. The matching log line names the
+  segment and the byte position.
 - Session and auth counters. Note that `:session_expired` and `:session_hijack_attempt` are **not
   disjoint**: one validation can emit both, so summing them does not count failed validations. The hijack
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so

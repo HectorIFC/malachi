@@ -103,23 +103,57 @@ defmodule Malachi.Log.Record do
   """
   @spec decode_one(binary()) ::
           {:ok, t(), pos_integer(), binary()} | :incomplete | {:error, atom()}
-  def decode_one(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>) do
+  def decode_one(binary) do
+    case split_frame(binary) do
+      {:ok, payload, frame_size, rest} ->
+        case decode_payload(payload) do
+          {:ok, record} -> {:ok, record, frame_size, rest}
+          :error -> {:error, :bad_payload}
+        end
+
+      incomplete_or_error ->
+        incomplete_or_error
+    end
+  end
+
+  @doc """
+  Verifies the frame at the front of `binary` **without deserializing its payload**: the framing
+  and the CRC are checked, then the frame is skipped. Same return shapes as `decode_one/1` minus
+  the record itself, so `{:error, :bad_payload}` cannot occur here (the payload is never parsed).
+
+  This is the integrity-scan path (`Malachi.Log.verify/2`): a scrub walks whole segments only to
+  confirm that every frame still matches its checksum, and building a `Record` struct per frame
+  would dominate that cost for no benefit.
+  """
+  @spec check_one(binary()) :: {:ok, pos_integer(), binary()} | :incomplete | {:error, atom()}
+  def check_one(binary) do
+    case split_frame(binary) do
+      {:ok, _payload, frame_size, rest} -> {:ok, frame_size, rest}
+      incomplete_or_error -> incomplete_or_error
+    end
+  end
+
+  # The single source of truth for framing and checksum verification, shared by decode_one/1 and
+  # check_one/1 so the two can never disagree about what a valid frame is.
+  #
+  # Note the CRC covers the PAYLOAD only: corruption inside the 10-byte header surfaces as
+  # :bad_magic, or as :incomplete when a mangled length field claims more bytes than exist. Every
+  # single-byte corruption is still caught, only the reported reason differs.
+  @spec split_frame(binary()) :: {:ok, binary(), pos_integer(), binary()} | :incomplete | {:error, atom()}
+  defp split_frame(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>) do
     if :erlang.crc32(payload) == checksum do
-      case decode_payload(payload) do
-        {:ok, record} -> {:ok, record, @frame_header_size + payload_length, rest}
-        :error -> {:error, :bad_payload}
-      end
+      {:ok, payload, @frame_header_size + payload_length, rest}
     else
       {:error, :bad_crc}
     end
   end
 
-  def decode_one(<<@magic::16, payload_length::32, _checksum::32, partial::binary>>)
-      when byte_size(partial) < payload_length,
-      do: :incomplete
+  defp split_frame(<<@magic::16, payload_length::32, _checksum::32, partial::binary>>)
+       when byte_size(partial) < payload_length,
+       do: :incomplete
 
-  def decode_one(binary) when byte_size(binary) < @frame_header_size, do: :incomplete
-  def decode_one(_binary), do: {:error, :bad_magic}
+  defp split_frame(binary) when byte_size(binary) < @frame_header_size, do: :incomplete
+  defp split_frame(_binary), do: {:error, :bad_magic}
 
   @doc """
   Decodes every complete, valid frame from the front of `binary`.

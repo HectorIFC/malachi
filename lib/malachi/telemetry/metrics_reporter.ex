@@ -14,7 +14,8 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :produce],
     [:malachi, :consume],
     [:malachi, :auth],
-    [:malachi, :replication, :commit]
+    [:malachi, :replication, :commit],
+    [:malachi, :storage, :integrity]
   ]
 
   @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
@@ -40,5 +41,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :replication, :commit], _measurements, %{result: result}, _config) do
     Metrics.record_replication(result)
+  end
+
+  def handle_event([:malachi, :storage, :integrity], _measurements, %{result: result}, _config) do
+    Metrics.record_integrity_failure(result)
   end
 end

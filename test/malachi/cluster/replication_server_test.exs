@@ -3,6 +3,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Storage.Layout
 
   @segment {{"events", 0}, 0}
 
@@ -278,6 +279,59 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert ReplicationServer.stored_bytes(name, unknown) == 0
   end
 
+  test "opening a corrupt sealed copy warns and emits an integrity event naming the segment" do
+    # Recovery knows the copy is damaged the moment it scans it. Reporting here, at the one place a
+    # segment is opened, is what makes the damage visible immediately: the background scrub verifies
+    # everything eventually, but on a slow cadence, so a node could otherwise serve short reads for
+    # days without a word. async: false is not needed: the handler is scoped to this test's pid.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_integrity_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_integrity_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 2} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b", "c"]))
+    GenServer.stop(first)
+
+    # seal it (the scrub's subject: an immutable copy nothing re-scans) and rot a byte in the middle
+    segment_directory = Layout.segment_directory(directory, @segment)
+    [log_file] = Path.wildcard(Path.join(segment_directory, "*.log"))
+    File.touch!(String.replace_suffix(log_file, ".log", ".sealed"))
+
+    {pairs, _valid} = Record.decode_all(File.read!(log_file))
+    {_record, position} = Enum.at(pairs, 1)
+    flip_at = position + 12
+    <<head::binary-size(flip_at), byte, tail::binary>> = File.read!(log_file)
+    File.write!(log_file, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
+
+    parent = self()
+    handler_id = "integrity-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:malachi, :storage, :integrity],
+      fn name, measurements, metadata, _config -> send(parent, {:telemetry, name, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+        # the first read is what opens (recovers) the segment
+        assert read_values(name, @segment) == ["a"]
+      end)
+
+    assert log =~ "failed verification at byte #{position}"
+    assert log =~ "bad_crc"
+    assert log =~ "sealed segment"
+
+    assert_receive {:telemetry, [:malachi, :storage, :integrity], %{position: ^position, unreadable_bytes: unreadable},
+                    %{result: :bad_crc, sealed: true, source: :recover, segment: @segment}}
+
+    assert unreadable > 0
+  end
+
   test "stored_bytes reads the on-disk size without opening; durable_end recovers where end_offset cannot" do
     directory = Path.join(System.tmp_dir!(), "malachi_repl_probe_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
@@ -339,6 +393,10 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
     @impl true
     def close(handle), do: ElixirStore.close(handle)
+    @impl true
+    def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
+    @impl true
+    def integrity(handle), do: ElixirStore.integrity(handle)
   end
 
   describe "group commit under replication" do
