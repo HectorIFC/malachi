@@ -125,14 +125,7 @@ defmodule Malachi.Storage.ElixirStore do
       sealed? = File.exists?(Segment.seal_marker_path(segment))
       integrity = integrity_verdict(path, valid_bytes, halt, sealed?)
 
-      # Drop any partial/corrupt trailing bytes from a crash mid-write, but ONLY while the segment
-      # is still active: that is the crash-recovery case, where the bytes past the last valid frame
-      # were never acked. A SEALED segment is immutable and was fully durable when it was sealed, so
-      # a short scan there means corruption at rest, and truncating would destroy the valid frames
-      # that follow the damaged one, which are precisely what a peer replica can no longer help
-      # recover at rf=1. The copy still serves only its valid prefix (reads are bounded by
-      # `write_position`), and `Malachi.Log.verify/2` plus the scrub report it for repair.
-      if valid_bytes < File.stat!(path).size and not sealed? do
+      if truncate?(integrity) do
         {:ok, _} = :file.position(file_descriptor, valid_bytes)
         :ok = :file.truncate(file_descriptor)
       end
@@ -165,10 +158,28 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
+  # Whether recovery may drop the bytes past the last valid frame. The rule is about WHAT the damage
+  # is, not only about the segment's state, because a replica's file carries a seal marker only when
+  # its log rolled locally (by size or age): sealing a segment is a control-plane decision, so a
+  # segment the cluster considers immutable usually has no marker on disk, and keying the guard on
+  # the marker alone would leave the destructive path wide open in exactly the deployment that
+  # matters.
+  #
+  # An `:incomplete` tail is the crash-mid-write shape: the scan ran out of bytes inside a frame, so
+  # by construction nothing valid follows it, and dropping it keeps the file clean and the next
+  # append contiguous. A checksum or framing failure is different: the frame was written whole and
+  # is wrong (rot, or a bug), and VALID frames may well follow it. Those are recoverable from a peer
+  # and must not be destroyed by the very node that noticed the damage. Reads are bounded by
+  # `write_position` either way, so leaving the bytes costs nothing but disk.
+  defp truncate?(:ok), do: false
+  defp truncate?(%{sealed?: true}), do: false
+  defp truncate?(%{reason: :incomplete}), do: true
+  defp truncate?(_rot), do: false
+
   # What the recovery scan concluded, for the caller to report (this module never logs). A scan that
   # consumed the file exactly is clean; anything else is described so the warning can name the byte
-  # position and how much of the file is unreadable. For an active segment those trailing bytes were
-  # just truncated away (a crash mid-write); for a sealed one they are still on disk, unreadable.
+  # position and how much of the file is unreadable. Those trailing bytes are dropped only when
+  # `truncate?/1` allows it; otherwise they stay on disk, unreadable but recoverable.
   defp integrity_verdict(path, valid_bytes, halt, sealed?) do
     unreadable_bytes = File.stat!(path).size - valid_bytes
 
@@ -206,13 +217,21 @@ defmodule Malachi.Storage.ElixirStore do
   # A clean scan must consume the file EXACTLY: `halt == :eof` with valid frames ending short of the
   # file size means the tail is a partial frame, which for a sealed segment is damage just like a
   # checksum mismatch (an active segment's torn tail is normal and is handled by `recover/3`).
+  # The damage map carries the same keys `recover/3` reports, so a caller (and the telemetry event)
+  # handles findings from either path identically.
   defp verdict(path, record_count, valid_bytes, halt) do
     file_size = File.stat!(path).size
+    unreadable = file_size - valid_bytes
 
     case halt do
-      :eof when valid_bytes == file_size -> {:ok, %{records: record_count, bytes: valid_bytes}}
-      :eof -> {:error, %{position: valid_bytes, reason: :incomplete, file: path}}
-      {:error, reason} -> {:error, %{position: valid_bytes, reason: reason, file: path}}
+      :eof when unreadable == 0 ->
+        {:ok, %{records: record_count, bytes: valid_bytes}}
+
+      :eof ->
+        {:error, %{position: valid_bytes, reason: :incomplete, unreadable_bytes: unreadable, file: path}}
+
+      {:error, reason} ->
+        {:error, %{position: valid_bytes, reason: reason, unreadable_bytes: unreadable, file: path}}
     end
   end
 

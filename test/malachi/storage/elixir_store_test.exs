@@ -212,6 +212,29 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert ElixirStore.append(recovered, [rec("b")]) == {:error, :sealed}
     end
 
+    test "rot in an ACTIVE segment keeps the valid frames that follow it", %{tmp_dir: directory} do
+      # Sealing is a control-plane decision: a replica's file only carries a seal marker when its own
+      # log rolled locally (by size or age), so a segment the cluster considers immutable usually has
+      # no marker on disk. Keying the guard on the marker alone would leave the destructive path open
+      # in exactly the deployment that matters, so the rule is about the DAMAGE: a checksum failure
+      # means the frame was written whole and is wrong, and the frames after it may be perfectly
+      # good, recoverable from a peer. Only a torn tail (the crash-mid-write shape) is dropped.
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+
+      path = Segment.path(store.segment)
+      size_before = File.stat!(path).size
+      corrupt_payload_byte(path, 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert File.stat!(path).size == size_before, "rot must not cost the valid frames after it"
+      assert %{reason: :bad_crc, sealed?: false} = ElixirStore.integrity(recovered)
+      # the copy still serves only its valid prefix; the rest waits for repair from a replica
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
+
     test "recovering a corrupt SEALED segment keeps its bytes instead of truncating them",
          %{tmp_dir: directory} do
       # A sealed segment was fully durable when it was sealed, so a short scan means corruption at
