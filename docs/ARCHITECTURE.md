@@ -63,6 +63,18 @@ flowchart LR
   A -->|"a new one rolls"| A2["new active segment"]
 ```
 
+Every record frame carries a CRC32 of its payload, which the store checks whenever it decodes a
+record. That is only a *passive* guarantee: a sealed segment is immutable and nothing re-reads it, so
+corruption at rest stays invisible until a consumer happens to need that exact record, and then it does
+not surface as an error but as a short read (the read bound comes from the control plane's record count,
+so the damaged copy simply stops producing records). `Malachi.Cluster.Scrubber` closes that: on every
+node, on a slow cadence, it re-verifies the checksums of the sealed segments it stores
+(`Malachi.Log.verify/2`, a read-only scan that never repairs or truncates) and rebuilds a damaged copy
+from a replica that still verifies, moving itself out of the read path first when it is the primary. A
+copy that will not decode is a lost replica, so the same re-replication clock applies to it. The one
+rule the repair never breaks: the local copy is not deleted until a peer has confirmed an intact one,
+because a partially readable copy beats no copy. See the operations guide for the knobs and cadence.
+
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks
 > never change, copying them to another node is safe.
@@ -226,10 +238,11 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   `scripts/docker-storage-chaos.sh`. Follower segment copies are corrupted mid-file, truncated, and
   deleted outright; the harness certifies the same invariants plus physical reconvergence
   (byte-identical copies across the nodes), exercising CRC-clamped recovery, write-path catch-up,
-  and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. Two deliberate limits, both
-  tracked as roadmap items: **in-place corruption of a sealed copy that keeps its byte size** is
-  invisible until a CRC scrub pass exists, and **damage to a primary copy** needs seal-on-failure
-  (NorthGuard seals the segment and moves producers to a new one when a replica fails).
+  and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. **In-place corruption that
+  keeps the byte size** is now caught by the integrity scrub (see the storage layer above); the
+  harness gains that event with the scrub's certification. One deliberate limit remains, tracked as
+  a roadmap item: **damage to a primary copy** needs seal-on-failure (NorthGuard seals the segment
+  and moves producers to a new one when a replica fails), so the harness always damages followers.
 - **Config-deployment certification** (the "deployments... and even config deployments" scenarios):
   delivered as `scripts/docker-config-chaos.sh`. A harmless config change is rolled node by node
   under traffic (availability must hold between steps and the new value must take effect), and a

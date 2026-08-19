@@ -17,6 +17,10 @@ defmodule Malachi.Telemetry do
       the byte where the damage starts, `sealed` whether the segment was immutable (damage there is
       corruption at rest, not a crash mid-write), and `source` where the verdict came from
       (`:recover` when a segment was opened, `:scrub` from the background verification pass).
+    * `[:malachi, :storage, :scrub]`. `%{verified, damaged, repaired, unrepairable}` / `%{}` - one
+      background verification pass finished, with how many segments it covered. Steady progress
+      with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
+      running.
 
   Emitting is a no-op fast path when nothing is attached, so these are safe on the hot path.
   """
@@ -56,6 +60,16 @@ defmodule Malachi.Telemetry do
       [:malachi, :storage, :integrity],
       %{position: verdict.position, unreadable_bytes: verdict.unreadable_bytes},
       %{result: verdict.reason, sealed: verdict.sealed?, source: source, segment: segment_id}
+    )
+  end
+
+  @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."
+  @spec scrub_pass(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
+  def scrub_pass(verified, damaged, repaired, unrepairable) do
+    :telemetry.execute(
+      [:malachi, :storage, :scrub],
+      %{verified: verified, damaged: damaged, repaired: repaired, unrepairable: unrepairable},
+      %{}
     )
   end
 end

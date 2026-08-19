@@ -76,6 +76,39 @@ MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupl
 MALACHI_SEGMENT_MAX_BYTES=67108864
 ```
 
+## Integrity scrub
+
+Every node continuously re-verifies the data it stores. A sealed segment is immutable and nothing
+re-reads it, so a checksum is otherwise only confirmed when a consumer happens to read that exact
+record: bit rot there is silent, and silent in the worst way, because a damaged copy answers reads
+with the records *before* the damage and nothing after, with no error. A consumer then stalls at
+that offset or skips the rest of the range.
+
+The scrub walks the node's own sealed segments, checks every record's checksum, and repairs a
+damaged copy from a replica that still verifies:
+
+```bash
+MALACHI_SCRUB_ENABLED=true           # default; set to false to turn the scrub off entirely
+MALACHI_SCRUB_INTERVAL_MS=60000      # time between passes
+MALACHI_SCRUB_SEGMENTS_PER_TICK=1    # segments verified per pass
+```
+
+A full cycle takes `sealed segments on the node x interval / segments per tick`. With the defaults
+and 64MB segments a node verifies about 90GB a day, so 10k sealed segments are revisited roughly
+weekly, the usual period for disk scrubbing. One pass costs a single segment scan, measured at 24
+to 86ms of one core for 64MB. Raise the interval on a slow or busy disk; lower it (or raise the
+per-tick count) to cover a large dataset more often.
+
+**On detection**, the node asks the segment's other replicas to verify their own copies. Only when
+one of them confirms an intact copy does the repair proceed: if this node is the segment's primary
+it first moves itself to the end of the replica set, so reads go to an intact replica immediately,
+and only then is the local copy deleted and refetched, then verified again. If **no** replica
+verifies, nothing is deleted and the failure is logged loudly: a partially readable copy is worth
+more than no copy. Watch `malachi_storage_integrity_failures_total{reason}` and the
+`[:malachi, :storage, :scrub]` telemetry event (steady passes with `damaged: 0` are what healthy
+looks like; no events at all means the scrub is not running). A repair is traced as
+`malachi.scrub.repair`.
+
 ## Chaos certification
 
 `scripts/docker-chaos-test.sh` runs the certification drill on a local 3-node RF=3 Docker cluster:

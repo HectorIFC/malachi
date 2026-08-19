@@ -31,6 +31,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Cluster.Scrubber
   alias Malachi.Cluster.SplitCoordinator
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
@@ -233,7 +234,7 @@ defmodule Malachi.Application do
           membership_child(nodes, vnodes),
           replication_child(),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir())
-        ]
+        ] ++ scrubber_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
@@ -593,6 +594,27 @@ defmodule Malachi.Application do
       end
     end)
     |> Map.new()
+  end
+
+  # The scrub runs on EVERY node, not just the leader: only a node can read its own disk, and a
+  # damaged copy is a per-copy fact. It also belongs here rather than with the coordinators, which are
+  # dropped wholesale in the sharded control plane (see coordinator_children/2).
+  defp scrubber_children do
+    if Application.get_env(:malachi, :scrub_enabled, true) do
+      opts = [
+        name: Malachi.LogScrubber,
+        metadata_source: fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+        local_ref: {Malachi.LogReplication, node()},
+        directory: log_data_dir(),
+        apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
+        interval: Application.get_env(:malachi, :scrub_interval_ms, 60_000),
+        segments_per_tick: Application.get_env(:malachi, :scrub_segments_per_tick, 1)
+      ]
+
+      [%{id: Malachi.LogScrubber, start: {Scrubber, :start_link, [opts]}}]
+    else
+      []
+    end
   end
 
   defp replication_child do
