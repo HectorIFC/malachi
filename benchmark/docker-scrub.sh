@@ -47,7 +47,12 @@ wait_healthy() {
 
 # Recreates the three nodes with the current scrub env and waits for them.
 restart_cluster() {
-  $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >"$WORK/up.log" 2>&1
+  # Checked, because a failed recreate is the one failure this harness cannot see downstream: the
+  # PREVIOUS containers are still up and still healthy, so wait_healthy passes and the run reports a
+  # number measured under the old scrub configuration as if it were the new one.
+  if ! $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >"$WORK/up.log" 2>&1; then
+    echo "cluster recreation failed"; cat "$WORK/up.log"; exit 1
+  fi
   wait_healthy || { echo "cluster did not converge to healthy"; cat "$WORK/up.log"; exit 1; }
 }
 
