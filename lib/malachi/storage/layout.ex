@@ -15,8 +15,8 @@ defmodule Malachi.Storage.Layout do
   Broker ids (`{{topic, range_seq}, seg_seq}`) get a readable name, `topic-r<range>-s<segment>`.
   Any other term (or a topic that is not path-safe) falls back to a collision-free Base64 encoding
   of the id, which keeps the directory inside `base`: segment ids arrive over inter-node
-  replication, so the topic is not trusted here even though `Malachi.Metadata.valid_topic_name?/1`
-  screens locally created topics.
+  replication, so the topic is not trusted here even though `Malachi.Metadata` screens the names of
+  locally created topics.
   """
   @spec segment_directory(Path.t(), term()) :: Path.t()
   def segment_directory(base, {{topic, range_seq}, seg_seq} = segment_id)
