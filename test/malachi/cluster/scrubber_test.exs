@@ -316,7 +316,60 @@ defmodule Malachi.Cluster.ScrubberTest do
         peer_scrubber: fn _node -> peer_scrubber end
       )
 
-    assert [{@segment, %{reason: :short_copy}}] = Scrubber.scrub_now(scrubber).damaged
+    stored = ReplicationServer.stored_bytes(replica, @segment)
+    result = Scrubber.scrub_now(scrubber)
+
+    assert [{@segment, %{reason: :short_copy}}] = result.damaged
+
+    # And the peer is short by exactly the same record, so it is NOT a source: a copy that verifies
+    # is not the same as a copy that is complete. Deleting these three records to refetch four that
+    # nobody has would take the copy out of the read path to gain nothing.
+    assert result.repaired == []
+    assert [{@segment, :no_intact_copy}] = result.unrepairable
+    assert ReplicationServer.stored_bytes(replica, @segment) == stored
+    assert read_values(replica) == ["a", "b", "c"]
+  end
+
+  test "a peer that verifies but is itself short is not a repair source" do
+    # The safety rule reads "a peer confirmed its copy verifies", and a checksum-clean copy can still
+    # be missing whole frames at the end. Repairing from one deletes the local copy and then catches
+    # up to an offset the source cannot reach, leaving this node with LESS than the damage it started
+    # with. The peer has to be complete against the sealed metadata, not merely readable.
+    {damaged_replica, damaged_directory} = start_replica()
+    {peer_replica, peer_directory} = start_replica()
+    metadata = sealed_everywhere([damaged_replica, peer_replica], ["a", "b", "c", "d"])
+
+    # the peer verifies cleanly but holds only the first record, so it can never serve the four the
+    # seal recorded
+    :ok = ReplicationServer.delete(peer_replica, @segment)
+    {:ok, _last} = ReplicationServer.follow(peer_replica, @segment, 0, records(["a"]))
+
+    rot_copy(damaged_directory)
+    intact_bytes = ReplicationServer.stored_bytes(damaged_replica, @segment)
+
+    peer_scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: peer_replica, directory: peer_directory)
+
+    assert {:ok, %{records: 1}} = Scrubber.verify_segment(peer_scrubber, @segment)
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: damaged_replica,
+        directory: damaged_directory,
+        peer_scrubber: fn _node -> peer_scrubber end
+      )
+
+    result = Scrubber.scrub_now(scrubber)
+
+    assert [{@segment, :no_intact_copy}] = result.unrepairable
+    assert result.repaired == []
+
+    # The bytes of b, c and d are still on disk. They are unreadable in sequence past the rot, which
+    # is what makes them salvageable by hand and what the safety rule exists to protect; refetching
+    # one record over them would have destroyed three.
+    assert ReplicationServer.stored_bytes(damaged_replica, @segment) == intact_bytes
+    assert read_values(damaged_replica) == ["a"]
   end
 
   test "a segment retention deleted mid-cycle is not reported as damage" do
@@ -401,6 +454,39 @@ defmodule Malachi.Cluster.ScrubberTest do
     )
 
     assert_receive {:pass, %{verified: [@segment]}}, 1_000
+  end
+
+  test "an unexpected message is logged, not fatal, and the cycle position survives it" do
+    # This worker is meant to run for the lifetime of the node. Dying on a stray message would cost
+    # the cycle position and the damaged set, so the restarted walk would begin at the first segment
+    # again and never reach the tail of the rotation on a node holding many segments.
+    {replica, directory} = start_replica()
+
+    {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+
+    metadata =
+      Enum.reduce(0..1, metadata, fn i, acc ->
+        segment = {root, i}
+        {:ok, _last} = ReplicationServer.follow(replica, segment, i * 10, records(["v#{i}"]))
+        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i * 10})
+        {acc, :ok} = Metadata.apply(acc, {:seal_segment, segment, 1, 0, 0})
+        acc
+      end)
+
+    scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+    assert [{^root, 0}] = Scrubber.scrub_now(scrubber).verified
+
+    log =
+      capture_log(fn ->
+        send(scrubber, {make_ref(), {:ok, %{records: 1, bytes: 1, files: 1}}})
+        # a call round-trip after the send proves the message was handled and the process is alive
+        assert Scrubber.damaged(scrubber) == []
+      end)
+
+    assert log =~ "unexpected message"
+    assert [{^root, 1}] = Scrubber.scrub_now(scrubber).verified, "the walk resumed where it stopped"
   end
 
   test "emits an integrity event for the scrub and a pass event with the counts" do

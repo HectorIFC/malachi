@@ -109,11 +109,15 @@ dataset in page cache, so the scrub was reading RAM. On a node whose data dwarfs
 scan is real disk I/O and competes with the write path.
 
 **On detection**, the node asks the segment's other replicas to verify their own copies. Only when
-one of them confirms an intact copy does the repair proceed: if this node is the segment's primary
-it first moves itself to the end of the replica set, so reads go to an intact replica immediately,
-and only then is the local copy deleted and refetched, then verified again. If **no** replica
-verifies, nothing is deleted and the failure is logged loudly: a partially readable copy is worth
-more than no copy. A repair is traced as `malachi.scrub.repair`.
+one of them confirms a copy that is both intact **and** complete does the repair proceed: if this
+node is the segment's primary it first moves itself to the end of the replica set, so reads go to an
+intact replica immediately, and only then is the local copy deleted and refetched, then verified
+again. Complete matters as much as intact, because a replica whose checksums all pass can still be
+missing whole records at the end, and repairing from one would delete this copy to refetch less than
+it held. So a replica qualifies only when its scan matches the record and byte counts the control
+plane recorded when the segment was sealed. If **no** replica qualifies, nothing is deleted and the
+failure is logged loudly: a partially readable copy is worth more than no copy. A repair is traced
+as `malachi.scrub.repair`.
 
 Two series to watch, and they answer different questions.
 `malachi_storage_integrity_failures_total{reason}` says whether anything is damaged, and

@@ -24,9 +24,14 @@ defmodule Malachi.Cluster.Scrubber do
 
   Damage is repaired by fetching the segment again from a replica that still has it intact, which
   means deleting the local copy first. The rule is that **the local copy is never destroyed before
-  a peer has confirmed its own copy verifies**: swapping a partially readable copy for no copy at
-  all would be worse than the damage. Peers are asked through their own `Scrubber` (never the
-  replication server), so the verification scan stays off the replication hot loop.
+  a peer has confirmed it holds the whole segment, intact**: swapping a partially readable copy for
+  a shorter one, or for no copy at all, would be worse than the damage. Both halves of that
+  sentence carry weight, and the second is the one easy to lose: a peer whose checksums all pass can
+  still be missing whole frames at the end, and repairing from it deletes the local copy and then
+  catches up to an offset the source cannot reach. So a peer qualifies only when its scan matches
+  what the control plane recorded at seal time, which is the same test `cross_check/4` applies to
+  this node's own copy. Peers are asked through their own `Scrubber` (never the replication server),
+  so the verification scan stays off the replication hot loop.
 
   When the damaged copy is the segment's primary, the repair first submits a
   `:set_segment_replicas` that moves this node to the end of the replica set. Reads follow the head
@@ -160,6 +165,17 @@ defmodule Malachi.Cluster.Scrubber do
     {:noreply, state}
   end
 
+  # A worker meant to run for the lifetime of the node must not die on a message it did not plan for:
+  # the crash costs the cycle position and the damaged set, so the restarted walk begins again at the
+  # first segment and the tail of the rotation is never reached on a busy node. Nothing here is known
+  # to send one (a reply arriving after `verify_segment/3` times out is dropped by the runtime, which
+  # deactivates the call's alias on timeout), and that is the point: an unexpected message is a fact
+  # worth surfacing, not a reason to take the process down.
+  def handle_info(message, state) do
+    Logger.warning("scrubber ignoring unexpected message: #{inspect(message)}")
+    {:noreply, state}
+  end
+
   # --- internals ---
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
@@ -222,18 +238,21 @@ defmodule Malachi.Cluster.Scrubber do
   # a copy with fewer records (or bytes) than that is damaged in a way no checksum can see: whole
   # frames are missing from the end.
   defp cross_check(segment, counts, acc, state) do
-    cond do
-      is_integer(segment.length) and counts.records < segment.length ->
-        verdict = %{reason: :short_copy, position: counts.bytes, unreadable_bytes: 0, sealed?: true}
-        report_damage(segment, verdict, acc, state)
-
-      is_integer(segment.byte_size) and counts.bytes < segment.byte_size ->
-        verdict = %{reason: :short_copy, position: counts.bytes, unreadable_bytes: 0, sealed?: true}
-        report_damage(segment, verdict, acc, state)
-
-      true ->
-        {%{acc | verified: [segment.id | acc.verified]}, forget_damage(state, segment.id)}
+    if short_copy?(segment, counts) do
+      verdict = %{reason: :short_copy, position: counts.bytes, unreadable_bytes: 0, sealed?: true}
+      report_damage(segment, verdict, acc, state)
+    else
+      {%{acc | verified: [segment.id | acc.verified]}, forget_damage(state, segment.id)}
     end
+  end
+
+  # Applied to this node's copy to classify it, and to a peer's copy to decide whether it can be a
+  # repair source. One predicate for both on purpose: a peer we would call damaged if it were ours is
+  # not a copy worth deleting ours for. `length` and `byte_size` are only set at seal time, so an
+  # unset one simply does not constrain (`register_segment` leaves them nil until the seal lands).
+  defp short_copy?(segment, counts) do
+    (is_integer(segment.length) and counts.records < segment.length) or
+      (is_integer(segment.byte_size) and counts.bytes < segment.byte_size)
   end
 
   defp report_damage(segment, verdict, acc, state) do
@@ -288,12 +307,17 @@ defmodule Malachi.Cluster.Scrubber do
     end
   end
 
-  # The safety rule: a peer must confirm its own copy verifies BEFORE the local one is deleted.
-  # An unreachable or damaged peer is simply not a source.
+  # The safety rule: a peer must confirm it holds the WHOLE segment, intact, BEFORE the local copy is
+  # deleted. An unreachable, damaged or short peer is simply not a source.
   defp intact_peer(segment, state) do
     segment.replica_set
     |> Enum.reject(&(&1 == state.resolved_ref))
-    |> Enum.find(fn replica -> match?({:ok, _counts}, peer_verify(state, replica, segment.id)) end)
+    |> Enum.find(fn replica ->
+      case peer_verify(state, replica, segment.id) do
+        {:ok, counts} -> not short_copy?(segment, counts)
+        {:error, _reason} -> false
+      end
+    end)
   end
 
   defp peer_verify(state, {_name, node} = _replica, segment_id) do
@@ -308,15 +332,22 @@ defmodule Malachi.Cluster.Scrubber do
     state = demote_if_primary(segment, state)
     to_offset = segment.start_offset + (segment.length || 0)
 
-    with :ok <- ReplicationServer.delete(state.resolved_ref, segment.id),
-         {:ok, ^to_offset} <- Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset),
+    # The point of no return, and it cannot fail (`delete/2` answers `:ok` even for a segment it does
+    # not hold): past this line the damaged bytes are gone and only the peer can put them back. That
+    # is what makes `intact_peer/2` strict about what counts as a source, and why a failure after it
+    # is reported apart from one decided before it, which left the copy untouched.
+    :ok = ReplicationServer.delete(state.resolved_ref, segment.id)
+
+    # Reaching `to_offset` is itself the completeness check: the catchup copied every offset the seal
+    # recorded, so the verify only has to confirm the frames landed readable.
+    with {:ok, ^to_offset} <- Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset),
          {:ok, _counts} <- verify(state, segment.id) do
       Tracer.set_attributes(%{"malachi.repair" => "ok"})
       {%{acc | repaired: [segment.id | acc.repaired]}, forget_damage(state, segment.id)}
     else
       other ->
         Tracer.set_attributes(%{"malachi.repair" => "failed"})
-        {%{acc | unrepairable: [{segment.id, other} | acc.unrepairable]}, state}
+        {%{acc | unrepairable: [{segment.id, {:refetch, other}} | acc.unrepairable]}, state}
     end
   end
 
@@ -384,11 +415,22 @@ defmodule Malachi.Cluster.Scrubber do
       segment_id in result.repaired ->
         ": repaired from an intact replica"
 
-      reason = List.keyfind(result.unrepairable, segment_id, 0) ->
-        ": NOT repaired (#{inspect(elem(reason, 1))}), this copy stays damaged"
+      entry = List.keyfind(result.unrepairable, segment_id, 0) ->
+        not_repaired(elem(entry, 1))
 
       true ->
         ""
     end
+  end
+
+  # The two failures need different operator action, so they do not share a message: everything up to
+  # the refetch leaves the damaged bytes on disk to salvage by hand, while a failure during it leaves
+  # a copy that is merely incomplete, which a later pass finds as short and repairs again on its own.
+  defp not_repaired({:refetch, reason}) do
+    ": repair FAILED mid-refetch (#{inspect(reason)}), this copy is incomplete until a later pass finishes it"
+  end
+
+  defp not_repaired(reason) do
+    ": NOT repaired (#{inspect(reason)}), this copy stays damaged and its bytes are still on disk"
   end
 end
