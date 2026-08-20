@@ -232,10 +232,12 @@ defmodule Malachi.Storage.ElixirStore do
     case File.read(index_path) do
       {:ok, binary} ->
         entries = parse_index(binary, [])
-        expected_entries = div(byte_size(binary), @index_entry_bytes)
 
         cond do
-          length(entries) < expected_entries ->
+          # A sidecar is a whole number of fixed-size entries, so a remainder means the file was cut
+          # mid-entry. Counting the parsed entries cannot see that: `parse_index/2` drops the partial
+          # tail, so the count always equals what the file size implies, damaged or not.
+          rem(byte_size(binary), @index_entry_bytes) != 0 ->
             {:error, index_damage(index_path, valid_bytes, :trailing_bytes)}
 
           bad = Enum.find(entries, &bad_index_entry?(&1, file_descriptor, valid_bytes)) ->
@@ -267,6 +269,10 @@ defmodule Malachi.Storage.ElixirStore do
       case :file.pread(file_descriptor, position, @read_window_bytes) do
         {:ok, chunk} -> not match?({:ok, %Record{offset: ^offset}, _size, _rest}, Record.decode_one(chunk))
         :eof -> true
+        # An entry whose frame cannot be read is not an entry a read can trust, whatever the reason.
+        # Reporting it as a bad entry is also the safe verdict: the repair for a bad index is a local
+        # rebuild, which re-reads the segment and fails loudly if the device is the real problem.
+        {:error, _reason} -> true
       end
     end
   end
@@ -307,6 +313,10 @@ defmodule Malachi.Storage.ElixirStore do
         case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
           {:ok, chunk} -> do_check(file_descriptor, valid_bytes, carry <> chunk, record_count)
           :eof -> {record_count, valid_bytes, :eof}
+          # A device that cannot be read IS the damage the scrub exists to find. Raising here instead
+          # would take down `Malachi.Cluster.Scrubber`, whose process runs this scan: the detector
+          # would die of exactly the condition it was built to report.
+          {:error, reason} -> {record_count, valid_bytes, {:error, reason}}
         end
 
       {:error, reason} ->

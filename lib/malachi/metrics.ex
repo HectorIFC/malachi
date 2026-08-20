@@ -80,13 +80,23 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
-  Records one integrity scrub pass: how many segments it verified and how many it repaired. A total
-  that stops advancing is how an operator sees that the scrub itself has stopped, which the failure
-  counters alone cannot show (they stay at zero both when all is well and when nothing is checking).
+  Records one integrity scrub pass: how many segments it verified, repaired, and could not repair. A
+  verified total that stops advancing is how an operator sees that the scrub itself has stopped,
+  which the failure counters alone cannot show (they stay at zero both when all is well and when
+  nothing is checking). The unrepairable total is the one that calls for a human: it counts damage
+  the cluster could not heal by itself, which on a single node is every finding there is.
   """
-  def record_scrub_pass(verified, repaired) do
+  def record_scrub_pass(verified, repaired, unrepairable) do
     :ets.update_counter(@metrics_table, :scrub_segments_verified, {2, verified}, {:scrub_segments_verified, 0})
     :ets.update_counter(@metrics_table, :scrub_segments_repaired, {2, repaired}, {:scrub_segments_repaired, 0})
+
+    :ets.update_counter(
+      @metrics_table,
+      :scrub_segments_unrepairable,
+      {2, unrepairable},
+      {:scrub_segments_unrepairable, 0}
+    )
+
     :ok
   end
 
@@ -260,7 +270,8 @@ defmodule Malachi.Metrics do
         integrity_short_copy: get_counter({:integrity_failure, :short_copy}),
         integrity_bad_index: get_counter({:integrity_failure, :bad_index}),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
-        scrub_segments_repaired: get_counter(:scrub_segments_repaired)
+        scrub_segments_repaired: get_counter(:scrub_segments_repaired),
+        scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable)
       },
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()

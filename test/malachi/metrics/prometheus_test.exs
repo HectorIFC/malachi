@@ -38,7 +38,8 @@ defmodule Malachi.Metrics.PrometheusTest do
         integrity_short_copy: 0,
         integrity_bad_index: 4,
         scrub_segments_verified: 4200,
-        scrub_segments_repaired: 3
+        scrub_segments_repaired: 3,
+        scrub_segments_unrepairable: 2
       }
     }
   end
@@ -81,6 +82,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_index"} 4)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="verified"} 4200)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="repaired"} 3)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="unrepairable"} 2)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

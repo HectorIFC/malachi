@@ -53,7 +53,8 @@ defmodule Malachi.Cluster.Scrubber do
     * `:peer_scrubber` - `(node() -> GenServer.server())`, how to reach a peer's scrubber. Defaults
       to this process's own registered name on that node, since every node runs the same worker
       under the same name;
-    * `:interval` - ms between ticks (default 60s);
+    * `:interval` - ms between ticks (default 60s). A value that is not a positive integer is
+      refused with a warning and the default used instead, since it arrives from the environment;
     * `:segments_per_tick` - segments verified per tick (default 1). With the default 64MB segment
       size a full cycle takes `segments * interval / segments_per_tick`, so a node holding 10k
       sealed segments revisits each one about weekly;
@@ -131,7 +132,7 @@ defmodule Malachi.Cluster.Scrubber do
       directory: Keyword.fetch!(opts, :directory),
       apply_command: Keyword.fetch!(opts, :apply_command),
       peer_scrubber: Keyword.get(opts, :peer_scrubber, &{registered_name, &1}),
-      interval: Keyword.get(opts, :interval, @default_interval),
+      interval: usable_interval(Keyword.get(opts, :interval, @default_interval)),
       segments_per_tick: max(1, Keyword.get(opts, :segments_per_tick, @default_segments_per_tick)),
       on_result: Keyword.get(opts, :on_result, &log_result/1),
       # Segments still to visit in this cycle; refilled from the metadata when it empties, so every
@@ -172,13 +173,32 @@ defmodule Malachi.Cluster.Scrubber do
   # deactivates the call's alias on timeout), and that is the point: an unexpected message is a fact
   # worth surfacing, not a reason to take the process down.
   def handle_info(message, state) do
-    Logger.warning("scrubber ignoring unexpected message: #{inspect(message)}")
+    # Bounded on purpose: whatever arrives here is by definition not understood, so it could carry a
+    # record payload, and a log line is the one place user data must not leak into by accident.
+    Logger.warning("scrubber ignoring unexpected message: #{inspect(message, limit: 10, printable_limit: 256)}")
+
     {:noreply, state}
   end
 
   # --- internals ---
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
+
+  # The interval reaches here straight from MALACHI_SCRUB_INTERVAL_MS, which parses any integer: zero
+  # would turn the cadence into a busy loop that scans the disk as fast as it can, and a negative one
+  # would crash `Process.send_after/3` at the first schedule. Neither is what an operator meant to ask
+  # for, and neither is worth refusing to boot over, so the value is rejected and said out loud. This
+  # is the same shape as the `max(1, ...)` on `:segments_per_tick`, which has the same origin.
+  defp usable_interval(interval) when is_integer(interval) and interval > 0, do: interval
+
+  defp usable_interval(interval) do
+    Logger.warning(
+      "scrub interval #{inspect(interval)} is not a positive number of milliseconds, " <>
+        "using the default of #{@default_interval}ms"
+    )
+
+    @default_interval
+  end
 
   defp resolve_ref(local_ref) when is_function(local_ref, 0), do: local_ref.()
   defp resolve_ref(local_ref), do: local_ref

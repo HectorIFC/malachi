@@ -123,7 +123,14 @@ Two series to watch, and they answer different questions.
 `malachi_storage_integrity_failures_total{reason}` says whether anything is damaged, and
 `malachi_storage_scrub_segments_total{result}` says whether the scrub is even running: a `verified`
 total that stops advancing means the checking stopped, which the failure counter alone can never
-tell you, since it reads zero both when all is well and when nothing is looking.
+tell you, since it reads zero both when all is well and when nothing is looking. Within that second
+series, `result="unrepairable"` is the one worth paging on: it counts damage the cluster could not
+heal by itself, so unlike `result="repaired"` it does not go away on its own.
+
+Note what the failure counter deliberately does **not** include: a torn frame at the end of an
+active segment after a crash. Those bytes were never acknowledged, so recovering past them is
+routine, and counting it would make an ordinary restart look like corruption at rest. It is still
+logged. Rot in an active segment, and anything at all in a sealed one, is counted.
 
 A single-node deployment scrubs too, and there the distinction matters more: with no replica there
 is nothing to repair from, so every finding lands in the unrepairable path with a loud log. That is

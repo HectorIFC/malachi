@@ -40,4 +40,39 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.integrity_bad_magic == before.integrity_bad_magic
     assert ops.integrity_incomplete == before.integrity_incomplete
   end
+
+  test "a torn tail on an ACTIVE segment is not counted as damage, but on a sealed one it is" do
+    # Recovering past unacknowledged bytes after a crash is routine, and ReplicationServer logs it as
+    # the cost of the crash rather than as an alarm. This counter is the series an operator alerts on,
+    # so counting a restart there would make an ordinary reboot look like corruption at rest.
+    before = Metrics.get_system_metrics().operations
+    torn_tail = %{reason: :incomplete, position: 128, unreadable_bytes: 64, sealed?: false}
+
+    Telemetry.storage_integrity(torn_tail, {{"events", 0}, 0}, :recover)
+
+    assert Metrics.get_system_metrics().operations.integrity_incomplete == before.integrity_incomplete
+
+    # the same reason on an immutable copy is corruption at rest, and stays counted
+    Telemetry.storage_integrity(%{torn_tail | sealed?: true}, {{"events", 0}, 0}, :scrub)
+
+    assert Metrics.get_system_metrics().operations.integrity_incomplete == before.integrity_incomplete + 1
+
+    # so is rot on an active segment: only the torn TAIL is expected after a crash
+    Telemetry.storage_integrity(%{torn_tail | reason: :bad_crc}, {{"events", 0}, 0}, :recover)
+
+    assert Metrics.get_system_metrics().operations.integrity_bad_crc == before.integrity_bad_crc + 1
+  end
+
+  test "a scrub pass exports what it could not repair, not only what it fixed" do
+    # A non-zero failure counter says something is damaged; only this says whether the cluster healed
+    # it. On a single node, with no replica to repair from, it is every finding there is.
+    before = Metrics.get_system_metrics().operations
+
+    Telemetry.scrub_pass(10, 2, 1, 1)
+
+    ops = Metrics.get_system_metrics().operations
+    assert ops.scrub_segments_verified == before.scrub_segments_verified + 10
+    assert ops.scrub_segments_repaired == before.scrub_segments_repaired + 1
+    assert ops.scrub_segments_unrepairable == before.scrub_segments_unrepairable + 1
+  end
 end

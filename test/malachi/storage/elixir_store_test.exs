@@ -482,6 +482,23 @@ defmodule Malachi.Storage.ElixirStoreTest do
                ElixirStore.verify(directory, "segment-0", index_interval: 1)
     end
 
+    test "an index cut mid-entry is reported, not silently accepted", %{tmp_dir: directory} do
+      # The sidecar is a whole number of fixed-size entries, so a remainder means the file was cut
+      # part way through one. Counting the entries the parser produced cannot see this: the parser
+      # drops the partial tail, so its count always matches what the file size implies. A truncated
+      # sidecar has to be caught by the leftover bytes.
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      full = File.read!(index_path)
+      File.write!(index_path, binary_part(full, 0, byte_size(full) - 5))
+
+      assert {:error, %{reason: :bad_index, detail: :trailing_bytes, file: ^index_path}} =
+               ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
     test "damage to the records is reported before the index is even considered", %{tmp_dir: directory} do
       # An index rebuilt over damaged records would faithfully describe the damage, so the segment's
       # own verdict has to come first.

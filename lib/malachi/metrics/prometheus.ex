@@ -98,7 +98,8 @@ defmodule Malachi.Metrics.Prometheus do
         "Segments the integrity scrub has processed (a total that stops advancing means it stopped)",
         [
           {[result: "verified"], ops.scrub_segments_verified},
-          {[result: "repaired"], ops.scrub_segments_repaired}
+          {[result: "repaired"], ops.scrub_segments_repaired},
+          {[result: "unrepairable"], ops.scrub_segments_unrepairable}
         ]
       ),
       topic_metrics(topics)

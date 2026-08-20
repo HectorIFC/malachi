@@ -489,6 +489,54 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{^root, 1}] = Scrubber.scrub_now(scrubber).verified, "the walk resumed where it stopped"
   end
 
+  test "the log line for an unexpected message is bounded, so a payload cannot leak into it" do
+    # Whatever reaches that clause is by definition not understood, so it may carry record values. A
+    # log line is the one place user data must not end up in by accident, and an unbounded inspect
+    # would also turn a single message into an enormous line.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a"])
+
+    scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+    secret = String.duplicate("s3cret-payload", 200)
+
+    log =
+      capture_log(fn ->
+        send(scrubber, {make_ref(), {:ok, secret}})
+        assert Scrubber.damaged(scrubber) == []
+      end)
+
+    assert log =~ "unexpected message"
+    refute log =~ secret
+    assert String.length(log) < 2_000
+  end
+
+  test "a non-positive interval is refused and the default used, rather than busy-looping" do
+    # The interval arrives from MALACHI_SCRUB_INTERVAL_MS, which parses any integer. Zero would scan
+    # the disk as fast as the loop can go; a negative value would crash the first schedule. Neither
+    # is worth refusing to boot over, so the value is rejected out loud.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a"])
+
+    for bad <- [0, -1] do
+      log =
+        capture_log(fn ->
+          scrubber =
+            start_scrubber(
+              metadata_source: fn -> metadata end,
+              local_ref: replica,
+              directory: directory,
+              interval: bad
+            )
+
+          assert :sys.get_state(scrubber).interval == 60_000
+        end)
+
+      assert log =~ "not a positive number of milliseconds"
+    end
+  end
+
   test "emits an integrity event for the scrub and a pass event with the counts" do
     {replica, directory} = start_replica()
     metadata = sealed_everywhere([replica], ["a", "b", "c"])
