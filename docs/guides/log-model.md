@@ -145,6 +145,29 @@ flowchart TB
 > different boxes. Here you hold a coat-check ticket, not a box number, so the cloakroom can split a rack in
 > two and the ticket still walks you through your coats in the order you left them.
 
+### What the guarantee does not cover
+
+The order above is the order the range's primary appends in. Four things follow from that, and none of
+them are covered by the guarantee:
+
+- **It is order, not adjacency.** A range holds many keys, so between two records of the same key there
+  are records of other keys. "The next record for this key is written after the previous one" is
+  guaranteed; "at the next offset" is not.
+- **Concurrent writers are not ordered relative to each other.** Two produces in flight at the same
+  time, on different connections or different nodes, land in whatever order they reach the primary's
+  mailbox. There are no producer sequence numbers and no idempotence. Ordering is guaranteed for writes
+  a client has ordered itself, that is, waiting for the acknowledgement before sending the next one.
+  Kafka's guarantee has the same shape: it is per producer, per partition.
+- **A retried produce lands at its retry position.** The primary appends a batch to its local log before
+  waiting for the quorum, so a produce that came back `no_quorum` and was retried appears twice, with
+  the second copy at the later position. Delivery is at-least-once, and the failed attempt does not hold
+  its place in the order.
+- **Two known gaps are open, and they are gaps, not intent.** For up to one metadata refresh after a
+  split, a node that has not yet seen it keeps writing to the sealed parent, and those records read
+  before the children's ([#41](https://github.com/HectorIFC/malachi/issues/41)). Primary failover
+  promotes a live replica without comparing how far its log has advanced and without fencing the old
+  primary ([#40](https://github.com/HectorIFC/malachi/issues/40)).
+
 ## Where this is going
 
 Ranges splitting is one axis of scale; the **metadata** itself is the other. The control plane is sharded

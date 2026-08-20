@@ -196,15 +196,17 @@ defmodule Malachi.Cluster.ReplicationServer do
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
   is the offset the batch must start at: it must equal this server's current end for the segment
   (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
-  or `{:error, :out_of_sync}` if this server is behind. Used by the primary's fan-out and by
-  `Malachi.Cluster.Catchup`.
+  or `{:error, :out_of_sync}` if this server is behind.
+
+  This is the **directed** append, used by `Malachi.Cluster.Catchup` to copy a span into a target
+  replica. The primary's own fan-out does not come through here: it pushes `:replica_append` casts
+  from its loop, which is what keeps the pipeline per-pair FIFO. A batch that arrives here never
+  triggers a catch-up, since the caller is already driving one.
   """
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()} | {:error, :out_of_sync}
   def follow(ref, segment_id, expected_first, records) do
-    # No source: a plain replica append (used by Catchup); never re-triggers a catch-up. A fresh
-    # log opens exactly where this batch starts.
-    GenServer.call(ref, {:follow, segment_id, expected_first, expected_first, records, nil})
+    GenServer.call(ref, {:follow, segment_id, expected_first, records})
   end
 
   @doc """
@@ -361,24 +363,17 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, :ok, %{state | logs: logs}}
   end
 
-  def handle_call({:follow, segment_id, base, expected_first, records, source}, _from, state) do
-    # Open a fresh segment at its `base` (not the batch's offset), so a brand-new replica that
-    # joins mid-segment sees the start gap and backfills it, rather than silently starting late.
-    {state, log} = fetch_or_open(state, segment_id, base)
+  def handle_call({:follow, segment_id, expected_first, records}, _from, state) do
+    # A fresh log opens exactly where this batch starts: the caller (Catchup) copies a span it chose,
+    # so there is no earlier gap for this replica to backfill. The primary's fan-out, which does have
+    # to seat a new replica at the segment's base, comes in through :replica_append instead.
+    {state, log} = fetch_or_open(state, segment_id, expected_first)
 
-    cond do
-      log.next_offset == expected_first ->
-        {log, _first, last} = append_durably(log, records)
-        {:reply, {:ok, last}, put_log(state, segment_id, log)}
-
-      source != nil and log.next_offset < expected_first ->
-        # Behind on the active segment (a new replica from base, or one that missed batches): kick
-        # off a background catch-up from the primary and skip this batch (it commits via the
-        # up-to-date replicas). We rejoin on a later batch as the catch-up converges on the head.
-        {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, base, source)}
-
-      true ->
-        {:reply, {:error, :out_of_sync}, state}
+    if log.next_offset == expected_first do
+      {log, _first, last} = append_durably(log, records)
+      {:reply, {:ok, last}, put_log(state, segment_id, log)}
+    else
+      {:reply, {:error, :out_of_sync}, state}
     end
   end
 
