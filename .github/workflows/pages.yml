@@ -3,6 +3,14 @@ name: Pages
 on:
   push:
     branches: [main]
+  # The results workflow pushes refreshed benchmark and chaos numbers to main, and GitHub does not
+  # start a workflow run from a push authenticated with GITHUB_TOKEN. That rule is what stops that
+  # workflow from committing to itself forever, and the cost is that its commit does not reach this
+  # one either: without this trigger the fresh numbers would sit on main unpublished until the next
+  # human push. Listening for the workflow itself to finish is the documented way around it.
+  workflow_run:
+    workflows: [Publish results]
+    types: [completed]
   workflow_dispatch:
 
 # Permissions are scoped per job rather than here, so the build never holds the Pages credentials: it
@@ -20,6 +28,14 @@ jobs:
     name: Build docs
     runs-on: ubuntu-latest
 
+    # workflow_run fires whenever the results workflow finishes on ANY branch, including every pull
+    # request, so it is narrowed here to a successful run on main. Every other trigger passes through
+    # unconditionally.
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_branch == 'main') }}
+
     permissions:
       contents: read
 
@@ -30,6 +46,12 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          # On a workflow_run trigger the default checkout ref is the SHA that STARTED the other
+          # workflow, which is the commit before the results it went on to push. Taking the branch tip
+          # instead is the whole point of building here: otherwise this republishes the site without
+          # the numbers it was woken up for.
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
 
       - name: 🔧 Setup Elixir
         uses: erlef/setup-beam@v1
