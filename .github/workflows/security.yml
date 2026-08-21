@@ -156,9 +156,21 @@ jobs:
     # with `1 configuration not found` and gave up computing which Trivy alerts the PR introduced,
     # for BOTH configurations. Running here restores that comparison as a side effect.
     #
+    # A manual run belongs here too: someone dispatching this workflow by hand is usually acting on a
+    # suspicion, and an audit that quietly leaves out the image scan answers a question it never
+    # actually asked. A missing scan is worse than a slow one, because it does not announce itself.
+    #
     # Deliberately NOT on the nightly schedule: that run scans the source tree, and adding an image
     # build to it buys a rebuild of unchanged code most nights.
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    #
+    # Spelled out rather than written as `!= 'schedule'`. The two are equivalent today, since
+    # `on.push.branches` already restricts pushes to main, but the negative form opts any future
+    # trigger into this job by default, and the ref check is what holds if `on.push.branches` is ever
+    # widened.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - uses: actions/checkout@v4
 
@@ -192,17 +204,24 @@ jobs:
 
   security-summary:
     name: Security Summary
-    needs: [sobelow, dependency-audit, secret-scanning, trivy-scan]
+    # docker-scan included: it runs on every pull request now, and a table headed Security Scan
+    # Results that omits one of the scans is worse than no table. `always()` keeps this job running
+    # when that one is skipped (the nightly), and the row then reads `skipped`, which is the honest
+    # answer rather than a gap.
+    needs: [sobelow, dependency-audit, secret-scanning, trivy-scan, docker-scan]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Summary
         run: |
-          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Sobelow | ${{ needs.sobelow.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency Audit | ${{ needs.dependency-audit.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Secret Scanning | ${{ needs.secret-scanning.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trivy Scan | ${{ needs.trivy-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Security Scan Results"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| Sobelow | ${{ needs.sobelow.result }} |"
+            echo "| Dependency Audit | ${{ needs.dependency-audit.result }} |"
+            echo "| Secret Scanning | ${{ needs.secret-scanning.result }} |"
+            echo "| Trivy Scan (filesystem) | ${{ needs.trivy-scan.result }} |"
+            echo "| Docker Image Scan | ${{ needs.docker-scan.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
