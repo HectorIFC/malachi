@@ -270,10 +270,14 @@ defmodule Malachi.MixProject do
       {:inet_cidr, "~> 1.0.9"},
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
-      # OpenTelemetry: trace client operations (produce/fetch). Exporter is off by default (traces_exporter
-      # :none). Set it to :otlp with an endpoint to ship spans to a collector.
+      # OpenTelemetry: trace client operations (produce/fetch). Still OFF by default: the sampler drops
+      # every span, so `Tracer.with_span` on the hot path stays a no-op until MALACHI_TRACING_ENABLED
+      # turns it on (see config/runtime.exs). The exporter ships as a dependency rather than as an
+      # instruction to add one, because a collector nobody can reach without editing mix.exs and
+      # recompiling is a collector nobody reaches: the shipped compose files point Jaeger at it.
       {:opentelemetry_api, "~> 1.4"},
       {:opentelemetry, "~> 1.5"},
+      {:opentelemetry_exporter, "~> 1.8"},
       # Raft (RabbitMQ's): replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via

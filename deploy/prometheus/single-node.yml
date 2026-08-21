@@ -1,0 +1,32 @@
+# Prometheus scrape config for the single-node compose stack.
+#
+# Malachi serves the Prometheus text exposition at /metrics on the dashboard port, content-negotiated:
+# ask for text/plain (or openmetrics) and you get metrics, ask for anything else and you get the
+# dashboard's JSON payload. Prometheus already sends both in its default Accept header, so nothing
+# here has to arrange that.
+#
+# The authentication is the part that needs arranging. /metrics requires an authenticated user, and a
+# Malachi session expires (one hour by default), so a token pasted into this file would work right up
+# until it did not, which is the worst kind of monitoring failure: silent and delayed.
+# `credentials_file` is re-read on every scrape, and the metrics-token sidecar in the compose file
+# rewrites it well inside the session lifetime.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: malachi
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/token/malachi.token
+    static_configs:
+      - targets: [malachi:4041]
+        labels:
+          deployment: single-node
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

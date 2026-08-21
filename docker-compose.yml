@@ -14,10 +14,22 @@ services:
       - MALACHI_TCP_PORT=4040
       - MALACHI_DASHBOARD_PORT=4041
       - MALACHI_LOCALE=en_US
-      - MALACHI_ADMIN_PASS=${MALACHI_ADMIN_PASS:-admin123}
-      - MALACHI_PRODUCER_PASS=${MALACHI_PRODUCER_PASS:-producer123}
-      - MALACHI_CONSUMER_PASS=${MALACHI_CONSUMER_PASS:-consumer123}
-      - MALACHI_APP_PASS=${MALACHI_APP_PASS:-app123}
+      # These defaults used to be admin123 / producer123 / consumer123 / app123, every one of which is
+      # on the list Malachi.Auth.ConfigValidator refuses to boot with (the image runs the prod release,
+      # where that check raises rather than warns). The consequence was that `docker compose up` on a
+      # fresh clone crash-looped on a security error, which is a hard way to learn about a password
+      # policy. These are long enough to pass and obviously placeholders; they are in a public file, so
+      # treat them as local-only and set the real ones in the environment for anything reachable.
+      - MALACHI_ADMIN_PASS=${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
+      - MALACHI_PRODUCER_PASS=${MALACHI_PRODUCER_PASS:-malachi-local-only-producer}
+      - MALACHI_CONSUMER_PASS=${MALACHI_CONSUMER_PASS:-malachi-local-only-consumer}
+      - MALACHI_APP_PASS=${MALACHI_APP_PASS:-malachi-local-only-app}
+      # The second thing that stopped this file from starting. The image runs the prod release, and
+      # prod requires TLS unless told otherwise, so without this the broker raised
+      # `TLS certificate file not configured` and crash-looped. Plaintext is the right answer for a
+      # stack whose ports are on your own machine and the wrong one for anything else: point
+      # MALACHI_TLS_CERTFILE and MALACHI_TLS_KEYFILE at real certificates and drop this line.
+      - MALACHI_REQUIRE_TLS=false
       - MALACHI_RATE_LIMIT_ENABLED=true
       - MALACHI_SESSION_IP_BINDING=true
       - MALACHI_AUDIT_LOG_OUTPUT=stdout
@@ -26,6 +38,13 @@ services:
       # Same paths as the Kubernetes manifest, both under the one persistent mount.
       - MALACHI_RA_DATA_DIR=/app/data/ra
       - MALACHI_LOG_DATA_DIR=/app/data/log
+      # Tracing, which is off by default everywhere else: the sampler drops every span so the produce
+      # and consume paths pay nothing until someone opts in. This stack opts in, at ratio 1.0, because
+      # its whole point is watching a small amount of traffic in detail. A busy deployment wants a
+      # fraction here (MALACHI_TRACING_SAMPLE_RATIO) or nothing at all.
+      - MALACHI_TRACING_ENABLED=true
+      - MALACHI_OTLP_ENDPOINT=http://jaeger:4318
+      - MALACHI_SERVICE_NAME=malachi
     security_opt:
       - no-new-privileges:true
     # The root filesystem stays read-only; the named volume below is the single writable persistent path,
@@ -38,12 +57,17 @@ services:
     mem_limit: 512m
     cpus: 2.0
     restart: unless-stopped
+    # The third thing that stopped this file from working, and the quietest. It used to probe with
+    # `nc -z`, and the BusyBox nc in this image has no -z flag, so the check exited 1 forever: the
+    # container ran fine and was reported unhealthy for its whole life, which also meant every
+    # `depends_on: service_healthy` below it never fired. This is the probe the image's own HEALTHCHECK
+    # and the cluster compose already use, against the endpoint built for it.
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4040"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
+      interval: 10s
+      timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 20s
 
   producer:
     image: node:20-alpine
@@ -55,7 +79,7 @@ services:
       - MALACHI_HOST=malachi
       - MALACHI_PORT=4040
       - MALACHI_USER=producer
-      - MALACHI_PASS=${MALACHI_PRODUCER_PASS:-producer123}
+      - MALACHI_PASS=${MALACHI_PRODUCER_PASS:-malachi-local-only-producer}
       - MALACHI_LOCALE=en_US
     depends_on:
       malachi:
@@ -64,6 +88,82 @@ services:
     profiles:
       - tools
 
+  # --- observability ---
+  #
+  # Traces and metrics, so a single command gives you a broker you can actually watch rather than one
+  # you have to instrument first. Malachi emits both natively: OpenTelemetry spans on the client
+  # operations (a produce is a distributed trace, down through the broker into the quorum commit) and
+  # the Prometheus text exposition on /metrics.
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: malachi-jaeger
+    ports:
+      # 16686 is the UI. 4318 is OTLP over HTTP, which is what the broker ships spans to; it stays on
+      # the compose network and is published only so you can point another local process at it.
+      - "16686:16686"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # Fetches a dashboard token and keeps the file Prometheus authenticates with fresh. /metrics needs an
+  # authenticated user and a session expires after an hour, so the alternative to this sidecar was a
+  # scrape config that quietly stops working after one. See deploy/prometheus/refresh-token.sh.
+  metrics-token:
+    image: curlimages/curl:8.10.1
+    container_name: malachi-metrics-token
+    entrypoint: ["sh", "/refresh-token.sh"]
+    # As root, because a fresh named volume is created owned by root and this image runs as an
+    # unprivileged user, so the first write failed with a permission error while the login itself
+    # succeeded: a token fetched and then dropped, which reads as an auth problem and is not one.
+    # The blast radius is one file in a private volume; Prometheus mounts the same volume read-only.
+    user: "0:0"
+    # Shares Prometheus's network namespace, so the login comes from the same address the scrape will.
+    # MALACHI_SESSION_IP_BINDING binds a session to the IP that created it, and with the sidecar on its
+    # own address every scrape came back 403 with a session_hijack_attempt in the audit log: the
+    # control working exactly as designed against a token minted next door. Minting it from the right
+    # address is the fix that keeps the control on; turning MALACHI_SESSION_IP_BINDING off would also
+    # work and is the wrong trade to copy into anything real.
+    network_mode: "service:prometheus"
+    environment:
+      - MALACHI_TARGETS=malachi=http://malachi:4041
+      - MALACHI_METRICS_USER=admin
+      - MALACHI_METRICS_PASS=${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
+      - TOKEN_DIR=/token
+    volumes:
+      - ./deploy/prometheus/refresh-token.sh:/refresh-token.sh:ro
+      - malachi-metrics-token:/token
+    depends_on:
+      malachi:
+        condition: service_healthy
+    mem_limit: 64m
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: malachi-prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/prometheus/single-node.yml:/etc/prometheus/prometheus.yml:ro
+      # Read-only: this container consumes the token, the sidecar above is the only writer.
+      - malachi-metrics-token:/etc/prometheus/token:ro
+      - malachi-prometheus:/prometheus
+    depends_on:
+      malachi:
+        condition: service_healthy
+    mem_limit: 512m
+    restart: unless-stopped
+
 volumes:
   # Persists the broker's log segments and ra state (credentials, ACLs, lockouts) across restarts.
   malachi-data:
+  # The scrape token, written by the sidecar and read by Prometheus. A volume rather than a bind mount
+  # so it never lands in the working tree, where a credential has no business being.
+  malachi-metrics-token:
+  malachi-prometheus:

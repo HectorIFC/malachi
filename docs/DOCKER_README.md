@@ -155,6 +155,61 @@ volumes:
 
 > These compose defaults are fine for test and development; tune them conservatively for production.
 
+Two ready-made stacks live in the repository, and both go further than the snippet above.
+
+### Single node, observable
+
+```bash
+docker compose up -d
+```
+
+A broker plus **Jaeger** and **Prometheus**, so the thing you just started is one you can watch:
+
+| What | Where |
+|------|-------|
+| Broker (binary protocol) | `localhost:4040` |
+| Dashboard | http://localhost:4041 |
+| Traces | http://localhost:16686 |
+| Metrics | http://localhost:9090 |
+
+Produce a little traffic and a produce shows up in Jaeger as a **distributed trace**: `malachi.produce`
+at the root, `malachi.broker.produce` under it, and `malachi.replication.commit` under that, carrying
+the topic, the record count and the byte count. Tracing is off by default everywhere else, because the
+sampler dropping every span is what makes `Tracer.with_span` free on the produce path; this stack sets
+`MALACHI_TRACING_ENABLED=true` and samples everything, which is right for watching a trickle and wrong
+for a busy node (use `MALACHI_TRACING_SAMPLE_RATIO` there).
+
+The metrics side needs one moving part that is worth understanding before you copy it. `/metrics`
+requires an authenticated user and a Malachi session expires, so a token pasted into a scrape config
+works right up until it does not. A small `metrics-token` sidecar logs in and rewrites the file
+Prometheus reads through `credentials_file`, which Prometheus re-reads on every scrape. It shares
+Prometheus's network namespace on purpose: sessions are bound to the IP that created them
+(`MALACHI_SESSION_IP_BINDING`), so the token has to be minted from the address that will use it.
+
+### Durable cluster, observable
+
+```bash
+docker compose -f docker-compose.cluster-durable.yml up -d
+```
+
+Three brokers forming one replicated control plane at replication factor 3, each on its own named
+volume, plus the same Jaeger and Prometheus. Restart the whole thing and the data is still there,
+which is the difference between this and `docker-compose.cluster.yml`: that one exists for benchmarks
+and keeps its data on tmpfs so fsync cost stays uniform across runs, and tmpfs is remounted empty on
+every restart.
+
+Only node 1 publishes to the host; the three are interchangeable for a client. Prometheus scrapes all
+three, because most Malachi series are per-node facts (BEAM memory, connections, the integrity scrub's
+progress over *that* node's disk) and scraping one would report a third of the cluster while looking
+complete. It uses one scrape job per node, each with its own token: users, ACLs and lockouts are
+replicated across the cluster through the auth `ra` group, but **sessions are not**, so a session
+minted on node 1 is rejected by node 2.
+
+Both stacks ship with placeholder credentials in a public file and with `MALACHI_REQUIRE_TLS=false`,
+which is the right trade for ports on your own machine and the wrong one for anything reachable. Set
+real passwords in the environment and point `MALACHI_TLS_CERTFILE` and `MALACHI_TLS_KEYFILE` at real
+certificates before either one leaves your laptop.
+
 ---
 
 ## Client protocol

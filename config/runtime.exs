@@ -479,6 +479,42 @@ config :malachi,
   auto_gc_enabled: System.get_env("MALACHI_AUTO_GC") != "false"
 
 # ============================================================
+# Tracing (OpenTelemetry)
+# ============================================================
+# Off unless asked for, which is the whole reason `Tracer.with_span` is affordable on the produce and
+# consume paths: with the sampler set to drop everything, a span costs a function call that decides not
+# to record. Turning it on here rather than in config.exs is what lets a deployment enable it without a
+# rebuild, which matters because the interesting time to trace is while something is wrong.
+#
+# MALACHI_TRACING_SAMPLE_RATIO trades detail for cost: 1.0 records every operation, which is what a
+# local compose stack wants and what a busy production node does not.
+if System.get_env("MALACHI_TRACING_ENABLED") == "true" do
+  ratio = parse_float.(System.get_env("MALACHI_TRACING_SAMPLE_RATIO"), 1.0)
+
+  sampler =
+    if ratio >= 1.0 do
+      :always_on
+    else
+      {:parent_based, %{root: {:trace_id_ratio_based, ratio}}}
+    end
+
+  config :opentelemetry,
+    sampler: sampler,
+    # Batched rather than :simple: a span per produce on a hot path would otherwise export inline and
+    # put the collector's latency on the request. (config/test.exs keeps :simple on purpose, so a test
+    # can assert on a span without waiting for a batch to flush.)
+    span_processor: :batch,
+    traces_exporter: :otlp,
+    resource: %{service: %{name: System.get_env("MALACHI_SERVICE_NAME") || "malachi"}}
+
+  config :opentelemetry_exporter,
+    # http_protobuf over the OTLP HTTP port rather than gRPC: one fewer moving part to misconfigure,
+    # and every collector worth pointing at speaks it. Jaeger's all-in-one image listens on 4318.
+    otlp_protocol: :http_protobuf,
+    otlp_endpoint: System.get_env("MALACHI_OTLP_ENDPOINT") || "http://localhost:4318"
+end
+
+# ============================================================
 # Production Security Warnings
 # ============================================================
 if actual_env == :prod do

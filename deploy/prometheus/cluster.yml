@@ -1,0 +1,54 @@
+# Prometheus scrape config for the durable 3-node cluster compose stack.
+#
+# One job per node, which looks like duplication and is not. Prometheus attaches `authorization` to a
+# scrape config rather than to a target, and each node needs a DIFFERENT token: users, ACLs and
+# lockouts are replicated across the cluster through the auth `ra` group, but sessions are not. They
+# live in a node-local ETS table, so a session minted on node 1 does not exist on node 2, which
+# answers `invalid_session` and a 403. Three tokens, therefore three jobs.
+#
+# The metrics-token sidecar writes one file per node and keeps them inside the session lifetime. It
+# also shares Prometheus's network namespace, so the logins come from the address that will scrape:
+# MALACHI_SESSION_IP_BINDING binds a session to the IP that created it.
+#
+# Every node is scraped rather than one of them, because most Malachi series are per-node facts (BEAM
+# memory, process count, connections, the integrity scrub's progress over THAT node's disk). Scraping
+# one node would report a third of the cluster and look complete.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: malachi1
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/token/malachi1.token
+    static_configs:
+      - targets: [malachi1:4041]
+        labels: { node: malachi1, deployment: cluster }
+
+  - job_name: malachi2
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/token/malachi2.token
+    static_configs:
+      - targets: [malachi2:4041]
+        labels: { node: malachi2, deployment: cluster }
+
+  - job_name: malachi3
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/token/malachi3.token
+    static_configs:
+      - targets: [malachi3:4041]
+        labels: { node: malachi3, deployment: cluster }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
