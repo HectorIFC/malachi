@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "timestamp": "2026-08-21T19:51:58Z",
+    "command": "scripts/docker-chaos-test.sh",
+    "git_ref": "d3a9c52-dirty",
+    "git_ref_date": "2026-08-21T16:46:03-03:00",
+    "malachi_version": "0.8.1",
+    "hardware": {
+      "cpu": "arm64",
+      "cores": 8,
+      "os": "Darwin 25.5.0"
+    }
+  },
+  "certification": "CHAOS CERTIFICATION",
+  "verdict": "passed",
+  "replication_factor": 3,
+  "events": [
+    "a: power pull (SIGKILL node 3)",
+    "b: network partition (node 2)",
+    "c: stalled node (SIGSTOP node 1)",
+    "d: rolling restart"
+  ],
+  "invariants": {
+    "acked_writes": 2614,
+    "post_chaos_records_per_s": 4683
+  },
+  "failures": []
+}

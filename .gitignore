@@ -10,6 +10,10 @@
 # Where third-party dependencies like ExDoc output generated docs.
 /doc/
 
+# Result pages rendered by `mix malachi.docs.results` from benchmark/published. Build output, not
+# source: committing them would create two places a number lives and one of them would go stale.
+/docs/generated/
+
 # Ignore .fetch files in case you like to edit your project deps locally.
 /.fetch
 
