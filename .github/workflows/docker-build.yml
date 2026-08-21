@@ -75,3 +75,27 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      # The Docker Hub page has no overview at all, so the image's own storefront says nothing about
+      # what it is or how to start it. This publishes one alongside every push of the image, which is
+      # the only way the two stay in step: a description updated by hand drifts from the image it
+      # describes, and nobody notices because nobody who works on the repo reads that page.
+      #
+      # A dedicated file rather than README.md, and not by preference: Docker Hub caps the description
+      # at 25,000 characters and the README is over 42,000, so publishing it would mean truncating it
+      # mid-section. The page it does publish is written for someone arriving at the image with no
+      # context, which is a different reader from the one the README addresses.
+      #
+      # Only on a real push. A pull request does not push the image either (see `push:` above), so
+      # updating the description from one would advertise a build that does not exist.
+      - name: Publish the Docker Hub overview
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+          readme-filepath: ./docs/DOCKERHUB.md
+          # Docker Hub caps this at 100 characters, and a colon followed by a space would end the YAML
+          # scalar early, so it is neither long nor punctuated the way prose would be.
+          short-description: An Elixir log broker on the NorthGuard model, quorum-replicated, cursors not offsets
