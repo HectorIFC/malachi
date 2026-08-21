@@ -135,8 +135,15 @@ logged. Rot in an active segment, and anything at all in a sealed one, is counte
 A single-node deployment scrubs too, and there the distinction matters more: with no replica there
 is nothing to repair from, so every finding lands in the unrepairable path with a loud log. That is
 still the difference between knowing and not knowing that data at rest went bad, and because
-recovery no longer truncates a damaged sealed segment, the frames after the damage are still on
-disk for a manual salvage.
+recovery never truncates a copy damaged by rot (a bad checksum or a mangled frame header), the
+frames after the damage are still on disk for a manual salvage.
+
+Be precise about which damage that covers, because the two shapes are not treated alike. Rot is left
+alone whatever the file's state. A torn tail is dropped unless the file carries its own seal marker,
+and a replica usually does not: that marker is written when the segment's log rolls locally, not
+when the control plane seals the segment. That asymmetry is deliberate rather than an oversight,
+since a torn tail has nothing valid after it by construction, so there is nothing to salvage. Rot is
+the case where the bytes past the damage are still worth keeping.
 
 ## Chaos certification
 

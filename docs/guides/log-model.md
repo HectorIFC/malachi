@@ -156,7 +156,7 @@ them are covered by the guarantee:
 - **Concurrent writers are not ordered relative to each other.** Two produces in flight at the same
   time, on different connections or different nodes, land in whatever order they reach the primary's
   mailbox. There are no producer sequence numbers and no idempotence. Ordering is guaranteed for writes
-  a client has ordered itself, that is, waiting for the acknowledgement before sending the next one.
+  a client has ordered itself, that is, waiting for the acknowledgment before sending the next one.
   Kafka's guarantee has the same shape: it is per producer, per partition.
 - **A retried produce lands at its retry position.** The primary appends a batch to its local log before
   waiting for the quorum, so a produce that came back `no_quorum` and was retried appears twice, with

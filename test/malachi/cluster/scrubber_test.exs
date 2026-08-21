@@ -499,17 +499,25 @@ defmodule Malachi.Cluster.ScrubberTest do
     scrubber =
       start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
 
-    secret = String.duplicate("s3cret-payload", 200)
+    # The assertion is on a SHORT fragment, deliberately. Asserting the absence of the whole payload
+    # is the trap: any bound on the log line makes that pass while the line still prints the first
+    # few hundred characters of the value, which is every bit as much of a leak.
+    fragment = "s3cret-payload"
+    secret = String.duplicate(fragment, 200)
 
     log =
       capture_log(fn ->
-        send(scrubber, {make_ref(), {:ok, secret}})
+        send(scrubber, {make_ref(), {:ok, [%{offset: 7, key: "user-3", value: secret}]}})
         assert Scrubber.damaged(scrubber) == []
       end)
 
     assert log =~ "unexpected message"
-    refute log =~ secret
-    assert String.length(log) < 2_000
+    refute log =~ fragment
+    refute log =~ "user-3"
+
+    # the shape survives, which is the whole reason the term is printed at all
+    assert log =~ "#Reference<"
+    assert String.length(log) < 500
   end
 
   test "a non-positive interval is refused and the default used, rather than busy-looping" do
@@ -542,20 +550,27 @@ defmodule Malachi.Cluster.ScrubberTest do
     metadata = sealed_everywhere([replica], ["a", "b", "c"])
     rot_copy(directory)
 
+    scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
     parent = self()
     handler_id = "scrub-telemetry-#{System.unique_integer([:positive])}"
 
+    # Filtered by the EMITTING process, which `:telemetry.execute/3` runs the handler in. Handlers are
+    # global and this file is async, so five other tests here rot a copy of the same segment and emit
+    # the same bad_crc/scrub event: without this, assert_receive can be satisfied by one of theirs and
+    # pass while this pass emitted nothing. Matching on the segment alone would not fix the second
+    # assertion either, since a pass event carries counts and no segment at all.
     :telemetry.attach_many(
       handler_id,
       [[:malachi, :storage, :integrity], [:malachi, :storage, :scrub]],
-      fn name, measurements, metadata, _config -> send(parent, {:telemetry, name, measurements, metadata}) end,
+      fn name, measurements, metadata, _config ->
+        if self() == scrubber, do: send(parent, {:telemetry, name, measurements, metadata})
+      end,
       nil
     )
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
-
-    scrubber =
-      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
 
     _result = Scrubber.scrub_now(scrubber)
 

@@ -72,8 +72,10 @@ node, on a slow cadence, it re-verifies the checksums of the sealed segments it 
 (`Malachi.Log.verify/2`, a read-only scan that never repairs or truncates) and rebuilds a damaged copy
 from a replica that still verifies, moving itself out of the read path first when it is the primary. A
 copy that will not decode is a lost replica, so the same re-replication clock applies to it. The one
-rule the repair never breaks: the local copy is not deleted until a peer has confirmed an intact one,
-because a partially readable copy beats no copy. See the operations guide for the knobs and cadence.
+rule the repair never breaks: the local copy is not deleted until a peer has confirmed a copy that is
+both intact and *complete* against what the control plane recorded at seal time, because a partially
+readable copy beats no copy, and beats a shorter one. See the operations guide for the knobs and
+cadence.
 
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks

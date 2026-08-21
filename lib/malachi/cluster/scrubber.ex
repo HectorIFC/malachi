@@ -173,9 +173,14 @@ defmodule Malachi.Cluster.Scrubber do
   # deactivates the call's alias on timeout), and that is the point: an unexpected message is a fact
   # worth surfacing, not a reason to take the process down.
   def handle_info(message, state) do
-    # Bounded on purpose: whatever arrives here is by definition not understood, so it could carry a
-    # record payload, and a log line is the one place user data must not leak into by accident.
-    Logger.warning("scrubber ignoring unexpected message: #{inspect(message, limit: 10, printable_limit: 256)}")
+    # `printable_limit: 0` is the point of these options, not `limit`: it replaces the CONTENT of
+    # every string in the term with an ellipsis while leaving the term's shape intact, so this prints
+    # something like `{#Reference<...>, {:ok, ...}}`. Whatever reaches this clause is by definition
+    # not a message we planned for, so it may carry record values, and a log line is the one place
+    # user data must not end up in by accident. Truncating the text is not enough for that: a bounded
+    # prefix of a payload is still a payload. The shape is what makes the line worth having, since it
+    # is what identifies the sender.
+    Logger.warning("scrubber ignoring unexpected message: #{inspect(message, limit: 3, printable_limit: 0)}")
 
     {:noreply, state}
   end

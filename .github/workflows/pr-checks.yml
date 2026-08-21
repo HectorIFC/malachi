@@ -263,7 +263,7 @@ jobs:
             // finish the work, not to wait on a reviewer.
             const isDraft = context.payload.pull_request.draft;
             const readyLine = isDraft
-              ? '- 📝 Still a draft: mark it ready for review when you are'
+              ? '- 📝 Still a draft: mark it ready for review when the work is finished'
               : '- 👀 Ready for review';
 
             const body = `## ${emoji} PR Validation Summary

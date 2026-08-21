@@ -167,7 +167,14 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
   test "an unreachable replica is skipped by the integrity probe, never repaired on unknown state" do
     [a, b] = [start_broker(), start_broker()]
+
+    # Waited for, not merely spawned. A pid that has not finished exiting yet is a plain process that
+    # answers no call, so the probe would block for its full timeout and then exit with :timeout
+    # instead of the :noproc this test is about: the same assertion, reached by a different path, two
+    # seconds later, at random.
     dead = spawn(fn -> :ok end)
+    reference = Process.monitor(dead)
+    assert_receive {:DOWN, ^reference, :process, ^dead, _reason}
 
     {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
     segment_id = {root, 0}

@@ -12,11 +12,15 @@ defmodule Malachi.Telemetry do
     * `[:malachi, :replication, :commit]`. `%{count}` / `%{result: :ok | :no_quorum}` - a quorum
       replication of a batch (`count` = records in the batch; `result` is whether a quorum stored it).
     * `[:malachi, :storage, :integrity]`. `%{position, unreadable_bytes}` /
-      `%{result, sealed, source, segment}` - a stored segment failed its checksum verification.
-      `result` is the framing/checksum reason (`:bad_crc`, `:bad_magic`, `:incomplete`), `position`
-      the byte where the damage starts, `sealed` whether the segment was immutable (damage there is
-      corruption at rest, not a crash mid-write), and `source` where the verdict came from
-      (`:recover` when a segment was opened, `:scrub` from the background verification pass).
+      `%{result, sealed, source, segment}` - a stored segment failed verification. `result` is what
+      the verification found, and the list is open rather than closed, so a consumer should have a
+      fallback branch: today it is `:bad_crc` or `:bad_magic` (a frame that does not decode),
+      `:incomplete` (a frame cut short), `:short_copy` (every frame decodes, but there are fewer
+      records or bytes than the control plane recorded at seal time), `:bad_index` (the sparse index
+      sidecar does not describe the segment) or a POSIX reason when the device itself could not be
+      read. `position` is the byte where the damage starts, `sealed` whether the segment was
+      immutable (damage there is corruption at rest, not a crash mid-write), and `source` where the
+      verdict came from (`:recover` when a segment was opened, `:scrub` from the background pass).
     * `[:malachi, :storage, :scrub]`. `%{verified, damaged, repaired, unrepairable}` / `%{}` - one
       background verification pass finished, with how many segments it covered. Steady progress
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not

@@ -257,6 +257,47 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
       assert Enum.map(records, & &1.value) == ["v0", "v1"]
     end
+
+    test "drops a partial trailing write (simulated crash mid-append)", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      # one frame per flush => each record is a clean frame boundary
+      store =
+        Enum.reduce(0..4, store, fn i, acc ->
+          {:ok, acc, _, _} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      :ok = ElixirStore.close(store)
+
+      # truncate the last few bytes => last frame becomes incomplete
+      path = Segment.path(store.segment)
+      size = File.stat!(path).size
+      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
+      {:ok, _} = :file.position(file_descriptor, size - 3)
+      :ok = :file.truncate(file_descriptor)
+      :file.close(file_descriptor)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+      assert recovered.segment.record_count == 4
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1", "v2", "v3"]
+      # file was truncated to the last valid frame boundary
+      assert File.stat!(path).size == recovered.segment.byte_size
+    end
+
+    test "stops at a corrupted frame (bit-rot), keeping the valid prefix", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+
+      # flip a byte in the payload of the 3rd frame (offset 2)
+      corrupt_payload_byte(Segment.path(store.segment), 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+      assert recovered.segment.record_count == 2
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
   end
 
   describe "integrity/1" do
@@ -554,47 +595,6 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
         File.rm_rf!(directory)
       end
-    end
-
-    test "drops a partial trailing write (simulated crash mid-append)", %{tmp_dir: directory} do
-      {:ok, store} = open(directory)
-      # one frame per flush => each record is a clean frame boundary
-      store =
-        Enum.reduce(0..4, store, fn i, acc ->
-          {:ok, acc, _, _} = ElixirStore.append(acc, [rec("v#{i}")])
-          {:ok, acc} = ElixirStore.sync(acc)
-          acc
-        end)
-
-      :ok = ElixirStore.close(store)
-
-      # truncate the last few bytes => last frame becomes incomplete
-      path = Segment.path(store.segment)
-      size = File.stat!(path).size
-      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
-      {:ok, _} = :file.position(file_descriptor, size - 3)
-      :ok = :file.truncate(file_descriptor)
-      :file.close(file_descriptor)
-
-      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
-      assert recovered.segment.record_count == 4
-      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
-      assert Enum.map(records, & &1.value) == ["v0", "v1", "v2", "v3"]
-      # file was truncated to the last valid frame boundary
-      assert File.stat!(path).size == recovered.segment.byte_size
-    end
-
-    test "stops at a corrupted frame (bit-rot), keeping the valid prefix", %{tmp_dir: directory} do
-      {:ok, store} = seed_frames(directory, 0..4)
-      :ok = ElixirStore.close(store)
-
-      # flip a byte in the payload of the 3rd frame (offset 2)
-      corrupt_payload_byte(Segment.path(store.segment), 2)
-
-      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
-      assert recovered.segment.record_count == 2
-      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
-      assert Enum.map(records, & &1.value) == ["v0", "v1"]
     end
   end
 
