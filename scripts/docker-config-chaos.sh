@@ -46,7 +46,7 @@ start_cluster
 start_checker "$CHECKER_WINDOW_S"
 sleep 10
 
-say "event h: rolling config deploy (group commit interval 2 -> 5)"
+event "h: rolling config deploy (group commit interval 2 -> 5)"
 export MALACHI_GROUP_COMMIT_INTERVAL_MS=5
 for node in malachi3 malachi2 malachi1; do
   before=$(acked_count)
@@ -61,7 +61,7 @@ for n in 1 2 3; do
 done
 echo "new config effective on all three nodes"
 
-say "event i: bad config on node 3 (crash-loop), quorum keeps serving, then rollback"
+event "i: bad config on node 3 (crash-loop), quorum keeps serving, then rollback"
 before=$(acked_count)
 export MALACHI_CLUSTER_STRATEGY=banana
 $COMPOSE up -d malachi3 >/dev/null 2>&1

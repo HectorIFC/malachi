@@ -5,15 +5,33 @@
 #
 # Contract: every check calls `fail` instead of exiting, so a run always reaches its summary;
 # `finish <name>` prints the PASS/FAIL banner and exits with the accumulated status.
+#
+# Set CHAOS_RESULT_FILE to also have `finish` write the run as JSON: what was injected, what held,
+# and on which commit. That file is what the published results page renders, so a drill that is not
+# read by a human still leaves a record.
 
 COMPOSE="docker compose -f docker-compose.cluster.yml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILED=0
 CHAOS_HOSTS="malachi1,malachi2,malachi3"
+EVENTS=()
+FAILURES=()
 
 say() { printf '\n== %s ==\n' "$1"; }
-fail() { echo "FAIL: $1"; FAILED=1; }
+
+fail() {
+  echo "FAIL: $1"
+  FAILED=1
+  FAILURES+=("$1")
+}
+
+# Announces an injected fault AND records it. One call site per event rather than a banner plus a
+# separate bookkeeping line, so the printed run and the recorded run can never disagree.
+event() {
+  EVENTS+=("$1")
+  say "event $1"
+}
 
 wait_healthy() {
   for _ in $(seq 1 48); do
@@ -68,6 +86,7 @@ close_window() {
   wait "$CHECKER" 2>/dev/null
   [ -n "${TRAFFIC:-}" ] && wait "$TRAFFIC" 2>/dev/null
   acked=$(wc -l < "$WORK/acked.log" 2>/dev/null | tr -d ' ')
+  ACKED_WRITES="${acked:-0}"
   echo "checker acked $acked writes through the chaos (log tail:)"
   tail -3 "$WORK/checker.log"
   [ "${acked:-0}" -gt 0 ] || fail "checker acked nothing: no availability at any point"
@@ -100,10 +119,75 @@ check_clean_produce() {
   post_errs=$(echo "$post" | jq -r '[.errors,.dropped]|add' 2>/dev/null)
   post_recs=$(echo "$post" | jq -r .records_per_s 2>/dev/null)
   if [ "${post_errs:-1}" = "0" ] && [ "${post_recs:-0}" -gt 0 ]; then
+    POST_CHAOS_RECORDS_PER_S="$post_recs"
     echo "post-chaos produce clean: ${post_recs} rec/s, 0 errors/drops"
   else
     fail "post-chaos produce not clean: $post"
   fi
+}
+
+# A JSON array of the arguments, escaped by jq rather than by hand. Event and failure text is free
+# form (it carries node names, paths and error strings), and one quote in any of it would produce a
+# file no parser accepts, which is a poor way for a published result to fail.
+json_array() {
+  if [ "$#" -eq 0 ]; then
+    echo '[]'
+  else
+    printf '%s\n' "$@" | jq -R . | jq -s .
+  fi
+}
+
+# When and from what, so a recorded run stands on its own. Same shape the two load generators write,
+# so one renderer covers all three. The version is read from mix.exs the way the release workflow
+# reads it; git is optional (a checkout is not guaranteed) and simply leaves the field empty.
+chaos_meta() {
+  ref="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  if [ -n "$ref" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then ref="${ref}-dirty"; fi
+
+  jq -n \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg command "${CHAOS_COMMAND:-$0}" \
+    --arg git_ref "$ref" \
+    --arg git_ref_date "$(git show -s --format=%cI HEAD 2>/dev/null || true)" \
+    --arg malachi_version "$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')" \
+    --arg cpu "$(uname -m)" \
+    --arg os "$(uname -s) $(uname -r)" \
+    --argjson cores "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo null)" \
+    '{timestamp: $timestamp, command: $command, git_ref: $git_ref, git_ref_date: $git_ref_date,
+      malachi_version: $malachi_version, hardware: {cpu: $cpu, cores: $cores, os: $os}}'
+}
+
+# The measured invariants, null where a harness does not run that check (the storage and config
+# drills certify other things). null says not measured; 0 would say measured and empty.
+chaos_invariants() {
+  jq -n \
+    --argjson acked "${ACKED_WRITES:-null}" \
+    --argjson post "${POST_CHAOS_RECORDS_PER_S:-null}" \
+    '{acked_writes: $acked, post_chaos_records_per_s: $post}'
+}
+
+# Writes the run as JSON when CHAOS_RESULT_FILE is set, and stays silent otherwise so an interactive
+# drill behaves exactly as before.
+write_result() {
+  [ -n "${CHAOS_RESULT_FILE:-}" ] || return 0
+  mkdir -p "$(dirname "$CHAOS_RESULT_FILE")"
+
+  verdict=passed
+  [ "$FAILED" != "0" ] && verdict=failed
+
+  jq -n \
+    --argjson meta "$(chaos_meta)" \
+    --arg certification "$1" \
+    --arg verdict "$verdict" \
+    --argjson replication_factor "${RF:-null}" \
+    --argjson events "$(json_array ${EVENTS[@]+"${EVENTS[@]}"})" \
+    --argjson invariants "$(chaos_invariants)" \
+    --argjson failures "$(json_array ${FAILURES[@]+"${FAILURES[@]}"})" \
+    '{meta: $meta, certification: $certification, verdict: $verdict,
+      replication_factor: $replication_factor, events: $events,
+      invariants: $invariants, failures: $failures}' > "$CHAOS_RESULT_FILE"
+
+  echo "result written to $CHAOS_RESULT_FILE"
 }
 
 # Prints the certification banner named $1 and exits 0/1 by the accumulated FAILED flag. On
@@ -120,6 +204,8 @@ finish() {
 
   $COMPOSE down >/dev/null 2>&1
   say "result"
+  # Before the exit below, not after: a failed drill is exactly the run whose record is worth having.
+  write_result "$1"
   if [ "$FAILED" != "0" ]; then
     echo "$1 FAILED (see FAIL lines above)"
     exit 1

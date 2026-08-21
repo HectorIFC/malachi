@@ -133,6 +133,64 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "reproduce metadata" do
+    test "the report carries a meta block describing when, from what, and on what" do
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("meta"))
+
+      assert %{meta: meta} = r
+      assert meta.timestamp =~ ~r/^\d{4}-\d{2}-\d{2}T/
+      assert is_binary(meta.hardware.cpu)
+      assert meta.hardware.schedulers > 0
+      assert meta.malachi_version =~ ~r/^\d+\.\d+\.\d+/
+
+      # The command is rebuilt from the EFFECTIVE config, not from what was typed, so a knob left at its
+      # default is still part of the reproduction. --keys was never passed here.
+      assert meta.command =~ "mix malachi.loadtest"
+      assert meta.command =~ "--scenario produce"
+      assert meta.command =~ "--connections 2"
+      assert meta.command =~ "--batch 5"
+      assert meta.command =~ "--keys 1000", "a defaulted knob still belongs in a reproduce command"
+    end
+
+    test "the recorded command carries no credentials" do
+      # This string is committed and published with the result. A password reaching it would be a leak
+      # that survives in git history, so the reconstruction excludes the auth options by construction.
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("nocreds"))
+
+      refute r.meta.command =~ "admin123"
+      refute r.meta.command =~ "--pass"
+      refute r.meta.command =~ "--token"
+    end
+
+    test "--json emits a document a parser accepts, matching the returned report" do
+      # The report now carries free text from the environment (an architecture string, a git ref, a
+      # host), and the previous hand-built JSON had no escaping: one quote in any of them produced a
+      # document no parser would take. Parsing the output is what pins that.
+      opts = [
+        port: @port,
+        user: "admin",
+        pass: "admin123",
+        warmup: 0,
+        duration: 1,
+        scenario: :produce,
+        connections: 2,
+        batch: 5,
+        topic: topic("json"),
+        json: true
+      ]
+
+      output = capture_io(fn -> Process.put(:report, Loadtest.run(opts)) end)
+      report = Process.get(:report)
+
+      assert {:ok, decoded} = Jason.decode(output)
+      assert decoded["scenario"] == "produce"
+      assert decoded["records_per_s"] == report.records_per_s
+      assert decoded["latency_ms"]["p50"] == report.latency_ms.p50
+      assert decoded["meta"]["command"] == report.meta.command
+      assert decoded["meta"]["hardware"]["cpu"] == report.meta.hardware.cpu
+    end
+  end
+
   describe "option validation and edge cases" do
     test "zero or negative counts are rejected up front with a named error" do
       assert_raise ArgumentError, ~r/connections must be a positive integer/, fn ->
