@@ -178,6 +178,17 @@ defmodule Malachi.BrokerServer do
   def metadata(server), do: GenServer.call(server, :metadata)
 
   @doc """
+  The `Malachi.Cluster.ReplicationServer` this broker owns, or `nil` when it was given an external
+  broker set (the clustered shape, where the replication server is supervised and named separately).
+
+  A single-node broker starts its own, unnamed, so this is the only way to name it as a replica: the
+  integrity scrub needs it to tell which stored segments are its own. Ask per use rather than caching
+  it, since a broker restart replaces the process.
+  """
+  @spec replication_ref(GenServer.server()) :: pid() | nil
+  def replication_ref(server), do: GenServer.call(server, :replication_ref)
+
+  @doc """
   The per-topic overview (`Malachi.Metadata.overview/1`) annotated with each topic's failure-domain
   violation count (`Malachi.Broker.domain_violations/2`), computed from a single merged-metadata view.
   """
@@ -301,6 +312,13 @@ defmodule Malachi.BrokerServer do
       |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes, bootstrap_orchestrator)
 
     {:ok, broker} = Broker.open(broker_opts)
+
+    # With authoritative (ra-backed) metadata, the topics/ranges/segments survive a restart, but the
+    # in-memory offsets and segment_seq maps do not: without recovery, every read of pre-restart data
+    # clamps to :eof at offset 0 (durable data unreadable, the failure the chaos harness caught).
+    # Best-effort: an unreachable primary falls back to the metadata floor and self-corrects later
+    # through offset adoption. In-memory metadata (nil refresh) has nothing to recover from.
+    broker = if metadata_refresh, do: recover_range_state(broker), else: broker
 
     state = %{
       broker: broker,
@@ -441,6 +459,10 @@ defmodule Malachi.BrokerServer do
 
   def handle_call(:metadata, _from, state) do
     {:reply, Broker.metadata(state.broker), state}
+  end
+
+  def handle_call(:replication_ref, _from, state) do
+    {:reply, state.replication, state}
   end
 
   def handle_call(:topics_overview, _from, state) do
@@ -702,13 +724,70 @@ defmodule Malachi.BrokerServer do
   # bootstrap any vnode whose ra cluster is not up yet; then re-seed the local cache from the clusters.
   # Reschedules itself. Idempotent: bootstrapping an already-formed vnode is a no-op, and the cache
   # re-seed only moves forward (the ra log is the source of truth).
+  # Recovers each range's end offset and segment sequence floor from the authoritative metadata plus
+  # the primaries' logs, so a restarted broker can serve reads of pre-restart data. Active segments
+  # ask their primary's replication server for the true end (falling back to the segment's start
+  # offset when unreachable, self-correcting later via offset adoption); sealed-only ranges compute
+  # the end from the sealed metadata (start_offset + length).
+  defp recover_range_state(broker) do
+    metadata = DSRSM.merged_metadata(broker.dsrsm)
+
+    metadata.topics
+    |> Map.keys()
+    |> Enum.flat_map(fn topic -> Enum.map(DSRSM.ranges_of_topic(broker.dsrsm, topic), &{topic, &1.id}) end)
+    |> Enum.reduce(broker, &recover_one_range/2)
+  end
+
+  defp recover_one_range({topic, range_id}, broker) do
+    case DSRSM.segments_of_range(broker.dsrsm, topic, range_id) do
+      [] ->
+        broker
+
+      segments ->
+        next = recovered_next_offset(segments)
+        min_seq = segments |> Enum.map(fn %{id: {_range, seq}} -> seq end) |> Enum.max() |> Kernel.+(1)
+        Broker.seed_range_state(broker, range_id, next, min_seq)
+    end
+  end
+
+  defp recovered_next_offset(segments) do
+    case Enum.find(segments, &(&1.state == :active)) do
+      %{id: segment_id, start_offset: start_offset, replica_set: [primary | _]} ->
+        case safe_end_offset(primary, segment_id) do
+          next when is_integer(next) -> next
+          _empty_or_unreachable -> start_offset
+        end
+
+      nil ->
+        # Sealed-only range: the seal command recorded each segment's length deterministically.
+        %{start_offset: start_offset, length: length} = Enum.max_by(segments, & &1.start_offset)
+        start_offset + (length || 0)
+    end
+  end
+
+  # Short timeout: this runs inside the broker loop (init and the periodic reconcile), and an
+  # unreachable primary must cost milliseconds, not the default five seconds per range.
+  defp safe_end_offset(primary, segment_id) do
+    ReplicationServer.end_offset(primary, segment_id, 250)
+  catch
+    :exit, _reason -> :unreachable
+  end
+
   defp reconcile_metadata(state) do
     schedule_reconcile(state)
     bootstrap_missing_vnodes(state.bootstrap)
 
     case state.metadata_refresh.() do
-      nil -> state
-      dsrsm -> %{state | broker: Broker.put_cache(state.broker, dsrsm)}
+      nil ->
+        state
+
+      dsrsm ->
+        # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
+        # local offsets map, which only advances for produces IT handles, so writes flowing through
+        # OTHER frontends (or landed while this node was down) would otherwise stay invisible to its
+        # reads forever. The seeding is monotone (max), so refreshing never rewinds live state.
+        broker = Broker.put_cache(state.broker, dsrsm)
+        %{state | broker: recover_range_state(broker)}
     end
   end
 

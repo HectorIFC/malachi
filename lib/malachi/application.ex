@@ -31,6 +31,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Cluster.Scrubber
   alias Malachi.Cluster.SplitCoordinator
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.VnodeCoordinatorManager
@@ -233,11 +234,15 @@ defmodule Malachi.Application do
           membership_child(nodes, vnodes),
           replication_child(),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir())
-        ]
+        ] ++ scrubber_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
-        for {name, dir} <- DataPlaneRouter.shards(log_data_dir()), do: log_broker_child(nil, nodes, name, dir)
+        # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
+        # the scrubber asks for its replication server.
+        Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
+          [log_broker_child(nil, nodes, name, dir) | scrubber_children(name, dir)]
+        end)
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
@@ -595,6 +600,64 @@ defmodule Malachi.Application do
     |> Map.new()
   end
 
+  # The scrub runs on EVERY node, not just the leader: only a node can read its own disk, and a
+  # damaged copy is a per-copy fact. It also belongs beside the data plane rather than with the
+  # coordinators, which are dropped wholesale in the sharded control plane (coordinator_children/2).
+  # Clustered: one scrubber over the node's named replication server.
+  defp scrubber_children do
+    scrubber_child(
+      Malachi.LogScrubber,
+      fn -> BrokerServer.metadata(Malachi.LogBroker) end,
+      {Malachi.LogReplication, node()},
+      log_data_dir()
+    )
+  end
+
+  # Single-node: the broker owns an unnamed replication server per shard, so each shard gets its own
+  # scrubber over its own data directory. Repair needs a replica and there is none here, so the scrub
+  # detects and alarms rather than fixing; that is still the difference between knowing and not
+  # knowing that data at rest went bad.
+  defp scrubber_children(broker_name, directory) do
+    scrubber_child(
+      :"#{broker_name}Scrubber",
+      fn -> BrokerServer.metadata(broker_name) end,
+      fn -> BrokerServer.replication_ref(broker_name) end,
+      directory
+    )
+  end
+
+  defp scrubber_child(name, metadata_source, local_ref, directory) do
+    if Application.get_env(:malachi, :scrub_enabled, true) do
+      opts = [
+        name: name,
+        metadata_source: metadata_source,
+        local_ref: local_ref,
+        directory: directory,
+        apply_command: fn command -> BrokerServer.apply_heal(Malachi.LogBroker, [command]) end,
+        interval: Application.get_env(:malachi, :scrub_interval_ms, 60_000),
+        segments_per_tick: Application.get_env(:malachi, :scrub_segments_per_tick, 1)
+      ]
+
+      [%{id: name, start: {Scrubber, :start_link, [opts]}}]
+    else
+      []
+    end
+  end
+
+  # Thresholds for a segment log's INTERNAL roll, forwarded to each segment as `Malachi.Log` options.
+  # Only passed when set, so an unset knob keeps the library defaults (1GB / 1h) rather than overriding
+  # them with nil. Rolling is what writes the sparse-index sidecar (the store persists it on seal), so
+  # lowering these is also how a test window gets sidecars to exercise at all.
+  defp log_roll_opts do
+    [max_bytes: :log_roll_max_bytes, max_age_ms: :log_roll_max_age_ms]
+    |> Enum.flat_map(fn {option, key} ->
+      case Application.get_env(:malachi, key) do
+        nil -> []
+        value -> [{option, value}]
+      end
+    end)
+  end
+
   defp replication_child do
     %{
       id: Malachi.LogReplication,
@@ -612,7 +675,7 @@ defmodule Malachi.Application do
              # Own interval knob too: tuning the rf=1 flush period must never silently retune every
              # replica's fsync cadence.
              group_commit_interval_ms: Application.get_env(:malachi, :replication_group_commit_interval_ms, 10)
-           ]
+           ] ++ log_roll_opts()
          ]}
     }
   end
@@ -727,8 +790,22 @@ defmodule Malachi.Application do
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
   defp log_broker_child(cluster, nodes, name, dir) do
-    opts = [name: name] ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+    # log_roll_opts reaches the single-node broker too: without an external broker set it starts its own
+    # replication server, and the roll thresholds are what make sidecars exist there as well.
+    opts =
+      [name: name] ++
+        segment_opts() ++ log_roll_opts() ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+
     %{id: name, start: {Malachi.BrokerServer, :start_link, [dir, opts]}}
+  end
+
+  # Only forwarded when configured (MALACHI_SEGMENT_MAX_BYTES), so an unset knob keeps the
+  # library default rather than overriding it with nil.
+  defp segment_opts do
+    case Application.get_env(:malachi, :segment_max_bytes) do
+      nil -> []
+      bytes -> [segment_max_bytes: bytes]
+    end
   end
 
   # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is

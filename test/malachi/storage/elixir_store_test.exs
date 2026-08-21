@@ -11,6 +11,41 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
   defp open(directory, opts \\ []), do: ElixirStore.open(directory, "segment-0", opts)
 
+  # One append+sync per record, so every record is its own clean frame boundary (what the damage
+  # helpers below index into).
+  defp seed_frames(directory, range, opts \\ []) do
+    {:ok, store} = open(directory, opts)
+
+    store =
+      Enum.reduce(range, store, fn i, acc ->
+        {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+        {:ok, acc} = ElixirStore.sync(acc)
+        acc
+      end)
+
+    {:ok, store}
+  end
+
+  # Byte position where the frame holding record `index` starts.
+  defp frame_position(path, index) do
+    {pairs, _valid_bytes} = Record.decode_all(File.read!(path))
+    {_record, position} = Enum.at(pairs, index)
+    position
+  end
+
+  # Flips a byte inside the payload of frame `index` (past the 10-byte header), the bit-rot shape
+  # the CRC exists to catch.
+  defp corrupt_payload_byte(path, index), do: corrupt_byte_at(path, frame_position(path, index) + 12)
+
+  defp corrupt_byte_at(path, position) do
+    <<head::binary-size(position), byte, tail::binary>> = File.read!(path)
+    File.write!(path, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
+  end
+
+  defp truncate_to(path, bytes) do
+    File.write!(path, binary_part(File.read!(path), 0, bytes))
+  end
+
   describe "append / sync / read round-trip" do
     test "reads back appended records in order with sequential offsets", %{tmp_dir: directory} do
       {:ok, store} = open(directory)
@@ -177,6 +212,52 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert ElixirStore.append(recovered, [rec("b")]) == {:error, :sealed}
     end
 
+    test "rot in an ACTIVE segment keeps the valid frames that follow it", %{tmp_dir: directory} do
+      # Sealing is a control-plane decision: a replica's file only carries a seal marker when its own
+      # log rolled locally (by size or age), so a segment the cluster considers immutable usually has
+      # no marker on disk. Keying the guard on the marker alone would leave the destructive path open
+      # in exactly the deployment that matters, so the rule is about the DAMAGE: a checksum failure
+      # means the frame was written whole and is wrong, and the frames after it may be perfectly
+      # good, recoverable from a peer. Only a torn tail (the crash-mid-write shape) is dropped.
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+
+      path = Segment.path(store.segment)
+      size_before = File.stat!(path).size
+      corrupt_payload_byte(path, 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert File.stat!(path).size == size_before, "rot must not cost the valid frames after it"
+      assert %{reason: :bad_crc, sealed?: false} = ElixirStore.integrity(recovered)
+      # the copy still serves only its valid prefix; the rest waits for repair from a replica
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
+
+    test "recovering a corrupt SEALED segment keeps its bytes instead of truncating them",
+         %{tmp_dir: directory} do
+      # A sealed segment was fully durable when it was sealed, so a short scan means corruption at
+      # rest, not a crash mid-write. Truncating there would destroy the valid frames AFTER the
+      # damaged one, which at rf=1 is the difference between repairable and permanently lost, and
+      # it happens silently on the next open. Recovery must leave the file alone and serve only the
+      # valid prefix; the scrub reports it for repair from an intact replica.
+      {:ok, store} = seed_frames(directory, 0..4)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      path = Segment.path(store.segment)
+      size_before = File.stat!(path).size
+      corrupt_payload_byte(path, 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert File.stat!(path).size == size_before, "a sealed segment must never be truncated by recovery"
+      assert recovered.segment.record_count == 2
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
+
     test "drops a partial trailing write (simulated crash mid-append)", %{tmp_dir: directory} do
       {:ok, store} = open(directory)
       # one frame per flush => each record is a clean frame boundary
@@ -206,30 +287,314 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
 
     test "stops at a corrupted frame (bit-rot), keeping the valid prefix", %{tmp_dir: directory} do
-      {:ok, store} = open(directory)
-
-      store =
-        Enum.reduce(0..4, store, fn i, acc ->
-          {:ok, acc, _, _} = ElixirStore.append(acc, [rec("v#{i}")])
-          {:ok, acc} = ElixirStore.sync(acc)
-          acc
-        end)
-
+      {:ok, store} = seed_frames(directory, 0..4)
       :ok = ElixirStore.close(store)
-      path = Segment.path(store.segment)
 
-      # find the start position of the 3rd frame (offset 2) and flip a byte in its payload
-      {pairs, _} = Record.decode_all(File.read!(path))
-      {_rec, frame2_pos} = Enum.at(pairs, 2)
-      data = File.read!(path)
-      flip_at = frame2_pos + 12
-      <<head::binary-size(flip_at), byte, tail::binary>> = data
-      File.write!(path, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
+      # flip a byte in the payload of the 3rd frame (offset 2)
+      corrupt_payload_byte(Segment.path(store.segment), 2)
 
       {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
       assert recovered.segment.record_count == 2
       assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
       assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
+  end
+
+  describe "integrity/1" do
+    test "a clean recovery reports :ok, and so does a freshly opened segment", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      assert ElixirStore.integrity(store) == :ok
+      :ok = ElixirStore.close(store)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+      assert ElixirStore.integrity(recovered) == :ok
+    end
+
+    test "a damaged SEALED segment reports the reason, position and unreadable bytes",
+         %{tmp_dir: directory} do
+      # The verdict exists so the caller can say something: recovery already scanned the file, and
+      # without carrying its finding out the node would serve a short copy in silence.
+      {:ok, store} = seed_frames(directory, 0..4)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      path = Segment.path(store.segment)
+      size = File.stat!(path).size
+      position = frame_position(path, 2)
+      corrupt_payload_byte(path, 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert %{reason: :bad_crc, position: ^position, sealed?: true, unreadable_bytes: unreadable} =
+               ElixirStore.integrity(recovered)
+
+      assert unreadable == size - position
+    end
+
+    test "a torn tail on an ACTIVE segment reports what truncation dropped", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      last_frame = frame_position(path, 4)
+      truncate_to(path, last_frame + 3)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert %{reason: :incomplete, position: ^last_frame, sealed?: false, unreadable_bytes: 3} =
+               ElixirStore.integrity(recovered)
+
+      # and the truncation still happened: an active segment's partial tail was never acked
+      assert File.stat!(path).size == last_frame
+    end
+  end
+
+  describe "a damaged sparse index never changes what a read returns" do
+    # The sidecar has no checksum of its own and every sealed read trusts its byte positions, so a
+    # rotted entry used to reproduce exactly the silent failure the record CRCs exist to prevent: the
+    # read comes back empty (or short) and the broker reads that as a drained source.
+    setup %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+      %{store: store, values: for(i <- 0..9, do: "v#{i}")}
+    end
+
+    defp open_sealed(directory, store) do
+      {:ok, reader} =
+        ElixirStore.open_read(directory, "segment-0", record_count: store.segment.record_count, base_offset: 0)
+
+      reader
+    end
+
+    defp write_index(path, entries) do
+      File.write!(path, for({offset, position} <- entries, into: <<>>, do: <<offset::64, position::64>>))
+    end
+
+    test "an entry pointing INSIDE a frame still reads every record", %{tmp_dir: directory} = context do
+      # the shape that returned an empty page: decoding starts mid-frame and fails on the first byte
+      write_index(Segment.index_path(context.store.segment), [
+        {5, frame_position(Segment.path(context.store.segment), 5) + 3}
+      ])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      assert {:ok, [record]} = ElixirStore.read(reader, 5, 1)
+      assert record.value == "v5"
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "an entry pointing PAST the target does not skip records", %{tmp_dir: directory} = context do
+      # a valid frame boundary, just the wrong one: the read would silently start after the target
+      path = Segment.path(context.store.segment)
+      write_index(Segment.index_path(context.store.segment), [{0, frame_position(path, 7)}])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "an entry past the end of the file is harmless", %{tmp_dir: directory} = context do
+      path = Segment.path(context.store.segment)
+      write_index(Segment.index_path(context.store.segment), [{0, File.stat!(path).size * 4}])
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 0, 100)
+      assert Enum.map(records, & &1.value) == context.values
+      :ok = ElixirStore.close(reader)
+    end
+
+    test "no index at all still reads correctly (it is only a hint)", %{tmp_dir: directory} = context do
+      File.rm!(Segment.index_path(context.store.segment))
+
+      reader = open_sealed(directory, context.store)
+      assert {:ok, records} = ElixirStore.read(reader, 3, 100)
+      assert Enum.map(records, & &1.value) == Enum.drop(context.values, 3)
+      :ok = ElixirStore.close(reader)
+    end
+
+    property "any single-byte corruption of the index leaves reads identical", context do
+      %{tmp_dir: directory, store: store, values: values} = context
+      index_path = Segment.index_path(store.segment)
+      pristine = File.read!(index_path)
+
+      check all(
+              position <- StreamData.integer(0..(byte_size(pristine) - 1)),
+              target <- StreamData.integer(0..9),
+              max_runs: 50
+            ) do
+        corrupt_byte_at(index_path, position)
+
+        reader = open_sealed(directory, store)
+        result = ElixirStore.read(reader, target, 100)
+        :ok = ElixirStore.close(reader)
+
+        assert {:ok, records} = result
+        assert Enum.map(records, & &1.value) == Enum.drop(values, target)
+
+        File.write!(index_path, pristine)
+      end
+    end
+  end
+
+  describe "verify/3" do
+    test "reports an intact segment with its record and byte counts", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+
+      bytes = File.stat!(Segment.path(store.segment)).size
+      assert ElixirStore.verify(directory, "segment-0") == {:ok, %{records: 5, bytes: bytes}}
+    end
+
+    test "reports a bad checksum with the position of the damaged frame", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      frame_position = frame_position(path, 2)
+
+      corrupt_payload_byte(path, 2)
+
+      assert {:error, details} = ElixirStore.verify(directory, "segment-0")
+      assert details.reason == :bad_crc
+      assert details.position == frame_position
+      assert details.file == path
+    end
+
+    test "reports a torn tail as :incomplete, not as a clean end of file", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      last_frame = frame_position(path, 4)
+
+      # cut the last frame in half: the scan runs out of bytes mid-frame
+      truncate_to(path, last_frame + 3)
+
+      assert {:error, %{reason: :incomplete, position: ^last_frame}} = ElixirStore.verify(directory, "segment-0")
+    end
+
+    test "reports a mangled frame header as :bad_magic", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      frame_position = frame_position(path, 1)
+
+      # the magic is the first byte of the frame, outside the CRC's coverage
+      corrupt_byte_at(path, frame_position)
+
+      assert {:error, %{reason: :bad_magic, position: ^frame_position}} = ElixirStore.verify(directory, "segment-0")
+    end
+
+    test "a corrupted length field is still caught, as an incomplete frame", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      frame_position = frame_position(path, 1)
+
+      # byte 2 of the header is the top byte of payload_length: inflating it makes the frame claim
+      # far more bytes than the file holds. The CRC never covers this field, so the framing does.
+      corrupt_byte_at(path, frame_position + 2)
+
+      assert {:error, %{reason: reason, position: ^frame_position}} = ElixirStore.verify(directory, "segment-0")
+      assert reason in [:incomplete, :bad_crc]
+    end
+
+    test "verifying a segment that is not stored here is :enoent, not a failure", %{tmp_dir: directory} do
+      assert ElixirStore.verify(directory, "segment-0") == {:error, :enoent}
+    end
+
+    test "an absent index is not damage: it is only a hint", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..3)
+      :ok = ElixirStore.close(store)
+      refute File.exists?(Segment.index_path(store.segment))
+
+      assert {:ok, %{records: 4}} = ElixirStore.verify(directory, "segment-0")
+    end
+
+    test "a rotted index entry is reported as :bad_index", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      corrupt_byte_at(index_path, byte_size(File.read!(index_path)) - 1)
+
+      assert {:error, %{reason: :bad_index, file: ^index_path}} =
+               ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
+    test "an index cut mid-entry is reported, not silently accepted", %{tmp_dir: directory} do
+      # The sidecar is a whole number of fixed-size entries, so a remainder means the file was cut
+      # part way through one. Counting the entries the parser produced cannot see this: the parser
+      # drops the partial tail, so its count always matches what the file size implies. A truncated
+      # sidecar has to be caught by the leftover bytes.
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      full = File.read!(index_path)
+      File.write!(index_path, binary_part(full, 0, byte_size(full) - 5))
+
+      assert {:error, %{reason: :bad_index, detail: :trailing_bytes, file: ^index_path}} =
+               ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
+    test "damage to the records is reported before the index is even considered", %{tmp_dir: directory} do
+      # An index rebuilt over damaged records would faithfully describe the damage, so the segment's
+      # own verdict has to come first.
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      corrupt_payload_byte(Segment.path(store.segment), 4)
+      corrupt_byte_at(Segment.index_path(store.segment), 0)
+
+      assert {:error, %{reason: :bad_crc}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+    end
+
+    test "rebuild_index writes an index the reads can trust again", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 1)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+
+      index_path = Segment.index_path(store.segment)
+      pristine = File.read!(index_path)
+      corrupt_byte_at(index_path, 8)
+      assert {:error, %{reason: :bad_index}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+
+      assert :ok = ElixirStore.rebuild_index(directory, "segment-0", index_interval: 1)
+
+      assert {:ok, %{records: 10}} = ElixirStore.verify(directory, "segment-0", index_interval: 1)
+      assert File.read!(index_path) == pristine, "a rebuild reproduces the index the seal wrote"
+    end
+
+    property "no single-byte corruption anywhere in a segment goes undetected" do
+      check all(
+              values <-
+                StreamData.list_of(StreamData.string(:alphanumeric, min_length: 1), min_length: 1, max_length: 8),
+              position_seed <- StreamData.positive_integer(),
+              max_runs: 60
+            ) do
+        directory = Path.join(System.tmp_dir!(), "malachi_verify_prop_#{System.unique_integer([:positive])}")
+        on_exit(fn -> File.rm_rf!(directory) end)
+
+        {:ok, store} = ElixirStore.open(directory, "segment-0")
+        {:ok, store, _first, _last} = ElixirStore.append(store, Enum.map(values, &rec/1))
+        {:ok, store} = ElixirStore.sync(store)
+        :ok = ElixirStore.close(store)
+
+        path = Segment.path(store.segment)
+        assert {:ok, _intact} = ElixirStore.verify(directory, "segment-0")
+
+        # every byte is fair game: header (magic, length, checksum) and payload alike
+        corrupt_byte_at(path, rem(position_seed, File.stat!(path).size))
+
+        assert {:error, %{reason: _reason}} = ElixirStore.verify(directory, "segment-0"),
+               "a corrupted segment must never verify as intact"
+
+        File.rm_rf!(directory)
+      end
     end
   end
 

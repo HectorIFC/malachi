@@ -14,7 +14,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :produce],
     [:malachi, :consume],
     [:malachi, :auth],
-    [:malachi, :replication, :commit]
+    [:malachi, :replication, :commit],
+    [:malachi, :storage, :integrity],
+    [:malachi, :storage, :scrub]
   ]
 
   @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
@@ -40,5 +42,22 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :replication, :commit], _measurements, %{result: result}, _config) do
     Metrics.record_replication(result)
+  end
+
+  # A torn frame at the END of an ACTIVE segment is ordinary crash recovery: those bytes were never
+  # acknowledged, and `Malachi.Cluster.ReplicationServer` already logs it as the cost of the crash
+  # rather than as an alarm. Counting it would put it in the very series an operator alerts on, so a
+  # routine restart would read as corruption at rest. Rot on an active segment is real damage and is
+  # still counted, and so is anything at all on a sealed one.
+  def handle_event([:malachi, :storage, :integrity], _measurements, %{result: :incomplete, sealed: false}, _config) do
+    :ok
+  end
+
+  def handle_event([:malachi, :storage, :integrity], _measurements, %{result: result}, _config) do
+    Metrics.record_integrity_failure(result)
+  end
+
+  def handle_event([:malachi, :storage, :scrub], measurements, _metadata, _config) do
+    Metrics.record_scrub_pass(measurements.verified, measurements.repaired, measurements.unrepairable)
   end
 end

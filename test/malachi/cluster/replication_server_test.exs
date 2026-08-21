@@ -3,6 +3,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Storage.Layout
 
   @segment {{"events", 0}, 0}
 
@@ -159,6 +160,45 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert stale == nil, "committed batch left a stale timeout: #{inspect(stale)}"
     end
 
+    test "an ack arriving after the no-quorum timeout does not answer the batch a second time" do
+      # The mirror of the test above, and the other half of the exactly-once invariant: there, an
+      # ack cancels the timer; here the timer wins and the ack arrives late. A parked batch must be
+      # answered EXACTLY once, so the late ack must find the batch gone and reply nothing. This is
+      # the interleaving the Concuerror spike targeted and could not explore (see
+      # docs/ARCHITECTURE.md), so it is pinned deterministically instead: a stub follower that
+      # never acks on its own lets the timeout fire first, and the ack is then injected by hand.
+      primary = start_broker(follow_timeout: 20)
+      silent_follower = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(silent_follower, :kill) end)
+
+      :ok =
+        ReplicationServer.replicate_async(
+          primary,
+          @segment,
+          [primary, silent_follower],
+          0,
+          records(["a"]),
+          self(),
+          :late
+        )
+
+      assert_receive {:replicate_result, :late, {:error, :no_quorum}}, 1_000
+
+      # The follower's ack, delayed past the timeout (its offset is the batch's last).
+      GenServer.cast(primary, {:replica_ack, @segment, silent_follower, {:ok, 0}})
+
+      refute_receive {:replicate_result, :late, _second}, 200
+
+      # Not a vacuous pass: the late ack really was processed (the tracker recorded the follower's
+      # offset), so the silence above is the timeout handler having consumed the batch, not the ack
+      # being discarded as unknown.
+      tracker = :sys.get_state(Process.whereis(primary)).trackers[@segment]
+      assert tracker.match[silent_follower] == 0
+
+      # The server is still healthy after the stale ack: it keeps serving new batches.
+      assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, [primary], 1, records(["b"]))
+    end
+
     test "quorum holds with one dead follower, fails without a majority" do
       # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives. A short
       # follow_timeout keeps the no-quorum case fast.
@@ -192,6 +232,129 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert eventually(fn -> read_values(behind, @segment) == ["a", "b", "c"] end),
              "behind replica should backfill to a/b/c, got #{inspect(read_values(behind, @segment))}"
     end
+  end
+
+  test "a replica restarted over its persisted directory recovers instead of crashing" do
+    # After a power-loss restart the segment files are already on disk; the first append used to blow
+    # up the server with an :already_exists MatchError (Log.open creating over existing files), which
+    # crash-looped the whole replication server on a restarted node, exactly what the chaos harness
+    # caught. With recover, the replica resumes at its durable end and keeps serving.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_restart_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_restart_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # The restarted replica accepts appends continuing its durable end (this crashed before the fix)
+    # and still serves the pre-restart records.
+    assert {:ok, 2} = ReplicationServer.replicate(name, @segment, [name], 0, records(["c"]))
+    assert read_values(name, @segment) == ["a", "b", "c"]
+  end
+
+  test "a restarted replica serves COLD reads of its durable segments (no append needed first)" do
+    # The storage-chaos harness read 0 of 4592 acked records off a healthy cluster: the read
+    # handler only served segments already open in memory, and only the append path opened them,
+    # so after a restart every pre-restart record answered :eof until some write touched its
+    # segment. A read must recover from disk on its own.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_cold_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_cold_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # first interaction is a READ, not an append
+    assert read_values(name, @segment) == ["a", "b"]
+
+    # a segment this server never stored still answers :eof, without creating files as a side effect
+    unknown = {{"cold_none", 0}, 0}
+    assert ReplicationServer.read(name, unknown, 0, 10) == :eof
+    assert ReplicationServer.stored_bytes(name, unknown) == 0
+  end
+
+  test "opening a corrupt sealed copy warns and emits an integrity event naming the segment" do
+    # Recovery knows the copy is damaged the moment it scans it. Reporting here, at the one place a
+    # segment is opened, is what makes the damage visible immediately: the background scrub verifies
+    # everything eventually, but on a slow cadence, so a node could otherwise serve short reads for
+    # days without a word. async: false is not needed: the handler is scoped to this test's pid.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_integrity_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_integrity_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    assert {:ok, 2} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b", "c"]))
+    GenServer.stop(first)
+
+    # seal it (the scrub's subject: an immutable copy nothing re-scans) and rot a byte in the middle
+    segment_directory = Layout.segment_directory(directory, @segment)
+    [log_file] = Path.wildcard(Path.join(segment_directory, "*.log"))
+    File.touch!(String.replace_suffix(log_file, ".log", ".sealed"))
+
+    {pairs, _valid} = Record.decode_all(File.read!(log_file))
+    {_record, position} = Enum.at(pairs, 1)
+    flip_at = position + 12
+    <<head::binary-size(flip_at), byte, tail::binary>> = File.read!(log_file)
+    File.write!(log_file, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
+
+    parent = self()
+    handler_id = "integrity-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:malachi, :storage, :integrity],
+      fn name, measurements, metadata, _config -> send(parent, {:telemetry, name, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+        # the first read is what opens (recovers) the segment
+        assert read_values(name, @segment) == ["a"]
+      end)
+
+    assert log =~ "failed verification at byte #{position}"
+    assert log =~ "bad_crc"
+    assert log =~ "sealed segment"
+
+    assert_receive {:telemetry, [:malachi, :storage, :integrity], %{position: ^position, unreadable_bytes: unreadable},
+                    %{result: :bad_crc, sealed: true, source: :recover, segment: @segment}}
+
+    assert unreadable > 0
+  end
+
+  test "stored_bytes reads the on-disk size without opening; durable_end recovers where end_offset cannot" do
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_probe_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_probe_#{System.unique_integer([:positive])}"
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # nothing stored yet: both probes answer the empty shape
+    assert ReplicationServer.stored_bytes(name, @segment) == 0
+
+    assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+    bytes = ReplicationServer.stored_bytes(name, @segment)
+    assert bytes > 0
+    GenServer.stop(first)
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # the restarted server has not opened the segment: end_offset says :empty (its documented
+    # contract), stored_bytes still sees the durable files, and durable_end recovers the true end,
+    # which is exactly the gap the sealed-copy integrity probe needs closed
+    assert ReplicationServer.end_offset(name, @segment) == :empty
+    assert ReplicationServer.stored_bytes(name, @segment) == bytes
+    assert ReplicationServer.durable_end(name, @segment, 0) == 2
   end
 
   # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
@@ -230,6 +393,12 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
     @impl true
     def close(handle), do: ElixirStore.close(handle)
+    @impl true
+    def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
+    @impl true
+    def integrity(handle), do: ElixirStore.integrity(handle)
+    @impl true
+    def rebuild_index(dir, id, opts), do: ElixirStore.rebuild_index(dir, id, opts)
   end
 
   describe "group commit under replication" do

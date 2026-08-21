@@ -68,6 +68,26 @@ defmodule Malachi.Cluster.MetadataServerTest do
     assert {:ok, %{name: "durable"}} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "durable"))
   end
 
+  test "start/2 over a stopped member RESUMES it: same uid (identity), state intact" do
+    # The amnesia regression the storage-chaos harness caught: booting through start/2 used to
+    # attempt start_cluster first, which registers a fresh EMPTY uid for the name before failing,
+    # so the subsequent restart resurrected an amnesiac member and orphaned the real Raft log.
+    # Two nodes rebooting that way formed an empty-log quorum and wiped the whole control plane.
+    # Resume-first keeps the uid (the member's identity) stable across restarts.
+    name = :"vnode_resume_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = MetadataServer.start(name)
+    on_exit(fn -> MetadataServer.delete(name) end)
+
+    {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+    uid_before = :ra_directory.uid_of(:default, name)
+    :ok = :ra.stop_server(:default, server_id)
+
+    # The boot path (start/2, not a bare restart_server) must resume, not re-form.
+    assert {:ok, ^server_id} = MetadataServer.start(name)
+    assert :ra_directory.uid_of(:default, name) == uid_before
+    assert {:ok, %{name: "events"}} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "events"))
+  end
+
   test "leader?/1 is true for the local server of a formed single-node cluster (1C-b)" do
     server_id = start_cluster()
     # a successful command guarantees a formed cluster with an elected leader

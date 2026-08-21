@@ -9,8 +9,16 @@ defmodule Malachi.LogApiTest do
 
   defp start_broker(directory) do
     {:ok, server} = BrokerServer.start_link(directory)
-    on_exit(fn -> if Process.alive?(server), do: BrokerServer.stop(server) end)
+    on_exit(fn -> stop_quietly(server) end)
     server
+  end
+
+  # Best-effort teardown: the broker can die concurrently between the aliveness check and the stop
+  # (it is linked to the test process), so a :noproc exit here is not a failure.
+  defp stop_quietly(server) do
+    if Process.alive?(server), do: BrokerServer.stop(server)
+  catch
+    :exit, _ -> :ok
   end
 
   test "produce by key then fetch by opaque cursor returns the records", %{tmp_dir: directory} do

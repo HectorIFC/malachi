@@ -63,6 +63,20 @@ flowchart LR
   A -->|"a new one rolls"| A2["new active segment"]
 ```
 
+Every record frame carries a CRC32 of its payload, which the store checks whenever it decodes a
+record. That is only a *passive* guarantee: a sealed segment is immutable and nothing re-reads it, so
+corruption at rest stays invisible until a consumer happens to need that exact record, and then it does
+not surface as an error but as a short read (the read bound comes from the control plane's record count,
+so the damaged copy simply stops producing records). `Malachi.Cluster.Scrubber` closes that: on every
+node, on a slow cadence, it re-verifies the checksums of the sealed segments it stores
+(`Malachi.Log.verify/2`, a read-only scan that never repairs or truncates) and rebuilds a damaged copy
+from a replica that still verifies, moving itself out of the read path first when it is the primary. A
+copy that will not decode is a lost replica, so the same re-replication clock applies to it. The one
+rule the repair never breaks: the local copy is not deleted until a peer has confirmed a copy that is
+both intact and *complete* against what the control plane recorded at seal time, because a partially
+readable copy beats no copy, and beats a shorter one. See the operations guide for the knobs and
+cadence.
+
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks
 > never change, copying them to another node is safe.
@@ -199,6 +213,14 @@ Four choices shape everything above. Each is stated with its reason and the code
    > **Analogy.** The on-disk format is written in plain handwriting any tool can read, not in a personal
    > shorthand only the BEAM understands, so a future native (Rust) store can reopen the same files.
 
+   The sidecar carries no checksum of its own, and it does not need one, because nothing is allowed to
+   depend on it being right: a read that starts where the index points and does not find what it asked
+   for simply rescans the segment from the beginning, which is exactly what an absent index does. The
+   scrub verifies the sidecar as well (every entry must land on a real frame carrying the offset it
+   claims) and repairs it **locally**, by rebuilding it from the segment. That is the difference between
+   derived data and the records themselves: a damaged segment has to be refetched from a replica, while a
+   damaged index never left home.
+
 3. **Keep and extend the binary protocol rather than sessionize it.** The `correlation_id` already provides
    the pipelining a session layer would have added, so the protocol stays `<<len::32, body>>` and grows by
    adding api_keys. See `Malachi.Wire`.
@@ -214,10 +236,45 @@ Four choices shape everything above. Each is stated with its reason and the code
 NorthGuard leans on **deterministic simulation** (a single-threaded cluster and clients with swappable
 time, network, disk, and RNG, replaying failures exactly) as a reliability pillar. That is essentially
 unfeasible on the BEAM, whose scheduler is preemptive and multicore and outside our control. This is a real
-downgrade in guarantees, and it is accepted explicitly. The substitutes are property-based stateful testing
-of the log model and the state machine (`stream_data`), `Concuerror` for concurrency checking at limited
-scale, Jepsen-style tests for distributed consistency, and fault injection for network partitions and
-storage chaos.
+downgrade in guarantees, and it is accepted explicitly. The substitutes, and their delivery status:
+
+- **Property-based stateful testing** of the log model and the state machine (`stream_data`): delivered.
+- **Fault injection with a Jepsen-style acked-durability check**: delivered as the chaos certification
+  harness (`scripts/docker-chaos-test.sh` + `scripts/chaos_checker.exs`). A 3-node RF=3 cluster takes
+  synthetic traffic while a node is SIGKILLed, partitioned, SIGSTOPped, and rolling-restarted; the
+  harness certifies that no acknowledged write is ever lost, that the cluster reconverges after every
+  event, and that availability recovers. See the operations guide.
+- **Storage fault injection** (the "different types of corruption" scenarios): delivered as
+  `scripts/docker-storage-chaos.sh`. Follower segment copies are corrupted mid-file, truncated, and
+  deleted outright; the harness certifies the same invariants plus physical reconvergence
+  (byte-identical copies across the nodes), exercising CRC-clamped recovery, write-path catch-up,
+  and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. **In-place corruption that
+  keeps the byte size** is now caught by the integrity scrub (see the storage layer above); the
+  harness gains that event with the scrub's certification. One deliberate limit remains, tracked as
+  a roadmap item: **damage to a primary copy** needs seal-on-failure (NorthGuard seals the segment
+  and moves producers to a new one when a replica fails), so the harness always damages followers.
+- **Config-deployment certification** (the "deployments... and even config deployments" scenarios):
+  delivered as `scripts/docker-config-chaos.sh`. A harmless config change is rolled node by node
+  under traffic (availability must hold between steps and the new value must take effect), and a
+  fail-fast bad config is pushed to one node and rolled back (the node must crash-loop without ever
+  going healthy, the surviving two must keep serving quorum writes, and the rollback must restore
+  3/3), on top of the acked-durability and reconvergence invariants.
+- **`Concuerror`** for systematic interleaving exploration: **attempted and blocked by the tool**,
+  with the spike kept as the reproducible record (`scripts/concuerror-setup.sh`,
+  `scripts/concuerror.sh`, `test/concuerror/replicate_race.ex`). What the spike established, in
+  order: Concuerror builds and runs on our OTP (its own CI matrix stops at OTP 23, so this was not
+  a given); it drives Elixir and OTP code, including a `GenServer` with the exact park, ack and
+  `Process.send_after`/`cancel_timer` race we wanted to check; but it cannot run the scenario that
+  matters, because `Malachi.Cluster.ReplicationServer` is disk-backed by design (its init creates
+  the data directory, log recovery scans it) and Concuerror's `file_server_2` emulation does not
+  implement `read_file_info`. `--non_racing_system file_server_2` does not help: the request type
+  is simply unimplemented. Unblocking it needs either a Concuerror release that supports the
+  request, or a filesystem-free seam through the storage layer (the `SegmentStore` behaviour is
+  injectable, but directory creation and segment discovery still go straight to the filesystem),
+  which is a production refactor driven purely by a verification tool and not worth it today. The
+  invariant the scenario targets, that a parked batch is answered exactly once, is covered by unit
+  tests for each path separately (ack cancels the timer; a fired timer finds the batch gone), just
+  not by systematic interleaving.
 
 ## Prior art
 

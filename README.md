@@ -212,7 +212,10 @@ are namespaced `malachi_`: BEAM health (`malachi_process_count`, `malachi_memory
 `malachi_uptime_seconds`, …), security counters (`malachi_rate_limit_blocked_total`,
 `malachi_failed_auth_total`, `malachi_tls_handshakes_total`, …), operation totals fed by the telemetry
 events (`malachi_records_produced_total`, `malachi_bytes_produced_total`, `malachi_records_consumed_total`,
-`malachi_auth_attempts_total{result}`, `malachi_replication_commits_total{result}`), and per-topic gauges
+`malachi_auth_attempts_total{result}`, `malachi_replication_commits_total{result}`,
+`malachi_storage_integrity_failures_total{reason}`: segments that failed checksum verification,
+`malachi_storage_scrub_segments_total{result}`: segments the integrity scrub processed), and
+per-topic gauges
 (`malachi_topic_ranges`, `malachi_topic_segments`, `malachi_topic_bytes`,
 `malachi_domain_violations`: segments spanning fewer than `min_domains` failure domains, …).
 
@@ -237,6 +240,8 @@ Malachi emits `:telemetry` events on its hot paths: attach a handler to feed met
 | `[:malachi, :consume]` | `%{count}` | `%{topic}` |
 | `[:malachi, :auth]` | `%{count: 1}` | `%{result: :ok \| :error}` |
 | `[:malachi, :replication, :commit]` | `%{count}` | `%{result: :ok \| :no_quorum}` |
+| `[:malachi, :storage, :integrity]` | `%{position, unreadable_bytes}` | `%{result, sealed, source, segment}` |
+| `[:malachi, :storage, :scrub]` | `%{verified, damaged, repaired, unrepairable}` | `%{}` |
 
 ```elixir
 :telemetry.attach("my-handler", [:malachi, :produce], fn _e, m, meta, _ ->

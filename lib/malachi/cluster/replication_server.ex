@@ -42,6 +42,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Log
+  alias Malachi.Storage.Layout
   alias Malachi.Telemetry
   alias OpenTelemetry.Ctx
 
@@ -195,21 +196,52 @@ defmodule Malachi.Cluster.ReplicationServer do
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
   is the offset the batch must start at: it must equal this server's current end for the segment
   (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
-  or `{:error, :out_of_sync}` if this server is behind. Used by the primary's fan-out and by
-  `Malachi.Cluster.Catchup`.
+  or `{:error, :out_of_sync}` if this server is behind.
+
+  This is the **directed** append, used by `Malachi.Cluster.Catchup` to copy a span into a target
+  replica. The primary's own fan-out does not come through here: it pushes `:replica_append` casts
+  from its loop, which is what keeps the pipeline per-pair FIFO. A batch that arrives here never
+  triggers a catch-up, since the caller is already driving one.
   """
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()} | {:error, :out_of_sync}
   def follow(ref, segment_id, expected_first, records) do
-    # No source: a plain replica append (used by Catchup); never re-triggers a catch-up. A fresh
-    # log opens exactly where this batch starts.
-    GenServer.call(ref, {:follow, segment_id, expected_first, expected_first, records, nil})
+    GenServer.call(ref, {:follow, segment_id, expected_first, records})
   end
 
-  @doc "This server's next offset for `segment_id`, or `:empty` if it stores none of it yet."
-  @spec end_offset(term(), term()) :: non_neg_integer() | :empty
-  def end_offset(ref, segment_id) do
-    GenServer.call(ref, {:end_offset, segment_id})
+  @doc """
+  This server's next offset for `segment_id`, or `:empty` if it stores none of it yet. `timeout`
+  bounds the call: pollers (the broker's periodic range-state refresh) pass a short one so an
+  unreachable replica cannot block their loop for the default five seconds.
+  """
+  @spec end_offset(term(), term(), timeout()) :: non_neg_integer() | :empty
+  def end_offset(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:end_offset, segment_id}, timeout)
+  end
+
+  @doc """
+  The on-disk byte size this server stores for `segment_id`: the sum of its segment files' sizes,
+  read without opening the log (no descriptors, no state change), so it is cheap enough to poll.
+  0 when nothing is stored. The first stage of the sealed-copy integrity probe
+  (`Malachi.Cluster.SelfHealing`): a **sealed** segment whose stored bytes fall short of the
+  metadata's sealed `byte_size` has lost data on this replica. Only meaningful for sealed segments;
+  an active segment's file legitimately trails its in-memory log by the unflushed buffer.
+  """
+  @spec stored_bytes(term(), term(), timeout()) :: non_neg_integer()
+  def stored_bytes(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:stored_bytes, segment_id}, timeout)
+  end
+
+  @doc """
+  The durable end offset this server holds for `segment_id`, recovering the log from disk when it
+  is not open yet. Unlike `end_offset/3` (which answers `:empty` for a segment that exists on disk
+  but has not been touched since this server booted), this gives the true resume point after a
+  restart, which is what a repair needs as its copy start. `base_offset` seats a missing or empty
+  log at the segment's base.
+  """
+  @spec durable_end(term(), term(), non_neg_integer(), timeout()) :: non_neg_integer()
+  def durable_end(ref, segment_id, base_offset, timeout \\ 5_000) do
+    GenServer.call(ref, {:durable_end, segment_id, base_offset}, timeout)
   end
 
   # --- GenServer ---
@@ -331,31 +363,41 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, :ok, %{state | logs: logs}}
   end
 
-  def handle_call({:follow, segment_id, base, expected_first, records, source}, _from, state) do
-    # Open a fresh segment at its `base` (not the batch's offset), so a brand-new replica that
-    # joins mid-segment sees the start gap and backfills it, rather than silently starting late.
-    {state, log} = fetch_or_open(state, segment_id, base)
+  def handle_call({:follow, segment_id, expected_first, records}, _from, state) do
+    # A fresh log opens exactly where this batch starts: the caller (Catchup) copies a span it chose,
+    # so there is no earlier gap for this replica to backfill. The primary's fan-out, which does have
+    # to seat a new replica at the segment's base, comes in through :replica_append instead.
+    {state, log} = fetch_or_open(state, segment_id, expected_first)
 
-    cond do
-      log.next_offset == expected_first ->
-        {log, _first, last} = append_durably(log, records)
-        {:reply, {:ok, last}, put_log(state, segment_id, log)}
-
-      source != nil and log.next_offset < expected_first ->
-        # Behind on the active segment (a new replica from base, or one that missed batches): kick
-        # off a background catch-up from the primary and skip this batch (it commits via the
-        # up-to-date replicas). We rejoin on a later batch as the catch-up converges on the head.
-        {:reply, {:error, :out_of_sync}, trigger_catchup(state, segment_id, base, source)}
-
-      true ->
-        {:reply, {:error, :out_of_sync}, state}
+    if log.next_offset == expected_first do
+      {log, _first, last} = append_durably(log, records)
+      {:reply, {:ok, last}, put_log(state, segment_id, log)}
+    else
+      {:reply, {:error, :out_of_sync}, state}
     end
   end
 
   def handle_call({:read, segment_id, offset, max_records}, _from, state) do
     case Map.fetch(state.logs, segment_id) do
-      :error -> {:reply, :eof, state}
-      {:ok, log} -> {:reply, Log.read(log, offset, max_records), state}
+      {:ok, log} ->
+        {:reply, Log.read(log, offset, max_records), state}
+
+      :error ->
+        # Cold read: a restarted server holds durable segments nothing has opened yet, and only the
+        # append path used to open them, so every pre-restart record answered :eof until some write
+        # happened to touch its segment (the storage-chaos harness read 0 of 4592 acked records off
+        # a fully healthy cluster this way). Recover from disk when files exist; reading a segment
+        # this server never stored stays :eof and must not create an empty log as a side effect.
+        directory = segment_directory(state.directory, segment_id)
+
+        if Path.wildcard(Path.join(directory, "*.log")) == [] do
+          {:reply, :eof, state}
+        else
+          # The base offset opt only seats an EMPTY log; with files present recover derives the
+          # true offsets from them, so 0 here is inert.
+          {state, log} = fetch_or_open(state, segment_id, 0)
+          {:reply, Log.read(log, offset, max_records), state}
+        end
     end
   end
 
@@ -381,6 +423,27 @@ defmodule Malachi.Cluster.ReplicationServer do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:stored_bytes, segment_id}, _from, state) do
+    bytes =
+      state.directory
+      |> segment_directory(segment_id)
+      |> Path.join("*.log")
+      |> Path.wildcard()
+      |> Enum.reduce(0, fn path, sum ->
+        case File.stat(path) do
+          {:ok, %{size: size}} -> sum + size
+          {:error, _reason} -> sum
+        end
+      end)
+
+    {:reply, bytes, state}
+  end
+
+  def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
+    {:reply, log.next_offset, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
@@ -802,9 +865,46 @@ defmodule Malachi.Cluster.ReplicationServer do
         {state, log}
 
       :error ->
+        # recover, not open: after a restart the segment's files may already exist on disk (a durable
+        # replica), and a blind open would crash the first append with :already_exists. recover resumes
+        # at the true durable end (a push past it nacks out_of_sync and catch-up backfills the gap) and
+        # falls back to a fresh open when the directory is empty.
         opts = [base_offset: base_offset] ++ state.log_opts
-        {:ok, log} = Log.open(segment_directory(state.directory, segment_id), opts)
+        {:ok, log} = Log.recover(segment_directory(state.directory, segment_id), opts)
+        report_integrity(log.integrity, segment_id)
         {put_log(state, segment_id, log), log}
+    end
+  end
+
+  # Recovery already scanned the segment, so it knows whether the bytes on disk are intact. Reporting
+  # that here, at the one place a segment is opened, is what makes damage visible the moment a node
+  # touches it: the background scrub verifies every segment eventually, but on its own slow cadence,
+  # so without this a node could serve a damaged copy for days without a word. Fires once per segment
+  # (the log is cached afterwards), so it cannot spam.
+  defp report_integrity(:ok, _segment_id), do: :ok
+
+  defp report_integrity(verdict, segment_id) do
+    Telemetry.storage_integrity(verdict, segment_id, :recover)
+
+    message =
+      "segment #{inspect(segment_id)} failed verification at byte #{verdict.position} " <>
+        "(#{verdict.reason}, #{verdict.unreadable_bytes} bytes unreadable)"
+
+    cond do
+      # Immutable and fully durable when it was sealed, so a short scan is corruption at rest. The
+      # copy now serves only its valid prefix and needs repair from a peer.
+      verdict.sealed? ->
+        Logger.warning(message <> ": sealed segment, this copy needs repair from an intact replica")
+
+      # A torn frame at the end of an active segment is ordinary crash recovery: those bytes were
+      # never acked. Worth a line because it quantifies what the crash cost, not an alarm.
+      verdict.reason == :incomplete ->
+        Logger.info("segment #{inspect(segment_id)} dropped #{verdict.unreadable_bytes} bytes of a partial write")
+
+      # A full frame that fails its checksum was written completely and is wrong: rot or a bug, not
+      # a torn write, even though the segment is still active.
+      true ->
+        Logger.warning(message <> ": active segment, damage past a complete frame")
     end
   end
 
@@ -816,28 +916,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   defp put_log(state, segment_id, log), do: put_in(state.logs[segment_id], log)
 
-  # A readable directory for the broker's {{topic, range_seq}, seg_seq} ids, with a safe, collision-free
-  # fallback for any other term. segment_ids arrive over inter-node replication, so the topic is not
-  # trusted here even though Metadata.valid_topic_name?/1 screens locally created topics: a path-unsafe
-  # topic (or a non-integer seq) falls through to the Base64 encoding, keeping the directory inside `base`.
-  defp segment_directory(base, {{topic, range_seq}, seg_seq} = segment_id)
-       when is_integer(range_seq) and is_integer(seg_seq) do
-    if safe_path_segment?(topic) do
-      Path.join(base, "#{topic}-r#{range_seq}-s#{seg_seq}")
-    else
-      encoded_segment_directory(base, segment_id)
-    end
-  end
-
-  defp segment_directory(base, segment_id), do: encoded_segment_directory(base, segment_id)
-
-  defp encoded_segment_directory(base, segment_id) do
-    Path.join(base, Base.url_encode64(:erlang.term_to_binary(segment_id), padding: false))
-  end
-
-  # Mirrors the allowlist in Metadata.valid_topic_name?/1 as a defense-in-depth check where the path is
-  # built, since segment_ids can arrive from other nodes.
-  defp safe_path_segment?(topic) do
-    is_binary(topic) and topic not in ["", ".", ".."] and topic =~ ~r/\A[A-Za-z0-9._-]+\z/
-  end
+  # The on-disk mapping lives in Malachi.Storage.Layout: the scrubber reads the same directories to
+  # verify their checksums, and a second copy of this rule could drift from the writer's.
+  defp segment_directory(base, segment_id), do: Layout.segment_directory(base, segment_id)
 end

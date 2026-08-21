@@ -63,7 +63,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     assert Metadata.get_segment(source.(), segment_id).replica_set == new_set
 
     # the loop is closed: a second pass has nothing to do
-    assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: []}
+    assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
   end
 
   test "reports a segment with no live source as failed and applies nothing" do

@@ -37,19 +37,39 @@ x-malachi-node: &malachi-node
     ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
     MALACHI_TCP_PORT: "4040"
     MALACHI_DASHBOARD_PORT: "4041"
-    MALACHI_CLUSTER_STRATEGY: "epmd"
+    # Parameterized (default epmd) so the config-deploy chaos drill can push a config that fails
+    # fast at boot (runtime.exs raises on an unknown strategy) to a single node and roll it back.
+    MALACHI_CLUSTER_STRATEGY: "${MALACHI_CLUSTER_STRATEGY:-epmd}"
     MALACHI_LOG_CLUSTER: "malachi_log"
     MALACHI_LOG_NODES: "malachi@malachi1,malachi@malachi2,malachi@malachi3"
     MALACHI_LOG_VNODES: "1"
     MALACHI_LOG_REPLICATION_FACTOR: "${RF:-1}"
     MALACHI_GROUP_COMMIT: "true"
-    MALACHI_GROUP_COMMIT_INTERVAL_MS: "2"
+    # Parameterized (default 2, the benchmark tuning) so the config-deploy chaos drill has a
+    # harmless setting to roll across the nodes while verifying availability between steps.
+    MALACHI_GROUP_COMMIT_INTERVAL_MS: "${MALACHI_GROUP_COMMIT_INTERVAL_MS:-2}"
     # Admission limits off so the sweep is not capped (they gate connections/auth, not the produce path).
     MALACHI_RATE_LIMIT_ENABLED: "false"
     MALACHI_CONNECTION_LIMIT_ENABLED: "false"
-    # Data on tmpfs (RAM) so fsync cost is uniform across nodes and runs.
-    MALACHI_LOG_DATA_DIR: "/tmp/malachi_log"
-    MALACHI_RA_DATA_DIR: "/tmp/malachi_ra"
+    # Data root: /tmp (tmpfs, RAM) by default so fsync cost is uniform for BENCHMARKS. The chaos
+    # certification overrides MALACHI_DATA_ROOT=/data (a per-node named volume) because tmpfs is
+    # remounted EMPTY on container restart, and durability-through-restart is exactly what it tests.
+    MALACHI_LOG_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_log"
+    MALACHI_RA_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_ra"
+    # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
+    # a small value so segments seal (and become repairable sealed copies) within its window.
+    MALACHI_SEGMENT_MAX_BYTES: "${MALACHI_SEGMENT_MAX_BYTES:-}"
+    # Internal roll of each segment's own log, which is what writes the sparse-index sidecar. Unset
+    # keeps the library defaults (1GB / 1h), so a benchmark never rolls; the storage-chaos drill sets
+    # them tiny, because otherwise no `.idx` exists in a test window and its integrity is untestable.
+    MALACHI_LOG_ROLL_MAX_BYTES: "${MALACHI_LOG_ROLL_MAX_BYTES:-}"
+    MALACHI_LOG_ROLL_MAX_AGE_MS: "${MALACHI_LOG_ROLL_MAX_AGE_MS:-}"
+    # Integrity scrub. Unset keeps the production defaults (enabled, one segment a minute); the
+    # storage-chaos drill turns the cadence way up so a repair happens inside a test window, and
+    # benchmark/docker-scrub.sh sweeps these to measure what the scrub costs under load.
+    MALACHI_SCRUB_ENABLED: "${MALACHI_SCRUB_ENABLED:-true}"
+    MALACHI_SCRUB_INTERVAL_MS: "${MALACHI_SCRUB_INTERVAL_MS:-}"
+    MALACHI_SCRUB_SEGMENTS_PER_TICK: "${MALACHI_SCRUB_SEGMENTS_PER_TICK:-}"
   tmpfs:
     - /tmp:rw,size=1g
   mem_limit: 2g
@@ -65,16 +85,22 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-1
     hostname: malachi1
+    volumes:
+      - malachi-chaos-1:/data
 
   malachi2:
     <<: *malachi-node
     container_name: malachi-cluster-2
     hostname: malachi2
+    volumes:
+      - malachi-chaos-2:/data
 
   malachi3:
     <<: *malachi-node
     container_name: malachi-cluster-3
     hostname: malachi3
+    volumes:
+      - malachi-chaos-3:/data
 
   loadtest:
     build:
@@ -93,3 +119,10 @@ services:
         condition: service_healthy
     # Overridden per run by `docker compose run --rm loadtest <flags>`; default for a plain `up`.
     command: ["--host", "malachi1,malachi2,malachi3", "--scenario", "produce", "--connections", "192", "--batch", "100", "--topics", "64", "--duration", "4", "--warmup", "1", "--json"]
+
+# Per-node persistent data volumes, used only when MALACHI_DATA_ROOT=/data (chaos certification);
+# benchmarks keep the tmpfs default and never touch these.
+volumes:
+  malachi-chaos-1:
+  malachi-chaos-2:
+  malachi-chaos-3:

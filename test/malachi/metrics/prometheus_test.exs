@@ -31,7 +31,15 @@ defmodule Malachi.Metrics.PrometheusTest do
         auth_ok: 12,
         auth_error: 3,
         replication_ok: 50,
-        replication_no_quorum: 1
+        replication_no_quorum: 1,
+        integrity_bad_crc: 2,
+        integrity_bad_magic: 0,
+        integrity_incomplete: 1,
+        integrity_short_copy: 0,
+        integrity_bad_index: 4,
+        scrub_segments_verified: 4200,
+        scrub_segments_repaired: 3,
+        scrub_segments_unrepairable: 2
       }
     }
   end
@@ -69,6 +77,12 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_auth_attempts_total{result="ok"} 12)
     assert out =~ ~s(malachi_auth_attempts_total{result="error"} 3)
     assert out =~ ~s(malachi_replication_commits_total{result="no_quorum"} 1)
+    assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_crc"} 2)
+    assert out =~ ~s(malachi_storage_integrity_failures_total{reason="incomplete"} 1)
+    assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_index"} 4)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="verified"} 4200)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="repaired"} 3)
+    assert out =~ ~s(malachi_storage_scrub_segments_total{result="unrepairable"} 2)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

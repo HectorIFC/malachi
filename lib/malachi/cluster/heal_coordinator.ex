@@ -29,6 +29,8 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   use GenServer
 
+  require Logger
+
   alias Malachi.Cluster.Failover
   alias Malachi.Cluster.SelfHealing
 
@@ -88,7 +90,14 @@ defmodule Malachi.Cluster.HealCoordinator do
 
     applied = healed.applied ++ promotions
     Enum.each(applied, state.apply_command)
-    %{applied: applied, failed: healed.failed}
+
+    # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
+    # discard the result, making persistent failures invisible until something else broke.
+    if healed.failed != [] do
+      Logger.warning("healing pass could not repair #{length(healed.failed)}: #{inspect(healed.failed)}")
+    end
+
+    %{applied: applied, failed: healed.failed, repaired: healed.repaired}
   end
 
   # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).

@@ -10,6 +10,7 @@ defmodule Malachi.Cluster.MetadataServer do
   """
 
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.RaResume
   alias Malachi.Metadata
 
   @system :default
@@ -27,6 +28,16 @@ defmodule Malachi.Cluster.MetadataServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
+    # Resume-first (see Malachi.Cluster.RaResume): forming over a member this node has ever started
+    # would register a fresh empty uid and resurrect an amnesiac member, the control-plane wipe the
+    # storage-chaos harness caught.
+    case RaResume.resume_or(@system, {cluster_name, node()}, fn -> form(cluster_name, nodes) end) do
+      :ok -> {:ok, {cluster_name, member_node(nodes)}}
+      other -> other
+    end
+  end
+
+  defp form(cluster_name, nodes) do
     server_ids = Enum.map(nodes, &{cluster_name, &1})
     machine = {:module, MetadataMachine, %{}}
 

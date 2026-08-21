@@ -182,6 +182,30 @@ config :malachi,
   # The replicated path's flush period, decoupled from the rf=1 knob above so tuning a single node
   # never silently retunes every replica's fsync cadence. Default 10ms (the NorthGuard time trigger).
   replication_group_commit_interval_ms: parse_int.(System.get_env("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS"), 10),
+  # Background integrity verification of data at rest (the CRC scrub). Each node walks its own sealed
+  # segments, re-checking every record's checksum, and repairs a damaged copy from an intact replica.
+  # Corruption at rest is otherwise silent: a damaged copy serves short reads with no error at all.
+  scrub_enabled: System.get_env("MALACHI_SCRUB_ENABLED") != "false",
+  # Cadence. A full cycle takes `sealed segments on the node x interval / segments per tick`, so the
+  # defaults revisit ~1440 segments a day (about 90GB with the default 64MB segments): a node holding
+  # 10k sealed segments verifies each about weekly, which is the usual scrub period for disks. Cost per
+  # tick is one segment scan, measured at 24 to 86ms of a core for 64MB (the scan checks checksums
+  # without deserializing records). Raise the interval on a busy or slow disk; lower it, or raise the
+  # per-tick count, to verify a large dataset more often.
+  scrub_interval_ms: parse_int.(System.get_env("MALACHI_SCRUB_INTERVAL_MS"), 60_000),
+  scrub_segments_per_tick: parse_int.(System.get_env("MALACHI_SCRUB_SEGMENTS_PER_TICK"), 1),
+  # Internal roll of a segment's own log: when its file reaches this many bytes or this age, the store
+  # seals that file (writing the sparse-index sidecar) and opens the next one inside the same segment
+  # directory. Distinct from MALACHI_SEGMENT_MAX_BYTES below, which is the broker sealing a SEGMENT in
+  # the control plane. Unset keeps the library defaults (1GB / 1h); the storage-chaos drill sets them
+  # tiny so sidecars exist within a test window.
+  log_roll_max_bytes: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_BYTES"), nil),
+  log_roll_max_age_ms: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_AGE_MS"), nil),
+  # Active-segment roll size (bytes): the broker seals the active segment once it reaches this many
+  # encoded bytes. Unset => the library default (64MB). Smaller values seal faster, which shortens the
+  # replication unit and is what the storage-chaos harness uses to exercise sealed-segment recovery
+  # within its window; production setups normally leave this at the default.
+  segment_max_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_MAX_BYTES"), nil),
   # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
   # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
   # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.

@@ -25,6 +25,8 @@ defmodule Malachi.Storage.ElixirStore do
 
   @default_index_interval 4096
   @read_window_bytes 262_144
+  # One persisted sparse-index entry: `<<offset::64, position::64>>` (see persist_index/1).
+  @index_entry_bytes 16
   # NorthGuard flushes a batch once it reaches ~10MB or ~20k records.
   @default_flush_bytes 10_485_760
   @default_flush_count 20_000
@@ -48,7 +50,20 @@ defmodule Malachi.Storage.ElixirStore do
           index_interval: pos_integer(),
           last_indexed_position: integer(),
           flush_bytes: pos_integer(),
-          flush_count: pos_integer()
+          flush_count: pos_integer(),
+          integrity: :ok | integrity_verdict()
+        }
+
+  @typedoc """
+  What the last scan of this segment concluded: `:ok`, or the first damage it hit, with the byte
+  position and how much of the file could not be read. Only `recover/3` scans, so a freshly opened
+  or read-only handle is `:ok` by construction.
+  """
+  @type integrity_verdict :: %{
+          reason: atom(),
+          position: non_neg_integer(),
+          unreadable_bytes: non_neg_integer(),
+          sealed?: boolean()
         }
 
   defstruct [
@@ -63,7 +78,8 @@ defmodule Malachi.Storage.ElixirStore do
     index_interval: @default_index_interval,
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes,
-    flush_count: @default_flush_count
+    flush_count: @default_flush_count,
+    integrity: :ok
   ]
 
   @impl true
@@ -105,16 +121,16 @@ defmodule Malachi.Storage.ElixirStore do
 
       # Scan the file in bounded chunks (never loading it whole), counting records and
       # building the sparse index. `valid_bytes` is where valid frames end.
-      {record_count, valid_bytes, index_entries} = scan_segment(file_descriptor, index_interval)
-
-      # Drop any partial/corrupt trailing bytes from a crash mid-write.
-      if valid_bytes < File.stat!(path).size do
-        {:ok, _} = :file.position(file_descriptor, valid_bytes)
-        :ok = :file.truncate(file_descriptor)
-      end
+      {record_count, valid_bytes, index_entries, halt} = scan_segment(file_descriptor, index_interval)
 
       base_offset = segment.base_offset
       sealed? = File.exists?(Segment.seal_marker_path(segment))
+      integrity = integrity_verdict(path, valid_bytes, halt, sealed?)
+
+      if truncate?(integrity) do
+        {:ok, _} = :file.position(file_descriptor, valid_bytes)
+        :ok = :file.truncate(file_descriptor)
+      end
 
       segment = %Segment{
         segment
@@ -136,8 +152,193 @@ defmodule Malachi.Storage.ElixirStore do
          index_interval: index_interval,
          last_indexed_position: last_indexed_position(index, index_interval),
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
-         flush_count: Keyword.get(opts, :flush_count, @default_flush_count)
+         flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
+         integrity: integrity
        }}
+    else
+      {:error, :enoent}
+    end
+  end
+
+  # Whether recovery may drop the bytes past the last valid frame. The rule is about WHAT the damage
+  # is, not only about the segment's state, because a replica's file carries a seal marker only when
+  # its log rolled locally (by size or age): sealing a segment is a control-plane decision, so a
+  # segment the cluster considers immutable usually has no marker on disk, and keying the guard on
+  # the marker alone would leave the destructive path wide open in exactly the deployment that
+  # matters.
+  #
+  # An `:incomplete` tail is the crash-mid-write shape: the scan ran out of bytes inside a frame, so
+  # by construction nothing valid follows it, and dropping it keeps the file clean and the next
+  # append contiguous. A checksum or framing failure is different: the frame was written whole and
+  # is wrong (rot, or a bug), and VALID frames may well follow it. Those are recoverable from a peer
+  # and must not be destroyed by the very node that noticed the damage. Reads are bounded by
+  # `write_position` either way, so leaving the bytes costs nothing but disk.
+  defp truncate?(:ok), do: false
+  defp truncate?(%{sealed?: true}), do: false
+  defp truncate?(%{reason: :incomplete}), do: true
+  defp truncate?(_rot), do: false
+
+  # What the recovery scan concluded, for the caller to report (this module never logs). A scan that
+  # consumed the file exactly is clean; anything else is described so the warning can name the byte
+  # position and how much of the file is unreadable. Those trailing bytes are dropped only when
+  # `truncate?/1` allows it; otherwise they stay on disk, unreadable but recoverable.
+  defp integrity_verdict(path, valid_bytes, halt, sealed?) do
+    unreadable_bytes = File.stat!(path).size - valid_bytes
+
+    case halt do
+      :eof when unreadable_bytes == 0 ->
+        :ok
+
+      :eof ->
+        %{reason: :incomplete, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+
+      {:error, reason} ->
+        %{reason: reason, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+    end
+  end
+
+  @impl true
+  def verify(directory, segment_id, opts \\ []) do
+    segment = Segment.new(segment_id, directory, opts)
+    path = Segment.path(segment)
+
+    if File.exists?(path) do
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+
+      try do
+        {record_count, valid_bytes, halt} = check_scan(file_descriptor)
+
+        # Frames first: with the segment itself damaged the sidecar's verdict is moot, and rebuilding
+        # an index over damaged frames would only bake the damage in.
+        with {:ok, counts} <- verdict(path, record_count, valid_bytes, halt) do
+          verify_index(segment, file_descriptor, valid_bytes, counts)
+        end
+      after
+        :file.close(file_descriptor)
+      end
+    else
+      {:error, :enoent}
+    end
+  end
+
+  # The sparse index sidecar has no checksum of its own and is trusted by every sealed read, so the
+  # scrub checks it too: each entry must point at the start of a real frame whose record carries the
+  # offset the entry claims. An absent sidecar is not damage (reads simply scan from the start), and
+  # a rotted one is repairable locally by `rebuild_index/3`, since the index is derived from the
+  # segment and never holds anything the segment does not.
+  defp verify_index(segment, file_descriptor, valid_bytes, counts) do
+    index_path = Segment.index_path(segment)
+
+    case File.read(index_path) do
+      {:ok, binary} ->
+        entries = parse_index(binary, [])
+
+        cond do
+          # A sidecar is a whole number of fixed-size entries, so a remainder means the file was cut
+          # mid-entry. Counting the parsed entries cannot see that: `parse_index/2` drops the partial
+          # tail, so the count always equals what the file size implies, damaged or not.
+          rem(byte_size(binary), @index_entry_bytes) != 0 ->
+            {:error, index_damage(index_path, valid_bytes, :trailing_bytes)}
+
+          bad = Enum.find(entries, &bad_index_entry?(&1, file_descriptor, valid_bytes)) ->
+            {:error, index_damage(index_path, elem(bad, 1), :entry)}
+
+          true ->
+            {:ok, counts}
+        end
+
+      {:error, :enoent} ->
+        {:ok, counts}
+
+      {:error, reason} ->
+        {:error, index_damage(index_path, 0, reason)}
+    end
+  end
+
+  defp index_damage(index_path, position, detail) do
+    %{position: position, reason: :bad_index, unreadable_bytes: 0, file: index_path, detail: detail}
+  end
+
+  # An entry is good when a frame starts exactly at its position and that frame's record carries the
+  # entry's offset. Reading one frame header plus a bounded window is enough: a frame that needs more
+  # than the window is decoded as incomplete, which is itself a mismatch worth reporting.
+  defp bad_index_entry?({offset, position}, file_descriptor, valid_bytes) do
+    if position < 0 or position >= valid_bytes do
+      true
+    else
+      case :file.pread(file_descriptor, position, @read_window_bytes) do
+        {:ok, chunk} -> not match?({:ok, %Record{offset: ^offset}, _size, _rest}, Record.decode_one(chunk))
+        :eof -> true
+        # An entry whose frame cannot be read is not an entry a read can trust, whatever the reason.
+        # Reporting it as a bad entry is also the safe verdict: the repair for a bad index is a local
+        # rebuild, which re-reads the segment and fails loudly if the device is the real problem.
+        {:error, _reason} -> true
+      end
+    end
+  end
+
+  # A clean scan must consume the file EXACTLY: `halt == :eof` with valid frames ending short of the
+  # file size means the tail is a partial frame, which for a sealed segment is damage just like a
+  # checksum mismatch (an active segment's torn tail is normal and is handled by `recover/3`).
+  # The damage map carries the same keys `recover/3` reports, so a caller (and the telemetry event)
+  # handles findings from either path identically.
+  defp verdict(path, record_count, valid_bytes, halt) do
+    file_size = File.stat!(path).size
+    unreadable = file_size - valid_bytes
+
+    case halt do
+      :eof when unreadable == 0 ->
+        {:ok, %{records: record_count, bytes: valid_bytes}}
+
+      :eof ->
+        {:error, %{position: valid_bytes, reason: :incomplete, unreadable_bytes: unreadable, file: path}}
+
+      {:error, reason} ->
+        {:error, %{position: valid_bytes, reason: reason, unreadable_bytes: unreadable, file: path}}
+    end
+  end
+
+  # The verification scan. Deliberately separate from `do_scan/7`: this one uses
+  # `Malachi.Log.Record.check_one/1`, which verifies the checksum without building a record struct,
+  # and it keeps no sparse index. A scrub walks whole segments just to confirm their checksums, so
+  # the per-record allocation `do_scan/7` needs for recovery would dominate its cost.
+  defp check_scan(file_descriptor), do: do_check(file_descriptor, 0, <<>>, 0)
+
+  defp do_check(file_descriptor, valid_bytes, carry, record_count) do
+    case Record.check_one(carry) do
+      {:ok, frame_size, rest} ->
+        do_check(file_descriptor, valid_bytes + frame_size, rest, record_count + 1)
+
+      :incomplete ->
+        case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
+          {:ok, chunk} -> do_check(file_descriptor, valid_bytes, carry <> chunk, record_count)
+          :eof -> {record_count, valid_bytes, :eof}
+          # A device that cannot be read IS the damage the scrub exists to find. Raising here instead
+          # would take down `Malachi.Cluster.Scrubber`, whose process runs this scan: the detector
+          # would die of exactly the condition it was built to report.
+          {:error, reason} -> {record_count, valid_bytes, {:error, reason}}
+        end
+
+      {:error, reason} ->
+        {record_count, valid_bytes, {:error, reason}}
+    end
+  end
+
+  @impl true
+  def rebuild_index(directory, segment_id, opts \\ []) do
+    segment = Segment.new(segment_id, directory, opts)
+    path = Segment.path(segment)
+
+    if File.exists?(path) do
+      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+
+      try do
+        {_record_count, _valid_bytes, entries, _halt} = scan_segment(file_descriptor, index_interval)
+        write_index(Segment.index_path(segment), entries)
+      after
+        :file.close(file_descriptor)
+      end
     else
       {:error, :enoent}
     end
@@ -300,6 +501,9 @@ defmodule Malachi.Storage.ElixirStore do
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
 
   @impl true
+  def integrity(%__MODULE__{integrity: integrity}), do: integrity
+
+  @impl true
   def pending?(%__MODULE__{pending_count: pending_count}), do: pending_count > 0
 
   @impl true
@@ -311,8 +515,32 @@ defmodule Malachi.Storage.ElixirStore do
   # --- reading ---
 
   defp do_read(store, target_offset, max_records) do
-    start_position = floor_position(store.index, target_offset)
-    collect(store, target_offset, max_records, start_position, <<>>, [])
+    case floor_position(store.index, target_offset) do
+      0 -> collect(store, target_offset, max_records, 0, <<>>, [])
+      start_position -> read_from_hint(store, target_offset, max_records, start_position)
+    end
+  end
+
+  # The sparse index is a HINT, and it comes from a sidecar file with no checksum of its own, so a
+  # rotted entry must never change what a read returns. Two ways it can lie, both silent:
+  #
+  #   * it points inside a frame, so decoding fails from the first byte and the read comes back empty,
+  #     which the broker reads as "this source is drained": the consumer stalls there forever;
+  #   * it points at a real frame boundary but PAST the target, so the read skips the records in
+  #     between and nobody notices.
+  #
+  # Both show up in the result, so they are caught by looking at it rather than by validating the
+  # index up front: an empty page, or a first record already past what was asked for. Either way the
+  # read is redone from the start of the segment, which is what an absent index does anyway. The
+  # happy path pays nothing; a lying index costs one rescan and still answers correctly.
+  defp read_from_hint(store, target_offset, max_records, start_position) do
+    case collect(store, target_offset, max_records, start_position, <<>>, []) do
+      [%Record{offset: offset} | _rest] = records when offset <= target_offset ->
+        records
+
+      _empty_or_past_the_target ->
+        collect(store, target_offset, max_records, 0, <<>>, [])
+    end
   end
 
   # `remaining_records` is a decreasing counter so we never call `length/1` per record
@@ -399,9 +627,12 @@ defmodule Malachi.Storage.ElixirStore do
     end)
   end
 
-  # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries}
-  # where `entries` is the ascending sparse index and `valid_bytes` is the end of the last
-  # valid frame (the safe truncation point after a crash). Never loads the whole file.
+  # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries, halt}
+  # where `entries` is the ascending sparse index, `valid_bytes` is the end of the last valid frame
+  # (the safe truncation point after a crash), and `halt` says WHY the scan stopped: `:eof` (clean
+  # end of file) or `{:error, reason}` from `Malachi.Log.Record`. Recovery ignores `halt` and simply
+  # truncates; verification needs it to tell a torn tail from bit rot, and to report the offending
+  # byte position. Never loads the whole file.
   defp scan_segment(file_descriptor, index_interval) do
     do_scan(file_descriptor, index_interval, 0, <<>>, 0, -index_interval, [])
   end
@@ -442,11 +673,11 @@ defmodule Malachi.Storage.ElixirStore do
             )
 
           :eof ->
-            {record_count, valid_bytes, Enum.reverse(entries)}
+            {record_count, valid_bytes, Enum.reverse(entries), :eof}
         end
 
-      {:error, _reason} ->
-        {record_count, valid_bytes, Enum.reverse(entries)}
+      {:error, reason} ->
+        {record_count, valid_bytes, Enum.reverse(entries), {:error, reason}}
     end
   end
 
@@ -458,12 +689,16 @@ defmodule Malachi.Storage.ElixirStore do
   end
 
   defp persist_index(store) do
+    write_index(Segment.index_path(store.segment), :array.to_list(store.index))
+  end
+
+  defp write_index(path, entries) do
     binary =
-      for {offset, position} <- :array.to_list(store.index), into: <<>> do
+      for {offset, position} <- entries, into: <<>> do
         <<offset::64, position::64>>
       end
 
-    File.write(Segment.index_path(store.segment), binary)
+    File.write(path, binary)
   end
 
   defp load_index_file(path) do

@@ -41,6 +41,13 @@ Worth alerting on:
 - **`malachi_domain_violations`**: segments that cannot meet their placement spread requirement. Non-zero
   means replicas are concentrating where they should not be, which is a real availability risk that is
   otherwise silent.
+- **`malachi_storage_integrity_failures_total{reason}`**: a stored segment failed checksum verification.
+  Non-zero means data at rest is damaged on that node, and the condition is otherwise invisible: a
+  damaged copy serves short reads with no error, so a consumer either stalls at the damaged offset or
+  silently skips the rest of that segment. `reason="incomplete"` on an active segment is ordinary crash
+  recovery (a partial tail that was never acked); on a sealed segment any reason means corruption at
+  rest, and that copy needs to be rebuilt from an intact replica. The matching log line names the
+  segment and the byte position.
 - Session and auth counters. Note that `:session_expired` and `:session_hijack_attempt` are **not
   disjoint**: one validation can emit both, so summing them does not count failed validations. The hijack
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so
@@ -63,7 +70,118 @@ MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :ov
 # workloads (many producers per range); on thin-spread loads it lowers throughput.
 MALACHI_REPLICATION_GROUP_COMMIT=false
 MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
+
+# Active-segment roll size (bytes); unset keeps the 64MB default. Smaller segments seal (and become
+# independently replicable/repairable units) sooner, at the cost of more metadata churn.
+MALACHI_SEGMENT_MAX_BYTES=67108864
 ```
+
+## Integrity scrub
+
+Every node continuously re-verifies the data it stores. A sealed segment is immutable and nothing
+re-reads it, so a checksum is otherwise only confirmed when a consumer happens to read that exact
+record: bit rot there is silent, and silent in the worst way, because a damaged copy answers reads
+with the records *before* the damage and nothing after, with no error. A consumer then stalls at
+that offset or skips the rest of the range.
+
+The scrub walks the node's own sealed segments, checks every record's checksum, and repairs a
+damaged copy from a replica that still verifies:
+
+```bash
+MALACHI_SCRUB_ENABLED=true           # default; set to false to turn the scrub off entirely
+MALACHI_SCRUB_INTERVAL_MS=60000      # time between passes
+MALACHI_SCRUB_SEGMENTS_PER_TICK=1    # segments verified per pass
+```
+
+A full cycle takes `sealed segments on the node x interval / segments per tick`. With the defaults
+and 64MB segments a node verifies about 90GB a day, so 10k sealed segments are revisited roughly
+weekly, the usual period for disk scrubbing. Raise the interval on a slow or busy disk; lower it
+(or raise the per-tick count) to cover a large dataset more often.
+
+**What it costs.** The scan itself was measured directly at 740 MB/s (64-byte records) to 2.7 GB/s
+(1KB records) on one core, so a 64MB segment costs 24 to 86ms of a core, and the shipped cadence
+works out to under 0.15% of one core and about 1 MB/s of reads. End to end the effect is smaller
+than a benchmark can resolve: on the 3-node Docker cluster (`benchmark/docker-scrub.sh`, which
+interleaves the cases so ordering cannot bias them) both the default cadence and one three thousand
+times faster landed inside the machine's run-to-run spread of roughly 15%. Re-run that sweep on
+real hardware before raising the rate a lot, and note the honest caveat: those runs had the whole
+dataset in page cache, so the scrub was reading RAM. On a node whose data dwarfs its memory the
+scan is real disk I/O and competes with the write path.
+
+**On detection**, the node asks the segment's other replicas to verify their own copies. Only when
+one of them confirms a copy that is both intact **and** complete does the repair proceed: if this
+node is the segment's primary it first moves itself to the end of the replica set, so reads go to an
+intact replica immediately, and only then is the local copy deleted and refetched, then verified
+again. Complete matters as much as intact, because a replica whose checksums all pass can still be
+missing whole records at the end, and repairing from one would delete this copy to refetch less than
+it held. So a replica qualifies only when its scan matches the record and byte counts the control
+plane recorded when the segment was sealed. If **no** replica qualifies, nothing is deleted and the
+failure is logged loudly: a partially readable copy is worth more than no copy. A repair is traced
+as `malachi.scrub.repair`.
+
+Two series to watch, and they answer different questions.
+`malachi_storage_integrity_failures_total{reason}` says whether anything is damaged, and
+`malachi_storage_scrub_segments_total{result}` says whether the scrub is even running: a `verified`
+total that stops advancing means the checking stopped, which the failure counter alone can never
+tell you, since it reads zero both when all is well and when nothing is looking. Within that second
+series, `result="unrepairable"` is the one worth paging on: it counts damage the cluster could not
+heal by itself, so unlike `result="repaired"` it does not go away on its own.
+
+Note what the failure counter deliberately does **not** include: a torn frame at the end of an
+active segment after a crash. Those bytes were never acknowledged, so recovering past them is
+routine, and counting it would make an ordinary restart look like corruption at rest. It is still
+logged. Rot in an active segment, and anything at all in a sealed one, is counted.
+
+A single-node deployment scrubs too, and there the distinction matters more: with no replica there
+is nothing to repair from, so every finding lands in the unrepairable path with a loud log. That is
+still the difference between knowing and not knowing that data at rest went bad, and because
+recovery never truncates a copy damaged by rot (a bad checksum or a mangled frame header), the
+frames after the damage are still on disk for a manual salvage.
+
+Be precise about which damage that covers, because the two shapes are not treated alike. Rot is left
+alone whatever the file's state. A torn tail is dropped unless the file carries its own seal marker,
+and a replica usually does not: that marker is written when the segment's log rolls locally, not
+when the control plane seals the segment. That asymmetry is deliberate rather than an oversight,
+since a torn tail has nothing valid after it by construction, so there is nothing to salvage. Rot is
+the case where the bytes past the damage are still worth keeping.
+
+## Chaos certification
+
+`scripts/docker-chaos-test.sh` runs the certification drill on a local 3-node RF=3 Docker cluster:
+synthetic traffic flows while a node is power-pulled (SIGKILL), partitioned off the network, stalled
+(SIGSTOP, sockets open but mute), and finally every node is rolling-restarted. Three invariants must
+hold or the script exits nonzero:
+
+1. **No acknowledged write is ever lost.** A checker produces sequential values through the whole
+   window, retrying through the faults, and records only the confirmed ones; at the end every one of
+   them must read back (rf=3 quorum durability).
+2. **The cluster reconverges** to 3/3 healthy after every event.
+3. **Availability recovers**: errors during an event are expected, and a clean produce+fetch must
+   pass once the chaos ends.
+
+Run it before releases or after touching replication, failover, or membership code.
+
+`scripts/docker-storage-chaos.sh` extends the drill to storage faults, injected with the target
+node stopped: a follower's segment copy suffers a torn write (cut short with a garbage partial
+frame appended: recovery clamps at the last CRC-valid frame and catch-up or the healing pass
+repairs the tail), a gross truncation to half, and a sealed-segment directory deleted outright.
+The deletion exercises the self-healing **integrity probe**: metadata still says the segment has
+all its replicas, so only a physical check (on-disk bytes vs the sealed byte size, run each healing
+pass) can spot the silent under-replication and re-backfill the copy. On top of the three
+invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
+file must end byte-identical across the three nodes. Damage always targets follower copies;
+primary damage is seal-on-failure territory (roadmap). In-place corruption that keeps the byte size
+(bit rot) and a rotted sparse index are covered too, by the integrity scrub described above. The run
+sets `MALACHI_SEGMENT_MAX_BYTES` and `MALACHI_LOG_ROLL_MAX_BYTES` low so segments seal and roll
+within the window; both knobs are available to any deployment that wants smaller roll sizes.
+
+`scripts/docker-config-chaos.sh` certifies config deployments, the way this repo deploys them (one
+image, config via env): a harmless setting is rolled across the nodes one at a time, requiring the
+checker's acks to keep flowing between every step and the new value to be effective on all three
+nodes at the end; then a config that fails fast at boot is pushed to a single node, which must
+crash-loop and never go healthy while the other two keep serving quorum writes, and rolling the
+env back must bring it home to 3/3. The same closing invariants apply: no acknowledged write lost,
+full reconvergence, clean produce+fetch after the chaos.
 
 ## Retention
 
