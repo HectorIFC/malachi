@@ -78,7 +78,7 @@ node loadtest.js --scenario produce --connections 20 --duration 10 --batch 10 \
 The [Node.js load test results](../generated/loadtest-node-results.md) page renders exactly this
 document, from `benchmark/published/loadtest-node.json`.
 
-Write to a path **outside the repository** and move the file into place afterwards, as above. Piping
+Write to a path **outside the repository** and move the file into place afterward, as above. Piping
 straight onto the tracked file truncates it first, which makes the working tree dirty while the run
 is in flight, and the recorded git ref then comes out as `<sha>-dirty` instead of naming a commit
 anyone can check out.

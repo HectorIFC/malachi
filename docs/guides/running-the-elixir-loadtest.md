@@ -43,7 +43,7 @@ state machine rather than the log, so they measure something the data-plane scen
 ## Driving a cluster
 
 `--host` takes a comma-separated list, and connection `i` targets host `i mod n`. That spreads load
-across every node's broker mailbox rather than funnelling a cluster's worth of traffic through one
+across every node's broker mailbox rather than funneling a cluster's worth of traffic through one
 node's socket:
 
 ```bash
@@ -97,7 +97,7 @@ still appears and the run is reproducible from the record alone. And it carries 
 construction: that string gets committed and published, and a password in it would outlive any
 rotation.
 
-Write to a path outside the repository and move the file into place afterwards. Redirecting straight
+Write to a path outside the repository and move the file into place afterward. Redirecting straight
 onto a tracked file truncates it first, which dirties the working tree while the run is in flight, and
 the recorded ref then reads `<sha>-dirty` rather than naming a commit.
 

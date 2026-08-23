@@ -6,7 +6,7 @@
 # were a token pasted into the scrape config that silently stops working after an hour, or turning the
 # endpoint's authentication off. This is the third option, and it is about thirty lines.
 #
-# ONE TOKEN PER NODE, which is not an optimisation but a requirement: users, ACLs and lockouts are
+# ONE TOKEN PER NODE, which is not an optimization but a requirement: users, ACLs and lockouts are
 # replicated across the cluster through the auth `ra` group, and sessions are NOT. They live in a local
 # ETS table (Malachi.Auth, @sessions_table), so a session minted on node 1 does not exist on node 2,
 # which answers `invalid_session` and a 403. A cluster therefore needs one login per node, and

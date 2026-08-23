@@ -198,8 +198,10 @@ which is the difference between this and `docker-compose.cluster.yml`: that one 
 and keeps its data on tmpfs so fsync cost stays uniform across runs, and tmpfs is remounted empty on
 every restart.
 
-Only node 1 publishes to the host; the three are interchangeable for a client. Prometheus scrapes all
-three, because most Malachi series are per-node facts (BEAM memory, connections, the integrity scrub's
+Only node 1 publishes to the host, so it is the only one a client on your machine can reach. The three
+are interchangeable to a client **on the compose network**, which is the sense that matters for how
+the cluster behaves: produce through any of them and the write is quorum-replicated across all three. Publish the other two if you want to exercise that from outside. Prometheus scrapes all three,
+because most Malachi series are per-node facts (BEAM memory, connections, the integrity scrub's
 progress over *that* node's disk) and scraping one would report a third of the cluster while looking
 complete. It uses one scrape job per node, each with its own token: users, ACLs and lockouts are
 replicated across the cluster through the auth `ra` group, but **sessions are not**, so a session

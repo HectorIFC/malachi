@@ -79,9 +79,14 @@ than emulating one.
 
 ## Persistence
 
-Nothing survives a restart unless you mount a volume and point the two data directories at it. Left
-unset, they land under `/tmp`, which is where the benchmark setups deliberately put them and where
-nothing keeps.
+Nothing survives the container being **recreated** unless you mount a volume and point the two data
+directories at it. Left unset, they land under `/tmp` inside the container's writable layer, which is
+where the benchmark setups deliberately put them.
+
+The distinction matters more than it looks. A `docker restart` keeps that writable layer, so data
+written under `/tmp` is still there afterward and the setup appears to persist. It is `docker rm`
+followed by a fresh `run`, or a `docker compose up` that recreates the container, that takes it, and
+that is the operation an upgrade performs.
 
 ```bash
 docker run -d --name malachi \

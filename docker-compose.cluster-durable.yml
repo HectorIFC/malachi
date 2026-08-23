@@ -84,8 +84,10 @@ services:
     environment:
       <<: *malachi-env
       MALACHI_SERVICE_NAME: malachi1
-    # Only node 1 publishes to the host: the three are interchangeable for a client, and publishing all
-    # of them would mean three ports doing the same job. Talk to the others over the compose network.
+    # Only node 1 publishes to the host, so it is the only one reachable from your machine. The three
+    # are interchangeable to a client ON the compose network, which is the sense the cluster cares
+    # about: a write through any of them is quorum-replicated across all three. Publish the other two
+    # if you want to drive them from outside.
     # Loopback, for the same reason as the single-node stack: placeholder credentials from a public
     # file, TLS off, and unauthenticated Jaeger and Prometheus beside it.
     ports:
