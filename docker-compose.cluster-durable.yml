@@ -86,9 +86,11 @@ services:
       MALACHI_SERVICE_NAME: malachi1
     # Only node 1 publishes to the host: the three are interchangeable for a client, and publishing all
     # of them would mean three ports doing the same job. Talk to the others over the compose network.
+    # Loopback, for the same reason as the single-node stack: placeholder credentials from a public
+    # file, TLS off, and unauthenticated Jaeger and Prometheus beside it.
     ports:
-      - "4040:4040"
-      - "4041:4041"
+      - "127.0.0.1:4040:4040"
+      - "127.0.0.1:4041:4041"
     volumes:
       - malachi-durable-1:/app/data
 
@@ -116,7 +118,7 @@ services:
     image: jaegertracing/all-in-one:1.60
     container_name: malachi-durable-jaeger
     ports:
-      - "16686:16686"
+      - "127.0.0.1:16686:16686"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     mem_limit: 512m
@@ -160,7 +162,7 @@ services:
     image: prom/prometheus:v2.54.1
     container_name: malachi-durable-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus

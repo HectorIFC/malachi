@@ -205,10 +205,15 @@ complete. It uses one scrape job per node, each with its own token: users, ACLs 
 replicated across the cluster through the auth `ra` group, but **sessions are not**, so a session
 minted on node 1 is rejected by node 2.
 
-Both stacks ship with placeholder credentials in a public file and with `MALACHI_REQUIRE_TLS=false`,
-which is the right trade for ports on your own machine and the wrong one for anything reachable. Set
-real passwords in the environment and point `MALACHI_TLS_CERTFILE` and `MALACHI_TLS_KEYFILE` at real
-certificates before either one leaves your laptop.
+Both stacks ship with placeholder credentials in a public file, with `MALACHI_REQUIRE_TLS=false`, and
+with Jaeger and Prometheus carrying no authentication of their own. Every port they publish is bound
+to `127.0.0.1` because of that combination rather than in spite of it: on `0.0.0.0` these files would
+hand anyone who can route to the host a plaintext broker whose password is on GitHub, plus every trace
+it has recorded.
+
+Set real passwords in the environment, point `MALACHI_TLS_CERTFILE` and `MALACHI_TLS_KEYFILE` at real
+certificates (mounted into the container, since those paths resolve inside it), and only then widen
+the bindings.
 
 ---
 

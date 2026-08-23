@@ -18,23 +18,44 @@ control plane is replicated by quorum (Raft, via `ra`).
 
 ```bash
 docker run -d --name malachi \
-  -p 4040:4040 -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="a-long-local-only-password" \
   -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 ```
 
 Then open the dashboard at [http://localhost:4041](http://localhost:4041), and check
-`http://localhost:4041/health`, which should answer `{"status":"ok"}`.
+`http://localhost:4041/health`, which should answer with an ok status.
 
-Both of those flags are load-bearing, so it is worth saying why rather than leaving you to find out
-from a crash loop.
+Three things in that command are load-bearing, so it is worth saying why rather than leaving you to
+find out from a crash loop.
 
 The image runs a **production** release, and a production release refuses to start on a weak or
 default password (`admin123` and friends are rejected outright, and anything under 12 characters is
 too short). It also requires TLS unless told otherwise, which is why `MALACHI_REQUIRE_TLS=false` is
-there: right for a container whose ports are on your own machine, wrong for anything reachable. For
-that, drop the flag and point `MALACHI_TLS_CERTFILE` and `MALACHI_TLS_KEYFILE` at real certificates.
+there.
+
+And the ports are bound to `127.0.0.1` rather than published on every interface, because the other two
+choices make that one matter: with TLS off and a password copied from a public page, `-p 4040:4040`
+would hand a plaintext broker to anyone who can route to your host. The loopback prefix is what keeps
+this a local example. Do not delete it to reach the container from another machine; make the
+deployment a real one instead.
+
+### Running it for real
+
+Drop `MALACHI_REQUIRE_TLS=false`, mount certificates, and point at their **container** paths. Host
+paths in those variables resolve inside the container, where they do not exist, so a bind mount is not
+optional:
+
+```bash
+docker run -d --name malachi \
+  -p 4040:4040 -p 4041:4041 \
+  -v /etc/malachi/certs:/certs:ro \
+  -e MALACHI_TLS_CERTFILE=/certs/server.pem \
+  -e MALACHI_TLS_KEYFILE=/certs/server-key.pem \
+  -e MALACHI_ADMIN_PASS="$(openssl rand -base64 32)" \
+  hectorcardoso/malachi:latest
+```
 
 ## Ports
 
@@ -64,7 +85,7 @@ nothing keeps.
 
 ```bash
 docker run -d --name malachi \
-  -p 4040:4040 -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 -p 127.0.0.1:4041:4041 \
   -v malachi-data:/app/data \
   -e MALACHI_LOG_DATA_DIR=/app/data/log \
   -e MALACHI_RA_DATA_DIR=/app/data/ra \
@@ -119,6 +140,18 @@ For three nodes at replication factor 3 on durable volumes, with the same two:
 
 ```bash
 docker compose -f docker-compose.cluster-durable.yml up -d
+```
+
+Both stacks are local examples in the same sense as the quick start above, and for the same reasons:
+they carry placeholder credentials that anyone can read in the repository, they set
+`MALACHI_REQUIRE_TLS=false`, and Jaeger and Prometheus have no authentication at all. Every port they
+publish is therefore bound to `127.0.0.1`. Override the credentials through the environment before
+either one goes anywhere:
+
+```bash
+MALACHI_ADMIN_PASS="$(openssl rand -base64 32)" \
+MALACHI_PRODUCER_PASS="$(openssl rand -base64 32)" \
+  docker compose up -d
 ```
 
 Tracing is off by default in every other setup, and deliberately: the sampler drops every span, so
