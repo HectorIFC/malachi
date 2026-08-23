@@ -57,28 +57,37 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     }
   ]
 
+  # Both directories are overridable, and only so the tests can point at a scratch pair. The task is
+  # run without arguments everywhere else (the `docs` alias, CI, by hand), which is why the defaults
+  # are the real paths rather than something a caller has to supply.
+  @switches [published_dir: :string, output_dir: :string]
+
   @impl Mix.Task
-  def run(_argv) do
-    File.mkdir_p!(@output_dir)
+  def run(argv) do
+    {opts, _rest} = OptionParser.parse!(argv, strict: @switches)
+    published_dir = Keyword.get(opts, :published_dir, @published_dir)
+    output_dir = Keyword.get(opts, :output_dir, @output_dir)
+
+    File.mkdir_p!(output_dir)
 
     for page <- @pages do
       page
-      |> read_result()
+      |> read_result(published_dir)
       |> render(page)
-      |> write(page)
+      |> write(page, output_dir)
     end
 
     :ok
   end
 
-  defp write(body, page) do
-    path = Path.join(@output_dir, page.output)
+  defp write(body, page, output_dir) do
+    path = Path.join(output_dir, page.output)
     File.write!(path, body)
     Mix.shell().info("wrote #{path}")
   end
 
-  defp read_result(page) do
-    path = Path.join(@published_dir, page.source)
+  defp read_result(page, published_dir) do
+    path = Path.join(published_dir, page.source)
 
     case File.read(path) do
       {:ok, body} -> decode(path, body)

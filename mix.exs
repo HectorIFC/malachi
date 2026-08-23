@@ -275,9 +275,15 @@ defmodule Malachi.MixProject do
       # turns it on (see config/runtime.exs). The exporter ships as a dependency rather than as an
       # instruction to add one, because a collector nobody can reach without editing mix.exs and
       # recompiling is a collector nobody reaches: the shipped compose files point Jaeger at it.
+      # The exporter is listed BEFORE the SDK on purpose, here and in the release's `applications`.
+      # Nothing in the dependency graph orders these two relative to each other, so the start order
+      # falls out of this list, and the SDK reads its exporter configuration while it initializes: an
+      # SDK that starts first can come up with no exporter registered and drop the spans from that
+      # window. It is a boot race, so it does not reproduce on demand, which is the argument for
+      # pinning the order rather than for waiting to see whether it bites.
       {:opentelemetry_api, "~> 1.4"},
-      {:opentelemetry, "~> 1.5"},
       {:opentelemetry_exporter, "~> 1.8"},
+      {:opentelemetry, "~> 1.5"},
       # Raft (RabbitMQ's): replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
@@ -302,7 +308,14 @@ defmodule Malachi.MixProject do
     [
       malachi: [
         include_executables_for: [:unix],
-        applications: [runtime_tools: :permanent],
+        # The OpenTelemetry pair is listed explicitly, and exporter first, for the reason spelled out
+        # beside them in deps/0: a release boots applications in this order, and an SDK that starts
+        # before its exporter can drop the spans from that window.
+        applications: [
+          opentelemetry_exporter: :permanent,
+          opentelemetry: :permanent,
+          runtime_tools: :permanent
+        ],
         steps: [:assemble, :tar]
       ]
     ]

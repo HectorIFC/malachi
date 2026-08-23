@@ -64,10 +64,14 @@ for rf in $RFS; do
   ( sleep $((WARM + DUR / 2)); docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > "$WORK/stats.txt" 2>/dev/null ) &
   stats_pid=$!
 
+  # stderr goes to a file rather than /dev/null. It used to be discarded, and the cost of that showed
+  # up twice: a run reported `(no json)` with the reason already thrown away, and diagnosing it needed
+  # the whole step reproduced by hand. It turned out to be `compose run` racing a teardown that had not
+  # finished draining, which the first line of that stderr says outright.
   json=$(RF="$rf" $COMPOSE run --rm loadtest \
            --host malachi1,malachi2,malachi3 --scenario produce \
            --connections "$CONNS" --batch "$BATCH" --topics "$TOPICS" \
-           --duration "$DUR" --warmup "$WARM" --record-size 256 --json 2>/dev/null \
+           --duration "$DUR" --warmup "$WARM" --record-size 256 --json 2>"$WORK/loadtest-rf$rf.err" \
          | grep -E '^\{' | tail -1)
 
   wait "$stats_pid" 2>/dev/null
@@ -75,7 +79,10 @@ for rf in $RFS; do
 
   if [ -z "$json" ]; then
     # A caseless client must fail the run, not blend in as a blank row.
-    printf "%-4s | %s\n" "$rf" "(no json)"; FAILED=1; continue
+    printf "%-4s | %s\n" "$rf" "(no json)"
+    echo "     the load generator produced no result; its stderr:"
+    tail -15 "$WORK/loadtest-rf$rf.err" | sed 's/^/       /'
+    FAILED=1; continue
   fi
   read -r recs p50 p99 err drop over recon < <(echo "$json" \
     | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv')

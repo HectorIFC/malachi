@@ -134,6 +134,18 @@ defmodule Malachi.LoadtestTest do
   end
 
   describe "reproduce metadata" do
+    test "the recorded command names the topic and the port that were actually used" do
+      # Both were missing and both break a reproduction quietly: a run on a non-default port published
+      # a command that dials 4040, and a fetch run against an existing topic published one that would
+      # create a new empty one.
+      t = topic("addressing")
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: t)
+
+      assert r.meta.command =~ "--topic #{t}"
+      assert r.meta.command =~ "--port #{@port}"
+      assert r.meta.command =~ "--host 127.0.0.1"
+    end
+
     test "the report carries a meta block describing when, from what, and on what" do
       r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("meta"))
 

@@ -592,7 +592,13 @@ defmodule Malachi.Loadtest do
         "--window #{cfg.window}",
         "--prepopulate #{cfg.prepopulate}",
         "--topics #{cfg.topics}",
-        "--host #{Enum.join(cfg.hosts, ",")}"
+        # Both of these were missing, and both break the reproduction in the same quiet way: a run
+        # against port 5040 published a command that connects to 4040, and a fetch run against an
+        # existing topic published one that would invent a new empty topic instead. The port default
+        # matches `Conn.connect/1`, so the recorded value is the one actually dialled.
+        "--topic #{cfg.topic}",
+        "--host #{Enum.join(cfg.hosts, ",")}",
+        "--port #{Keyword.get(cfg.conn_opts, :port, 4040)}"
       ],
       " "
     )

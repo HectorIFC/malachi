@@ -489,8 +489,28 @@ config :malachi,
 # MALACHI_TRACING_SAMPLE_RATIO trades detail for cost: 1.0 records every operation, which is what a
 # local compose stack wants and what a busy production node does not.
 if System.get_env("MALACHI_TRACING_ENABLED") == "true" do
-  ratio = parse_float.(System.get_env("MALACHI_TRACING_SAMPLE_RATIO"), 1.0)
+  # Validated, because the two ways to get this wrong fail differently and one of them fails quietly.
+  # A negative value reaches `:trace_id_ratio_based` and breaks the sampler at startup; a value above
+  # 1.0 used to fall through to `:always_on`, so someone asking for 200 percent got full sampling and
+  # no hint that the number meant nothing. Out of range is refused out loud and the default used, the
+  # same shape as the scrub interval.
+  ratio =
+    case parse_float.(System.get_env("MALACHI_TRACING_SAMPLE_RATIO"), 1.0) do
+      value when is_number(value) and value >= 0.0 and value <= 1.0 ->
+        value
 
+      value ->
+        IO.warn("""
+        MALACHI_TRACING_SAMPLE_RATIO must be between 0.0 and 1.0, got #{inspect(value)}.
+        Falling back to 1.0 (sample everything).
+        """)
+
+        1.0
+    end
+
+  # 0.0 is left to the ratio sampler rather than shortcut to `:always_off`: under `:parent_based` a
+  # ratio of zero still records the children of a span someone else decided to sample, which is the
+  # useful reading of "start no traces of my own" in a distributed system.
   sampler =
     if ratio >= 1.0 do
       :always_on
