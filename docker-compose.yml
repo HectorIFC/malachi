@@ -32,9 +32,14 @@ services:
       # The second thing that stopped this file from starting. The image runs the prod release, and
       # prod requires TLS unless told otherwise, so without this the broker raised
       # `TLS certificate file not configured` and crash-looped. Plaintext is the right answer for a
-      # stack whose ports are on your own machine and the wrong one for anything else: point
-      # MALACHI_TLS_CERTFILE and MALACHI_TLS_KEYFILE at real certificates and drop this line.
-      - MALACHI_REQUIRE_TLS=false
+      # stack whose ports are on your own machine and the wrong one for anything else.
+      #
+      # Turning it back on takes MALACHI_REQUIRE_TLS=true AND certificates. Setting
+      # MALACHI_TLS_CERTFILE and MALACHI_TLS_KEYFILE alone leaves this false and the broker still
+      # serving plaintext, which is the worst shape a security setting can fail in: it looks
+      # configured. Overridable from the environment for that reason, rather than hardcoded here
+      # where it could only be changed by editing the file.
+      - MALACHI_REQUIRE_TLS=${MALACHI_REQUIRE_TLS:-false}
       - MALACHI_RATE_LIMIT_ENABLED=true
       - MALACHI_SESSION_IP_BINDING=true
       - MALACHI_AUDIT_LOG_OUTPUT=stdout

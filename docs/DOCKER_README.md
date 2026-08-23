@@ -213,9 +213,25 @@ to `127.0.0.1` because of that combination rather than in spite of it: on `0.0.0
 hand anyone who can route to the host a plaintext broker whose password is on GitHub, plus every trace
 it has recorded.
 
-Set real passwords in the environment, point `MALACHI_TLS_CERTFILE` and `MALACHI_TLS_KEYFILE` at real
-certificates (mounted into the container, since those paths resolve inside it), and only then widen
-the bindings.
+Undoing that takes three separate things, and the middle one is easy to miss:
+
+```bash
+MALACHI_ADMIN_PASS="$(openssl rand -base64 32)" \
+MALACHI_REQUIRE_TLS=true \
+MALACHI_TLS_CERTFILE=/certs/server.pem \
+MALACHI_TLS_KEYFILE=/certs/server-key.pem \
+  docker compose up -d
+```
+
+Real passwords in the environment. `MALACHI_REQUIRE_TLS=true`, which is **not** implied by setting the
+certificate paths: with the flag left at `false` the broker reads those files and still serves
+plaintext, a security setting failing in the shape that looks configured. And certificates mounted
+into the container, because those two paths resolve inside it, so add a
+`- /etc/malachi/certs:/certs:ro` volume alongside them.
+
+Only then widen the broker's bindings, and widen only the broker's. Jaeger and Prometheus have no
+authentication to turn on, so they stay on `127.0.0.1` until you have put something in front of them
+that does.
 
 ---
 
