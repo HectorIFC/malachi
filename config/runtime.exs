@@ -489,19 +489,20 @@ config :malachi,
 # MALACHI_TRACING_SAMPLE_RATIO trades detail for cost: 1.0 records every operation, which is what a
 # local compose stack wants and what a busy production node does not.
 if System.get_env("MALACHI_TRACING_ENABLED") == "true" do
-  # Validated, because the two ways to get this wrong fail differently and one of them fails quietly.
-  # A negative value reaches `:trace_id_ratio_based` and breaks the sampler at startup; a value above
-  # 1.0 used to fall through to `:always_on`, so someone asking for 200 percent got full sampling and
-  # no hint that the number meant nothing. Out of range is refused out loud and the default used, the
-  # same shape as the scrub interval.
+  # The rule lives in Malachi.Config, not inline here, and for the reason that module's own moduledoc
+  # gives: this file is skipped entirely under config_env() == :test, so a rule written inline cannot
+  # be reached by the suite. `parse_float` above is deliberately lenient and cannot be trusted with
+  # this one, which `sampling_ratio/1` explains.
+  raw_ratio = System.get_env("MALACHI_TRACING_SAMPLE_RATIO")
+
   ratio =
-    case parse_float.(System.get_env("MALACHI_TRACING_SAMPLE_RATIO"), 1.0) do
-      value when is_number(value) and value >= 0.0 and value <= 1.0 ->
+    case Malachi.Config.sampling_ratio(raw_ratio) do
+      {:ok, value} ->
         value
 
-      value ->
+      :invalid ->
         IO.warn("""
-        MALACHI_TRACING_SAMPLE_RATIO must be between 0.0 and 1.0, got #{inspect(value)}.
+        MALACHI_TRACING_SAMPLE_RATIO must be a number between 0.0 and 1.0, got #{inspect(raw_ratio)}.
         Falling back to 1.0 (sample everything).
         """)
 

@@ -146,6 +146,30 @@ defmodule Malachi.LoadtestTest do
       assert r.meta.command =~ "--host 127.0.0.1"
     end
 
+    test "free text in the recorded command survives a shell round trip" do
+      # A topic with a space recorded as `--topic has a space`, which on replay parses as
+      # `--topic has` and silently targets a different topic. The server's allowlist rejects this
+      # name, so the run fails, but the command is recorded either way and a string this module
+      # emits should not rely on a downstream validator to come out well formed.
+      t = "has a space and a ' quote"
+      r = run(scenario: :produce, connections: 1, batch: 1, topic: t)
+
+      assert r.meta.command =~ ~s(--topic 'has a space and a '\\'' quote')
+
+      # The proof is not the shape of the escaping but that a shell reads back what went in.
+      {parsed, 0} = System.cmd("sh", ["-c", "set -- #{r.meta.command}; while [ $# -gt 0 ]; do
+        if [ \"$1\" = --topic ]; then printf '%s' \"$2\"; exit 0; fi; shift; done"])
+
+      assert parsed == t
+    end
+
+    test "an ordinary command is not quoted, so it stays readable" do
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("plain"))
+
+      refute r.meta.command =~ "'"
+      assert r.meta.command =~ "--host 127.0.0.1"
+    end
+
     test "the report carries a meta block describing when, from what, and on what" do
       r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("meta"))
 

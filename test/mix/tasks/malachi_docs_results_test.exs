@@ -86,6 +86,16 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
         assert body =~ guide
       end
     end
+
+    test "the page names the file the task actually looked at", context do
+      # It used to name the default directory whatever the caller passed, so with --published-dir the
+      # page sent a reader to a path the task never opened.
+      run(context)
+
+      body = page(context, "chaos-results.md")
+      assert body =~ Path.join(context.published, "chaos-node.json")
+      refute body =~ "benchmark/published"
+    end
   end
 
   describe "when a source is unreadable" do

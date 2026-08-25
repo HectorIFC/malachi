@@ -596,12 +596,31 @@ defmodule Malachi.Loadtest do
         # against port 5040 published a command that connects to 4040, and a fetch run against an
         # existing topic published one that would invent a new empty topic instead. The port default
         # matches `Conn.connect/1`, so the recorded value is the one actually dialled.
-        "--topic #{cfg.topic}",
-        "--host #{Enum.join(cfg.hosts, ",")}",
+        "--topic #{shell_arg(cfg.topic)}",
+        "--host #{shell_arg(Enum.join(cfg.hosts, ","))}",
         "--port #{Keyword.get(cfg.conn_opts, :port, 4040)}"
       ],
       " "
     )
+  end
+
+  # The two free-text values above are the ones a shell can misread. A topic with a space records as
+  # `--topic has a space`, which on replay parses as `--topic has` and silently targets a different
+  # topic; the host list is not validated anywhere at all. The server's allowlist would reject that
+  # topic, but the command is recorded even for a run that failed, and a string this module emits
+  # should not depend on a downstream validator to be correct.
+  #
+  # Quoted only when it has to be, so an ordinary command stays readable. Single quotes because they
+  # are the one POSIX quoting with no escapes inside; an embedded single quote is closed, escaped and
+  # reopened, which is the standard idiom for exactly this.
+  defp shell_arg(value) do
+    string = to_string(value)
+
+    if string != "" and string =~ ~r{\A[A-Za-z0-9._,:/@=+-]+\z} do
+      string
+    else
+      "'" <> String.replace(string, "'", "'\\''") <> "'"
+    end
   end
 
   defp version do

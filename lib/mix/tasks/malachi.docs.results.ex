@@ -86,12 +86,15 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     Mix.shell().info("wrote #{path}")
   end
 
+  # `:missing` carries the path it looked at rather than letting the page rebuild one from the module
+  # attribute: with `--published-dir` those two disagree, and the page would tell a reader to go look
+  # at a file the task never opened.
   defp read_result(page, published_dir) do
     path = Path.join(published_dir, page.source)
 
     case File.read(path) do
       {:ok, body} -> decode(path, body)
-      {:error, :enoent} -> :missing
+      {:error, :enoent} -> {:missing, path}
       {:error, reason} -> Mix.raise("cannot read #{path}: #{inspect(reason)}")
     end
   end
@@ -103,17 +106,17 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     end
   end
 
-  defp render(:missing, page), do: render_missing(page)
+  defp render({:missing, path}, page), do: render_missing(page, path)
   defp render({:ok, result}, %{kind: :loadtest} = page), do: render_loadtest(page, result)
   defp render({:ok, result}, %{kind: :chaos} = page), do: render_chaos(page, result)
 
-  defp render_missing(page) do
+  defp render_missing(page, path) do
     {how_to_path, how_to_title} = page.how_to
 
     page_body([
       "# #{page.title}",
       "No run has been recorded yet.",
-      "This page renders `#{@published_dir}/#{page.source}`, written from #{page.generator}. " <>
+      "This page renders `#{path}`, written from #{page.generator}. " <>
         "A checkout that has never had one recorded shows this instead of numbers from somewhere else.",
       "See [#{how_to_title}](#{how_to_path}) to record one."
     ])
