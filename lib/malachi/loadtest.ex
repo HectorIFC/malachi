@@ -584,34 +584,46 @@ defmodule Malachi.Loadtest do
   # so there is not always an argv to quote; and a reproduction needs the defaults too, while an argv
   # shows only what was typed. Credential VALUES are deliberately absent: this string gets committed
   # and published, and `--pass` or `--token` has no business in either. File paths are not values and
-  # do come along, see `tls_args/1`.
+  # do come along, see `tls_options/1`.
   defp command(cfg) do
-    Enum.join(
+    options =
       [
-        "mix malachi.loadtest",
-        "--scenario #{cfg.scenario}",
-        "--connections #{cfg.connections}",
-        "--duration #{cfg.duration}",
-        "--warmup #{cfg.warmup}",
-        "--batch #{cfg.batch}",
-        "--record-size #{cfg.record_size}",
-        "--keys #{cfg.keys}",
-        "--pipeline #{cfg.pipeline}",
-        "--max #{cfg.max}",
-        "--window #{cfg.window}",
-        "--prepopulate #{cfg.prepopulate}",
-        "--topics #{cfg.topics}",
-        # Both of these were missing, and both break the reproduction in the same quiet way: a run
-        # against port 5040 published a command that connects to 4040, and a fetch run against an
-        # existing topic published one that would invent a new empty topic instead. The port default
-        # matches `Conn.connect/1`, so the recorded value is the one actually dialled.
-        "--topic #{shell_arg(cfg.topic)}",
-        "--host #{shell_arg(Enum.join(cfg.hosts, ","))}",
-        "--port #{Keyword.get(cfg.conn_opts, :port, 4040)}"
-      ] ++ tls_args(cfg.conn_opts),
-      " "
-    )
+        scenario: cfg.scenario,
+        connections: cfg.connections,
+        duration: cfg.duration,
+        warmup: cfg.warmup,
+        batch: cfg.batch,
+        "record-size": cfg.record_size,
+        keys: cfg.keys,
+        pipeline: cfg.pipeline,
+        max: cfg.max,
+        window: cfg.window,
+        prepopulate: cfg.prepopulate,
+        topics: cfg.topics,
+        # The topic and the port were both missing once, and both broke the reproduction in the same
+        # quiet way: a run against port 5040 published a command that connects to 4040, and a fetch
+        # run against an existing topic published one that would invent a new empty topic instead.
+        # The port default matches `Conn.connect/1`, so the recorded value is the one actually
+        # dialled.
+        topic: cfg.topic,
+        host: Enum.join(cfg.hosts, ","),
+        port: Keyword.get(cfg.conn_opts, :port, 4040)
+      ] ++ tls_options(cfg.conn_opts)
+
+    Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
   end
+
+  # `--name=value` rather than two arguments, for every option rather than only the ones that look
+  # risky. `OptionParser` reads a separate value beginning with a hyphen as another switch, so a topic
+  # named `-weird` produced a command that does not merely target the wrong thing but refuses to run,
+  # complaining that --topic is missing its argument and that -w, -e, -i, -r and -d are unknown
+  # options. That name passes the server's allowlist, which permits hyphens, so this is reachable with
+  # a topic the broker accepts rather than only with one it rejects.
+  #
+  # Uniform because the alternative is deciding per option which values could start with a hyphen, and
+  # that judgement is what has already been wrong three times in this function.
+  defp render_option({flag, true}), do: "--#{flag}"
+  defp render_option({flag, value}), do: "--#{flag}=#{shell_arg(value)}"
 
   # Transport last, and only when TLS is on, so an ordinary plaintext command is unchanged. Omitting
   # it was the third thing this function got wrong in the same way: a run over TLS published a command
@@ -623,12 +635,12 @@ defmodule Malachi.Loadtest do
   # command that names a key file leaks no key. Dropping them would produce a command that runs and
   # quietly reproduces a weaker configuration, which is the bug being fixed rather than a smaller
   # version of it.
-  defp tls_args(conn_opts) do
+  defp tls_options(conn_opts) do
     if Keyword.get(conn_opts, :tls) do
-      ["--tls"] ++
+      [tls: true] ++
         for option <- [:cacert, :cert, :key],
             path = Keyword.get(conn_opts, option),
-            do: "--#{option} #{shell_arg(path)}"
+            do: {option, path}
     else
       []
     end

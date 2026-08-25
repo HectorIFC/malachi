@@ -141,27 +141,32 @@ defmodule Malachi.LoadtestTest do
       t = topic("addressing")
       r = run(scenario: :produce, connections: 2, batch: 5, topic: t)
 
-      assert r.meta.command =~ "--topic #{t}"
-      assert r.meta.command =~ "--port #{@port}"
-      assert r.meta.command =~ "--host 127.0.0.1"
+      assert r.meta.command =~ "--topic=#{t}"
+      assert r.meta.command =~ "--port=#{@port}"
+      assert r.meta.command =~ "--host=127.0.0.1"
     end
 
-    # Reads back the value a shell would pass for `flag` in the given command, which is the only
-    # question worth asking about escaping: not what the quoting looks like, but what survives it.
+    # The argv a shell would hand the mix task, one element per line. Asking a shell is the only
+    # question worth asking about quoting: not what the escaping looks like, but what survives it.
+    defp replay_argv(command) do
+      {output, 0} = System.cmd("sh", ["-c", ~s(set -- #{command}; printf '%s\\n' "$@")])
+
+      # `mix` and `malachi.loadtest` lead; the rest is what OptionParser would see.
+      output |> String.split("\n", trim: true) |> Enum.drop(2)
+    end
+
     defp shell_value(command, flag) do
-      script = ~s(set -- #{command}
-        while [ $# -gt 0 ]; do
-          if [ "$1" = "#{flag}" ]; then printf '%s' "$2"; exit 0; fi
-          shift
-        done)
+      prefix = flag <> "="
 
-      {value, 0} = System.cmd("sh", ["-c", script])
-      value
+      command
+      |> replay_argv()
+      |> Enum.find_value("", fn arg ->
+        if String.starts_with?(arg, prefix), do: String.replace_prefix(arg, prefix, "")
+      end)
     end
 
-    # An absent flag reads back as an empty string, which is what `shell_value/2` returns when the loop
-    # never matches. Asserting that beats `refute command =~ "--key"`, which passes for the wrong
-    # reason and fails for another one: `--keys 1000` contains it.
+    # An absent flag reads back as an empty string. Asserting that beats a refute on the substring
+    # `--key`, which passes for the wrong reason and fails for another one: `--keys=1000` contains it.
     defp shell_flag_absent?(command, flag), do: shell_value(command, flag) == ""
 
     test "free text in the recorded command survives a shell round trip" do
@@ -175,12 +180,31 @@ defmodule Malachi.LoadtestTest do
       assert shell_value(command, "--topic") == t
     end
 
+    test "a value starting with a hyphen replays as a value, not as another switch" do
+      # A hyphen is inside the server's topic allowlist, so `-weird` is a name the broker accepts.
+      # Emitted as two arguments, OptionParser read the value as a switch and the replay did not run
+      # at all: it complained that --topic was missing its argument and that -w, -e, -i, -r and -d
+      # were unknown options. The `--name=value` form is what makes it a value again.
+      command = Loadtest.reproduce_command(topic: "-weird")
+
+      assert shell_value(command, "--topic") == "-weird"
+      # Parsed the way a replay parses it, not matched as text: this is the step that used to raise.
+      replayed = command |> replay_argv() |> Enum.filter(&String.starts_with?(&1, "--topic="))
+      assert {[topic: "-weird"], []} = OptionParser.parse!(replayed, strict: [topic: :string])
+    end
+
+    test "a certificate path starting with a hyphen replays the same way" do
+      command = Loadtest.reproduce_command(tls: true, cacert: "-relative/ca.pem")
+
+      assert shell_value(command, "--cacert") == "-relative/ca.pem"
+    end
+
     test "an ordinary command is not quoted, so it stays readable" do
       command = Loadtest.reproduce_command(topic: "plain_topic")
 
       refute command =~ "'"
-      assert command =~ "--topic plain_topic"
-      assert command =~ "--host 127.0.0.1"
+      assert command =~ "--topic=plain_topic"
+      assert command =~ "--host=127.0.0.1"
     end
 
     test "a TLS run records a command that reconnects over TLS" do
@@ -239,10 +263,10 @@ defmodule Malachi.LoadtestTest do
       # The command is rebuilt from the EFFECTIVE config, not from what was typed, so a knob left at its
       # default is still part of the reproduction. --keys was never passed here.
       assert meta.command =~ "mix malachi.loadtest"
-      assert meta.command =~ "--scenario produce"
-      assert meta.command =~ "--connections 2"
-      assert meta.command =~ "--batch 5"
-      assert meta.command =~ "--keys 1000", "a defaulted knob still belongs in a reproduce command"
+      assert meta.command =~ "--scenario=produce"
+      assert meta.command =~ "--connections=2"
+      assert meta.command =~ "--batch=5"
+      assert meta.command =~ "--keys=1000", "a defaulted knob still belongs in a reproduce command"
     end
 
     test "the recorded command carries no credentials" do
