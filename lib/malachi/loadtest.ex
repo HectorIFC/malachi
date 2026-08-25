@@ -77,6 +77,14 @@ defmodule Malachi.Loadtest do
     report
   end
 
+  @doc false
+  # The reproduce command for a set of options, without running anything. Exposed for the tests: the
+  # branches worth pinning (TLS on, a topic a shell would misread) either need infrastructure to reach
+  # through `run/1` or need a run that fails on purpose, and neither tells you more about the string
+  # than calling the builder does. Not part of the API; `run/1` puts this in the report.
+  @spec reproduce_command(keyword()) :: String.t()
+  def reproduce_command(opts), do: opts |> normalize() |> command()
+
   # --- config ---
 
   defp normalize(opts) do
@@ -574,8 +582,9 @@ defmodule Malachi.Loadtest do
   # Rebuilt from the EFFECTIVE config rather than quoted from `System.argv/0`, which is what the Node
   # generator records. Two reasons: `run/1` is called directly as well (the mix task is a thin wrapper),
   # so there is not always an argv to quote; and a reproduction needs the defaults too, while an argv
-  # shows only what was typed. Credentials are deliberately absent: this string gets committed and
-  # published, and `--pass` has no business in either.
+  # shows only what was typed. Credential VALUES are deliberately absent: this string gets committed
+  # and published, and `--pass` or `--token` has no business in either. File paths are not values and
+  # do come along, see `tls_args/1`.
   defp command(cfg) do
     Enum.join(
       [
@@ -599,12 +608,33 @@ defmodule Malachi.Loadtest do
         "--topic #{shell_arg(cfg.topic)}",
         "--host #{shell_arg(Enum.join(cfg.hosts, ","))}",
         "--port #{Keyword.get(cfg.conn_opts, :port, 4040)}"
-      ],
+      ] ++ tls_args(cfg.conn_opts),
       " "
     )
   end
 
-  # The two free-text values above are the ones a shell can misread. A topic with a space records as
+  # Transport last, and only when TLS is on, so an ordinary plaintext command is unchanged. Omitting
+  # it was the third thing this function got wrong in the same way: a run over TLS published a command
+  # that reconnects in plaintext, which does not reproduce the run and does not say so. It measures a
+  # different thing too, since the handshake and the record layer are part of what was timed.
+  #
+  # The certificate paths come along. They are paths, not secrets, which is the line this function
+  # already draws: `--pass` and `--token` are excluded because they carry the secret VALUE, and a
+  # command that names a key file leaks no key. Dropping them would produce a command that runs and
+  # quietly reproduces a weaker configuration, which is the bug being fixed rather than a smaller
+  # version of it.
+  defp tls_args(conn_opts) do
+    if Keyword.get(conn_opts, :tls) do
+      ["--tls"] ++
+        for option <- [:cacert, :cert, :key],
+            path = Keyword.get(conn_opts, option),
+            do: "--#{option} #{shell_arg(path)}"
+    else
+      []
+    end
+  end
+
+  # The free-text values above are the ones a shell can misread. A topic with a space records as
   # `--topic has a space`, which on replay parses as `--topic has` and silently targets a different
   # topic; the host list is not validated anywhere at all. The server's allowlist would reject that
   # topic, but the command is recorded even for a run that failed, and a string this module emits

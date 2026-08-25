@@ -146,28 +146,85 @@ defmodule Malachi.LoadtestTest do
       assert r.meta.command =~ "--host 127.0.0.1"
     end
 
+    # Reads back the value a shell would pass for `flag` in the given command, which is the only
+    # question worth asking about escaping: not what the quoting looks like, but what survives it.
+    defp shell_value(command, flag) do
+      script = ~s(set -- #{command}
+        while [ $# -gt 0 ]; do
+          if [ "$1" = "#{flag}" ]; then printf '%s' "$2"; exit 0; fi
+          shift
+        done)
+
+      {value, 0} = System.cmd("sh", ["-c", script])
+      value
+    end
+
+    # An absent flag reads back as an empty string, which is what `shell_value/2` returns when the loop
+    # never matches. Asserting that beats `refute command =~ "--key"`, which passes for the wrong
+    # reason and fails for another one: `--keys 1000` contains it.
+    defp shell_flag_absent?(command, flag), do: shell_value(command, flag) == ""
+
     test "free text in the recorded command survives a shell round trip" do
       # A topic with a space recorded as `--topic has a space`, which on replay parses as
       # `--topic has` and silently targets a different topic. The server's allowlist rejects this
-      # name, so the run fails, but the command is recorded either way and a string this module
+      # name, so a real run fails, but the command is recorded either way and a string this module
       # emits should not rely on a downstream validator to come out well formed.
       t = "has a space and a ' quote"
-      r = run(scenario: :produce, connections: 1, batch: 1, topic: t)
+      command = Loadtest.reproduce_command(topic: t)
 
-      assert r.meta.command =~ ~s(--topic 'has a space and a '\\'' quote')
-
-      # The proof is not the shape of the escaping but that a shell reads back what went in.
-      {parsed, 0} = System.cmd("sh", ["-c", "set -- #{r.meta.command}; while [ $# -gt 0 ]; do
-        if [ \"$1\" = --topic ]; then printf '%s' \"$2\"; exit 0; fi; shift; done"])
-
-      assert parsed == t
+      assert shell_value(command, "--topic") == t
     end
 
     test "an ordinary command is not quoted, so it stays readable" do
-      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("plain"))
+      command = Loadtest.reproduce_command(topic: "plain_topic")
 
-      refute r.meta.command =~ "'"
-      assert r.meta.command =~ "--host 127.0.0.1"
+      refute command =~ "'"
+      assert command =~ "--topic plain_topic"
+      assert command =~ "--host 127.0.0.1"
+    end
+
+    test "a TLS run records a command that reconnects over TLS" do
+      # Omitting this published a command that reconnects in PLAINTEXT: it does not reproduce the run,
+      # and it does not measure the same thing either, since the handshake and the record layer are
+      # part of what was timed.
+      command =
+        Loadtest.reproduce_command(
+          tls: true,
+          cacert: "ca.pem",
+          cert: "client.pem",
+          key: "/etc/certs/client key.pem"
+        )
+
+      assert command =~ "--tls"
+      assert shell_value(command, "--cacert") == "ca.pem"
+      assert shell_value(command, "--cert") == "client.pem"
+      # Paths come along because they are paths; a space in one still has to survive.
+      assert shell_value(command, "--key") == "/etc/certs/client key.pem"
+    end
+
+    test "a plaintext run records no transport flags at all" do
+      command = Loadtest.reproduce_command([])
+
+      refute command =~ "--tls"
+      assert shell_flag_absent?(command, "--cacert")
+    end
+
+    test "server-authenticated TLS records the flag without inventing certificate paths" do
+      command = Loadtest.reproduce_command(tls: true)
+
+      assert command =~ "--tls"
+      assert shell_flag_absent?(command, "--cacert")
+      assert shell_flag_absent?(command, "--cert")
+      assert shell_flag_absent?(command, "--key")
+    end
+
+    test "the recorded command still carries no credential values" do
+      command = Loadtest.reproduce_command(tls: true, user: "admin", pass: "hunter2", token: "t0ken")
+
+      refute command =~ "hunter2"
+      refute command =~ "t0ken"
+      refute command =~ "--pass"
+      refute command =~ "--token"
     end
 
     test "the report carries a meta block describing when, from what, and on what" do
