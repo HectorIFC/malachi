@@ -1,24 +1,10 @@
 name: Pages
 
 on:
-  push:
-    branches: [main]
-  # The results workflow pushes refreshed benchmark and chaos numbers to main, and GitHub does not
-  # start a workflow run from a push authenticated with GITHUB_TOKEN. That rule is what stops that
-  # workflow from committing to itself forever, and the cost is that its commit does not reach this
-  # one either: without this trigger the fresh numbers would sit on main unpublished until the next
-  # human push. Listening for the workflow itself to finish is the documented way around it.
   workflow_run:
     workflows: [Publish results]
     types: [completed]
   workflow_dispatch:
-
-# Permissions are scoped per job rather than here, so the build never holds the Pages credentials: it
-# runs third-party code (mix deps.get pulls Hex packages, and the actions themselves), and only the
-# deploy job needs to mint an OIDC token.
-
-# One deploy at a time. cancel-in-progress stays false on purpose: cancelling a run that is already
-# uploading would leave the site half-published, and a superseded build is cheap to let finish.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -27,19 +13,13 @@ jobs:
   build:
     name: Build docs
     runs-on: ubuntu-latest
-
-    # workflow_run fires whenever the results workflow finishes on ANY branch, including every pull
-    # request, so it is narrowed here to a successful run on main. Every other trigger passes through
-    # unconditionally.
     if: >-
       ${{ github.event_name != 'workflow_run' ||
-          (github.event.workflow_run.conclusion == 'success' &&
-           github.event.workflow_run.head_branch == 'main') }}
+          github.event.workflow_run.head_branch == 'main' }}
 
     permissions:
       contents: read
 
-    # ex_doc lives in the dev deps, and the site embeds @moduledoc from a dev build.
     env:
       MIX_ENV: dev
 
@@ -47,10 +27,6 @@ jobs:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
-          # On a workflow_run trigger the default checkout ref is the SHA that STARTED the other
-          # workflow, which is the commit before the results it went on to push. Taking the branch tip
-          # instead is the whole point of building here: otherwise this republishes the site without
-          # the numbers it was woken up for.
           ref: ${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
 
       - name: 🔧 Setup Elixir
@@ -80,17 +56,12 @@ jobs:
           done
           exit 1
 
-      # The `docs` mix alias runs the strict build (`--warnings-as-errors`, so a broken reference fails here
-      # rather than shipping a page with a dead link) and then stages the static benchmark results page at
-      # /benchmarks/. Both live in the alias (mix.exs) so local `mix docs` and CI produce the same site.
       - name: 📝 Generate documentation
         run: mix docs
 
       - name: ⚙️ Configure Pages
         uses: actions/configure-pages@v5
 
-      # doc/ is the ex_doc default output (mix.exs sets no :output) and is gitignored, so it only ever
-      # exists as a build artifact.
       - name: 📤 Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -101,8 +72,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
 
-    # Only this job publishes, so only this job carries the credentials. It checks out nothing, so it
-    # does not need contents either.
     permissions:
       pages: write
       id-token: write

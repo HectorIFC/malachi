@@ -84,6 +84,7 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, ip)
       end
 
+      await_attempts(victim, ip, 10)
       await_locked(victim, ip)
 
       # Unlock
