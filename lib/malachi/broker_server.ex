@@ -825,7 +825,26 @@ defmodule Malachi.BrokerServer do
             seen_vnodes: seen_vnodes(state, dsrsm, unreachable),
             unreachable_vnodes: unreachable
         }
+        |> wake_all_subscribers()
     end
+  end
+
+  # A streaming subscriber is pushed to on subscribe, on its ack, and on a produce to its topic, and
+  # nowhere else, which leaves it stranded in two ways. One that subscribed while its topic's vnode
+  # was still blank was pushed nothing and nothing pushes it again: an ack cannot, having no records
+  # to acknowledge, so a produce THROUGH THIS BROKER is the only way out. And a produce through a
+  # different frontend is exactly what never arrives here, since it wakes that broker's subscribers
+  # and not this one's. A topic written through one node and streamed from another delivered nothing.
+  #
+  # This is the same gap the offsets refresh above exists to close, described in its own comment: a
+  # frontend only learns about writes it did not handle on this tick. Subscribers belong on the same
+  # tick for the same reason.
+  #
+  # A caught-up subscriber costs a local lookup per range and no round trip: `locate_segment` answers
+  # `:eof` from the offsets map before any read function is called. The subscriber that does have a
+  # backlog pays for records it was owed anyway.
+  defp wake_all_subscribers(state) do
+    Enum.reduce(Map.keys(state.subscribers), state, &wake_subscribers(&2, &1, {:ok, []}))
   end
 
   # The vnodes this broker has read at least once since boot. A vnode that has never answered has no

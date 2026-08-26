@@ -115,6 +115,38 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = GenServer.stop(cold_repl)
   end
 
+  test "a subscriber is pushed records produced through a different frontend" do
+    # A streaming subscriber used to be pushed only on subscribe, on its own ack, and on a produce
+    # through the broker it subscribed to. A produce through another frontend woke that frontend's
+    # subscribers and not this one's, so a topic written on one node and streamed from another
+    # delivered nothing, with no error anywhere and both nodes healthy. An ack cannot recover it,
+    # having no records to acknowledge.
+    cluster = :"bs_sub_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    name = :"sub_repl_#{System.unique_integer([:positive])}"
+    directory = Path.join(System.tmp_dir!(), "malachi_sub_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+    on_exit(fn -> if Process.alive?(repl), do: GenServer.stop(repl) end)
+
+    opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 100]
+    {:ok, writer} = BrokerServer.start_link("unused", opts)
+    {:ok, streamer} = BrokerServer.start_link("unused", opts)
+
+    {:ok, _root} = BrokerServer.create_topic(writer, "events", 4)
+    :ok = BrokerServer.subscribe(streamer, "events", "g", 100, 10)
+
+    # Produced through the OTHER broker, so nothing on this path wakes the subscription.
+    {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("v1", key: "k1")])
+
+    assert_receive {:log_records, "events", records, _positions}, 3_000
+    assert Enum.map(records, & &1.value) == ["v1"]
+
+    :ok = BrokerServer.stop(writer)
+    :ok = BrokerServer.stop(streamer)
+  end
+
   test "a topic whose metadata vnode never answered is refused, not reported as drained" do
     # Two vnodes: one on this node, one routed at a node that does not exist, so its ra cluster can
     # never be read. That is the shape of a broker whose control plane is partly unreachable, which is
