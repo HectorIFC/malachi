@@ -310,4 +310,26 @@ jobs:
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add benchmark/published
           git commit -m "chore(results): refresh published benchmark and chaos results from CI"
-          git push
+
+          # Rebase before pushing, and try again if the push still loses. This job checks out the SHA
+          # that triggered it, then spends several minutes running load tests and a chaos drill, so
+          # anything pushed to main in the meantime leaves it behind: a bare push is rejected with
+          # `fetch first`, which is exactly how it failed when a version bump landed during a run.
+          # The concurrency group above serializes runs of THIS workflow and cannot serialize a human,
+          # so it was never the protection this needed.
+          #
+          # Retried rather than rebased once, because the same race can happen again between the
+          # rebase and the push. Bounded, because a push that keeps losing is a busy main rather than
+          # a transient, and failing then is the honest outcome. The commit touches only
+          # benchmark/published, so a rebase conflict means something else wrote the same results,
+          # which is a case that should stop rather than resolve itself.
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}); rebasing onto the current main"
+            git pull --rebase origin main
+          done
+
+          echo "still could not push after 3 attempts"
+          exit 1
