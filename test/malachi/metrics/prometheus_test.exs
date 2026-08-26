@@ -68,7 +68,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ "malachi_tls_enabled 1\n"
   end
 
-  test "operation counters (O4) are emitted" do
+  test "operation counters are emitted" do
     out = render([])
 
     assert out =~ "# TYPE malachi_records_produced_total counter\nmalachi_records_produced_total 100\n"

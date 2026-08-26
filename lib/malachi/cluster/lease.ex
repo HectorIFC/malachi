@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.Lease do
   @moduledoc """
   The pure state of a **lease**: a fenced, expiring lock that elects a single holder for the
-  non-idempotent work of rebalancing (R3). It is the deterministic core replicated by `LeaseMachine`
+  non-idempotent work of rebalancing. It is the deterministic core replicated by `LeaseMachine`
   over a dedicated `ra` cluster (exactly as `Malachi.Metadata` sits behind `MetadataMachine`), so every
   replica reaches the same lease state from the same command log.
 

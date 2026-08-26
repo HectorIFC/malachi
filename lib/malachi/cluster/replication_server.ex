@@ -122,7 +122,7 @@ defmodule Malachi.Cluster.ReplicationServer do
           | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
   def replicate(primary, segment_id, replica_set, base_offset, records) do
     # Carry the caller's trace context (the broker produce span, possibly on another node) so the quorum
-    # replication becomes a child span: distributed tracing across the produce -> replication hop (O5b).
+    # replication becomes a child span: distributed tracing across the produce -> replication hop.
     GenServer.call(
       primary,
       {:replicate, segment_id, replica_set, base_offset, records, Ctx.get_current()},

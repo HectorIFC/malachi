@@ -5,7 +5,7 @@ defmodule Malachi.Cluster.DSRSM do
   consistent hashing to the vnode that owns them, so the cluster's metadata is sharded
   across vnodes (and different topics land on different vnodes, avoiding hotspots).
 
-  ## Sharding granularity (Phase 1a)
+  ## Sharding granularity
 
   A topic's metadata: the topic plus **all** its ranges and segments - is co-located on a
   single vnode, routed by **topic name**. Every command and query therefore carries the
@@ -25,14 +25,14 @@ defmodule Malachi.Cluster.DSRSM do
   vnode), a command naming topic A but targeting a range of co-located topic B would
   silently act on B's range. Callers (the coordinator) must pass matching pairs.
 
-  > TODO: this validation gap closes with range-id sharding (Phase 1b+), where range/segment
+  > TODO: this validation gap closes with range-id sharding, where range/segment
   > operations route by range id and the range's own vnode is authoritative, the topic
   > param drops out for those ops, so a mismatch becomes impossible rather than relying on
   > the caller.
 
   Like `Metadata`, this is a pure, deterministic value: `command/3` returns
-  `{new_dsrsm, reply}`. In Phase 1b each vnode becomes a `ra` group; this routing layer is
-  unchanged.
+  `{new_dsrsm, reply}`. Backing each vnode with its own `ra` group leaves this routing layer
+  unchanged; see `Malachi.Cluster.ReplicatedDSRSM`, which does exactly that.
   """
 
   alias Malachi.Cluster.HashRing

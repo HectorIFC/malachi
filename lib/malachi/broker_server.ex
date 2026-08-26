@@ -224,7 +224,7 @@ defmodule Malachi.BrokerServer do
   def committed_offsets(server, group, topic), do: GenServer.call(server, {:committed_offsets, group, topic})
 
   @doc """
-  Subscribes the calling process as a streaming consumer of `topic` for consumer `group` (B2): records
+  Subscribes the calling process as a streaming consumer of `topic` for consumer `group`: records
   are pushed to it as `{:log_records, topic, records, next_positions}` as they are produced, resuming
   from the group's committed position and bounded by a credit `window` (at most `window` records in
   flight, at most `max` per push). Ack with `stream_ack/5` to return credit and commit progress. `:ok`.
@@ -358,7 +358,7 @@ defmodule Malachi.BrokerServer do
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
       waiters: [],
-      # Streaming subscribers (B2): `%{topic => [subscriber]}`. A subscriber is pushed records as they
+      # Streaming subscribers: `%{topic => [subscriber]}`. A subscriber is pushed records as they
       # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
       # commit the group's position. See `wake_subscribers/2` / `push_subscriber/2`.
       subscribers: %{},
@@ -1143,7 +1143,7 @@ defmodule Malachi.BrokerServer do
   #   * `:metadata_vnodes`. A sharded control plane: one ra cluster per vnode, each placed on its own
   #     `nodes`, routed by topic. Every node only *routes* at boot; the reconcile loop bootstraps the
   #     clusters on whichever node is currently the leader. `metadata_vnodes` is `[{vnode_id, token,
-  #     nodes}]` (D-c).
+  #     nodes}]`.
   #   * `:metadata_cluster`: a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
   #   * neither, in-memory metadata (single node).
   defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do

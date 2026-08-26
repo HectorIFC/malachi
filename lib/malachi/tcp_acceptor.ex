@@ -285,7 +285,7 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # mTLS-identity auth (P4): authenticate the client from the certificate it presented at the TLS handshake
+  # mTLS-identity auth: authenticate the client from the certificate it presented at the TLS handshake
   # instead of a password. Gated so an unverified certificate can never authenticate (see `ensure_mtls_allowed/0`).
   # On success the session is minted exactly like the password path (SessionManager.create_session). Failed
   # attempts are not fed to the lockout manager (there is no password to brute-force); the rate limit still
@@ -367,7 +367,7 @@ defmodule Malachi.TCPAcceptor do
 
   defp mtls_client_error(reason), do: reason
 
-  # OIDC/JWT auth (P4): authenticate the client from a signed JWT (bearer token) instead of a password. The
+  # OIDC/JWT auth: authenticate the client from a signed JWT (bearer token) instead of a password. The
   # token is self-contained (signed by the IdP), so it needs no TLS peer cert, but operators should run TLS
   # to keep the bearer token confidential in transit (documented). Gated behind an opt-in flag; on success the
   # session is minted exactly like the password path. No lockout (nothing to brute-force); the rate limit

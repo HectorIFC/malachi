@@ -112,7 +112,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Aborts a split that a crashed coordinator left in flight, rolling it back to the pre-split state: moves
   every topic that reached the new vnode back to its owner under `state`'s (unchanged) ring and lifts any
-  migration fence left on a source: the same derived, best-effort rollback an in-call failure runs (B1).
+  migration fence left on a source: the same derived, best-effort rollback an in-call failure runs.
   `state` is the pre-split topology (a pending split never advanced the ring); `new_server_id` addresses the
   new vnode's (possibly unreachable) cluster.
 

@@ -1,6 +1,6 @@
 defmodule Malachi.Storage.ElixirStore do
   @moduledoc """
-  Pure-Elixir `Malachi.Storage.SegmentStore` implementation (Phase 0).
+  Pure-Elixir `Malachi.Storage.SegmentStore` implementation.
 
   File-per-segment, append-only, with batched writes and an fsync-before-ack durability
   contract. `append/2` buffers; the buffer is flushed and fsynced on an explicit `sync/1`

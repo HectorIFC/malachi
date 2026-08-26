@@ -513,7 +513,7 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
-  # --- admin user management (P3): REST CRUD over the replicated user store. The auth stage already gated
+  # --- admin user management: REST CRUD over the replicated user store. The auth stage already gated
   # these to the :admin permission (has_required_permission?), so the handlers run only for admins. Passwords
   # arrive in the JSON body in the clear, so run the dashboard over TLS in production. ---
 
@@ -562,7 +562,7 @@ defmodule Malachi.Dashboard do
 
   defp handle_delete_user(socket, username), do: respond_user_result(socket, Auth.remove_user(username), "200 OK")
 
-  # --- per-topic ACL management (P5): /users/:username/acls, admin-gated by has_required_permission?. ---
+  # --- per-topic ACL management: /users/:username/acls, admin-gated by has_required_permission?. ---
 
   # Routes a /users/<rest> request: `acl_fun.(username)` when `rest` is `"<username>/acls"`, else `fallback`.
   defp route_acl(_socket, rest, acl_fun, fallback) do
@@ -711,7 +711,7 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :OPTIONS, path: path}, headers, _client_ip, _session),
     do: serve_cors_preflight(socket, headers, path)
 
-  # Admin user management (P3): gated to :admin by the auth stage above.
+  # Admin user management: gated to :admin by the auth stage above.
   defp handle_route(socket, %{method: :GET, path: "/users"}, _headers, _client_ip, _session),
     do: handle_list_users(socket)
 
@@ -721,7 +721,7 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, _session),
     do: handle_user_password(socket, rest, headers)
 
-  # Per-topic ACL management (P5): /users/:username/acls: GET lists, POST grants, DELETE revokes. A DELETE
+  # Per-topic ACL management: /users/:username/acls: GET lists, POST grants, DELETE revokes. A DELETE
   # on a bare /users/:username (no /acls suffix) falls back to deleting the user.
   defp handle_route(socket, %{method: :GET, path: "/users/" <> rest}, _headers, _client_ip, _session),
     do: route_acl(socket, rest, &handle_list_acls(socket, &1), fn -> serve_404(socket) end)

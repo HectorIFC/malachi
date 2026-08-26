@@ -191,7 +191,7 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(control)
   end
 
-  test "the membership leader bootstraps the vnodes via the reconcile loop (D-c-1d)" do
+  test "the membership leader bootstraps the vnodes via the reconcile loop" do
     # membership where this node is the sole (thus lowest) live member → it is the bootstrap leader
     {:ok, membership} = AliveMembersStub.start_link([{Malachi.LogMembership, node()}])
     vnode = :"bs_ml_#{System.unique_integer([:positive])}"

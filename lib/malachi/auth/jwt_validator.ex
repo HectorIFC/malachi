@@ -1,7 +1,7 @@
 defmodule Malachi.Auth.JwtValidator do
   @moduledoc """
   Pure validation of a signed JWT (JWS) and extraction of its identity claim: the deterministic core of the
-  OIDC auth provider (P4). Given a token and a validation `config`, it verifies the signature and the standard
+  OIDC auth provider. Given a token and a validation `config`, it verifies the signature and the standard
   claims (`iss`, `aud`, `exp`) and returns the claim set, or a specific error.
 
   Signature verification is delegated to `Joken`/`jose` (a maintained library) rather than hand-rolled, and

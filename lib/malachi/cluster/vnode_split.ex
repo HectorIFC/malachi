@@ -7,7 +7,7 @@ defmodule Malachi.Cluster.VnodeSplit do
   migrating the displaced topics' metadata, fenced and copy-first
   (`Malachi.Cluster.ReplicatedDSRSM.split_vnode/4`), then **advances** the topology (which moves the ring
   forward and clears the intent) and **publishes** it back to the membership (`set_topology`). On a logical
-  migration failure, `split_vnode` has already rolled back in-process (B1), so it just clears the now-stale
+  migration failure, `split_vnode` has already rolled back in-process, so it just clears the now-stale
   intent (`clear_pending`) and returns the error. From there gossip disseminates the topology and every node
   adopts the new ring for both metadata and consumer-group routing (Int-1 / VS-2b).
 
@@ -95,7 +95,7 @@ defmodule Malachi.Cluster.VnodeSplit do
         MembershipServer.set_topology(membership, RingTopology.advance(pending, grown.ring, placements))
 
       {:error, _reason} = error ->
-        # split_vnode already rolled the migration back in-process (B1), so the ring is back to pre-split;
+        # split_vnode already rolled the migration back in-process, so the ring is back to pre-split;
         # drop the now-stale intent (`clear_pending` bumps the version forward, keeping the old ring) so no
         # failover reconciler acts on an already-undone split. Only a *crash* before here leaves it pending.
         MembershipServer.set_topology(membership, RingTopology.clear_pending(pending))
