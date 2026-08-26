@@ -7,6 +7,7 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.AliveMembersStub
 
   setup_all do
     :ok
@@ -192,7 +193,7 @@ defmodule Malachi.BrokerServerRaTest do
 
   test "the membership leader bootstraps the vnodes via the reconcile loop (D-c-1d)" do
     # membership where this node is the sole (thus lowest) live member → it is the bootstrap leader
-    {:ok, membership} = Malachi.Test.AliveMembersStub.start_link([{Malachi.LogMembership, node()}])
+    {:ok, membership} = AliveMembersStub.start_link([{Malachi.LogMembership, node()}])
     vnode = :"bs_ml_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(vnode) end)
 
