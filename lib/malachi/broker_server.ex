@@ -980,7 +980,7 @@ defmodule Malachi.BrokerServer do
   # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
   # drop) the ones that now have data, leaving the rest parked until their timeout.
   # Synchronous produce (group commit off): replicate the batch through `replicate/5`, which fsyncs on a
-  # quorum before returning, then reply and wake consumers. The historical default; unchanged behaviour.
+  # quorum before returning, then reply and wake consumers. The historical default; unchanged behavior.
   # Non-blocking produce (the NorthGuard end-to-end pipelined shape): plan the produce in this loop
   # (routing, segment opening, optimistic offset commit), fire the replication dispatches as casts, park
   # the caller, and reply from the `:replicate_result` messages. The loop is free for the next produce
