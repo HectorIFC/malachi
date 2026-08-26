@@ -212,18 +212,33 @@ jobs:
               catch { return null; }
             };
 
+            // Every field is read defensively, and not out of politeness. The try above catches a file
+            // that is absent or unparseable, but a file that parses and is INCOMPLETE used to throw:
+            // records_per_s undefined has no toLocaleString, and a chaos record written by a drill that
+            // died before computing its invariants has no verdict to upper-case. The throw failed the
+            // step, so the pull request got no comment at all, exactly on the runs that went wrong and
+            // exactly when the numbers were most worth seeing.
+            // The unit travels with the number and is dropped along with it, so a field that is absent
+            // reads as absent rather than as "not recorded rec/s", which claims a measurement and
+            // withholds it in the same breath.
+            const measured = (value, unit, absent) =>
+              typeof value === 'number' ? `${value.toLocaleString('en-US')} ${unit}` : absent;
+            const list = (value) => (Array.isArray(value) ? value : []);
+
             // A missing result is reported as missing rather than skipped: a workload that failed to
             // produce one is the thing a reader most needs to notice.
             const loadRow = (label, result) =>
               result
-                ? `| ${label} | ${result.records_per_s.toLocaleString('en-US')} rec/s | ${result.errors} | \`${result.meta.git_ref}\` |`
+                ? `| ${label} | ${measured(result.records_per_s, 'rec/s', 'not recorded')} | ${result.errors ?? '?'} | \`${result.meta?.git_ref ?? 'unknown'}\` |`
                 : `| ${label} | not recorded | | |`;
 
             const chaos = read('chaos-node.json');
+            const failures = list(chaos?.failures);
             const chaosLine = chaos
-              ? `**${chaos.verdict.toUpperCase()}** at RF ${chaos.replication_factor}: ${chaos.events.length} faults injected, ` +
-                `${(chaos.invariants.acked_writes ?? 0).toLocaleString('en-US')} acknowledged writes verified` +
-                (chaos.failures.length ? `\n\nFailures:\n${chaos.failures.map((f) => `- ${f}`).join('\n')}` : '')
+              ? `**${(chaos.verdict ?? 'unknown').toUpperCase()}** at RF ${chaos.replication_factor ?? '?'}: ` +
+                `${list(chaos.events).length} faults injected, ` +
+                `${measured(chaos.invariants?.acked_writes, 'acknowledged writes verified', 'acknowledged writes not counted')}` +
+                (failures.length ? `\n\nFailures:\n${failures.map((f) => `- ${f}`).join('\n')}` : '')
               : 'not recorded';
 
             const body = `## 📊 Measured on this branch

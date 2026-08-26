@@ -129,12 +129,12 @@ check_clean_produce() {
 # A JSON array of the arguments, escaped by jq rather than by hand. Event and failure text is free
 # form (it carries node names, paths and error strings), and one quote in any of it would produce a
 # file no parser accepts, which is a poor way for a published result to fail.
+# One array element per argument, whatever the argument contains. The previous form piped the
+# arguments through `jq -R`, which reads a LINE at a time, so a failure message spanning two lines
+# became two failures: the recorded result overstated how many things broke and split the sentence
+# describing each. `--args` passes them as arguments rather than as text to be re-split.
 json_array() {
-  if [ "$#" -eq 0 ]; then
-    echo '[]'
-  else
-    printf '%s\n' "$@" | jq -R . | jq -s .
-  fi
+  jq -n -c '$ARGS.positional' --args ${1+"$@"}
 }
 
 # When and from what, so a recorded run stands on its own. Same shape the two load generators write,

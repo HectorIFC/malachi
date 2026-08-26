@@ -283,10 +283,22 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
   # A row whose value is nil is dropped rather than rendered blank, so a table never claims to have
   # measured something the run did not record.
+  # A header with no rows under it renders as an empty table, which reads as a measurement that came
+  # back with nothing rather than a section that had nothing to render. `bullets/1` already answers
+  # that case in words; this matches it.
   defp table(rows) do
-    body = for {label, value} <- rows, value != nil, do: "| #{label} | #{value} |"
-    Enum.join(["| Measure | Value |", "| --- | --- |" | body], "\n")
+    case for {label, value} <- rows, value != nil, do: "| #{cell(label)} | #{cell(value)} |" do
+      [] -> "None recorded."
+      body -> Enum.join(["| Measure | Value |", "| --- | --- |" | body], "\n")
+    end
   end
+
+  # A pipe inside a cell ends the cell. The recorded command and the CPU model both land in one, and
+  # both come from outside this module, so a topic named `a|b` or a CPU string with a pipe in it would
+  # not merely look wrong: it would shift every later column and change what the numbers appear to
+  # measure. Escaped even inside the backticks of `code/1`, which GitHub's table parser splits on
+  # regardless.
+  defp cell(value), do: value |> to_string() |> String.replace("|", "\\|")
 
   defp bullets(items) when items in [nil, []], do: "None recorded."
   defp bullets(items), do: Enum.map_join(items, "\n", fn item -> "- #{item}" end)

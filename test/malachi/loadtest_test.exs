@@ -251,6 +251,32 @@ defmodule Malachi.LoadtestTest do
       refute command =~ "--token"
     end
 
+    test "a password run records which user it authenticated as, and still no password" do
+      # The identity decides what the run was allowed to do: a user without a produce ACL on the
+      # topic measures rejections, and a command that reproduces it as admin disagrees with the
+      # numbers printed beside it. The name is not the secret.
+      command = Loadtest.reproduce_command(user: "reader", pass: "hunter2")
+
+      assert shell_value(command, "--user") == "reader"
+      refute command =~ "hunter2"
+    end
+
+    test "a password run with no user named records the one that was actually dialled" do
+      assert shell_value(Loadtest.reproduce_command([]), "--user") == "admin"
+    end
+
+    test "a token or certificate run names no user, having authenticated without one" do
+      assert shell_flag_absent?(Loadtest.reproduce_command(token: "t0ken"), "--user")
+      assert shell_flag_absent?(Loadtest.reproduce_command(tls: true, cert: "c.pem", key: "k.pem"), "--user")
+    end
+
+    test "a run that produced JSON records the flag that produced it" do
+      # Without it the reproduction prints a summary to the terminal and writes no JSON, so the one
+      # thing the command cannot do is regenerate the page it is quoted on.
+      assert Loadtest.reproduce_command(json: true) =~ "--json"
+      refute Loadtest.reproduce_command(json: false) =~ "--json"
+    end
+
     test "the report carries a meta block describing when, from what, and on what" do
       r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("meta"))
 

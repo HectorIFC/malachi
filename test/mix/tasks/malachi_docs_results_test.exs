@@ -215,6 +215,38 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
     end
   end
 
+  describe "table cells" do
+    test "a pipe in a recorded value does not split the row into extra columns", context do
+      # The command and the CPU model both come from outside this module and both land in a cell. An
+      # unescaped pipe ends the cell early, shifting every later column, so the page reads as though
+      # the numbers describe something other than what was measured.
+      publish(
+        context,
+        "loadtest-elixir.json",
+        loadtest_result(%{"meta" => %{"command" => "mix run --topic=a|b", "cpu" => "x|y"}})
+      )
+
+      run(context)
+
+      page = page(context, "loadtest-elixir-results.md")
+
+      assert page =~ "a\\|b"
+      refute page =~ "--topic=a|b"
+    end
+
+    test "a table with nothing to show says so instead of rendering an empty one", context do
+      # Every value nil left a header and a separator with no rows under them, which reads as a
+      # measurement that came back empty rather than a section with nothing to render.
+      publish(context, "loadtest-elixir.json", loadtest_result(%{"meta" => nil, "latency_ms" => %{}}))
+      run(context)
+
+      page = page(context, "loadtest-elixir-results.md")
+
+      refute page =~ "| Measure | Value |\n| --- | --- |\n\n"
+      assert page =~ "None recorded."
+    end
+  end
+
   test "each written page is announced", context do
     run(context)
 

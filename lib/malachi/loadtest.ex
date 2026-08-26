@@ -608,7 +608,7 @@ defmodule Malachi.Loadtest do
         topic: cfg.topic,
         host: Enum.join(cfg.hosts, ","),
         port: Keyword.get(cfg.conn_opts, :port, 4040)
-      ] ++ tls_options(cfg.conn_opts)
+      ] ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
 
     Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
   end
@@ -635,6 +635,26 @@ defmodule Malachi.Loadtest do
   # command that names a key file leaks no key. Dropping them would produce a command that runs and
   # quietly reproduces a weaker configuration, which is the bug being fixed rather than a smaller
   # version of it.
+  # The identity the run authenticated as, which decides what it was allowed to do: a user without a
+  # produce ACL on the topic measures rejections, and the published command would reproduce it as
+  # admin and disagree with its own numbers. The name is not the secret, which is the line
+  # `tls_options/1` already draws: `--pass` and `--token` stay out because they carry the VALUE.
+  # Nothing is recorded for a token or certificate run, where there is no username in play and naming
+  # one would describe a different handshake than the one measured.
+  defp auth_options(conn_opts) do
+    cond do
+      Keyword.get(conn_opts, :token) -> []
+      Keyword.get(conn_opts, :cert) -> []
+      true -> [user: Keyword.get(conn_opts, :user, "admin")]
+    end
+  end
+
+  # The flag that produced the artifact the command is printed inside. Without it the reproduction
+  # prints a human-readable summary to the terminal and writes no JSON, so the one thing it cannot do
+  # is regenerate the page it is quoted on.
+  defp json_option(%{json: true}), do: [json: true]
+  defp json_option(_cfg), do: []
+
   defp tls_options(conn_opts) do
     if Keyword.get(conn_opts, :tls) do
       [tls: true] ++
