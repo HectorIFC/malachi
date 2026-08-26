@@ -119,7 +119,7 @@ Kubernetes manifest use these same paths.
 docker run \
   --name malachi \
   -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
   -e MALACHI_TLS_CERTFILE=/app/priv/cert/server.crt \
   -e MALACHI_TLS_KEYFILE=/app/priv/cert/server.key \
@@ -132,9 +132,16 @@ server might look is not enough, and a run that only mounts them exits at boot w
 file not configured`. `MALACHI_TLS_CACERTFILE` is the optional third, for verifying client
 certificates.
 
-Unlike the plaintext examples above, these ports are published on every interface, which is the point
-of configuring TLS. The mounted files are read at boot and validated then, so a certificate that is
-expired or unreadable stops the container rather than being discovered by a client later.
+The two ports are bound differently on purpose, and the asymmetry is the important part. TLS covers
+the broker on 4040, which is why that one is published: encrypting it is what the certificates are
+for. It does not cover the dashboard. `Malachi.Dashboard` listens with `:gen_tcp.listen` and has no
+TLS path at all, so 4041 serves plain HTTP whatever the certificates say, and it is the port carrying
+the login form and the session cookie. Publishing it on every interface would hand those out in
+cleartext next to a broker you had just taken the trouble to encrypt. Reach a remote dashboard
+through a reverse proxy that terminates TLS in front of it, not by widening this binding.
+
+The mounted files are read at boot and validated then, so a certificate that is expired or unreadable
+stops the container rather than being discovered by a client later.
 
 ---
 
