@@ -123,35 +123,20 @@ services:
   # Fetches a dashboard token and keeps the file Prometheus authenticates with fresh. /metrics needs an
   # authenticated user and a session expires after an hour, so the alternative to this sidecar was a
   # scrape config that quietly stops working after one. See deploy/prometheus/refresh-token.sh.
+  # Everything shared with the cluster stack lives in the extended file, including the two comments
+  # explaining why this runs as root and why it shares Prometheus's network namespace.
   metrics-token:
-    image: curlimages/curl:8.10.1
+    extends:
+      file: deploy/prometheus/metrics-token.yml
+      service: metrics-token
     container_name: malachi-metrics-token
-    entrypoint: ["sh", "/refresh-token.sh"]
-    # As root, because a fresh named volume is created owned by root and this image runs as an
-    # unprivileged user, so the first write failed with a permission error while the login itself
-    # succeeded: a token fetched and then dropped, which reads as an auth problem and is not one.
-    # The blast radius is one file in a private volume; Prometheus mounts the same volume read-only.
-    user: "0:0"
-    # Shares Prometheus's network namespace, so the login comes from the same address the scrape will.
-    # MALACHI_SESSION_IP_BINDING binds a session to the IP that created it, and with the sidecar on its
-    # own address every scrape came back 403 with a session_hijack_attempt in the audit log: the
-    # control working exactly as designed against a token minted next door. Minting it from the right
-    # address is the fix that keeps the control on; turning MALACHI_SESSION_IP_BINDING off would also
-    # work and is the wrong trade to copy into anything real.
-    network_mode: "service:prometheus"
     environment:
       - MALACHI_TARGETS=malachi=http://malachi:4041
-      - MALACHI_METRICS_USER=admin
-      - MALACHI_METRICS_PASS=${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
-      - TOKEN_DIR=/token
     volumes:
-      - ./deploy/prometheus/refresh-token.sh:/refresh-token.sh:ro
       - malachi-metrics-token:/token
     depends_on:
       malachi:
         condition: service_healthy
-    mem_limit: 64m
-    restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:v2.54.1

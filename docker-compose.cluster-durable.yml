@@ -71,6 +71,14 @@ x-malachi-node: &malachi-node
   restart: on-failure
   security_opt:
     - no-new-privileges:true
+  # The same hardening the single-node stack has had, and the one it was missing: this is the stack
+  # shaped like a real deployment, so it is the one where a writable root filesystem matters most.
+  # The per-node volume mounted at /app/data is the single writable persistent path; /tmp is a
+  # writable tmpfs that does not survive a restart, which is what the ra and log dirs must not be, and
+  # they are under /app/data for exactly that reason.
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid
   mem_limit: 1g
   healthcheck:
     test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
@@ -133,35 +141,21 @@ services:
   # sessions are not: they live in a node-local ETS table, so a session minted on node 1 answers
   # `invalid_session` on node 2 and the scrape 403s. Three logins, three token files, three scrape
   # jobs in deploy/prometheus/cluster.yml.
+  # One token per node, which is a requirement rather than a flourish: sessions are node-local while
+  # users and ACLs replicate, so a token minted on node 1 is rejected by node 2. The shared definition
+  # and the reasoning behind the rest of its settings are in the extended file.
   metrics-token:
-    image: curlimages/curl:8.10.1
+    extends:
+      file: deploy/prometheus/metrics-token.yml
+      service: metrics-token
     container_name: malachi-durable-metrics-token
-    entrypoint: ["sh", "/refresh-token.sh"]
-    # As root, because a fresh named volume is created owned by root and this image runs as an
-    # unprivileged user, so the first write failed with a permission error while the login itself
-    # succeeded: a token fetched and then dropped, which reads as an auth problem and is not one.
-    # The blast radius is one file in a private volume; Prometheus mounts the same volume read-only.
-    user: "0:0"
-    # Shares Prometheus's network namespace, so the login comes from the same address the scrape will.
-    # MALACHI_SESSION_IP_BINDING binds a session to the IP that created it, and with the sidecar on its
-    # own address every scrape came back 403 with a session_hijack_attempt in the audit log: the
-    # control working exactly as designed against a token minted next door. Minting it from the right
-    # address is the fix that keeps the control on; turning MALACHI_SESSION_IP_BINDING off would also
-    # work and is the wrong trade to copy into anything real.
-    network_mode: "service:prometheus"
     environment:
       - MALACHI_TARGETS=malachi1=http://malachi1:4041,malachi2=http://malachi2:4041,malachi3=http://malachi3:4041
-      - MALACHI_METRICS_USER=admin
-      - MALACHI_METRICS_PASS=${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
-      - TOKEN_DIR=/token
     volumes:
-      - ./deploy/prometheus/refresh-token.sh:/refresh-token.sh:ro
       - malachi-durable-token:/token
     depends_on:
       malachi1:
         condition: service_healthy
-    mem_limit: 64m
-    restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:v2.54.1

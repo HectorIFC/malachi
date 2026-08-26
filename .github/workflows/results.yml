@@ -199,8 +199,15 @@ jobs:
           done
           git status --porcelain -- benchmark/published
 
+      # Skipped for a pull request opened from a fork. GITHUB_TOKEN is read-only there whatever this
+      # workflow asks for in `permissions`, so the write below comes back 403 and fails the step: a
+      # red run for a contributor who did nothing wrong, on a job whose numbers were measured fine and
+      # are still uploaded as artifacts. Reaching for `pull_request_target` would grant the write and
+      # is the wrong trade, since this job checks out and runs the pull request's own code.
       - name: 💬 Report on the pull request
-        if: github.event_name == 'pull_request'
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
