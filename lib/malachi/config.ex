@@ -42,4 +42,47 @@ defmodule Malachi.Config do
         dir
     end
   end
+
+  @doc """
+  Normalizes the OpenTelemetry sampling ratio taken from `MALACHI_TRACING_SAMPLE_RATIO`.
+
+  Returns `{:ok, ratio}` for a number in `0.0..1.0`, and `:invalid` for anything else, leaving the
+  caller to warn and fall back. Absent is `{:ok, 1.0}`: tracing is opt-in, so a deployment that turned
+  it on without naming a ratio asked to see everything.
+
+  Strict on purpose, unlike the lenient float parsing used for most settings. `Float.parse/1` returns
+  the leading number and discards the rest, so `"0,1"` would become `0.0` and trace nothing, while
+  `"ten"` would fail to parse and take the default, tracing *everything*. Both are silent, and the
+  second is silent in the direction that puts real work on a production node. Requiring the parse to
+  consume the whole string is what separates a value from a typo.
+
+  ## Examples
+
+      iex> Malachi.Config.sampling_ratio(nil)
+      {:ok, 1.0}
+
+      iex> Malachi.Config.sampling_ratio("0.25")
+      {:ok, 0.25}
+
+      iex> Malachi.Config.sampling_ratio("0")
+      {:ok, 0.0}
+
+      iex> Malachi.Config.sampling_ratio("0,1")
+      :invalid
+
+      iex> Malachi.Config.sampling_ratio("ten")
+      :invalid
+
+      iex> Malachi.Config.sampling_ratio("1.5")
+      :invalid
+  """
+  @spec sampling_ratio(String.t() | nil) :: {:ok, float()} | :invalid
+  def sampling_ratio(nil), do: {:ok, 1.0}
+
+  def sampling_ratio(raw) when is_binary(raw) do
+    case Float.parse(String.trim(raw)) do
+      {ratio, ""} when ratio >= 0.0 and ratio <= 1.0 -> {:ok, ratio}
+      _malformed_or_out_of_range -> :invalid
+    end
+  end
 end

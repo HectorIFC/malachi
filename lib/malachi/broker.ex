@@ -454,9 +454,15 @@ defmodule Malachi.Broker do
   Replaces the broker's local metadata cache, e.g. re-seeded from the authoritative ra clusters by a
   periodic refresh, which fills in vnodes not yet ready at boot and picks up writes made through other
   nodes. The ra log is the source of truth, so a refresh only ever moves the cache forward.
+
+  `unreachable` names the vnodes the refresh could not read; those keep whatever view this broker
+  already held, because the refresh represents them with an empty `Metadata` and installing it would
+  delete live topics from the cache. See `Malachi.Cluster.DSRSM.retain_vnodes/3`.
   """
-  @spec put_cache(t(), DSRSM.t()) :: t()
-  def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm), do: %{broker | dsrsm: dsrsm}
+  @spec put_cache(t(), DSRSM.t(), [DSRSM.vnode_id()]) :: t()
+  def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm, unreachable \\ []) do
+    %{broker | dsrsm: DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable)}
+  end
 
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done

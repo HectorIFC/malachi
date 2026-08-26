@@ -77,6 +77,14 @@ defmodule Malachi.Loadtest do
     report
   end
 
+  @doc false
+  # The reproduce command for a set of options, without running anything. Exposed for the tests: the
+  # branches worth pinning (TLS on, a topic a shell would misread) either need infrastructure to reach
+  # through `run/1` or need a run that fails on purpose, and neither tells you more about the string
+  # than calling the builder does. Not part of the API; `run/1` puts this in the report.
+  @spec reproduce_command(keyword()) :: String.t()
+  def reproduce_command(opts), do: opts |> normalize() |> command()
+
   # --- config ---
 
   defp normalize(opts) do
@@ -532,6 +540,7 @@ defmodule Malachi.Loadtest do
     secs = cfg.duration
 
     %{
+      meta: meta(cfg),
       scenario: cfg.scenario,
       connections: cfg.connections,
       pipeline: cfg.pipeline,
@@ -547,6 +556,190 @@ defmodule Malachi.Loadtest do
       mb_per_s: Float.round(records * cfg.record_size / 1_048_576 / secs, 2),
       latency_ms: %{p50: ms(hist, 50), p99: ms(hist, 99), p99_9: ms(hist, 99.9), p99_99: ms(hist, 99.99)}
     }
+  end
+
+  # --- reproduce metadata ---
+
+  # What turns a number into a result: when it was taken, from which commit, on what. Deliberately the
+  # same shape the Node generator writes (`buildMeta` in scripts/loadtest.js), so the published pages can
+  # render a run from either tool through one path instead of two.
+  #
+  # The version and the git ref describe THIS tree, the one the generator ran from, not the server it
+  # drove. They coincide in every setup that matters (CI, a local run) and the distinction only appears
+  # when someone points the generator at a host running another build, which the recorded host makes
+  # visible.
+  defp meta(cfg) do
+    %{
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+      command: command(cfg),
+      git_ref: git_ref(),
+      git_ref_date: git(["show", "-s", "--format=%cI", "HEAD"]),
+      malachi_version: version(),
+      hardware: hardware()
+    }
+  end
+
+  # Rebuilt from the EFFECTIVE config rather than quoted from `System.argv/0`, which is what the Node
+  # generator records. Two reasons: `run/1` is called directly as well (the mix task is a thin wrapper),
+  # so there is not always an argv to quote; and a reproduction needs the defaults too, while an argv
+  # shows only what was typed. Credential VALUES are deliberately absent: this string gets committed
+  # and published, and `--pass` or `--token` has no business in either. File paths are not values and
+  # do come along, see `tls_options/1`.
+  defp command(cfg) do
+    options =
+      [
+        scenario: cfg.scenario,
+        connections: cfg.connections,
+        duration: cfg.duration,
+        warmup: cfg.warmup,
+        batch: cfg.batch,
+        "record-size": cfg.record_size,
+        keys: cfg.keys,
+        pipeline: cfg.pipeline,
+        max: cfg.max,
+        window: cfg.window,
+        prepopulate: cfg.prepopulate,
+        topics: cfg.topics,
+        # The topic and the port were both missing once, and both broke the reproduction in the same
+        # quiet way: a run against port 5040 published a command that connects to 4040, and a fetch
+        # run against an existing topic published one that would invent a new empty topic instead.
+        # The port default matches `Conn.connect/1`, so the recorded value is the one actually
+        # dialed.
+        topic: cfg.topic,
+        host: Enum.join(cfg.hosts, ","),
+        port: Keyword.get(cfg.conn_opts, :port, 4040)
+      ] ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
+
+    Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
+  end
+
+  # `--name=value` rather than two arguments, for every option rather than only the ones that look
+  # risky. `OptionParser` reads a separate value beginning with a hyphen as another switch, so a topic
+  # named `-weird` produced a command that does not merely target the wrong thing but refuses to run,
+  # complaining that --topic is missing its argument and that -w, -e, -i, -r and -d are unknown
+  # options. That name passes the server's allowlist, which permits hyphens, so this is reachable with
+  # a topic the broker accepts rather than only with one it rejects.
+  #
+  # Uniform because the alternative is deciding per option which values could start with a hyphen, and
+  # that judgement is what has already been wrong three times in this function.
+  defp render_option({flag, true}), do: "--#{flag}"
+  defp render_option({flag, value}), do: "--#{flag}=#{shell_arg(value)}"
+
+  # Transport last, and only when TLS is on, so an ordinary plaintext command is unchanged. Omitting
+  # it was the third thing this function got wrong in the same way: a run over TLS published a command
+  # that reconnects in plaintext, which does not reproduce the run and does not say so. It measures a
+  # different thing too, since the handshake and the record layer are part of what was timed.
+  #
+  # The certificate paths come along. They are paths, not secrets, which is the line this function
+  # already draws: `--pass` and `--token` are excluded because they carry the secret VALUE, and a
+  # command that names a key file leaks no key. Dropping them would produce a command that runs and
+  # quietly reproduces a weaker configuration, which is the bug being fixed rather than a smaller
+  # version of it.
+  # The identity the run authenticated as, which decides what it was allowed to do: a user without a
+  # produce ACL on the topic measures rejections, and the published command would reproduce it as
+  # admin and disagree with its own numbers. The name is not the secret, which is the line
+  # `tls_options/1` already draws: `--pass` and `--token` stay out because they carry the VALUE.
+  # Nothing is recorded for a token or certificate run, where there is no username in play and naming
+  # one would describe a different handshake than the one measured.
+  defp auth_options(conn_opts) do
+    cond do
+      Keyword.get(conn_opts, :token) -> []
+      Keyword.get(conn_opts, :cert) -> []
+      true -> [user: Keyword.get(conn_opts, :user, "admin")]
+    end
+  end
+
+  # The flag that produced the artifact the command is printed inside. Without it the reproduction
+  # prints a human-readable summary to the terminal and writes no JSON, so the one thing it cannot do
+  # is regenerate the page it is quoted on.
+  defp json_option(%{json: true}), do: [json: true]
+  defp json_option(_cfg), do: []
+
+  defp tls_options(conn_opts) do
+    if Keyword.get(conn_opts, :tls) do
+      [tls: true] ++
+        for option <- [:cacert, :cert, :key],
+            path = Keyword.get(conn_opts, option),
+            do: {option, path}
+    else
+      []
+    end
+  end
+
+  # The free-text values above are the ones a shell can misread. A topic with a space records as
+  # `--topic has a space`, which on replay parses as `--topic has` and silently targets a different
+  # topic; the host list is not validated anywhere at all. The server's allowlist would reject that
+  # topic, but the command is recorded even for a run that failed, and a string this module emits
+  # should not depend on a downstream validator to be correct.
+  #
+  # Quoted only when it has to be, so an ordinary command stays readable. Single quotes because they
+  # are the one POSIX quoting with no escapes inside; an embedded single quote is closed, escaped and
+  # reopened, which is the standard idiom for exactly this.
+  defp shell_arg(value) do
+    string = to_string(value)
+
+    if string != "" and string =~ ~r{\A[A-Za-z0-9._,:/@=+-]+\z} do
+      string
+    else
+      "'" <> String.replace(string, "'", "'\\''") <> "'"
+    end
+  end
+
+  defp version do
+    case Application.spec(:malachi, :vsn) do
+      nil -> nil
+      vsn -> to_string(vsn)
+    end
+  end
+
+  defp git_ref do
+    case git(["rev-parse", "--short", "HEAD"]) do
+      nil -> nil
+      ref -> if git(["status", "--porcelain"]) in [nil, ""], do: ref, else: ref <> "-dirty"
+    end
+  end
+
+  # nil rather than a raise when git is missing or this is not a checkout: the generator has to run from
+  # a container and from a release tarball too, and a blank provenance field is a smaller problem than a
+  # load test that refuses to start over it.
+  defp git(args) do
+    case System.cmd("git", args, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {_output, _status} -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  # The BEAM knows an architecture triple, not a marketing CPU name, and reports `:unknown` for the
+  # processor count on some platforms. Recording only what it actually knows beats filling the gap:
+  # a missing field reads as missing, an invented one reads as fact.
+  defp hardware do
+    %{
+      cpu: to_string(:erlang.system_info(:system_architecture)),
+      cores: logical_processors(),
+      schedulers: :erlang.system_info(:schedulers_online),
+      os: os_description()
+    }
+  end
+
+  defp logical_processors do
+    case :erlang.system_info(:logical_processors_available) do
+      count when is_integer(count) -> count
+      _unknown -> nil
+    end
+  end
+
+  defp os_description do
+    {_family, name} = :os.type()
+
+    version =
+      case :os.version() do
+        {major, minor, release} -> "#{major}.#{minor}.#{release}"
+        other -> to_string(other)
+      end
+
+    "#{name} #{version}"
   end
 
   defp ms(hist, p), do: Float.round(Histogram.percentile(hist, p) / 1000, 2)
@@ -587,15 +780,11 @@ defmodule Malachi.Loadtest do
 
   defp warn_if_empty(_r), do: :ok
 
-  defp json(r) do
-    l = r.latency_ms
-
-    ~s({"scenario":"#{r.scenario}","connections":#{r.connections},"pipeline":#{r.pipeline},) <>
-      ~s("duration_s":#{r.duration_s},"ops":#{r.ops},"records":#{r.records},"errors":#{r.errors},) <>
-      ~s("dropped":#{r.dropped},"overloaded":#{r.overloaded},"reconnects":#{r.reconnects},) <>
-      ~s("ops_per_s":#{r.ops_per_s},"records_per_s":#{r.records_per_s},"mb_per_s":#{r.mb_per_s},) <>
-      ~s("latency_ms":{"p50":#{l.p50},"p99":#{l.p99},"p99_9":#{l.p99_9},"p99_99":#{l.p99_99}}})
-  end
+  # Encoded rather than concatenated. The report now carries free text from the environment (the CPU
+  # architecture string, a git ref, a topic name), and hand-built JSON has no escaping: one quote or
+  # backslash in any of them would emit a document no parser accepts, which is a bad way for a published
+  # result to fail. Jason is already a dependency.
+  defp json(report), do: Jason.encode!(report)
 
   defp mono_ms, do: System.monotonic_time(:millisecond)
   defp mono_us, do: System.monotonic_time(:microsecond)

@@ -87,12 +87,8 @@ defmodule Malachi.LogApi do
           {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch(server, topic, cursor, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     case decode_cursor(cursor) do
-      {:ok, positions} ->
-        {records, next_cursor} = do_fetch(server, topic, positions, max, wait_ms)
-        {:ok, records, next_cursor}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, positions} -> do_fetch(server, topic, positions, max, wait_ms)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -102,11 +98,10 @@ defmodule Malachi.LogApi do
   records and then `commit/4`s `next_cursor` to advance the durable position (at-least-once).
   """
   @spec fetch_group(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer(), non_neg_integer()) ::
-          {:ok, [Record.t()], cursor()}
+          {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch_group(server, topic, group, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     positions = BrokerServer.committed_offsets(server, group, topic)
-    {records, next_cursor} = do_fetch(server, topic, positions, max, wait_ms)
-    {:ok, records, next_cursor}
+    do_fetch(server, topic, positions, max, wait_ms)
   end
 
   @doc """
@@ -129,8 +124,7 @@ defmodule Malachi.LogApi do
     case GroupCoordinator.poll(coordinator, group, topic, member) do
       {:ok, _generation, ranges} ->
         positions = BrokerServer.committed_offsets(server, group, topic)
-        {records, next_cursor} = do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
-        {:ok, records, next_cursor}
+        do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
 
       # this node no longer owns the topic's coordination (stale routing during failover), the client
       # re-resolves and retries against the new owner
@@ -253,11 +247,19 @@ defmodule Malachi.LogApi do
 
   defp do_fetch(server, topic, positions, max, wait_ms, ranges \\ nil) do
     Tracer.with_span "malachi.consume" do
-      {records, next_positions} = BrokerServer.consume(server, topic, positions, max, wait_ms, ranges)
-      count = length(records)
-      Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count})
-      Telemetry.consume(topic, count)
-      {records, encode_cursor(next_positions)}
+      case BrokerServer.consume(server, topic, positions, max, wait_ms, ranges) do
+        # The broker cannot see this topic's metadata, so it has nothing true to say. Surfacing the
+        # error is the difference between a client retrying and a client concluding the topic is empty.
+        {:error, reason} ->
+          Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.error" => inspect(reason)})
+          {:error, reason}
+
+        {records, next_positions} ->
+          count = length(records)
+          Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count})
+          Telemetry.consume(topic, count)
+          {:ok, records, encode_cursor(next_positions)}
+      end
     end
   end
 

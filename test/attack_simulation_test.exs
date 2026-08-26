@@ -9,6 +9,8 @@ defmodule Malachi.AttackSimulationTest do
   """
   use ExUnit.Case, async: false
 
+  import Malachi.Test.PollingHelper
+
   alias Malachi.Auth
   alias Malachi.Auth.{LockoutManager, SessionManager}
   alias Malachi.ConnectionLimiter
@@ -30,6 +32,24 @@ defmodule Malachi.AttackSimulationTest do
     {:ok, victim: victim, attacker_ip: attacker_ip}
   end
 
+  # `record_failed_attempt/2` is non-blocking by design: it hands the replicated write to a background
+  # task and returns immediately. Every assertion about lockout state therefore has to WAIT for that
+  # write rather than assume it landed, and a fixed sleep is what made this file flaky. It failed in CI
+  # on a run whose sibling run of the same commit passed: the runner was loaded, the quorum write took
+  # longer than the 100ms, and the assertion read the state before it existed. Reads are local and
+  # cheap (see the LockoutManager moduledoc), so polling costs nothing.
+  defp await_locked(username, ip) do
+    wait_until!(fn -> match?({:locked, _}, LockoutManager.locked?(username, ip)) end)
+  end
+
+  # The mirror case, which polling cannot express: waiting for something NOT to happen succeeds
+  # instantly and proves nothing. The attempt counter is the observable that says the writes landed, so
+  # waiting for it is what makes the `:not_locked` that follows mean the threshold was not crossed,
+  # rather than that the assertion simply got there first.
+  defp await_attempts(username, ip, count) do
+    wait_until!(fn -> LockoutManager.get_failed_attempts(username, ip) == count end)
+  end
+
   describe "brute force attack" do
     test "repeated failed attempts trigger lockout", %{victim: victim, attacker_ip: ip} do
       # Simulate failed logins by recording failed attempts directly
@@ -38,11 +58,8 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, ip)
       end
 
-      # Allow async GenServer.cast to process
-      Process.sleep(100)
-
       # Account should be locked for this IP
-      assert match?({:locked, _}, LockoutManager.locked?(victim, ip))
+      await_locked(victim, ip)
     end
 
     test "lockout prevents access from locked IP", %{
@@ -54,9 +71,7 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, ip)
       end
 
-      Process.sleep(100)
-
-      assert match?({:locked, _}, LockoutManager.locked?(victim, ip))
+      await_locked(victim, ip)
 
       # Verify locked accounts list includes this entry
       locked = LockoutManager.list_locked_accounts()
@@ -69,9 +84,8 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, ip)
       end
 
-      Process.sleep(100)
-
-      assert match?({:locked, _}, LockoutManager.locked?(victim, ip))
+      await_attempts(victim, ip, 10)
+      await_locked(victim, ip)
 
       # Unlock
       LockoutManager.unlock_account(victim, ip)
@@ -87,22 +101,21 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, clean_ip)
       end
 
-      Process.sleep(50)
-
+      await_attempts(victim, clean_ip, 3)
       assert :not_locked == LockoutManager.locked?(victim, clean_ip)
 
       # Successful auth should reset counter
       LockoutManager.record_successful_auth(victim, clean_ip)
-
-      Process.sleep(50)
+      await_attempts(victim, clean_ip, 0)
 
       # More failed attempts should start counting from zero
       for _ <- 1..3 do
         LockoutManager.record_failed_attempt(victim, clean_ip)
       end
 
-      Process.sleep(50)
-
+      # 3 again rather than 6 is the whole point of the reset, and it is now asserted rather than
+      # inferred from the account still being unlocked.
+      await_attempts(victim, clean_ip, 3)
       assert :not_locked == LockoutManager.locked?(victim, clean_ip)
     end
   end
@@ -119,9 +132,7 @@ defmodule Malachi.AttackSimulationTest do
         LockoutManager.record_failed_attempt(victim, locked_ip)
       end
 
-      Process.sleep(100)
-
-      assert match?({:locked, _}, LockoutManager.locked?(victim, locked_ip))
+      await_locked(victim, locked_ip)
 
       # Other IPs should not be locked
       clean_ip = List.last(ips)
@@ -141,13 +152,13 @@ defmodule Malachi.AttackSimulationTest do
         end
       end
 
-      Process.sleep(100)
-
-      # None should be locked yet (assuming lockout threshold > 4)
+      # Four attempts is under the lockout threshold, so none of the five should lock. Waiting for
+      # each counter to reach 4 is what makes that a claim rather than a race: the previous version
+      # slept and then asserted `:not_locked or {:locked, _}`, which is every possible return value
+      # and so could not fail.
       for ip <- ips do
-        result = LockoutManager.locked?(victim, ip)
-        # Just verify the system doesn't crash under distributed attack
-        assert result == :not_locked or match?({:locked, _}, result)
+        await_attempts(victim, ip, 4)
+        assert :not_locked == LockoutManager.locked?(victim, ip)
       end
     end
   end

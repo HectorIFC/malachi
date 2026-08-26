@@ -50,7 +50,7 @@ defmodule Malachi.Cluster.Placement do
       distinct `:spread` attribute values it covers; without `:spread`, distinct brokers). Best-effort
       spread already maximises domain coverage, but with few domains or missing attributes the set can
       still concentrate; `:min_domains` makes that a checkable guarantee. Absent → no domain requirement.
-    * `:policy` - `:soft` (default) keeps the current best-effort behaviour; `:hard` **rejects** a
+    * `:policy` - `:soft` (default) keeps the current best-effort behavior; `:hard` **rejects** a
       placement that cannot reach `:min_domains` with `{:error, {:insufficient_domains, covered, required}}`
       so a caller can fail fast instead of silently placing an under-diversified (not HA) replica set.
 

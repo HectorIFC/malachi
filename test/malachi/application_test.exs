@@ -76,7 +76,7 @@ defmodule Malachi.ApplicationTest do
       end
     end
 
-    test "with a topology, each vnode's replicas land in distinct racks (A1)" do
+    test "with a topology, each vnode's replicas land in distinct racks" do
       vnodes = App.sharded_vnodes(:log_meta, 6)
       nodes = [:a1@h, :a2@h, :b1@h, :b2@h]
 
@@ -99,7 +99,7 @@ defmodule Malachi.ApplicationTest do
       assert App.place_vnodes(vnodes, nodes, 2, spread: {"rack", attrs}) == placed
     end
 
-    test "with :max_skew, balances vnode replicas across nodes (A2)" do
+    test "with :max_skew, balances vnode replicas across nodes" do
       vnodes = App.sharded_vnodes(:log_meta, 9)
       nodes = [:a@h, :b@h, :c@h]
 

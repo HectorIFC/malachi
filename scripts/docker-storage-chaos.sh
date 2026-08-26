@@ -117,21 +117,21 @@ start_cluster
 start_checker "$CHECKER_WINDOW_S"
 sleep 25
 
-say "event e: torn write on a follower's active-segment copy (cut to 3/4 + garbage tail)"
+event "e: torn write on a follower's active-segment copy (cut to 3/4 + garbage tail)"
 damage_follower active 'f=$(ls $dir/*.log | head -1); sz=$(wc -c <$f); truncate -s $((sz * 3 / 4)) $f; head -c 50 /dev/urandom >> $f' &&
   echo "torn write injected and node restarted"
 
-say "event f: truncate a follower's active-segment copy to half"
+event "f: truncate a follower's active-segment copy to half"
 damage_follower active 'f=$(ls $dir/*.log | head -1); sz=$(wc -c <$f); truncate -s $((sz / 2)) $f' &&
   echo "truncation injected and node restarted"
 
-say "event g: delete a follower's sealed-segment directory, then restart it"
+event "g: delete a follower's sealed-segment directory, then restart it"
 if damage_follower sealed 'rm -rf $dir'; then
   echo "sealed copy deleted and node restarted; waiting for the integrity probe to re-backfill"
   wait_copy_repaired "lost sealed copy was not re-backfilled (silent under-replication)"
 fi
 
-say "event h: bit rot inside a follower's sealed copy, keeping the file's exact size"
+event "h: bit rot inside a follower's sealed copy, keeping the file's exact size"
 # dd with conv=notrunc overwrites in place: the file keeps its length and its size probe stays
 # happy, so nothing but a checksum scan can tell this copy from a good one.
 if damage_follower sealed 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=32 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
@@ -139,7 +139,7 @@ if damage_follower sealed 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); dd
   wait_copy_repaired "rotted sealed copy was not repaired by the integrity scrub"
 fi
 
-say "event i: corrupt a follower's sparse-index sidecar, leaving its records untouched"
+event "i: corrupt a follower's sparse-index sidecar, leaving its records untouched"
 # The .idx is derived from the records, so this must be repaired WITHOUT a peer and without touching
 # the .log: the scrub rebuilds it from the segment the node already holds. The records' md5 is captured
 # before and after to prove the segment itself was never rewritten.

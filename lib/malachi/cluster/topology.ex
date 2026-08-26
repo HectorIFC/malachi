@@ -4,7 +4,7 @@ defmodule Malachi.Cluster.Topology do
 
   Connectivity-only: libcluster discovers and connects peer nodes over Erlang distribution; the SWIM
   membership and the `ra` control plane keep using the configured `:log_nodes` for their initial member
-  set, and dynamic `ra` membership rides on the rebalancing coordinator (R3). This module only wires the
+  set, and dynamic `ra` membership rides on the rebalancing coordinator. This module only wires the
   discovery strategy: it does not touch cluster formation.
 
   Pure: `build/1` maps the config to the keyword list `Cluster.Supervisor` expects, so the strategy wiring

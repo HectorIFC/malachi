@@ -91,7 +91,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     # the owning vnode still commits (its cluster kept quorum / re-elected), and its earlier metadata
     # is intact, while a topic on the other vnode is unaffected too
     assert {:ok, _root} = commit(replicated, victim_topic, {:create_topic, "#{victim_topic}_after", 4})
-    {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(replicated)
     assert DSRSM.get_topic(cache, victim_topic).name == victim_topic
     assert DSRSM.get_topic(cache, "#{victim_topic}_after").name == "#{victim_topic}_after"
 
@@ -136,7 +136,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     end
 
     # snapshot materializes every vnode's metadata into one local cache, queried cross-node
-    {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(replicated)
     for name <- names, do: assert(DSRSM.get_topic(cache, name).name == name)
   end
 
@@ -163,7 +163,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     assert Metadata.get_topic(metadata, "events").name == "events"
     assert {:ok, _root2} = commit(router, "events", {:create_topic, "events_via_router", 4})
 
-    {:ok, cache} = ReplicatedDSRSM.snapshot(router)
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(router)
     assert DSRSM.get_topic(cache, "events").name == "events"
     assert DSRSM.get_topic(cache, "events_via_router").name == "events_via_router"
   end

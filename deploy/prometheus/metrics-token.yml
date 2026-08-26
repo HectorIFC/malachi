@@ -1,0 +1,34 @@
+# The Prometheus token sidecar, defined once and extended by each stack that needs it.
+#
+# It lived twice, in docker-compose.yml and docker-compose.cluster-durable.yml, identical but for the
+# container name, the target list, the volume and what it waits on. Twenty-five of its twenty-nine
+# lines were the same in both, including the two comments below, which record lessons that cost a
+# debugging session each. Two copies of a lesson is one copy that will be corrected and one that will
+# not.
+#
+# What each stack still supplies for itself:
+#   container_name, environment.MALACHI_TARGETS, the token volume, and depends_on.
+services:
+  metrics-token:
+    image: curlimages/curl:8.10.1
+    entrypoint: ["sh", "/refresh-token.sh"]
+    # As root, because a fresh named volume is created owned by root and this image runs as an
+    # unprivileged user, so the first write failed with a permission error while the login itself
+    # succeeded: a token fetched and then dropped, which reads as an auth problem and is not one.
+    # The blast radius is one file in a private volume; Prometheus mounts the same volume read-only.
+    user: "0:0"
+    # Shares Prometheus's network namespace, so the login comes from the same address the scrape will.
+    # MALACHI_SESSION_IP_BINDING binds a session to the IP that created it, and with the sidecar on its
+    # own address every scrape came back 403 with a session_hijack_attempt in the audit log: the
+    # control working exactly as designed against a token minted next door. Minting it from the right
+    # address is the fix that keeps the control on; turning MALACHI_SESSION_IP_BINDING off would also
+    # work and is the wrong trade to copy into anything real.
+    network_mode: "service:prometheus"
+    environment:
+      - MALACHI_METRICS_USER=admin
+      - MALACHI_METRICS_PASS=${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
+      - TOKEN_DIR=/token
+    volumes:
+      - ./refresh-token.sh:/refresh-token.sh:ro
+    mem_limit: 64m
+    restart: unless-stopped

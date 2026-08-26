@@ -56,7 +56,7 @@ read_file = fn
     end
 end
 
-# mTLS-identity auth policy (P4): which certificate field names the malachi username. "cn" (default), or
+# mTLS-identity auth policy: which certificate field names the malachi username. "cn" (default), or
 # "san:uri" / "san:dns" / "san:email" to use the first Subject Alternative Name of that kind.
 parse_mtls_policy = fn val ->
   case val && String.downcase(val) do
@@ -127,11 +127,11 @@ config :malachi,
   tls_versions: parse_tls_versions.(System.get_env("MALACHI_TLS_VERSIONS"), [:"tlsv1.3", :"tlsv1.2"]),
   tls_verify: System.get_env("MALACHI_TLS_VERIFY") || "verify_none",
   tls_fail_if_no_peer_cert: System.get_env("MALACHI_TLS_FAIL_IF_NO_PEER_CERT") == "true",
-  # mTLS-identity auth (P4): opt-in, and only honored when the listener verifies peer certs (verify_peer),
+  # mTLS-identity auth: opt-in, and only honored when the listener verifies peer certs (verify_peer),
   # so an unverified/forged certificate can never authenticate. The policy maps a cert field to a username.
   mtls_auth: System.get_env("MALACHI_MTLS_AUTH") == "true",
   mtls_identity_policy: parse_mtls_policy.(System.get_env("MALACHI_MTLS_POLICY")),
-  # OIDC/JWT auth (P4): opt-in. The server validates a signed JWT against the IdP's public key (PEM read from
+  # OIDC/JWT auth: opt-in. The server validates a signed JWT against the IdP's public key (PEM read from
   # MALACHI_OIDC_PUBLIC_KEY_FILE) and the expected issuer/audience, mapping an identity claim to a user.
   # Bearer tokens should travel over TLS; OidcConfig fails closed if the key/issuer/audience are unset.
   oidc_auth: System.get_env("MALACHI_OIDC_AUTH") == "true",
@@ -140,7 +140,7 @@ config :malachi,
   oidc_audience: System.get_env("MALACHI_OIDC_AUDIENCE"),
   oidc_algorithm: System.get_env("MALACHI_OIDC_ALGORITHM") || "RS256",
   oidc_identity_claim: System.get_env("MALACHI_OIDC_IDENTITY_CLAIM") || "sub",
-  # Per-topic ACL enforcement (P5). Default (false) is backward-compatible: a global produce/consume
+  # Per-topic ACL enforcement. Default (false) is backward-compatible: a global produce/consume
   # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
   # permissions and denies by default. A produce/consume needs an explicit ACL grant (or :admin).
   acl_strict: System.get_env("MALACHI_ACL_STRICT") == "true",
@@ -477,6 +477,63 @@ config :malachi,
   memory_check_interval_ms: parse_int.(System.get_env("MALACHI_MEMORY_CHECK_INTERVAL"), 30_000),
   gc_threshold_mb: parse_int.(System.get_env("MALACHI_GC_THRESHOLD_MB"), 500),
   auto_gc_enabled: System.get_env("MALACHI_AUTO_GC") != "false"
+
+# ============================================================
+# Tracing (OpenTelemetry)
+# ============================================================
+# Off unless asked for, which is the whole reason `Tracer.with_span` is affordable on the produce and
+# consume paths: with the sampler set to drop everything, a span costs a function call that decides not
+# to record. Turning it on here rather than in config.exs is what lets a deployment enable it without a
+# rebuild, which matters because the interesting time to trace is while something is wrong.
+#
+# MALACHI_TRACING_SAMPLE_RATIO trades detail for cost: 1.0 records every operation, which is what a
+# local compose stack wants and what a busy production node does not.
+if System.get_env("MALACHI_TRACING_ENABLED") == "true" do
+  # The rule lives in Malachi.Config, not inline here, and for the reason that module's own moduledoc
+  # gives: this file is skipped entirely under config_env() == :test, so a rule written inline cannot
+  # be reached by the suite. `parse_float` above is deliberately lenient and cannot be trusted with
+  # this one, which `sampling_ratio/1` explains.
+  raw_ratio = System.get_env("MALACHI_TRACING_SAMPLE_RATIO")
+
+  ratio =
+    case Malachi.Config.sampling_ratio(raw_ratio) do
+      {:ok, value} ->
+        value
+
+      :invalid ->
+        IO.warn("""
+        MALACHI_TRACING_SAMPLE_RATIO must be a number between 0.0 and 1.0, got #{inspect(raw_ratio)}.
+        Falling back to 1.0 (sample everything).
+        """)
+
+        1.0
+    end
+
+  # 0.0 is left to the ratio sampler rather than shortcut to `:always_off`: under `:parent_based` a
+  # ratio of zero still records the children of a span someone else decided to sample, which is the
+  # useful reading of "start no traces of my own" in a distributed system.
+  sampler =
+    if ratio >= 1.0 do
+      :always_on
+    else
+      {:parent_based, %{root: {:trace_id_ratio_based, ratio}}}
+    end
+
+  config :opentelemetry,
+    sampler: sampler,
+    # Batched rather than :simple: a span per produce on a hot path would otherwise export inline and
+    # put the collector's latency on the request. (config/test.exs keeps :simple on purpose, so a test
+    # can assert on a span without waiting for a batch to flush.)
+    span_processor: :batch,
+    traces_exporter: :otlp,
+    resource: %{service: %{name: System.get_env("MALACHI_SERVICE_NAME") || "malachi"}}
+
+  config :opentelemetry_exporter,
+    # http_protobuf over the OTLP HTTP port rather than gRPC: one fewer moving part to misconfigure,
+    # and every collector worth pointing at speaks it. Jaeger's all-in-one image listens on 4318.
+    otlp_protocol: :http_protobuf,
+    otlp_endpoint: System.get_env("MALACHI_OTLP_ENDPOINT") || "http://localhost:4318"
+end
 
 # ============================================================
 # Production Security Warnings

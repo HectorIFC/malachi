@@ -1,0 +1,185 @@
+# A durable 3-node Malachi cluster you can watch: three brokers forming one replicated control plane,
+# every write quorum-replicated, all of it on named volumes that survive a restart, plus Jaeger and
+# Prometheus.
+#
+# Distinct from docker-compose.cluster.yml, which exists for BENCHMARKS and is deliberately not
+# durable: it keeps its data on tmpfs so that fsync cost is uniform across runs, and tmpfs is remounted
+# EMPTY every time a container restarts. That is the right trade for measuring and the wrong one for
+# anything you want to keep, which is why this is a separate file rather than a flag on that one.
+#
+#   docker compose -f docker-compose.cluster-durable.yml up -d
+#
+# Then: the dashboard on 4041 (node 1), traces at http://localhost:16686, metrics at
+# http://localhost:9090. Restart the whole thing and the data is still there.
+
+x-malachi-node: &malachi-node
+  image: ${DOCKERHUB_USERNAME:-hectorcardoso}/malachi:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: &malachi-env
+    # Erlang distribution: an Elixir release derives its node name from RELEASE_NODE plus the
+    # container hostname, so these three come up as malachi@malachi1..3, which is exactly what
+    # MALACHI_LOG_NODES names below. The cookie is set explicitly rather than left to the one baked
+    # into the image at build time: that default only holds while all three run the same build, and
+    # the failure when it does not is a silent refusal to connect.
+    RELEASE_DISTRIBUTION: sname
+    RELEASE_NODE: malachi
+    RELEASE_COOKIE: ${MALACHI_COOKIE:-malachi_durable_cookie}
+    MALACHI_TCP_PORT: "4040"
+    MALACHI_DASHBOARD_PORT: "4041"
+    MALACHI_LOCALE: en_US
+    # One replicated control plane across the three, and a replication factor of 3, so every
+    # acknowledged write is on every node before it is acknowledged. This is the durability regime,
+    # not the throughput one; the benchmark compose runs RF=1 for the opposite reason.
+    MALACHI_CLUSTER_STRATEGY: epmd
+    MALACHI_LOG_CLUSTER: malachi_log
+    MALACHI_LOG_NODES: malachi@malachi1,malachi@malachi2,malachi@malachi3
+    MALACHI_LOG_VNODES: "1"
+    MALACHI_LOG_REPLICATION_FACTOR: "3"
+    # Under the single persistent mount, so segments and the ra log (users, ACLs, lockouts) both
+    # survive a restart. Leaving these unset would land them under /tmp, which is where the benchmark
+    # compose deliberately puts them and where nothing survives.
+    #
+    # /app/data rather than /data, and not by taste: the image runs as a non-root user, and Docker
+    # only gives a fresh named volume the mounting directory's ownership when that directory already
+    # exists in the image. /app/data does; /data would be created by root and the broker died on
+    # `permission denied` trying to make /data/log inside it. Same path as the single-node compose and
+    # the Kubernetes manifest.
+    MALACHI_RA_DATA_DIR: /app/data/ra
+    MALACHI_LOG_DATA_DIR: /app/data/log
+    MALACHI_ADMIN_PASS: ${MALACHI_ADMIN_PASS:-malachi-local-only-admin}
+    MALACHI_PRODUCER_PASS: ${MALACHI_PRODUCER_PASS:-malachi-local-only-producer}
+    MALACHI_CONSUMER_PASS: ${MALACHI_CONSUMER_PASS:-malachi-local-only-consumer}
+    MALACHI_APP_PASS: ${MALACHI_APP_PASS:-malachi-local-only-app}
+    MALACHI_AUDIT_LOG_OUTPUT: stdout
+    # The image runs the prod release, and prod requires TLS unless told otherwise. Plaintext is right
+    # for a stack on your own machine and wrong for anything else, so turning it back on takes
+    # MALACHI_REQUIRE_TLS=true AND certificates: setting MALACHI_TLS_CERTFILE and MALACHI_TLS_KEYFILE
+    # alone leaves this false and the broker still serving plaintext, which is the failure that looks
+    # like success. Overridable from the environment for that reason, rather than hardcoded here where
+    # it could only be changed by editing the file. Note this covers the client protocol only; Erlang
+    # distribution between the three nodes has its own switch (MALACHI_DIST_TLS).
+    MALACHI_REQUIRE_TLS: "${MALACHI_REQUIRE_TLS:-false}"
+    # Every node traces into the same Jaeger, so a produce that fans out to the other two shows up as
+    # one trace spanning all three rather than as three unrelated ones.
+    MALACHI_TRACING_ENABLED: "true"
+    MALACHI_OTLP_ENDPOINT: http://jaeger:4318
+  # The first node to reach cluster formation tries to form the shared ra group while its peers' BEAMs
+  # are still booting, finds no quorum, and exits. Restarting on failure is the standard answer; after
+  # a restart or two all three form the group and go healthy.
+  restart: on-failure
+  security_opt:
+    - no-new-privileges:true
+  # The same hardening the single-node stack has had, and the one it was missing: this is the stack
+  # shaped like a real deployment, so it is the one where a writable root filesystem matters most.
+  # The per-node volume mounted at /app/data is the single writable persistent path; /tmp is a
+  # writable tmpfs that does not survive a restart, which is what the ra and log dirs must not be, and
+  # they are under /app/data for exactly that reason.
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid
+  mem_limit: 1g
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 40s
+
+services:
+  malachi1:
+    <<: *malachi-node
+    container_name: malachi-durable-1
+    hostname: malachi1
+    environment:
+      <<: *malachi-env
+      MALACHI_SERVICE_NAME: malachi1
+    # Only node 1 publishes to the host, so it is the only one reachable from your machine. The three
+    # are interchangeable to a client ON the compose network, which is the sense the cluster cares
+    # about: a write through any of them is quorum-replicated across all three. Publish the other two
+    # if you want to drive them from outside.
+    # Loopback, for the same reason as the single-node stack: placeholder credentials from a public
+    # file, TLS off, and unauthenticated Jaeger and Prometheus beside it.
+    ports:
+      - "127.0.0.1:4040:4040"
+      - "127.0.0.1:4041:4041"
+    volumes:
+      - malachi-durable-1:/app/data
+
+  malachi2:
+    <<: *malachi-node
+    container_name: malachi-durable-2
+    hostname: malachi2
+    environment:
+      <<: *malachi-env
+      MALACHI_SERVICE_NAME: malachi2
+    volumes:
+      - malachi-durable-2:/app/data
+
+  malachi3:
+    <<: *malachi-node
+    container_name: malachi-durable-3
+    hostname: malachi3
+    environment:
+      <<: *malachi-env
+      MALACHI_SERVICE_NAME: malachi3
+    volumes:
+      - malachi-durable-3:/app/data
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: malachi-durable-jaeger
+    ports:
+      - "127.0.0.1:16686:16686"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # One token PER NODE. Users, ACLs and lockouts are replicated through the auth `ra` group, but
+  # sessions are not: they live in a node-local ETS table, so a session minted on node 1 answers
+  # `invalid_session` on node 2 and the scrape 403s. Three logins, three token files, three scrape
+  # jobs in deploy/prometheus/cluster.yml.
+  # One token per node, which is a requirement rather than a flourish: sessions are node-local while
+  # users and ACLs replicate, so a token minted on node 1 is rejected by node 2. The shared definition
+  # and the reasoning behind the rest of its settings are in the extended file.
+  metrics-token:
+    extends:
+      file: deploy/prometheus/metrics-token.yml
+      service: metrics-token
+    container_name: malachi-durable-metrics-token
+    environment:
+      - MALACHI_TARGETS=malachi1=http://malachi1:4041,malachi2=http://malachi2:4041,malachi3=http://malachi3:4041
+    volumes:
+      - malachi-durable-token:/token
+    depends_on:
+      malachi1:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: malachi-durable-prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/prometheus/cluster.yml:/etc/prometheus/prometheus.yml:ro
+      - malachi-durable-token:/etc/prometheus/token:ro
+      - malachi-durable-prometheus:/prometheus
+    depends_on:
+      malachi1:
+        condition: service_healthy
+    mem_limit: 512m
+    restart: unless-stopped
+
+volumes:
+  # One per node, as a real cluster would have: a shared volume would make three replicas of the same
+  # bytes into one copy wearing three hats, and none of the replication would be real.
+  malachi-durable-1:
+  malachi-durable-2:
+  malachi-durable-3:
+  malachi-durable-token:
+  malachi-durable-prometheus:

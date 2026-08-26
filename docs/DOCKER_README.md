@@ -32,11 +32,19 @@ docker pull hectorcardoso/malachi:latest
 ```bash
 docker run \
   --name malachi \
-  -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 ```
+
+Two parts of that command are not decoration. The image runs the production release, and production
+requires TLS unless told otherwise, so without `MALACHI_REQUIRE_TLS=false` the container exits at
+once with `TLS certificate file not configured`. And because it is then serving plaintext, the ports
+are bound to `127.0.0.1`: a bare `-p 4040:4040` publishes on every interface your machine has, which
+on a shared network hands out an unencrypted broker. Change the prefix deliberately, with TLS and
+real credentials, rather than by deleting it. See [TLS Configuration](#tls-configuration).
 
 **Note**: The image automatically detects your platform (AMD64 or ARM64) and uses the appropriate build.
 
@@ -90,9 +98,10 @@ directories at a persistent volume mounted at `/app/data`, which the image alrea
 ```bash
 docker run \
   --name malachi \
-  -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_REQUIRE_TLS=false \
   -e MALACHI_LOG_DATA_DIR=/app/data/log \
   -e MALACHI_RA_DATA_DIR=/app/data/ra \
   -v malachi-data:/app/data \
@@ -110,17 +119,29 @@ Kubernetes manifest use these same paths.
 docker run \
   --name malachi \
   -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
-  -e MALACHI_ENABLE_TLS=true \
+  -e MALACHI_TLS_CERTFILE=/app/priv/cert/server.crt \
+  -e MALACHI_TLS_KEYFILE=/app/priv/cert/server.key \
   -v /path/to/certs:/app/priv/cert:ro \
   hectorcardoso/malachi:latest
 ```
 
-Required certificate files in the mounted volume:
-- `server.crt` - Server certificate
-- `server.key` - Private key
-- `ca.crt` - CA certificate (optional)
+The paths are given explicitly because there is no default for them: mounting the files somewhere the
+server might look is not enough, and a run that only mounts them exits at boot with `TLS certificate
+file not configured`. `MALACHI_TLS_CACERTFILE` is the optional third, for verifying client
+certificates.
+
+The two ports are bound differently on purpose, and the asymmetry is the important part. TLS covers
+the broker on 4040, which is why that one is published: encrypting it is what the certificates are
+for. It does not cover the dashboard. `Malachi.Dashboard` listens with `:gen_tcp.listen` and has no
+TLS path at all, so 4041 serves plain HTTP whatever the certificates say, and it is the port carrying
+the login form and the session cookie. Publishing it on every interface would hand those out in
+cleartext next to a broker you had just taken the trouble to encrypt. Reach a remote dashboard
+through a reverse proxy that terminates TLS in front of it, not by widening this binding.
+
+The mounted files are read at boot and validated then, so a certificate that is expired or unreadable
+stops the container rather than being discovered by a client later.
 
 ---
 
@@ -154,6 +175,84 @@ volumes:
 ```
 
 > These compose defaults are fine for test and development; tune them conservatively for production.
+
+Two ready-made stacks live in the repository, and both go further than the snippet above.
+
+### Single node, observable
+
+```bash
+docker compose up -d
+```
+
+A broker plus **Jaeger** and **Prometheus**, so the thing you just started is one you can watch:
+
+| What | Where |
+|------|-------|
+| Broker (binary protocol) | `localhost:4040` |
+| Dashboard | http://localhost:4041 |
+| Traces | http://localhost:16686 |
+| Metrics | http://localhost:9090 |
+
+Produce a little traffic and a produce shows up in Jaeger as a **distributed trace**: `malachi.produce`
+at the root, `malachi.broker.produce` under it, and `malachi.replication.commit` under that, carrying
+the topic, the record count and the byte count. Tracing is off by default everywhere else, because the
+sampler dropping every span is what makes `Tracer.with_span` free on the produce path; this stack sets
+`MALACHI_TRACING_ENABLED=true` and samples everything, which is right for watching a trickle and wrong
+for a busy node (use `MALACHI_TRACING_SAMPLE_RATIO` there).
+
+The metrics side needs one moving part that is worth understanding before you copy it. `/metrics`
+requires an authenticated user and a Malachi session expires, so a token pasted into a scrape config
+works right up until it does not. A small `metrics-token` sidecar logs in and rewrites the file
+Prometheus reads through `credentials_file`, which Prometheus re-reads on every scrape. It shares
+Prometheus's network namespace on purpose: sessions are bound to the IP that created them
+(`MALACHI_SESSION_IP_BINDING`), so the token has to be minted from the address that will use it.
+
+### Durable cluster, observable
+
+```bash
+docker compose -f docker-compose.cluster-durable.yml up -d
+```
+
+Three brokers forming one replicated control plane at replication factor 3, each on its own named
+volume, plus the same Jaeger and Prometheus. Restart the whole thing and the data is still there,
+which is the difference between this and `docker-compose.cluster.yml`: that one exists for benchmarks
+and keeps its data on tmpfs so fsync cost stays uniform across runs, and tmpfs is remounted empty on
+every restart.
+
+Only node 1 publishes to the host, so it is the only one a client on your machine can reach. The three
+are interchangeable to a client **on the compose network**, which is the sense that matters for how
+the cluster behaves: produce through any of them and the write is quorum-replicated across all three. Publish the other two if you want to exercise that from outside. Prometheus scrapes all three,
+because most Malachi series are per-node facts (BEAM memory, connections, the integrity scrub's
+progress over *that* node's disk) and scraping one would report a third of the cluster while looking
+complete. It uses one scrape job per node, each with its own token: users, ACLs and lockouts are
+replicated across the cluster through the auth `ra` group, but **sessions are not**, so a session
+minted on node 1 is rejected by node 2.
+
+Both stacks ship with placeholder credentials in a public file, with `MALACHI_REQUIRE_TLS=false`, and
+with Jaeger and Prometheus carrying no authentication of their own. Every port they publish is bound
+to `127.0.0.1` because of that combination rather than in spite of it: on `0.0.0.0` these files would
+hand anyone who can route to the host a plaintext broker whose password is on GitHub, plus every trace
+it has recorded.
+
+Undoing that takes three separate things, and the middle one is easy to miss:
+
+```bash
+MALACHI_ADMIN_PASS="$(openssl rand -base64 32)" \
+MALACHI_REQUIRE_TLS=true \
+MALACHI_TLS_CERTFILE=/certs/server.pem \
+MALACHI_TLS_KEYFILE=/certs/server-key.pem \
+  docker compose up -d
+```
+
+Real passwords in the environment. `MALACHI_REQUIRE_TLS=true`, which is **not** implied by setting the
+certificate paths: with the flag left at `false` the broker reads those files and still serves
+plaintext, a security setting failing in the shape that looks configured. And certificates mounted
+into the container, because those two paths resolve inside it, so add a
+`- /etc/malachi/certs:/certs:ro` volume alongside them.
+
+Only then widen the broker's bindings, and widen only the broker's. Jaeger and Prometheus have no
+authentication to turn on, so they stay on `127.0.0.1` until you have put something in front of them
+that does.
 
 ---
 

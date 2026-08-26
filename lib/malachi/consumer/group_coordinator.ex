@@ -8,7 +8,7 @@ defmodule Malachi.Consumer.GroupCoordinator do
   membership change: join, leave, eviction - or a change in the topic's ranges recomputes the whole
   assignment and bumps a **generation** counter; a member re-reads its assignment on the next heartbeat and
   sees the new generation, its signal to take over its (possibly changed) ranges. Because the assignment is
-  deterministic and sticky (S1), a rebalance moves few ranges.
+  deterministic and sticky, a rebalance moves few ranges.
 
   This is the coordinator **logic** as a single GenServer, reached through seams (`:clock`, `:ranges_fun`)
   so it is testable without a cluster; which node coordinates which group (or replicating the membership)

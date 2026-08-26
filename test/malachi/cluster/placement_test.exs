@@ -282,7 +282,7 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
-  describe "place_balanced/4, global load balancing (A2)" do
+  describe "place_balanced/4, global load balancing" do
     test "empty brokers give each item an empty replica set" do
       assert Placement.place_balanced([:x, :y], [], 2) == [{:x, []}, {:y, []}]
     end

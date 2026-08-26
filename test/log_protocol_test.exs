@@ -275,7 +275,7 @@ defmodule Malachi.LogProtocolTest do
     end)
   end
 
-  describe "admin user management (P3)" do
+  describe "admin user management" do
     test "admin creates a user over the wire; the user then authenticates and is listed; delete revokes it" do
       username = "wireuser_#{System.unique_integer([:positive])}"
       on_exit(fn -> Malachi.Auth.remove_user(username) end)
@@ -342,7 +342,7 @@ defmodule Malachi.LogProtocolTest do
     end
   end
 
-  describe "admin per-topic ACL management (P5)" do
+  describe "admin per-topic ACL management" do
     test "admin grants an ACL over the wire; it is listed; revoke removes it" do
       username = "aclwire_#{System.unique_integer([:positive])}"
       Malachi.Auth.add_user(username, "Acl-Pass-1", [:produce])

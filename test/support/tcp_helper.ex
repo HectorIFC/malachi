@@ -91,7 +91,7 @@ defmodule Malachi.Test.TCPHelper do
     end
   end
 
-  # ---- streaming (B2) helpers ----
+  # ---- streaming helpers ----
 
   @doc "Sends a subscribe frame (opens a push stream); no immediate response is expected."
   def subscribe(socket, topic, group, window, max, correlation_id) do

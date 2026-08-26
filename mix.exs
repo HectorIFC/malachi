@@ -46,15 +46,17 @@ defmodule Malachi.MixProject do
 
   defp aliases do
     [
-      # `mix docs` runs the strict build (a broken ref fails the build) and then stages the standalone
-      # benchmark dashboard at doc/benchmarks, so /benchmarks/ ships with the site and the sidebar link
-      # resolves both locally and on GitHub Pages. rm_rf before cp_r keeps it idempotent across re-runs
-      # (`cp -r` into an existing dir would nest a second copy). Baking `--warnings-as-errors` into the
-      # alias makes a plain `mix docs` strict everywhere (local and CI), so neither has to pass the flag and
-      # local output matches CI. Overriding `docs` here does not recurse: Mix runs the underlying docs task
-      # (forwarding any CLI args to it) and then the copy function (the documented idiom, e.g.
-      # `test: ["test", &fun/1]`).
-      docs: ["docs --warnings-as-errors", &copy_benchmarks/1]
+      # `mix docs` renders the recorded results into docs/generated first, then runs the strict build (a
+      # broken ref fails the build), then stages the standalone benchmark dashboard at doc/benchmarks, so
+      # /benchmarks/ ships with the site and the sidebar link resolves both locally and on GitHub Pages.
+      # The generation step has to come FIRST: ExDoc requires every extra to exist on disk before it
+      # starts, and those pages are build output rather than tracked files. rm_rf before cp_r keeps the
+      # staging idempotent across re-runs (`cp -r` into an existing dir would nest a second copy). Baking
+      # `--warnings-as-errors` into the alias makes a plain `mix docs` strict everywhere (local and CI), so
+      # neither has to pass the flag and local output matches CI. Overriding `docs` here does not recurse:
+      # Mix runs the underlying docs task (forwarding any CLI args to it) and then the copy function (the
+      # documented idiom, e.g. `test: ["test", &fun/1]`).
+      docs: ["malachi.docs.results", "docs --warnings-as-errors", &copy_benchmarks/1]
     ]
   end
 
@@ -125,11 +127,20 @@ defmodule Malachi.MixProject do
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
       "docs/HOOKS.md": [title: "Git hooks"],
+      "docs/guides/running-the-node-loadtest.md": [title: "Running the Node.js load test"],
+      "docs/guides/running-the-elixir-loadtest.md": [title: "Running the Elixir load test"],
+      "docs/guides/running-chaos-drills.md": [title: "Running the chaos drills"],
+      # Build output, not tracked files: `mix malachi.docs.results` renders these from the JSON under
+      # benchmark/published before ExDoc runs (see the `docs` alias). They are listed here like any other
+      # extra, which is why that ordering is not optional.
+      "docs/generated/loadtest-node-results.md": [title: "Node.js load test results"],
+      "docs/generated/loadtest-elixir-results.md": [title: "Elixir load test results"],
+      "docs/generated/chaos-results.md": [title: "Chaos certification results"],
       # External link (ExDoc :url extra -> URLNode): the benchmark dashboard is a standalone static page
       # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
       # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
       # full-page navigation (an in-site `.html` would be hijacked and break, since the page has no swup root).
-      "Benchmark results": [url: "benchmarks/"]
+      "Interactive dashboard": [url: "benchmarks/"]
     ]
   end
 
@@ -155,9 +166,25 @@ defmodule Malachi.MixProject do
         "docs/DOCKER_TESTING.md",
         "docs/MULTI_ARCH_BUILD.md"
       ],
-      # The pattern is the URL itself, not a file path: for a URLNode, Config.match_extra compares the
-      # group pattern against the node's url (`path == string`).
-      Benchmarks: ["benchmarks/"],
+      # ExDoc groups extras one level deep (`groups_for_extras` is a flat keyword list), so a section with
+      # subsections inside it is not expressible: each subsection is its own group instead. Each pairs the
+      # page that explains how to run something with the page that shows what the last run measured.
+      #
+      # The pattern for the dashboard is the URL itself, not a file path: for a URLNode,
+      # Config.match_extra compares the group pattern against the node's url (`path == string`).
+      "Benchmarks: Node.js": [
+        "docs/guides/running-the-node-loadtest.md",
+        "docs/generated/loadtest-node-results.md",
+        "benchmarks/"
+      ],
+      "Benchmarks: Elixir": [
+        "docs/guides/running-the-elixir-loadtest.md",
+        "docs/generated/loadtest-elixir-results.md"
+      ],
+      "Chaos Engineering": [
+        "docs/guides/running-chaos-drills.md",
+        "docs/generated/chaos-results.md"
+      ],
       Development: ["docs/HOOKS.md"]
     ]
   end
@@ -237,15 +264,25 @@ defmodule Malachi.MixProject do
       # Runtime dependencies - PINNED to patch-level
       {:jason, "~> 1.4.4"},
       {:argon2_elixir, "~> 4.1.3"},
-      # JWT/JWS validation for the OIDC auth provider (P4). Built on erlang-jose; handles the algorithm
+      # JWT/JWS validation for the OIDC auth provider. Built on erlang-jose; handles the algorithm
       # pitfalls (alg:none, RS256/HS256 confusion) that hand-rolled JWT verification gets wrong.
       {:joken, "~> 2.6.2"},
       {:inet_cidr, "~> 1.0.9"},
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
-      # OpenTelemetry: trace client operations (produce/fetch). Exporter is off by default (traces_exporter
-      # :none). Set it to :otlp with an endpoint to ship spans to a collector.
+      # OpenTelemetry: trace client operations (produce/fetch). Still OFF by default: the sampler drops
+      # every span, so `Tracer.with_span` on the hot path stays a no-op until MALACHI_TRACING_ENABLED
+      # turns it on (see config/runtime.exs). The exporter ships as a dependency rather than as an
+      # instruction to add one, because a collector nobody can reach without editing mix.exs and
+      # recompiling is a collector nobody reaches: the shipped compose files point Jaeger at it.
+      # The exporter is listed BEFORE the SDK on purpose, here and in the release's `applications`.
+      # Nothing in the dependency graph orders these two relative to each other, so the start order
+      # falls out of this list, and the SDK reads its exporter configuration while it initializes: an
+      # SDK that starts first can come up with no exporter registered and drop the spans from that
+      # window. It is a boot race, so it does not reproduce on demand, which is the argument for
+      # pinning the order rather than for waiting to see whether it bites.
       {:opentelemetry_api, "~> 1.4"},
+      {:opentelemetry_exporter, "~> 1.8"},
       {:opentelemetry, "~> 1.5"},
       # Raft (RabbitMQ's): replicates the Metadata state machine (DS-RSM vnodes)
       {:ra, "~> 2.16"},
@@ -271,7 +308,14 @@ defmodule Malachi.MixProject do
     [
       malachi: [
         include_executables_for: [:unix],
-        applications: [runtime_tools: :permanent],
+        # The OpenTelemetry pair is listed explicitly, and exporter first, for the reason spelled out
+        # beside them in deps/0: a release boots applications in this order, and an SDK that starts
+        # before its exporter can drop the spans from that window.
+        applications: [
+          opentelemetry_exporter: :permanent,
+          opentelemetry: :permanent,
+          runtime_tools: :permanent
+        ],
         steps: [:assemble, :tar]
       ]
     ]

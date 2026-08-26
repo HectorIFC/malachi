@@ -112,7 +112,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @doc """
   Aborts a split that a crashed coordinator left in flight, rolling it back to the pre-split state: moves
   every topic that reached the new vnode back to its owner under `state`'s (unchanged) ring and lifts any
-  migration fence left on a source: the same derived, best-effort rollback an in-call failure runs (B1).
+  migration fence left on a source: the same derived, best-effort rollback an in-call failure runs.
   `state` is the pre-split topology (a pending split never advanced the ring); `new_server_id` addresses the
   new vnode's (possibly unreachable) cluster.
 
@@ -181,13 +181,21 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   vnodes' ra clusters via `server_for/2`).
 
   A vnode whose cluster is not ready yet (still electing, or the orchestrator has not bootstrapped it)
-  contributes an **empty** `Metadata`, so this never fails on a not-ready vnode; re-snapshotting later
-  fills it in (the ra log is authoritative, so a refresh only ever moves the cache forward).
+  contributes an **empty** `Metadata` and its id is returned in the second list, so a caller can tell
+  "this vnode holds no topics" from "this vnode did not answer". Collapsing those two is what made a
+  restarted broker serve an empty page for a topic with durable records on disk: the unreachable vnode
+  contributed nothing, the cache replaced the real topics with that nothing, and every read of them
+  succeeded with zero records. Re-snapshotting later fills the vnode in (the ra log is authoritative,
+  so a refresh only ever moves the cache forward).
   """
-  @spec snapshot(t()) :: {:ok, DSRSM.t()}
+  @spec snapshot(t()) :: {:ok, DSRSM.t(), [vnode_id()]}
   def snapshot(%__MODULE__{} = state) do
-    metadata_by_vnode = Map.new(state.vnodes, fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id)} end)
-    {:ok, DSRSM.seed(state.ring, metadata_by_vnode)}
+    read = Map.new(state.vnodes, fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id)} end)
+
+    metadata_by_vnode = Map.new(read, fn {vnode_id, result} -> {vnode_id, metadata_or_empty(result)} end)
+    unreachable = for {vnode_id, :unreachable} <- read, do: vnode_id
+
+    {:ok, DSRSM.seed(state.ring, metadata_by_vnode), unreachable}
   end
 
   @doc "The ids of the vnodes."
@@ -204,15 +212,22 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   # --- internals ---
 
-  # The vnode's replicated Metadata, or an empty one when its cluster is unreachable / not ready yet.
-  # A linearizable query runs on the (possibly remote) leader, so use a named stdlib function rather
-  # than a module-local closure, which the leader node may not have loaded.
+  # The vnode's replicated Metadata, or `:unreachable` when its cluster does not answer (still
+  # electing, not bootstrapped yet, or partitioned). A linearizable query runs on the (possibly remote)
+  # leader, so use a named stdlib function rather than a module-local closure, which the leader node
+  # may not have loaded.
   defp vnode_metadata(server_id) do
     case MetadataServer.query(server_id, &Function.identity/1) do
-      {:ok, metadata} -> metadata
-      {:error, _reason} -> Metadata.new()
+      {:ok, metadata} -> {:ok, metadata}
+      {:error, _reason} -> :unreachable
     end
   end
+
+  # The placeholder keeps the cache shape total (every vnode on the ring has an entry). It is only a
+  # placeholder: the caller is told which entries it stands for, and decides whether to keep its own
+  # previous view instead.
+  defp metadata_or_empty({:ok, metadata}), do: metadata
+  defp metadata_or_empty(:unreachable), do: Metadata.new()
 
   defp with_vnode(state, topic_name, fun) do
     case HashRing.route(state.ring, topic_name) do

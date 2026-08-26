@@ -1,6 +1,6 @@
 defmodule Malachi.Wire do
   @moduledoc """
-  The binary wire protocol for the NorthGuard log client (B1): a length-prefixed, request/response
+  The binary wire protocol for the NorthGuard log client: a length-prefixed, request/response
   framing that replaces the JSON+base64 line protocol (measured ~29% fewer bytes and 9-17x less
   serialization CPU in `benchmark/protocol_bench.exs`).
 
@@ -57,11 +57,11 @@ defmodule Malachi.Wire do
   @delete_user 9
   @change_password 10
   @list_users 11
-  # mTLS-identity auth (P4): empty payload; the server authenticates from the verified peer certificate.
+  # mTLS-identity auth: empty payload; the server authenticates from the verified peer certificate.
   @mtls_auth 12
-  # OIDC/JWT auth (P4): payload is a signed JWT; the server validates it and maps a claim to a user.
+  # OIDC/JWT auth: payload is a signed JWT; the server validates it and maps a claim to a user.
   @token_auth 13
-  # admin per-topic ACL management (P5): grant/revoke a {username, operation, pattern}, list a user's ACLs.
+  # admin per-topic ACL management: grant/revoke a {username, operation, pattern}, list a user's ACLs.
   @grant_acl 14
   @revoke_acl 15
   @list_acls 16
@@ -237,7 +237,7 @@ defmodule Malachi.Wire do
     {topic, group, cursor}
   end
 
-  # Streaming (B2): subscribe opens a server-push stream for a consumer `group`, bounded by a credit
+  # Streaming: subscribe opens a server-push stream for a consumer `group`, bounded by a credit
   # `window` (max in-flight records) and a per-push `max` batch size. The server then pushes records as
   # ordinary success responses tagged with the subscribe's correlation id, each carrying an
   # `encode_fetch_resp/2` payload (records + the next opaque cursor).
@@ -327,7 +327,7 @@ defmodule Malachi.Wire do
     users
   end
 
-  # ---- admin per-topic ACL management (P5). operation is a byte string ("produce"/"consume"); resource is a
+  # ---- admin per-topic ACL management. operation is a byte string ("produce"/"consume"); resource is a
   # pattern ("orders.eu" literal, or "orders.*" prefix). grant and revoke share the request shape. ----
 
   def encode_acl_req(username, operation, pattern) do

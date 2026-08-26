@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.Rebalance do
   @moduledoc """
   Executes a rebalancing plan (from `Malachi.Application.rebalance_plan/2`) against the vnodes' ra
-  clusters (R3). For each change it **adds the joining members before removing the leaving ones**
+  clusters. For each change it **adds the joining members before removing the leaving ones**
   (add-before-remove, so a vnode never drops below quorum mid-move) through injected `add_member` /
   `remove_member` seams, so the executor is testable without ra, and R3-b supplies the real ra ops.
 

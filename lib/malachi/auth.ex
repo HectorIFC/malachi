@@ -55,7 +55,7 @@ defmodule Malachi.Auth do
 
   @doc """
   Verifies a username/password against the user store **without** creating a session: the session-less core
-  of authentication, used by `Malachi.Auth.PasswordProvider` (P4). Returns `{:ok, permissions}` or
+  of authentication, used by `Malachi.Auth.PasswordProvider`. Returns `{:ok, permissions}` or
   `{:error, :invalid_password | :user_not_found}`.
 
   Runs a dummy hash (`Argon2.no_user_verify/0`) for an unknown user so the response time does not reveal

@@ -133,6 +133,212 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "reproduce metadata" do
+    test "the recorded command names the topic and the port that were actually used" do
+      # Both were missing and both break a reproduction quietly: a run on a non-default port published
+      # a command that dials 4040, and a fetch run against an existing topic published one that would
+      # create a new empty one.
+      t = topic("addressing")
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: t)
+
+      assert r.meta.command =~ "--topic=#{t}"
+      assert r.meta.command =~ "--port=#{@port}"
+      assert r.meta.command =~ "--host=127.0.0.1"
+    end
+
+    # The argv a shell would hand the mix task, one element per line. Asking a shell is the only
+    # question worth asking about quoting: not what the escaping looks like, but what survives it.
+    defp replay_argv(command) do
+      {output, 0} = System.cmd("sh", ["-c", ~s(set -- #{command}; printf '%s\\n' "$@")])
+
+      # `mix` and `malachi.loadtest` lead; the rest is what OptionParser would see.
+      output |> String.split("\n", trim: true) |> Enum.drop(2)
+    end
+
+    defp shell_value(command, flag) do
+      prefix = flag <> "="
+
+      command
+      |> replay_argv()
+      |> Enum.find_value("", fn arg ->
+        if String.starts_with?(arg, prefix), do: String.replace_prefix(arg, prefix, "")
+      end)
+    end
+
+    # Absence asked of the argument list, not of the extracted value. Reading `shell_value/2 == ""`
+    # also holds for a flag that IS emitted with an empty value, so `--cert=` would have satisfied
+    # every assertion that the certificate paths are omitted: the helper answered the question it
+    # could rather than the one being asked. A refute on the substring `--key` is worse still, since
+    # `--keys=1000` contains it.
+    defp shell_flag_absent?(command, flag) do
+      command |> replay_argv() |> Enum.all?(&(not String.starts_with?(&1, flag <> "=")))
+    end
+
+    test "free text in the recorded command survives a shell round trip" do
+      # A topic with a space recorded as `--topic has a space`, which on replay parses as
+      # `--topic has` and silently targets a different topic. The server's allowlist rejects this
+      # name, so a real run fails, but the command is recorded either way and a string this module
+      # emits should not rely on a downstream validator to come out well formed.
+      t = "has a space and a ' quote"
+      command = Loadtest.reproduce_command(topic: t)
+
+      assert shell_value(command, "--topic") == t
+    end
+
+    test "a value starting with a hyphen replays as a value, not as another switch" do
+      # A hyphen is inside the server's topic allowlist, so `-weird` is a name the broker accepts.
+      # Emitted as two arguments, OptionParser read the value as a switch and the replay did not run
+      # at all: it complained that --topic was missing its argument and that -w, -e, -i, -r and -d
+      # were unknown options. The `--name=value` form is what makes it a value again.
+      command = Loadtest.reproduce_command(topic: "-weird")
+
+      assert shell_value(command, "--topic") == "-weird"
+      # Parsed the way a replay parses it, not matched as text: this is the step that used to raise.
+      replayed = command |> replay_argv() |> Enum.filter(&String.starts_with?(&1, "--topic="))
+      assert {[topic: "-weird"], []} = OptionParser.parse!(replayed, strict: [topic: :string])
+    end
+
+    test "a certificate path starting with a hyphen replays the same way" do
+      command = Loadtest.reproduce_command(tls: true, cacert: "-relative/ca.pem")
+
+      assert shell_value(command, "--cacert") == "-relative/ca.pem"
+    end
+
+    test "an ordinary command is not quoted, so it stays readable" do
+      command = Loadtest.reproduce_command(topic: "plain_topic")
+
+      refute command =~ "'"
+      assert command =~ "--topic=plain_topic"
+      assert command =~ "--host=127.0.0.1"
+    end
+
+    test "a TLS run records a command that reconnects over TLS" do
+      # Omitting this published a command that reconnects in PLAINTEXT: it does not reproduce the run,
+      # and it does not measure the same thing either, since the handshake and the record layer are
+      # part of what was timed.
+      command =
+        Loadtest.reproduce_command(
+          tls: true,
+          cacert: "ca.pem",
+          cert: "client.pem",
+          key: "/etc/certs/client key.pem"
+        )
+
+      assert command =~ "--tls"
+      assert shell_value(command, "--cacert") == "ca.pem"
+      assert shell_value(command, "--cert") == "client.pem"
+      # Paths come along because they are paths; a space in one still has to survive.
+      assert shell_value(command, "--key") == "/etc/certs/client key.pem"
+    end
+
+    test "a plaintext run records no transport flags at all" do
+      command = Loadtest.reproduce_command([])
+
+      refute command =~ "--tls"
+      assert shell_flag_absent?(command, "--cacert")
+    end
+
+    test "server-authenticated TLS records the flag without inventing certificate paths" do
+      command = Loadtest.reproduce_command(tls: true)
+
+      assert command =~ "--tls"
+      assert shell_flag_absent?(command, "--cacert")
+      assert shell_flag_absent?(command, "--cert")
+      assert shell_flag_absent?(command, "--key")
+    end
+
+    test "the recorded command still carries no credential values" do
+      command = Loadtest.reproduce_command(tls: true, user: "admin", pass: "hunter2", token: "t0ken")
+
+      refute command =~ "hunter2"
+      refute command =~ "t0ken"
+      refute command =~ "--pass"
+      refute command =~ "--token"
+    end
+
+    test "a password run records which user it authenticated as, and still no password" do
+      # The identity decides what the run was allowed to do: a user without a produce ACL on the
+      # topic measures rejections, and a command that reproduces it as admin disagrees with the
+      # numbers printed beside it. The name is not the secret.
+      command = Loadtest.reproduce_command(user: "reader", pass: "hunter2")
+
+      assert shell_value(command, "--user") == "reader"
+      refute command =~ "hunter2"
+    end
+
+    test "a password run with no user named records the one that was actually dialled" do
+      assert shell_value(Loadtest.reproduce_command([]), "--user") == "admin"
+    end
+
+    test "a token or certificate run names no user, having authenticated without one" do
+      assert shell_flag_absent?(Loadtest.reproduce_command(token: "t0ken"), "--user")
+      assert shell_flag_absent?(Loadtest.reproduce_command(tls: true, cert: "c.pem", key: "k.pem"), "--user")
+    end
+
+    test "a run that produced JSON records the flag that produced it" do
+      # Without it the reproduction prints a summary to the terminal and writes no JSON, so the one
+      # thing the command cannot do is regenerate the page it is quoted on.
+      assert Loadtest.reproduce_command(json: true) =~ "--json"
+      refute Loadtest.reproduce_command(json: false) =~ "--json"
+    end
+
+    test "the report carries a meta block describing when, from what, and on what" do
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("meta"))
+
+      assert %{meta: meta} = r
+      assert meta.timestamp =~ ~r/^\d{4}-\d{2}-\d{2}T/
+      assert is_binary(meta.hardware.cpu)
+      assert meta.hardware.schedulers > 0
+      assert meta.malachi_version =~ ~r/^\d+\.\d+\.\d+/
+
+      # The command is rebuilt from the EFFECTIVE config, not from what was typed, so a knob left at its
+      # default is still part of the reproduction. --keys was never passed here.
+      assert meta.command =~ "mix malachi.loadtest"
+      assert meta.command =~ "--scenario=produce"
+      assert meta.command =~ "--connections=2"
+      assert meta.command =~ "--batch=5"
+      assert meta.command =~ "--keys=1000", "a defaulted knob still belongs in a reproduce command"
+    end
+
+    test "the recorded command carries no credentials" do
+      # This string is committed and published with the result. A password reaching it would be a leak
+      # that survives in git history, so the reconstruction excludes the auth options by construction.
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("nocreds"))
+
+      refute r.meta.command =~ "admin123"
+      refute r.meta.command =~ "--pass"
+      refute r.meta.command =~ "--token"
+    end
+
+    test "--json emits a document a parser accepts, matching the returned report" do
+      # The report now carries free text from the environment (an architecture string, a git ref, a
+      # host), and the previous hand-built JSON had no escaping: one quote in any of them produced a
+      # document no parser would take. Parsing the output is what pins that.
+      opts = [
+        port: @port,
+        user: "admin",
+        pass: "admin123",
+        warmup: 0,
+        duration: 1,
+        scenario: :produce,
+        connections: 2,
+        batch: 5,
+        topic: topic("json"),
+        json: true
+      ]
+
+      output = capture_io(fn -> Process.put(:report, Loadtest.run(opts)) end)
+      report = Process.get(:report)
+
+      assert {:ok, decoded} = Jason.decode(output)
+      assert decoded["scenario"] == "produce"
+      assert decoded["records_per_s"] == report.records_per_s
+      assert decoded["latency_ms"]["p50"] == report.latency_ms.p50
+      assert decoded["meta"]["command"] == report.meta.command
+      assert decoded["meta"]["hardware"]["cpu"] == report.meta.hardware.cpu
+    end
+  end
+
   describe "option validation and edge cases" do
     test "zero or negative counts are rejected up front with a named error" do
       assert_raise ArgumentError, ~r/connections must be a positive integer/, fn ->

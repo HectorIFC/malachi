@@ -11,7 +11,7 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   coordinator's `active_range_ids/2` resolves against the local broker).
 
   Single-node / in-memory has no sharded control plane → no topology → everything is `:local`, so the
-  behaviour is exactly the pre-routing one. The routing decision is a pure function (`location/4`) with
+  behavior is exactly the pre-routing one. The routing decision is a pure function (`location/4`) with
   the topology and live leadership passed in; `resolve/2` is the thin runtime wrapper that reads the
   boot-published topology (`:persistent_term`) and the current Raft leader.
   """

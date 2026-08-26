@@ -122,7 +122,7 @@ defmodule Malachi.Cluster.ReplicationServer do
           | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
   def replicate(primary, segment_id, replica_set, base_offset, records) do
     # Carry the caller's trace context (the broker produce span, possibly on another node) so the quorum
-    # replication becomes a child span: distributed tracing across the produce -> replication hop (O5b).
+    # replication becomes a child span: distributed tracing across the produce -> replication hop.
     GenServer.call(
       primary,
       {:replicate, segment_id, replica_set, base_offset, records, Ctx.get_current()},
@@ -171,11 +171,19 @@ defmodule Malachi.Cluster.ReplicationServer do
     GenServer.call(ref, :flush)
   end
 
-  @doc "Reads up to `max_records` records of `segment_id` stored on this server, from `offset`."
+  @doc """
+  Reads up to `max_records` records of `segment_id` stored on this server, from `offset`.
+
+  A server that is down or on an unreachable node answers `{:error, :unreachable}` rather than exiting
+  the caller. The caller is the broker loop serving a consumer, and letting it exit would take the
+  whole node's reads down with the one segment whose primary went away.
+  """
   @spec read(term(), term(), non_neg_integer(), pos_integer()) ::
           {:ok, [Malachi.Log.Record.t()]} | :eof | {:error, term()}
   def read(ref, segment_id, offset, max_records) do
     GenServer.call(ref, {:read, segment_id, offset, max_records})
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc """

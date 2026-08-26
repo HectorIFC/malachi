@@ -36,25 +36,25 @@ start_checker "$CHECKER_WINDOW_S"
 start_traffic $((CHECKER_WINDOW_S - 20))
 sleep 15
 
-say "event a: power pull (SIGKILL node 3)"
+event "a: power pull (SIGKILL node 3)"
 docker kill malachi-cluster-3 >/dev/null 2>&1
 sleep 10
 docker start malachi-cluster-3 >/dev/null 2>&1
 wait_healthy && echo "reconverged after power pull" || fail "cluster did not reconverge after power pull"
 
-say "event b: network partition (node 2)"
+event "b: network partition (node 2)"
 docker network disconnect "$NET" malachi-cluster-2 >/dev/null 2>&1
 sleep 10
 docker network connect "$NET" malachi-cluster-2 >/dev/null 2>&1
 wait_healthy && echo "reconverged after partition" || fail "cluster did not reconverge after partition"
 
-say "event c: stalled node (SIGSTOP node 1)"
+event "c: stalled node (SIGSTOP node 1)"
 docker pause malachi-cluster-1 >/dev/null 2>&1
 sleep 8
 docker unpause malachi-cluster-1 >/dev/null 2>&1
 wait_healthy && echo "reconverged after stall" || fail "cluster did not reconverge after stall"
 
-say "event d: rolling restart"
+event "d: rolling restart"
 for node in malachi3 malachi2 malachi1; do
   $COMPOSE restart "$node" >/dev/null 2>&1
   wait_healthy || fail "cluster did not reconverge after restarting $node"

@@ -319,7 +319,7 @@ defmodule Malachi.Metrics do
       read_concurrency: true
     ])
 
-    # Fold the telemetry hot-path events into these counters (O4). Attached here so the ETS table exists
+    # Fold the telemetry hot-path events into these counters. Attached here so the ETS table exists
     # first; idempotent, so a Metrics restart re-attaches cleanly.
     MetricsReporter.attach()
 

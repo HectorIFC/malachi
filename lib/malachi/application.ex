@@ -156,7 +156,7 @@ defmodule Malachi.Application do
     end
   end
 
-  # The replicated account-lockout store (P6): forms the ra lockout cluster across `nodes` and supervises the
+  # The replicated account-lockout store: forms the ra lockout cluster across `nodes` and supervises the
   # `LockoutManager` facade (which owns the cleanup timer). When clustered it also supervises a reconciler that
   # self-joins this node on a staggered boot (reusing the generic `LeaseReconciler`); single-node needs no
   # self-join. Mirrors `user_store_children/1`. The cluster is formed here (imperatively) before the facade
@@ -186,7 +186,7 @@ defmodule Malachi.Application do
     reconciler ++ [Malachi.Auth.LockoutManager]
   end
 
-  # The replicated per-topic ACL store (P5): forms the ra ACL cluster across `nodes` (so grants replicate
+  # The replicated per-topic ACL store: forms the ra ACL cluster across `nodes` (so grants replicate
   # cluster-wide and every node enforces the same ACLs). When clustered it also supervises a reconciler that
   # self-joins this node on a staggered boot. Mirrors `user_store_children/1`. Must precede Auth (whose
   # remove_user revokes a user's grants) and the acceptor (which authorizes produce/consume against it).
@@ -359,7 +359,7 @@ defmodule Malachi.Application do
       name: @log_lease_holder,
       renew: fn -> renew_lease(lease_server, duration) end,
       release: fn fence -> LeaseServer.release(lease_server, node(), fence) end,
-      # on becoming leader, reconcile any split a previously-crashed coordinator left in flight (B2). Async
+      # on becoming leader, reconcile any split a previously-crashed coordinator left in flight. Async
       # cast (never blocks the election loop); a no-op if the split coordinator is absent or nothing pends.
       on_acquired: fn _fence -> SplitCoordinator.reconcile(Malachi.LogSplitCoordinator) end,
       retry_period_ms: Application.get_env(:malachi, :lease_retry_period_ms, 2_000),
@@ -576,7 +576,7 @@ defmodule Malachi.Application do
   @doc ~S"""
   Parses a `"node1=rack_a,node2=rack_b"` cluster topology string into `%{node => value}` (node atom →
   attribute string, e.g. rack/zone): the static per-node placement attribute used by `place_vnodes/4`
-  for rack-aware vnode placement (A1). `nil`/`""` => `%{}`. Entries without exactly one `=` are ignored;
+  for rack-aware vnode placement. `nil`/`""` => `%{}`. Entries without exactly one `=` are ignored;
   node and value are trimmed. Node names come from a trusted operator (deploy config), so
   `String.to_atom` is fine here. Being static config identical on every node keeps placement deterministic.
   """
@@ -811,7 +811,7 @@ defmodule Malachi.Application do
   # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is
   # sharded across that many vnodes, each its own ra cluster placed on a subset of `nodes` (rendezvous,
   # `:log_vnode_replication_factor` members), routed by topic. A single deterministic seed node
-  # bootstraps them; the others only route (D-c-1c).
+  # bootstraps them; the others only route.
   defp metadata_opts(cluster, nodes) do
     case vnode_placement(cluster, nodes) do
       nil ->
@@ -874,7 +874,7 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  The bootstrap-orchestrator policy used at runtime (D-c-1d): a `(-> boolean())` true only on the
+  The bootstrap-orchestrator policy used at runtime: a `(-> boolean())` true only on the
   lowest-sorted **live** member (per SWIM membership on `membership_server`), so the role **fails over**
   when the current leader dies: unlike `static_seed/1`, which is fixed to the lowest configured node.
   Conservative: if membership is unavailable it returns false (never risking two orchestrators); a
@@ -931,7 +931,7 @@ defmodule Malachi.Application do
   of a vnode's replicas); `[max_skew: n]` instead balances the **whole set's** load across nodes (A2,
   `Placement.place_balanced/4`, a global decision), so no node is overloaded. The two are mutually
   exclusive (standalone A2). Pure and deterministic: every node computes the same placement.
-  Used by the sharded control plane so vnode leaders land on different nodes (D-c-1).
+  Used by the sharded control plane so vnode leaders land on different nodes.
   """
   @spec place_vnodes([{atom(), non_neg_integer()}], [node()], pos_integer(), keyword()) ::
           [{atom(), non_neg_integer(), [node()]}]
@@ -957,9 +957,9 @@ defmodule Malachi.Application do
   vnode ids/tokens are fixed and HRW is stable, adding or removing a node re-places only the vnodes that
   must move (a vnode changes only if it adopts a joined node, or held a left one), leaving the rest put.
 
-  This is the target that the rebalancing plan (R2) diffs the *current* placement against: recomputing
+  This is the target that the rebalancing plan diffs the *current* placement against: recomputing
   it over the live membership (vs the static `:log_nodes`) is how the ring follows nodes joining/leaving.
-  `place_opts` is forwarded for rack/zone spread (A1). Pure: the caller supplies `nodes` (e.g. the live
+  `place_opts` is forwarded for rack/zone spread. Pure: the caller supplies `nodes` (e.g. the live
   members), so a coordinated recompute stays deterministic across the cluster.
   """
   @spec desired_placement(atom(), pos_integer(), [node()], pos_integer(), keyword()) ::
@@ -969,7 +969,7 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  The **rebalancing plan** (R2): the per-vnode membership changes to move from the `current` placement to
+  The **rebalancing plan**: the per-vnode membership changes to move from the `current` placement to
   the `desired` one (from `desired_placement/5`), *staged*: it computes what to change without applying
   anything. For each vnode whose node set differs it yields `%{vnode_id:, add:, remove:}`, where `add`
   are the nodes to join that vnode's ra cluster and `remove` the ones to drop; vnodes that already match

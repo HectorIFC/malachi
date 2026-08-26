@@ -3,7 +3,7 @@ defmodule Malachi.Auth.LockoutManager do
   Account-lockout facade over the **replicated** lockout store (`Malachi.Auth.LockoutServer`, a dedicated
   `ra` cluster). Applies progressive lockout after repeated failed logins, keyed by `{username, ip}`.
 
-  Replaces the old node-local ETS store (P6): lockouts now replicate across the cluster, so brute-force
+  Replaces the old node-local ETS store: lockouts now replicate across the cluster, so brute-force
   protection is **cluster-wide** (an attacker cannot spread attempts across nodes to dodge the limit) and
   **survives a restart** (a restart cannot reset a lockout). The pure lockout logic lives in
   `Malachi.Auth.LockoutRegistry`; this module reads the lockout config, routes reads to the local replica

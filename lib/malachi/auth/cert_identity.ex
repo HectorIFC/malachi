@@ -1,7 +1,7 @@
 defmodule Malachi.Auth.CertIdentity do
   @moduledoc """
   Pure extraction of a client **identity string** from a DER-encoded X.509 certificate, the deterministic
-  core of the mTLS auth provider (P4). Given a peer certificate, it reads the subject Common Name (CN) or a
+  core of the mTLS auth provider. Given a peer certificate, it reads the subject Common Name (CN) or a
   Subject Alternative Name (SAN), per a configured policy, yielding the string the mTLS provider maps to a
   malachi user (policy 2A: CN = username, permissions from the replicated user store).
 

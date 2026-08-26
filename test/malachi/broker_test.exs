@@ -483,4 +483,28 @@ defmodule Malachi.BrokerTest do
       assert {:ok, segment.replica_set} == Placement.place(segment.id, @brokers, 3)
     end
   end
+
+  describe "put_cache/3" do
+    test "a refresh that could not read a vnode does not erase that vnode's topics" do
+      {broker, root_id} = broker_with_topic("events")
+      assert Broker.active_range_ids(broker, "events") == [root_id]
+
+      # The refresh represents an unreadable vnode with an empty Metadata. Installing it wholesale is
+      # what made a read of a topic with durable records answer a successful empty page.
+      {:ok, vnode} = DSRSM.vnode_for(broker.dsrsm, "events")
+      blanked = %{broker.dsrsm | vnodes: Map.put(broker.dsrsm.vnodes, vnode, Metadata.new())}
+
+      assert Broker.active_range_ids(Broker.put_cache(broker, blanked), "events") == []
+      assert Broker.active_range_ids(Broker.put_cache(broker, blanked, [vnode]), "events") == [root_id]
+    end
+
+    test "a refresh that read every vnode installs as-is, so deletions still land" do
+      {broker, _root_id} = broker_with_topic("events")
+      emptied = %{broker.dsrsm | vnodes: Map.new(broker.dsrsm.vnodes, fn {id, _m} -> {id, Metadata.new()} end)}
+
+      # Retention is for vnodes that did not answer. One that answered and reported nothing is
+      # authoritative, or a dropped topic would live in the cache forever.
+      assert Broker.active_range_ids(Broker.put_cache(broker, emptied, []), "events") == []
+    end
+  end
 end

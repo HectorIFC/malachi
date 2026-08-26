@@ -130,11 +130,17 @@ docker pull hectorcardoso/malachi:latest
 
 docker run \
   --name malachi \
-  -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS=your_secure_password \
+  -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 ```
+
+The image runs the production release, which requires TLS unless told otherwise, so without
+`MALACHI_REQUIRE_TLS=false` the container exits at boot with `TLS certificate file not configured`.
+It is then serving plaintext, which is why the ports are bound to `127.0.0.1` rather than published
+on every interface. To serve real traffic, configure TLS instead of widening the binding.
 
 ### Using Docker Compose
 
