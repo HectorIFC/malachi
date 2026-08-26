@@ -38,10 +38,19 @@ write_token() {
   printf '%s' "$2" > "${TOKEN_DIR}/${1}.token.new" && mv "${TOKEN_DIR}/${1}.token.new" "${TOKEN_DIR}/${1}.token"
 }
 
+# Escapes a value for use inside a JSON string. Backslash first, or the backslashes this adds in front
+# of the quotes would themselves be escaped by the second pass. Without it a password containing a
+# quote or a backslash produces malformed JSON, the login fails, and the only sign is this script
+# logging that the target is not ready: the failure looks like a node still booting, forever. Strong
+# passwords are exactly the ones likely to contain those characters.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 fetch_token() {
   curl -sf -X POST "${1}/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"${MALACHI_METRICS_USER}\",\"password\":\"${MALACHI_METRICS_PASS}\"}" \
+    -d "{\"username\":\"$(json_escape "$MALACHI_METRICS_USER")\",\"password\":\"$(json_escape "$MALACHI_METRICS_PASS")\"}" \
     2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p'
 }
 

@@ -32,11 +32,19 @@ docker pull hectorcardoso/malachi:latest
 ```bash
 docker run \
   --name malachi \
-  -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 ```
+
+Two parts of that command are not decoration. The image runs the production release, and production
+requires TLS unless told otherwise, so without `MALACHI_REQUIRE_TLS=false` the container exits at
+once with `TLS certificate file not configured`. And because it is then serving plaintext, the ports
+are bound to `127.0.0.1`: a bare `-p 4040:4040` publishes on every interface your machine has, which
+on a shared network hands out an unencrypted broker. Change the prefix deliberately, with TLS and
+real credentials, rather than by deleting it. See [TLS Configuration](#tls-configuration).
 
 **Note**: The image automatically detects your platform (AMD64 or ARM64) and uses the appropriate build.
 
@@ -90,9 +98,10 @@ directories at a persistent volume mounted at `/app/data`, which the image alrea
 ```bash
 docker run \
   --name malachi \
-  -p 4040:4040 \
-  -p 4041:4041 \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
+  -e MALACHI_REQUIRE_TLS=false \
   -e MALACHI_LOG_DATA_DIR=/app/data/log \
   -e MALACHI_RA_DATA_DIR=/app/data/ra \
   -v malachi-data:/app/data \
@@ -112,15 +121,20 @@ docker run \
   -p 4040:4040 \
   -p 4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
-  -e MALACHI_ENABLE_TLS=true \
+  -e MALACHI_TLS_CERTFILE=/app/priv/cert/server.crt \
+  -e MALACHI_TLS_KEYFILE=/app/priv/cert/server.key \
   -v /path/to/certs:/app/priv/cert:ro \
   hectorcardoso/malachi:latest
 ```
 
-Required certificate files in the mounted volume:
-- `server.crt` - Server certificate
-- `server.key` - Private key
-- `ca.crt` - CA certificate (optional)
+The paths are given explicitly because there is no default for them: mounting the files somewhere the
+server might look is not enough, and a run that only mounts them exits at boot with `TLS certificate
+file not configured`. `MALACHI_TLS_CACERTFILE` is the optional third, for verifying client
+certificates.
+
+Unlike the plaintext examples above, these ports are published on every interface, which is the point
+of configuring TLS. The mounted files are read at boot and validated then, so a certificate that is
+expired or unreadable stops the container rather than being discovered by a client later.
 
 ---
 

@@ -56,7 +56,7 @@ read_file = fn
     end
 end
 
-# mTLS-identity auth policy (P4): which certificate field names the malachi username. "cn" (default), or
+# mTLS-identity auth policy: which certificate field names the malachi username. "cn" (default), or
 # "san:uri" / "san:dns" / "san:email" to use the first Subject Alternative Name of that kind.
 parse_mtls_policy = fn val ->
   case val && String.downcase(val) do
@@ -127,11 +127,11 @@ config :malachi,
   tls_versions: parse_tls_versions.(System.get_env("MALACHI_TLS_VERSIONS"), [:"tlsv1.3", :"tlsv1.2"]),
   tls_verify: System.get_env("MALACHI_TLS_VERIFY") || "verify_none",
   tls_fail_if_no_peer_cert: System.get_env("MALACHI_TLS_FAIL_IF_NO_PEER_CERT") == "true",
-  # mTLS-identity auth (P4): opt-in, and only honored when the listener verifies peer certs (verify_peer),
+  # mTLS-identity auth: opt-in, and only honored when the listener verifies peer certs (verify_peer),
   # so an unverified/forged certificate can never authenticate. The policy maps a cert field to a username.
   mtls_auth: System.get_env("MALACHI_MTLS_AUTH") == "true",
   mtls_identity_policy: parse_mtls_policy.(System.get_env("MALACHI_MTLS_POLICY")),
-  # OIDC/JWT auth (P4): opt-in. The server validates a signed JWT against the IdP's public key (PEM read from
+  # OIDC/JWT auth: opt-in. The server validates a signed JWT against the IdP's public key (PEM read from
   # MALACHI_OIDC_PUBLIC_KEY_FILE) and the expected issuer/audience, mapping an identity claim to a user.
   # Bearer tokens should travel over TLS; OidcConfig fails closed if the key/issuer/audience are unset.
   oidc_auth: System.get_env("MALACHI_OIDC_AUTH") == "true",
@@ -140,7 +140,7 @@ config :malachi,
   oidc_audience: System.get_env("MALACHI_OIDC_AUDIENCE"),
   oidc_algorithm: System.get_env("MALACHI_OIDC_ALGORITHM") || "RS256",
   oidc_identity_claim: System.get_env("MALACHI_OIDC_IDENTITY_CLAIM") || "sub",
-  # Per-topic ACL enforcement (P5). Default (false) is backward-compatible: a global produce/consume
+  # Per-topic ACL enforcement. Default (false) is backward-compatible: a global produce/consume
   # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
   # permissions and denies by default. A produce/consume needs an explicit ACL grant (or :admin).
   acl_strict: System.get_env("MALACHI_ACL_STRICT") == "true",
