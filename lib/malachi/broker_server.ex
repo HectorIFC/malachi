@@ -345,12 +345,6 @@ defmodule Malachi.BrokerServer do
       # clusters were necessarily up. Meaningless without `metadata_refresh` (in-memory metadata is
       # already local truth), which is why `metadata_ready?/2` checks that first.
       seen_vnodes: MapSet.new(),
-      # The vnodes the LAST refresh could not read. Distinct from `seen_vnodes` on purpose: "have I
-      # ever held a view of this vnode" decides whether a read can be answered at all, while "is it
-      # answering right now" decides whether this node should still be routed to. Conflating them
-      # makes readiness monotone, so a node that loses the control plane an hour after boot keeps
-      # reporting itself ready forever.
-      unreachable_vnodes: [],
       # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
       # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
       # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
@@ -822,8 +816,7 @@ defmodule Malachi.BrokerServer do
         %{
           state
           | broker: recover_range_state(broker),
-            seen_vnodes: seen_vnodes(state, dsrsm, unreachable),
-            unreachable_vnodes: unreachable
+            seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
         }
         |> wake_all_subscribers()
     end
@@ -925,14 +918,21 @@ defmodule Malachi.BrokerServer do
   # topic's vnode must have answered at least once: until then the cache holds an empty placeholder for
   # it, which reads exactly like a topic that exists and is drained.
   # What readiness reports: every vnode has been read at least once AND the last refresh reached them
-  # all. A load balancer routes topics it cannot enumerate, so the whole node steps out of rotation
-  # when any part of its control-plane view is missing or currently stale, rather than serving the
-  # half of its keyspace it can still see and quietly mis-answering the other half.
+  # What readiness reports: every vnode on the ring has been read at least once, so this node holds a
+  # view of the whole keyspace and can answer for any topic routed to it. The same question the read
+  # path asks per topic in `topic_metadata_ready?/2`, asked about the node, because a load balancer
+  # routes topics it cannot enumerate.
+  #
+  # Deliberately NOT "is the control plane answering right now". A refresh that fails leaves the last
+  # view in place and this node keeps serving from it correctly, so reporting it unready would take a
+  # working node out of rotation. Worse, every node sees the same control-plane outage at the same
+  # moment, so that answer empties the load balancer precisely when all of its backends still work.
+  # The view goes stale during such an outage, which is a real cost, and the honest place to surface it
+  # is a signal an operator watches rather than one a router acts on.
   defp all_vnodes_seen?(%{metadata_refresh: nil}), do: true
 
   defp all_vnodes_seen?(state) do
-    state.unreachable_vnodes == [] and
-      state.broker.dsrsm |> DSRSM.vnode_ids() |> Enum.all?(&MapSet.member?(state.seen_vnodes, &1))
+    state.broker.dsrsm |> DSRSM.vnode_ids() |> Enum.all?(&MapSet.member?(state.seen_vnodes, &1))
   end
 
   defp topic_metadata_ready?(%{metadata_refresh: nil}, _topic), do: true

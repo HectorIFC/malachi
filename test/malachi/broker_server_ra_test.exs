@@ -147,6 +147,70 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(streamer)
   end
 
+  test "a broker that loses the control plane stays ready, and keeps serving what it already knew" do
+    # Readiness answers whether this node can serve, not whether the control plane is answering. A
+    # refresh that fails leaves the last view in place and reads keep working from it, so reporting
+    # unready would pull a working node out of rotation. Every node sees the same outage at the same
+    # moment, so that answer would empty the load balancer exactly when all of its backends still work.
+    cluster = :"bs_ready_#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "malachi_ready_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(dir) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: dir)
+    on_exit(fn -> if Process.alive?(repl), do: GenServer.stop(repl) end)
+
+    {:ok, server} =
+      BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster, brokers_refresh_interval: 50)
+
+    {:ok, root} = BrokerServer.create_topic(server, "events", 4)
+    {:ok, _} = BrokerServer.produce(server, "events", [Record.new("v1", key: "k1")])
+    assert BrokerServer.metadata_ready?(server)
+
+    # The control plane goes away. Several refreshes fail before the assertions below.
+    MetadataServer.delete(cluster)
+    Process.sleep(300)
+
+    assert BrokerServer.metadata_ready?(server), "a node serving from its retained view is ready"
+    assert {:ok, [record]} = BrokerServer.read(server, root, 0, 100)
+    assert record.value == "v1"
+    assert {[_], _positions} = BrokerServer.consume(server, "events", %{}, 100, 0)
+
+    :ok = BrokerServer.stop(server)
+  end
+
+  test "a sharded broker stays ready when a vnode it had already read stops answering" do
+    # The case that distinguishes this policy from the previous one. A vnode that was never reachable
+    # leaves the node unready under both, because there is no view of it to serve from. One that WAS
+    # read and then went silent used to report unready, and now does not: the retained view is what it
+    # serves, and it is still serving.
+    #
+    # `bootstrap_orchestrator` is forced off so nothing recreates the vnode's cluster underneath the
+    # assertion, which is what this node would otherwise do a tick later as the sole member.
+    suffix = System.unique_integer([:positive])
+    vnode = :"bs_gone_#{suffix}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+    {:ok, _server_id} = MetadataServer.start(vnode, [node()])
+
+    {:ok, server} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{vnode, 0, [node()]}],
+        bootstrap_orchestrator: fn -> false end,
+        brokers_refresh_interval: 50
+      )
+
+    {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    Process.sleep(200)
+    assert BrokerServer.metadata_ready?(server), "the vnode answered, so the node is ready"
+
+    MetadataServer.delete(vnode)
+    Process.sleep(300)
+
+    assert BrokerServer.metadata_ready?(server), "a vnode that went silent does not unready the node"
+    assert BrokerServer.active_range_ids(server, "events") != [], "and its topics are still there"
+
+    :ok = BrokerServer.stop(server)
+  end
+
   test "a topic whose metadata vnode never answered is refused, not reported as drained" do
     # Two vnodes: one on this node, one routed at a node that does not exist, so its ra cluster can
     # never be read. That is the shape of a broker whose control plane is partly unreachable, which is
