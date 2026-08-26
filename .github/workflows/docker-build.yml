@@ -88,14 +88,54 @@ jobs:
       #
       # Only on a real push. A pull request does not push the image either (see `push:` above), so
       # updating the description from one would advertise a build that does not exist.
-      - name: Publish the Docker Hub overview
+      #
+      # Its own credential, and not for tidiness. This endpoint needs a token scoped
+      # `read/write/delete`, which the token that pushes the image is not: reusing it here answered
+      # `Forbidden` and failed the job on a run whose image had already published fine. Keeping the
+      # push token narrow and confining the wider scope to this one call, made once per push to main,
+      # is the trade worth making. Skipped with a note when the secret is absent, so a fork or a
+      # checkout without it does not fail a build over a description.
+      # Lifted into `env` because the `secrets` context is not available to a step's `if`, only to its
+      # `with`, `env` and `run`. Testing it here is what lets the step below skip cleanly instead of
+      # authenticating with an empty password and reading the 401 as a credentials problem.
+      - name: Check for the description credential
+        id: overview_cred
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
+        run: |
+          if [ -n "${TOKEN}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "DOCKERHUB_DESCRIPTION_TOKEN is not set; leaving the Docker Hub overview as published"
+          fi
+
+      - name: Publish the Docker Hub overview
+        id: overview
+        if: steps.overview_cred.outputs.present == 'true'
+        continue-on-error: true
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
           repository: ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
           readme-filepath: ./docs/DOCKERHUB.md
           # Docker Hub caps this at 100 characters, and a colon followed by a space would end the YAML
           # scalar early, so it is neither long nor punctuated the way prose would be.
           short-description: An Elixir log broker on the NorthGuard model, quorum-replicated, cursors not offsets
+
+      # `continue-on-error` above keeps a stale overview from failing a build whose image published
+      # correctly, and the cost of that is a failure nobody reads. This says it out loud, in the job
+      # summary rather than only in a collapsed step, so the two outcomes stay distinguishable: the
+      # image is out either way, the page describing it may not be.
+      - name: Say so if the overview did not update
+        if: steps.overview.outcome == 'failure'
+        run: |
+          {
+            echo "### Docker Hub overview not updated"
+            echo
+            echo "The image published. The description PATCH failed, most often because"
+            echo "DOCKERHUB_DESCRIPTION_TOKEN lacks the read/write/delete scope the endpoint requires."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "overview update failed; see the job summary"
