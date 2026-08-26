@@ -379,7 +379,14 @@ defmodule Malachi.BrokerServerTest do
 
       # With wait_ms set, an empty page parks the caller. A failure must not: parking would hide the
       # error behind a timeout and then hand back the same empty page.
-      assert {:error, :unreachable} = BrokerServer.consume(server, "events", %{}, 100, 200)
+      #
+      # The wait is long and the assertion is on the clock, so the test states what it means. The
+      # shape alone would catch a regression to parking, because a long-poll timeout replies
+      # `{[], positions}` and not an error, but it would catch it five seconds late and say only that
+      # the answer was wrong, not that the caller had been held.
+      task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
+
+      assert {:error, :unreachable} = Task.await(task, 1_000)
     end
   end
 end

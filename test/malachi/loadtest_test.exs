@@ -165,9 +165,14 @@ defmodule Malachi.LoadtestTest do
       end)
     end
 
-    # An absent flag reads back as an empty string. Asserting that beats a refute on the substring
-    # `--key`, which passes for the wrong reason and fails for another one: `--keys=1000` contains it.
-    defp shell_flag_absent?(command, flag), do: shell_value(command, flag) == ""
+    # Absence asked of the argument list, not of the extracted value. Reading `shell_value/2 == ""`
+    # also holds for a flag that IS emitted with an empty value, so `--cert=` would have satisfied
+    # every assertion that the certificate paths are omitted: the helper answered the question it
+    # could rather than the one being asked. A refute on the substring `--key` is worse still, since
+    # `--keys=1000` contains it.
+    defp shell_flag_absent?(command, flag) do
+      command |> replay_argv() |> Enum.all?(&(not String.starts_with?(&1, flag <> "=")))
+    end
 
     test "free text in the recorded command survives a shell round trip" do
       # A topic with a space recorded as `--topic has a space`, which on replay parses as
