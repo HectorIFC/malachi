@@ -838,12 +838,24 @@ defmodule Malachi.Dashboard do
   # Liveness: the HTTP server answered, so the node is up. Always 200, unauthenticated (probes).
   defp serve_health(socket), do: serve_status(socket, "/health", 200, "ok")
 
-  # Readiness: 200 once the log broker is running (ready to serve produce/consume), else 503, so a load
-  # balancer / k8s stops routing to a node that is still booting or has lost its broker.
+  # Readiness: 200 once the log broker is running AND has read every metadata vnode at least once, else
+  # 503, so a load balancer / k8s stops routing to a node that is still booting, has lost its broker, or
+  # holds an empty placeholder for a vnode and would answer reads of its topics with an empty page.
   defp serve_ready(socket) do
-    if Process.whereis(Malachi.LogBroker),
+    if broker_ready?(),
       do: serve_status(socket, "/ready", 200, "ready"),
       else: serve_status(socket, "/ready", 503, "not_ready")
+  end
+
+  # A short timeout, and a busy broker counts as not ready: a readiness check that blocks on the loop it
+  # reports on would hang exactly when the node is under the pressure worth reporting.
+  defp broker_ready? do
+    case Process.whereis(Malachi.LogBroker) do
+      nil -> false
+      pid -> BrokerServer.metadata_ready?(pid, 1_000)
+    end
+  catch
+    :exit, _reason -> false
   end
 
   defp serve_status(socket, route, code, status) do

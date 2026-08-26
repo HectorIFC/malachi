@@ -71,13 +71,25 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
     assert {:error, :no_vnode} = ReplicatedDSRSM.query(empty, "events", &Metadata.get_topic(&1, "events"))
   end
 
-  test "snapshot tolerates a vnode whose cluster is not ready (empty metadata, no crash)" do
+  test "snapshot names the vnodes it could not read instead of passing their emptiness off as metadata" do
     # route to a server that was never started; snapshot must not fail, only yield empty metadata
     {:ok, state} =
       ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(ring_bits: 4), :rd_ghost, 0, {:rd_ghost_never_started, node()})
 
-    assert {:ok, cache} = ReplicatedDSRSM.snapshot(state)
+    assert {:ok, cache, unreachable} = ReplicatedDSRSM.snapshot(state)
     assert DSRSM.get_topic(cache, "anything") == nil
+
+    # The empty metadata alone is indistinguishable from a vnode that genuinely holds no topics, and a
+    # reader that installs it deletes live topics from its cache. The id is what makes them different.
+    assert unreachable == [:rd_ghost]
+  end
+
+  test "snapshot reports a vnode it did read as reachable" do
+    {state, _a, _b} = start_cluster()
+    {:ok, _root} = ReplicatedDSRSM.command(state, "events", {:create_topic, "events", 4})
+
+    assert {:ok, cache, []} = ReplicatedDSRSM.snapshot(state)
+    assert DSRSM.get_topic(cache, "events").name == "events"
   end
 
   test "route_vnode reaches an already-started vnode without starting it" do
@@ -93,7 +105,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
     assert {:ok, %{name: "events"}} = ReplicatedDSRSM.query(router, "events", &Metadata.get_topic(&1, "events"))
     assert {:ok, _root2} = ReplicatedDSRSM.command(router, "events", {:create_topic, "events2", 4})
 
-    {:ok, cache} = ReplicatedDSRSM.snapshot(router)
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(router)
     assert DSRSM.get_topic(cache, "events").name == "events"
     assert DSRSM.get_topic(cache, "events2").name == "events2"
   end

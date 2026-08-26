@@ -138,7 +138,7 @@ defmodule Malachi.BrokerServer do
           non_neg_integer(),
           [term()] | nil
         ) ::
-          {[Malachi.Log.Record.t()], map()}
+          {[Malachi.Log.Record.t()], map()} | {:error, :metadata_unavailable}
   def consume(server, topic, positions, max_records, wait_ms, ranges \\ nil) do
     # The call may block up to wait_ms server-side; give it headroom over the default 5s call timeout.
     GenServer.call(server, {:consume, topic, positions, max_records, wait_ms, ranges}, wait_ms + 5_000)
@@ -149,6 +149,15 @@ defmodule Malachi.BrokerServer do
           {:ok, [Malachi.Log.Record.t()], Broker.history_cursor()} | {:error, term()}
   def stream_history(server, range_id, cursor \\ :start, max_records \\ 1000),
     do: GenServer.call(server, {:stream_history, range_id, cursor, max_records})
+
+  @doc """
+  Whether this broker has read every metadata vnode at least once since boot. Until it has, a topic
+  whose vnode is still silent is represented by an empty placeholder in the local cache, and every read
+  of it answers a page with no records: durable data reported as a drained topic. A node in that state
+  can accept connections and pass `/health` while being unable to answer a single read honestly.
+  """
+  @spec metadata_ready?(GenServer.server(), timeout()) :: boolean()
+  def metadata_ready?(server, timeout \\ 1_000), do: GenServer.call(server, :metadata_ready?, timeout)
 
   @doc "No-op: writes are already durable on return. Kept for API compatibility."
   @spec sync(GenServer.server()) :: :ok
@@ -330,6 +339,18 @@ defmodule Malachi.BrokerServer do
       # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. See
       # `reconcile_metadata/1`.
       metadata_refresh: metadata_refresh,
+      # The metadata vnodes this broker has read at least once since boot (see `seen_vnodes/3`). Empty
+      # at boot even when the boot snapshot succeeded: the reconcile that follows `init` fills it, and
+      # treating the boot snapshot as authoritative would mean trusting a snapshot taken before the ra
+      # clusters were necessarily up. Meaningless without `metadata_refresh` (in-memory metadata is
+      # already local truth), which is why `metadata_ready?/2` checks that first.
+      seen_vnodes: MapSet.new(),
+      # The vnodes the LAST refresh could not read. Distinct from `seen_vnodes` on purpose: "have I
+      # ever held a view of this vnode" decides whether a read can be answered at all, while "is it
+      # answering right now" decides whether this node should still be routed to. Conflating them
+      # makes readiness monotone, so a node that loses the control plane an hour after boot keeps
+      # reporting itself ready forever.
+      unreachable_vnodes: [],
       # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
       # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
       # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
@@ -402,28 +423,18 @@ defmodule Malachi.BrokerServer do
   end
 
   def handle_call({:consume, topic, positions, max_records, wait_ms, ranges}, from, state) do
-    case consume_ranges(state.broker, topic, positions, max_records, ranges) do
-      # Caught up and willing to wait: park the request; a later produce to this topic (or the
-      # timeout) replies. Hold the original positions (and range scope) so the wake re-consumes the same.
-      {[], _positions} when wait_ms > 0 ->
-        ref = make_ref()
-        timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
-
-        waiter = %{
-          ref: ref,
-          timer: timer,
-          from: from,
-          topic: topic,
-          positions: positions,
-          max: max_records,
-          ranges: ranges
-        }
-
-        {:noreply, %{state | waiters: [waiter | state.waiters]}}
-
-      {records, next_positions} ->
-        {:reply, {records, next_positions}, state}
+    # The vnode owning this topic may never have answered, in which case this broker knows of no ranges
+    # for it and every read would report the topic drained. Saying so is the whole point: an empty page
+    # here is a successful wrong answer, and a client cannot tell it from having caught up.
+    if topic_metadata_ready?(state, topic) do
+      consume_or_park(topic, positions, max_records, wait_ms, ranges, from, state)
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
     end
+  end
+
+  def handle_call(:metadata_ready?, _from, state) do
+    {:reply, all_vnodes_seen?(state), state}
   end
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
@@ -562,7 +573,7 @@ defmodule Malachi.BrokerServer do
   def handle_cast({:adopt_topology, %RingTopology{} = topology}, state) do
     replicated = replicated_of(topology)
     broker = adopt_topology(state.broker, topology)
-    metadata_refresh = fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end
+    metadata_refresh = sharded_refresh(replicated)
     bootstrap = if state.bootstrap, do: %{state.bootstrap | replicated: replicated}, else: state.bootstrap
 
     {:noreply, %{state | broker: broker, metadata_refresh: metadata_refresh, bootstrap: bootstrap}}
@@ -753,9 +764,16 @@ defmodule Malachi.BrokerServer do
   defp recovered_next_offset(segments) do
     case Enum.find(segments, &(&1.state == :active)) do
       %{id: segment_id, start_offset: start_offset, replica_set: [primary | _]} ->
-        case safe_end_offset(primary, segment_id) do
-          next when is_integer(next) -> next
-          _empty_or_unreachable -> start_offset
+        case safe_durable_end(primary, segment_id, start_offset) do
+          next when is_integer(next) ->
+            next
+
+          # The primary did not answer, so the end is unknown. Zero is inert under the monotone seed,
+          # which is the point: start_offset would be a horizon high enough to serve the range's
+          # earlier segments and low enough to hide the active one, and a page that stops in the
+          # middle of durable data is the failure this whole change is about. Retried next tick.
+          :unreachable ->
+            0
         end
 
       nil ->
@@ -765,10 +783,20 @@ defmodule Malachi.BrokerServer do
     end
   end
 
+  # `durable_end` rather than `end_offset`, which is the whole of the cold-segment fix. `end_offset` is
+  # deliberately cheap and never opens anything, so it answers :empty for a segment this server holds
+  # on disk but has not touched since it booted. Recovery took that for a real end, set the read
+  # horizon to the segment's base, and every read then clamped to :eof before it could reach the read
+  # path's own cold-segment recovery: no read, so no open segment, so no horizon, so no read. Only a
+  # produce broke the loop. `durable_end` recovers the log from disk and answers the true resume point,
+  # which is exactly what this caller means.
+  #
   # Short timeout: this runs inside the broker loop (init and the periodic reconcile), and an
-  # unreachable primary must cost milliseconds, not the default five seconds per range.
-  defp safe_end_offset(primary, segment_id) do
-    ReplicationServer.end_offset(primary, segment_id, 250)
+  # unreachable primary must cost milliseconds, not the default five seconds per range. A legitimate
+  # open that overruns it is retried on the next tick, by which point the server has finished opening
+  # and answers from memory.
+  defp safe_durable_end(primary, segment_id, base_offset) do
+    ReplicationServer.durable_end(primary, segment_id, base_offset, 250)
   catch
     :exit, _reason -> :unreachable
   end
@@ -781,14 +809,31 @@ defmodule Malachi.BrokerServer do
       nil ->
         state
 
-      dsrsm ->
+      {dsrsm, unreachable} ->
         # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
         # local offsets map, which only advances for produces IT handles, so writes flowing through
         # OTHER frontends (or landed while this node was down) would otherwise stay invisible to its
         # reads forever. The seeding is monotone (max), so refreshing never rewinds live state.
-        broker = Broker.put_cache(state.broker, dsrsm)
-        %{state | broker: recover_range_state(broker)}
+        #
+        # `unreachable` keeps this tick from erasing the topics of a vnode that did not answer, which
+        # would make every read of them succeed with zero records for as long as it stayed silent.
+        broker = Broker.put_cache(state.broker, dsrsm, unreachable)
+
+        %{
+          state
+          | broker: recover_range_state(broker),
+            seen_vnodes: seen_vnodes(state, dsrsm, unreachable),
+            unreachable_vnodes: unreachable
+        }
     end
+  end
+
+  # The vnodes this broker has read at least once since boot. A vnode that has never answered has no
+  # view to fall back on, so its topics cannot be served at all, and that is the difference between a
+  # cache that is stale and one that is blank. Monotone: once seen, a later outage does not unsee it.
+  defp seen_vnodes(state, dsrsm, unreachable) do
+    read = DSRSM.vnode_ids(dsrsm) -- unreachable
+    MapSet.union(state.seen_vnodes, MapSet.new(read))
   end
 
   # Bootstrap step: only the leader acts, and only on vnodes whose cluster is not yet ready. Starting a
@@ -826,15 +871,82 @@ defmodule Malachi.BrokerServer do
   # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
   # (a group member's assignment) consumes only those, intersected with the active set, so a stale
   # assigned range that has since split is skipped, and the client never sees ranges either way.
+  defp consume_or_park(topic, positions, max_records, wait_ms, ranges, from, state) do
+    case consume_ranges(state.broker, topic, positions, max_records, ranges) do
+      # A read that failed is not a read that found nothing: waiting would only park the client on a
+      # broken range until its long poll expires and then hand it the same empty page.
+      {:error, _reason} = error ->
+        {:reply, error, state}
+
+      # Caught up and willing to wait: park the request; a later produce to this topic (or the
+      # timeout) replies. Hold the original positions (and range scope) so the wake re-consumes the same.
+      {:ok, {[], _positions}} when wait_ms > 0 ->
+        ref = make_ref()
+        timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
+
+        waiter = %{
+          ref: ref,
+          timer: timer,
+          from: from,
+          topic: topic,
+          positions: positions,
+          max: max_records,
+          ranges: ranges
+        }
+
+        {:noreply, %{state | waiters: [waiter | state.waiters]}}
+
+      {:ok, {records, next_positions}} ->
+        {:reply, {records, next_positions}, state}
+    end
+  end
+
+  # Whether this broker holds a view of `topic`'s metadata that it is entitled to answer from. Without a
+  # metadata authority the local metadata IS the truth, so there is nothing to wait for. With one, the
+  # topic's vnode must have answered at least once: until then the cache holds an empty placeholder for
+  # it, which reads exactly like a topic that exists and is drained.
+  # What readiness reports: every vnode has been read at least once AND the last refresh reached them
+  # all. A load balancer routes topics it cannot enumerate, so the whole node steps out of rotation
+  # when any part of its control-plane view is missing or currently stale, rather than serving the
+  # half of its keyspace it can still see and quietly mis-answering the other half.
+  defp all_vnodes_seen?(%{metadata_refresh: nil}), do: true
+
+  defp all_vnodes_seen?(state) do
+    state.unreachable_vnodes == [] and
+      state.broker.dsrsm |> DSRSM.vnode_ids() |> Enum.all?(&MapSet.member?(state.seen_vnodes, &1))
+  end
+
+  defp topic_metadata_ready?(%{metadata_refresh: nil}, _topic), do: true
+
+  defp topic_metadata_ready?(state, topic) do
+    case DSRSM.vnode_for(state.broker.dsrsm, topic) do
+      {:ok, vnode_id} -> MapSet.member?(state.seen_vnodes, vnode_id)
+      # An empty ring routes nowhere; there is no vnode to have heard from, so nothing to gate on.
+      {:error, :empty} -> true
+    end
+  end
+
   defp consume_ranges(broker, topic, positions, max_records, ranges) do
     broker
     |> selected_ranges(topic, ranges)
-    |> Enum.reduce({[], positions}, fn range_id, {acc, positions} ->
+    |> Enum.reduce_while({:ok, {[], positions}}, fn range_id, {:ok, {acc, positions}} ->
       cursor = Map.get(positions, range_id, :start)
 
       case Broker.read_consume(broker, range_id, cursor, max_records, &ReplicationServer.read/4) do
-        {:ok, records, next_cursor} -> {acc ++ records, Map.put(positions, range_id, next_cursor)}
-        {:error, _reason} -> {acc, positions}
+        {:ok, records, next_cursor} ->
+          {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor)}}}
+
+        # A range the control plane no longer knows (a stale assignment whose range has since split)
+        # holds nothing for this consumer; skipping it is the right answer, not a failure.
+        {:error, :no_such_range} ->
+          {:cont, {:ok, {acc, positions}}}
+
+        # Anything else is a read that FAILED: an unreachable segment primary, a storage error. This
+        # used to fall into the same skip, so the page came back short (often empty) and successful,
+        # which a consumer reads as "caught up" and commits past. Fail the fetch instead; a client can
+        # retry a failure, and cannot detect a lie.
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
@@ -960,10 +1072,15 @@ defmodule Malachi.BrokerServer do
     still_waiting =
       Enum.reduce(on_topic, [], fn waiter, keep ->
         case consume_ranges(state.broker, waiter.topic, waiter.positions, waiter.max, waiter.ranges) do
-          {[], _positions} ->
+          # A failed re-read keeps the waiter parked: its own timeout is the right place to give up,
+          # and replying an empty page here would be the silent short read the failure is hiding.
+          {:error, _reason} ->
             [waiter | keep]
 
-          {records, next_positions} ->
+          {:ok, {[], _positions}} ->
+            [waiter | keep]
+
+          {:ok, {records, next_positions}} ->
             Process.cancel_timer(waiter.timer)
             GenServer.reply(waiter.from, {records, next_positions})
             keep
@@ -997,10 +1114,15 @@ defmodule Malachi.BrokerServer do
     else
       # `subscriber.ranges` scopes the push to a group member's assigned ranges (nil = the whole group).
       case consume_ranges(broker, subscriber.topic, subscriber.positions, budget, subscriber.ranges) do
-        {[], _positions} ->
+        # Push nothing on a failed read rather than advancing the subscriber past records it never
+        # received; the next produce (or ack) retries the push.
+        {:error, _reason} ->
           subscriber
 
-        {records, next_positions} ->
+        {:ok, {[], _positions}} ->
+          subscriber
+
+        {:ok, {records, next_positions}} ->
           send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})
           %{subscriber | positions: next_positions, in_flight: subscriber.in_flight + length(records)}
       end
@@ -1030,14 +1152,14 @@ defmodule Malachi.BrokerServer do
     # (the same HashRing the metadata is sharded by). Absent in single-node/in-memory → coordination
     # stays local.
     CoordinatorRouter.put_topology(replicated.ring, replicated.vnodes)
-    {:ok, cache} = ReplicatedDSRSM.snapshot(replicated)
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(replicated)
 
     new_opts =
       opts
       |> Keyword.put(:dsrsm, cache)
       |> Keyword.put(:command_fun, sharded_command_fun(replicated))
 
-    refresh = fn -> elem(ReplicatedDSRSM.snapshot(replicated), 1) end
+    refresh = sharded_refresh(replicated)
     bootstrap = %{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}
     {new_opts, refresh, bootstrap}
   end
@@ -1068,13 +1190,24 @@ defmodule Malachi.BrokerServer do
   end
 
   # A refresh that re-reads the single ra cluster into a one-vnode DSRSM; nil if the cluster is
-  # momentarily unreachable (a leader election), so the cache is simply left as-is that tick.
+  # momentarily unreachable (a leader election), so the cache is simply left as-is that tick. The one
+  # vnode is either read or not read, so the unreachable list is always empty: a failure is the `nil`.
   defp single_cluster_refresh(server_id) do
     fn ->
       case MetadataServer.query(server_id, &Function.identity/1) do
-        {:ok, metadata} -> DSRSM.single(metadata)
+        {:ok, metadata} -> {DSRSM.single(metadata), []}
         {:error, _reason} -> nil
       end
+    end
+  end
+
+  # The sharded equivalent. Unlike the single cluster it can be PARTLY readable, so it never answers
+  # nil: it answers the vnodes it read plus the ids of the ones it did not, and the caller keeps its
+  # own view of those rather than accepting the empty placeholder.
+  defp sharded_refresh(replicated) do
+    fn ->
+      {:ok, dsrsm, unreachable} = ReplicatedDSRSM.snapshot(replicated)
+      {dsrsm, unreachable}
     end
   end
 

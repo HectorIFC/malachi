@@ -351,4 +351,35 @@ defmodule Malachi.BrokerServerTest do
       assert is_function(adopted.metadata_refresh, 0)
     end
   end
+
+  describe "a read that fails" do
+    test "is reported, not returned as an empty page", %{tmp_dir: tmp_dir} do
+      replica = start_supervised!({ReplicationServer, directory: Path.join(tmp_dir, "replica")})
+      server = start(Path.join(tmp_dir, "broker"), brokers: [replica])
+
+      {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("v1", "k1"), record("v2", "k2")])
+      assert {[_, _], _positions} = BrokerServer.consume(server, "events", %{}, 100, 0)
+
+      # The segment's only replica goes away, so the records are real and durable but this broker
+      # cannot reach them. Answering `{[], positions}` here is what a consumer reads as "caught up",
+      # and it would commit past records it never saw.
+      :ok = stop_supervised!(ReplicationServer)
+
+      assert {:error, :unreachable} = BrokerServer.consume(server, "events", %{}, 100, 0)
+    end
+
+    test "is reported rather than parked until the long poll expires", %{tmp_dir: tmp_dir} do
+      replica = start_supervised!({ReplicationServer, directory: Path.join(tmp_dir, "replica")})
+      server = start(Path.join(tmp_dir, "broker"), brokers: [replica])
+
+      {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("v1", "k1")])
+      :ok = stop_supervised!(ReplicationServer)
+
+      # With wait_ms set, an empty page parks the caller. A failure must not: parking would hide the
+      # error behind a timeout and then hand back the same empty page.
+      assert {:error, :unreachable} = BrokerServer.consume(server, "events", %{}, 100, 200)
+    end
+  end
 end

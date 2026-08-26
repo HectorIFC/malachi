@@ -66,6 +66,20 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
+  A fresh cache with `vnode_ids`' entries taken from `previous` instead: what a reader does with the
+  vnodes a snapshot could not reach. Their entry in `fresh` is an empty placeholder, and installing
+  that placeholder would erase topics whose records are durable on disk, turning every read of them
+  into a successful empty page. Keeping the last view this reader held is stale at worst, and the
+  reader already tolerates staleness between refreshes; it is `nil` metadata that has no honest
+  reading. A vnode absent from `previous` (never yet reached) keeps the placeholder, since there is no
+  older view to keep.
+  """
+  @spec retain_vnodes(t(), t(), [vnode_id()]) :: t()
+  def retain_vnodes(%__MODULE__{} = fresh, %__MODULE__{} = previous, vnode_ids) do
+    %{fresh | vnodes: Map.merge(fresh.vnodes, Map.take(previous.vnodes, vnode_ids))}
+  end
+
+  @doc """
   A DS-RSM over `ring` whose vnodes already hold `metadata_by_vnode` (`%{vnode_id => Metadata}`):
   used to seed a local read cache that mirrors an authoritative `Malachi.Cluster.ReplicatedDSRSM`
   sharing the same ring: reads are served from this cache, writes routed back through the vnodes' ra

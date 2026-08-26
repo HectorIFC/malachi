@@ -235,6 +235,40 @@ defmodule Malachi.Cluster.DSRSMTest do
     end
   end
 
+  describe "retain_vnodes/3" do
+    test "keeps the previous view of a named vnode and the fresh view of every other" do
+      previous = with_vnodes([{:v0, 0}, {:v1, 8}])
+      {previous, {:ok, _root}} = DSRSM.command(previous, "kept", {:create_topic, "kept", 4})
+      {previous, {:ok, _root}} = DSRSM.command(previous, "refreshed", {:create_topic, "refreshed", 4})
+
+      # what a snapshot that could not read `kept`'s vnode produces: an empty placeholder for it
+      kept_home = home_of(previous, "kept")
+      fresh = %{previous | vnodes: Map.put(previous.vnodes, kept_home, Malachi.Metadata.new())}
+      assert DSRSM.get_topic(fresh, "kept") == nil
+
+      merged = DSRSM.retain_vnodes(fresh, previous, [kept_home])
+
+      assert DSRSM.get_topic(merged, "kept").name == "kept"
+      assert DSRSM.get_topic(merged, "refreshed").name == "refreshed"
+    end
+
+    test "an empty list changes nothing, so a fully readable snapshot installs as-is" do
+      previous = with_vnodes([{:v0, 0}, {:v1, 8}])
+      {fresh, {:ok, _root}} = DSRSM.command(previous, "events", {:create_topic, "events", 4})
+
+      assert DSRSM.retain_vnodes(fresh, previous, []) == fresh
+    end
+
+    test "a vnode the reader has never held keeps the placeholder rather than inventing one" do
+      previous = with_vnodes([{:v0, 0}])
+      fresh = with_vnodes([{:v0, 0}, {:v1, 8}])
+
+      merged = DSRSM.retain_vnodes(fresh, previous, [:v1])
+
+      assert Map.fetch!(merged.vnodes, :v1) == Map.fetch!(fresh.vnodes, :v1)
+    end
+  end
+
   # Whether `topic` exists in the given vnode's metadata shard.
   defp topic_in_vnode?(dsrsm, vnode_id, topic) do
     metadata = Map.fetch!(dsrsm.vnodes, vnode_id)
