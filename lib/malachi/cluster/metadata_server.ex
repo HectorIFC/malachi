@@ -81,14 +81,26 @@ defmodule Malachi.Cluster.MetadataServer do
   end
 
   @doc """
-  Runs `query_fun` over the replicated `Metadata` state with a linearizable (consistent)
-  read. `query_fun` receives the `Metadata` state (e.g. `&Malachi.Metadata.get_topic(&1, name)`).
+  Reads the replicated `Metadata` state with a linearizable (consistent) read and returns
+  `query_fun` applied to it. `query_fun` receives the `Metadata` state (e.g.
+  `&Malachi.Metadata.get_topic(&1, name)`), and is applied **here, in the calling process**,
+  not inside the ra server.
+
+  That split is forced by `ra`, which only accepts an `{M, F, A}` for a consistent query and applies
+  it as `apply(M, F, A ++ [State])`, appending the state as the *last* argument. Our projections take
+  the state first, so no direct translation exists that does not either flip their arguments or grow a
+  layer of arity-shuffling wrappers. Asking for the state itself and projecting locally costs nothing
+  in practice, since every caller outside the test suite asks for the whole state anyway, and it keeps
+  a raising `query_fun` from taking the replicated server down with it.
+
+  A failed read never reaches `query_fun`: an error or a timeout is returned as-is rather than
+  projected over a stand-in state.
   """
   @spec query(server_id(), (Metadata.t() -> result)) :: {:ok, result} | {:error, term()}
         when result: term()
   def query(server_id, query_fun) do
-    case :ra.consistent_query(server_id, query_fun) do
-      {:ok, result, _leader} -> {:ok, result}
+    case :ra.consistent_query(server_id, {Function, :identity, []}) do
+      {:ok, metadata, _leader} -> {:ok, query_fun.(metadata)}
       {:error, reason} -> {:error, reason}
       {:timeout, _server} -> {:error, :timeout}
     end
