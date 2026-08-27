@@ -60,9 +60,18 @@ defmodule Malachi.MixProject do
     ]
   end
 
+  # Stages the standalone dashboard, then the results it renders beside it. The page fetches them by
+  # relative path, so everything it needs lives under `/benchmarks/` and it stays a directory anyone
+  # can serve on its own. The JSON is the same set the generated pages read, which is the point: the
+  # dashboard used to render a hand-captured sample of its own and drifted three versions behind the
+  # project without anyone noticing.
   defp copy_benchmarks(_args) do
     File.rm_rf!("doc/benchmarks")
     File.cp_r!("benchmark/dashboard", "doc/benchmarks")
+
+    for source <- Path.wildcard("benchmark/published/*.json") do
+      File.cp!(source, Path.join("doc/benchmarks", Path.basename(source)))
+    end
   end
 
   # Loads Mermaid and turns the ```mermaid code blocks (which ExDoc emits as `pre code.mermaid`) into
@@ -140,7 +149,7 @@ defmodule Malachi.MixProject do
       # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
       # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
       # full-page navigation (an in-site `.html` would be hijacked and break, since the page has no swup root).
-      "Interactive dashboard": [url: "benchmarks/"]
+      "All results, one page": [url: "benchmarks/"]
     ]
   end
 
@@ -172,10 +181,13 @@ defmodule Malachi.MixProject do
       #
       # The pattern for the dashboard is the URL itself, not a file path: for a URLNode,
       # Config.match_extra compares the group pattern against the node's url (`path == string`).
+      # Its own group, and no longer inside the Node.js one. It sat there while it rendered a single
+      # Node sample; it now renders all three recorded results, so filing it under one of them would
+      # describe it wrongly and hide the other two behind a heading that does not mention them.
+      "Benchmark dashboard": ["benchmarks/"],
       "Benchmarks: Node.js": [
         "docs/guides/running-the-node-loadtest.md",
-        "docs/generated/loadtest-node-results.md",
-        "benchmarks/"
+        "docs/generated/loadtest-node-results.md"
       ],
       "Benchmarks: Elixir": [
         "docs/guides/running-the-elixir-loadtest.md",

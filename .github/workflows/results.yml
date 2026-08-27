@@ -1,16 +1,16 @@
 name: Publish results
 
-# Keeps the published benchmark and chaos pages current without anyone remembering to refresh them.
-# The pages under docs/generated are rendered from benchmark/published/*.json, and before this those
-# JSON files were only ever written by hand, which is how the site came to advertise 0.7.8 numbers
-# while the project shipped 0.8.1.
+# Keeps every published benchmark and chaos number current without anyone remembering to refresh it.
+# Everything the site shows comes from benchmark/published/*.json: the generated pages under
+# docs/generated, and the standalone dashboard at /benchmarks/, which reads the same three files. They
+# were once written by hand, which is how the site came to advertise 0.7.8 numbers while the project
+# shipped 0.8.1, and the dashboard kept a fourth copy of its own that drifted the same way.
 #
 # The split between the two triggers is the whole design. A pull request RUNS the workloads and
 # reports them, but commits nothing: runner-to-runner variance would otherwise put a few thousand
-# records per second of noise into every diff, which is exactly the churn that kept
-# bench-dashboard.yml manual. A push to main runs them again and commits the result, so what the site
-# publishes is always what the merged code measured on a CI runner rather than on whichever laptop
-# last felt like capturing a sample.
+# records per second of noise into every diff. A push to main runs them again and commits the result,
+# so what the site publishes is always what the merged code measured on a CI runner rather than on
+# whichever laptop last felt like capturing a sample.
 on:
   pull_request:
   push:

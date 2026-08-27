@@ -89,7 +89,17 @@ mix malachi.loadtest --scenario produce --connections 20 --duration 10 --batch 1
 ```
 
 The [Elixir load test results](../generated/loadtest-elixir-results.md) page renders exactly this
-document, from `benchmark/published/loadtest-elixir.json`.
+document, from `benchmark/published/loadtest-elixir.json`, as does the Elixir section of the
+[benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
+
+That file is written by CI, not by hand: the Publish results workflow runs this command on every push
+to main and commits the result, so an edit of your own would be overwritten by the next merge. A pull
+request runs it too and reports the numbers in a comment without committing them.
+
+This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
+counts backpressure that the Node one does not (dropped connections, server-shed produces,
+reconnects). Both pages render only what the run recorded, so the two sections legitimately show
+different fields rather than one of them looking incomplete.
 
 Two things about that `meta` block are worth knowing. The recorded command is rebuilt from the
 **effective** configuration rather than copied from what you typed, so a knob you left at its default

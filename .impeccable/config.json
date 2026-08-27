@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "roboto",
+        "createdAt": "2026-08-27T02:29:14.441Z",
+        "reason": "Roboto here is the Android/ChromeOS fallback inside the standard system stack (ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif) at benchmark/dashboard/index.html:39, not a chosen display face: no @font-face and no webfont link anywhere in the file, and git diff shows the line predates this change. Assistant decided; not confirmed by the user."
+      }
+    ]
+  }
+}
