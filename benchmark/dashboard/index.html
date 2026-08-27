@@ -84,17 +84,7 @@
         <div class="cap" id="hl-cap"></div>
       </div>
 
-      <div class="cards" id="cards"></div>
-
-      <section>
-        <h2>Latency percentiles (ms)</h2>
-        <div class="panel"><figure id="chart"></figure></div>
-      </section>
-
-      <section>
-        <h2>Reproduce</h2>
-        <div class="panel"><dl class="meta" id="meta"></dl></div>
-      </section>
+      <div id="sections"></div>
 
       <footer id="footer"></footer>
     </div>
@@ -131,15 +121,23 @@
         ]);
       }
 
-      function drawChart(latency) {
+      function drawChart(latency, target) {
         const W = 720,
           H = 300,
           pad = { l: 48, r: 20, t: 16, b: 34 };
-        const pts = PCTLS.map(([key]) => latency[key] ?? 0);
+
+        // Only the percentiles this run actually recorded. Substituting 0 for a missing one drew a
+        // curve that dives to the floor and climbs back, which reads as a measured latency of zero:
+        // the BEAM generator keeps four percentiles and the Node one keeps a full histogram, so the
+        // Elixir chart showed P90 and P95 as 0.00 between a P50 of 6ms and a P99 of 29ms.
+        const shown = PCTLS.filter(([key]) => latency[key] != null);
+        if (!shown.length) return;
+
+        const pts = shown.map(([key]) => latency[key]);
         const maxY = Math.max(...pts) * 1.1 || 1;
         const iw = W - pad.l - pad.r,
           ih = H - pad.t - pad.b;
-        const x = (i) => pad.l + (PCTLS.length === 1 ? iw / 2 : (i / (PCTLS.length - 1)) * iw);
+        const x = (i) => pad.l + (shown.length === 1 ? iw / 2 : (i / (shown.length - 1)) * iw);
         const y = (v) => pad.t + ih - (v / maxY) * ih;
 
         const svg = svgEl("svg", {
@@ -166,66 +164,151 @@
         // Dots + x labels + value labels
         pts.forEach((v, i) => {
           svg.appendChild(svgEl("circle", { cx: x(i), cy: y(v), r: 3.5, fill: "var(--accent)" }));
-          svg.appendChild(svgEl("text", { x: x(i), y: H - pad.b + 18, "text-anchor": "middle", text: PCTLS[i][1] }));
+          svg.appendChild(svgEl("text", { x: x(i), y: H - pad.b + 18, "text-anchor": "middle", text: shown[i][1] }));
           svg.appendChild(svgEl("text", { x: x(i), y: y(v) - 8, "text-anchor": "middle", fill: "var(--text)", text: fmt(v, 2) }));
         });
-        document.getElementById("chart").appendChild(svg);
+        target.appendChild(svg);
       }
 
-      function render(d) {
-        const lat = d.latency_ms || {};
-        document.getElementById("subtitle").textContent =
-          `${d.scenario} (${d.mode}) - ${d.connections} connections - ${d.meta?.hardware?.cpu ?? "unknown CPU"}`;
+      // The three results this page publishes, in the order they are shown. They come from
+      // benchmark/published/, which the Publish results workflow rewrites on every push to main, so
+      // this page is as current as the last merge rather than as the last time someone remembered to
+      // capture a sample by hand.
+      const SOURCES = [
+        { file: "loadtest-node.json", title: "Node.js load test", kind: "loadtest", headline: true },
+        { file: "loadtest-elixir.json", title: "Elixir load test", kind: "loadtest" },
+        { file: "chaos-node.json", title: "Chaos certification", kind: "chaos" },
+      ];
 
-        document.getElementById("hl-num").textContent = fmt(d.records_per_s);
-        document.getElementById("hl-unit").textContent = "records/s";
-        document.getElementById("hl-cap").textContent =
-          `${fmt(d.mb_per_s, 2)} MB/s over ${fmt(d.duration_s, 1)}s - ${fmt(d.records)} records, ${d.errors} errors`;
+      function section(title) {
+        const body = el("div", { class: "panel" });
+        const node = el("section", {}, [el("h2", { text: title }), body]);
+        document.getElementById("sections").appendChild(node);
+        return body;
+      }
 
-        const cards = document.getElementById("cards");
-        cards.appendChild(card("Ops/s", fmt(d.ops_per_s)));
-        if (lat.p50 != null) cards.appendChild(card("P50 latency", fmt(lat.p50, 2), "ms"));
-        if (lat.p99 != null) cards.appendChild(card("P99 latency", fmt(lat.p99, 2), "ms"));
-        if (lat.p99_99 != null) cards.appendChild(card("P99.99 latency", fmt(lat.p99_99, 2), "ms"));
-        if (lat.stddev != null) cards.appendChild(card("Std dev", fmt(lat.stddev, 2), "ms"));
-
-        if (lat.p50 != null) drawChart(lat);
-        else document.getElementById("chart").innerHTML = '<span class="k">No latency for this scenario</span>';
-
-        const m = d.meta || {};
+      // A value the run did not record is left out; a value it recorded as zero is shown as zero.
+      // Collapsing the two would turn "this tool does not measure that" into "it measured nothing",
+      // which is the claim a reader would act on.
+      function metaList(m) {
         const hw = m.hardware || {};
+        const dl = el("dl", { class: "meta" });
         const rows = [
-          ["Command", el("dd", { class: "cmd mono", text: m.command || "n/a" })],
-          ["Git ref", el("dd", { class: "mono", text: `${m.git_ref || "n/a"}${m.git_ref_date ? " (" + m.git_ref_date + ")" : ""}` })],
-          ["Version", el("dd", { text: m.malachi_version || "n/a" })],
-          ["Hardware", el("dd", { text: `${hw.cpu || "?"} - ${hw.cores || "?"} cores - ${hw.memory_bytes ? fmt(hw.memory_bytes / 1e9, 1) + " GB" : "?"} - ${hw.os || "?"}` })],
-          ["Run at", el("dd", { text: m.timestamp || "n/a" })],
+          ["Command", el("dd", { class: "cmd mono", text: m.command || "not recorded" })],
+          ["Git ref", el("dd", { class: "mono", text: `${m.git_ref || "not recorded"}${m.git_ref_date ? " (" + m.git_ref_date + ")" : ""}` })],
+          ["Version", el("dd", { text: m.malachi_version || "not recorded" })],
+          ["Run at", el("dd", { text: m.timestamp || "not recorded" })],
         ];
-        const meta = document.getElementById("meta");
+        if (hw.cpu || hw.cores || hw.os) {
+          rows.push([
+            "Hardware",
+            el("dd", {
+              text: `${hw.cpu || "?"} - ${hw.cores || "?"} cores - ${hw.memory_bytes ? fmt(hw.memory_bytes / 1e9, 1) + " GB" : "?"} - ${hw.os || "?"}`,
+            }),
+          ]);
+        }
         for (const [k, dd] of rows) {
-          meta.appendChild(el("dt", { text: k }));
-          meta.appendChild(dd);
+          dl.appendChild(el("dt", { text: k }));
+          dl.appendChild(dd);
+        }
+        return dl;
+      }
+
+      function renderLoadtest(body, d, isHeadline) {
+        const lat = d.latency_ms || {};
+
+        if (isHeadline) {
+          document.getElementById("subtitle").textContent =
+            `${d.scenario ?? "?"}${d.mode ? " (" + d.mode + ")" : ""} - ${d.connections ?? "?"} connections - ${d.meta?.hardware?.cpu ?? "unknown CPU"}`;
+          document.getElementById("hl-num").textContent = fmt(d.records_per_s);
+          document.getElementById("hl-unit").textContent = "records/s";
+          document.getElementById("hl-cap").textContent =
+            `${fmt(d.mb_per_s, 2)} MB/s over ${fmt(d.duration_s, 1)}s - ${fmt(d.records)} records, ${d.errors} errors`;
         }
 
-        document.getElementById("footer").innerHTML =
-          'Example run generated by <code>scripts/loadtest.js --json</code>. Absolute numbers reflect the machine above, not a tuned server. See the ' +
-          '<a href="https://github.com/HectorIFC/malachi/tree/main/benchmark">benchmark suite</a>.';
+        const cards = el("div", { class: "cards" });
+        cards.appendChild(card("Records/s", fmt(d.records_per_s)));
+        if (d.ops_per_s != null) cards.appendChild(card("Ops/s", fmt(d.ops_per_s)));
+        if (d.errors != null) cards.appendChild(card("Errors", fmt(d.errors)));
+        if (lat.p50 != null) cards.appendChild(card("P50 latency", fmt(lat.p50, 2), "ms"));
+        if (lat.p99 != null) cards.appendChild(card("P99 latency", fmt(lat.p99, 2), "ms"));
+        // Only the BEAM generator counts backpressure, so these appear for it and not for Node.
+        if (d.dropped != null) cards.appendChild(card("Dropped", fmt(d.dropped)));
+        if (d.overloaded != null) cards.appendChild(card("Server-shed", fmt(d.overloaded)));
+        if (d.reconnects != null) cards.appendChild(card("Reconnects", fmt(d.reconnects)));
+        body.appendChild(cards);
+
+        if (lat.p50 != null) {
+          body.appendChild(el("h3", { text: "Latency percentiles (ms)" }));
+          const figure = el("figure");
+          body.appendChild(figure);
+          drawChart(lat, figure);
+        }
+
+        body.appendChild(el("h3", { text: "Reproduce" }));
+        body.appendChild(metaList(d.meta || {}));
       }
 
-      fetch("./data.json")
-        .then((r) => {
-          if (!r.ok) throw new Error("HTTP " + r.status);
-          return r.json();
-        })
-        .then(render)
-        .catch((e) => {
-          // textContent (via el's `text:`), not innerHTML: e.message can carry HTML fragments from a parse error.
-          const subtitle = document.getElementById("subtitle");
-          subtitle.textContent = "";
-          subtitle.appendChild(
-            el("span", { class: "err", text: `Could not load data.json (${e.message}). Serve this directory over HTTP.` }),
-          );
-        });
+      function renderChaos(body, d) {
+        const inv = d.invariants || {};
+        const failures = Array.isArray(d.failures) ? d.failures : [];
+        const events = Array.isArray(d.events) ? d.events : [];
+
+        const cards = el("div", { class: "cards" });
+        cards.appendChild(card("Verdict", (d.verdict || "unknown").toUpperCase()));
+        if (d.replication_factor != null) cards.appendChild(card("Replication factor", fmt(d.replication_factor)));
+        cards.appendChild(card("Faults injected", fmt(events.length)));
+        if (inv.acked_writes != null) cards.appendChild(card("Acked writes verified", fmt(inv.acked_writes)));
+        if (inv.post_chaos_records_per_s != null) cards.appendChild(card("Post-chaos produce", fmt(inv.post_chaos_records_per_s), "rec/s"));
+        body.appendChild(cards);
+
+        if (events.length) {
+          body.appendChild(el("h3", { text: "Faults injected" }));
+          body.appendChild(el("ul", {}, events.map((e) => el("li", { text: e }))));
+        }
+
+        // Shown only when there are failures, and never summarised away: a drill that broke an
+        // invariant is the one thing on this page nobody should have to click to find.
+        if (failures.length) {
+          body.appendChild(el("h3", { class: "err", text: "Failures" }));
+          body.appendChild(el("ul", {}, failures.map((f) => el("li", { class: "err", text: f }))));
+        }
+
+        body.appendChild(el("h3", { text: "Reproduce" }));
+        body.appendChild(metaList(d.meta || {}));
+      }
+
+      // Each source is fetched and rendered on its own. One file that is missing, unreadable or half
+      // written leaves a note in its own section and takes nothing else down with it, which is the
+      // difference between a page that says what it knows and a page that goes blank.
+      function load(source) {
+        const body = section(source.title);
+
+        return fetch("./" + source.file)
+          .then((r) => {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.json();
+          })
+          .then((d) => {
+            if (source.kind === "chaos") renderChaos(body, d);
+            else renderLoadtest(body, d, source.headline === true);
+          })
+          .catch((e) => {
+            // textContent, not innerHTML: a parse error's message can carry fragments of the file.
+            body.appendChild(el("div", { class: "err", text: `Could not load ${source.file}: ${e.message}` }));
+            if (source.headline) document.getElementById("subtitle").textContent = "headline result unavailable";
+          });
+      }
+
+      Promise.all(SOURCES.map(load)).then(() => {
+        if (document.getElementById("subtitle").textContent === "Loading...") {
+          document.getElementById("subtitle").textContent = "no results recorded yet";
+        }
+        document.getElementById("footer").innerHTML =
+          'Recorded by the <a href="https://github.com/HectorIFC/malachi/blob/main/.github/workflows/results.yml">Publish results</a> workflow ' +
+          "on every push to main, from <code>benchmark/published/</code>. Absolute numbers reflect a shared CI runner, not a tuned server. See the " +
+          '<a href="https://github.com/HectorIFC/malachi/tree/main/benchmark">benchmark suite</a>.';
+      });
     </script>
   </body>
 </html>

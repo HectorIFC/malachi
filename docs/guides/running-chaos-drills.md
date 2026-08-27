@@ -97,7 +97,13 @@ The file is written **before** the harness exits, including when it failed, beca
 exactly the run whose record is worth keeping. Unset the variable and nothing is written.
 
 The [Chaos certification results](../generated/chaos-results.md) page renders exactly this document,
-from `benchmark/published/chaos-node.json`.
+from `benchmark/published/chaos-node.json`, and the [benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/) shows
+the same run beside the two load tests.
+
+CI keeps that file current: the Publish results workflow runs the node-fault drill on every push to
+main and commits its record, failures included. Only that drill is published. The storage-corruption
+and config-deployment drills above are run by hand, so a record from either stays wherever you point
+`CHAOS_RESULT_FILE`.
 
 ## Reading a failure
 

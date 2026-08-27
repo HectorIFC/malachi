@@ -76,7 +76,20 @@ node loadtest.js --scenario produce --connections 20 --duration 10 --batch 10 \
 ```
 
 The [Node.js load test results](../generated/loadtest-node-results.md) page renders exactly this
-document, from `benchmark/published/loadtest-node.json`.
+document, from `benchmark/published/loadtest-node.json`, and so does the headline of the
+[benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
+
+You do not update that file by hand, and a hand-edit would not survive: the Publish results workflow
+runs a variant of this command on a CI runner on every push to main and commits what it measured, so
+the site always shows the merged code rather than whichever laptop last captured a sample. The
+variant adds `--warmup 2`, which excludes the opening seconds from the statistics; the command above
+has none, so it pays for topic creation and JIT warmup where the published figure does not. Add it
+locally when you want a number comparable to the site.
+
+To see what a change does before merging, open a pull request: the workflow runs there too without
+committing, because runner variance would otherwise put noise in every diff. It posts the numbers as
+a comment when the branch is in this repository; from a fork that step is skipped and the numbers
+come back as the run's artifacts. Run it locally, as above, when you want a number for yourself.
 
 Write to a path **outside the repository** and move the file into place afterward, as above. Piping
 straight onto the tracked file truncates it first, which makes the working tree dirty while the run

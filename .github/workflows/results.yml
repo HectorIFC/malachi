@@ -1,16 +1,19 @@
 name: Publish results
 
-# Keeps the published benchmark and chaos pages current without anyone remembering to refresh them.
-# The pages under docs/generated are rendered from benchmark/published/*.json, and before this those
-# JSON files were only ever written by hand, which is how the site came to advertise 0.7.8 numbers
-# while the project shipped 0.8.1.
+# Keeps every published benchmark and chaos number current without anyone remembering to refresh it.
+# Everything the site shows comes from benchmark/published/*.json: the generated pages under
+# docs/generated, and the standalone dashboard at /benchmarks/, which reads the same three files. They
+# were once written by hand, which is how the site came to advertise 0.7.8 numbers while the project
+# shipped 0.8.1, and the dashboard kept a fourth copy of its own that drifted the same way.
 #
 # The split between the two triggers is the whole design. A pull request RUNS the workloads and
-# reports them, but commits nothing: runner-to-runner variance would otherwise put a few thousand
-# records per second of noise into every diff, which is exactly the churn that kept
-# bench-dashboard.yml manual. A push to main runs them again and commits the result, so what the site
-# publishes is always what the merged code measured on a CI runner rather than on whichever laptop
-# last felt like capturing a sample.
+# commits nothing: runner-to-runner variance would otherwise put a few thousand records per second of
+# noise into every diff. It also reports them in a comment, but only from a branch in this repository:
+# GITHUB_TOKEN is read-only on a pull request from a fork, so that step is skipped there rather than
+# failing, and a fork's numbers reach its author through the uploaded artifacts instead. A push to
+# main runs them again and commits the result,
+# so what the site publishes is always what the merged code measured on a CI runner rather than on
+# whichever laptop last felt like capturing a sample.
 on:
   pull_request:
   push:
@@ -190,9 +193,24 @@ jobs:
 
       - name: 📋 Collect what was measured
         id: collect
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           mkdir -p benchmark/published
+
+          # A workload that produced no artifact used to leave the last committed file in place, and
+          # the pull request comment then reported that older measurement as this run's.
+          #
+          # Cleared on a pull request only, where nothing is committed and the worst case is a row
+          # that reads "not recorded". On a push to main the commit step below would see the removal
+          # as a deletion and drop a good published result over one failed run, trading a stale number
+          # for no number at all. There the file stays, and every surface that renders it prints the
+          # git ref it came from, so a reader can see it is not this commit's.
+          if [ "$EVENT" = "pull_request" ]; then
+            rm -f benchmark/published/*.json
+          fi
+
           for f in "$RUNNER_TEMP"/artifacts/*.json; do
             [ -e "$f" ] || continue
             cp "$f" "benchmark/published/$(basename "$f")"
