@@ -30,6 +30,31 @@ defmodule Malachi.Cluster.MetadataServerTest do
     assert Enum.sort(Enum.map(active, & &1.id)) == Enum.sort([left_id, right_id])
   end
 
+  test "a raising query_fun fails the caller and leaves the replicated server serving" do
+    server_id = start_cluster()
+    {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+
+    assert_raise RuntimeError, "projection blew up", fn ->
+      MetadataServer.query(server_id, fn _metadata -> raise "projection blew up" end)
+    end
+
+    # The projection runs in this process, not inside ra, so the crash cannot take the vnode with it.
+    assert {:ok, %{name: "events"}} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "events"))
+  end
+
+  test "a failed read is returned as an error rather than projected over a stand-in state" do
+    name = :"vnode_unreachable_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = MetadataServer.start(name)
+    on_exit(fn -> MetadataServer.delete(name) end)
+
+    :ok = :ra.stop_server(:default, server_id)
+
+    # The fun would raise if it were ever applied, which is how this pins that an unreachable server
+    # does not get an empty Metadata projected into a plausible-looking answer.
+    assert {:error, _reason} =
+             MetadataServer.query(server_id, fn _metadata -> raise "query_fun must not run" end)
+  end
+
   test "delete of a running cluster returns :ok and removes it" do
     name = :"vnode_del_#{System.unique_integer([:positive])}"
     {:ok, server_id} = MetadataServer.start(name)
