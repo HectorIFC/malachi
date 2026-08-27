@@ -44,8 +44,12 @@ load their data, because the JSON only sits next to `index.html` after `mix docs
 
 Nothing to do by hand. A push to main runs both load tests and the chaos drill on a CI runner and commits the
 results to `benchmark/published/`, which republishes this page. To see what a change does to the numbers
-before merging, open a pull request: the same workflow runs there and reports the measurements in a comment
-without committing them, because runner-to-runner variance would otherwise put noise in every diff.
+before merging, open a pull request: the same workflow runs there without committing anything, because
+runner-to-runner variance would otherwise put noise in every diff.
+
+From a branch in this repository it also posts the measurements as a comment. From a fork it does not:
+`GITHUB_TOKEN` is read-only there, so the comment step is skipped rather than failing the run, and the
+numbers come back as the run's uploaded artifacts instead.
 
 To measure locally instead, see the guides for
 [the Node.js load test](../../docs/guides/running-the-node-loadtest.md),

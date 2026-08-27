@@ -92,9 +92,15 @@ The [Elixir load test results](../generated/loadtest-elixir-results.md) page ren
 document, from `benchmark/published/loadtest-elixir.json`, as does the Elixir section of the
 [benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
 
-That file is written by CI, not by hand: the Publish results workflow runs this command on every push
-to main and commits the result, so an edit of your own would be overwritten by the next merge. A pull
-request runs it too and reports the numbers in a comment without committing them.
+That file is written by CI, not by hand: the Publish results workflow runs a variant of this command
+on every push to main and commits the result, so an edit of your own would be overwritten by the next
+merge. A pull request runs it too without committing, and posts the numbers as a comment when the
+branch lives in this repository; from a fork the comment is skipped and the artifacts carry them.
+
+The variant differs in two ways. It passes credentials, and it adds `--warmup 2`, which excludes the
+opening seconds from the statistics. That second one matters if you are comparing: the command above
+has no warmup, so its numbers carry the cost of topic creation and JIT warmup that the published ones
+do not. Add `--warmup 2` locally when you want a figure comparable to the site.
 
 This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
 counts backpressure that the Node one does not (dropped connections, server-shed produces,
