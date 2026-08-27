@@ -45,7 +45,16 @@ defmodule Malachi.Cluster.MetadataServerTest do
   test "a failed read is returned as an error rather than projected over a stand-in state" do
     name = :"vnode_unreachable_#{System.unique_integer([:positive])}"
     {:ok, server_id} = MetadataServer.start(name)
-    on_exit(fn -> MetadataServer.delete(name) end)
+
+    on_exit(fn ->
+      # This test leaves the only member stopped, and a delete routed through a stopped member can
+      # only come back {:error, {:no_more_servers_to_try, [error: :noproc]}}. Restarting it first is
+      # what makes the teardown actually delete the cluster rather than discard a failure. If the
+      # test instead fails before the stop, the restart returns {:error, {:already_started, _}} and
+      # the delete still succeeds, which is why the restart's result is the one thing discarded here.
+      _ = :ra.restart_server(:default, server_id)
+      MetadataServer.delete(name)
+    end)
 
     :ok = :ra.stop_server(:default, server_id)
 
