@@ -88,10 +88,13 @@ defmodule Malachi.Cluster.LeaseServer do
     command(server_id, {:release, candidate, fence})
   end
 
-  @doc "The current lease state via a consistent query."
+  @doc """
+  The current lease state via a consistent query. The `{Function, :identity, []}` is `ra`'s required
+  shape for a consistent query (a plain fun is rejected); it returns the machine state unchanged.
+  """
   @spec get(server_id()) :: {:ok, Lease.t()} | {:error, term()}
   def get(server_id) do
-    case :ra.consistent_query(server_id, &Function.identity/1) do
+    case :ra.consistent_query(server_id, {Function, :identity, []}) do
       {:ok, %Lease{} = lease, _leader} -> {:ok, lease}
       {:error, reason} -> {:error, reason}
       {:timeout, _server} -> {:error, :timeout}
