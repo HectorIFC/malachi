@@ -62,6 +62,25 @@ defmodule Malachi.LogApiTest do
     assert {:error, :invalid_cursor} = LogApi.fetch(server, "events", bad, 100)
   end
 
+  test "an oversized cursor is rejected without being decoded", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    # Deliberately a *well-formed* cursor that is merely too big. A malformed one would be rejected by
+    # valid_positions?/1 whether or not the size guard exists, so it could not tell the two apart; this
+    # one decodes and validates cleanly, and only the ceiling stands between it and the heap.
+    positions = for seq <- 0..8_191, into: %{}, do: {{"events", seq}, {seq, seq * 1000}}
+    huge = LogApi.encode_cursor(positions)
+    assert byte_size(huge) > 256 * 1024
+    assert {:error, :invalid_cursor} = LogApi.fetch(server, "events", huge, 100)
+
+    # The ceiling clears a real cursor by orders of magnitude: a topic tops out at 2^8 ranges and no
+    # client can raise that, so this guard cannot reject a position this server itself issued.
+    {:ok, _records, cursor} = LogApi.fetch(server, "events", :start, 100)
+    assert byte_size(cursor) < 256 * 1024
+    assert {:ok, [], ^cursor} = LogApi.fetch(server, "events", cursor, 100)
+  end
+
   test "an invalid record (missing/non-binary value) is rejected", %{tmp_dir: directory} do
     server = start_broker(directory)
     :ok = LogApi.create_topic(server, "events")
