@@ -62,6 +62,59 @@ defmodule Malachi.LogApiTest do
     assert {:error, :invalid_cursor} = LogApi.fetch(server, "events", bad, 100)
   end
 
+  test "an oversized cursor is rejected without being decoded", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    # Deliberately a *well-formed* cursor that is merely too big. A malformed one would be rejected by
+    # valid_positions?/1 whether or not the size guard exists, so it could not tell the two apart; this
+    # one decodes and validates cleanly, and only the ceiling stands between it and the heap.
+    positions = for seq <- 0..8_191, into: %{}, do: {{"events", seq}, {seq, seq * 1000}}
+    huge = LogApi.encode_cursor(positions)
+    assert byte_size(huge) > 256 * 1024
+    assert {:error, :invalid_cursor} = LogApi.fetch(server, "events", huge, 100)
+
+    # The ceiling clears a real cursor by orders of magnitude: a topic tops out at 2^8 ranges and no
+    # client can raise that, so this guard cannot reject a position this server itself issued.
+    {:ok, _records, cursor} = LogApi.fetch(server, "events", :start, 100)
+    assert byte_size(cursor) < 256 * 1024
+    assert {:ok, [], ^cursor} = LogApi.fetch(server, "events", cursor, 100)
+  end
+
+  test "a compressed cursor is rejected, so the size ceiling cannot be bypassed", %{tmp_dir: directory} do
+    server = start_broker(directory)
+    :ok = LogApi.create_topic(server, "events")
+
+    # Why the byte ceiling alone is not a bound: Erlang's compressed external format carries an
+    # uncompressed-size header, so this token stays tiny and still inflates into a million-element
+    # list, roughly 16MB of heap for a couple of KB of request. Asserted on its own rather than
+    # through fetch/4, because a list would be turned away by valid_positions?/1 in any case and
+    # would prove nothing about the guard.
+    bomb = :erlang.term_to_binary(List.duplicate(0, 1_000_000), [{:compressed, 9}])
+    assert byte_size(Base.url_encode64(bomb)) < 10_000
+    assert length(:erlang.binary_to_term(bomb, [:safe])) == 1_000_000
+
+    # The guard itself, on a compressed cursor that is otherwise perfectly valid: right shape, right
+    # size, and it would decode and pass validation if it ever reached them. Only the tag stops it.
+    positions = for seq <- 0..255, into: %{}, do: {{"events", seq}, {seq, seq * 1000}}
+    compressed = Base.url_encode64(:erlang.term_to_binary(positions, [{:compressed, 9}]))
+    assert byte_size(compressed) < 256 * 1024
+    assert {:error, :invalid_cursor} = LogApi.fetch(server, "events", compressed, 100)
+
+    # And the same positions uncompressed are accepted, so the rejection is about the encoding rather
+    # than about anything else in this cursor.
+    assert {:ok, _records, _next} = LogApi.fetch(server, "events", LogApi.encode_cursor(positions), 100)
+  end
+
+  test "cursor_prefix_is_still_a_map: the encoder keeps emitting the tag decode_cursor requires" do
+    # decode_cursor/1 admits only <<131, 116, ...>>, the external format's version byte plus MAP_EXT.
+    # That is an assumption about OTP rather than about our code, so it gets asserted rather than
+    # trusted: if a future release ever tags a map differently, this fails here instead of in
+    # production, where the symptom would be every legitimate cursor being rejected as invalid.
+    assert <<131, 116, _rest::binary>> = :erlang.term_to_binary(%{})
+    assert <<131, 116, _rest::binary>> = :erlang.term_to_binary(%{{"events", 0} => {0, 0}})
+  end
+
   test "an invalid record (missing/non-binary value) is rejected", %{tmp_dir: directory} do
     server = start_broker(directory)
     :ok = LogApi.create_topic(server, "events")

@@ -9,7 +9,7 @@ Guide for maintaining security practices during Malachi development.
 mix deps.audit
 
 # Run Sobelow security analyzer
-mix sobelow --config --exit
+mix sobelow --config
 
 # Check code quality
 mix credo --strict
@@ -128,7 +128,7 @@ Before submitting a PR, verify:
 - [ ] Input validation for any new user-facing inputs
 - [ ] No new dependencies with known vulnerabilities (`mix deps.audit`)
 - [ ] Security tests pass (`mix test test/security_*.exs test/tls_*.exs`)
-- [ ] Code passes Sobelow scan (`mix sobelow --config --exit`)
+- [ ] Code passes Sobelow scan (`mix sobelow --config`)
 - [ ] No GPL-licensed dependencies added
 - [ ] TLS configurations use secure defaults
 - [ ] Rate limiting tested for new endpoints
@@ -141,13 +141,19 @@ Before submitting a PR, verify:
 | Tool | Purpose | Command |
 |------|---------|---------|
 | mix_audit | Dependency vulnerability scanning | `mix deps.audit` |
-| Sobelow | Elixir/Phoenix security analysis | `mix sobelow --config --exit` |
+| Sobelow | Elixir/Phoenix security analysis | `mix sobelow --config` |
 | Credo | Code quality and safety checks | `mix credo --strict` |
 | Gitleaks | Secret detection in git history | `gitleaks detect` |
 | Trivy | Container and filesystem scanning | `trivy fs .` |
 | CodeQL | Advanced code analysis | GitHub Actions |
 | Dependabot | Automated dependency updates | Configured in `.github/dependabot.yml` |
 | Benchee | Performance benchmarking | `mix run benchmark/*.exs` |
+
+A passing Sobelow scan is not a scan with no output. It prints 29 low-confidence findings, all of
+them file paths taken from configuration or atoms taken from environment variables and CLI flags,
+and `.sobelow-conf` explains why those are accepted rather than hidden. What fails the build is a
+high-confidence finding. Do not add `--exit` to that command: a bare `--exit` means `low` and takes
+precedence over the config file, which turns every one of those 29 into a build failure.
 
 ## CI/CD Security Pipeline
 

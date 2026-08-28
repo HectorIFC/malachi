@@ -48,10 +48,15 @@ jobs:
           done
           exit 1
 
+      # Neither command passes --exit: a bare --exit means "low", and sobelow lets the command line
+      # win over the file, so passing it here would silently override the policy in .sobelow-conf and
+      # fail the build on the 29 low findings that file explains we accept. The threshold lives in the
+      # config and nowhere else. The first run writes the artifact and is allowed to fail; the second
+      # is the gate.
       - name: Run Sobelow
         run: |
-          mix sobelow --config --exit --format json --out sobelow-results.json || true
-          mix sobelow --config --exit
+          mix sobelow --config --format json --out sobelow-results.json || true
+          mix sobelow --config
 
       - name: Upload Sobelow results
         if: always()

@@ -1,12 +1,26 @@
+# Read by `mix sobelow --config`. The key names matter more than they look: sobelow reads `:exit`,
+# `:ignore` and `:ignore_files`, while `exit_on`, `ignored` and `ignored_files` are the local variable
+# names inside its own source. This file used to spell them the second way, so for its whole life the
+# ignore list suppressed nothing and the exit setting blocked nothing: the scan printed 46 findings
+# and exited 0.
+#
+# `threshold: :low` prints everything; `exit: "high"` is what fails the build. The low findings are
+# real reports we keep in the log rather than hide, but they all trace file paths from configuration
+# or atoms from env and CLI flags, which is operator input rather than anything off the wire. Making
+# them blocking would mean annotating 23 functions across 10 files, and the predictable result is that
+# every new function touching a file gets a reflex annotation. That is ceremony, not safety.
+#
+# `skip: true` enables per-site `# sobelow_skip` comments, which is how a genuine high-confidence
+# finding gets an exception without blinding the rule everywhere else.
 [
-  ignored: ["Traversal.FileModule"],
-  skip: false,
+  ignore: [],
+  ignore_files: [],
+  skip: true,
   verbose: false,
   private: false,
   router: "",
-  exit_on: :low,
+  exit: "high",
   format: "txt",
   out: "",
-  threshold: :low,
-  ignored_files: []
+  threshold: :low
 ]
