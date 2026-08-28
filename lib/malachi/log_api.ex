@@ -12,12 +12,16 @@ defmodule Malachi.LogApi do
   an untrusted client, `decode_cursor/1` bounds its size, uses `binary_to_term(_, [:safe])` and
   validates the shape.
 
-  Those three steps answer different attacks, and only the middle one is about code execution. On
-  OTP 28 the `:safe` option rejects both a fun and an atom the node has never seen, so a crafted
-  token cannot introduce code or exhaust the atom table. What `:safe` does not bound is *size*: the
-  Erlang external format spends about 2.7 bytes per list element where the heap spends 16, so a token
-  the wire would accept buys several times its own weight in memory. `@max_cursor_bytes` is the guard
-  for that, and `valid_positions?/1` then rejects anything that decoded cleanly but is not a cursor.
+  Those steps answer different attacks, and only one of them is about code execution. On OTP 28 the
+  `:safe` option rejects both a fun and an atom the node has never seen, so a crafted token cannot
+  introduce code or exhaust the atom table.
+
+  What `:safe` does not bound is *size*, and that takes two guards rather than one. A byte ceiling
+  alone is not enough, because Erlang's external term format has a compressed variant whose header
+  declares an uncompressed size: measured, a 2.6KB token inflates into a million-element list, so a
+  token well under any sane ceiling can still ask for gigabytes. So `decode_cursor/1` requires the
+  uncompressed map tag *and* a ceiling, both before decoding, and `valid_positions?/1` then rejects
+  whatever decoded cleanly without being a cursor.
 
   `create_topic`, `produce` (by key) and `fetch`/`fetch_group` (by opaque cursor) over a topic's
   ranges, including consumer groups with server-side committed positions, cross-epoch consume across
@@ -308,17 +312,19 @@ defmodule Malachi.LogApi do
   defp decode_cursor(nil), do: {:ok, %{}}
   defp decode_cursor(:start), do: {:ok, %{}}
 
-  # The size check comes first, and has to: everything after it decodes, and decoding is the step that
-  # turns the client's bytes into our memory. A cursor covers one topic's ranges, so its size is set by
-  # the keyspace, 2^8 = 256 ranges (`@default_keyspace_bits`), which no client can raise. Measured, 256
-  # ranges encode to about 8KB under an ordinary topic name and about 93KB under a 255-character one,
-  # so this ceiling clears the worst legitimate cursor by roughly 2.8x while cutting what an abusive
-  # one can allocate from the frame limit's 16MB (`config/config.exs`) down to a couple of megabytes.
+  # A cursor covers one topic's ranges, so its size is set by the keyspace, 2^8 = 256 ranges
+  # (`@default_keyspace_bits`), which no client can raise. Measured, 256 ranges encode to about 8KB
+  # under an ordinary topic name and about 93KB under a 255-character one, so this clears the worst
+  # legitimate cursor by roughly 2.8x while holding an abusive one far below the frame limit's 16MB
+  # (`config/config.exs`).
   @max_cursor_bytes 262_144
 
+  # Both checks run before `safe_term/1`, and that ordering is the point: decoding is the step that
+  # turns the client's bytes into our memory, so a guard that runs after it has already paid.
   defp decode_cursor(token) when is_binary(token) do
     with true <- byte_size(token) <= @max_cursor_bytes,
          {:ok, binary} <- Base.url_decode64(token),
+         true <- map_term?(binary),
          {:ok, positions} <- safe_term(binary),
          true <- valid_positions?(positions) do
       {:ok, positions}
@@ -329,10 +335,22 @@ defmodule Malachi.LogApi do
 
   defp decode_cursor(_other), do: {:error, :invalid_cursor}
 
+  # Erlang's external term format opens with a version byte and a tag; 116 is MAP_EXT, which is what
+  # `encode_cursor/1` always produces, and `cursor_prefix_is_still_a_map` in the test suite fails
+  # loudly if a future OTP ever changes that.
+  #
+  # Requiring it is what makes `@max_cursor_bytes` mean anything. Tag 80 is the *compressed* format,
+  # carrying a four-byte uncompressed-size header, and `binary_to_term(_, [:safe])` inflates it: a
+  # 2.6KB token expands into a million-element list, about 6000x, so a token sitting comfortably under
+  # the ceiling could still ask for gigabytes of heap. `valid_positions?/1` enforces the same
+  # is-a-map rule, but only after that allocation has happened. This enforces it in time.
+  defp map_term?(<<131, 116, _rest::binary>>), do: true
+  defp map_term?(_binary), do: false
+
   # Never trust a client-supplied binary: on OTP 28 :safe rejects funs and atoms this node has never
   # seen, so what reaches valid_positions?/1 is plain data. Sobelow flags every binary_to_term on the
   # grounds that :safe still deserializes funs, which its own docs assert but which no longer holds;
-  # the size ceiling in decode_cursor/1 covers the memory side the option genuinely does not.
+  # what :safe genuinely does not bound is size, which is what the two guards above are for.
   # sobelow_skip ["Misc.BinToTerm"]
   defp safe_term(binary) do
     {:ok, :erlang.binary_to_term(binary, [:safe])}
