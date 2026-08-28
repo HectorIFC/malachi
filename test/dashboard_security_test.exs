@@ -1,6 +1,8 @@
 defmodule Malachi.DashboardSecurityTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Malachi.Auth.UserStore
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.Test.DashboardHelper
@@ -421,6 +423,73 @@ defmodule Malachi.DashboardSecurityTest do
       assert status_code(response) == 403
       refute String.downcase(response) =~ "set-cookie: malachi_token=;"
       :gen_tcp.close(socket)
+    end
+  end
+
+  # Every test here sets `:enable_tls` to the opposite of the cookie policy, and that opposition is the
+  # assertion: the flag used to be read from `:enable_tls`, which describes the broker listener on 4040,
+  # while the cookie is issued on 4041, which has no TLS path at all. Pinning them against each other is
+  # what proves the broker's setting no longer participates.
+  describe "session cookie Secure flag" do
+    test "is set when the dashboard is configured for it, with the broker's TLS off" do
+      response = with_cookie_policy(true, false, &login_response/0)
+
+      assert String.contains?(response, "Set-Cookie: malachi_token=")
+      assert String.contains?(response, "; Secure")
+    end
+
+    test "is absent when the dashboard is not configured for it, with the broker's TLS on" do
+      # The regression. Marking the cookie Secure over plain HTTP makes the browser refuse to store it,
+      # so the login form posts, the server answers 200, and nothing happens. Only localhost escapes it,
+      # because browsers treat that origin as trustworthy.
+      response = with_cookie_policy(false, true, &login_response/0)
+
+      assert String.contains?(response, "Set-Cookie: malachi_token=")
+      refute String.contains?(response, "; Secure")
+    end
+
+    test "the cookie-clearing redirect follows the same policy as the login cookie" do
+      secure = with_cookie_policy(true, false, &clearing_response/0)
+      plain = with_cookie_policy(false, true, &clearing_response/0)
+
+      # They share secure_cookie_flag/0 precisely so a policy change cannot make them disagree: a clear
+      # whose attributes do not match the cookie that was set is a clear the browser can ignore.
+      assert String.downcase(secure) =~ "set-cookie: malachi_token=;"
+      assert String.contains?(secure, "; Secure")
+      assert String.downcase(plain) =~ "set-cookie: malachi_token=;"
+      refute String.contains?(plain, "; Secure")
+    end
+
+    test "warns when a forwarded protocol says the cookie will be dropped" do
+      log =
+        capture_log(fn ->
+          with_cookie_policy(true, false, fn -> login_response(%{"X-Forwarded-Proto" => "http"}) end)
+        end)
+
+      assert log =~ "X-Forwarded-Proto"
+    end
+
+    test "warns when the request arrived over HTTPS but the cookie is not Secure" do
+      log =
+        capture_log(fn ->
+          with_cookie_policy(false, true, fn -> login_response(%{"X-Forwarded-Proto" => "https"}) end)
+        end)
+
+      assert log =~ "X-Forwarded-Proto"
+    end
+
+    test "stays quiet when the forwarded protocol agrees, and when there is none" do
+      # A proxy that does not forward the header is ordinary, so its absence cannot be a warning without
+      # becoming noise. Silence here is what keeps the two warnings above worth reading.
+      agreeing =
+        capture_log(fn ->
+          with_cookie_policy(true, false, fn -> login_response(%{"X-Forwarded-Proto" => "https"}) end)
+        end)
+
+      absent = capture_log(fn -> with_cookie_policy(true, false, &login_response/0) end)
+
+      refute agreeing =~ "X-Forwarded-Proto"
+      refute absent =~ "X-Forwarded-Proto"
     end
   end
 
@@ -1122,6 +1191,51 @@ defmodule Malachi.DashboardSecurityTest do
     {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
     :gen_tcp.close(socket)
 
+    response
+  end
+
+  # Applies a cookie policy for the duration of `fun` and restores both settings afterwards, including on
+  # a failing assertion: leaking either of these would silently change what the rest of the suite tests.
+  # `enable_tls` is passed explicitly rather than left alone because these tests exist to show it has no
+  # say, which only means something when it is set against the expected outcome.
+  defp with_cookie_policy(secure_cookie?, enable_tls?, fun) do
+    previous = {
+      Application.get_env(:malachi, :dashboard_secure_cookie),
+      Application.get_env(:malachi, :enable_tls)
+    }
+
+    Application.put_env(:malachi, :dashboard_secure_cookie, secure_cookie?)
+    Application.put_env(:malachi, :enable_tls, enable_tls?)
+
+    try do
+      fun.()
+    after
+      {previous_cookie, previous_tls} = previous
+      Application.put_env(:malachi, :dashboard_secure_cookie, previous_cookie)
+      Application.put_env(:malachi, :enable_tls, previous_tls)
+    end
+  end
+
+  # Both of these bind the socket with a match rather than a case: a connection that fails has to fail the
+  # test, not pass it quietly.
+  defp login_response(extra_headers \\ %{}) do
+    {:ok, socket} = DashboardHelper.connect()
+    body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
+
+    {:ok, response} =
+      DashboardHelper.request(socket, :POST, "/login", body: body, headers: extra_headers)
+
+    :gen_tcp.close(socket)
+    response
+  end
+
+  defp clearing_response do
+    {:ok, socket} = DashboardHelper.connect()
+
+    {:ok, response} =
+      DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachi_token=not_a_real_token"})
+
+    :gen_tcp.close(socket)
     response
   end
 

@@ -84,7 +84,8 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 | `MALACHI_TCP_PORT` | `4040` | TCP server port for clients |
 | `MALACHI_DASHBOARD_PORT` | `4041` | HTTP dashboard port |
 | `MALACHI_LOCALE` | `en_US` | Language (`en_US`, `pt_BR`) |
-| `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption |
+| `MALACHI_ENABLE_TLS` | `false` | Enable TLS encryption on the broker port. It says nothing about the dashboard, which has no TLS path. |
+| `MALACHI_DASHBOARD_SECURE_COOKIE` | `false` | Mark the dashboard session cookie `Secure`. Set it only behind a TLS-terminating proxy; see the ports note below. |
 | `MALACHI_ADMIN_PASS` | *(generated)* | Admin password; if unset, a random one is generated and logged on first boot. Without a persistent ra volume, this happens again on every restart. See Users and credentials. |
 | `MALACHI_LOG_DATA_DIR` | *(tmp)* | Directory for the durable log segments. Must be an absolute path on a volume; see Data Persistence. |
 | `MALACHI_RA_DATA_DIR` | *(tmp)* | Directory for the ra log (users, ACLs, lockouts). Must be an absolute path on a volume; see Data Persistence. |
@@ -139,6 +140,15 @@ TLS path at all, so 4041 serves plain HTTP whatever the certificates say, and it
 the login form and the session cookie. Publishing it on every interface would hand those out in
 cleartext next to a broker you had just taken the trouble to encrypt. Reach a remote dashboard
 through a reverse proxy that terminates TLS in front of it, not by widening this binding.
+
+When you do put a proxy in front, set `MALACHI_DASHBOARD_SECURE_COOKIE=true`. That is the one thing
+the server cannot work out for itself: it only ever sees a plain-HTTP connection from the proxy, so
+whether the browser reached it over HTTPS is a fact about your deployment. Leave it off for a
+dashboard reached directly, because a browser refuses to store a `Secure` cookie served over plain
+HTTP, and the resulting login answers 200 and simply does nothing. The boot log states which of the
+two is in effect. Note that this used to follow `MALACHI_ENABLE_TLS`, which describes the broker port
+and made every production build mark the cookie `Secure` over plain HTTP; if you run behind a proxy
+and login worked before without setting anything, that is the setting you now need.
 
 The mounted files are read at boot and validated then, so a certificate that is expired or unreadable
 stops the container rather than being discovered by a client later.

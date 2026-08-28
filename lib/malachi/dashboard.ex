@@ -32,6 +32,16 @@ defmodule Malachi.Dashboard do
     case :gen_tcp.listen(port, opts) do
       {:ok, socket} ->
         Logger.info(I18n.t(:dashboard_started, port: port))
+        # Stating the cookie policy at boot is part of the fix rather than decoration: the failure it
+        # guards against is a login that answers 200 and does nothing, which is invisible from the outside.
+        # The two states need different advice, not one sentence with a boolean in it, so they are two
+        # messages: one names the variable to set, the other names the assumption being made.
+        Logger.info(
+          if secure_cookie?(),
+            do: I18n.t(:dashboard_cookie_secure),
+            else: I18n.t(:dashboard_cookie_plain)
+        )
+
         send(self(), :accept)
         {:ok, %{socket: socket, port: port}}
 
@@ -341,14 +351,37 @@ defmodule Malachi.Dashboard do
     "HTTP/1.1 302 Found\r\nLocation: /login\r\nSet-Cookie: malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0#{secure_cookie_flag()}\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n"
   end
 
-  # "; Secure" only under TLS, so the cookie is not marked Secure on a plain-HTTP dev server (where the
-  # browser would then silently drop it). Shared by the login cookie and the cookie-clearing redirects, so a
-  # change to the Secure policy cannot make them disagree.
+  # "; Secure" comes from the dashboard's own setting, and from nothing else. This module listens with
+  # `:gen_tcp.listen` and has no TLS path, so the transport it serves is always plain HTTP; the only way it
+  # is reached over HTTPS is behind a proxy that terminates TLS, and that is a fact about the deployment
+  # which only the operator can state. It used to read `:enable_tls`, the broker's switch for another port,
+  # which marked the cookie Secure over plain HTTP: browsers refuse to store that, so login failed with a
+  # 200 and no error for anyone not on localhost. Shared by the login cookie and the cookie-clearing
+  # redirects, so a change to the policy cannot make them disagree.
   defp secure_cookie_flag do
-    if Application.get_env(:malachi, :enable_tls), do: "; Secure", else: ""
+    if secure_cookie?(), do: "; Secure", else: ""
   end
 
-  defp send_login_success(socket, token) do
+  defp secure_cookie?, do: Application.get_env(:malachi, :dashboard_secure_cookie, false)
+
+  # `X-Forwarded-Proto` is read here to REPORT, never to decide. The cookie policy comes from configuration
+  # and nothing a client sends can change it, which is why this needs no trusted-proxy gate. What it buys is
+  # the one diagnosis the server can otherwise not make: whether the policy matches how the browser actually
+  # reached the dashboard. Only a header that is present and disagrees is worth a line, in either direction.
+  # A proxy that forwards nothing is ordinary, so its absence has to stay silent or the warning becomes
+  # noise and stops being read.
+  defp warn_on_proto_mismatch(headers) do
+    case {secure_cookie?(), Map.get(headers, "x-forwarded-proto")} do
+      {_same, nil} -> :ok
+      {true, "https"} -> :ok
+      {false, proto} when proto != "https" -> :ok
+      {true, proto} -> Logger.warning(I18n.t(:dashboard_cookie_secure_over_plain, proto: proto))
+      {false, _https} -> Logger.warning(I18n.t(:dashboard_cookie_plain_over_https))
+    end
+  end
+
+  defp send_login_success(socket, token, headers) do
+    warn_on_proto_mismatch(headers)
     response_body = Jason.encode!(%{"s" => "ok", "token" => token})
 
     cookie_header =
@@ -468,7 +501,7 @@ defmodule Malachi.Dashboard do
                   %{}
                 )
 
-                send_login_success(socket, token)
+                send_login_success(socket, token, headers)
 
               {:error, _reason} ->
                 Metrics.increment_dashboard_auth_failed()

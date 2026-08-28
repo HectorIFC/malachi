@@ -129,6 +129,38 @@ defmodule Malachi.I18n do
       "pt_BR" => "🌐 Malachi Dashboard rodando em http://localhost:%{port}",
       "en_US" => "🌐 Malachi Dashboard running at http://localhost:%{port}"
     },
+    dashboard_cookie_plain: %{
+      "pt_BR" =>
+        "Cookie de sessão do dashboard sem Secure. O listener serve HTTP puro; defina " <>
+          "MALACHI_DASHBOARD_SECURE_COOKIE=true se um proxy terminar TLS na frente dele",
+      "en_US" =>
+        "Dashboard session cookie is not marked Secure. This listener serves plain HTTP; set " <>
+          "MALACHI_DASHBOARD_SECURE_COOKIE=true when a TLS-terminating proxy sits in front of it"
+    },
+    dashboard_cookie_secure: %{
+      "pt_BR" =>
+        "Cookie de sessão do dashboard marcado como Secure. Isso pressupõe um proxy terminando TLS na " <>
+          "frente: alcançado direto por HTTP, o navegador descarta o cookie e o login falha sem erro",
+      "en_US" =>
+        "Dashboard session cookie is marked Secure. That assumes a TLS-terminating proxy in front: " <>
+          "reached directly over HTTP, the browser drops the cookie and login fails with no error"
+    },
+    dashboard_cookie_secure_over_plain: %{
+      "pt_BR" =>
+        "Cookie Secure emitido, mas a requisição chegou com X-Forwarded-Proto: %{proto}. Se o navegador " <>
+          "alcança o dashboard por HTTP puro, ele descarta o cookie e o login falha sem erro",
+      "en_US" =>
+        "Issued a Secure cookie, but the request arrived with X-Forwarded-Proto: %{proto}. If the browser " <>
+          "reaches the dashboard over plain HTTP it drops the cookie and login fails with no error"
+    },
+    dashboard_cookie_plain_over_https: %{
+      "pt_BR" =>
+        "Requisição chegou com X-Forwarded-Proto: https, mas o cookie de sessão não está marcado como " <>
+          "Secure. Defina MALACHI_DASHBOARD_SECURE_COOKIE=true para o navegador não o enviar por HTTP",
+      "en_US" =>
+        "Request arrived with X-Forwarded-Proto: https, but the session cookie is not marked Secure. Set " <>
+          "MALACHI_DASHBOARD_SECURE_COOKIE=true so the browser will not send it over plain HTTP"
+    },
     rate_limiter_started: %{
       "pt_BR" => "✅ RateLimiter iniciado",
       "en_US" => "✅ RateLimiter started"
