@@ -41,6 +41,7 @@ defmodule Malachi.Dashboard do
             do: I18n.t(:dashboard_cookie_secure),
             else: I18n.t(:dashboard_cookie_plain)
         )
+
         send(self(), :accept)
         {:ok, %{socket: socket, port: port}}
 

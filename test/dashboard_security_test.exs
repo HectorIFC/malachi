@@ -1233,9 +1233,7 @@ defmodule Malachi.DashboardSecurityTest do
     {:ok, socket} = DashboardHelper.connect()
 
     {:ok, response} =
-      DashboardHelper.request(socket, :GET, "/",
-        headers: %{"Cookie" => "malachi_token=not_a_real_token"}
-      )
+      DashboardHelper.request(socket, :GET, "/", headers: %{"Cookie" => "malachi_token=not_a_real_token"})
 
     :gen_tcp.close(socket)
     response

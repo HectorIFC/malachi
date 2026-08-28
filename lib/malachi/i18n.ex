@@ -131,7 +131,7 @@ defmodule Malachi.I18n do
     },
     dashboard_cookie_plain: %{
       "pt_BR" =>
-        "Cookie de sessao do dashboard sem Secure. O listener serve HTTP puro; defina " <>
+        "Cookie de sessão do dashboard sem Secure. O listener serve HTTP puro; defina " <>
           "MALACHI_DASHBOARD_SECURE_COOKIE=true se um proxy terminar TLS na frente dele",
       "en_US" =>
         "Dashboard session cookie is not marked Secure. This listener serves plain HTTP; set " <>
@@ -139,24 +139,24 @@ defmodule Malachi.I18n do
     },
     dashboard_cookie_secure: %{
       "pt_BR" =>
-        "Cookie de sessao do dashboard marcado como Secure. Isso pressupoe um proxy terminando TLS na " <>
-          "frente: alcancado direto por HTTP, o navegador descarta o cookie e o login falha sem erro",
+        "Cookie de sessão do dashboard marcado como Secure. Isso pressupõe um proxy terminando TLS na " <>
+          "frente: alcançado direto por HTTP, o navegador descarta o cookie e o login falha sem erro",
       "en_US" =>
         "Dashboard session cookie is marked Secure. That assumes a TLS-terminating proxy in front: " <>
           "reached directly over HTTP, the browser drops the cookie and login fails with no error"
     },
     dashboard_cookie_secure_over_plain: %{
       "pt_BR" =>
-        "Cookie Secure emitido, mas a requisicao chegou com X-Forwarded-Proto: %{proto}. Se o navegador " <>
-          "alcanca o dashboard por HTTP puro, ele descarta o cookie e o login falha sem erro",
+        "Cookie Secure emitido, mas a requisição chegou com X-Forwarded-Proto: %{proto}. Se o navegador " <>
+          "alcança o dashboard por HTTP puro, ele descarta o cookie e o login falha sem erro",
       "en_US" =>
         "Issued a Secure cookie, but the request arrived with X-Forwarded-Proto: %{proto}. If the browser " <>
           "reaches the dashboard over plain HTTP it drops the cookie and login fails with no error"
     },
     dashboard_cookie_plain_over_https: %{
       "pt_BR" =>
-        "Requisicao chegou com X-Forwarded-Proto: https, mas o cookie de sessao nao esta marcado como " <>
-          "Secure. Defina MALACHI_DASHBOARD_SECURE_COOKIE=true para o navegador nao o enviar por HTTP",
+        "Requisição chegou com X-Forwarded-Proto: https, mas o cookie de sessão não está marcado como " <>
+          "Secure. Defina MALACHI_DASHBOARD_SECURE_COOKIE=true para o navegador não o enviar por HTTP",
       "en_US" =>
         "Request arrived with X-Forwarded-Proto: https, but the session cookie is not marked Secure. Set " <>
           "MALACHI_DASHBOARD_SECURE_COOKIE=true so the browser will not send it over plain HTTP"
