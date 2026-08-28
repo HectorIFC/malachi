@@ -334,6 +334,12 @@ config :malachi,
      end),
   dashboard_auth_rate_limit: parse_int.(System.get_env("MALACHI_DASHBOARD_AUTH_RATE_LIMIT"), 10),
   dashboard_auth_rate_window_ms: parse_int.(System.get_env("MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS"), 60_000),
+  # Whether the session cookie is marked Secure. Off by default because `Malachi.Dashboard` listens with
+  # `:gen_tcp.listen` and has no TLS path, so the transport it actually serves is plain HTTP, and a browser
+  # refuses to store a Secure cookie from a non-trustworthy origin. Turn it on when a TLS-terminating proxy
+  # sits in front, which is the only shape where the dashboard is reached over HTTPS. This deliberately does
+  # not read `enable_tls`: that switch describes the broker listener on another port.
+  dashboard_secure_cookie: System.get_env("MALACHI_DASHBOARD_SECURE_COOKIE") == "true",
   # CORS configuration
   dashboard_cors_enabled: System.get_env("MALACHI_DASHBOARD_CORS_ENABLED") == "true",
   dashboard_cors_origins:
