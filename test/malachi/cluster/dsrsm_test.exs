@@ -298,6 +298,17 @@ defmodule Malachi.Cluster.DSRSMTest do
                DSRSM.command(dsrsm, "events", {:merge_ranges, orders_root, events_root})
     end
 
+    test "a merge is rejected when only the second range belongs to another topic", %{
+      dsrsm: dsrsm,
+      events_root: events_root,
+      orders_root: orders_root
+    } do
+      # Routed by "events", first id is events' range (matches), second is orders'. Both ids must belong to
+      # the routed topic; checking only the first would let this merge onto orders' range.
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:merge_ranges, events_root, orders_root})
+    end
+
     test "a segment command routed by the wrong topic is rejected", %{dsrsm: dsrsm, orders_root: orders_root} do
       # Production segment ids are {range_id, seq}; this one belongs to orders. Seal it while routed by
       # "events" and the guard reads the topic out of the id and rejects.

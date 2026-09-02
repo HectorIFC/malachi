@@ -24,9 +24,9 @@ defmodule Malachi.Cluster.DSRSM do
   only unique within one), so a command naming topic A but targeting a range of co-located topic B would
   otherwise act on B's range. `command/3` now rejects that pair with `{:error, :range_topic_mismatch}`,
   comparing `topic_name` against the topic the command's range/segment id embeds
-  (`Malachi.Metadata.routed_range_topic/1`, from the `{topic, seq}` range id or the `{range_id, seq}`
-  segment id). Only range/segment commands are checked: a command that names its topic directly cannot be
-  aimed at a co-located topic's range. The broker only ever derives `topic_name` from the command, so this
+  (`Malachi.Metadata.routed_to_foreign_topic?/2`, over the `{topic, seq}` range id or the `{range_id, seq}`
+  segment id, and both ids of a merge). Only range/segment commands are checked: a command that names its
+  topic directly cannot be aimed at a co-located topic's range. The broker only ever derives `topic_name` from the command, so this
   is defense in depth against a future or direct caller, not a bug the broker can hit today.
 
   > When range-id sharding lands, range/segment operations route by range id and the range's own vnode is
@@ -134,14 +134,12 @@ defmodule Malachi.Cluster.DSRSM do
   """
   @spec command(t(), Metadata.topic_name(), Metadata.command()) :: {t(), term()}
   def command(%__MODULE__{} = dsrsm, topic_name, command) do
-    case Metadata.routed_range_topic(command) do
-      target when is_binary(target) and target != topic_name ->
-        # The command targets a range/segment of `target` but was routed by `topic_name`. Applying it here
-        # would act on a co-located topic's range. Reject it rather than trust the caller to pair them.
-        {dsrsm, {:error, :range_topic_mismatch}}
-
-      _matched_or_topicless ->
-        update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
+    if Metadata.routed_to_foreign_topic?(command, topic_name) do
+      # A range/segment id in the command belongs to a topic other than `topic_name`. Applying it here
+      # would act on a co-located topic's range. Reject it rather than trust the caller to pair them.
+      {dsrsm, {:error, :range_topic_mismatch}}
+    else
+      update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
     end
   end
 

@@ -168,33 +168,46 @@ defmodule Malachi.Metadata do
   def command_target_topic({:delete_topic, name}), do: name
   def command_target_topic({:set_topic_policy, name, _policy}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
-  def command_target_topic(command), do: routed_range_topic(command)
+  def command_target_topic(command), do: List.first(routed_range_topics(command))
 
   @doc """
-  The topic a range/segment command targets **through its id**, or `nil` for any other command.
+  The topics a range/segment command's ids belong to (structurally), or `[]` for any other command.
 
   This is the narrower half of `command_target_topic/1`, and the one the routing guard uses: only a
   command carrying a `range_id`/`segment_id` can be pointed at a co-located topic's range, so only these
   can mismatch the topic they were routed by (`:range_topic_mismatch`, in `Malachi.Cluster.DSRSM`). A
   command that names its topic directly (create/seal/delete/commit) targets exactly that topic and is not
-  guarded.
+  guarded. `merge_ranges` carries **two** ids, so it yields two topics and both must match where it was
+  routed. An id of an unrecognized shape drops out (no topic to check) rather than raising.
 
   Distinct from the private `command_topic/2`, which resolves a range's **stored** topic from the state
   for the migration fence: that one needs the range to exist; this reads the id itself, catching a
   mismatch before any lookup.
   """
-  @spec routed_range_topic(command()) :: topic_name() | nil
-  def routed_range_topic({:split_range, range_id}), do: range_id_topic(range_id)
-  def routed_range_topic({:merge_ranges, range_id_a, _range_id_b}), do: range_id_topic(range_id_a)
-  def routed_range_topic({:register_segment, range_id, _seg, _replicas, _off}), do: range_id_topic(range_id)
-  def routed_range_topic({:seal_segment, segment_id, _len, _bytes, _at}), do: segment_id_topic(segment_id)
-  def routed_range_topic({:delete_segment, segment_id}), do: segment_id_topic(segment_id)
-  def routed_range_topic({:set_segment_replicas, segment_id, _replicas}), do: segment_id_topic(segment_id)
-  def routed_range_topic(_not_range_scoped), do: nil
+  @spec routed_range_topics(command()) :: [topic_name()]
+  def routed_range_topics({:split_range, range_id}), do: topics([range_id_topic(range_id)])
+  def routed_range_topics({:merge_ranges, a, b}), do: topics([range_id_topic(a), range_id_topic(b)])
+  def routed_range_topics({:register_segment, range_id, _seg, _replicas, _off}), do: topics([range_id_topic(range_id)])
+  def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _at}), do: topics([segment_id_topic(segment_id)])
+  def routed_range_topics({:delete_segment, segment_id}), do: topics([segment_id_topic(segment_id)])
+  def routed_range_topics({:set_segment_replicas, segment_id, _replicas}), do: topics([segment_id_topic(segment_id)])
+  def routed_range_topics(_not_range_scoped), do: []
+
+  defp topics(list), do: Enum.reject(list, &is_nil/1)
+
+  @doc """
+  Whether a command carries a range/segment id belonging to a topic other than `topic_name`, the routing
+  layer's mismatch check. True when any recognized id's topic differs; false for a command that names its
+  topic directly or whose ids all match. Shared by `Malachi.Cluster.DSRSM` and its replicated counterpart.
+  """
+  @spec routed_to_foreign_topic?(command(), topic_name()) :: boolean()
+  def routed_to_foreign_topic?(command, topic_name) do
+    Enum.any?(routed_range_topics(command), &(&1 != topic_name))
+  end
 
   # A range id is `{topic, seq}` and a segment id is `{range_id, seq}`. Match those shapes rather than
   # `elem/2` so an id of any other shape yields `nil` (no topic to check) instead of raising: the guard
-  # runs on every command, and it must never crash on an id it does not recognise.
+  # runs on every command, and it must never crash on an id it does not recognize.
   defp range_id_topic({topic, _seq}), do: topic
   defp range_id_topic(_), do: nil
   defp segment_id_topic({{topic, _range_seq}, _seg_seq}), do: topic
