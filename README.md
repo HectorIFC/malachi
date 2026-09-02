@@ -274,7 +274,7 @@ config :opentelemetry_exporter,
 
 ## 🔐 Authentication
 
-Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node and survives restarts.
+Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node. They survive a restart only when the `ra` log is on a persistent volume: point `MALACHI_RA_DATA_DIR` at one, otherwise it defaults to a temp directory and the users are lost whenever that directory does not survive (a recreated container or a reboot).
 
 
 ### Default Users (development)
@@ -292,7 +292,7 @@ In **dev/test** these convenience users are seeded:
 
 ### First boot in production
 
-No default credentials ship. On first boot, if you have not set `MALACHI_ADMIN_PASS`, Malachi **generates a random admin password and logs it once**: save it from the logs (it cannot be recovered). Provide your own with `MALACHI_ADMIN_PASS` (and `MALACHI_PRODUCER_PASS` / `MALACHI_CONSUMER_PASS` / `MALACHI_APP_PASS` for the other service accounts), or set `MALACHI_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
+No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi **generates a random admin password and logs it**: save it from the logs (it cannot be recovered). This is a one-time event only when `MALACHI_RA_DATA_DIR` points at a persistent volume; on the temp default the store is ephemeral, so a new password is generated and logged whenever that directory does not survive (a recreated container or a reboot). Provide your own with `MALACHI_ADMIN_PASS` (and `MALACHI_PRODUCER_PASS` / `MALACHI_CONSUMER_PASS` / `MALACHI_APP_PASS` for the other service accounts), or set `MALACHI_DISABLE_DEFAULT_USERS=true` to seed nothing and manage users yourself.
 
 ### Environment Variables
 
