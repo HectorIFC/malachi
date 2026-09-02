@@ -157,6 +157,50 @@ defmodule Malachi.Metadata do
   def new, do: %__MODULE__{}
 
   @doc """
+  The topic a command belongs to, for **routing** it to the owning vnode, or `nil` if it names none.
+
+  Structural, no state: a topic command names its topic; a `range_id` is `{topic, seq}` and a
+  `segment_id` is `{range_id, seq}`, so the topic is `elem/2` away. The broker uses this to dispatch.
+  """
+  @spec command_target_topic(command()) :: topic_name() | nil
+  def command_target_topic({:create_topic, name, _bits}), do: name
+  def command_target_topic({:seal_topic, name}), do: name
+  def command_target_topic({:delete_topic, name}), do: name
+  def command_target_topic({:set_topic_policy, name, _policy}), do: name
+  def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
+  def command_target_topic(command), do: routed_range_topic(command)
+
+  @doc """
+  The topic a range/segment command targets **through its id**, or `nil` for any other command.
+
+  This is the narrower half of `command_target_topic/1`, and the one the routing guard uses: only a
+  command carrying a `range_id`/`segment_id` can be pointed at a co-located topic's range, so only these
+  can mismatch the topic they were routed by (`:range_topic_mismatch`, in `Malachi.Cluster.DSRSM`). A
+  command that names its topic directly (create/seal/delete/commit) targets exactly that topic and is not
+  guarded.
+
+  Distinct from the private `command_topic/2`, which resolves a range's **stored** topic from the state
+  for the migration fence: that one needs the range to exist; this reads the id itself, catching a
+  mismatch before any lookup.
+  """
+  @spec routed_range_topic(command()) :: topic_name() | nil
+  def routed_range_topic({:split_range, range_id}), do: range_id_topic(range_id)
+  def routed_range_topic({:merge_ranges, range_id_a, _range_id_b}), do: range_id_topic(range_id_a)
+  def routed_range_topic({:register_segment, range_id, _seg, _replicas, _off}), do: range_id_topic(range_id)
+  def routed_range_topic({:seal_segment, segment_id, _len, _bytes, _at}), do: segment_id_topic(segment_id)
+  def routed_range_topic({:delete_segment, segment_id}), do: segment_id_topic(segment_id)
+  def routed_range_topic({:set_segment_replicas, segment_id, _replicas}), do: segment_id_topic(segment_id)
+  def routed_range_topic(_not_range_scoped), do: nil
+
+  # A range id is `{topic, seq}` and a segment id is `{range_id, seq}`. Match those shapes rather than
+  # `elem/2` so an id of any other shape yields `nil` (no topic to check) instead of raising: the guard
+  # runs on every command, and it must never crash on an id it does not recognise.
+  defp range_id_topic({topic, _seq}), do: topic
+  defp range_id_topic(_), do: nil
+  defp segment_id_topic({{topic, _range_seq}, _seg_seq}), do: topic
+  defp segment_id_topic(_), do: nil
+
+  @doc """
   Applies a command, returning `{new_state, reply}`. Deterministic: the same command on the
   same state always yields the same result on every replica. On failure the state is
   returned unchanged with an `{:error, reason}` reply.

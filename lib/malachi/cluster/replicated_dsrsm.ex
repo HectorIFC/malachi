@@ -148,12 +148,20 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   """
   @spec command(t(), Metadata.topic_name(), Metadata.command()) :: term()
   def command(%__MODULE__{} = state, topic_name, command) do
-    with_vnode(state, topic_name, fn server_id ->
-      case MetadataServer.command(server_id, command) do
-        {:ok, reply} -> reply
-        {:error, reason} -> {:error, {:raft, reason}}
-      end
-    end)
+    case Metadata.routed_range_topic(command) do
+      target when is_binary(target) and target != topic_name ->
+        # Rejected here, before the Raft submit, so a command that targets another topic's range never
+        # enters the log. Same guard as `Malachi.Cluster.DSRSM.command/3`, at the replicated boundary.
+        {:error, :range_topic_mismatch}
+
+      _matched_or_topicless ->
+        with_vnode(state, topic_name, fn server_id ->
+          case MetadataServer.command(server_id, command) do
+            {:ok, reply} -> reply
+            {:error, reason} -> {:error, {:raft, reason}}
+          end
+        end)
+    end
   end
 
   @doc """
