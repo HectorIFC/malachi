@@ -47,13 +47,17 @@ flowchart TD
 > others never heard of it. The `ra` quorum is one shared address book that every node agrees on and can
 > read from its own local copy.
 
-**Consequence:** users, ACLs, and lockouts are consistent across the cluster and survive restart and
-failover. Brute-force protection is cluster-wide (attempts on different nodes count against one limit).
+**Consequence:** users, ACLs, and lockouts are consistent across the cluster and survive failover. They
+survive a restart only when the `ra` log is durable: set `MALACHI_RA_DATA_DIR` to a persistent volume,
+because the default is a temp directory that is lost on restart. Brute-force protection is cluster-wide
+(attempts on different nodes count against one limit).
 
 ### No hardcoded production credentials
 
-The base configuration seeds no users. In production the node generates a random admin password on first
-boot and logs it once (the Redpanda/Elasticsearch pattern), unless one is supplied through the environment.
+The base configuration seeds no users. In production the node generates a random admin password and logs
+it (the Redpanda/Elasticsearch pattern), unless one is supplied through the environment. It is a one-time
+event only with a persistent `MALACHI_RA_DATA_DIR`; on the temp default the admin is regenerated and
+re-logged on every restart.
 This is cluster-safe: each node generates one and writes it through consensus, and `ra` deduplicates on
 `:user_exists`, so exactly one password wins and is logged. Convenience defaults for producer, consumer,
 and app exist only in `config/dev.exs` and `config/test.exs`, never on the production path.

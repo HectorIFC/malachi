@@ -66,6 +66,11 @@ defmodule Malachi.Auth.ConfigValidator do
       validate_admin_exists_warn()
     end
 
+    # Runs in every env because it is a no-op unless generation is on, and generation is only ever on
+    # outside dev/test. A warning rather than a raise: an ephemeral store is exactly what you want in
+    # development, and even in production it is a deliberate posture, just a risky one to hit by accident.
+    validate_generated_admin_persistence_warn()
+
     :ok
   end
 
@@ -196,6 +201,20 @@ defmodule Malachi.Auth.ConfigValidator do
 
     unless has_admin or generate_admin do
       Logger.warning(I18n.t(:warning_no_admin_dev))
+    end
+  end
+
+  # A generated admin lives only in the ra store. With MALACHI_RA_DATA_DIR unset, `:ra_data_dir` is nil
+  # here (config/runtime.exs sets it only when the env var is present) and `Malachi.Application` falls back
+  # to a temp directory, so the store is ephemeral and a new admin password is generated and logged on
+  # every restart. Warn when both hold. Deployments that mount a volume set the dir, so this stays quiet
+  # for them.
+  defp validate_generated_admin_persistence_warn do
+    generate_admin = Application.get_env(:malachi, :generate_admin, false)
+    ra_data_dir = Application.get_env(:malachi, :ra_data_dir)
+
+    if generate_admin and is_nil(ra_data_dir) do
+      Logger.warning(I18n.t(:warning_generated_admin_ephemeral))
     end
   end
 
