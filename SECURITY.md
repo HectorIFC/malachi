@@ -127,7 +127,7 @@ export MALACHI_GC_THRESHOLD_MB=500
 ## Known Security Limitations
 
 - **Inter-node authentication:** Nodes trust each other through the Erlang distribution cookie (`$RELEASE_COOKIE`). For authenticated, encrypted node-to-node traffic, enable mutual-TLS distribution (see `rel/dist_tls.conf.example` and `MALACHI_DIST_TLS_OPTFILE`) and keep the cookie secret.
-- **User storage:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. They persist across restarts only when `MALACHI_RA_DATA_DIR` points at a durable volume; the default is a temp directory that is lost on restart. Set it to a persistent path and secure that directory with restricted file permissions (e.g., `chmod 700`).
+- **User storage:** User credentials (Argon2 password hashes) are stored in the Raft (`ra`) log on disk. They persist across restarts only when `MALACHI_RA_DATA_DIR` points at a durable volume; the default is a temp directory that is lost when it does not survive a restart (a recreated container or a reboot). Set it to a persistent path and secure that directory with restricted file permissions (e.g., `chmod 700`).
 - **No at-rest encryption:** Records are protected in transit by TLS, but the on-disk log is stored in plaintext (the record CRC guards integrity, not confidentiality). Add application-level encryption if you need encryption at rest.
 
 ## Container Image Vulnerabilities

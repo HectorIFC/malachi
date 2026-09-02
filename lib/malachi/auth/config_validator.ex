@@ -206,9 +206,9 @@ defmodule Malachi.Auth.ConfigValidator do
 
   # A generated admin lives only in the ra store. With MALACHI_RA_DATA_DIR unset, `:ra_data_dir` is nil
   # here (config/runtime.exs sets it only when the env var is present) and `Malachi.Application` falls back
-  # to a temp directory, so the store is ephemeral and a new admin password is generated and logged on
-  # every restart. Warn when both hold. Deployments that mount a volume set the dir, so this stays quiet
-  # for them.
+  # to a temp directory. That directory does not survive a recreated container or a reboot, and whenever it
+  # is lost a fresh admin password is generated and logged; a plain restart that keeps the temp dir keeps
+  # the admin. Warn when both hold. Deployments that mount a volume set the dir, so this stays quiet.
   defp validate_generated_admin_persistence_warn do
     generate_admin = Application.get_env(:malachi, :generate_admin, false)
     ra_data_dir = Application.get_env(:malachi, :ra_data_dir)

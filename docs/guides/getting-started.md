@@ -76,7 +76,8 @@ Each client authenticates first. In development the seeded users are `producer` 
 > Those seeded users exist in `dev`/`test` only. Production refuses to boot with them: you either supply
 > passwords explicitly or let the node generate a random admin password and print it in the logs. That is
 > a one-time event only when `MALACHI_RA_DATA_DIR` is a persistent volume; on the temp default it repeats
-> on every restart. See the *Authentication* section of the [README](../../README.md).
+> whenever the temp directory does not survive (a recreated container or a reboot). See the
+> *Authentication* section of the [README](../../README.md).
 
 ## The dashboard
 
