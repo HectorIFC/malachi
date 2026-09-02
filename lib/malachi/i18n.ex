@@ -304,6 +304,18 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️  Modo desenvolvimento: Nenhum usuário admin configurado",
       "en_US" => "⚠️  Development mode: No admin user configured"
     },
+    warning_generated_admin_ephemeral: %{
+      "pt_BR" =>
+        "⚠️  Admin gerado sobre um store efêmero: MALACHI_RA_DATA_DIR não está setado, então o log do " <>
+          "ra fica em um diretório temporário que não sobrevive a um container recriado ou a um reboot. " <>
+          "Quando ele se perde, o admin gerado vai junto e uma senha nova é gerada e logada. Aponte " <>
+          "MALACHI_RA_DATA_DIR para um volume persistente.",
+      "en_US" =>
+        "⚠️  Generated admin on an ephemeral store: MALACHI_RA_DATA_DIR is unset, so the ra log lives in " <>
+          "a temp directory that does not survive a recreated container or a reboot. When it is lost the " <>
+          "generated admin goes with it and a new password is generated and logged. Point " <>
+          "MALACHI_RA_DATA_DIR at a persistent volume."
+    },
     # Validator translations
     # Atom monitor translations
     atom_monitor_started: %{
