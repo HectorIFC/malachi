@@ -117,9 +117,14 @@ class MalachiClient {
     } catch (err) {
       // A frame past the length cap, or an otherwise malformed one, is unrecoverable mid-stream: the buffer
       // can no longer be resynced. Drop the connection instead of buffering a hostile server, and free the
-      // bytes held so far. `destroy` fires 'close' -> _onClose -> _failAll, which is idempotent.
+      // bytes held so far. Clear the socket reference first so a request issued after this rejects as
+      // 'not connected' (the guard in `_request`) rather than writing to a destroyed socket; leaving
+      // `closed` false keeps the client reconnectable. `destroy` fires 'close' -> _onClose -> _failAll,
+      // which is idempotent.
       this.buffer = Buffer.alloc(0);
-      if (this.socket) this.socket.destroy();
+      const socket = this.socket;
+      this.socket = null;
+      if (socket) socket.destroy();
       this._failAll(new MalachiError(err.message));
     }
   }
