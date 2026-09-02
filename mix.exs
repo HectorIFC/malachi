@@ -149,7 +149,11 @@ defmodule Malachi.MixProject do
       # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
       # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
       # full-page navigation (an in-site `.html` would be hijacked and break, since the page has no swup root).
-      "All results, one page": [url: "benchmarks/"]
+      "All results, one page": [url: "benchmarks/"],
+      # External link to the published container image. An absolute URL renders as a plain sidebar link
+      # (no swup interception, since it leaves the site), so an operator reading the docs can reach the
+      # image without hunting for it in the README.
+      "Docker Hub": [url: "https://hub.docker.com/r/hectorcardoso/malachi"]
     ]
   end
 

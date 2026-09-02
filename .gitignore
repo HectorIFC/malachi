@@ -33,7 +33,7 @@ malachi-*.tar
 /priv/cert/*.pem
 # Inter-node TLS dev certs (CA + node key/cert + optfile), never commit private keys
 /priv/dist_cert/
-
+/priv/
 # Environment files
 .env
 .env.local

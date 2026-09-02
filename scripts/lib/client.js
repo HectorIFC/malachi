@@ -109,9 +109,18 @@ class MalachiClient {
   _onData(chunk) {
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
     let frame;
-    while ((frame = wire.decodeFrame(this.buffer)) !== null) {
-      this.buffer = frame.rest;
-      this._dispatch(wire.decodeResponse(frame.body));
+    try {
+      while ((frame = wire.decodeFrame(this.buffer)) !== null) {
+        this.buffer = frame.rest;
+        this._dispatch(wire.decodeResponse(frame.body));
+      }
+    } catch (err) {
+      // A frame past the length cap, or an otherwise malformed one, is unrecoverable mid-stream: the buffer
+      // can no longer be resynced. Drop the connection instead of buffering a hostile server, and free the
+      // bytes held so far. `destroy` fires 'close' -> _onClose -> _failAll, which is idempotent.
+      this.buffer = Buffer.alloc(0);
+      if (this.socket) this.socket.destroy();
+      this._failAll(new MalachiError(err.message));
     }
   }
 

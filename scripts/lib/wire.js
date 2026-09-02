@@ -105,10 +105,18 @@ function encodeFrame(body) {
   return Buffer.concat([u32(body.length), body]);
 }
 
-// Peels one frame off a buffer: { body, rest } or null if the whole frame is not present yet.
+// The largest frame this client will accept from the server, mirroring the server's own max_frame_size
+// (config/config.exs). Without a cap, a hostile or MITM server can declare a 4 GiB length and dribble
+// bytes, and the client's buffer grows toward it until the process runs out of memory. The server bounds
+// the client's input the same way (frame_too_large in lib/malachi/wire.ex); this bounds the server's.
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+// Peels one frame off a buffer: { body, rest }, null if the whole frame is not present yet, or throws on a
+// declared length past the cap (which no honest server would send).
 function decodeFrame(buffer) {
   if (buffer.length < 4) return null;
   const len = buffer.readUInt32BE(0);
+  if (len > MAX_FRAME_BYTES) throw new Error(`frame_too_large: ${len} > ${MAX_FRAME_BYTES}`);
   if (buffer.length < 4 + len) return null;
   return { body: buffer.subarray(4, 4 + len), rest: buffer.subarray(4 + len) };
 }
@@ -271,6 +279,7 @@ module.exports = {
   API,
   OK,
   ERROR,
+  MAX_FRAME_BYTES,
   encodeFrame,
   decodeFrame,
   encodeRequest,
@@ -293,3 +302,28 @@ module.exports = {
   encodeListAclsReq,
   decodeListAclsResp,
 };
+
+// Self-test: `node scripts/lib/wire.js`. No server needed. Guards the frame-length cap against
+// regression, the same way loadtest.js self-tests its histogram.
+if (require.main === module) {
+  const assert = require('assert');
+
+  // A declared length past the cap throws before any buffering, so the client cannot be driven to OOM by
+  // a server-controlled length. The buffer here is tiny; the point is the length field, not the payload.
+  const oversized = Buffer.alloc(4);
+  oversized.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
+  assert.throws(() => decodeFrame(oversized), /frame_too_large/, 'oversized frame must be rejected');
+
+  // A length exactly at the cap, still incomplete, returns null (wait for more) rather than throwing.
+  const atCap = Buffer.alloc(4);
+  atCap.writeUInt32BE(MAX_FRAME_BYTES, 0);
+  assert.strictEqual(decodeFrame(atCap), null, 'a frame at the cap is accepted (pending more bytes)');
+
+  // A normal frame still round-trips.
+  const body = Buffer.from('hello');
+  const framed = encodeFrame(body);
+  const decoded = decodeFrame(framed);
+  assert.ok(decoded && decoded.body.equals(body), 'a normal frame decodes unchanged');
+
+  console.log('wire.js self-test passed');
+}

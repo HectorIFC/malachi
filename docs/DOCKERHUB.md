@@ -12,6 +12,10 @@ control plane is replicated by quorum (Raft, via `ra`).
 [Source](https://github.com/HectorIFC/malachi) &middot;
 [Benchmarks and chaos results](https://hectorifc.github.io/malachi/loadtest-node-results.html)
 
+## Introduction
+
+[![Malachi Introduction](https://img.youtube.com/vi/u1a_Kxs1yeE/0.jpg)](https://youtu.be/u1a_Kxs1yeE)
+
 ---
 
 ## Quick start
