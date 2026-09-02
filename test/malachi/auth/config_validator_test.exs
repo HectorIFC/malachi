@@ -16,6 +16,7 @@ defmodule Malachi.Auth.ConfigValidatorTest do
 
       on_exit(fn ->
         {ga, dir} = original
+
         restore = fn key, value ->
           if is_nil(value), do: Application.delete_env(:malachi, key), else: Application.put_env(:malachi, key, value)
         end
