@@ -158,6 +158,39 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       assert body =~ "**25,889 records per second**"
       assert body =~ "| Recorded | without metadata |"
     end
+
+    test "the ceiling attribution renders: peak connections, server CPU and the lower-bound note", context do
+      publish(
+        context,
+        "loadtest-node.json",
+        loadtest_result(%{
+          "connections" => 128,
+          "server_cpu_cores" => 2.91,
+          "server_cpu_budget" => 3,
+          "peak_at_ladder_limit" => true
+        })
+      )
+
+      run(context)
+      body = page(context, "loadtest-node-results.md")
+
+      assert body =~ "peaking at 128 connections (server at 2.91 of 3 cores)"
+      assert body =~ "| Peak connections | 128 |"
+      assert body =~ "| Server CPU (cores) | 2.91 of 3 |"
+      assert body =~ "This is a lower bound"
+    end
+
+    test "server CPU is dropped when a run did not sample it, and a non-limited peak is not called a lower bound",
+         context do
+      # macOS smoke and any run without /proc leave these unset; a blank row would read as measured zero,
+      # and the lower-bound caveat must appear only for a peak that actually hit the ladder limit.
+      publish(context, "loadtest-node.json", loadtest_result(%{"peak_at_ladder_limit" => false}))
+      run(context)
+
+      body = page(context, "loadtest-node-results.md")
+      refute body =~ "Server CPU (cores)"
+      refute body =~ "lower bound"
+    end
   end
 
   describe "the chaos page" do

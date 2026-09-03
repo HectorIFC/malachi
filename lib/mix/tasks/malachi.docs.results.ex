@@ -146,8 +146,18 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
   defp loadtest_headline(result) do
     "**#{number(result["records_per_s"])} records per second** at saturation over " <>
       "#{result["duration_s"]}s with #{result["errors"]} errors, scenario `#{result["scenario"]}`, " <>
-      "peaking at #{result["connections"]} connections#{server_cpu_phrase(result)}."
+      "peaking at #{result["connections"]} connections#{server_cpu_phrase(result)}." <>
+      ladder_limit_note(result)
   end
+
+  # When the sweep peaked at its top rung the knee may lie beyond it, so the figure is a lower bound on
+  # the ceiling rather than the ceiling. Only added when the run recorded that it hit the limit.
+  defp ladder_limit_note(%{"peak_at_ladder_limit" => true}),
+    do:
+      " This is a lower bound: the connection sweep peaked at its top rung, so the true ceiling may be " <>
+        "higher."
+
+  defp ladder_limit_note(_), do: ""
 
   # Only when a run recorded it. The generator is pinned to one core and the server to the rest, so this
   # says whether the server's cores saturated (its ceiling was found) or the single generator core capped

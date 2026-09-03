@@ -36,11 +36,18 @@ RSIZE="${RSIZE:-256}"
 export MALACHI_USER="${MALACHI_USER:-admin}"
 export MALACHI_PASS="${MALACHI_PASS:-admin123}"
 export MALACHI_PORT="${MALACHI_PORT:-4040}"
+# The Node generator reads MALACHI_HOST from the environment; force it to the server this script boots so
+# an inherited value can never aim the load at another server while CPU sampling targets our idle local
+# one. (The Elixir generator takes --host instead, passed explicitly below.)
+export MALACHI_HOST="127.0.0.1"
 # Admission limits gate connections/auth, not the produce hot path; leaving them on would cap the sweep.
 export MALACHI_RATE_LIMIT_ENABLED="${MALACHI_RATE_LIMIT_ENABLED:-false}"
 export MALACHI_CONNECTION_LIMIT_ENABLED="${MALACHI_CONNECTION_LIMIT_ENABLED:-false}"
 
 OUT="${OUT:-$ROOT/loadtest-$GENERATOR.json}"
+# Create OUT's directory up front: without -e a failed final write would otherwise still exit 0 and
+# report a peak the run never persisted.
+mkdir -p "$(dirname "$OUT")"
 RUN_DIR="${RUN_DIR:-${RUNNER_TEMP:-/tmp}/ceiling-$GENERATOR}"
 mkdir -p "$RUN_DIR"
 SERVER_LOG="$RUN_DIR/server.log"
@@ -75,6 +82,10 @@ cpu_ticks() { # cpu_ticks <pid>
 SERVER_PID=""
 BEAM_PID=""
 boot_server() {
+  # Refuse a port already held (a foreign server, or one a previous point failed to release): otherwise
+  # the wait loop below sees it open at once and greenlights measuring THAT server, while the fresh mix
+  # run dies on the bind and CPU sampling targets our own dead child.
+  if port_open; then echo "port $MALACHI_PORT is already in use; refusing to boot" >&2; return 1; fi
   rm -rf "$TMP/malachi_log" "$TMP/malachi_ra"
   # +S N:N so the BEAM opens no more schedulers than pinned cores, else it oversubscribes them; busy-wait
   # off for the same reason (a spinning scheduler would burn a pinned core doing nothing).
@@ -131,7 +142,7 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     ERL_AFLAGS="+S 1:1" $lt_pin mix malachi.loadtest --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
-      --duration "$DUR" --warmup "$WARM" --pipeline 1 \
+      --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
       --user "$MALACHI_USER" --pass "$MALACHI_PASS" > "$out" 2>> "$RUN_DIR/loadtest.err" \
       || { echo "run failed: connections=$n (see loadtest.err)" >&2; rm -f "$out"; }
   fi
@@ -166,16 +177,20 @@ if [ -z "$best" ]; then
   echo "no successful runs in the sweep; see $RUN_DIR/loadtest.err" >&2
   exit 1
 fi
-echo "$best" > "$OUT"
-
 peak_n="$(echo "$best" | jq -r '.connections')"
 peak_rps="$(echo "$best" | jq -r '.records_per_s')"
 peak_cores="$(echo "$best" | jq -r '.server_cpu_cores // "n/a"')"
-echo "== peak: $peak_rps rec/s @ $peak_n connections, server $peak_cores of $SRV_BUDGET cores ==" >&2
-
-# No silent cap: a peak at the top of the ladder means the knee may lie beyond it, so the number is a
-# lower bound on the ceiling rather than the ceiling. Say so instead of quietly reporting it as the top.
 top="$(echo "$CONNS_LADDER" | awk '{print $NF}')"
-if [ "$peak_n" = "$top" ]; then
+
+# No silent cap: a peak at the top of the ladder means the knee may lie beyond it, so the number is only
+# a lower bound on the ceiling. Stamp that onto the result so the caveat travels with the number into the
+# comment and the pages, not just this CI log.
+limited=false
+[ "$peak_n" = "$top" ] && limited=true
+best="$(echo "$best" | jq --argjson limited "$limited" '. + {peak_at_ladder_limit: $limited}')"
+echo "$best" > "$OUT"
+
+echo "== peak: $peak_rps rec/s @ $peak_n connections, server $peak_cores of $SRV_BUDGET cores ==" >&2
+if [ "$limited" = true ]; then
   echo "WARN: peak at the top of the ladder ($top); widen CONNS_LADDER to confirm the ceiling." >&2
 fi

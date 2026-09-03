@@ -247,7 +247,8 @@ jobs:
             // found by sweeping connections rather than a fixed-concurrency sample.
             const throughput = (result) =>
               typeof result.records_per_s === 'number'
-                ? `${result.records_per_s.toLocaleString('en-US')} rec/s @ ${result.connections ?? '?'} conns`
+                ? `${result.records_per_s.toLocaleString('en-US')} rec/s @ ${result.connections ?? '?'} conns` +
+                  (result.peak_at_ladder_limit ? ' (lower bound)' : '')
                 : 'not recorded';
 
             // With the generator pinned to one core and the server to the rest, this says which side
