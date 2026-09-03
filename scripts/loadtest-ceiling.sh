@@ -57,9 +57,20 @@ SERVER_LOG="$RUN_DIR/server.log"
 : > "$RUN_DIR/loadtest.err"
 TMP="${TMPDIR:-/tmp}"
 
-# How many cores each cpuset names, for the "X of N cores" attribution and the scheduler counts.
-SRV_BUDGET="$(echo "$SRV_CPUSET" | tr ',' '\n' | grep -c .)"
-LT_BUDGET="$(echo "$LT_CPUSET" | tr ',' '\n' | grep -c .)"
+# How many cores a taskset cpu-list names, for the "X of N cores" attribution and the scheduler counts.
+# Handles every form taskset accepts: single ids (0), ranges (1-3), and strides (0-10:2); counting
+# comma tokens alone would read 1-3 as ONE core and boot the server with a third of its schedulers.
+count_cpus() { # count_cpus <cpu-list>
+  echo "$1" | tr ',' '\n' | awk -F'[-:]' '
+    /^$/ { next }
+    NF == 1 { total += 1 }
+    NF == 2 { total += $2 - $1 + 1 }
+    NF == 3 { total += int(($2 - $1) / $3) + 1 }
+    END { print total + 0 }
+  '
+}
+SRV_BUDGET="$(count_cpus "$SRV_CPUSET")"
+LT_BUDGET="$(count_cpus "$LT_CPUSET")"
 CLK_TCK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
 
 # The generator-side BEAM flags. +S alone is NOT enough on a pinned single core: the VM still starts 4
