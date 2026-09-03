@@ -146,7 +146,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
   defp loadtest_headline(result) do
     "**#{number(result["records_per_s"])} records per second** at saturation over " <>
       "#{result["duration_s"]}s with #{result["errors"]} errors, scenario `#{result["scenario"]}`, " <>
-      "peaking at #{result["connections"]} connections#{server_cpu_phrase(result)}." <>
+      "peaking at #{result["connections"]} connections#{cpu_phrase(result)}." <>
       ladder_limit_note(result)
   end
 
@@ -159,20 +159,25 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
   defp ladder_limit_note(_), do: ""
 
-  # Only when a run recorded it. The generator is pinned to one core and the server to the rest, so this
-  # says whether the server's cores saturated (its ceiling was found) or the single generator core capped
-  # first (in which case the throughput is a lower bound on the ceiling, not the ceiling).
-  defp server_cpu_phrase(%{"server_cpu_cores" => cores, "server_cpu_budget" => budget})
-       when is_number(cores) and is_number(budget),
-       do: " (server at #{cores} of #{budget} cores)"
+  # One side's CPU attribution ("2.47 of 3"), or nil when the run did not sample that side, so it is
+  # dropped rather than rendered as a measured zero. `side` is "server" or "generator".
+  defp cpu_cell(result, side) do
+    cores = result["#{side}_cpu_cores"]
+    budget = result["#{side}_cpu_budget"]
+    if is_number(cores) and is_number(budget), do: "#{cores} of #{budget}"
+  end
 
-  defp server_cpu_phrase(_), do: ""
+  # Which side saturated: the generator is pinned to one core and the server to the rest, so a server
+  # near its budget found its ceiling, while a generator near its budget capped first and the number is
+  # a lower bound. Only the sides a run actually sampled are rendered.
+  defp cpu_phrase(result) do
+    sides =
+      for side <- ["server", "generator"], cell = cpu_cell(result, side), cell != nil do
+        "#{side} at #{cell} cores"
+      end
 
-  defp server_cpu_cell(%{"server_cpu_cores" => cores, "server_cpu_budget" => budget})
-       when is_number(cores) and is_number(budget),
-       do: "#{cores} of #{budget}"
-
-  defp server_cpu_cell(_), do: nil
+    if sides == [], do: "", else: " (" <> Enum.join(sides, ", ") <> ")"
+  end
 
   defp throughput_rows(result) do
     [
@@ -184,8 +189,9 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       {"Operations", number(result["ops"] || result["operations"])},
       # The connection count at the sweep's peak: the load that drove this ceiling number.
       {"Peak connections", number(result["connections"])},
-      # Absent on runs that did not sample it (skipped by table/1), so it never reads as a measured zero.
-      {"Server CPU (cores)", server_cpu_cell(result)},
+      # Absent on runs that did not sample them (skipped by table/1), so they never read as measured zeros.
+      {"Server CPU (cores)", cpu_cell(result, "server")},
+      {"Generator CPU (cores)", cpu_cell(result, "generator")},
       {"Duration", suffix(result["duration_s"], "s")},
       {"Errors", result["errors"]}
     ]

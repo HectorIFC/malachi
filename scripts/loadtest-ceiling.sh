@@ -3,15 +3,15 @@
 # the server to SRV_CPUSET and the generator to LT_CPUSET so the client can never steal server CPU, and
 # ramp --connections across CONNS_LADDER until throughput stops rising. The peak run is the ceiling and
 # becomes the canonical $OUT json; the whole ladder is kept beside it under $RUN_DIR. A sampler reads the
-# server beam's /proc CPU over each measured window so the report can say whether the SERVER (3 cores)
-# saturated or the 1-core generator capped first.
+# /proc CPU of BOTH the server beam and the generator over each measured window, so the report can say
+# which side saturated: the server (its ceiling was found) or the generator (the number is a lower bound).
 #
 # The methodology is identical for both generators (closed-loop, same flags); each is meant to run on its
 # OWN runner so one load test never influences the other. The server is always the Malachi broker (BEAM);
 # only the generator differs.
 #
 # Usage: GENERATOR=node|elixir OUT=/path/loadtest-node.json scripts/loadtest-ceiling.sh
-# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  CONNS_LADDER="32 64 128 256"  DUR=15  WARM=3  BATCH=10
+# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  CONNS_LADDER="32 64 128 256 512"  DUR=15  WARM=3  BATCH=10
 #   RSIZE=256  MALACHI_USER=admin  MALACHI_PASS=admin123  MALACHI_PORT=4040
 #
 # Not -e: a single failed sweep point must not abort the whole ladder; failures are handled per point.
@@ -28,7 +28,9 @@ esac
 
 SRV_CPUSET="${SRV_CPUSET:-1,2,3}"
 LT_CPUSET="${LT_CPUSET:-0}"
-CONNS_LADDER="${CONNS_LADDER:-32 64 128 256}"
+# 512 included because the first CI runs peaked at 256, the then-top rung, with the server short of its
+# core budget: the knee lies above.
+CONNS_LADDER="${CONNS_LADDER:-32 64 128 256 512}"
 DUR="${DUR:-15}"
 WARM="${WARM:-3}"
 BATCH="${BATCH:-10}"
@@ -55,9 +57,18 @@ SERVER_LOG="$RUN_DIR/server.log"
 : > "$RUN_DIR/loadtest.err"
 TMP="${TMPDIR:-/tmp}"
 
-# How many cores SRV_CPUSET names, for the "X of N cores" attribution and the server scheduler count.
+# How many cores each cpuset names, for the "X of N cores" attribution and the scheduler counts.
 SRV_BUDGET="$(echo "$SRV_CPUSET" | tr ',' '\n' | grep -c .)"
+LT_BUDGET="$(echo "$LT_CPUSET" | tr ',' '\n' | grep -c .)"
 CLK_TCK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+
+# The generator-side BEAM flags. +S alone is NOT enough on a pinned single core: the VM still starts 4
+# dirty CPU schedulers, 10 dirty IO schedulers and aux threads by default, and schedulers busy-wait when
+# idle. ~16 threads timeslicing one core, several of them spinning, produced second-long stalls in CI
+# (p50 37ms, p99 1.1-2.4s, server nearly idle) and a non-monotonic ladder. So: schedulers = pinned
+# cores, dirty pools shrunk to 1 (a generator does no file IO inside the window), and all busy-wait off,
+# the same treatment the server gets.
+GEN_ERL_AFLAGS="+S ${LT_BUDGET}:${LT_BUDGET} +SDcpu ${LT_BUDGET}:${LT_BUDGET} +SDio 1 +sbwt none +sbwtdcpu none +sbwtdio none"
 
 # A pin prefix like 'taskset -c 1,2,3' (or empty locally where taskset is absent). Kept as a scalar and
 # used inline, NOT a shell function: backgrounding a function would put a subshell between $! and the
@@ -115,50 +126,67 @@ trap kill_server EXIT
 run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical fields + attribution)
   local n="$1"
   local out="$RUN_DIR/run-$n.json"
-  local cpu_file="$RUN_DIR/cpu-$n.txt"
-  rm -f "$cpu_file"
+  local srv_cpu_file="$RUN_DIR/cpu-srv-$n.txt"
+  local gen_cpu_file="$RUN_DIR/cpu-gen-$n.txt"
+  rm -f "$srv_cpu_file" "$gen_cpu_file"
 
   # Fresh server per ladder point: a later N must never measure a server bloated by an earlier one.
   boot_server || return 1
 
-  # Sample the server beam's CPU across the MEASURED window only (skip warmup, then delta over DUR). A
-  # background subshell so it runs concurrently with the generator; writes cores to $cpu_file or nothing.
-  (
-    sleep "$WARM"
-    t0="$(cpu_ticks "$BEAM_PID")" || exit 0
-    sleep "$DUR"
-    t1="$(cpu_ticks "$BEAM_PID")" || exit 0
-    awk -v a="$t0" -v b="$t1" -v hz="$CLK_TCK" -v s="$DUR" 'BEGIN { printf "%.2f", ((b - a) / hz) / s }' \
-      > "$cpu_file"
-  ) &
-  local sampler=$!
-
+  # The generator runs in the background so its pid can be sampled alongside the server's; its exit
+  # status is collected by the wait below. taskset/mix/node all exec straight into the measured process,
+  # so $! is the right pid for /proc on both sides.
   if [ "$GENERATOR" = node ]; then
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     $lt_pin node scripts/loadtest.js --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
-      --duration "$DUR" --warmup "$WARM" > "$out" 2>> "$RUN_DIR/loadtest.err" \
-      || { echo "run failed: connections=$n (see loadtest.err)" >&2; rm -f "$out"; }
+      --duration "$DUR" --warmup "$WARM" > "$out" 2>> "$RUN_DIR/loadtest.err" &
   else
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
-    ERL_AFLAGS="+S 1:1" $lt_pin mix malachi.loadtest --scenario produce --json \
+    ERL_AFLAGS="$GEN_ERL_AFLAGS" $lt_pin mix malachi.loadtest --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
-      --user "$MALACHI_USER" --pass "$MALACHI_PASS" > "$out" 2>> "$RUN_DIR/loadtest.err" \
-      || { echo "run failed: connections=$n (see loadtest.err)" >&2; rm -f "$out"; }
+      --user "$MALACHI_USER" --pass "$MALACHI_PASS" > "$out" 2>> "$RUN_DIR/loadtest.err" &
   fi
+  local gen_pid=$!
 
+  # Sample both sides' CPU across the MEASURED window only (skip warmup, then delta over DUR). One
+  # background subshell; each side writes its cores file, or nothing where /proc is unavailable.
+  (
+    sleep "$WARM"
+    srv_t0="$(cpu_ticks "$BEAM_PID")" || srv_t0=""
+    gen_t0="$(cpu_ticks "$gen_pid")" || gen_t0=""
+    sleep "$DUR"
+    if [ -n "$srv_t0" ] && srv_t1="$(cpu_ticks "$BEAM_PID")"; then
+      awk -v a="$srv_t0" -v b="$srv_t1" -v hz="$CLK_TCK" -v s="$DUR" \
+        'BEGIN { printf "%.2f", ((b - a) / hz) / s }' > "$srv_cpu_file"
+    fi
+    if [ -n "$gen_t0" ] && gen_t1="$(cpu_ticks "$gen_pid")"; then
+      awk -v a="$gen_t0" -v b="$gen_t1" -v hz="$CLK_TCK" -v s="$DUR" \
+        'BEGIN { printf "%.2f", ((b - a) / hz) / s }' > "$gen_cpu_file"
+    fi
+  ) &
+  local sampler=$!
+
+  if ! wait "$gen_pid"; then
+    echo "run failed: connections=$n (see loadtest.err)" >&2
+    rm -f "$out"
+  fi
   wait "$sampler" 2> /dev/null
-  local cores="null"
-  [ -s "$cpu_file" ] && cores="$(cat "$cpu_file")"
+
+  local srv_cores="null" gen_cores="null"
+  [ -s "$srv_cpu_file" ] && srv_cores="$(cat "$srv_cpu_file")"
+  [ -s "$gen_cpu_file" ] && gen_cores="$(cat "$gen_cpu_file")"
 
   kill_server
 
   # Stamp the attribution onto the run json (skip a point whose generator produced nothing).
   [ -f "$out" ] || return 0
   local tmp="$out.tmp"
-  if jq --argjson cores "${cores:-null}" --argjson budget "$SRV_BUDGET" \
-       '. + {server_cpu_cores: $cores, server_cpu_budget: $budget}' "$out" > "$tmp"; then
+  if jq --argjson srv "${srv_cores:-null}" --argjson srvb "$SRV_BUDGET" \
+       --argjson gen "${gen_cores:-null}" --argjson genb "$LT_BUDGET" \
+       '. + {server_cpu_cores: $srv, server_cpu_budget: $srvb, generator_cpu_cores: $gen, generator_cpu_budget: $genb}' \
+       "$out" > "$tmp"; then
     mv "$tmp" "$out"
   else
     rm -f "$tmp"
@@ -180,7 +208,8 @@ if [ -z "$best" ]; then
 fi
 peak_n="$(echo "$best" | jq -r '.connections')"
 peak_rps="$(echo "$best" | jq -r '.records_per_s')"
-peak_cores="$(echo "$best" | jq -r '.server_cpu_cores // "n/a"')"
+peak_srv="$(echo "$best" | jq -r '.server_cpu_cores // "n/a"')"
+peak_gen="$(echo "$best" | jq -r '.generator_cpu_cores // "n/a"')"
 top="$(echo "$CONNS_LADDER" | awk '{print $NF}')"
 
 # No silent cap: a peak at the top of the ladder means the knee may lie beyond it, so the number is only
@@ -191,7 +220,7 @@ limited=false
 best="$(echo "$best" | jq --argjson limited "$limited" '. + {peak_at_ladder_limit: $limited}')"
 echo "$best" > "$OUT"
 
-echo "== peak: $peak_rps rec/s @ $peak_n connections, server $peak_cores of $SRV_BUDGET cores ==" >&2
+echo "== peak: $peak_rps rec/s @ $peak_n connections, server $peak_srv of $SRV_BUDGET cores, generator $peak_gen of $LT_BUDGET ==" >&2
 if [ "$limited" = true ]; then
   echo "WARN: peak at the top of the ladder ($top); widen CONNS_LADDER to confirm the ceiling." >&2
 fi

@@ -61,7 +61,11 @@ jobs:
           elixir-version: '1.19.4'
           otp-version: '28.1'
 
+      # Only the node leg needs a Node runtime: it is the generator there. The elixir leg's harness uses
+      # bash and jq alone, and Elixir is set up in both legs because the SERVER under test is an Elixir
+      # application either way.
       - name: 🟢 Set up Node
+        if: matrix.generator == 'node'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -104,7 +108,7 @@ jobs:
           OUT="$RUNNER_TEMP/results/loadtest-$GENERATOR.json" \
             RUN_DIR="$RUNNER_TEMP/results/ladder-$GENERATOR" \
             scripts/loadtest-ceiling.sh
-          jq -r '"peak: \(.records_per_s) rec/s @ \(.connections) conns, server \(.server_cpu_cores) of \(.server_cpu_budget) cores, \(.errors) errors, ref \(.meta.git_ref)"' \
+          jq -r '"peak: \(.records_per_s) rec/s @ \(.connections) conns, server \(.server_cpu_cores) of \(.server_cpu_budget) cores, generator \(.generator_cpu_cores) of \(.generator_cpu_budget), \(.errors) errors, ref \(.meta.git_ref)"' \
             "$RUNNER_TEMP/results/loadtest-$GENERATOR.json"
 
       # A per-generator artifact name: upload-artifact v4+ rejects two parallel jobs writing the same
@@ -252,18 +256,24 @@ jobs:
                 : 'not recorded';
 
             // With the generator pinned to one core and the server to the rest, this says which side
-            // saturated: near the budget means the server's ceiling was found, well below means the
-            // single generator core capped first and the number is a lower bound. Absent on old runs.
-            const serverCpu = (result) =>
-              typeof result.server_cpu_cores === 'number' && typeof result.server_cpu_budget === 'number'
-                ? `${result.server_cpu_cores} / ${result.server_cpu_budget} cores`
-                : 'n/a';
+            // saturated: a server near its budget means its ceiling was found, a generator near its
+            // budget means the client capped first and the number is a lower bound. Each side renders
+            // only when the run sampled it (absent on old runs and non-/proc hosts).
+            const cpuSide = (label, cores, budget) =>
+              typeof cores === 'number' && typeof budget === 'number' ? `${label} ${cores}/${budget}` : null;
+            const cpu = (result) => {
+              const sides = [
+                cpuSide('srv', result.server_cpu_cores, result.server_cpu_budget),
+                cpuSide('gen', result.generator_cpu_cores, result.generator_cpu_budget),
+              ].filter(Boolean);
+              return sides.length ? `${sides.join(', ')} cores` : 'n/a';
+            };
 
             // A missing result is reported as missing rather than skipped: a workload that failed to
             // produce one is the thing a reader most needs to notice.
             const loadRow = (label, result) =>
               result
-                ? `| ${label} | ${throughput(result)} | ${serverCpu(result)} | ${result.errors ?? '?'} | \`${result.meta?.git_ref ?? 'unknown'}\` |`
+                ? `| ${label} | ${throughput(result)} | ${cpu(result)} | ${result.errors ?? '?'} | \`${result.meta?.git_ref ?? 'unknown'}\` |`
                 : `| ${label} | not recorded | | | |`;
 
             const chaos = read('chaos-node.json');
@@ -277,7 +287,7 @@ jobs:
 
             const body = `## 📊 Measured on this branch
 
-            | Load test | Throughput | Server CPU | Errors | Commit |
+            | Load test | Throughput | CPU | Errors | Commit |
             |---|---|---|---|---|
             ${loadRow('Node.js', read('loadtest-node.json'))}
             ${loadRow('Elixir', read('loadtest-elixir.json'))}
@@ -285,8 +295,9 @@ jobs:
             **Chaos certification**: ${chaosLine}
 
             Each generator ran on its own runner, server pinned to 3 cores and generator to 1, sweeping
-            connections until throughput plateaued; the row shows that peak. Server CPU near 3 means the
-            server's ceiling was found, well below means the single generator core capped first.
+            connections until throughput plateaued; the row shows that peak. In the CPU column, srv near
+            3 means the server's ceiling was found; gen near 1 means the single generator core capped
+            first and the throughput is a lower bound on the server's ceiling.
 
             These numbers are measured, not committed: a shared runner varies enough between runs that
             recording them here would put noise in every diff. The published pages are refreshed from

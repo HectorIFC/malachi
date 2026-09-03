@@ -97,10 +97,12 @@ GENERATOR=node SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-node.json scripts/
 
 The pinning is the whole point: on one runner an unpinned generator steals server CPU and flatters the
 number. Because the generator gets a single core, a low ceiling can be this client capping rather than
-the server, so the run also samples the server's CPU across the peak window and the published page
-reports it: near three of three cores means the server's ceiling was found, well below means this
-one-core client capped first. If the peak lands at the top of the sweep the script warns to widen
-`CONNS_LADDER`, since the knee may lie beyond it.
+the server, so the run samples both sides' CPU across the peak window and the published page reports
+them: a server near three of three cores saturated (its ceiling was found), a generator near one of one
+capped first (the number is a lower bound). The load drives a **single topic**, which in Malachi means
+a single range and a serialized append on its primary, so the published figure is the one-topic
+ceiling. If the peak lands at the top of the sweep the script warns to widen `CONNS_LADDER`, since the
+knee may lie beyond it.
 
 To see what a change does before merging, open a pull request: the workflow runs there too without
 committing, because runner variance would otherwise put noise in every diff. Node and Elixir run on

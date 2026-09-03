@@ -98,8 +98,8 @@ request runs it too without committing, and posts the numbers as a comment when 
 this repository; from a fork the comment is skipped and the artifacts carry them.
 
 CI does not run the bare command above. It runs `scripts/loadtest-ceiling.sh` with `GENERATOR=elixir`,
-which boots a dedicated server pinned to three cores and pins this generator to the fourth **with a
-single scheduler** (`+S 1:1`), then sweeps `--connections` and publishes the peak as the ceiling:
+which boots a dedicated server pinned to three cores and pins this generator to the fourth, then sweeps
+`--connections` and publishes the peak as the ceiling:
 
 ```bash
 GENERATOR=elixir SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-elixir.json scripts/loadtest-ceiling.sh
@@ -107,11 +107,26 @@ GENERATOR=elixir SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-elixir.json scri
 
 The single core is deliberate: it holds this multi-core generator to the same one core the Node client
 gets, so the published number compares the servers rather than the generators. Node and Elixir run on
-**separate** runners, so one load test never influences the other. Because the generator is held to
-one core, the run also samples the server's CPU across the peak window and the page reports it: near
-three of three cores means the server saturated, well below means this generator capped first. Run the
-script the same way locally when you want that ceiling; the bare command above is a single point at
-whatever concurrency you pass.
+**separate** runners, so one load test never influences the other.
+
+Holding a BEAM to one core takes more than `taskset`. The harness passes
+`+S 1:1 +SDcpu 1:1 +SDio 1 +sbwt none +sbwtdcpu none +sbwtdio none`: schedulers capped at the pinned
+core count, the dirty CPU and IO pools shrunk from their defaults of 4 and 10 threads (a generator does
+no file IO inside the window), and busy-wait off everywhere. Without those, roughly sixteen VM threads
+timeslice one core with several of them spinning, and the first CI runs showed exactly that pathology:
+p50 latency in the tens of milliseconds but p99 above a second, a non-monotonic connection ladder, and
+the server nearly idle. That is a harness artifact, not a BEAM verdict: the BEAM's strength is
+multi-core scalability, which a one-core pin removes by construction, so a single-threaded event loop
+client may still edge it out here. The attribution below says who capped, which is what the comparison
+needs.
+
+The run samples both sides' CPU across the peak window and the page reports them: a server near three
+of three cores saturated (its ceiling was found), a generator near one of one capped first (the number
+is a lower bound). Both generators drive a **single topic**, which in Malachi means a single range and
+a serialized append on its primary, so the published figure is the one-topic ceiling; `--topics` spreads
+load across ranges when you want the multi-shard picture locally. Run the script the same way locally
+when you want the published ceiling; the bare command above is a single point at whatever concurrency
+you pass.
 
 This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
 counts backpressure that the Node one does not (dropped connections, server-shed produces,
