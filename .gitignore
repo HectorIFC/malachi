@@ -29,12 +29,10 @@ malachi-*.tar
 # Temporary files, for example, from tests.
 /tmp/
 
-# TLS certificates (generated for development by scripts/generate-dev-certs.sh: server.key, server.crt).
-# Ignore the whole directory: it is generated on demand and must never carry a private key into git.
+# TLS certificates (generated for development)
 /priv/cert/
 # Inter-node TLS dev certs (CA + node key/cert + optfile), never commit private keys
 /priv/dist_cert/
-/priv/
 # Environment files
 .env
 .env.local

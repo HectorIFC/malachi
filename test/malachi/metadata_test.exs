@@ -547,4 +547,26 @@ defmodule Malachi.MetadataTest do
 
     state.topic_ranges == expected_tr and state.range_segments == expected_rs
   end
+
+  describe "command_target_topic/1" do
+    test "reads the topic out of each command shape, structurally" do
+      assert Metadata.command_target_topic({:create_topic, "events", 4}) == "events"
+      assert Metadata.command_target_topic({:seal_topic, "events"}) == "events"
+      assert Metadata.command_target_topic({:commit_offset, "g", "events", %{}}) == "events"
+      assert Metadata.command_target_topic({:split_range, {"events", 3}}) == "events"
+      assert Metadata.command_target_topic({:merge_ranges, {"events", 3}, {"events", 4}}) == "events"
+      assert Metadata.command_target_topic({:register_segment, {"events", 3}, {{"events", 3}, 0}, [], 0}) == "events"
+      assert Metadata.command_target_topic({:seal_segment, {{"events", 3}, 0}, 1, 2, 3}) == "events"
+      assert Metadata.command_target_topic({:delete_segment, {{"events", 3}, 0}}) == "events"
+    end
+
+    test "returns nil where there is no range/segment to check, and never raises on an odd id shape" do
+      # define_policy and the migration commands are not range-scoped, so the mismatch guard skips them.
+      assert Metadata.command_target_topic({:define_policy, "p", %{}}) == nil
+      assert Metadata.command_target_topic({:begin_migration, "events"}) == nil
+      # A string segment id (some tests use these) carries no topic: nil, not a crash.
+      assert Metadata.command_target_topic({:seal_segment, "s1", 1, 2, 3}) == nil
+      assert Metadata.command_target_topic({:split_range, "not-a-tuple"}) == nil
+    end
+  end
 end
