@@ -137,7 +137,11 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       # timer must have been cancelled, so no {:replicate_timeout, ...} ever arrives. Before the
       # cancel, every committed batch fired a stale message that walked the inflight and pending
       # structures for nothing.
-      primary = start_broker(follow_timeout: 150)
+      # follow_timeout does double duty here: it is both how long the commit has to reach quorum and how
+      # soon a stale timer would fire. A healthy two-replica commit takes about a millisecond, so 1000ms
+      # gives it a thousandfold margin, where 150ms could lose the race on a loaded two-core CI runner and
+      # fail this test on its setup line rather than on the stale-message property (issue #56).
+      primary = start_broker(follow_timeout: 1000)
       follower = start_broker()
       pid = Process.whereis(primary)
 
@@ -147,8 +151,9 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
       assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary, follower], 0, records(["a"]))
 
-      # Give a stale timer (150ms) ample time to fire if it was not cancelled.
-      Process.sleep(300)
+      # Give a stale timer (1000ms) ample time to fire if it was not cancelled; the 1.5x margin keeps an
+      # uncancelled timer detectable.
+      Process.sleep(1500)
 
       stale =
         receive do

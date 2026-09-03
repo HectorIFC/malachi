@@ -269,6 +269,62 @@ defmodule Malachi.Cluster.DSRSMTest do
     end
   end
 
+  describe "cross-topic command rejection" do
+    # One vnode co-locates every topic, so "events" and "orders" share it and their range ids collide in
+    # scope. This is the exact shape the guard defends: a command routed by one topic carrying the other's
+    # range id.
+    setup do
+      dsrsm = with_vnodes(only: 8)
+      {dsrsm, {:ok, events_root}} = DSRSM.command(dsrsm, "events", {:create_topic, "events", 4})
+      {dsrsm, {:ok, orders_root}} = DSRSM.command(dsrsm, "orders", {:create_topic, "orders", 4})
+      {:ok, dsrsm: dsrsm, events_root: events_root, orders_root: orders_root}
+    end
+
+    test "a range command routed by the wrong topic is rejected", %{dsrsm: dsrsm, orders_root: orders_root} do
+      # Routed by "events" but targeting orders' range. Without the guard this would split orders' range.
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:split_range, orders_root})
+
+      # And orders' range is untouched: still the single active root, not split.
+      assert [%{id: ^orders_root, state: :active}] = DSRSM.active_ranges_of_topic(dsrsm, "orders")
+    end
+
+    test "a merge routed by the wrong topic is rejected", %{
+      dsrsm: dsrsm,
+      events_root: events_root,
+      orders_root: orders_root
+    } do
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:merge_ranges, orders_root, events_root})
+    end
+
+    test "a merge is rejected when only the second range belongs to another topic", %{
+      dsrsm: dsrsm,
+      events_root: events_root,
+      orders_root: orders_root
+    } do
+      # Routed by "events", first id is events' range (matches), second is orders'. Both ids must belong to
+      # the routed topic; checking only the first would let this merge onto orders' range.
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:merge_ranges, events_root, orders_root})
+    end
+
+    test "a segment command routed by the wrong topic is rejected", %{dsrsm: dsrsm, orders_root: orders_root} do
+      # Production segment ids are {range_id, seq}; this one belongs to orders. Seal it while routed by
+      # "events" and the guard reads the topic out of the id and rejects.
+      seg_id = {orders_root, 0}
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "orders", {:register_segment, orders_root, seg_id, [:b1], 0})
+
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:seal_segment, seg_id, 1, 10, 0})
+    end
+
+    test "the matching pair still succeeds", %{dsrsm: dsrsm, orders_root: orders_root} do
+      assert {_dsrsm, {:ok, _left, _right}} =
+               DSRSM.command(dsrsm, "orders", {:split_range, orders_root})
+    end
+  end
+
   # Whether `topic` exists in the given vnode's metadata shard.
   defp topic_in_vnode?(dsrsm, vnode_id, topic) do
     metadata = Map.fetch!(dsrsm.vnodes, vnode_id)

@@ -795,22 +795,15 @@ defmodule Malachi.Broker do
   # Applies a metadata mutation via the configured command function (in-memory by default, or
   # Raft-backed), routing it to the vnode owning the command's topic and threading the sharded cache
   # so multiple mutations in one operation see each other. Returns `{dsrsm, reply}`.
+  # Routes each control-plane command to the vnode owning its topic, which every such command names
+  # directly or embeds in its range id (`{topic, seq}`) or segment id (`{range_id, seq}`). The routing
+  # layer rejects a command whose target topic disagrees with where it was routed (`:range_topic_mismatch`).
   defp apply_metadata(broker, command) do
-    broker.command_fun.(broker.dsrsm, command_topic(command), command)
+    broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
   end
 
-  # The topic whose shard owns each control-plane command the broker emits, so the DSRSM dispatches
-  # it to the right vnode. Every such command targets exactly one topic, named directly or derivable
-  # from its range id (`{topic, seq}`) or segment id (`{range_id, seq}`).
-  defp command_topic({:create_topic, name, _bits}), do: name
-  defp command_topic({:commit_offset, _group, topic, _offsets}), do: topic
-  defp command_topic({:split_range, range_id}), do: topic_of_range(range_id)
-  defp command_topic({:merge_ranges, range_id_a, _range_id_b}), do: topic_of_range(range_id_a)
-  defp command_topic({:register_segment, range_id, _id, _replicas, _start}), do: topic_of_range(range_id)
-  defp command_topic({:seal_segment, segment_id, _len, _bytes, _at}), do: topic_of_segment(segment_id)
-  defp command_topic({:delete_segment, segment_id}), do: topic_of_segment(segment_id)
-  defp command_topic({:set_segment_replicas, segment_id, _replicas}), do: topic_of_segment(segment_id)
-
+  # Query routing: a range/segment id embeds its topic, which is how a read is dispatched to the owning
+  # vnode. The command path uses `Metadata.command_target_topic/1` instead (it takes a whole command).
   defp topic_of_range(range_id), do: elem(range_id, 0)
   defp topic_of_segment(segment_id), do: topic_of_range(elem(segment_id, 0))
 

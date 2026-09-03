@@ -17,18 +17,22 @@ defmodule Malachi.Cluster.DSRSM do
   globally-unique range-id scheme, so it, and **vnode split** (rebalancing, which migrates
   metadata between vnodes): are deferred to a later increment. See `docs/ARCHITECTURE.md`.
 
-  ## Caller contract: `(topic_name, range_id/segment_id)` must match
+  ## Caller contract: `(topic_name, range_id/segment_id)` must match, and is enforced
 
-  Because the topic name is used only for *routing*, the target `range_id`/`segment_id` of a
-  command or query must actually belong to `topic_name`. A mismatched pair is not rejected:
-  since several co-located topics share a vnode (and range ids are only unique within a
-  vnode), a command naming topic A but targeting a range of co-located topic B would
-  silently act on B's range. Callers (the coordinator) must pass matching pairs.
+  Because the topic name is used only for *routing*, the target `range_id`/`segment_id` of a mutating
+  command must actually belong to `topic_name`: several co-located topics share a vnode (range ids are
+  only unique within one), so a command naming topic A but targeting a range of co-located topic B would
+  otherwise act on B's range. `command/3` now rejects that pair with `{:error, :range_topic_mismatch}`,
+  comparing `topic_name` against the topic the command's range/segment id embeds
+  (`Malachi.Metadata.routed_to_foreign_topic?/2`, over the `{topic, seq}` range id or the `{range_id, seq}`
+  segment id, and both ids of a merge). Only range/segment commands are checked: a command that names its
+  topic directly cannot be aimed at a co-located topic's range. The broker only ever derives `topic_name`
+  from the command, so this is defense in depth against a future or direct caller, not a bug the broker
+  can hit today.
 
-  > TODO: this validation gap closes with range-id sharding, where range/segment
-  > operations route by range id and the range's own vnode is authoritative, the topic
-  > param drops out for those ops, so a mismatch becomes impossible rather than relying on
-  > the caller.
+  > When range-id sharding lands, range/segment operations route by range id and the range's own vnode is
+  > authoritative, so the topic param drops out for those ops and the mismatch cannot even be expressed.
+  > The structural check here stays correct in the meantime.
 
   Like `Metadata`, this is a pure, deterministic value: `command/3` returns
   `{new_dsrsm, reply}`. Backing each vnode with its own `ra` group leaves this routing layer
@@ -131,7 +135,13 @@ defmodule Malachi.Cluster.DSRSM do
   """
   @spec command(t(), Metadata.topic_name(), Metadata.command()) :: {t(), term()}
   def command(%__MODULE__{} = dsrsm, topic_name, command) do
-    update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
+    if Metadata.routed_to_foreign_topic?(command, topic_name) do
+      # A range/segment id in the command belongs to a topic other than `topic_name`. Applying it here
+      # would act on a co-located topic's range. Reject it rather than trust the caller to pair them.
+      {dsrsm, {:error, :range_topic_mismatch}}
+    else
+      update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
+    end
   end
 
   @doc """
