@@ -144,9 +144,25 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
   end
 
   defp loadtest_headline(result) do
-    "**#{number(result["records_per_s"])} records per second** over #{result["duration_s"]}s with " <>
-      "#{result["errors"]} errors, scenario `#{result["scenario"]}` on #{result["connections"]} connections."
+    "**#{number(result["records_per_s"])} records per second** at saturation over " <>
+      "#{result["duration_s"]}s with #{result["errors"]} errors, scenario `#{result["scenario"]}`, " <>
+      "peaking at #{result["connections"]} connections#{server_cpu_phrase(result)}."
   end
+
+  # Only when a run recorded it. The generator is pinned to one core and the server to the rest, so this
+  # says whether the server's cores saturated (its ceiling was found) or the single generator core capped
+  # first (in which case the throughput is a lower bound on the ceiling, not the ceiling).
+  defp server_cpu_phrase(%{"server_cpu_cores" => cores, "server_cpu_budget" => budget})
+       when is_number(cores) and is_number(budget),
+       do: " (server at #{cores} of #{budget} cores)"
+
+  defp server_cpu_phrase(_), do: ""
+
+  defp server_cpu_cell(%{"server_cpu_cores" => cores, "server_cpu_budget" => budget})
+       when is_number(cores) and is_number(budget),
+       do: "#{cores} of #{budget}"
+
+  defp server_cpu_cell(_), do: nil
 
   defp throughput_rows(result) do
     [
@@ -156,6 +172,10 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       {"Records", number(result["records"])},
       # The Node client calls it `operations` and the BEAM one `ops`; same measure, two spellings.
       {"Operations", number(result["ops"] || result["operations"])},
+      # The connection count at the sweep's peak: the load that drove this ceiling number.
+      {"Peak connections", number(result["connections"])},
+      # Absent on runs that did not sample it (skipped by table/1), so it never reads as a measured zero.
+      {"Server CPU (cores)", server_cpu_cell(result)},
       {"Duration", suffix(result["duration_s"], "s")},
       {"Errors", result["errors"]}
     ]
