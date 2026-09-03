@@ -8,9 +8,10 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
 
     * `:leading` - `(-> [vnode_id])`, the vnodes this node currently leads (e.g. `leading_vnodes/3`
       over live Raft leadership);
-    * `:spawn` - `(vnode_id -> handle)`, starts that vnode's coordinators (e.g. under a
-      `DynamicSupervisor`) and returns an opaque handle to later stop them by;
-    * `:stop` - `(handle -> any)`, stops a vnode's coordinators;
+    * `:spawn` - `(vnode_id -> pid)`, starts that vnode's coordinators (e.g. a `Supervisor` under a
+      `DynamicSupervisor`) and returns the pid of that (sub)tree, which the manager monitors and later
+      stops by;
+    * `:stop` - `(pid -> any)`, stops a vnode's coordinators;
     * `:interval` - reconcile period in ms (default 5_000);
     * `:name` - optional registered name.
 
@@ -18,9 +19,18 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   idempotent and routed through `ra`, so a brief double-run only redoes work (the same reasoning as
   1C-a, hence no lease). `reconcile_now/1` reconciles synchronously and returns the running vnode ids
   (a manual trigger, e.g. for tests).
+
+  Self-healing on death: the manager monitors each spawned pid. If a vnode's coordinator tree dies on
+  its own (e.g. its supervisor exhausts its restart intensity), the manager drops it so the next
+  reconcile starts it again while this node still leads it, rather than leaving it silently down until
+  leadership changes. The interval paces the retry, so a coordinator that keeps dying respawns at most
+  once per reconcile with a log each time instead of spinning. A deliberate stop demonitors first, so
+  it is never mistaken for a death.
   """
 
   use GenServer
+
+  require Logger
 
   @default_interval 5_000
 
@@ -54,6 +64,25 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   @impl true
   def handle_info(:reconcile, state), do: {:noreply, reconcile_and_schedule(state)}
 
+  # A coordinator tree died on its own (not via stop_vnodes, which demonitors first). Drop it and let
+  # the next reconcile start it again while this node still leads it. Respawning here instead of on the
+  # tick would turn a crash-looping coordinator into a tight respawn loop; the reconcile interval paces
+  # the retry and keeps each one visible in the log.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Enum.find(state.running, fn {_vnode_id, {_pid, monitor_ref}} -> monitor_ref == ref end) do
+      {vnode_id, _handle} ->
+        Logger.warning(
+          "vnode #{inspect(vnode_id)} coordinators went down (#{inspect(reason)}); " <>
+            "restarting on the next reconcile"
+        )
+
+        {:noreply, %{state | running: Map.delete(state.running, vnode_id)}}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
   @impl true
   def handle_call(:reconcile_now, _from, state) do
     state = reconcile(state)
@@ -81,7 +110,9 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   defp start_vnodes(state, vnode_ids) do
     running =
       Enum.reduce(vnode_ids, state.running, fn vnode_id, acc ->
-        Map.put(acc, vnode_id, state.spawn.(vnode_id))
+        pid = state.spawn.(vnode_id)
+        ref = Process.monitor(pid)
+        Map.put(acc, vnode_id, {pid, ref})
       end)
 
     %{state | running: running}
@@ -90,8 +121,11 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   defp stop_vnodes(state, vnode_ids) do
     running =
       Enum.reduce(vnode_ids, state.running, fn vnode_id, acc ->
-        {handle, acc} = Map.pop(acc, vnode_id)
-        state.stop.(handle)
+        {{pid, ref}, acc} = Map.pop(acc, vnode_id)
+        # Demonitor before stopping so the stop we are about to cause is not delivered back as a :DOWN
+        # and mistaken for an unbidden death; [:flush] also drops a :DOWN already in the mailbox.
+        Process.demonitor(ref, [:flush])
+        state.stop.(pid)
         acc
       end)
 
