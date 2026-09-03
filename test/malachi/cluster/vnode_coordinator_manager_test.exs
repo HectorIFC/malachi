@@ -11,11 +11,23 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
   defp start_manager(leading_agent, opts \\ []) do
     test_pid = self()
 
+    # The fake coordinators below are unlinked sleepers, so nothing reaps them when the test ends and
+    # they would pile up in the VM across runs. Collect every spawned pid (post-death replacements
+    # included) and kill them in on_exit. The collector is unlinked so it outlives the manager (which
+    # is linked to the test pid and so already dead by the time on_exit runs).
+    {:ok, spawned} = Agent.start(fn -> [] end)
+
+    on_exit(fn ->
+      spawned |> Agent.get(& &1) |> Enum.each(&Process.exit(&1, :kill))
+      Agent.stop(spawned)
+    end)
+
     {:ok, manager} =
       Manager.start_link(
         leading: fn -> Agent.get(leading_agent, & &1) end,
         spawn: fn vnode_id ->
           pid = spawn(fn -> Process.sleep(:infinity) end)
+          Agent.update(spawned, &[pid | &1])
           send(test_pid, {:spawn, vnode_id, pid})
           pid
         end,
