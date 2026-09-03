@@ -26,8 +26,9 @@ defmodule Malachi.Cluster.DSRSM do
   comparing `topic_name` against the topic the command's range/segment id embeds
   (`Malachi.Metadata.routed_to_foreign_topic?/2`, over the `{topic, seq}` range id or the `{range_id, seq}`
   segment id, and both ids of a merge). Only range/segment commands are checked: a command that names its
-  topic directly cannot be aimed at a co-located topic's range. The broker only ever derives `topic_name` from the command, so this
-  is defense in depth against a future or direct caller, not a bug the broker can hit today.
+  topic directly cannot be aimed at a co-located topic's range. The broker only ever derives `topic_name`
+  from the command, so this is defense in depth against a future or direct caller, not a bug the broker
+  can hit today.
 
   > When range-id sharding lands, range/segment operations route by range id and the range's own vnode is
   > authoritative, so the topic param drops out for those ops and the mismatch cannot even be expressed.
