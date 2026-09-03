@@ -40,14 +40,15 @@ export MALACHI_PORT="${MALACHI_PORT:-4040}"
 # an inherited value can never aim the load at another server while CPU sampling targets our idle local
 # one. (The Elixir generator takes --host instead, passed explicitly below.)
 export MALACHI_HOST="127.0.0.1"
-# Admission limits gate connections/auth, not the produce hot path; leaving them on would cap the sweep.
-export MALACHI_RATE_LIMIT_ENABLED="${MALACHI_RATE_LIMIT_ENABLED:-false}"
-export MALACHI_CONNECTION_LIMIT_ENABLED="${MALACHI_CONNECTION_LIMIT_ENABLED:-false}"
+# Admission limits gate connections/auth, not the produce hot path; forced off (not defaulted) so an
+# inherited =true cannot leave a cap in place and get published as the ceiling.
+export MALACHI_RATE_LIMIT_ENABLED=false
+export MALACHI_CONNECTION_LIMIT_ENABLED=false
 
 OUT="${OUT:-$ROOT/loadtest-$GENERATOR.json}"
-# Create OUT's directory up front: without -e a failed final write would otherwise still exit 0 and
-# report a peak the run never persisted.
-mkdir -p "$(dirname "$OUT")"
+# Create OUT's directory up front, and fail if that cannot be done: without -e a failed final write
+# would otherwise still exit 0 and report a peak the run never persisted.
+mkdir -p "$(dirname "$OUT")" || { echo "cannot create output directory for $OUT" >&2; exit 1; }
 RUN_DIR="${RUN_DIR:-${RUNNER_TEMP:-/tmp}/ceiling-$GENERATOR}"
 mkdir -p "$RUN_DIR"
 SERVER_LOG="$RUN_DIR/server.log"
