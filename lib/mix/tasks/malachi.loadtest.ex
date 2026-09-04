@@ -28,6 +28,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       delays connection i by `i * --connect-stagger-ms` (100); all-at-once opens everything together.
       Each pacing knob is only accepted with the strategy that reads it.
     * auth: `--user` (admin) `--pass` (admin123), or `--token`, or `--tls`/`--cacert`/`--cert`/`--key`
+    * `--tls` verifies the server's certificate and hostname against `--cacert`, or against the system
+      trust store when none is given. `--insecure` skips that verification: development only, since it
+      makes the connection encrypted but unauthenticated and therefore open to interception.
     * `--json` emit the report as JSON
   """
 
@@ -61,6 +64,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     pass: :string,
     token: :string,
     tls: :boolean,
+    insecure: :boolean,
     cacert: :string,
     cert: :string,
     key: :string,

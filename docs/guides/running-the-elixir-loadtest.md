@@ -78,6 +78,18 @@ mix malachi.loadtest --token "$(...)"   # instead of --user/--pass
 A `--cert` without a `--key` (or the reverse) is rejected before a connection is opened, rather than
 failing later inside the handshake.
 
+`--tls` authenticates the server as well as encrypting the connection: the certificate is checked
+against `--cacert` when you name a CA, and against the operating system's trust store when you do not,
+and either way the hostname you connected to has to match the certificate. A broker using a private CA
+(what `scripts/generate-dist-certs.sh` produces) therefore needs its `--cacert`, and says so if you
+forget it rather than returning a raw TLS alert.
+
+`--insecure` skips that verification. It exists for a development server whose certificate nothing can
+vouch for, and it is the only way to get the old behavior back, deliberately: an unverified TLS
+connection is encrypted but unauthenticated, so anyone on the path can present their own certificate
+and read and rewrite the traffic. Runs that use it record it in the reproduce command, since the
+numbers came from that configuration.
+
 ## Recording a result
 
 `--json` prints one JSON document with a `meta` block: when, from which commit, on what hardware, and
