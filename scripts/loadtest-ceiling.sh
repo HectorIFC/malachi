@@ -215,11 +215,28 @@ for n in $CONNS_LADDER; do
   run_point "$n"
 done
 
-# The ceiling is the peak throughput across the ladder; that run becomes the canonical result.
-best="$(jq -s 'map(select(.records_per_s != null)) | sort_by(.records_per_s) | last // empty' \
+# The ceiling is the peak throughput across the ladder, taken only from clean rungs: a throughput
+# recorded alongside errors measures the failure rather than the server (a rung past the knee timing
+# requests out is the usual case), so an errorful rung may show where the knee is but never be the
+# published peak.
+best="$(jq -s 'map(select(.records_per_s != null and .errors == 0)) | sort_by(.records_per_s) | last // empty' \
   "$RUN_DIR"/run-*.json 2> /dev/null)"
+
+# No silent caps: every rung kept out of the election is named. The filters are complements (== 0
+# above, != 0 here), so a rung that somehow failed to record its error count shows up here too instead
+# of vanishing between them.
+errorful="$(jq -rs 'map(select(.records_per_s != null and .errors != 0) | "\(.connections) conns (\(.errors // "unrecorded") errors)") | join(", ")' \
+  "$RUN_DIR"/run-*.json 2> /dev/null)"
+if [ -n "$errorful" ]; then
+  echo "NOTE: rungs excluded from the peak election for recording errors: $errorful" >&2
+fi
+
 if [ -z "$best" ]; then
-  echo "no successful runs in the sweep; see $RUN_DIR/loadtest.err" >&2
+  if [ -n "$errorful" ]; then
+    echo "every completed rung recorded errors; refusing to publish an errorful throughput as the ceiling" >&2
+  else
+    echo "no successful runs in the sweep; see $RUN_DIR/loadtest.err" >&2
+  fi
   exit 1
 fi
 peak_n="$(echo "$best" | jq -r '.connections')"
