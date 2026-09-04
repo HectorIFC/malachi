@@ -92,15 +92,51 @@ The [Elixir load test results](../generated/loadtest-elixir-results.md) page ren
 document, from `benchmark/published/loadtest-elixir.json`, as does the Elixir section of the
 [benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
 
-That file is written by CI, not by hand: the Publish results workflow runs a variant of this command
-on every push to main and commits the result, so an edit of your own would be overwritten by the next
-merge. A pull request runs it too without committing, and posts the numbers as a comment when the
-branch lives in this repository; from a fork the comment is skipped and the artifacts carry them.
+That file is written by CI, not by hand: the Publish results workflow measures it on every push to
+main and commits the result, so an edit of your own would be overwritten by the next merge. A pull
+request runs it too without committing, and posts the numbers as a comment when the branch lives in
+this repository; from a fork the comment is skipped and the artifacts carry them.
 
-The variant differs in two ways. It passes credentials, and it adds `--warmup 2`, which excludes the
-opening seconds from the statistics. That second one matters if you are comparing: the command above
-has no warmup, so its numbers carry the cost of topic creation and JIT warmup that the published ones
-do not. Add `--warmup 2` locally when you want a figure comparable to the site.
+CI does not run the bare command above. It runs `scripts/loadtest-ceiling.sh` with `GENERATOR=elixir`,
+which boots a dedicated server pinned to three cores and pins this generator to the fourth, then sweeps
+`--connections` and publishes the peak as the ceiling:
+
+```bash
+GENERATOR=elixir SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-elixir.json scripts/loadtest-ceiling.sh
+```
+
+The single core is deliberate: it holds this multi-core generator to the same one core the Node client
+gets, so the published number compares the servers rather than the generators. Node and Elixir run on
+**separate** runners, so one load test never influences the other.
+
+Holding a BEAM to one core takes more than `taskset`. The harness passes
+`+S 1:1 +SDcpu 1:1 +SDio 1 +sbwt none +sbwtdcpu none +sbwtdio none`: schedulers capped at the pinned
+core count, the dirty CPU and IO pools shrunk from their defaults of 4 and 10 threads (a generator does
+no file IO inside the window), and busy-wait off everywhere. Without those, roughly sixteen VM threads
+timeslice one core with several of them spinning, and the first CI runs showed exactly that pathology:
+p50 latency in the tens of milliseconds but p99 above a second, a non-monotonic connection ladder, and
+the server nearly idle. That is a harness artifact, not a BEAM verdict: the BEAM's strength is
+multi-core scalability, which a one-core pin removes by construction, so a single-threaded event loop
+client may still edge it out here. The attribution below says who capped, which is what the comparison
+needs.
+
+The run samples both sides' CPU across the peak window and the page reports them: a server near three
+of three cores saturated (its ceiling was found), a generator near one of one capped first (the number
+is a lower bound). Both generators drive a **single topic**, which in Malachi means a single range and
+a serialized append on its primary, so the published figure is the one-topic ceiling; `--topics` spreads
+load across ranges when you want the multi-shard picture locally. Run the script the same way locally
+when you want the published ceiling; the bare command above is a single point at whatever concurrency
+you pass.
+
+How connections are opened is part of the methodology too. Every connection pays an Argon2 credential
+verification on the server, so opening hundreds simultaneously is an auth storm: on the 3-core CI
+server it saturated all three cores for tens of seconds and timed the high rungs out during setup.
+Both generators take the same `--connect-strategy` flag: `bounded` (default; at most
+`--connect-concurrency` connects in flight, 32), `stagger` (connection `i` starts after
+`i * --connect-stagger-ms`), or `all-at-once` (the storm, kept for reproducing it on purpose). The
+ceiling harness pins `bounded` at 32 explicitly, each pacing knob is only accepted with the strategy
+that reads it, and a connection that still fails aborts the run with a `SetupError` naming how many of
+how many failed, instead of a crashed worker's exit dump.
 
 This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
 counts backpressure that the Node one does not (dropped connections, server-shed produces,

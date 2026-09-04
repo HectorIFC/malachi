@@ -144,8 +144,39 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
   end
 
   defp loadtest_headline(result) do
-    "**#{number(result["records_per_s"])} records per second** over #{result["duration_s"]}s with " <>
-      "#{result["errors"]} errors, scenario `#{result["scenario"]}` on #{result["connections"]} connections."
+    "**#{number(result["records_per_s"])} records per second** at saturation over " <>
+      "#{result["duration_s"]}s with #{result["errors"]} errors, scenario `#{result["scenario"]}`, " <>
+      "peaking at #{result["connections"]} connections#{cpu_phrase(result)}." <>
+      ladder_limit_note(result)
+  end
+
+  # When the sweep peaked at its top rung the knee may lie beyond it, so the figure is a lower bound on
+  # the ceiling rather than the ceiling. Only added when the run recorded that it hit the limit.
+  defp ladder_limit_note(%{"peak_at_ladder_limit" => true}),
+    do:
+      " This is a lower bound: the connection sweep peaked at its top rung, so the true ceiling may be " <>
+        "higher."
+
+  defp ladder_limit_note(_), do: ""
+
+  # One side's CPU attribution ("2.47 of 3"), or nil when the run did not sample that side, so it is
+  # dropped rather than rendered as a measured zero. `side` is "server" or "generator".
+  defp cpu_cell(result, side) do
+    cores = result["#{side}_cpu_cores"]
+    budget = result["#{side}_cpu_budget"]
+    if is_number(cores) and is_number(budget), do: "#{cores} of #{budget}"
+  end
+
+  # Which side saturated: the generator is pinned to one core and the server to the rest, so a server
+  # near its budget found its ceiling, while a generator near its budget capped first and the number is
+  # a lower bound. Only the sides a run actually sampled are rendered.
+  defp cpu_phrase(result) do
+    sides =
+      for side <- ["server", "generator"], cell = cpu_cell(result, side), cell != nil do
+        "#{side} at #{cell} cores"
+      end
+
+    if sides == [], do: "", else: " (" <> Enum.join(sides, ", ") <> ")"
   end
 
   defp throughput_rows(result) do
@@ -156,6 +187,11 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       {"Records", number(result["records"])},
       # The Node client calls it `operations` and the BEAM one `ops`; same measure, two spellings.
       {"Operations", number(result["ops"] || result["operations"])},
+      # The connection count at the sweep's peak: the load that drove this ceiling number.
+      {"Peak connections", number(result["connections"])},
+      # Absent on runs that did not sample them (skipped by table/1), so they never read as measured zeros.
+      {"Server CPU (cores)", cpu_cell(result, "server")},
+      {"Generator CPU (cores)", cpu_cell(result, "generator")},
       {"Duration", suffix(result["duration_s"], "s")},
       {"Errors", result["errors"]}
     ]

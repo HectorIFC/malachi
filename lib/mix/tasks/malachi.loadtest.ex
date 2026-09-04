@@ -22,6 +22,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       data-plane shards
     * `--host` (127.0.0.1); accepts a comma-separated list for a cluster (connections round-robin
       across the hosts), `--port` (4040)
+    * `--connect-strategy` bounded | stagger | all-at-once (default bounded): how the connections are
+      opened, since each one pays a server-side credential verification and opening hundreds at once is
+      an auth storm. bounded keeps at most `--connect-concurrency` (32) connects in flight; stagger
+      delays connection i by `i * --connect-stagger-ms` (100); all-at-once opens everything together.
+      Each pacing knob is only accepted with the strategy that reads it.
     * auth: `--user` (admin) `--pass` (admin123), or `--token`, or `--tls`/`--cacert`/`--cert`/`--key`
     * `--json` emit the report as JSON
   """
@@ -30,8 +35,14 @@ defmodule Mix.Tasks.Malachi.Loadtest do
 
   @scenarios ~w(produce fetch mixed stream user acl)
 
+  # CLI spelling => internal atom; the map is the validation (anything else is a clean Mix error).
+  @connect_strategies %{"bounded" => :bounded, "stagger" => :stagger, "all-at-once" => :all_at_once}
+
   @switches [
     scenario: :string,
+    connect_strategy: :string,
+    connect_concurrency: :integer,
+    connect_stagger_ms: :integer,
     connections: :integer,
     duration: :integer,
     warmup: :integer,
@@ -59,9 +70,34 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   @impl Mix.Task
   def run(argv) do
     {opts, _rest} = OptionParser.parse!(argv, strict: @switches)
-    Malachi.Loadtest.run(Keyword.update(opts, :scenario, :produce, &scenario!/1))
+
+    opts =
+      opts
+      |> Keyword.update(:scenario, :produce, &scenario!/1)
+      |> Keyword.replace_lazy(:connect_strategy, &connect_strategy!/1)
+
+    Malachi.Loadtest.run(opts)
+  rescue
+    # Both are conditions with a one-line explanation, not bugs: a SetupError is operational (the server
+    # would not take the connections) and an ArgumentError is input validation (bad counts, a pacing
+    # knob passed with the wrong connect strategy). Exit non-zero with that line alone, parity with the
+    # Node generator's clean errors, instead of a crash dump.
+    e in Malachi.Loadtest.SetupError -> Mix.raise(Exception.message(e))
+    e in ArgumentError -> Mix.raise(Exception.message(e))
   end
 
   defp scenario!(s) when s in @scenarios, do: String.to_atom(s)
   defp scenario!(s), do: Mix.raise("unknown --scenario #{inspect(s)} (expected one of: #{Enum.join(@scenarios, ", ")})")
+
+  defp connect_strategy!(s) do
+    case @connect_strategies do
+      %{^s => strategy} ->
+        strategy
+
+      _ ->
+        Mix.raise(
+          "unknown --connect-strategy #{inspect(s)} (expected one of: #{Enum.join(Map.keys(@connect_strategies), ", ")})"
+        )
+    end
+  end
 end

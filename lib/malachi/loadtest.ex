@@ -10,6 +10,20 @@ defmodule Malachi.Loadtest do
   worker connects and authenticates, waits at a barrier so all connections start together, runs its
   scenario for `warmup + duration`, and records only during the measured window. It is resilient: a shed
   produce backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
+
+  How the connections are OPENED is a strategy (`:connect_strategy`), because each one pays a full
+  credential verification on the server and opening hundreds at once is a self-inflicted auth storm:
+
+    * `:bounded` (default) - at most `:connect_concurrency` (default 32) connections inside
+      connect+auth at once; the next starts when one finishes. Keeps each auth's individual latency
+      near `concurrency / server_verify_rate` instead of the whole queue's drain time.
+    * `:stagger` - connection `i` starts `i * :connect_stagger_ms` (default 100) after the first, with
+      no in-flight bound. A time ramp that does not adapt to the server's verify rate.
+    * `:all_at_once` - every connection starts simultaneously (the storm, kept on purpose for
+      reproducing it and for comparing with historical runs).
+
+  A connection that fails to open under any strategy fails the run with a `SetupError` naming how many
+  of how many failed, rather than crashing a linked worker.
   """
 
   alias Malachi.Loadtest.Conn
@@ -17,7 +31,13 @@ defmodule Malachi.Loadtest do
   alias Malachi.Log.Record
   alias Malachi.Wire
 
+  defmodule SetupError do
+    @moduledoc "A load test could not establish its connections; the message says how many and why."
+    defexception [:message]
+  end
+
   @scenarios [:produce, :fetch, :mixed, :stream, :user, :acl]
+  @connect_strategies [:bounded, :stagger, :all_at_once]
 
   @ops 1
   @records 2
@@ -58,12 +78,39 @@ defmodule Malachi.Loadtest do
     hist = Histogram.new()
     parent = self()
 
+    # The gate only exists for the bounded strategy; the other strategies pace themselves.
+    cfg = Map.put(cfg, :gate, if(cfg.connect_strategy == :bounded, do: start_gate(cfg.connect_concurrency)))
+
     workers =
       for index <- 0..(cfg.connections - 1) do
         spawn_link(fn -> worker(parent, index, cfg, ops, hist) end)
       end
 
-    Enum.each(workers, fn _ -> receive(do: ({:ready, _} -> :ok)) end)
+    failures =
+      Enum.reduce(workers, [], fn _, acc ->
+        receive do
+          {:ready, _} -> acc
+          {:connect_failed, _pid, reason} -> [reason | acc]
+        end
+      end)
+
+    if cfg.gate, do: send(cfg.gate, :stop)
+
+    # Fail the whole run rather than measuring fewer connections than the report would claim. The ready
+    # workers are killed explicitly: a caller that rescues this exception (a test, IEx) never sends them
+    # an exit signal through the link, and they would otherwise wait for :go forever, holding sockets.
+    if failures != [] do
+      Enum.each(workers, fn w ->
+        Process.unlink(w)
+        Process.exit(w, :kill)
+      end)
+
+      raise SetupError,
+            "#{length(failures)} of #{cfg.connections} connections failed to connect and authenticate " <>
+              "(first error: #{inspect(List.last(failures))}). A server saturated verifying credentials " <>
+              "is the usual cause: lower --connections, or use --connect-strategy bounded with a smaller " <>
+              "--connect-concurrency."
+    end
 
     now = mono_ms()
     warmup_end = now + cfg.warmup * 1000
@@ -94,6 +141,9 @@ defmodule Malachi.Loadtest do
 
     %{
       scenario: scenario,
+      connect_strategy: connect_strategy!(opts),
+      connect_concurrency: positive!(opts, :connect_concurrency, 32),
+      connect_stagger_ms: positive!(opts, :connect_stagger_ms, 100),
       connections: positive!(opts, :connections, 128),
       duration: positive!(opts, :duration, 10),
       warmup: non_negative!(opts, :warmup, 2),
@@ -122,6 +172,28 @@ defmodule Malachi.Loadtest do
     [{:host, Enum.at(cfg.hosts, rem(index, length(cfg.hosts)))} | cfg.conn_opts]
   end
 
+  # Validates the connect strategy and that each pacing knob is only passed with the strategy that reads
+  # it: silently ignoring `connect_stagger_ms` under `:bounded` (or the concurrency under `:stagger`)
+  # would let a run claim a pacing it never applied.
+  defp connect_strategy!(opts) do
+    strategy = Keyword.get(opts, :connect_strategy, :bounded)
+
+    unless strategy in @connect_strategies do
+      raise ArgumentError,
+            "unknown connect_strategy #{inspect(strategy)} (expected one of: #{inspect(@connect_strategies)})"
+    end
+
+    if strategy != :bounded and Keyword.has_key?(opts, :connect_concurrency) do
+      raise ArgumentError, "connect_concurrency only applies to the :bounded connect strategy"
+    end
+
+    if strategy != :stagger and Keyword.has_key?(opts, :connect_stagger_ms) do
+      raise ArgumentError, "connect_stagger_ms only applies to the :stagger connect strategy"
+    end
+
+    strategy
+  end
+
   # A zero or negative count would fail late and confusingly (an ArithmeticError after the whole run,
   # or an instantly-empty measurement): reject it up front with a named error instead.
   defp positive!(opts, key, default) do
@@ -139,7 +211,16 @@ defmodule Malachi.Loadtest do
   end
 
   defp setup(cfg) do
-    {:ok, admin} = connect_auth(conn_opts_for(cfg, 0))
+    admin =
+      case connect_auth(conn_opts_for(cfg, 0)) do
+        {:ok, conn} ->
+          conn
+
+        {:error, reason} ->
+          raise SetupError,
+                "could not connect and authenticate to create the topic (#{inspect(reason)}); " <>
+                  "is the server up and are the credentials right?"
+      end
 
     admin =
       Enum.reduce(topic_names(cfg), admin, fn topic, conn ->
@@ -159,6 +240,51 @@ defmodule Malachi.Loadtest do
 
   defp connect_auth(conn_opts) do
     with {:ok, conn} <- Conn.connect(conn_opts), do: Conn.authenticate(conn, conn_opts)
+  end
+
+  # Opens worker `index`'s connection under the configured strategy (see the moduledoc). Mid-run
+  # reconnects bypass this on purpose: they are rare singles, not a storm, and the gate is gone by then.
+  defp ramp_connect(%{connect_strategy: :bounded, gate: gate}, _index, conn_opts) do
+    send(gate, {:acquire, self()})
+    receive(do: (:granted -> :ok))
+    result = connect_auth(conn_opts)
+    send(gate, :release)
+    result
+  end
+
+  defp ramp_connect(%{connect_strategy: :stagger} = cfg, index, conn_opts) do
+    Process.sleep(index * cfg.connect_stagger_ms)
+    connect_auth(conn_opts)
+  end
+
+  defp ramp_connect(%{connect_strategy: :all_at_once}, _index, conn_opts), do: connect_auth(conn_opts)
+
+  # A tiny counting semaphore for the bounded strategy: at most `slots` grants outstanding, FIFO beyond
+  # that. Linked to the run process and stopped explicitly once every worker is past connect.
+  defp start_gate(slots), do: spawn_link(fn -> gate_loop(slots, :queue.new()) end)
+
+  defp gate_loop(slots, waiting) do
+    receive do
+      {:acquire, pid} when slots > 0 ->
+        send(pid, :granted)
+        gate_loop(slots - 1, waiting)
+
+      {:acquire, pid} ->
+        gate_loop(slots, :queue.in(pid, waiting))
+
+      :release ->
+        case :queue.out(waiting) do
+          {{:value, pid}, rest} ->
+            send(pid, :granted)
+            gate_loop(slots, rest)
+
+          {:empty, rest} ->
+            gate_loop(slots + 1, rest)
+        end
+
+      :stop ->
+        :ok
+    end
   end
 
   # keyspace_bits 8 (server default); ignore already-exists so re-runs work.
@@ -187,7 +313,16 @@ defmodule Malachi.Loadtest do
 
   defp worker(parent, index, cfg, ops, hist) do
     conn_opts = conn_opts_for(cfg, index)
-    {:ok, conn} = connect_auth(conn_opts)
+
+    # A failed connect is reported to the parent and the worker ends normally: the parent decides the
+    # run's fate (SetupError naming every failure) instead of a linked MatchError crash taking it down.
+    case ramp_connect(cfg, index, conn_opts) do
+      {:ok, conn} -> worker_loop(parent, index, cfg, ops, hist, conn_opts, conn)
+      {:error, reason} -> send(parent, {:connect_failed, self(), reason})
+    end
+  end
+
+  defp worker_loop(parent, index, cfg, ops, hist, conn_opts, conn) do
     ctx = build_ctx(cfg, index)
     send(parent, {:ready, self()})
     {warmup_end, measure_end} = receive(do: ({:go, w, e} -> {w, e}))
@@ -608,9 +743,21 @@ defmodule Malachi.Loadtest do
         topic: cfg.topic,
         host: Enum.join(cfg.hosts, ","),
         port: Keyword.get(cfg.conn_opts, :port, 4040)
-      ] ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
+      ] ++
+        connect_options(cfg) ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
 
     Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
+  end
+
+  # The connect strategy shapes the run (it is what tames the auth storm), so it must be reproducible
+  # from the record. Its pacing knob travels only with the strategy that reads it: the up-front
+  # validation rejects a cross-strategy knob, so a rebuilt command carrying both would refuse to run.
+  defp connect_options(cfg) do
+    case cfg.connect_strategy do
+      :bounded -> ["connect-strategy": "bounded", "connect-concurrency": cfg.connect_concurrency]
+      :stagger -> ["connect-strategy": "stagger", "connect-stagger-ms": cfg.connect_stagger_ms]
+      :all_at_once -> ["connect-strategy": "all-at-once"]
+    end
   end
 
   # `--name=value` rather than two arguments, for every option rather than only the ones that look

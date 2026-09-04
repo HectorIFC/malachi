@@ -158,6 +158,58 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       assert body =~ "**25,889 records per second**"
       assert body =~ "| Recorded | without metadata |"
     end
+
+    test "the ceiling attribution renders: peak connections, both CPU sides and the lower-bound note", context do
+      publish(
+        context,
+        "loadtest-node.json",
+        loadtest_result(%{
+          "connections" => 128,
+          "server_cpu_cores" => 2.91,
+          "server_cpu_budget" => 3,
+          "generator_cpu_cores" => 0.98,
+          "generator_cpu_budget" => 1,
+          "peak_at_ladder_limit" => true
+        })
+      )
+
+      run(context)
+      body = page(context, "loadtest-node-results.md")
+
+      assert body =~ "peaking at 128 connections (server at 2.91 of 3 cores, generator at 0.98 of 1 cores)"
+      assert body =~ "| Peak connections | 128 |"
+      assert body =~ "| Server CPU (cores) | 2.91 of 3 |"
+      assert body =~ "| Generator CPU (cores) | 0.98 of 1 |"
+      assert body =~ "This is a lower bound"
+    end
+
+    test "a run that sampled only one CPU side renders that side alone", context do
+      publish(
+        context,
+        "loadtest-node.json",
+        loadtest_result(%{"server_cpu_cores" => 2.47, "server_cpu_budget" => 3})
+      )
+
+      run(context)
+      body = page(context, "loadtest-node-results.md")
+
+      assert body =~ "(server at 2.47 of 3 cores)"
+      refute body =~ "generator at"
+      refute body =~ "Generator CPU (cores)"
+    end
+
+    test "CPU rows are dropped when a run did not sample them, and a non-limited peak is not called a lower bound",
+         context do
+      # macOS smoke and any run without /proc leave these unset; a blank row would read as measured zero,
+      # and the lower-bound caveat must appear only for a peak that actually hit the ladder limit.
+      publish(context, "loadtest-node.json", loadtest_result(%{"peak_at_ladder_limit" => false}))
+      run(context)
+
+      body = page(context, "loadtest-node-results.md")
+      refute body =~ "Server CPU (cores)"
+      refute body =~ "Generator CPU (cores)"
+      refute body =~ "lower bound"
+    end
   end
 
   describe "the chaos page" do
