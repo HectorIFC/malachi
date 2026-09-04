@@ -34,6 +34,10 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 
 const SCENARIOS = ['produce', 'fetch', 'stream', 'mixed'];
+// How connections are opened (mirrored, name for name, by `mix malachi.loadtest`): each connection
+// pays a server-side credential verification, so opening hundreds at once is a self-inflicted auth
+// storm. bounded caps in-flight connects, stagger delays each start, all-at-once is the storm.
+const CONNECT_STRATEGIES = ['bounded', 'stagger', 'all-at-once'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -163,6 +167,35 @@ const cfg = config({ username: 'app', password: 'app123' });
 function connect() {
   const client = new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000 });
   return client.connect(cfg.username, cfg.password);
+}
+
+// Opens `count` connections under opts.connectStrategy (see CONNECT_STRATEGIES). bounded is a pool of
+// K async workers pulling the next index: at most K connects (and their auth round-trips) in flight,
+// which keeps each auth's individual latency near K / server_verify_rate instead of the whole queue's
+// drain time. stagger delays connection i's START by i * connectStaggerMs and lets completions overlap.
+async function makeClients(count, opts) {
+  if (opts.connectStrategy === 'all-at-once') {
+    return Promise.all(Array.from({ length: count }, connect));
+  }
+  if (opts.connectStrategy === 'stagger') {
+    return Promise.all(
+      Array.from({ length: count }, async (_, i) => {
+        await sleep(i * opts.connectStaggerMs);
+        return connect();
+      })
+    );
+  }
+  const clients = new Array(count);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(opts.connectConcurrency, count) }, async () => {
+      while (next < count) {
+        const i = next++;
+        clients[i] = await connect();
+      }
+    })
+  );
+  return clients;
 }
 
 // A reusable value buffer of the requested size (the codec copies it, so sharing across records is safe).
@@ -530,6 +563,11 @@ ${colors.yellow('Options')}
                      Omit or 0 = closed-loop. Not applicable to stream.
   --max-inflight <n> Open-loop in-flight cap; hitting it flags saturation (default 100000)
   --connections <n>  Concurrent connections/workers (default 10)
+  --connect-strategy <s>     How connections open: bounded | stagger | all-at-once (default bounded).
+                             Each connection pays a server-side credential check, so hundreds at once
+                             is an auth storm; bounded caps in-flight connects.
+  --connect-concurrency <n>  bounded only: max connects in flight (default 32)
+  --connect-stagger-ms <ms>  stagger only: delay between connection starts (default 100)
   --duration <s>     Test duration in seconds (default 10)
   --topic <t>        Topic (default loadtest_<timestamp>, auto-created)
   --batch <n>        Records per produce op (default 1)
@@ -555,6 +593,7 @@ async function main() {
   const valueFlags = [
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
+    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms',
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
@@ -562,6 +601,24 @@ async function main() {
   const scenario = flags.scenario || 'produce';
   if (!SCENARIOS.includes(scenario)) {
     console.error(colors.red(`Unknown scenario "${scenario}" (expected: ${SCENARIOS.join(', ')})`));
+    process.exit(1);
+  }
+
+  // Mirrors the Elixir generator's connect strategies exactly (same names, defaults, and semantics):
+  // each connection pays a server-side credential verification, so HOW they open is methodology. A
+  // pacing knob passed with a strategy that does not read it is an error, not a silent no-op: the run
+  // would otherwise claim a pacing it never applied.
+  const connectStrategy = flags['connect-strategy'] || 'bounded';
+  if (!CONNECT_STRATEGIES.includes(connectStrategy)) {
+    console.error(colors.red(`Unknown connect-strategy "${connectStrategy}" (expected: ${CONNECT_STRATEGIES.join(', ')})`));
+    process.exit(1);
+  }
+  if (connectStrategy !== 'bounded' && flags['connect-concurrency'] !== undefined) {
+    console.error(colors.red('--connect-concurrency only applies to the bounded connect strategy'));
+    process.exit(1);
+  }
+  if (connectStrategy !== 'stagger' && flags['connect-stagger-ms'] !== undefined) {
+    console.error(colors.red('--connect-stagger-ms only applies to the stagger connect strategy'));
     process.exit(1);
   }
 
@@ -580,6 +637,9 @@ async function main() {
     samples: int(flags.samples, 100000),
     rate: int(flags.rate, 0),
     maxInflight: int(flags['max-inflight'], 100000),
+    connectStrategy,
+    connectConcurrency: int(flags['connect-concurrency'], 32),
+    connectStaggerMs: int(flags['connect-stagger-ms'], 100),
     json: !!flags.json,
   };
 
@@ -603,7 +663,7 @@ async function main() {
 
     await prepopulate(opts.topic, opts.prepopulate, opts.recordSize, opts.keys);
 
-    clients = await Promise.all(Array.from({ length: opts.connections }, connect));
+    clients = await makeClients(opts.connections, opts);
 
     if (opts.warmup > 0) {
       const warmStats = new Stats();
@@ -613,7 +673,7 @@ async function main() {
       // unsubscribe frame), so reuse across warmup+measure would double-subscribe. Fresh connections also
       // reset any TCP/GC warmup state for the measured run.
       clients.forEach((c) => c.close());
-      clients = await Promise.all(Array.from({ length: opts.connections }, connect));
+      clients = await makeClients(opts.connections, opts);
     }
 
     const stats = new Stats();

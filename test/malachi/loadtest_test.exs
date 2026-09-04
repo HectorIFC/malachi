@@ -358,6 +358,30 @@ defmodule Malachi.LoadtestTest do
       end
     end
 
+    test "an unknown connect strategy and cross-strategy pacing knobs are named errors up front" do
+      assert_raise ArgumentError, ~r/unknown connect_strategy :warp/, fn ->
+        Loadtest.run(connect_strategy: :warp)
+      end
+
+      # Each pacing knob only applies to the strategy that reads it; accepting it silently would let a
+      # run claim a pacing it never applied.
+      assert_raise ArgumentError, ~r/connect_concurrency only applies to the :bounded/, fn ->
+        Loadtest.run(connect_strategy: :stagger, connect_concurrency: 8)
+      end
+
+      assert_raise ArgumentError, ~r/connect_stagger_ms only applies to the :stagger/, fn ->
+        Loadtest.run(connect_stagger_ms: 50)
+      end
+
+      assert_raise ArgumentError, ~r/connect_stagger_ms only applies to the :stagger/, fn ->
+        Loadtest.run(connect_strategy: :all_at_once, connect_stagger_ms: 50)
+      end
+
+      assert_raise ArgumentError, ~r/connect_concurrency must be a positive integer/, fn ->
+        Loadtest.run(connect_concurrency: 0)
+      end
+    end
+
     test "prepopulate smaller than batch seeds nothing instead of sending spurious batches" do
       # 1..0 without an explicit step enumerates DOWN and used to send two batches; the //1 step keeps
       # the range empty, so the fetch finds a genuinely empty backlog.
@@ -403,6 +427,60 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "connect strategies and setup failures" do
+    test "every connect strategy completes a run against the real server" do
+      # bounded with concurrency 1 fully serializes the gate (grant -> connect -> release -> next), so a
+      # deadlock or a lost grant would hang this test rather than pass it.
+      for opts <- [
+            [connect_strategy: :bounded, connect_concurrency: 1],
+            [connect_strategy: :stagger, connect_stagger_ms: 1],
+            [connect_strategy: :all_at_once]
+          ] do
+        r = run([scenario: :produce, connections: 4, batch: 2, topic: topic("strat")] ++ opts)
+        assert r.errors == 0, "#{inspect(opts)} should complete cleanly"
+        assert r.ops > 0
+      end
+    end
+
+    test "a server that is not there fails setup with a SetupError, not a crash" do
+      # Grab a port the OS just released, so the connect is refused instantly.
+      {:ok, listen} = :gen_tcp.listen(0, [:binary])
+      {:ok, dead_port} = :inet.port(listen)
+      :gen_tcp.close(listen)
+
+      assert_raise Loadtest.SetupError, ~r/could not connect and authenticate to create the topic/, fn ->
+        Loadtest.run(port: dead_port, user: "admin", pass: "admin123", connections: 2, duration: 1)
+      end
+    end
+
+    test "workers that cannot connect fail the run with a SetupError naming how many, not a MatchError" do
+      # A wire stub that serves the first `allow` connections and slams the door on the rest. The admin
+      # setup connection always comes first, so allow = 2 lets setup and ONE worker through while the
+      # other two workers fail: the run must abort cleanly counting 2 of 3, and must not report a
+      # measurement taken with fewer connections than requested.
+      seen = :ets.new(:limited_conns, [:public, :set])
+      :ets.insert(seen, {:conns, 0})
+
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: 4, active: false, reuseaddr: true])
+      {:ok, port} = :inet.port(listen)
+      spawn(fn -> fake_accept_limited(listen, seen, 2) end)
+
+      assert_raise Loadtest.SetupError, ~r/2 of 3 connections failed to connect and authenticate/, fn ->
+        Loadtest.run(
+          port: port,
+          host: "127.0.0.1",
+          user: "admin",
+          pass: "admin123",
+          connections: 3,
+          duration: 1,
+          topic: "limited"
+        )
+      end
+
+      :gen_tcp.close(listen)
+    end
+  end
+
   # --- fake wire server (resilience test) ---
 
   defp fake_accept(listen, seen) do
@@ -441,4 +519,36 @@ defmodule Malachi.LoadtestTest do
 
   # An unframed ok-response body; packet: 4 on the listen socket prepends the length prefix.
   defp ok_body(corr, payload), do: <<corr::32, Wire.ok_code()::16, payload::binary>>
+
+  # --- limited wire server (setup-failure test) ---
+
+  # Serves the wire protocol for the first `allow` connections and closes every later one right after
+  # accept, so worker connections fail while the earlier admin setup succeeds.
+  defp fake_accept_limited(listen, seen, allow) do
+    case :gen_tcp.accept(listen) do
+      {:ok, sock} ->
+        if :ets.update_counter(seen, :conns, 1) <= allow do
+          spawn(fn -> fake_serve_all(sock) end)
+        else
+          :gen_tcp.close(sock)
+        end
+
+        fake_accept_limited(listen, seen, allow)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  # Acks every request (auth, create_topic); the run aborts before any produce reaches it.
+  defp fake_serve_all(sock) do
+    case :gen_tcp.recv(sock, 0) do
+      {:ok, <<_api_key::16, corr::32, _payload::binary>>} ->
+        :gen_tcp.send(sock, ok_body(corr, <<>>))
+        fake_serve_all(sock)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
 end

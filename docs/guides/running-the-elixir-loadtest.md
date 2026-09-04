@@ -128,6 +128,16 @@ load across ranges when you want the multi-shard picture locally. Run the script
 when you want the published ceiling; the bare command above is a single point at whatever concurrency
 you pass.
 
+How connections are opened is part of the methodology too. Every connection pays an Argon2 credential
+verification on the server, so opening hundreds simultaneously is an auth storm: on the 3-core CI
+server it saturated all three cores for tens of seconds and timed the high rungs out during setup.
+Both generators take the same `--connect-strategy` flag: `bounded` (default; at most
+`--connect-concurrency` connects in flight, 32), `stagger` (connection `i` starts after
+`i * --connect-stagger-ms`), or `all-at-once` (the storm, kept for reproducing it on purpose). The
+ceiling harness pins `bounded` at 32 explicitly, each pacing knob is only accepted with the strategy
+that reads it, and a connection that still fails aborts the run with a `SetupError` naming how many of
+how many failed, instead of a crashed worker's exit dump.
+
 This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
 counts backpressure that the Node one does not (dropped connections, server-shed produces,
 reconnects). Both pages render only what the run recorded, so the two sections legitimately show

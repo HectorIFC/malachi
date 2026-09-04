@@ -147,16 +147,21 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   # The generator runs in the background so its pid can be sampled alongside the server's; its exit
   # status is collected by the wait below. taskset/mix/node all exec straight into the measured process,
   # so $! is the right pid for /proc on both sides.
+  # The connect strategy is pinned explicitly (not left to the generators' defaults) so the published
+  # methodology is visible here: bounded connects avoid the auth storm that killed the high rungs, since
+  # every connection pays an Argon2 verify on the 3-core server and hundreds at once exhaust it.
   if [ "$GENERATOR" = node ]; then
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     $lt_pin node scripts/loadtest.js --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
-      --duration "$DUR" --warmup "$WARM" > "$out" 2>> "$RUN_DIR/loadtest.err" &
+      --duration "$DUR" --warmup "$WARM" \
+      --connect-strategy bounded --connect-concurrency 32 > "$out" 2>> "$RUN_DIR/loadtest.err" &
   else
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     ERL_AFLAGS="$GEN_ERL_AFLAGS" $lt_pin mix malachi.loadtest --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
+      --connect-strategy bounded --connect-concurrency 32 \
       --user "$MALACHI_USER" --pass "$MALACHI_PASS" > "$out" 2>> "$RUN_DIR/loadtest.err" &
   fi
   local gen_pid=$!

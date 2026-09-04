@@ -104,6 +104,15 @@ a single range and a serialized append on its primary, so the published figure i
 ceiling. If the peak lands at the top of the sweep the script warns to widen `CONNS_LADDER`, since the
 knee may lie beyond it.
 
+How connections are opened is part of the methodology. Every connection pays a server-side credential
+verification (Argon2, expensive by design), so opening hundreds simultaneously is an auth storm: on the
+3-core CI server it exhausted the high rungs' client timeouts before a single record flowed. Both
+generators therefore take the same `--connect-strategy` flag: `bounded` (default; at most
+`--connect-concurrency` connects in flight, 32), `stagger` (connection `i` starts after
+`i * --connect-stagger-ms`), or `all-at-once` (the storm, kept for reproducing it on purpose). The
+ceiling harness pins `bounded` at 32 explicitly, and each pacing knob is only accepted with the
+strategy that reads it.
+
 To see what a change does before merging, open a pull request: the workflow runs there too without
 committing, because runner variance would otherwise put noise in every diff. Node and Elixir run on
 **separate** runners so neither load test influences the other. It posts the numbers as a comment when
