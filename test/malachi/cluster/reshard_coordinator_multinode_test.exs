@@ -5,6 +5,8 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
   # multi-node networking is unavailable.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   @moduletag :multinode
 
   alias Malachi.Cluster.HashRing
@@ -31,7 +33,7 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
   defp start_membership(topology) do
     name = :"reshard_ms_#{System.unique_integer([:positive])}"
     {:ok, pid} = MembershipServer.start_link(name: name, peers: [], topology: topology, protocol_period: 3_600_000)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    on_exit(fn -> stop_quietly(pid) end)
     name
   end
 
@@ -74,7 +76,7 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
       )
 
     on_exit(fn ->
-      Enum.each([splits, reshard], fn pid -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      Enum.each([splits, reshard], &stop_quietly/1)
     end)
 
     reshard
