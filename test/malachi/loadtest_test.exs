@@ -245,6 +245,18 @@ defmodule Malachi.LoadtestTest do
       assert shell_flag_absent?(command, "--cacert")
       assert shell_flag_absent?(command, "--cert")
       assert shell_flag_absent?(command, "--key")
+      # Verification is the default, so a run that did not ask to skip it must not record that it did.
+      assert shell_flag_absent?(command, "--insecure")
+    end
+
+    test "a run that skipped server verification records it" do
+      # --insecure turns off certificate verification, so a command that omitted it would reproduce a
+      # stronger configuration than the run and disagree with its own numbers, the same reason the
+      # certificate paths are recorded.
+      command = Loadtest.reproduce_command(tls: true, insecure: true)
+
+      assert command =~ "--tls"
+      assert command =~ "--insecure"
     end
 
     test "the recorded command still carries no credential values" do

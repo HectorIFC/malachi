@@ -163,7 +163,7 @@ defmodule Malachi.Loadtest do
       # `--host` accepts a comma-separated list (a cluster): connection `i` targets `hosts[rem(i, n)]`,
       # spreading the load across every node's broker mailbox. A single host keeps today's behavior.
       hosts: opts |> Keyword.get(:host, "127.0.0.1") |> String.split(",", trim: true) |> Enum.map(&String.trim/1),
-      conn_opts: Keyword.take(opts, [:port, :user, :pass, :token, :tls, :cacert, :cert, :key])
+      conn_opts: Keyword.take(opts, [:port, :user, :pass, :token, :tls, :cacert, :cert, :key, :insecure])
     }
   end
 
@@ -804,10 +804,17 @@ defmodule Malachi.Loadtest do
 
   defp tls_options(conn_opts) do
     if Keyword.get(conn_opts, :tls) do
+      # --insecure travels with the rest: it turns off server verification, so a recorded command that
+      # omitted it would reproduce a STRONGER configuration than the run and disagree with its numbers,
+      # the same reasoning that put the certificate paths here.
+      insecure = if Keyword.get(conn_opts, :insecure), do: [insecure: true], else: []
+
       [tls: true] ++
-        for option <- [:cacert, :cert, :key],
-            path = Keyword.get(conn_opts, option),
-            do: {option, path}
+        for(
+          option <- [:cacert, :cert, :key],
+          path = Keyword.get(conn_opts, option),
+          do: {option, path}
+        ) ++ insecure
     else
       []
     end
