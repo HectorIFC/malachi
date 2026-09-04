@@ -4,6 +4,7 @@ defmodule Malachi.BrokerServerStreamingTest do
   use ExUnit.Case, async: false
 
   import Malachi.Test.PollingHelper
+  import Malachi.Test.TeardownHelper
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
@@ -117,7 +118,7 @@ defmodule Malachi.BrokerServerStreamingTest do
         tick_ms: 3_600_000
       )
 
-    on_exit(fn -> if Process.alive?(coord), do: GenServer.stop(coord) end)
+    on_exit(fn -> stop_quietly(coord) end)
     coord
   end
 

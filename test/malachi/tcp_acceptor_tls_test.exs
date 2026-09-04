@@ -4,6 +4,8 @@ defmodule Malachi.TCPAcceptorTLSTest do
   # the client past it. There is no other end-to-end TLS test in the suite.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.Wire
 
   # A throwaway self-signed server cert/key generated per run. The dist certs under priv/dist_cert are
@@ -78,7 +80,7 @@ defmodule Malachi.TCPAcceptorTLSTest do
 
     port = free_port()
     {:ok, acceptor} = Malachi.TCPAcceptor.start_link({port, ssl_listen_opts(ctx.certfile, ctx.keyfile), 1, :ssl})
-    on_exit(fn -> if Process.alive?(acceptor), do: GenServer.stop(acceptor) end)
+    on_exit(fn -> stop_quietly(acceptor) end)
 
     # let the acceptor enter its accept loop
     Process.sleep(50)

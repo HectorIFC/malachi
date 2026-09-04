@@ -4,6 +4,8 @@ defmodule Malachi.Cluster.VnodeSplitTest do
   # publishes the topology. Tagged so it can be excluded where multi-node networking is unavailable.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   @moduletag :multinode
 
   alias Malachi.Cluster.HashRing
@@ -29,7 +31,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
   defp start_membership(topology) do
     name = :"vsplit_ms_#{System.unique_integer([:positive])}"
     {:ok, pid} = MembershipServer.start_link(name: name, peers: [], topology: topology, protocol_period: 3_600_000)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    on_exit(fn -> stop_quietly(pid) end)
     name
   end
 

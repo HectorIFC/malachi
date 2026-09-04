@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.SplitCoordinatorTest do
   use ExUnit.Case, async: true
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.RingTopology
@@ -9,7 +11,7 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
 
   defp start_coordinator(leader?, membership) do
     {:ok, pid} = SplitCoordinator.start_link(membership: membership, leader?: leader?)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    on_exit(fn -> stop_quietly(pid) end)
     pid
   end
 
@@ -17,7 +19,7 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
   defp start_membership(topology \\ nil) do
     name = :"sc_ms_#{System.unique_integer([:positive])}"
     {:ok, pid} = MembershipServer.start_link(name: name, peers: [], topology: topology, protocol_period: 3_600_000)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    on_exit(fn -> stop_quietly(pid) end)
     name
   end
 

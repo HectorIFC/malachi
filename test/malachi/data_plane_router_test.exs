@@ -2,6 +2,8 @@ defmodule Malachi.DataPlaneRouterTest do
   # async: false because the routing tests toggle the shared :data_shards app env.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Log.Record
@@ -111,7 +113,7 @@ defmodule Malachi.DataPlaneRouterTest do
     {:ok, broker} = BrokerServer.start_link(dir, name: :"dpr_broker_#{tag}")
 
     on_exit(fn ->
-      if Process.alive?(broker), do: GenServer.stop(broker)
+      stop_quietly(broker)
       File.rm_rf!(dir)
     end)
 

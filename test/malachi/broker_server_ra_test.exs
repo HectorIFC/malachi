@@ -2,6 +2,8 @@ defmodule Malachi.BrokerServerRaTest do
   # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.BrokerServer
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
@@ -128,7 +130,7 @@ defmodule Malachi.BrokerServerRaTest do
     directory = Path.join(System.tmp_dir!(), "malachi_sub_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
     {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
-    on_exit(fn -> if Process.alive?(repl), do: GenServer.stop(repl) end)
+    on_exit(fn -> stop_quietly(repl) end)
 
     opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 100]
     {:ok, writer} = BrokerServer.start_link("unused", opts)
@@ -156,7 +158,7 @@ defmodule Malachi.BrokerServerRaTest do
     dir = Path.join(System.tmp_dir!(), "malachi_ready_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, repl} = ReplicationServer.start_link(directory: dir)
-    on_exit(fn -> if Process.alive?(repl), do: GenServer.stop(repl) end)
+    on_exit(fn -> stop_quietly(repl) end)
 
     {:ok, server} =
       BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster, brokers_refresh_interval: 50)

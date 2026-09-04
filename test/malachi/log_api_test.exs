@@ -1,6 +1,8 @@
 defmodule Malachi.LogApiTest do
   use ExUnit.Case, async: true
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.BrokerServer
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.LogApi
@@ -11,14 +13,6 @@ defmodule Malachi.LogApiTest do
     {:ok, server} = BrokerServer.start_link(directory)
     on_exit(fn -> stop_quietly(server) end)
     server
-  end
-
-  # Best-effort teardown: the broker can die concurrently between the aliveness check and the stop
-  # (it is linked to the test process), so a :noproc exit here is not a failure.
-  defp stop_quietly(server) do
-    if Process.alive?(server), do: BrokerServer.stop(server)
-  catch
-    :exit, _ -> :ok
   end
 
   test "produce by key then fetch by opaque cursor returns the records", %{tmp_dir: directory} do
@@ -256,7 +250,7 @@ defmodule Malachi.LogApiTest do
         tick_ms: 3_600_000
       )
 
-    on_exit(fn -> if Process.alive?(coord), do: GenServer.stop(coord) end)
+    on_exit(fn -> stop_quietly(coord) end)
     coord
   end
 

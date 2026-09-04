@@ -2,6 +2,8 @@ defmodule Malachi.GroupCommitTest do
   # async: false because the coalescing test uses a named ETS counter and leans on the flush timer.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.TeardownHelper
+
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
@@ -74,8 +76,8 @@ defmodule Malachi.GroupCommitTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(broker), do: GenServer.stop(broker)
-      if Process.alive?(repl_pid), do: GenServer.stop(repl_pid)
+      stop_quietly(broker)
+      stop_quietly(repl_pid)
       File.rm_rf!(base)
     end)
 
@@ -171,7 +173,7 @@ defmodule Malachi.GroupCommitTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(broker), do: GenServer.stop(broker)
+      stop_quietly(broker)
       File.rm_rf!(base)
     end)
 

@@ -2,6 +2,7 @@ defmodule Malachi.BrokerServerTest do
   use ExUnit.Case, async: true
 
   import Malachi.Test.PollingHelper
+  import Malachi.Test.TeardownHelper
 
   alias Malachi.Broker
   alias Malachi.BrokerServer
@@ -21,14 +22,6 @@ defmodule Malachi.BrokerServerTest do
     {:ok, server} = BrokerServer.start_link(directory, opts)
     on_exit(fn -> stop_quietly(server) end)
     server
-  end
-
-  # Best-effort teardown: the broker can die concurrently between the aliveness check and the stop
-  # (it is linked to the test process), so a :noproc exit here is not a failure.
-  defp stop_quietly(server) do
-    if Process.alive?(server), do: BrokerServer.stop(server)
-  catch
-    :exit, _ -> :ok
   end
 
   defp with_topic(directory, opts \\ []) do
