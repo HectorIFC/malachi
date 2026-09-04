@@ -91,8 +91,13 @@ defmodule Mix.Tasks.Malachi.Loadtest do
 
   defp connect_strategy!(s) do
     case @connect_strategies do
-      %{^s => strategy} -> strategy
-      _ -> Mix.raise("unknown --connect-strategy #{inspect(s)} (expected one of: #{Enum.join(Map.keys(@connect_strategies), ", ")})")
+      %{^s => strategy} ->
+        strategy
+
+      _ ->
+        Mix.raise(
+          "unknown --connect-strategy #{inspect(s)} (expected one of: #{Enum.join(Map.keys(@connect_strategies), ", ")})"
+        )
     end
   end
 end
