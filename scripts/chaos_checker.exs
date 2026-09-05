@@ -376,9 +376,15 @@ defmodule ChaosChecker do
   @doc """
   Reads the topic from the start into a set of values, treating an empty page as "nothing right now"
   rather than "nothing left": the scan only ends once pages keep coming back empty for `:settle_ms`.
-  Any page carrying records resets that patience, so a long log still drains in one pass. Returns
-  `{values, conn, :settled | :timeout}`: `:timeout` means the absolute `:deadline` cut the scan short,
-  so `values` is a PREFIX of the topic and the caller must not read a missing value as a lost one.
+  Any page carrying records resets that patience, so a long log still drains in one pass.
+
+  Returns `{values, conn, scan}`, where `scan` is `%{status: :settled | :timeout, pages: [page]}`.
+  `:timeout` means the absolute `:deadline` cut the scan short, so `values` is a PREFIX of the topic
+  and the caller must not read a missing value as a lost one. `pages` is one entry per fetch, in
+  order, each `%{from: cursor, to: cursor, count: n, first: value, last: value}`: see `page_lines/1`
+  and `skipped_at/2` for what it answers, which is whether a scan that came up short ran out of time
+  or walked past records. The status travels inside the map rather than beside it so a caller cannot
+  take one and forget the other, which is the whole reason they are reported together.
 
   `fetch` is `(conn, topic, cursor -> {:ok, values, next_cursor, conn} | {:error, reason})`, injected
   so this policy can be exercised without a cluster; `:sleep` and `:now` are injected for the same
