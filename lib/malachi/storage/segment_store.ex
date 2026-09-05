@@ -62,6 +62,14 @@ defmodule Malachi.Storage.SegmentStore do
   @doc "The logical offset the next appended record will receive."
   @callback next_offset(handle()) :: non_neg_integer()
 
+  @doc """
+  How many bytes the records counted by `next_offset/1` occupy. The two travel together: a failover
+  seal records a segment's length and its size, and taking them from different sources would describe
+  a segment that never existed. Named `size_bytes` rather than `byte_size` because the latter would
+  shadow `Kernel.byte_size/1` in every implementing module.
+  """
+  @callback size_bytes(handle()) :: non_neg_integer()
+
   @doc "Whether the segment is sealed (immutable)."
   @callback sealed?(handle()) :: boolean()
 

@@ -364,9 +364,29 @@ defmodule Malachi.Broker do
     update_active_replica_set(broker, segment_id, replica_set)
   end
 
+  # Failover seals an active segment whose primary died (`Malachi.Cluster.Failover`), so the cached
+  # entry must go with it: the store refuses an append to a sealed segment, and a broker still holding
+  # it in `segments` would keep routing produces at a segment that can no longer take them. Dropping it
+  # is what makes the next produce open a fresh one, the same roll `seal_active_segment/2` performs.
+  defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
+    {dsrsm, _reply} = apply_metadata(broker, command)
+    broker = %{broker | dsrsm: dsrsm}
+    forget_active_segment(broker, segment_id)
+  end
+
   defp apply_replica_command(command, broker) do
     {dsrsm, _reply} = apply_metadata(broker, command)
     %{broker | dsrsm: dsrsm}
+  end
+
+  # Drops the range's cached active segment when the seal targets exactly it. Guarded on the id, so a
+  # seal of some older segment of the same range (a late command, a retry) cannot evict the segment
+  # that is currently open and take writes down with it.
+  defp forget_active_segment(broker, {range_id, _seq} = segment_id) do
+    case Map.get(broker.segments, range_id) do
+      %{id: ^segment_id} -> %{broker | segments: Map.delete(broker.segments, range_id)}
+      _other -> broker
+    end
   end
 
   defp update_active_replica_set(broker, {range_id, _seq} = segment_id, replica_set) do

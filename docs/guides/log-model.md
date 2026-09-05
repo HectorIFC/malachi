@@ -162,11 +162,17 @@ them are covered by the guarantee:
   waiting for the quorum, so a produce that came back `no_quorum` and was retried appears twice, with
   the second copy at the later position. Delivery is at-least-once, and the failed attempt does not hold
   its place in the order.
-- **Two known gaps are open, and they are gaps, not intent.** For up to one metadata refresh after a
-  split, a node that has not yet seen it keeps writing to the sealed parent, and those records read
-  before the children's ([#41](https://github.com/HectorIFC/malachi/issues/41)). Primary failover
-  promotes a live replica without comparing how far its log has advanced and without fencing the old
-  primary ([#40](https://github.com/HectorIFC/malachi/issues/40)).
+- **A primary that dies seals its segment rather than handing it over.** Writing rolls to a fresh
+  segment, which is what NorthGuard does, and it is what keeps an offset from being issued twice: a
+  batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
+  promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
+  removes the possibility instead of detecting it, and the store refuses appends to a sealed segment, so
+  the seal also fences an old primary that comes back. The seal is placed at the furthest durable end a
+  **majority** of the replica set reports; without a majority the committed end is unknowable, so the
+  segment is left alone and its range stops accepting writes until one answers again.
+- **One known gap is open, and it is a gap, not intent.** For up to one metadata refresh after a split,
+  a node that has not yet seen it keeps writing to the sealed parent, and those records read before the
+  children's ([#41](https://github.com/HectorIFC/malachi/issues/41)).
 
 ## Where this is going
 

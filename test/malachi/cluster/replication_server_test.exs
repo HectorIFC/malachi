@@ -391,6 +391,8 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     @impl true
     def next_offset(handle), do: ElixirStore.next_offset(handle)
     @impl true
+    def size_bytes(handle), do: ElixirStore.size_bytes(handle)
+    @impl true
     def sealed?(handle), do: ElixirStore.sealed?(handle)
     @impl true
     def pending?(handle), do: ElixirStore.pending?(handle)
@@ -655,6 +657,40 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       check.() -> true
       remaining_ms <= 0 -> false
       true -> Process.sleep(20) && eventually(check, remaining_ms - 20)
+    end
+  end
+
+  describe "why a behind replica must never be promoted (issue #40)" do
+    test "a replica that missed an acknowledged batch reissues its offsets once it starts writing" do
+      # The hazard the control plane's failover policy exists to avoid, pinned at the layer where it is
+      # real. Nothing here is a bug in this module: a primary appends at ITS OWN log end, which is the
+      # only thing it can do. What must never happen is a replica that is BEHIND being handed the
+      # primary's job, and that decision belongs to `Malachi.Cluster.Failover`, which seals the segment
+      # instead of promoting anyone. This test is the evidence for why it seals.
+      primary = start_broker()
+      follower = start_broker()
+      behind = start_broker()
+
+      # Acknowledged on a majority (primary + follower) while `behind` is unreachable, which is exactly
+      # what a quorum of two out of three permits.
+      :ok = GenServer.stop(behind)
+
+      assert {:ok, 0} =
+               ReplicationServer.replicate(primary, @segment, [primary, follower, behind], 0, records(["acked"]))
+
+      # `behind` returns holding nothing of this segment, and is handed the primary's job.
+      behind = start_broker()
+      assert ReplicationServer.durable_end(follower, @segment, 0) == 1
+      assert ReplicationServer.durable_end(behind, @segment, 0) == 0
+
+      assert {:ok, 0} =
+               ReplicationServer.replicate(behind, @segment, [behind, follower], 0, records(["after-failover"]))
+
+      # Two replicas, same offset, different records, and the second write was acknowledged to its
+      # client. No gap was reported: the follower's end was already past the batch's expected first
+      # offset, so it read as a batch it already had.
+      assert {:ok, [%{value: "acked"}]} = ReplicationServer.read(follower, @segment, 0, 10)
+      assert {:ok, [%{value: "after-failover"}]} = ReplicationServer.read(behind, @segment, 0, 10)
     end
   end
 end

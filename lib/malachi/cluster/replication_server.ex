@@ -252,6 +252,19 @@ defmodule Malachi.Cluster.ReplicationServer do
     GenServer.call(ref, {:durable_end, segment_id, base_offset}, timeout)
   end
 
+  @doc """
+  What this server holds for `segment_id`, as `{end_offset, byte_size}` taken from the **same** handle
+  in one call: `durable_end/4`'s offset plus the bytes those records occupy. Failover seals a segment
+  with a length and a size, and reading them separately (or from different replicas) would record a
+  segment that never existed, so they are answered together. Same recovery behaviour as
+  `durable_end/4`: `base_offset` seats a missing or empty log at the segment's base.
+  """
+  @spec durable_stats(term(), term(), non_neg_integer(), timeout()) ::
+          {non_neg_integer(), non_neg_integer()}
+  def durable_stats(ref, segment_id, base_offset, timeout \\ 5_000) do
+    GenServer.call(ref, {:durable_stats, segment_id, base_offset}, timeout)
+  end
+
   # --- GenServer ---
 
   @impl true
@@ -452,6 +465,12 @@ defmodule Malachi.Cluster.ReplicationServer do
   def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {:reply, log.next_offset, state}
+  end
+
+  @impl true
+  def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
+    {:reply, {log.next_offset, Log.size_bytes(log)}, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the

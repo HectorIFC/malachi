@@ -154,6 +154,15 @@ defmodule Malachi.Log do
   def pending?(%__MODULE__{active: nil}), do: false
   def pending?(%__MODULE__{} = log), do: log.store.pending?(log.active)
 
+  @doc """
+  The bytes the active segment's records occupy, buffered ones included, so it covers exactly the
+  records `next_offset` counts. 0 with no active segment. Failover reads this alongside the end offset
+  when sealing a segment whose primary died.
+  """
+  @spec size_bytes(t()) :: non_neg_integer()
+  def size_bytes(%__MODULE__{active: nil}), do: 0
+  def size_bytes(%__MODULE__{} = log), do: log.store.size_bytes(log.active)
+
   @doc "Closes the active segment's file handle, if any."
   @spec close(t()) :: :ok
   def close(%__MODULE__{active: nil}), do: :ok

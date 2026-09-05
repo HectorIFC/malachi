@@ -22,9 +22,21 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
   (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
-  `Malachi.Cluster.Failover.plan/2` (promoting a live replica to primary for active segments whose
-  primary died), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
+  `Malachi.Cluster.Failover.plan/4` (sealing active segments whose primary died, so writing rolls to a
+  fresh segment), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
   returns the combined result, for tests and manual triggers.
+
+  Failover needs to know what each surviving replica holds, which no pure function can answer, so this
+  pass does the probing: `Failover.candidates/2` names the segments, each live replica is asked for its
+  `durable_stats`, and the answers go to `Failover.plan/4`. A replica that does not answer in time
+  simply does not count, which is what leaves a segment below a majority unsealed and its range
+  blocked; that case is logged every pass, because a blocked range that says nothing is the failure
+  mode worth avoiding.
+
+    * `:probe` - `((replica, segment_id, base_offset) -> {end_offset, byte_size} | :error)`, how a
+      replica is asked (default `Malachi.Cluster.ReplicationServer.durable_stats/4` with a short
+      timeout, so an unreachable replica cannot stall the pass);
+    * `:probe_timeout` - ms for that default probe (default 1000).
   """
 
   use GenServer
@@ -32,6 +44,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   require Logger
 
   alias Malachi.Cluster.Failover
+  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SelfHealing
 
   @default_interval 5_000
@@ -61,7 +74,8 @@ defmodule Malachi.Cluster.HealCoordinator do
       heal_opts: Keyword.get(opts, :heal_opts, []),
       # `(-> {attribute_key, attributes} | nil)`: the current spread for rack/DC-aware re-replication,
       # resolved per pass so it tracks live membership. Default: no spread.
-      spread: Keyword.get(opts, :spread, fn -> nil end)
+      spread: Keyword.get(opts, :spread, fn -> nil end),
+      probe: Keyword.get(opts, :probe, default_probe(Keyword.get(opts, :probe_timeout, 1_000)))
     }
 
     schedule(state)
@@ -86,9 +100,9 @@ defmodule Malachi.Cluster.HealCoordinator do
 
     heal_opts = put_spread(state.heal_opts, state.spread.())
     healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
-    promotions = Failover.plan(metadata, live)
+    seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live), System.system_time(:millisecond))
 
-    applied = healed.applied ++ promotions
+    applied = healed.applied ++ seals
     Enum.each(applied, state.apply_command)
 
     # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
@@ -103,6 +117,51 @@ defmodule Malachi.Cluster.HealCoordinator do
   # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).
   defp put_spread(opts, nil), do: opts
   defp put_spread(opts, spread), do: Keyword.put(opts, :spread, spread)
+
+  # Asks every live replica of every failover candidate what it holds. The impure half of the
+  # failover decision: `Failover` stays a pure function of these answers.
+  defp probe_candidates(state, metadata, live) do
+    metadata
+    |> Failover.candidates(live)
+    |> Map.new(fn {segment_id, replicas} ->
+      segment = Map.fetch!(metadata.segments, segment_id)
+      answers = for r <- replicas, stats = probe(state, r, segment_id, segment.start_offset), into: %{}, do: {r, stats}
+      warn_if_blocked(segment_id, answers, segment.replica_set)
+      {segment_id, answers}
+    end)
+  end
+
+  # `nil` (rather than an error tuple) so the comprehension above filters a silent replica out: a
+  # replica that cannot answer tells us nothing about what it holds, and counting it would be the same
+  # mistake as sealing on a guess.
+  defp probe(state, replica, segment_id, base_offset) do
+    case state.probe.(replica, segment_id, base_offset) do
+      {end_offset, byte_size} when is_integer(end_offset) and is_integer(byte_size) -> {end_offset, byte_size}
+      _other -> nil
+    end
+  end
+
+  defp warn_if_blocked(segment_id, answers, replica_set) do
+    unless Failover.majority?(map_size(answers), replica_set) do
+      Logger.warning(
+        "segment #{inspect(segment_id)} cannot be sealed for failover: #{map_size(answers)} of " <>
+          "#{length(replica_set)} replicas answered, no majority. Its range is blocked for writes " <>
+          "until a majority returns, because sealing on a minority could discard acknowledged writes"
+      )
+    end
+  end
+
+  # ReplicationServer.durable_stats/4 with a short timeout, wrapped so an unreachable replica is a
+  # silent one rather than a crashed healing pass.
+  defp default_probe(timeout) do
+    fn replica, segment_id, base_offset ->
+      try do
+        ReplicationServer.durable_stats(replica, segment_id, base_offset, timeout)
+      catch
+        :exit, _reason -> :error
+      end
+    end
+  end
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 end
