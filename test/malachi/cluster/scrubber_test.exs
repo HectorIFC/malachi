@@ -511,13 +511,21 @@ defmodule Malachi.Cluster.ScrubberTest do
         assert Scrubber.damaged(scrubber) == []
       end)
 
-    assert log =~ "unexpected message"
+    # The absence checks stay on the WHOLE capture: the payload must not appear anywhere, whichever
+    # line it might have reached.
     refute log =~ fragment
     refute log =~ "user-3"
 
+    # The length bound, though, is about the scrubber's own line, so it is measured on that line
+    # rather than on everything captured. `capture_log` collects Logger output process-wide, and this
+    # file is async, so a line from another test running at the same moment lands in `log` too: that
+    # is what failed this test in CI at 513 characters when the line itself is around 120.
+    line = log |> String.split("\n", trim: true) |> Enum.find(&(&1 =~ "unexpected message"))
+
+    assert line, "the scrubber must log that it ignored the message"
     # the shape survives, which is the whole reason the term is printed at all
-    assert log =~ "#Reference<"
-    assert String.length(log) < 500
+    assert line =~ "#Reference<"
+    assert String.length(line) < 500
   end
 
   test "a non-positive interval is refused and the default used, rather than busy-looping" do
