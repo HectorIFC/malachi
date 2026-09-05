@@ -325,6 +325,39 @@ defmodule Malachi.BrokerTest do
       assert read_all(broker, store, root_id) |> Enum.map(& &1.value) == ["value", "value", "value"]
     end
 
+    test "a hole in the middle of a range is stepped over, not stopped on", %{store: store} do
+      # A range's segments are meant to tile its offsets and registration enforces it, but a hole can
+      # still open afterwards: retention expires by sealed_at, so clocks that disagree across nodes can
+      # drop a middle segment while its neighbours survive, and an operator can delete one outright.
+      # Before this, a read landing in the hole resolved to the segment BEFORE it and got :eof, and
+      # consume stops on :eof rather than advancing, so one hole wedged every consumer of the range
+      # forever. The records in the hole are gone either way; the ones above it must not be.
+      # Measured from the record shape this test actually produces, so each one fills a segment and
+      # rolls the next: a threshold taken from a larger record would quietly never be crossed.
+      one_record = Record.encoded_size(record("v0", "k0"))
+      {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..3, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      # Four segments at offsets 0..3. Drop the one in the middle, the way a skewed age retention or a
+      # direct operator delete would, leaving 0, 2 and 3 with a hole at 1.
+      [_s0, s1 | _] = segments(broker, root_id)
+      {broker, :ok} = Broker.delete_segment(broker, s1.id)
+
+      assert Enum.map(segments(broker, root_id), & &1.start_offset) == [0, 2, 3]
+
+      # The consumer crosses the hole and reaches everything above it, rather than stalling at 1.
+      {records, _cursor} = consume(broker, store, root_id, :start)
+      assert Enum.map(records, & &1.value) == ["v0", "v2", "v3"]
+
+      # And a direct read of the missing offset serves the next segment instead of answering :eof.
+      assert {:ok, [%{value: "v2"}]} = Broker.read(broker, root_id, 1, 1, read_fun(store))
+    end
+
     test "a frontend whose offset lags a seal is refused rather than allowed to overlap", %{store: store} do
       # The state a failover seal leaves on a frontend that has not caught up: the range's segments are
       # all sealed, and this frontend still thinks the range ends earlier than it does. Opening a

@@ -305,8 +305,13 @@ defmodule Malachi.Broker do
           {:ok, [Record.t()]} | :eof | {:error, term()}
   def read(%__MODULE__{} = broker, range_id, offset, max_records, read_fun) do
     case locate_segment(broker, range_id, offset) do
-      :eof -> :eof
-      {:ok, segment} -> read_fun.(primary(segment), segment.id, offset, max_records)
+      :eof ->
+        :eof
+
+      {:ok, segment} ->
+        # Never below the segment's base: `locate_segment/3` steps up when the requested offset falls
+        # in a hole, and asking a segment for an offset it never held is not a question it can answer.
+        read_fun.(primary(segment), segment.id, max(offset, segment.start_offset), max_records)
     end
   end
 
@@ -873,20 +878,54 @@ defmodule Malachi.Broker do
 
   defp batch_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + Record.encoded_size(record) end)
 
-  # The segment of `range_id` containing `offset` (range-relative), or `:eof` past the range's
-  # end. Segments partition the offset space contiguously, so the owning segment is the last one
-  # whose `start_offset` is at or below `offset`.
+  # The segment of `range_id` serving `offset` (range-relative), or `:eof` past the range's end.
+  #
+  # Segments are meant to tile the offset space, and the control plane enforces it on registration, so
+  # normally this is just the last segment starting at or below `offset`. It does not assume it,
+  # because a hole can appear after the fact: retention expires by `sealed_at`, and clocks that
+  # disagree across nodes can expire a segment while its neighbours on both sides survive; an operator
+  # can delete one directly. Landing in a hole and answering with the segment BEFORE it would return
+  # :eof, and the consume cursor stops on :eof rather than advancing, so a single hole wedges every
+  # consumer of the range permanently. Stepping up to the next segment instead loses only what is
+  # already gone. Callers read the records' own offsets rather than counting from the one they asked
+  # for, so a step forward stays consistent.
   defp locate_segment(broker, range_id, offset) do
     if offset < 0 or offset >= next_offset(broker, range_id) do
       :eof
     else
-      segment =
-        broker.dsrsm
-        |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
-        |> Enum.sort_by(& &1.start_offset, :desc)
-        |> Enum.find(&(&1.start_offset <= offset))
+      segments = DSRSM.segments_of_range(broker.dsrsm, topic_of_range(range_id), range_id)
 
-      if segment, do: {:ok, segment}, else: :eof
+      case Enum.find(Enum.sort_by(segments, & &1.start_offset, :desc), &(&1.start_offset <= offset)) do
+        nil -> next_segment_above(segments, offset)
+        segment -> if serves?(segment, offset), do: {:ok, segment}, else: next_segment_above(segments, offset)
+      end
+    end
+  end
+
+  # Whether a segment's own extent covers `offset`. An active segment has no recorded length: it is
+  # the write head, so everything from its start upward is its to serve.
+  defp serves?(%{length: length, start_offset: start}, offset) when is_integer(length) do
+    offset < start + length
+  end
+
+  defp serves?(_active_segment, _offset), do: true
+
+  # The last record's assigned offset, falling back to counting from `requested` when the store did
+  # not assign them (the fake stores in tests, and any reader that predates the assignment). The
+  # fallback is the old arithmetic, so a store that assigns nothing behaves exactly as before.
+  defp last_offset(records, requested) do
+    case List.last(records) do
+      %{offset: offset} when is_integer(offset) -> offset
+      _unassigned -> requested + length(records) - 1
+    end
+  end
+
+  # The nearest segment starting above `offset`, for a read that landed in a hole (or below the
+  # earliest segment still stored, after retention dropped the front of the range).
+  defp next_segment_above(segments, offset) do
+    case segments |> Enum.filter(&(&1.start_offset > offset)) |> Enum.min_by(& &1.start_offset, fn -> nil end) do
+      nil -> :eof
+      segment -> {:ok, segment}
     end
   end
 
@@ -958,7 +997,11 @@ defmodule Malachi.Broker do
         kept = filter_records(records, filter_range)
         acc = Enum.reverse(kept) ++ acc
         count = count + length(kept)
-        next_offset = offset + length(records)
+        # From the records themselves, not from the offset that was asked for. The read can start
+        # ABOVE the request when it steps over a hole left by retention or an operator, and counting
+        # from the request would put the cursor back inside that hole, re-delivering what was already
+        # returned and never getting past it.
+        next_offset = last_offset(records, offset) + 1
 
         if count >= max_records do
           {:ok, Enum.reverse(acc), {index, next_offset}}
