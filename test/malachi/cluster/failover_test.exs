@@ -61,12 +61,26 @@ defmodule Malachi.Cluster.FailoverTest do
                ]
     end
 
+    test "the majority-th largest end is NOT the seal point, because the dead primary cannot answer" do
+      # The rule that looks right and is not: with :a dead, a record :a acknowledged together with :c
+      # alone sits above what a majority of the ANSWERS ({:b, :c}) agree on. Sealing at :b's end would
+      # discard an acknowledged write, so the maximum is both safe and the lowest safe choice.
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+      ends = %{b: {2, 200}, c: {5, 500}}
+      majority_of_answers = 2
+
+      assert [{:seal_segment, ^segment_id, length, _bytes, @now} | _] =
+               Failover.plan(metadata, [:b, :c], probes(segment_id, ends), @now)
+
+      assert length > majority_of_answers
+    end
+
     test "the sealed length counts records from the segment's start offset, not from zero" do
       {metadata, {root, _} = _sid} = segment([:a, :b, :c], false)
       segment_id = {root, 1}
       {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [:a, :b, :c], 10})
 
-      # A segment based at 10 whose replicas end at 14 holds 4 records, not 14.
+      # A segment based at 10 whose furthest replica ends at 14 holds 4 records, not 14.
       ends = %{b: {14, 400}, c: {12, 200}}
       commands = Failover.plan(metadata, [:b, :c], probes(segment_id, ends), @now)
 

@@ -497,12 +497,6 @@ defmodule Malachi.Storage.ElixirStore do
   @impl true
   def next_offset(%__MODULE__{next_offset: next_offset}), do: next_offset
 
-  # Written bytes plus the buffered ones, so the size covers exactly the records `next_offset/1`
-  # counts. Reporting only `write_position` would undercount a segment with a full buffer and make a
-  # failover seal claim a length its byte size contradicts.
-  @impl true
-  def size_bytes(%__MODULE__{write_position: written, pending_bytes: pending}), do: written + pending
-
   @impl true
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
 

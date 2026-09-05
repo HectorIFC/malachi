@@ -16,12 +16,15 @@ defmodule Malachi.Cluster.Failover do
 
   ## The seal point, and when a range is left blocked
 
-  The seal is placed at the **highest durable end** reported by the segment's replicas, and only when a
-  **majority** of the replica set answered the probe. An acknowledged write lives on a majority, so with
-  a majority reporting, at least one reporter holds every acknowledged record. Below a majority the
-  committed end is unknowable, and sealing at a lone survivor's end could discard acknowledged writes:
-  precisely what this policy exists to prevent. So the segment is left alone and its range stops
-  accepting writes.
+  The seal is placed at the **highest durable end** any replica reports, and only when a **majority** of
+  the replica set answered the probe. Both halves are forced, not chosen. An acknowledged write lives on
+  a majority of the full replica set, and the answering replicas are themselves a majority; two
+  majorities of the same set always intersect, so **at least one answering replica holds every
+  acknowledged record**, and the highest end among them is at or above all of them. Any lower point,
+  including the offset a majority of the ANSWERS agree on, can sit below an acknowledged record that
+  only the dead primary and one survivor ever held, and sealing there would discard it: exactly what
+  this policy exists to prevent. Below a majority answering, no such intersection is guaranteed, the
+  committed end is unknowable, and the segment is left alone with its range no longer accepting writes.
 
   That block is not a latch. The caller (`Malachi.Cluster.HealCoordinator`) is a periodic
   level-triggered loop, so the next pass re-evaluates: as soon as a majority answers again, the seal is
@@ -90,19 +93,22 @@ defmodule Malachi.Cluster.Failover do
     answers = Map.get(probes, segment_id, %{})
 
     if majority?(map_size(answers), segment.replica_set) do
-      # The furthest reporter defines the seal: it is the only one that can hold every acknowledged
-      # record. Its byte size travels with it rather than being maxed independently, since a length
-      # from one replica and a size from another would describe a segment that never existed.
-      {furthest, {end_offset, byte_size}} = Enum.max_by(answers, fn {_replica, {offset, _bytes}} -> offset end)
+      # The furthest end reported, not the one a majority of the ANSWERS agree on. Taking the
+      # majority-th largest looks like Raft's commit index but is wrong here: the dead primary does not
+      # answer, so a record it acknowledged together with a single survivor sits above that point and
+      # would be sealed away. The intersection argument in the moduledoc is what makes the maximum both
+      # safe and the lowest safe choice.
+      {holder, {end_offset, byte_size}} =
+        Enum.max_by(answers, fn {_replica, {offset, _bytes}} -> offset end)
 
       [
         {:seal_segment, segment_id, end_offset - segment.start_offset, byte_size, now_ms},
         # Reads route to the head of the replica set, and the head here is the broker that just died,
-        # so the sealed segment would answer `:unreachable` until re-replication got to it. Moving the
-        # furthest replica to the head restores reads at once, and it holds everything the seal
-        # promised. Reordering is what was unsafe on an ACTIVE segment (the new head would reissue
-        # offsets); on a sealed one no append is possible at all, so it is only a routing change.
-        {:set_segment_replicas, segment_id, [furthest | List.delete(segment.replica_set, furthest)]}
+        # so the sealed segment would answer `:unreachable` until re-replication got to it. Moving a
+        # replica that holds everything the seal promised to the head restores reads at once.
+        # Reordering is what was unsafe on an ACTIVE segment (the new head would reissue offsets); on a
+        # sealed one no append is possible at all, so it is only a routing change.
+        {:set_segment_replicas, segment_id, [holder | List.delete(segment.replica_set, holder)]}
       ]
     else
       []

@@ -256,7 +256,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   What this server holds for `segment_id`, as `{end_offset, byte_size}` taken from the **same** handle
   in one call: `durable_end/4`'s offset plus the bytes those records occupy. Failover seals a segment
   with a length and a size, and reading them separately (or from different replicas) would record a
-  segment that never existed, so they are answered together. Same recovery behaviour as
+  segment that never existed, so they are answered together. Same recovery behavior as
   `durable_end/4`: `base_offset` seats a missing or empty log at the segment's base.
   """
   @spec durable_stats(term(), term(), non_neg_integer(), timeout()) ::
@@ -447,19 +447,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   def handle_call({:stored_bytes, segment_id}, _from, state) do
-    bytes =
-      state.directory
-      |> segment_directory(segment_id)
-      |> Path.join("*.log")
-      |> Path.wildcard()
-      |> Enum.reduce(0, fn path, sum ->
-        case File.stat(path) do
-          {:ok, %{size: size}} -> sum + size
-          {:error, _reason} -> sum
-        end
-      end)
-
-    {:reply, bytes, state}
+    {:reply, bytes_on_disk(state, segment_id), state}
   end
 
   def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
@@ -470,7 +458,20 @@ defmodule Malachi.Cluster.ReplicationServer do
   @impl true
   def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
-    {:reply, {log.next_offset, Log.size_bytes(log)}, state}
+
+    # Flush before answering, so the numbers describe records that can actually be READ back. A log's
+    # next offset counts buffered records too, and the store serves only committed ones, so reporting
+    # it unflushed would let failover seal a segment at a length its own replicas cannot serve: the
+    # metadata would promise records that read as :eof, and a range's reads would stop dead there.
+    # Making it durable first is also the honest thing for a seal point to mean.
+    log = if Log.pending?(log), do: elem(Log.sync(log), 1), else: log
+    state = put_log(state, segment_id, log)
+
+    # Bytes read off disk rather than from the active handle: a log that rolled internally counts its
+    # sealed segments in `next_offset`, so asking the active handle alone would answer a size that
+    # describes fewer records than the length beside it, and a fresh segment would answer zero. After
+    # the sync above the files hold everything the offset counts.
+    {:reply, {log.next_offset, bytes_on_disk(state, segment_id)}, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
@@ -886,6 +887,21 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   # `base_offset` is used only when the segment's log does not exist yet, so a fresh segment starts
   # at its range-relative first offset.
+  # Every `*.log` file this server holds for the segment, sealed ones included, which is what makes it
+  # the whole logical segment rather than whichever piece is open right now.
+  defp bytes_on_disk(state, segment_id) do
+    state.directory
+    |> segment_directory(segment_id)
+    |> Path.join("*.log")
+    |> Path.wildcard()
+    |> Enum.reduce(0, fn path, sum ->
+      case File.stat(path) do
+        {:ok, %{size: size}} -> sum + size
+        {:error, _reason} -> sum
+      end
+    end)
+  end
+
   defp fetch_or_open(state, segment_id, base_offset) do
     case Map.fetch(state.logs, segment_id) do
       {:ok, log} ->

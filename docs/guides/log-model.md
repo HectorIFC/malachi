@@ -167,9 +167,13 @@ them are covered by the guarantee:
   batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
   promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
   removes the possibility instead of detecting it, and the store refuses appends to a sealed segment, so
-  the seal also fences an old primary that comes back. The seal is placed at the furthest durable end a
-  **majority** of the replica set reports; without a majority the committed end is unknowable, so the
-  segment is left alone and its range stops accepting writes until one answers again.
+  the seal also fences an old primary that comes back. The seal goes at the **highest** durable end
+  reported, once a **majority** of the replica set has answered: an acknowledged record lives on a
+  majority, the answering replicas are a majority, and two majorities of a set always intersect, so at
+  least one answer holds every acknowledged record. Note it is the highest end among the answers, not
+  the end a majority of them agree on; that lower point can sit below a record the dead primary
+  acknowledged with a single survivor. Without a majority answering there is no intersection to argue
+  from, so the segment is left alone and its range stops accepting writes until one answers again.
 - **One known gap is open, and it is a gap, not intent.** For up to one metadata refresh after a split,
   a node that has not yet seen it keeps writing to the sealed parent, and those records read before the
   children's ([#41](https://github.com/HectorIFC/malachi/issues/41)).

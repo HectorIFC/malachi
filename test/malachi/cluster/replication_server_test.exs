@@ -391,8 +391,6 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     @impl true
     def next_offset(handle), do: ElixirStore.next_offset(handle)
     @impl true
-    def size_bytes(handle), do: ElixirStore.size_bytes(handle)
-    @impl true
     def sealed?(handle), do: ElixirStore.sealed?(handle)
     @impl true
     def pending?(handle), do: ElixirStore.pending?(handle)
@@ -657,6 +655,24 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       check.() -> true
       remaining_ms <= 0 -> false
       true -> Process.sleep(20) && eventually(check, remaining_ms - 20)
+    end
+  end
+
+  describe "durable_stats/4" do
+    test "reports only what a read can serve, flushing first so a seal cannot promise :eof" do
+      # The numbers this returns become a sealed segment's length and byte size. A log's next offset
+      # counts buffered records and `read/3` serves only committed ones, so answering without flushing
+      # would let failover seal a segment at a length its own replicas cannot serve: reads of that
+      # range stop dead at the boundary, which is how a cluster ends up with acknowledged writes that
+      # are durable and unreadable at the same time.
+      server = start_broker(group_commit: true, group_commit_interval_ms: 60_000)
+      {:ok, _} = ReplicationServer.append(server, @segment, [server], 0, records(["buffered"]))
+
+      assert {1, bytes} = ReplicationServer.durable_stats(server, @segment, 0)
+      assert bytes > 0
+
+      # Everything the probe counted is readable, which is the property the seal depends on.
+      assert {:ok, [%{value: "buffered"}]} = ReplicationServer.read(server, @segment, 0, 10)
     end
   end
 
