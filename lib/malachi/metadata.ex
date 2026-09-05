@@ -331,28 +331,20 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
-    if Map.has_key?(state.segments, segment_id) do
-      {state, {:error, :segment_exists}}
-    else
-      case fetch_active_range(state, range_id) do
-        {:error, _reason} = error ->
-          {state, error}
+    cond do
+      Map.has_key?(state.segments, segment_id) ->
+        {state, {:error, :segment_exists}}
 
-        {:ok, _range} ->
-          segment = %{
-            id: segment_id,
-            range_id: range_id,
-            replica_set: replica_set,
-            state: :active,
-            start_offset: start_offset,
-            length: nil,
-            byte_size: nil,
-            sealed_at: nil
-          }
+      start_offset < range_end(state, range_id) ->
+        # A segment starting below where the range already ends would claim offsets another segment
+        # owns, and two segments handing out the same offsets is how one acknowledged record quietly
+        # replaces another. The caller derives this offset from its own view, which can lag behind a
+        # seal applied elsewhere, so the control plane checks it rather than trusting it: a frontend
+        # that is behind gets an error it can retry after refreshing, instead of silently overlapping.
+        {state, {:error, :segment_overlap}}
 
-          state = %{state | segments: Map.put(state.segments, segment_id, segment)}
-          {index_add_segment(state, range_id, segment_id), :ok}
-      end
+      true ->
+        register_new_segment(state, range_id, segment_id, replica_set, start_offset)
     end
   end
 
@@ -877,6 +869,40 @@ defmodule Malachi.Metadata do
   end
 
   # --- internals: lookups / segment update ---
+
+  # Where a range's segments end today: a sealed one ends at its start plus its length, and an active
+  # one is only known to reach its start, which is enough to catch a registration below it.
+  defp range_end(state, range_id) do
+    state
+    |> segments_of_range(range_id)
+    |> Enum.map(fn
+      %{start_offset: start, length: length} when is_integer(length) -> start + length
+      %{start_offset: start} -> start
+    end)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp register_new_segment(state, range_id, segment_id, replica_set, start_offset) do
+    case fetch_active_range(state, range_id) do
+      {:error, _reason} = error ->
+        {state, error}
+
+      {:ok, _range} ->
+        segment = %{
+          id: segment_id,
+          range_id: range_id,
+          replica_set: replica_set,
+          state: :active,
+          start_offset: start_offset,
+          length: nil,
+          byte_size: nil,
+          sealed_at: nil
+        }
+
+        state = %{state | segments: Map.put(state.segments, segment_id, segment)}
+        {index_add_segment(state, range_id, segment_id), :ok}
+    end
+  end
 
   defp fetch_active_range(state, range_id) do
     case Map.fetch(state.ranges, range_id) do

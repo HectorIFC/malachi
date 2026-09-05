@@ -151,6 +151,34 @@ defmodule Malachi.MetadataTest do
       assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b4]
     end
 
+    test "a segment cannot start below where the range already ends" do
+      # Two segments handing out the same offsets is how one acknowledged record quietly replaces
+      # another. The start offset comes from the caller's own view, which can lag behind a seal applied
+      # elsewhere (a failover on another node), so the control plane refuses it rather than trusting it.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 0})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 4})
+
+      # Continuing exactly where the sealed segment ended is the correct roll, and a gap above it is
+      # not an overlap either.
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg2", [:b1], 5})
+      assert Metadata.get_segment(state, "seg2").start_offset == 5
+    end
+
+    test "an active segment blocks a registration below its start, without knowing its end" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 10})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 9})
+    end
+
     test "errors registering a duplicate segment or on a sealed/unknown range" do
       {state, root_id} = create_topic()
       {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})

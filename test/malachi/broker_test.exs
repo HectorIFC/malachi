@@ -325,6 +325,32 @@ defmodule Malachi.BrokerTest do
       assert read_all(broker, store, root_id) |> Enum.map(& &1.value) == ["value", "value", "value"]
     end
 
+    test "a frontend whose offset lags a seal is refused rather than allowed to overlap", %{store: store} do
+      # The state a failover seal leaves on a frontend that has not caught up: the range's segments are
+      # all sealed, and this frontend still thinks the range ends earlier than it does. Opening a
+      # segment at that stale offset would hand out offsets the sealed one already owns, which is how
+      # one acknowledged record quietly replaces another, so the control plane refuses it.
+      one_record = Record.encoded_size(record("value", "key"))
+      {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("value", "key#{index}")])
+          broker
+        end)
+
+      before = segments(broker, root_id)
+      # Rewound by hand because the situation it stands for (this node's view is behind another node's
+      # seal) needs shared metadata to arise on its own, and the point under test is what the control
+      # plane does with the stale offset, not how the frontend came to hold one.
+      stale = %{broker | offsets: %{root_id => 1}, segments: %{}}
+
+      assert {stale, {:error, :segment_overlap}} = produce(stale, store, "events", [record("v", "k")])
+
+      # Refused, and nothing half-registered: the range still holds exactly the segments it did.
+      assert Enum.map(segments(stale, root_id), & &1.id) == Enum.map(before, & &1.id)
+    end
+
     test "a consumer below the earliest available offset skips retention-expired data", %{store: store} do
       one_record = Record.encoded_size(record("value", "key"))
       {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
