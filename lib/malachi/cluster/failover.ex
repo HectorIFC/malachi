@@ -17,14 +17,21 @@ defmodule Malachi.Cluster.Failover do
   ## The seal point, and when a range is left blocked
 
   The seal is placed at the **highest durable end** any replica reports, and only when a **majority** of
-  the replica set answered the probe. Both halves are forced, not chosen. An acknowledged write lives on
-  a majority of the full replica set, and the answering replicas are themselves a majority; two
-  majorities of the same set always intersect, so **at least one answering replica holds every
-  acknowledged record**, and the highest end among them is at or above all of them. Any lower point,
-  including the offset a majority of the ANSWERS agree on, can sit below an acknowledged record that
-  only the dead primary and one survivor ever held, and sealing there would discard it: exactly what
-  this policy exists to prevent. Below a majority answering, no such intersection is guaranteed, the
-  committed end is unknowable, and the segment is left alone with its range no longer accepting writes.
+  the replica set answered the probe. Both halves are forced, not chosen.
+
+  The argument, per record rather than per replica, because the difference matters: take an
+  acknowledged record at offset `o`. It lives on a majority of the full replica set, the answering
+  replicas are themselves a majority, and two majorities of the same set always intersect, so **some**
+  answering replica holds `o`. A replica's log is contiguous (replication rejects a gap), so that
+  replica's reported end is above `o`, and the highest end among the answers is at least that. The
+  covering replica may be a **different one for each record**; no single answer need hold the whole
+  segment, which is exactly why the seal takes the maximum instead of trusting one replica's view.
+
+  Any lower point, including the offset a majority of the ANSWERS agree on, can sit below an
+  acknowledged record that only the dead primary and one survivor ever held, and sealing there would
+  discard it: exactly what this policy exists to prevent. Below a majority answering, no such
+  intersection is guaranteed, the committed end is unknowable, and the segment is left alone with its
+  range no longer accepting writes.
 
   That block is not a latch. The caller (`Malachi.Cluster.HealCoordinator`) is a periodic
   level-triggered loop, so the next pass re-evaluates: as soon as a majority answers again, the seal is

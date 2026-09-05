@@ -756,13 +756,15 @@ defmodule Malachi.Broker do
 
         {:ok, broker}
 
-      {dsrsm, {:error, reason}} when reason in [:segment_exists, :segment_overlap] ->
-        # Lost the registration race to another frontend, by id (`:segment_exists`) or by offset
+      {dsrsm, {:error, reason}} when reason in [:segment_exists, :segment_overlap, :active_segment_exists] ->
+        # Lost the registration race to another frontend: by id (`:segment_exists`), by offset
         # (`:segment_overlap`, this frontend derived a start below where the range already ends,
-        # typically because a failover sealed the previous segment elsewhere). Both say the same thing,
-        # this view is stale, and both have the same remedy. The returned metadata may already carry the
-        # winner's segment: adopt it and carry on; when it is still stale, surface the error and let
-        # the next produce adopt after the periodic metadata refresh.
+        # typically because a failover sealed the previous segment elsewhere), or because the range
+        # already has a write head (`:active_segment_exists`, the rival registered first and its
+        # segment is the one to write to). All three say the same thing, this view is stale, and all
+        # three have the same remedy. The returned metadata may already carry the winner's segment:
+        # adopt it and carry on; when it is still stale, surface the error and let the next produce
+        # adopt after the periodic metadata refresh.
         broker = %{broker | dsrsm: dsrsm}
 
         case adopt_active_segment(broker, range_id) do

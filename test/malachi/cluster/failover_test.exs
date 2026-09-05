@@ -76,7 +76,10 @@ defmodule Malachi.Cluster.FailoverTest do
     end
 
     test "the sealed length counts records from the segment's start offset, not from zero" do
-      {metadata, {root, _} = _sid} = segment([:a, :b, :c], false)
+      # Sealed first, because a range has one write head: the roll that opens the segment under test is
+      # exactly what seals the one before it.
+      {metadata, {root, _} = first_id} = segment([:a, :b, :c], false)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, first_id, 10, 1_000, 0})
       segment_id = {root, 1}
       {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [:a, :b, :c], 10})
 
