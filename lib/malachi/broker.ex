@@ -364,9 +364,29 @@ defmodule Malachi.Broker do
     update_active_replica_set(broker, segment_id, replica_set)
   end
 
+  # Failover seals an active segment whose primary died (`Malachi.Cluster.Failover`), so the cached
+  # entry must go with it: the store refuses an append to a sealed segment, and a broker still holding
+  # it in `segments` would keep routing produces at a segment that can no longer take them. Dropping it
+  # is what makes the next produce open a fresh one, the same roll `seal_active_segment/2` performs.
+  defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
+    {dsrsm, _reply} = apply_metadata(broker, command)
+    broker = %{broker | dsrsm: dsrsm}
+    forget_active_segment(broker, segment_id)
+  end
+
   defp apply_replica_command(command, broker) do
     {dsrsm, _reply} = apply_metadata(broker, command)
     %{broker | dsrsm: dsrsm}
+  end
+
+  # Drops the range's cached active segment when the seal targets exactly it. Guarded on the id, so a
+  # seal of some older segment of the same range (a late command, a retry) cannot evict the segment
+  # that is currently open and take writes down with it.
+  defp forget_active_segment(broker, {range_id, _seq} = segment_id) do
+    case Map.get(broker.segments, range_id) do
+      %{id: ^segment_id} -> %{broker | segments: Map.delete(broker.segments, range_id)}
+      _other -> broker
+    end
   end
 
   defp update_active_replica_set(broker, {range_id, _seq} = segment_id, replica_set) do
@@ -736,15 +756,20 @@ defmodule Malachi.Broker do
 
         {:ok, broker}
 
-      {dsrsm, {:error, :segment_exists}} ->
-        # Lost the registration race to another frontend. The returned metadata may already carry the
-        # winner's segment: adopt it and carry on; when it is still stale, surface the error and let
-        # the next produce adopt after the periodic metadata refresh.
+      {dsrsm, {:error, reason}} when reason in [:segment_exists, :segment_overlap, :active_segment_exists] ->
+        # Lost the registration race to another frontend: by id (`:segment_exists`), by offset
+        # (`:segment_overlap`, this frontend derived a start below where the range already ends,
+        # typically because a failover sealed the previous segment elsewhere), or because the range
+        # already has a write head (`:active_segment_exists`, the rival registered first and its
+        # segment is the one to write to). All three say the same thing, this view is stale, and all
+        # three have the same remedy. The returned metadata may already carry the winner's segment:
+        # adopt it and carry on; when it is still stale, surface the error and let the next produce
+        # adopt after the periodic metadata refresh.
         broker = %{broker | dsrsm: dsrsm}
 
         case adopt_active_segment(broker, range_id) do
           {:ok, broker, _segment} -> {:ok, broker}
-          :none -> {:error, :segment_exists}
+          :none -> {:error, reason}
         end
 
       {_dsrsm, {:error, reason}} ->

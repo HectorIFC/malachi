@@ -162,11 +162,25 @@ them are covered by the guarantee:
   waiting for the quorum, so a produce that came back `no_quorum` and was retried appears twice, with
   the second copy at the later position. Delivery is at-least-once, and the failed attempt does not hold
   its place in the order.
-- **Two known gaps are open, and they are gaps, not intent.** For up to one metadata refresh after a
-  split, a node that has not yet seen it keeps writing to the sealed parent, and those records read
-  before the children's ([#41](https://github.com/HectorIFC/malachi/issues/41)). Primary failover
-  promotes a live replica without comparing how far its log has advanced and without fencing the old
-  primary ([#40](https://github.com/HectorIFC/malachi/issues/40)).
+- **A primary that dies seals its segment rather than handing it over.** Writing rolls to a fresh
+  segment, which is what NorthGuard does, and it is what keeps an offset from being issued twice: a
+  batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
+  promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
+  removes the possibility instead of detecting it, and the store refuses appends to a sealed segment, so
+  the seal also fences an old primary that comes back. The seal goes at the **highest** durable end
+  reported, once a **majority** of the replica set has answered. Why that covers everything
+  acknowledged: take any acknowledged record, at offset `o`. It lives on a majority, the answering
+  replicas are a majority, and two majorities of a set always intersect, so **some** answering replica
+  holds it. A replica's log is contiguous, so that replica's durable end is above `o`, and the highest
+  end among the answers is at least that. The replica doing the covering can be a different one for
+  each record, which is why the seal takes the highest end rather than trusting any single replica to
+  hold the whole segment. Note also that it is the highest end among the answers, not the end a
+  majority of them agree on; that lower point can sit below a record the dead primary acknowledged
+  with a single survivor. Without a majority answering there is no intersection to argue from, so the
+  segment is left alone and its range stops accepting writes until one answers again.
+- **One known gap is open, and it is a gap, not intent.** For up to one metadata refresh after a split,
+  a node that has not yet seen it keeps writing to the sealed parent, and those records read before the
+  children's ([#41](https://github.com/HectorIFC/malachi/issues/41)).
 
 ## Where this is going
 

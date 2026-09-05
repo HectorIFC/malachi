@@ -151,6 +151,46 @@ defmodule Malachi.MetadataTest do
       assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b4]
     end
 
+    test "a segment cannot start below where the range already ends" do
+      # Two segments handing out the same offsets is how one acknowledged record quietly replaces
+      # another. The start offset comes from the caller's own view, which can lag behind a seal applied
+      # elsewhere (a failover on another node), so the control plane refuses it rather than trusting it.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 0})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 4})
+
+      # Continuing exactly where the sealed segment ended is the correct roll, and a gap above it is
+      # not an overlap either.
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg2", [:b1], 5})
+      assert Metadata.get_segment(state, "seg2").start_offset == 5
+    end
+
+    test "an active segment blocks ANY further registration, at, below or above its start" do
+      # A range has one write head. An active segment's end is exactly what the metadata does not
+      # know, so an offset bound cannot police this: a rival registering at or above the active
+      # start looks clean while claiming offsets the active segment is handing out right now. Two
+      # frontends arrive here with different seq counters, so the duplicate-id check does not fire
+      # either. Refusing outright is what keeps a range from growing a second write head.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 10})
+
+      for offset <- [9, 10, 11, 1_000] do
+        assert {_state, {:error, :active_segment_exists}} =
+                 Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], offset})
+      end
+
+      # Sealing the write head is what makes room for the next one, which is what the roll does.
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg2", [:b1], 15})
+      assert Metadata.get_segment(state, "seg2").start_offset == 15
+    end
+
     test "errors registering a duplicate segment or on a sealed/unknown range" do
       {state, root_id} = create_topic()
       {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
@@ -161,6 +201,9 @@ defmodule Malachi.MetadataTest do
       assert {_state, {:error, :no_such_range}} =
                Metadata.apply(state, {:register_segment, 999, "seg2", [:b1], 0})
 
+      # Sealed first: a split seals the parent's segment in the real path, and leaving it active here
+      # would have the registration below fail on the write-head guard instead of on the sealed range.
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 1, 0, 0})
       {state, {:ok, _l, _r}} = apply!(state, {:split_range, root_id})
 
       assert {_state, {:error, :sealed}} =
@@ -315,8 +358,8 @@ defmodule Malachi.MetadataTest do
     {state, root_id} = create_topic(Metadata.new(), "events", 4)
     {state, {:ok, left_id, _right_id}} = apply!(state, {:split_range, root_id})
     {state, :ok} = apply!(state, {:register_segment, left_id, "seg-a", [:b1], 0})
-    {state, :ok} = apply!(state, {:register_segment, left_id, "seg-b", [:b1], 100})
     {state, :ok} = apply!(state, {:seal_segment, "seg-a", 100, 4096, 1_700_000_000_000})
+    {state, :ok} = apply!(state, {:register_segment, left_id, "seg-b", [:b1], 100})
     {state, :ok} = apply!(state, {:commit_offset, "group-1", "events", %{left_id => {0, 50}}})
     {state, left_id}
   end

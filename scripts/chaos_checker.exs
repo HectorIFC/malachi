@@ -50,8 +50,15 @@ defmodule ChaosChecker do
   # After a missing set is computed, how long to keep re-reading before calling it a durability
   # failure. A value that shows up here was never lost, only late to this node, which is a different
   # finding and is reported as one.
+  #
+  # A floor, not the budget: see `revisit_budget_ms/1` for why the real one is measured.
   @revisit_ms 10_000
   @revisit_poll_ms 500
+
+  # How many complete re-reads of the topic the revisit must be able to afford. One is not enough: the
+  # scan that decides the verdict has to both finish AND have waited, so the budget has to cover a pass
+  # that reaches the end plus a couple that watch for late arrivals.
+  @revisit_scan_passes 3
 
   # A ceiling on the whole verification scan. The settle budget alone cannot bound it: every page that
   # carries records resets that budget, so a topic still being written to would keep the scan open for
@@ -74,7 +81,9 @@ defmodule ChaosChecker do
 
     conn = connect_retry(hosts, 0, System.monotonic_time(:millisecond) + 30_000)
     scan_deadline = System.monotonic_time(:millisecond) + @verify_scan_ms
+    started = System.monotonic_time(:millisecond)
     {read, conn, status} = drain(&fetch_page/3, conn, topic, deadline: scan_deadline)
+    scan_ms = System.monotonic_time(:millisecond) - started
     missing = MapSet.difference(acked, read)
 
     IO.puts("acked=#{MapSet.size(acked)} read=#{MapSet.size(read)} missing=#{MapSet.size(missing)}")
@@ -85,25 +94,18 @@ defmodule ChaosChecker do
         System.halt(0)
 
       :inconclusive ->
+        report_topology(hosts, topic)
         report_inconclusive(missing, @verify_scan_ms)
 
       :missing ->
-        revisit(conn, topic, acked, read, missing)
+        revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms))
     end
   end
 
   def main(["topology", hosts, topic]) do
-    {:ok, _apps} = Application.ensure_all_started(:inets)
-
     case topology(parse_hosts(hosts), topic) do
       {:ok, ranges} ->
-        for range <- ranges, segment <- range["segments"] do
-          IO.puts(
-            "SEGMENT range=#{range["seq"]} seq=#{segment["seq"]} state=#{segment["state"]} " <>
-              "start=#{segment["start_offset"]} primary=#{segment["primary"]} " <>
-              "replicas=#{Enum.join(segment["replica_set"], ",")}"
-          )
-        end
+        Enum.each(segment_lines(ranges), &IO.puts/1)
 
       {:error, reason} ->
         IO.puts("topology failed: #{inspect(reason)}")
@@ -116,6 +118,51 @@ defmodule ChaosChecker do
     IO.puts("       chaos_checker.exs verify   <hosts> <topic> <acked_file>")
     IO.puts("       chaos_checker.exs topology <hosts> <topic>")
     System.halt(2)
+  end
+
+  @doc """
+  How long the revisit gets, given how long the first full scan took (`scan_ms`).
+
+  Measured rather than fixed, because the revisit re-reads the WHOLE topic on every iteration and all
+  of those iterations share this one budget. A flat ceiling therefore encodes a guess about how fast
+  the machine is: on a slow runner a single pass already overruns it, so the revisit can never reach
+  the end, every run with any visibility lag reports as inconclusive, and the certification gate stops
+  meaning anything. The first scan is a direct measurement of what one pass costs on THIS machine, so
+  the budget is stated as what it actually needs to be: room for `#{@revisit_scan_passes}` of them.
+  The floor keeps a suspiciously fast first scan (an empty or barely-written topic) from producing a
+  budget too small to observe anything.
+  """
+  @spec revisit_budget_ms(non_neg_integer()) :: pos_integer()
+  def revisit_budget_ms(scan_ms), do: max(@revisit_ms, @revisit_scan_passes * scan_ms)
+
+  @doc """
+  One `SEGMENT ...` line per segment, in the order the topology reports them.
+
+  Shared by the `topology` command and by the failure paths of `verify`, which is the point: a run
+  that ends in an unread or missing block is exactly the run whose segment map is worth having, and
+  re-reading it from a rerun is not the same evidence, because the cluster has moved on by then.
+  """
+  @spec segment_lines([map()]) :: [String.t()]
+  def segment_lines(ranges) do
+    for range <- ranges, segment <- range["segments"] do
+      "SEGMENT range=#{range["seq"]} seq=#{segment["seq"]} state=#{segment["state"]} " <>
+        "start=#{segment["start_offset"]} length=#{segment["length"]} bytes=#{segment["byte_size"]} " <>
+        "primary=#{segment["primary"]} replicas=#{Enum.join(segment["replica_set"], ",")}"
+    end
+  end
+
+  # The segment map at the moment a verification failed, so the next look at it starts from evidence
+  # rather than from theory. Best effort by design: a topology call that fails must not replace the
+  # verdict the caller is about to report with an error about the diagnostics.
+  defp report_topology(hosts, topic) do
+    case topology(hosts, topic) do
+      {:ok, ranges} ->
+        IO.puts("segment map at the time of the failure:")
+        Enum.each(segment_lines(ranges), &IO.puts/1)
+
+      {:error, reason} ->
+        IO.puts("segment map unavailable: #{inspect(reason)}")
+    end
   end
 
   @doc """
@@ -141,23 +188,58 @@ defmodule ChaosChecker do
         "produced to."
     )
 
+    IO.puts("missing #{describe(missing)}")
     System.halt(1)
   end
 
+  @doc """
+  A compact description of a set of `c-N` values: how many, the extremes, and whether they form one
+  unbroken run. Which values are absent says more than how many: an unbroken run ending at the last
+  value produced is a scan that stopped early, while a scattered set points somewhere else entirely.
+  """
+  @spec describe(MapSet.t()) :: String.t()
+  def describe(values) do
+    numbers = values |> Enum.map(&sequence_number/1) |> Enum.reject(&is_nil/1) |> Enum.sort()
+
+    case numbers do
+      [] ->
+        "#{MapSet.size(values)} values: #{values |> Enum.take(5) |> inspect()}"
+
+      _ ->
+        first = List.first(numbers)
+        last = List.last(numbers)
+        shape = if last - first + 1 == length(numbers), do: "one unbroken run", else: "scattered"
+
+        "#{length(numbers)} values, c-#{first} to c-#{last}, #{shape}"
+    end
+  end
+
+  defp sequence_number("c-" <> digits) do
+    case Integer.parse(digits) do
+      {number, ""} -> number
+      _ -> nil
+    end
+  end
+
+  defp sequence_number(_other), do: nil
+
   # A missing set is not yet a verdict. Re-read the whole topic until either the missing values turn up
   # (they were late to this node, not lost) or the budget runs out (they are gone).
-  defp revisit(conn, topic, acked, read, missing) do
-    IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{@revisit_ms}ms")
+  defp revisit(conn, hosts, topic, acked, read, missing, budget_ms) do
+    IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{budget_ms}ms")
     started = System.monotonic_time(:millisecond)
-    {read, elapsed_ms, status} = revisit_loop(conn, topic, acked, read, started + @revisit_ms, started, :settled)
+    {read, elapsed_ms, status} = revisit_loop(conn, topic, acked, read, started + budget_ms, started, :settled)
     missing = MapSet.difference(acked, read)
 
     cond do
       MapSet.size(missing) > 0 and status == :timeout ->
-        report_inconclusive(missing, @revisit_ms)
+        report_topology(hosts, topic)
+        report_inconclusive(missing, budget_ms)
 
       MapSet.size(missing) > 0 ->
-        IO.puts("VERIFY FAILED, first missing: #{missing |> Enum.take(10) |> inspect()}")
+        IO.puts("VERIFY FAILED, missing #{describe(missing)}")
+        IO.puts("first missing: #{missing |> Enum.take(10) |> inspect()}")
+        report_topology(hosts, topic)
         System.halt(1)
 
       true ->
@@ -340,9 +422,17 @@ defmodule ChaosChecker do
   # Logs into the first reachable node's dashboard and fetches the topic drill-down. Plain :httpc
   # (the dashboard speaks HTTP/1.1 on 4041); the Bearer token comes from POST /login, the same
   # credentials the wire connection uses.
-  defp topology([], _topic), do: {:error, :no_reachable_dashboard}
+  # Starts :inets here rather than at each call site: the dashboard is now read from the verify
+  # failure paths too, and an http client that is only started on one of them is a diagnostic that
+  # works everywhere except where it is needed. `ensure_all_started` is idempotent.
+  defp topology(hosts, topic) do
+    {:ok, _apps} = Application.ensure_all_started(:inets)
+    request_topology(hosts, topic)
+  end
 
-  defp topology([host | rest], topic) do
+  defp request_topology([], _topic), do: {:error, :no_reachable_dashboard}
+
+  defp request_topology([host | rest], topic) do
     base = "http://#{host}:4041"
     login_body = Jason.encode!(%{username: "admin", password: "admin123"})
     http_opts = [timeout: 5_000]
@@ -357,7 +447,7 @@ defmodule ChaosChecker do
          {:ok, %{"ranges" => ranges}} <- Jason.decode(detail) do
       {:ok, ranges}
     else
-      _error when rest != [] -> topology(rest, topic)
+      _error when rest != [] -> request_topology(rest, topic)
       error -> {:error, error}
     end
   end

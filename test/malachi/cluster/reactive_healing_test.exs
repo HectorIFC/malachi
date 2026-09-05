@@ -126,8 +126,8 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
            end)
   end
 
-  test "failover promotes a live replica when an active segment's primary dies" do
-    brokers = [r1, r2, r3, r4] = for _ <- 1..4, do: start_replication()
+  test "failover seals the active segment when its primary dies, and writing rolls to a new one" do
+    brokers = [_r1, _r2, _r3, _r4] = for _ <- 1..4, do: start_replication()
     {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live_fo)
 
     {:ok, control} =
@@ -137,7 +137,9 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
         # large, so the segment stays active across both produces
         segment_max_bytes: 1_000_000,
         live_brokers: fn -> Agent.get(live_agent, & &1) end,
-        brokers_refresh_interval: 60_000
+        # Short, so the segment opened after the seal is placed on the survivors rather than on a
+        # cached set that still lists the dead broker.
+        brokers_refresh_interval: 15
       )
 
     {:ok, root} = BrokerServer.create_topic(control, "events", 4)
@@ -156,28 +158,64 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
          interval: 60_000}
       )
 
-    # the segment's primary dies
+    # The primary leaves the live set. It is dropped rather than killed on purpose: failover keys off
+    # membership, not process liveness, so this exercises the decision under test without dragging in a
+    # dead pid, whose silently discarded casts turn every unlucky placement into a five second produce
+    # timeout and made this test flaky. A primary whose process is truly gone is covered by the
+    # re-replication test above and by the chaos drill.
     Agent.update(live_agent, fn live -> live -- [primary] end)
-    :ok = GenServer.stop(primary)
 
     result = HealCoordinator.heal_now(coordinator)
-    assert [{:set_segment_replicas, _id, _set}] = result.applied
 
-    # the active segment now has a live primary (different from the dead one)
-    [healed] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
-    [new_primary | _] = healed.replica_set
-    refute new_primary == primary
-    assert new_primary in ([r1, r2, r3, r4] -- [primary])
+    # Sealed rather than promoted: a promoted replica could be behind the offsets the dead primary
+    # already acknowledged, and would then reissue them. A sealed segment can never hand an offset out
+    # twice, and the store refuses appends to it even if the old primary comes back.
+    assert [{:seal_segment, sealed_id, 1, _bytes, _at}, {:set_segment_replicas, _same, [live_head | _]}] =
+             result.applied
 
-    # writes continue to the new primary, and both records read back
-    {:ok, _placements} = BrokerServer.produce(control, "events", [Record.new("b", key: "b")])
+    # The sealed segment is read from a live replica right away: reads route at the head, and the head
+    # was the broker that just died.
+    refute live_head == primary
+    assert sealed_id == segment.id
 
+    [sealed] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+    assert sealed.state == :sealed
+    assert sealed.length == 1
+
+    # A second pass repairs the segment just sealed: `heal_sealed` only acts on sealed segments, so the
+    # pass that seals cannot also re-replicate it. Recovery therefore takes two ticks (seal, then
+    # repair), which the periodic loop supplies on its own.
+    repair = HealCoordinator.heal_now(coordinator)
+    assert Enum.any?(repair.applied, &match?({:set_segment_replicas, ^sealed_id, _set}, &1))
+
+    [repaired] = Enum.filter(Metadata.segments_of_range(BrokerServer.metadata(control), root), &(&1.id == sealed_id))
+    [sealed_primary | _] = repaired.replica_set
+    refute sealed_primary == primary, "the sealed segment must be readable from a live primary"
+
+    # writes continue on a NEW segment of the same range, and both records read back. Retried only for
+    # the placement set to refresh off the live seam, which is milliseconds.
+    assert eventually(fn -> match?({:ok, _}, BrokerServer.produce(control, "events", [Record.new("b", key: "b")])) end)
+
+    segments = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+    assert length(segments) == 2, "the produce must open a fresh segment, not reopen the sealed one"
+    assert Enum.any?(segments, &(&1.state == :active and &1.id != sealed_id))
+    # the new segment starts where the sealed one ended: no offset is ever assigned twice
+    [rolled] = Enum.filter(segments, &(&1.state == :active))
+    assert rolled.start_offset == 1
+
+    # Nothing was lost across the roll. Asserted through consume, which chains a range's segments (and
+    # is what the chaos drill's verify uses); `read/4` answers from one segment at a time, so it stops
+    # at the sealed segment's end by design rather than because a record went missing.
     assert eventually(fn ->
-             case BrokerServer.read(control, root, 0, 100) do
-               {:ok, records} -> Enum.map(records, & &1.value) == ["a", "b"]
+             case BrokerServer.consume(control, "events", %{}, 100, 0) do
+               {records, _next} when is_list(records) -> Enum.map(records, & &1.value) == ["a", "b"]
                _ -> false
              end
            end)
+
+    # And each record sits in its own segment, at an offset assigned exactly once.
+    assert {:ok, [%{value: "a", offset: 0}]} = BrokerServer.read(control, root, 0, 100)
+    assert {:ok, [%{value: "b", offset: 1}]} = BrokerServer.read(control, root, 1, 100)
   end
 
   test "live_brokers bridges membership member ids to broker references" do
@@ -198,6 +236,114 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
 
     :ok = stop_supervised!(b)
     assert eventually(fn -> live_brokers.() == [broker_a] end)
+  end
+
+  # The reproduction of issue #75: an acknowledged write is lost when failover hands the segment to a
+  # replica that never received it. A batch commits once a MAJORITY has it durably, so with rf=3 one
+  # replica can legitimately be behind; promoting that one let it append at offsets the dead primary
+  # had already acknowledged, silently replacing them. Sealing instead keeps every acknowledged offset
+  # assigned exactly once, which is what this asserts.
+  test "an acknowledged write survives failover even when a replica missed it" do
+    # Registered names, so a replica keeps its identity across a restart (a pid would not) and the
+    # replica set still points at it when it comes back holding less than the others.
+    names = for index <- 1..3, do: :"rh_behind_#{index}_#{System.unique_integer([:positive])}"
+    directories = Map.new(names, &{&1, Path.join(System.tmp_dir!(), "malachi_behind_#{&1}")})
+    on_exit(fn -> Enum.each(Map.values(directories), &File.rm_rf!/1) end)
+
+    start_named = fn name ->
+      spec = %{
+        id: {:behind, name},
+        start: {ReplicationServer, :start_link, [[directory: directories[name], name: name]]},
+        restart: :temporary
+      }
+
+      start_supervised!(spec)
+      {name, node()}
+    end
+
+    refs = Map.new(names, &{&1, start_named.(&1)})
+    brokers = Map.values(refs)
+    {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live_behind)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: brokers,
+        replication_factor: 3,
+        segment_max_bytes: 1_000_000,
+        live_brokers: fn -> Agent.get(live_agent, & &1) end,
+        # Short, so the segment opened after the failover is placed on the surviving brokers rather
+        # than on a cached set that still lists the dead one.
+        brokers_refresh_interval: 15
+      )
+
+    {:ok, root} = BrokerServer.create_topic(control, "events", 4)
+    {:ok, _} = BrokerServer.produce(control, "events", [Record.new("first", key: "k0")])
+
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
+    [primary, second | _] = segment.replica_set
+    behind_name = Enum.find(names, &(refs[&1] == second))
+
+    # The replica that failover used to promote (first live in replica-set order) goes down, so it
+    # misses the next batch entirely. The batch still commits: primary plus the third replica is a
+    # majority of three.
+    :ok = GenServer.stop(second)
+    {:ok, _} = BrokerServer.produce(control, "events", [Record.new("acked", key: "k1")])
+
+    # It comes back with the same identity and a log that ends one record short, and then the primary
+    # leaves the live set. Dropped rather than killed for the same reason as the test above: what
+    # failover reads is membership, and a dead pid only adds five second produce timeouts to a test
+    # that is about which offsets end up where.
+    start_named.(behind_name)
+    Agent.update(live_agent, fn live -> live -- [primary] end)
+
+    {:ok, coordinator} =
+      start_supervised(
+        {HealCoordinator,
+         live_brokers: fn -> Agent.get(live_agent, & &1) end,
+         metadata_source: fn -> BrokerServer.metadata(control) end,
+         apply_command: fn command -> BrokerServer.apply_heal(control, [command]) end,
+         replication_factor: 3,
+         interval: 60_000}
+      )
+
+    # The seal is placed at the furthest replica's end (2 records), not the behind one's (1). Promoting
+    # the behind replica would have reopened offset 1, where "acked" already lives.
+    # Deliberately not asserting the command shape here: what this test is about is the acknowledged
+    # record, so the invariant below carries the proof. Under the old mechanism (promote the first live
+    # replica) this pass still "succeeds" and the data is what goes missing.
+    HealCoordinator.heal_now(coordinator)
+
+    # Second pass: `heal_sealed` only acts on already-sealed segments, so the pass that seals cannot
+    # also move the sealed segment onto a live primary. The periodic loop supplies that tick on its own.
+    HealCoordinator.heal_now(coordinator)
+
+    # Until the placement set refreshes, the segment opened after the seal can still list the dead
+    # broker and the produce times out on it. Retried a bounded number of times rather than with
+    # `eventually`, whose millisecond budget does not account for a check that itself blocks for the
+    # replication timeout. A produce that timed out wrote nothing, so a retry cannot duplicate a
+    # record, and the offsets asserted below would catch it if it did.
+    assert {:ok, _} =
+             Enum.reduce_while(1..6, nil, fn _attempt, last ->
+               case BrokerServer.produce(control, "events", [Record.new("after", key: "k2")]) do
+                 {:ok, _} = ok ->
+                   {:halt, ok}
+
+                 error ->
+                   Process.sleep(150)
+                   {:cont, error || last}
+               end
+             end)
+
+    assert eventually(fn ->
+             case BrokerServer.consume(control, "events", %{}, 100, 0) do
+               {records, _next} when is_list(records) -> Enum.map(records, & &1.value) == ["first", "acked", "after"]
+               _ -> false
+             end
+           end)
+
+    # The acknowledged record kept its offset, and the post-failover write did not reuse it.
+    assert {:ok, [%{value: "acked", offset: 1}]} = BrokerServer.read(control, root, 1, 1)
+    assert {:ok, [%{value: "after", offset: 2}]} = BrokerServer.read(control, root, 2, 1)
   end
 
   defp eventually(check, remaining_ms \\ 3_000) do

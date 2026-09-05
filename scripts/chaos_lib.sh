@@ -95,10 +95,32 @@ close_window() {
 # Invariant: every acknowledged write is still readable.
 verify_acked() {
   say "invariant: every acknowledged write survived"
+  # Let the cluster reconverge FIRST. The invariant under test is that an acknowledged write survived,
+  # not that it is visible within seconds of a rolling restart, and scanning a cluster that is still
+  # coming back measures the second while claiming to measure the first: that is what made this drill
+  # fail roughly one run in four with nothing wrong in the broker. Waiting cannot hide a real loss,
+  # because re-replication only copies records that exist; nothing can invent one back. A cluster that
+  # never converges is still reported, by check_convergence, which owns that invariant.
+  wait_healthy || echo "cluster not fully healthy before the scan; verifying anyway"
+
   checker_run "verify $CHAOS_HOSTS $CHAOS_TOPIC /chaos/acked.log" >"$WORK/verify.log" 2>&1
-  tail -3 "$WORK/verify.log"
+  # The counts line comes before the verdict, so a fixed tail of 3 used to cut it off exactly when it
+  # mattered most.
+  grep -E "^(acked=|VERIFY|[0-9]+ values not visible|missing |first missing)" "$WORK/verify.log" | tail -6
+  # The checker dumps the segment map on any non-OK verdict. Printed separately from the tail above so
+  # a long map cannot push the verdict itself out of view, and only when there is one: this is the
+  # evidence a rerun cannot recover, because by then the cluster has moved on.
+  if grep -q "^SEGMENT " "$WORK/verify.log"; then
+    echo "segment map at the time of the failure:"
+    grep "^SEGMENT " "$WORK/verify.log"
+  fi
   if grep -q "VERIFY OK" "$WORK/verify.log"; then
     echo "durability invariant holds"
+  elif grep -q "VERIFY INCONCLUSIVE" "$WORK/verify.log"; then
+    # The checker could not finish reading the topic, so it never established whether anything is
+    # missing. Still a failed run, since the invariant went unverified, but calling it lost data would
+    # be an accusation the evidence does not support.
+    fail "the durability invariant could not be verified (see verify output above); this is not evidence of data loss"
   else
     fail "acked writes were lost (see verify output above)"
   fi
