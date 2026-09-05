@@ -448,12 +448,21 @@ defmodule Malachi.Metadata do
         # registers, which is the whole reason one write head is a rule the system can keep.
         {state, {:error, :active_segment_exists}}
 
-      start_offset < range_end(state, range_id) ->
-        # A segment starting below where the range already ends would claim offsets another segment
-        # owns, and two segments handing out the same offsets is how one acknowledged record quietly
-        # replaces another. The caller derives this offset from its own view, which can lag behind a
-        # seal applied elsewhere, so the control plane checks it rather than trusting it: a frontend
-        # that is behind gets an error it can retry after refreshing, instead of silently overlapping.
+      discontiguous?(state, range_id, start_offset) ->
+        # A range's segments must tile its offsets exactly, with no overlap and no gap.
+        #
+        # Starting BELOW where the range ends claims offsets another segment owns, and two segments
+        # handing out the same offsets is how one acknowledged record quietly replaces another.
+        #
+        # Starting ABOVE is the same defect wearing the other sign, and it is worse than it looks: a
+        # read for an offset in the gap resolves to the segment BEFORE it (`Broker.locate_segment/3`
+        # takes the greatest start at or below the offset), which answers :eof, and the consume cursor
+        # then stops there rather than advancing, so every consumer of the range wedges permanently
+        # before the later segment.
+        #
+        # Either way the caller derived the offset from a view that is not the control plane's, so it
+        # is checked rather than trusted: a frontend that is behind gets an error it can retry after
+        # refreshing, instead of silently corrupting the range's offset space.
         {state, {:error, :segment_overlap}}
 
       true ->
@@ -898,15 +907,28 @@ defmodule Malachi.Metadata do
     state |> segments_of_range(range_id) |> Enum.any?(&(&1.state == :active))
   end
 
-  # Where a range's SEALED segments end. An active segment is handled by `active_segment?/2` instead,
-  # since its end is unknown to the metadata and treating its start as an end would be a bound that
-  # quietly admits the overlap it looks like it is checking for.
+  # Whether `start_offset` would leave the range's segments failing to tile its offsets: either below
+  # where they end (overlap) or above it (gap).
+  #
+  # A range with nothing to be contiguous with imposes nothing. That is not only the first segment: a
+  # range whose sealed segments have all been dropped by retention still has a frontend counting from
+  # where it left off, and demanding that it restart at zero would break the next produce for good.
+  defp discontiguous?(state, range_id, start_offset) do
+    case range_end(state, range_id) do
+      nil -> false
+      offset -> start_offset != offset
+    end
+  end
+
+  # Where a range's SEALED segments end, or nil when it has none. An active segment is handled by
+  # `active_segment?/2` instead, since its end is unknown to the metadata and treating its start as an
+  # end would be a bound that quietly admits the overlap it looks like it is checking for.
   defp range_end(state, range_id) do
     state
     |> segments_of_range(range_id)
     |> Enum.filter(&is_integer(&1.length))
     |> Enum.map(&(&1.start_offset + &1.length))
-    |> Enum.max(fn -> 0 end)
+    |> Enum.max(fn -> nil end)
   end
 
   # The insert itself. Every precondition (the range accepts writes, the id is free, the range has no

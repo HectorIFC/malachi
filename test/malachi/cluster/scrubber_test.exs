@@ -414,9 +414,11 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     metadata =
       Enum.reduce(0..2, metadata, fn i, acc ->
+        # Contiguous, one record each: a range's segments tile its offsets, so spacing them out would
+        # build a range with holes, which the control plane refuses and no roll can produce.
         segment = {root, i}
-        {:ok, _last} = ReplicationServer.follow(replica, segment, i * 10, records(["v#{i}"]))
-        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i * 10})
+        {:ok, _last} = ReplicationServer.follow(replica, segment, i, records(["v#{i}"]))
+        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i})
         {acc, :ok} = Metadata.apply(acc, {:seal_segment, segment, 1, 0, 0})
         acc
       end)
@@ -466,9 +468,11 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     metadata =
       Enum.reduce(0..1, metadata, fn i, acc ->
+        # Contiguous, one record each: a range's segments tile its offsets, so spacing them out would
+        # build a range with holes, which the control plane refuses and no roll can produce.
         segment = {root, i}
-        {:ok, _last} = ReplicationServer.follow(replica, segment, i * 10, records(["v#{i}"]))
-        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i * 10})
+        {:ok, _last} = ReplicationServer.follow(replica, segment, i, records(["v#{i}"]))
+        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i})
         {acc, :ok} = Metadata.apply(acc, {:seal_segment, segment, 1, 0, 0})
         acc
       end)

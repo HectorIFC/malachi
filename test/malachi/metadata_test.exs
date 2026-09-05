@@ -165,10 +165,38 @@ defmodule Malachi.MetadataTest do
       assert {_state, {:error, :segment_overlap}} =
                Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 4})
 
-      # Continuing exactly where the sealed segment ended is the correct roll, and a gap above it is
-      # not an overlap either.
+      # Continuing exactly where the sealed segment ended is the correct roll.
       {state, :ok} = apply!(state, {:register_segment, root_id, "seg2", [:b1], 5})
       assert Metadata.get_segment(state, "seg2").start_offset == 5
+    end
+
+    test "a segment cannot start above where the range ends either, because a gap wedges consumers" do
+      # The same defect wearing the other sign, and the more damaging one. A read for an offset in the
+      # gap resolves to the segment BEFORE it, since locate_segment takes the greatest start at or
+      # below the offset, and that segment answers :eof. The consume cursor then stops there instead
+      # of advancing, so every consumer of the range is stuck before the later segment forever. A
+      # range's segments have to tile its offsets exactly.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+
+      for offset <- [6, 10, 1_000] do
+        assert {_state, {:error, :segment_overlap}} =
+                 Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], offset})
+      end
+    end
+
+    test "a range with nothing left to be contiguous with imposes no offset" do
+      # Retention drops sealed segments, and it can drop all of them. The frontend still counts from
+      # where it left off, so demanding that the next segment restart at zero would break the range's
+      # next produce for good. With nothing to tile against, any start is accepted.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 200, 4096, 1_700_000_000_000})
+      {state, :ok} = apply!(state, {:delete_segment, "seg1"})
+
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg2", [:b1], 200})
+      assert Metadata.get_segment(state, "seg2").start_offset == 200
     end
 
     test "an active segment blocks ANY further registration, at, below or above its start" do
