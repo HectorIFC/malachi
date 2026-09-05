@@ -168,6 +168,73 @@ defmodule ChaosCheckerTest do
     end
   end
 
+  describe "revisit_budget_ms/1 (how long the deciding scan gets)" do
+    test "affords three of the first scan's passes once that scan is slower than the floor" do
+      # The case a fixed ceiling gets wrong: on a runner where one pass costs 9s, a 10s budget cannot
+      # complete even one, so the verdict is inconclusive no matter what the cluster did.
+      assert ChaosChecker.revisit_budget_ms(9_000) == 27_000
+    end
+
+    test "a fast first scan still gets the floor, not three times almost nothing" do
+      # An empty or barely written topic drains in milliseconds; tripling that would leave no room to
+      # observe a late arrival at all, which is the only thing the revisit exists to do.
+      assert ChaosChecker.revisit_budget_ms(50) == 10_000
+      assert ChaosChecker.revisit_budget_ms(0) == 10_000
+    end
+
+    test "the floor and the measurement meet without a step" do
+      # At the crossover the two rules agree, so no first-scan duration produces a budget below either.
+      assert ChaosChecker.revisit_budget_ms(3_333) == 10_000
+      assert ChaosChecker.revisit_budget_ms(3_334) == 10_002
+    end
+  end
+
+  describe "segment_lines/1 (the map a failing run leaves behind)" do
+    test "renders one line per segment, carrying the fields a seal is made of" do
+      ranges = [
+        %{
+          "seq" => 0,
+          "segments" => [
+            %{
+              "seq" => 1,
+              "state" => "sealed",
+              "start_offset" => 10,
+              "length" => 5,
+              "byte_size" => 640,
+              "primary" => "node2",
+              "replica_set" => ["node2", "node1", "node3"]
+            }
+          ]
+        }
+      ]
+
+      assert ChaosChecker.segment_lines(ranges) == [
+               "SEGMENT range=0 seq=1 state=sealed start=10 length=5 bytes=640 " <>
+                 "primary=node2 replicas=node2,node1,node3"
+             ]
+    end
+
+    test "a topic with no segments renders nothing rather than a placeholder line" do
+      assert ChaosChecker.segment_lines([%{"seq" => 0, "segments" => []}]) == []
+      assert ChaosChecker.segment_lines([]) == []
+    end
+  end
+
+  describe "describe/1 (what the missing values look like)" do
+    test "an unbroken run reads as one, with its extremes" do
+      # The shape that says the scan stopped early rather than that records went missing at random.
+      assert ChaosChecker.describe(MapSet.new(["c-8", "c-9", "c-10"])) == "3 values, c-8 to c-10, one unbroken run"
+    end
+
+    test "a gap in the middle reads as scattered" do
+      assert ChaosChecker.describe(MapSet.new(["c-1", "c-5"])) == "2 values, c-1 to c-5, scattered"
+    end
+
+    test "values that do not follow the c-N shape are still reported" do
+      assert ChaosChecker.describe(MapSet.new(["surprise"])) =~ "1 values"
+    end
+  end
+
   test "a failed fetch is not an empty log: it is fatal, never a short successful page" do
     # A read that failed used to be indistinguishable from a drained topic, which is a successful wrong
     # answer. `on_error` stands in for the halt so the test can observe it.
