@@ -46,7 +46,7 @@ defmodule ChaosCheckerTest do
     {fetch, _agent} = scripted(pages)
     {now, sleep} = fake_clock()
     opts = Keyword.merge([now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250], opts)
-    {values, :conn} = ChaosChecker.drain(fetch, :conn, "topic", opts)
+    {values, :conn, _status} = ChaosChecker.drain(fetch, :conn, "topic", opts)
     values
   end
 
@@ -91,7 +91,7 @@ defmodule ChaosCheckerTest do
       endless = fn conn, _topic, _cursor -> {:ok, ["v"], "cursor", conn} end
       {now, sleep} = fake_clock(50)
 
-      {_values, :conn} =
+      {_values, :conn, :timeout} =
         ChaosChecker.drain(endless, :conn, "topic",
           now: now,
           sleep: sleep,
@@ -106,7 +106,7 @@ defmodule ChaosCheckerTest do
       {fetch, _agent} = scripted([[], [], [], []])
       {now, sleep} = fake_clock(10)
 
-      {values, :conn} =
+      {values, :conn, :timeout} =
         ChaosChecker.drain(fetch, :conn, "topic",
           now: now,
           sleep: sleep,
@@ -128,7 +128,7 @@ defmodule ChaosCheckerTest do
         sleep.(ms)
       end
 
-      {_values, :conn} =
+      {_values, :conn, _status} =
         ChaosChecker.drain(fetch, :conn, "topic",
           now: now,
           sleep: recording_sleep,
@@ -144,6 +144,27 @@ defmodule ChaosCheckerTest do
     test "no deadline means the settle budget alone decides, as a plain scan expects" do
       values = drain([["a"], [], [], [], []], settle_ms: 1_000, poll_ms: 250)
       assert Enum.to_list(values) == ["a"]
+    end
+  end
+
+  describe "verdict/2 (a truncated scan is not a durability failure)" do
+    test "a value missing from a scan that was cut short is inconclusive, not lost" do
+      # The trap this exists to avoid: a scan stopped by its ceiling read only a prefix, so an
+      # acknowledged value living past the last fetched cursor is simply unread. Reporting that as
+      # data loss would be the same false alarm this checker was rewritten to stop making, with a new
+      # cause.
+      assert ChaosChecker.verdict(1, :timeout) == :inconclusive
+      assert ChaosChecker.verdict(500, :timeout) == :inconclusive
+    end
+
+    test "a value missing from a scan that reached the end is worth the alarm" do
+      assert ChaosChecker.verdict(1, :settled) == :missing
+    end
+
+    test "finding everything is a pass however the scan ended" do
+      # A truncated scan that nonetheless read every acknowledged value proved what it had to prove.
+      assert ChaosChecker.verdict(0, :timeout) == :ok
+      assert ChaosChecker.verdict(0, :settled) == :ok
     end
   end
 
@@ -171,7 +192,7 @@ defmodule ChaosCheckerTest do
       sleep.(ms)
     end
 
-    {_values, :conn} =
+    {_values, :conn, _status} =
       ChaosChecker.drain(fetch, :conn, "topic",
         now: now,
         sleep: counting_sleep,

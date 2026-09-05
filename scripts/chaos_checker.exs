@@ -53,6 +53,11 @@ defmodule ChaosChecker do
   @revisit_ms 10_000
   @revisit_poll_ms 500
 
+  # A ceiling on the whole verification scan. The settle budget alone cannot bound it: every page that
+  # carries records resets that budget, so a topic still being written to would keep the scan open for
+  # as long as it kept producing. Generous next to the drill's few thousand records read 500 at a time.
+  @verify_scan_ms 60_000
+
   def main(["produce", hosts, topic, duration_s, acked_file]) do
     hosts = parse_hosts(hosts)
     deadline = System.monotonic_time(:millisecond) + String.to_integer(duration_s) * 1000
@@ -68,16 +73,22 @@ defmodule ChaosChecker do
     acked = acked_file |> File.read!() |> String.split("\n", trim: true) |> MapSet.new()
 
     conn = connect_retry(hosts, 0, System.monotonic_time(:millisecond) + 30_000)
-    {read, conn} = drain(&fetch_page/3, conn, topic)
+    scan_deadline = System.monotonic_time(:millisecond) + @verify_scan_ms
+    {read, conn, status} = drain(&fetch_page/3, conn, topic, deadline: scan_deadline)
     missing = MapSet.difference(acked, read)
 
     IO.puts("acked=#{MapSet.size(acked)} read=#{MapSet.size(read)} missing=#{MapSet.size(missing)}")
 
-    if MapSet.size(missing) == 0 do
-      IO.puts("VERIFY OK: every acknowledged write survived")
-      System.halt(0)
-    else
-      revisit(conn, topic, acked, read, missing)
+    case verdict(MapSet.size(missing), status) do
+      :ok ->
+        IO.puts("VERIFY OK: every acknowledged write survived")
+        System.halt(0)
+
+      :inconclusive ->
+        report_inconclusive(missing, @verify_scan_ms)
+
+      :missing ->
+        revisit(conn, topic, acked, read, missing)
     end
   end
 
@@ -107,15 +118,44 @@ defmodule ChaosChecker do
     System.halt(2)
   end
 
+  @doc """
+  What a scan's outcome means, given how many acknowledged values it could not find and whether it
+  finished or hit its ceiling.
+
+  The distinction that matters: a scan cut short by its deadline read only a PREFIX of the topic, so
+  values it did not reach are unread, not lost. Calling that a durability failure would be the same
+  false alarm this checker was rewritten to stop making, only with a different cause, so it is
+  reported as an inconclusive verification instead. A scan that settled did reach the end, so anything
+  still absent is worth the alarm.
+  """
+  @spec verdict(non_neg_integer(), :settled | :timeout) :: :ok | :inconclusive | :missing
+  def verdict(0, _status), do: :ok
+  def verdict(_missing, :timeout), do: :inconclusive
+  def verdict(_missing, :settled), do: :missing
+
+  defp report_inconclusive(missing, budget_ms) do
+    IO.puts(
+      "VERIFY INCONCLUSIVE: the scan hit its #{budget_ms}ms ceiling with #{MapSet.size(missing)} " <>
+        "acknowledged values unread, so it reached only a prefix of the topic. This is not evidence " <>
+        "of data loss; re-run with a longer ceiling, or check whether the topic is still being " <>
+        "produced to."
+    )
+
+    System.halt(1)
+  end
+
   # A missing set is not yet a verdict. Re-read the whole topic until either the missing values turn up
   # (they were late to this node, not lost) or the budget runs out (they are gone).
   defp revisit(conn, topic, acked, read, missing) do
     IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{@revisit_ms}ms")
     started = System.monotonic_time(:millisecond)
-    {read, elapsed_ms} = revisit_loop(conn, topic, acked, read, started + @revisit_ms, started)
+    {read, elapsed_ms, status} = revisit_loop(conn, topic, acked, read, started + @revisit_ms, started, :settled)
     missing = MapSet.difference(acked, read)
 
     cond do
+      MapSet.size(missing) > 0 and status == :timeout ->
+        report_inconclusive(missing, @revisit_ms)
+
       MapSet.size(missing) > 0 ->
         IO.puts("VERIFY FAILED, first missing: #{missing |> Enum.take(10) |> inspect()}")
         System.halt(1)
@@ -133,19 +173,24 @@ defmodule ChaosChecker do
     end
   end
 
-  defp revisit_loop(conn, topic, acked, read, deadline, started) do
+  # `status` carries whether the last re-read reached the end of the topic or was cut off by the
+  # budget, because a cut-off read leaves values unread rather than proving them gone.
+  defp revisit_loop(conn, topic, acked, read, deadline, started, status) do
     now = System.monotonic_time(:millisecond)
 
     if MapSet.subset?(acked, read) or now >= deadline do
-      {read, now - started}
+      # Everything found means the scan did its job whatever the clock says; only an unfinished search
+      # inherits the timeout.
+      status = if MapSet.subset?(acked, read), do: :settled, else: status
+      {read, now - started, status}
     else
       Process.sleep(min(@revisit_poll_ms, deadline - now))
       # The re-read shares THIS budget rather than taking a fresh settle window of its own: otherwise
       # a retry starting just before the deadline could still run a full scan past it, and a topic
       # that keeps producing would reset that scan's patience forever, leaving the bounded revisit
       # unbounded.
-      {fresh, conn} = drain(&fetch_page/3, conn, topic, deadline: deadline)
-      revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started)
+      {fresh, conn, status} = drain(&fetch_page/3, conn, topic, deadline: deadline)
+      revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started, status)
     end
   end
 
@@ -155,7 +200,8 @@ defmodule ChaosChecker do
   Reads the topic from the start into a set of values, treating an empty page as "nothing right now"
   rather than "nothing left": the scan only ends once pages keep coming back empty for `:settle_ms`.
   Any page carrying records resets that patience, so a long log still drains in one pass. Returns
-  `{values, conn}`.
+  `{values, conn, :settled | :timeout}`: `:timeout` means the absolute `:deadline` cut the scan short,
+  so `values` is a PREFIX of the topic and the caller must not read a missing value as a lost one.
 
   `fetch` is `(conn, topic, cursor -> {:ok, values, next_cursor, conn} | {:error, reason})`, injected
   so this policy can be exercised without a cluster; `:sleep` and `:now` are injected for the same
@@ -185,7 +231,7 @@ defmodule ChaosChecker do
 
   defp drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config) do
     if expired?(config, config.deadline) do
-      {acc, conn}
+      {acc, conn, :timeout}
     else
       drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config)
     end
@@ -195,7 +241,8 @@ defmodule ChaosChecker do
     case fetch.(conn, topic, cursor) do
       {:ok, [], _next, conn} ->
         if expired?(config, settle_deadline) do
-          {acc, conn}
+          # Quiet for a whole settle window: the topic is drained, which is a real end of scan.
+          {acc, conn, :settled}
         else
           # Never sleep past the caller's ceiling: a poll that would overshoot it is cut to whatever is
           # left, so the scan returns on time instead of one poll late.
