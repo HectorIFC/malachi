@@ -107,9 +107,18 @@ verify_acked() {
   # The counts line comes before the verdict, so a fixed tail of 3 used to cut it off exactly when it
   # mattered most.
   grep -E "^(acked=|VERIFY|[0-9]+ values not visible|missing |first missing)" "$WORK/verify.log" | tail -6
-  # The checker dumps the segment map on any non-OK verdict. Printed separately from the tail above so
-  # a long map cannot push the verdict itself out of view, and only when there is one: this is the
-  # evidence a rerun cannot recover, because by then the cluster has moved on.
+  # The checker dumps the page trace and the segment map on any non-OK verdict. Printed separately
+  # from the tail above so neither can push the verdict itself out of view, and only when there is
+  # one: this is the evidence a rerun cannot recover, because by then the cluster has moved on.
+  #
+  # The SCAN SKIPPED line comes first because it is the finding, not the raw material: it separates a
+  # scan that ran out of time (raise the budget) from a cursor that advanced past records the server
+  # had not made visible (a different bug entirely), which the verdict alone could never distinguish.
+  grep "^SCAN SKIPPED" "$WORK/verify.log" || true
+  if grep -q "^PAGE " "$WORK/verify.log"; then
+    echo "scan trace, one line per fetch:"
+    grep "^PAGE " "$WORK/verify.log"
+  fi
   if grep -q "^SEGMENT " "$WORK/verify.log"; then
     echo "segment map at the time of the failure:"
     grep "^SEGMENT " "$WORK/verify.log"

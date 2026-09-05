@@ -46,7 +46,7 @@ defmodule ChaosCheckerTest do
     {fetch, _agent} = scripted(pages)
     {now, sleep} = fake_clock()
     opts = Keyword.merge([now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250], opts)
-    {values, :conn, _status} = ChaosChecker.drain(fetch, :conn, "topic", opts)
+    {values, :conn, _scan} = ChaosChecker.drain(fetch, :conn, "topic", opts)
     values
   end
 
@@ -91,7 +91,7 @@ defmodule ChaosCheckerTest do
       endless = fn conn, _topic, _cursor -> {:ok, ["v"], "cursor", conn} end
       {now, sleep} = fake_clock(50)
 
-      {_values, :conn, :timeout} =
+      {_values, :conn, %{status: :timeout}} =
         ChaosChecker.drain(endless, :conn, "topic",
           now: now,
           sleep: sleep,
@@ -106,7 +106,7 @@ defmodule ChaosCheckerTest do
       {fetch, _agent} = scripted([[], [], [], []])
       {now, sleep} = fake_clock(10)
 
-      {values, :conn, :timeout} =
+      {values, :conn, %{status: :timeout}} =
         ChaosChecker.drain(fetch, :conn, "topic",
           now: now,
           sleep: sleep,
@@ -128,7 +128,7 @@ defmodule ChaosCheckerTest do
         sleep.(ms)
       end
 
-      {_values, :conn, _status} =
+      {_values, :conn, _scan} =
         ChaosChecker.drain(fetch, :conn, "topic",
           now: now,
           sleep: recording_sleep,
@@ -165,6 +165,116 @@ defmodule ChaosCheckerTest do
       # A truncated scan that nonetheless read every acknowledged value proved what it had to prove.
       assert ChaosChecker.verdict(0, :timeout) == :ok
       assert ChaosChecker.verdict(0, :settled) == :ok
+    end
+  end
+
+  describe "the page trace (telling a skipped scan from a slow one)" do
+    # A scan that walked the topic in three fetches, the middle one starting well above where the
+    # previous ended: the cursor moved over c-6 through c-9 and the scan never returned them.
+    defp skipping_pages do
+      [
+        %{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"},
+        %{from: "a", to: "b", count: 2, first: "c-10", last: "c-12"},
+        %{from: "b", to: "b", count: 0, first: nil, last: nil}
+      ]
+    end
+
+    test "names the two pages that bracket the missing values" do
+      missing = MapSet.new(["c-6", "c-7", "c-8", "c-9"])
+
+      assert {before, following} = ChaosChecker.skipped_at(skipping_pages(), missing)
+      assert before.last == "c-5"
+      assert following.first == "c-10"
+    end
+
+    test "a scan that simply stopped early has no bracketing boundary" do
+      # Everything missing lies ABOVE the last page, which is a scan that ran out of time. Reporting a
+      # skip here would be inventing a boundary to fit, and it is the distinction the whole trace
+      # exists to draw.
+      pages = [%{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"}]
+
+      assert ChaosChecker.skipped_at(pages, MapSet.new(["c-6", "c-7"])) == nil
+    end
+
+    test "values that do not carry a sequence number yield no boundary rather than a wrong one" do
+      assert ChaosChecker.skipped_at(skipping_pages(), MapSet.new(["surprise"])) == nil
+      assert ChaosChecker.skipped_at([], MapSet.new(["c-1"])) == nil
+    end
+
+    test "the boundary is found from the LOWEST missing value, not whichever comes first" do
+      # A set that is not in order, and one whose lowest member sits in the gap while others sit above
+      # the end of the scan: the first gap is the one that explains the scan.
+      missing = MapSet.new(["c-99", "c-7", "c-42"])
+
+      assert {before, following} = ChaosChecker.skipped_at(skipping_pages(), missing)
+      assert {before.last, following.first} == {"c-5", "c-10"}
+    end
+
+    test "two cursors sharing a long prefix get different labels" do
+      # The bug this pins: cursors are base64 Erlang terms, so they all open with the same header.
+      # Labelling them by their prefix rendered every page identical in the one trace whose whole job
+      # is to show when the cursor moved.
+      prefix = "g3QAAAABbQAAAA"
+      pages = [%{from: prefix <> "aaa", to: prefix <> "zzz", count: 1, first: "c-1", last: "c-1"}]
+
+      [line] = ChaosChecker.page_lines(pages)
+      [_, from, to] = Regex.run(~r/from=(\S+) to=(\S+)/, line)
+
+      refute from == to, "a moved cursor must not render as the same label"
+    end
+
+    test "a cursor that did not move renders as the same label" do
+      same = "g3QAAAABbQAAAAsame"
+      pages = [%{from: same, to: same, count: 1, first: "c-1", last: "c-1"}]
+
+      [line] = ChaosChecker.page_lines(pages)
+      [_, from, to] = Regex.run(~r/from=(\S+) to=(\S+)/, line)
+
+      assert from == to
+    end
+
+    test "renders one line per page, collapsing runs of empty polls" do
+      lines = ChaosChecker.page_lines(skipping_pages())
+
+      assert length(lines) == 3
+      assert Enum.at(lines, 0) =~ "from=start"
+      assert Enum.at(lines, 0) =~ "count=2 first=c-1 last=c-5"
+      assert Enum.at(lines, 2) == "PAGE (1 empty, cursor held)"
+    end
+
+    test "a stretch of empty polls collapses to a single line carrying its length" do
+      empties = for _ <- 1..12, do: %{from: "a", to: "a", count: 0, first: nil, last: nil}
+
+      assert ChaosChecker.page_lines(empties) == ["PAGE (12 empty, cursor held)"]
+    end
+  end
+
+  describe "drain/4 records the pages it walked" do
+    test "one entry per fetch, in order, carrying the values it returned" do
+      {fetch, _agent} = scripted([["c-1", "c-2"], ["c-3"], []])
+      {now, sleep} = fake_clock()
+
+      {_values, :conn, scan} =
+        ChaosChecker.drain(fetch, :conn, "topic", now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
+
+      carrying = Enum.filter(scan.pages, &(&1.count > 0))
+      assert Enum.map(carrying, & &1.count) == [2, 1]
+      assert Enum.map(carrying, & &1.first) == ["c-1", "c-3"]
+      assert Enum.map(carrying, & &1.last) == ["c-2", "c-3"]
+      assert scan.status == :settled
+    end
+
+    test "an empty poll is recorded too, holding the cursor it was asked from" do
+      # The trace has to show a poll that found nothing at a position, because a scan that sat at one
+      # cursor and a scan that walked past it look identical in the values alone.
+      {fetch, _agent} = scripted([[], ["c-1"], []])
+      {now, sleep} = fake_clock()
+
+      {_values, :conn, scan} =
+        ChaosChecker.drain(fetch, :conn, "topic", now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
+
+      assert [%{count: 0, from: nil, to: nil} | _] = scan.pages
+      assert Enum.any?(scan.pages, &(&1.count == 1))
     end
   end
 
@@ -259,7 +369,7 @@ defmodule ChaosCheckerTest do
       sleep.(ms)
     end
 
-    {_values, :conn, _status} =
+    {_values, :conn, _scan} =
       ChaosChecker.drain(fetch, :conn, "topic",
         now: now,
         sleep: counting_sleep,

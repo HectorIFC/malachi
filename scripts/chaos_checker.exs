@@ -82,23 +82,26 @@ defmodule ChaosChecker do
     conn = connect_retry(hosts, 0, System.monotonic_time(:millisecond) + 30_000)
     scan_deadline = System.monotonic_time(:millisecond) + @verify_scan_ms
     started = System.monotonic_time(:millisecond)
-    {read, conn, status} = drain(&fetch_page/3, conn, topic, deadline: scan_deadline)
+    {read, conn, scan} = drain(&fetch_page/3, conn, topic, deadline: scan_deadline)
     scan_ms = System.monotonic_time(:millisecond) - started
     missing = MapSet.difference(acked, read)
 
     IO.puts("acked=#{MapSet.size(acked)} read=#{MapSet.size(read)} missing=#{MapSet.size(missing)}")
 
-    case verdict(MapSet.size(missing), status) do
+    case verdict(MapSet.size(missing), scan.status) do
       :ok ->
         IO.puts("VERIFY OK: every acknowledged write survived")
         System.halt(0)
 
       :inconclusive ->
+        report_scan(scan, missing)
         report_topology(hosts, topic)
         report_inconclusive(missing, @verify_scan_ms)
 
       :missing ->
-        revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms))
+        # The FIRST scan's trace, not a later one: it is the pass where a skip first happened, and the
+        # revisit re-reads from the start, so its own pages describe a topic that has since moved on.
+        revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms), scan)
     end
   end
 
@@ -193,6 +196,96 @@ defmodule ChaosChecker do
   end
 
   @doc """
+  The scan's pages rendered one per line, with runs of empty pages collapsed.
+
+  Reads as a walk: each line is one fetch, what it was asked from, what it returned, and the span of
+  values it carried. A scan that is merely slow shows pages marching upward and then stopping; a scan
+  that skipped shows one page ending at a value and the next starting well above it, which is the
+  distinction the verdict alone could never make.
+  """
+  @spec page_lines([map()]) :: [String.t()]
+  def page_lines(pages) do
+    pages
+    |> Enum.chunk_by(&(&1.count == 0))
+    |> Enum.flat_map(fn
+      [%{count: 0} | _] = empties -> ["PAGE (#{length(empties)} empty, cursor held)"]
+      carrying -> Enum.map(carrying, &page_line/1)
+    end)
+  end
+
+  defp page_line(page) do
+    "PAGE from=#{cursor_label(page.from)} to=#{cursor_label(page.to)} " <>
+      "count=#{page.count} first=#{page.first} last=#{page.last}"
+  end
+
+  # Cursors are opaque on the wire, so what matters here is telling one from another and seeing when
+  # one repeats, not decoding it. Hashed rather than truncated: the cursor is a base64 Erlang term, so
+  # every one of them opens with the same header, and showing a prefix rendered every page identical
+  # (g3QAAAAB...) precisely in the trace that exists to compare them. A hash of the WHOLE cursor is
+  # short, stable, and different exactly when the cursor is.
+  defp cursor_label(nil), do: "start"
+
+  defp cursor_label(cursor) do
+    cursor |> :erlang.phash2() |> Integer.to_string(16) |> String.pad_leading(8, "0")
+  end
+
+  @doc """
+  Where a scan walked past values it never returned, given its `pages` and the `missing` set: the two
+  consecutive pages that bracket the lowest missing value, or `nil` when no page boundary does.
+
+  This is the finding the page trace exists to produce. A cursor that advances over records makes the
+  values above the gap readable while the ones inside it never come back, which looks exactly like a
+  slow scan from the outside and is nothing like it: one is a budget to raise, the other is the server
+  handing out a position past data it had not made visible yet. `nil` means the trace does not explain
+  the missing set, which is worth knowing too rather than inventing a boundary that fits.
+  """
+  @spec skipped_at([map()], MapSet.t()) :: {map(), map()} | nil
+  def skipped_at(pages, missing) do
+    carrying = Enum.filter(pages, &(&1.count > 0))
+
+    with lowest when is_integer(lowest) <- lowest_sequence(missing) do
+      carrying
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.find(fn [before, following] ->
+        brackets?(sequence_number(before.last), sequence_number(following.first), lowest)
+      end)
+      |> case do
+        [before, following] -> {before, following}
+        nil -> nil
+      end
+    else
+      _no_sequence -> nil
+    end
+  end
+
+  defp brackets?(last, first, lowest) when is_integer(last) and is_integer(first) do
+    last < lowest and first > lowest
+  end
+
+  defp brackets?(_last, _first, _lowest), do: false
+
+  defp lowest_sequence(values) do
+    values |> Enum.map(&sequence_number/1) |> Enum.reject(&is_nil/1) |> Enum.min(fn -> nil end)
+  end
+
+  # The page trace at the point a scan came up short, plus the boundary that explains it when one does.
+  defp report_scan(scan, missing) do
+    Enum.each(page_lines(scan.pages), &IO.puts/1)
+
+    case skipped_at(scan.pages, missing) do
+      {before, following} ->
+        IO.puts(
+          "SCAN SKIPPED: a page ending at #{before.last} was followed by one starting at " <>
+            "#{following.first}, so the cursor advanced past values the scan never returned. " <>
+            "This is not a scan that ran out of time."
+        )
+
+      nil ->
+        IO.puts("scan trace does not show a page boundary over the missing values")
+    end
+  end
+
+  @doc """
   A compact description of a set of `c-N` values: how many, the extremes, and whether they form one
   unbroken run. Which values are absent says more than how many: an unbroken run ending at the last
   value produced is a scan that stopped early, while a scattered set points somewhere else entirely.
@@ -225,7 +318,7 @@ defmodule ChaosChecker do
 
   # A missing set is not yet a verdict. Re-read the whole topic until either the missing values turn up
   # (they were late to this node, not lost) or the budget runs out (they are gone).
-  defp revisit(conn, hosts, topic, acked, read, missing, budget_ms) do
+  defp revisit(conn, hosts, topic, acked, read, missing, budget_ms, first_scan) do
     IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{budget_ms}ms")
     started = System.monotonic_time(:millisecond)
     {read, elapsed_ms, status} = revisit_loop(conn, topic, acked, read, started + budget_ms, started, :settled)
@@ -233,12 +326,14 @@ defmodule ChaosChecker do
 
     cond do
       MapSet.size(missing) > 0 and status == :timeout ->
+        report_scan(first_scan, missing)
         report_topology(hosts, topic)
         report_inconclusive(missing, budget_ms)
 
       MapSet.size(missing) > 0 ->
         IO.puts("VERIFY FAILED, missing #{describe(missing)}")
         IO.puts("first missing: #{missing |> Enum.take(10) |> inspect()}")
+        report_scan(first_scan, missing)
         report_topology(hosts, topic)
         System.halt(1)
 
@@ -271,8 +366,8 @@ defmodule ChaosChecker do
       # a retry starting just before the deadline could still run a full scan past it, and a topic
       # that keeps producing would reset that scan's patience forever, leaving the bounded revisit
       # unbounded.
-      {fresh, conn, status} = drain(&fetch_page/3, conn, topic, deadline: deadline)
-      revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started, status)
+      {fresh, conn, scan} = drain(&fetch_page/3, conn, topic, deadline: deadline)
+      revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started, scan.status)
     end
   end
 
@@ -308,12 +403,12 @@ defmodule ChaosChecker do
       deadline: Keyword.get(opts, :deadline, :infinity)
     }
 
-    drain_loop(fetch, conn, topic, nil, MapSet.new(), now.() + settle_ms, config)
+    drain_loop(fetch, conn, topic, nil, %{values: MapSet.new(), pages: []}, now.() + settle_ms, config)
   end
 
   defp drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config) do
     if expired?(config, config.deadline) do
-      {acc, conn, :timeout}
+      finish_scan(acc, conn, :timeout)
     else
       drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config)
     end
@@ -322,9 +417,11 @@ defmodule ChaosChecker do
   defp drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config) do
     case fetch.(conn, topic, cursor) do
       {:ok, [], _next, conn} ->
+        acc = record_page(acc, cursor, cursor, [])
+
         if expired?(config, settle_deadline) do
           # Quiet for a whole settle window: the topic is drained, which is a real end of scan.
-          {acc, conn, :settled}
+          finish_scan(acc, conn, :settled)
         else
           # Never sleep past the caller's ceiling: a poll that would overshoot it is cut to whatever is
           # left, so the scan returns on time instead of one poll late.
@@ -337,11 +434,28 @@ defmodule ChaosChecker do
       {:ok, values, next_cursor, conn} ->
         # Progress resets the patience: only an uninterrupted stretch of nothing ends the scan. The
         # absolute deadline above is what keeps that reset from running forever.
-        drain_loop(fetch, conn, topic, next_cursor, Enum.into(values, acc), config.now.() + config.settle_ms, config)
+        acc = record_page(acc, cursor, next_cursor, values)
+        acc = %{acc | values: Enum.into(values, acc.values)}
+        drain_loop(fetch, conn, topic, next_cursor, acc, config.now.() + config.settle_ms, config)
 
       other ->
         config.on_error.(other)
     end
+  end
+
+  # One entry per fetch, in the order the scan made them. The whole point is to be able to answer
+  # WHERE a scan stopped seeing values it should have seen: a page that ends at one sequence number
+  # followed by a page that starts well above it is a cursor that moved past records, which is a
+  # different finding from a scan that ran out of time, and the two were indistinguishable from the
+  # outside. Kept even on a clean scan, since it costs one small map per fetch and the run that turns
+  # out to need it is never the one you decided to instrument.
+  defp record_page(acc, from, to, values) do
+    page = %{from: from, to: to, count: length(values), first: List.first(values), last: List.last(values)}
+    %{acc | pages: [page | acc.pages]}
+  end
+
+  defp finish_scan(acc, conn, status) do
+    {acc.values, conn, %{status: status, pages: Enum.reverse(acc.pages)}}
   end
 
   defp expired?(_config, :infinity), do: false
