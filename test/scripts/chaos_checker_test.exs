@@ -83,6 +83,70 @@ defmodule ChaosCheckerTest do
     assert Enum.sort(values) == Enum.sort(for i <- 1..10, do: "v#{i}")
   end
 
+  describe "the caller's deadline" do
+    test "ends a scan whose pages keep arriving, so a busy topic cannot hold it open forever" do
+      # The settle budget is reset by every page carrying records, which is what lets a long log drain
+      # in one pass. Without an absolute ceiling that same reset lets a topic under continuous produce
+      # keep the scan running indefinitely, and the revisit loop that calls it stops being bounded.
+      endless = fn conn, _topic, _cursor -> {:ok, ["v"], "cursor", conn} end
+      {now, sleep} = fake_clock(50)
+
+      {_values, :conn} =
+        ChaosChecker.drain(endless, :conn, "topic",
+          now: now,
+          sleep: sleep,
+          settle_ms: 1_000,
+          deadline: 500
+        )
+
+      # Returning at all is the assertion: without the ceiling this call does not terminate.
+    end
+
+    test "a scan starting near the deadline returns instead of spending a whole settle window" do
+      {fetch, _agent} = scripted([[], [], [], []])
+      {now, sleep} = fake_clock(10)
+
+      {values, :conn} =
+        ChaosChecker.drain(fetch, :conn, "topic",
+          now: now,
+          sleep: sleep,
+          settle_ms: 10_000,
+          poll_ms: 250,
+          deadline: 20
+        )
+
+      assert Enum.to_list(values) == []
+    end
+
+    test "a sleep never overshoots the deadline" do
+      {:ok, slept} = Agent.start_link(fn -> [] end)
+      {fetch, _agent} = scripted([])
+      {now, sleep} = fake_clock()
+
+      recording_sleep = fn ms ->
+        Agent.update(slept, &[ms | &1])
+        sleep.(ms)
+      end
+
+      {_values, :conn} =
+        ChaosChecker.drain(fetch, :conn, "topic",
+          now: now,
+          sleep: recording_sleep,
+          settle_ms: 10_000,
+          poll_ms: 250,
+          deadline: 600
+        )
+
+      # 250 + 250 + 100: the last poll is cut to what is left rather than running past the ceiling.
+      assert Agent.get(slept, & &1) |> Enum.reverse() == [250, 250, 100]
+    end
+
+    test "no deadline means the settle budget alone decides, as a plain scan expects" do
+      values = drain([["a"], [], [], [], []], settle_ms: 1_000, poll_ms: 250)
+      assert Enum.to_list(values) == ["a"]
+    end
+  end
+
   test "a failed fetch is not an empty log: it is fatal, never a short successful page" do
     # A read that failed used to be indistinguishable from a drained topic, which is a successful wrong
     # answer. `on_error` stands in for the halt so the test can observe it.

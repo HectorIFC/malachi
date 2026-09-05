@@ -139,8 +139,12 @@ defmodule ChaosChecker do
     if MapSet.subset?(acked, read) or now >= deadline do
       {read, now - started}
     else
-      Process.sleep(@revisit_poll_ms)
-      {fresh, conn} = drain(&fetch_page/3, conn, topic)
+      Process.sleep(min(@revisit_poll_ms, deadline - now))
+      # The re-read shares THIS budget rather than taking a fresh settle window of its own: otherwise
+      # a retry starting just before the deadline could still run a full scan past it, and a topic
+      # that keeps producing would reset that scan's patience forever, leaving the bounded revisit
+      # unbounded.
+      {fresh, conn} = drain(&fetch_page/3, conn, topic, deadline: deadline)
       revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started)
     end
   end
@@ -167,32 +171,55 @@ defmodule ChaosChecker do
       poll_ms: Keyword.get(opts, :poll_ms, @drain_poll_ms),
       sleep: Keyword.get(opts, :sleep, &Process.sleep/1),
       now: now,
-      on_error: Keyword.get(opts, :on_error, &halt_on_fetch_error/1)
+      on_error: Keyword.get(opts, :on_error, &halt_on_fetch_error/1),
+      # An absolute ceiling on the whole scan, separate from the settle budget. The settle deadline is
+      # reset by every page that carries records, which is what lets a long log drain in one pass, but
+      # it also means a topic that keeps producing could hold the scan open indefinitely. A caller
+      # working to its own budget (the revisit loop) passes that budget here so the scan cannot outlive
+      # it. `:infinity` for a scan that should run until the log is quiet.
+      deadline: Keyword.get(opts, :deadline, :infinity)
     }
 
     drain_loop(fetch, conn, topic, nil, MapSet.new(), now.() + settle_ms, config)
   end
 
-  defp drain_loop(fetch, conn, topic, cursor, acc, deadline, config) do
+  defp drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config) do
+    if expired?(config, config.deadline) do
+      {acc, conn}
+    else
+      drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config)
+    end
+  end
+
+  defp drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config) do
     case fetch.(conn, topic, cursor) do
       {:ok, [], _next, conn} ->
-        if config.now.() >= deadline do
+        if expired?(config, settle_deadline) do
           {acc, conn}
         else
-          config.sleep.(config.poll_ms)
+          # Never sleep past the caller's ceiling: a poll that would overshoot it is cut to whatever is
+          # left, so the scan returns on time instead of one poll late.
+          config.sleep.(capped_sleep(config))
           # The same cursor on purpose: an empty page means this position had nothing to give yet, so
           # the scan resumes from it rather than skipping past values it never read.
-          drain_loop(fetch, conn, topic, cursor, acc, deadline, config)
+          drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config)
         end
 
       {:ok, values, next_cursor, conn} ->
-        # Progress resets the patience: only an uninterrupted stretch of nothing ends the scan.
+        # Progress resets the patience: only an uninterrupted stretch of nothing ends the scan. The
+        # absolute deadline above is what keeps that reset from running forever.
         drain_loop(fetch, conn, topic, next_cursor, Enum.into(values, acc), config.now.() + config.settle_ms, config)
 
       other ->
         config.on_error.(other)
     end
   end
+
+  defp expired?(_config, :infinity), do: false
+  defp expired?(config, deadline), do: config.now.() >= deadline
+
+  defp capped_sleep(%{deadline: :infinity} = config), do: config.poll_ms
+  defp capped_sleep(config), do: max(0, min(config.poll_ms, config.deadline - config.now.()))
 
   defp halt_on_fetch_error(other) do
     IO.puts("fetch failed: #{inspect(other)}")
