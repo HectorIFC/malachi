@@ -327,6 +327,11 @@ defmodule Malachi.DashboardSecurityTest do
           assert String.contains?(response, "Content-Security-Policy") or
                    String.contains?(response, "content-security-policy")
 
+          # Case-insensitive, like the CORS assertion below: the header casing is the responder's business.
+          # The exact policy value is pinned in dashboard_security_headers_test.exs, which runs whether or
+          # not the dashboard is listening.
+          assert String.downcase(response) =~ "permissions-policy: "
+
           :gen_tcp.close(socket)
 
         {:error, _} ->
