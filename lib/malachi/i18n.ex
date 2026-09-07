@@ -234,6 +234,10 @@ defmodule Malachi.I18n do
       "pt_BR" => "⏳ Iniciando shutdown gracioso...",
       "en_US" => "⏳ Starting graceful shutdown..."
     },
+    fence_failed: %{
+      "pt_BR" => "⚠️ Cerca do segmento %{segment_id} falhou: %{reason}; o segmento pai segue aberto",
+      "en_US" => "⚠️ Fence for segment %{segment_id} failed: %{reason}; the parent stays open"
+    },
     group_flush_failed: %{
       "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
       "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"

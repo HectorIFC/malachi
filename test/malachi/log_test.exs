@@ -84,6 +84,106 @@ defmodule Malachi.LogTest do
     end
   end
 
+  describe "seal/1 (the whole-log fence's durable record)" do
+    test "an append after seal/1 still succeeds: enforcement is not here", %{tmp_dir: directory} do
+      # Deliberate placement. The fence is enforced in `Malachi.Cluster.ReplicationServer`, because
+      # repair must still be able to write into a sealed segment (`follow/4`), and because the append
+      # path here is hard-matched by its callers: a refusal raised from `Log.append/2` would kill the
+      # replication server and take every segment it hosts with it.
+      {:ok, log} = open(directory)
+      log = append_sync(log, rec("a"))
+
+      {:ok, log} = Log.seal(log)
+      assert Log.sealed?(log)
+      assert File.exists?(Log.seal_marker_path(directory))
+
+      assert {:ok, log, 1, 1} = Log.append(log, [rec("b")])
+      assert log.next_offset == 2
+    end
+
+    test "seal/1 answers the same end before and after, and buffered records stay readable", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      # Appended and NOT synced: the seal's own fsync is what makes them durable, and the end it
+      # reports has to count them or the seal would promise fewer records than the log holds.
+      {:ok, log, _first, _last} = Log.append(log, [rec("a"), rec("b")])
+      before = log.next_offset
+
+      {:ok, log} = Log.seal(log)
+
+      assert log.next_offset == before
+      assert Enum.map(read_all(log), & &1.value) == ["a", "b"]
+    end
+
+    test "seal/1 is idempotent and the second call touches nothing", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = append_sync(log, rec("a"))
+
+      {:ok, sealed} = Log.seal(log)
+      marker = Log.seal_marker_path(directory)
+      stat = File.stat!(marker)
+
+      assert {:ok, ^sealed} = Log.seal(sealed)
+      assert File.stat!(marker) == stat
+    end
+
+    test "seal/1 works on an empty log and on one that just rolled", %{tmp_dir: directory} do
+      {:ok, empty} = open(directory)
+      assert {:ok, %Log{sealed?: true, next_offset: 0}} = Log.seal(empty)
+
+      rolled_directory = Path.join(directory, "rolled")
+      {:ok, log} = open(rolled_directory)
+      log = append_sync(log, rec("a"))
+      {:ok, log} = Log.roll(log)
+      assert log.active == nil
+
+      assert {:ok, %Log{sealed?: true, next_offset: 1}} = Log.seal(log)
+    end
+
+    test "recover/2 brings the seal back, and its absence back as unsealed", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = append_sync(log, rec("a"))
+      {:ok, _log} = Log.seal(log)
+
+      assert {:ok, %Log{sealed?: true, next_offset: 1}} = Log.recover(directory, max_bytes: 120)
+
+      File.rm!(Log.seal_marker_path(directory))
+      assert {:ok, %Log{sealed?: false}} = Log.recover(directory, max_bytes: 120)
+    end
+
+    test "recover/2 of an empty directory carries the marker too", %{tmp_dir: directory} do
+      File.mkdir_p!(directory)
+      File.touch!(Log.seal_marker_path(directory))
+
+      assert {:ok, %Log{sealed?: true, next_offset: 0}} = Log.recover(directory, max_bytes: 120)
+    end
+
+    test "a log whose last FILE is sealed by a roll does not come back fenced", %{tmp_dir: directory} do
+      # The regression that rules out reusing `Segment.seal_marker_path/1` as the fence. Rolling seals
+      # files routinely on :max_bytes, and `recover/2` then comes back with `active: nil` and happily
+      # opens a new one. A per-file marker would have fenced every log whose last file happened to roll.
+      {:ok, log} = open(directory)
+      log = Enum.reduce(0..9, log, fn index, acc -> append_sync(acc, rec("value-#{index}")) end)
+      {:ok, log} = Log.roll(log)
+      assert log.active == nil
+
+      refute File.exists?(Log.seal_marker_path(directory))
+
+      assert {:ok, recovered} = Log.recover(directory, max_bytes: 120)
+      refute Log.sealed?(recovered)
+      assert {:ok, _log, _first, _last} = Log.append(recovered, [rec("after")])
+    end
+
+    test "the marker is inert to verify/2 and rebuild_index/2", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = Enum.reduce(0..5, log, fn index, acc -> append_sync(acc, rec("value-#{index}")) end)
+      {:ok, _log} = Log.seal(log)
+
+      assert {:ok, %{records: 6, files: files}} = Log.verify(directory, max_bytes: 120)
+      assert files >= 1
+      assert :ok = Log.rebuild_index(directory, max_bytes: 120)
+    end
+  end
+
   describe "read bounds" do
     test "eof past the end and out_of_range below the start", %{tmp_dir: directory} do
       {:ok, log} = Log.open(directory, base_offset: 50)

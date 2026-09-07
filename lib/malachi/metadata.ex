@@ -157,6 +157,22 @@ defmodule Malachi.Metadata do
   def new, do: %__MODULE__{}
 
   @doc """
+  The seal command for `segment` ending at `end_offset` with `byte_size` bytes on disk, at `at`.
+
+  One constructor rather than two, because both seal paths (the produce roll in `Malachi.Broker` and
+  primary failover in `Malachi.Cluster.Failover`) turn an END OFFSET into a LENGTH the same way, and a
+  second copy of that subtraction is a copy that can drift.
+  """
+  @spec seal_command(
+          %{:id => segment_id(), :start_offset => non_neg_integer(), optional(atom()) => any()},
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: command()
+  def seal_command(segment, end_offset, byte_size, at),
+    do: {:seal_segment, segment.id, end_offset - segment.start_offset, byte_size, at}
+
+  @doc """
   The topic a command belongs to, for **routing** it to the owning vnode, or `nil` if it names none.
 
   Structural, no state: a topic command names its topic; a `range_id` is `{topic, seq}` and a
@@ -331,35 +347,38 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
-    if Map.has_key?(state.segments, segment_id) do
-      {state, {:error, :segment_exists}}
-    else
-      case fetch_active_range(state, range_id) do
-        {:error, _reason} = error ->
-          {state, error}
-
-        {:ok, _range} ->
-          segment = %{
-            id: segment_id,
-            range_id: range_id,
-            replica_set: replica_set,
-            state: :active,
-            start_offset: start_offset,
-            length: nil,
-            byte_size: nil,
-            sealed_at: nil
-          }
-
-          state = %{state | segments: Map.put(state.segments, segment_id, segment)}
-          {index_add_segment(state, range_id, segment_id), :ok}
-      end
+    # The range is the context, so it is settled first: a range that is unknown or sealed does not
+    # accept a segment at any offset, and reporting an offset complaint about it would send the caller
+    # off to fix the wrong thing.
+    case fetch_active_range(state, range_id) do
+      {:error, _reason} = error -> {state, error}
+      {:ok, _range} -> register_into_range(state, range_id, segment_id, replica_set, start_offset)
     end
   end
 
   defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
-    update_segment(state, segment_id, fn segment ->
-      %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
-    end)
+    case Map.fetch(state.segments, segment_id) do
+      :error ->
+        {state, {:error, :no_such_segment}}
+
+      # An idempotent retry: the fence that produced this length answers the same number every time, and
+      # a caller whose command timed out re-issues it. Nothing is rewritten, so retention's clock
+      # (`sealed_at`) does not move on a retry.
+      {:ok, %{state: :sealed, length: ^length}} ->
+        {state, :ok}
+
+      # Two authorities decided different edges for one segment (a roll fence racing a failover seal).
+      # Overwriting would move the sealed edge after a successor may already have registered at the old
+      # one, breaking the tiling rule, and under `Malachi.Broker`'s read budget a shrunk length HIDES
+      # acknowledged records. The existing length travels back so the loser converges on the winner
+      # instead of wedging its range.
+      {:ok, %{state: :sealed, length: existing}} ->
+        {state, {:error, {:already_sealed, existing}}}
+
+      {:ok, segment} ->
+        sealed = %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
+        {%{state | segments: Map.put(state.segments, segment_id, sealed)}, :ok}
+    end
   end
 
   defp do_apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
@@ -447,6 +466,44 @@ defmodule Malachi.Metadata do
   # deterministically (and again on replay), e.g. an older replica seeing a newer
   # command during a rolling upgrade. Keep the replica alive and surface the problem.
   defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
+
+  defp register_into_range(state, range_id, segment_id, replica_set, start_offset) do
+    cond do
+      Map.has_key?(state.segments, segment_id) ->
+        {state, {:error, :segment_exists}}
+
+      active_segment?(state, range_id) ->
+        # A range has exactly one write head. A second active segment is a second one, and the offset
+        # check below cannot catch it: an active segment's end is precisely what the metadata does not
+        # know, so it contributes only its start and a rival registering at or above that start looks
+        # clean. Two frontends reach here with different `seq` counters, so `:segment_exists` does not
+        # fire either, and the result is two segments handing out the same offsets on possibly
+        # different replica sets: the divergence sealing a failed primary's segment exists to prevent,
+        # arriving through registration instead. The roll path is unaffected because it seals before it
+        # registers, which is the whole reason one write head is a rule the system can keep.
+        {state, {:error, :active_segment_exists}}
+
+      discontiguous?(state, range_id, start_offset) ->
+        # A range's segments must tile its offsets exactly, with no overlap and no gap.
+        #
+        # Starting BELOW where the range ends claims offsets another segment owns, and two segments
+        # handing out the same offsets is how one acknowledged record quietly replaces another.
+        #
+        # Starting ABOVE is the same defect wearing the other sign, and it is worse than it looks: a
+        # read for an offset in the gap resolves to the segment BEFORE it (`Broker.locate_segment/3`
+        # takes the greatest start at or below the offset), which answers :eof, and the consume cursor
+        # then stops there rather than advancing, so every consumer of the range wedges permanently
+        # before the later segment.
+        #
+        # Either way the caller derived the offset from a view that is not the control plane's, so it
+        # is checked rather than trusted: a frontend that is behind gets an error it can retry after
+        # refreshing, instead of silently corrupting the range's offset space.
+        {state, {:error, :segment_overlap}}
+
+      true ->
+        register_new_segment(state, range_id, segment_id, replica_set, start_offset)
+    end
+  end
 
   # --- queries ---
 
@@ -877,6 +934,55 @@ defmodule Malachi.Metadata do
   end
 
   # --- internals: lookups / segment update ---
+
+  # Whether the range already has a write head. Checked before the offset bound rather than folded
+  # into it, because the two answer different questions: this one is about how many segments may be
+  # open at once, the other about where a new one may start.
+  defp active_segment?(state, range_id) do
+    state |> segments_of_range(range_id) |> Enum.any?(&(&1.state == :active))
+  end
+
+  # Whether `start_offset` would leave the range's segments failing to tile its offsets: either below
+  # where they end (overlap) or above it (gap).
+  #
+  # A range with nothing to be contiguous with imposes nothing. That is not only the first segment: a
+  # range whose sealed segments have all been dropped by retention still has a frontend counting from
+  # where it left off, and demanding that it restart at zero would break the next produce for good.
+  defp discontiguous?(state, range_id, start_offset) do
+    case range_end(state, range_id) do
+      nil -> false
+      offset -> start_offset != offset
+    end
+  end
+
+  # Where a range's SEALED segments end, or nil when it has none. An active segment is handled by
+  # `active_segment?/2` instead, since its end is unknown to the metadata and treating its start as an
+  # end would be a bound that quietly admits the overlap it looks like it is checking for.
+  defp range_end(state, range_id) do
+    state
+    |> segments_of_range(range_id)
+    |> Enum.filter(&is_integer(&1.length))
+    |> Enum.map(&(&1.start_offset + &1.length))
+    |> Enum.max(fn -> nil end)
+  end
+
+  # The insert itself. Every precondition (the range accepts writes, the id is free, the range has no
+  # write head, the offset is above what is sealed) is settled by the caller.
+  defp register_new_segment(state, range_id, segment_id, replica_set, start_offset) do
+    segment = %{
+      id: segment_id,
+      range_id: range_id,
+      replica_set: replica_set,
+      state: :active,
+      start_offset: start_offset,
+      length: nil,
+      byte_size: nil,
+      sealed_at: nil
+    }
+
+    state = %{state | segments: Map.put(state.segments, segment_id, segment)}
+    {index_add_segment(state, range_id, segment_id), :ok}
+  end
 
   defp fetch_active_range(state, range_id) do
     case Map.fetch(state.ranges, range_id) do

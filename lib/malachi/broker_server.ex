@@ -48,12 +48,18 @@ defmodule Malachi.BrokerServer do
   alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
+
+  # Bounds the split/merge fence. Deliberately not reachable from the produce path: see
+  # `fence_and_seal/2` for why a network call belongs on one and not the other.
+  @fence_timeout 1_000
   # Produce call timeout: must exceed every server-side completion path (replication no_quorum ~5s,
   # the async-produce safety timer at 6s), so callers get a real error reply, never a call exit.
   @produce_call_timeout 10_000
   # Safety net for an async produce whose replication result never arrives (e.g. the cast to a dead
   # primary was silently dropped): reply an error instead of leaving the caller to time out.
   @async_produce_timeout 6_000
+  # How long a roll's fence may take, matching the heal coordinator's probe timeout. A spurious timeout
+  # is safe: the roll stays owed and a re-fence is idempotent, answering the same numbers.
 
   # --- client API ---
 
@@ -82,7 +88,7 @@ defmodule Malachi.BrokerServer do
       per-flush fsync (default 8000, or app env).
     * `:group_commit_max_inflight` - past this many parked records, shed produces with `:overloaded`
       instead of dropping the connection (default 200000, or app env).
-    * `:segment_max_bytes` - byte threshold at which the active segment seals and rolls.
+    * `:segment_max_bytes` - byte threshold at which the active segment asks to roll.
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
     * standard `GenServer` options (`:name`, etc.) are honored.
@@ -448,14 +454,33 @@ defmodule Malachi.BrokerServer do
     {:reply, :ok, state}
   end
 
+  # Fence the parent's segment BEFORE the metadata split, which is the order the seal rule requires (the
+  # length must be what closing the segment answered) and which also closes the write half of the split
+  # gap: a node that has not seen the split can no longer get a record into the parent, because the
+  # parent's store is physically fenced before either child exists. Its READS still go to the parent,
+  # which is correct cross-epoch behavior.
   def handle_call({:split_range, range_id}, _from, state) do
-    {broker, reply} = Broker.split_range(state.broker, range_id)
-    {:reply, reply, %{state | broker: broker}}
+    case fence_parent(state, range_id) do
+      {:ok, state} ->
+        {broker, reply} = Broker.split_range(state.broker, range_id)
+        {:reply, reply, %{state | broker: broker}}
+
+      {:error, reason, state} ->
+        {:reply, {:error, {:fence_failed, reason}}, state}
+    end
   end
 
+  # Both parents are fenced first, and the merge is applied only when both succeeded. A fence that
+  # succeeds for A while B's fails leaves A with a short sealed segment and the merge refused; A's next
+  # produce opens a fresh segment at the sealed end, which is harmless.
   def handle_call({:merge_ranges, range_id_a, range_id_b}, _from, state) do
-    {broker, reply} = Broker.merge_ranges(state.broker, range_id_a, range_id_b)
-    {:reply, reply, %{state | broker: broker}}
+    with {:ok, state} <- fence_parent(state, range_id_a),
+         {:ok, state} <- fence_parent(state, range_id_b) do
+      {broker, reply} = Broker.merge_ranges(state.broker, range_id_a, range_id_b)
+      {:reply, reply, %{state | broker: broker}}
+    else
+      {:error, reason, state} -> {:reply, {:error, {:fence_failed, reason}}, state}
+    end
   end
 
   def handle_call({:active_range_ids, topic}, _from, state) do
@@ -595,11 +620,24 @@ defmodule Malachi.BrokerServer do
             {state, pending} = adopt_result(state, pending, dispatch, actual)
 
             if pending.remaining == 1 do
+              # Every dispatch of this produce has answered, so the counter now carries the primary's
+              # truth for each range it touched and a requested roll can be recorded at a length that
+              # is no longer a guess. Only on the success path: a failed dispatch leaves the plan's
+              # reservation standing above what was actually stored, and sealing there would promise
+              # records that do not exist, which reads worse than a short seal (`Broker.settle_rolls/1`).
+              state = %{state | broker: Broker.settle_rolls(state.broker)}
               {:noreply, finish_async_produce(state, ref, pending, {:ok, pending.placements})}
             else
               pending = %{pending | remaining: pending.remaining - 1}
               {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
             end
+
+          # The segment was fenced between the plan and the push: seat this frontend at the fenced end so
+          # the client's retry opens or adopts the successor instead of racing :segment_overlap.
+          {:error, {:sealed, end_offset}} ->
+            broker = Broker.forget_sealed(state.broker, dispatch.range_id, dispatch.segment_id, end_offset)
+            state = %{state | broker: broker}
+            {:noreply, finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})}
 
           {:error, reason} ->
             {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
@@ -795,6 +833,41 @@ defmodule Malachi.BrokerServer do
     :exit, _reason -> :unreachable
   end
 
+  # Fences and seals a range's active segment on demand, for a split or a merge retiring it. A range
+  # with no open segment has nothing to fence, which is a success: there is no length to get wrong.
+  defp fence_parent(state, range_id) do
+    case Broker.active_roll(state.broker, range_id) do
+      :none -> {:ok, state}
+      roll -> fence_and_seal(state, roll)
+    end
+  end
+
+  # The fence belongs on THIS path and not on the produce path, and what separates them is the caller's
+  # rhythm rather than the correctness of the fence. A split or a merge retires the range: it happens
+  # once, it is already a control-plane round trip, and nothing may write to the parent afterwards, so
+  # paying a network call to make that true is exactly the trade. The produce path is the opposite on
+  # every count, and a fence there put a synchronous call to a possibly mute primary inside the loop
+  # that serializes every client of this node, retried on every produce with no backoff. It seals from
+  # the counter the primary has already corrected instead (`Broker.settle_rolls/1`).
+  defp fence_and_seal(state, roll) do
+    case ReplicationServer.seal(roll.primary, roll.segment_id, roll.start_offset, @fence_timeout) do
+      {:ok, end_offset, byte_size} ->
+        case Broker.record_seal(state.broker, roll, end_offset, byte_size, System.system_time(:millisecond)) do
+          {broker, :ok} ->
+            {:ok, %{state | broker: broker}}
+
+          # The store is fenced but the metadata is not: the parent is closed to writes and the split
+          # must not proceed on a range whose end the control plane does not know.
+          {broker, {:error, reason}} ->
+            {:error, reason, %{state | broker: broker}}
+        end
+
+      {:error, reason} ->
+        Logger.warning(I18n.t(:fence_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
+        {:error, reason, state}
+    end
+  end
+
   defp reconcile_metadata(state) do
     schedule_reconcile(state)
     bootstrap_missing_vnodes(state.bootstrap)
@@ -811,7 +884,12 @@ defmodule Malachi.BrokerServer do
         #
         # `unreachable` keeps this tick from erasing the topics of a vnode that did not answer, which
         # would make every read of them succeed with zero records for as long as it stayed silent.
-        broker = Broker.put_cache(state.broker, dsrsm, unreachable)
+        # `drop_stale_active_segments/1` right after the cache swap, so a segment sealed on ANOTHER node
+        # stops being routed at here within one reconcile instead of only when the store refuses a batch.
+        broker =
+          state.broker
+          |> Broker.put_cache(dsrsm, unreachable)
+          |> Broker.drop_stale_active_segments()
 
         %{
           state
@@ -992,10 +1070,13 @@ defmodule Malachi.BrokerServer do
         {:reply, {:ok, placements}, %{state | broker: broker}}
 
       {broker, {:ok, placements, dispatches}} ->
+        # The plan's counter is a RESERVATION, so no roll may settle yet: only the primary's answers,
+        # folded in by `adopt_result/4` as each dispatch lands, say where the segment really ends.
+        state = %{state | broker: broker}
         ref = make_ref()
 
         Enum.each(dispatches, fn d ->
-          tag = {ref, %{range_id: d.range_id, last: d.last, count: d.count}}
+          tag = {ref, %{range_id: d.range_id, segment_id: d.segment_id, last: d.last, count: d.count}}
 
           ReplicationServer.replicate_async(
             d.primary,
@@ -1011,7 +1092,7 @@ defmodule Malachi.BrokerServer do
         timer = Process.send_after(self(), {:produce_timeout, ref}, @async_produce_timeout)
 
         pending = %{from: from, topic: topic, placements: placements, remaining: length(dispatches), timer: timer}
-        {:noreply, %{state | broker: broker, async_produces: Map.put(state.async_produces, ref, pending)}}
+        {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
 
       {broker, {:error, _reason} = error} ->
         {:reply, error, %{state | broker: broker}}
@@ -1021,12 +1102,17 @@ defmodule Malachi.BrokerServer do
   # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
   # is a no-op; when frontends interleaved, the batch's placement becomes the actual contiguous span
   # `[actual - count + 1, actual]` and the local counter jumps forward to the primary's end.
-  defp adopt_result(state, pending, %{range_id: range_id, last: expected, count: count}, actual) do
+  defp adopt_result(state, pending, dispatch, actual) do
+    %{range_id: range_id, segment_id: segment_id, last: expected, count: count} = dispatch
+
     if actual == expected do
       {state, pending}
     else
+      # The placements always follow the primary's truth, even when the counter no longer does: the
+      # client must be told where its records actually landed. The counter, in contrast, is only moved
+      # when the dispatch still names the range's write head (see `Broker.adopt_offsets/4`).
       placements = Map.put(pending.placements, range_id, {actual - count + 1, actual})
-      state = %{state | broker: Broker.adopt_offsets(state.broker, range_id, actual)}
+      state = %{state | broker: Broker.adopt_offsets(state.broker, range_id, segment_id, actual)}
       {state, %{pending | placements: placements}}
     end
   end
@@ -1055,9 +1141,12 @@ defmodule Malachi.BrokerServer do
           waiter = %{from: from, reply: reply, topic: topic}
           pending_records = state.pending_records + length(records)
 
+          # Settled here rather than where the threshold tripped: `Broker.produce/4` has already seated
+          # the counter on the primary's answer for this batch, so the length is exact. On the produce
+          # path a seal is a metadata command and nothing more, never a call to a replica.
           state = %{
             state
-            | broker: broker,
+            | broker: Broker.settle_rolls(broker),
               pending_produce: [waiter | state.pending_produce],
               pending_records: pending_records
           }

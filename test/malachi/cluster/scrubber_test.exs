@@ -30,7 +30,11 @@ defmodule Malachi.Cluster.ScrubberTest do
 
   # Metadata with one SEALED segment held by every replica, each holding the real records: the shape
   # the scrub walks (sealed copies are the ones nothing ever re-reads).
-  defp sealed_everywhere(replica_set, values) do
+  # `sealed_length` overrides what the control plane claims the segment holds, for the cases that model
+  # a copy short of the seal. It is passed to the ONE seal command rather than applied as a second one:
+  # re-sealing a segment at a different length is now refused, since two authorities disagreeing about
+  # an edge is a conflict to converge on, not a rewrite to wave through.
+  defp sealed_everywhere(replica_set, values, sealed_length \\ nil) do
     for replica <- replica_set do
       {:ok, _last} = ReplicationServer.follow(replica, @segment, 0, records(values))
     end
@@ -38,7 +42,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
     {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, @segment, replica_set, 0})
     bytes = ReplicationServer.stored_bytes(hd(replica_set), @segment)
-    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, @segment, length(values), bytes, 0})
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, @segment, sealed_length || length(values), bytes, 0})
     metadata
   end
 
@@ -300,10 +304,8 @@ defmodule Malachi.Cluster.ScrubberTest do
     # segment held when it was sealed, so a copy missing whole frames at the end is damaged too.
     {replica, directory} = start_replica()
     {peer_replica, peer_directory} = start_replica()
-    metadata = sealed_everywhere([replica, peer_replica], ["a", "b", "c"])
-
     # claim one more record than the copies actually hold
-    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, @segment, 4, 0, 0})
+    metadata = sealed_everywhere([replica, peer_replica], ["a", "b", "c"], 4)
 
     peer_scrubber =
       start_scrubber(metadata_source: fn -> metadata end, local_ref: peer_replica, directory: peer_directory)
@@ -414,9 +416,11 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     metadata =
       Enum.reduce(0..2, metadata, fn i, acc ->
+        # Contiguous, one record each: a range's segments tile its offsets, so spacing them out would
+        # build a range with holes, which the control plane refuses and no roll can produce.
         segment = {root, i}
-        {:ok, _last} = ReplicationServer.follow(replica, segment, i * 10, records(["v#{i}"]))
-        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i * 10})
+        {:ok, _last} = ReplicationServer.follow(replica, segment, i, records(["v#{i}"]))
+        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i})
         {acc, :ok} = Metadata.apply(acc, {:seal_segment, segment, 1, 0, 0})
         acc
       end)
@@ -466,9 +470,11 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     metadata =
       Enum.reduce(0..1, metadata, fn i, acc ->
+        # Contiguous, one record each: a range's segments tile its offsets, so spacing them out would
+        # build a range with holes, which the control plane refuses and no roll can produce.
         segment = {root, i}
-        {:ok, _last} = ReplicationServer.follow(replica, segment, i * 10, records(["v#{i}"]))
-        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i * 10})
+        {:ok, _last} = ReplicationServer.follow(replica, segment, i, records(["v#{i}"]))
+        {acc, :ok} = Metadata.apply(acc, {:register_segment, root, segment, [replica], i})
         {acc, :ok} = Metadata.apply(acc, {:seal_segment, segment, 1, 0, 0})
         acc
       end)

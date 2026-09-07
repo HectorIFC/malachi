@@ -71,8 +71,10 @@ flowchart TD
   position lands in exactly one range. Ranges **split** as they grow, which is how a topic scales without
   the client choosing a partition count up front.
 - **Segment.** Each range is a series of segments. The active segment takes appends until it crosses its
-  size threshold, then it is **sealed** and a new one rolls. Sealed segments are immutable, which is what
-  makes re-replicating them safe.
+  size threshold, then it is **sealed** and a new one rolls. Sealing is a fence, not a label: the store is
+  closed first and reports where it ended, and that answer becomes the segment's recorded length, so a
+  sealed segment's extent can never disagree with what its replicas hold. Sealed segments are immutable,
+  which is what makes re-replicating them safe.
 - **Replica set.** Each segment is replicated across nodes chosen by rendezvous (HRW) hashing. A write is
   acknowledged when a **quorum** has it durably (fsync before counting), so the system tolerates
   ⌊(N-1)/2⌋ slow or failed replicas.
@@ -162,11 +164,32 @@ them are covered by the guarantee:
   waiting for the quorum, so a produce that came back `no_quorum` and was retried appears twice, with
   the second copy at the later position. Delivery is at-least-once, and the failed attempt does not hold
   its place in the order.
-- **Two known gaps are open, and they are gaps, not intent.** For up to one metadata refresh after a
-  split, a node that has not yet seen it keeps writing to the sealed parent, and those records read
-  before the children's ([#41](https://github.com/HectorIFC/malachi/issues/41)). Primary failover
-  promotes a live replica without comparing how far its log has advanced and without fencing the old
-  primary ([#40](https://github.com/HectorIFC/malachi/issues/40)).
+- **A primary that dies seals its segment rather than handing it over.** Writing rolls to a fresh
+  segment, which is what NorthGuard does, and it is what keeps an offset from being issued twice: a
+  batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
+  promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
+  removes the possibility instead of detecting it. Finding the seal point and making it binding are two
+  steps, in this order: the pass first **measures** every live replica, leaving it writable, and only
+  once those answers reach a majority does it **fence** them, sealing each answering copy before the
+  control plane records anything. An old primary that comes back then appends to its own log and finds
+  no quorum, because every follower it reaches refuses the push. The order matters because a fence has
+  no inverse: closing replicas of a segment the pass then declines to seal would leave them refusing
+  writes forever, which at a replication factor of 2 blocks the range for good. The seal goes at the
+  **highest** durable end reported, once a **majority** of the replica set has answered. Why that covers everything
+  acknowledged: take any acknowledged record, at offset `o`. It lives on a majority, the answering
+  replicas are a majority, and two majorities of a set always intersect, so **some** answering replica
+  holds it. A replica's log is contiguous, so that replica's durable end is above `o`, and the highest
+  end among the answers is at least that. The replica doing the covering can be a different one for
+  each record, which is why the seal takes the highest end rather than trusting any single replica to
+  hold the whole segment. Note also that it is the highest end among the answers, not the end a
+  majority of them agree on; that lower point can sit below a record the dead primary acknowledged
+  with a single survivor. Without a majority answering there is no intersection to argue from, so the
+  segment is left alone and its range stops accepting writes until one answers again.
+- **The write half of the split gap is closed; the read half is not.** A split fences the parent's
+  segment before either child exists, so a node that has not yet seen the split can no longer get a
+  record INTO the parent: its produce is refused, it seats itself at the fenced edge and retries against
+  the successor. Its READS still go to the parent for up to one metadata refresh, which is correct
+  cross-epoch behavior rather than a gap ([#41](https://github.com/HectorIFC/malachi/issues/41)).
 
 ## Where this is going
 

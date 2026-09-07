@@ -366,12 +366,19 @@ defmodule Malachi.Cluster.PlacementTest do
     end
   end
 
-  # Builds a Metadata with one topic/range, registering each {segment_id, replica_set}.
+  # Builds a Metadata with one topic/range holding each {segment_id, replica_set}, as a rolled range:
+  # every segment but the last is sealed, at its own offset. Registering them all at offset 0 and
+  # leaving them active would build a range with several write heads, which the control plane refuses
+  # and which no produce path can reach, so the fixture would be describing a cluster that cannot exist.
   defp with_segments(specs, rf: _rf) do
     {metadata, {:ok, root_id}} = Metadata.apply(Metadata.new(), {:create_topic, "t", 8})
+    last = length(specs) - 1
 
-    Enum.reduce(specs, metadata, fn {segment_id, replica_set}, acc ->
-      apply!(acc, {:register_segment, root_id, segment_id, replica_set, 0})
+    specs
+    |> Enum.with_index()
+    |> Enum.reduce(metadata, fn {{segment_id, replica_set}, index}, acc ->
+      acc = apply!(acc, {:register_segment, root_id, segment_id, replica_set, index})
+      if index == last, do: acc, else: apply!(acc, {:seal_segment, segment_id, 1, 0, 0})
     end)
   end
 

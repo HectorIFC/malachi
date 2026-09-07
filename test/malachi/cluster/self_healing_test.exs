@@ -5,6 +5,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
   alias Malachi.Cluster.SelfHealing
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Storage.Layout
 
   defp start_broker do
     {ref, _directory, _id} = start_broker_with_directory()
@@ -54,6 +55,63 @@ defmodule Malachi.Cluster.SelfHealingTest do
     # applying the command makes the segment fully replicated again
     {healed, :ok} = Metadata.apply(metadata, {:set_segment_replicas, segment_id, new_set})
     assert SelfHealing.heal_sealed(healed, [a, b, d], 3).applied == []
+  end
+
+  test "a FENCED sealed segment still heals: the fence never blocks repair" do
+    # `follow/4` is deliberately outside the fence, because re-replicating sealed segments is this
+    # module's whole job. The bound is structural rather than a permission: a follow requires
+    # `expected_first` to equal the target's current end, and its `to` comes from the sealed extent, so
+    # a repair cannot hand out an offset above the sealed edge.
+    [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+
+    # Every holder fenced, the way the produce roll and failover both leave a closed segment.
+    for replica <- [a, b, c] do
+      assert {:ok, _end, _bytes} = ReplicationServer.seal(replica, segment_id, 0)
+    end
+
+    result = SelfHealing.heal_sealed(metadata, [a, b, d], 3)
+
+    assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+    assert result.failed == []
+    assert d in new_set
+    assert read_values(d, segment_id) == ["x", "y", "z"]
+  end
+
+  test "the integrity probe fires for a segment sealed with the fence's byte size" do
+    # Before the fence, a produce-path seal recorded the FRONTEND's byte tally, which
+    # `adopt_active_segment/2` resets to zero, so `bytes < segment.byte_size` never fired for those
+    # segments and a short copy went unnoticed. The fence answers `bytes_on_disk`, the same measure
+    # `stored_bytes/3` reports, so the two sides finally compare like with like.
+    {a, _dir_a, _id_a} = start_broker_with_directory()
+    {b, dir_b, id_b} = start_broker_with_directory()
+
+    {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    segment_id = {root, 0}
+    {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b], 0})
+
+    for replica <- [a, b] do
+      {:ok, _last} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y", "z"]))
+    end
+
+    # The seal's numbers come from the fence, not from a tally beside it.
+    {:ok, end_offset, byte_size} = ReplicationServer.seal(a, segment_id, 0)
+    {:ok, ^end_offset, ^byte_size} = ReplicationServer.seal(b, segment_id, 0)
+    seal = Metadata.seal_command(%{id: segment_id, start_offset: 0}, end_offset, byte_size, 0)
+    {metadata, :ok} = Metadata.apply(metadata, seal)
+
+    assert byte_size > 0
+
+    # b loses its files while down and comes back short; the probe compares its stored bytes against
+    # the fence's number and finally sees the shortfall.
+    b = restart_broker_over(dir_b, id_b, fn -> File.rm_rf!(Layout.segment_directory(dir_b, segment_id)) end)
+    metadata = rewrite_replicas(metadata, segment_id, [a, b])
+
+    assert ReplicationServer.stored_bytes(b, segment_id) < byte_size
+
+    result = SelfHealing.heal_sealed(metadata, [a, b], 2)
+    assert result.repaired == [{segment_id, b}]
+    assert read_values(b, segment_id) == ["x", "y", "z"]
   end
 
   test "re-replication is rack-aware when :spread is forwarded" do
