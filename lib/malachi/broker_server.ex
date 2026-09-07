@@ -74,9 +74,9 @@ defmodule Malachi.BrokerServer do
       set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
       currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
-    * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
     * `:fence_timeout` - ms a split's or a merge's store fence may take before the operation is
       refused (default 1000). Not on the produce path: see `fence_and_seal/2`.
+    * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
       authoritative via that `ra` cluster (mutations go through the log; reads come from a local
       cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
     * `:metadata_nodes` - the nodes the metadata Raft cluster spans (default `[node()]`); several
