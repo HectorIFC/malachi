@@ -249,6 +249,185 @@ defmodule ChaosCheckerTest do
     end
   end
 
+  describe "skip_confirmed?/3 (a skip is a verdict only once two full reads agree on it)" do
+    # The bug this pins: with two segments owning the same offsets, every re-read of the topic returns
+    # the same pages and skips the same block, so the revisit could never find the values and ended in
+    # INCONCLUSIVE, wording that says the opposite of what happened. A boundary that is there again on
+    # a fresh read is structural, and the flow must call it so before spending the revisit budget.
+    defp missing_block, do: MapSet.new(["c-6", "c-7", "c-8", "c-9"])
+
+    # The same walk on a fresh read: the cursors are different (a fresh read hands out its own), the
+    # sequence numbers at the boundary are not.
+    defp same_skip_fresh_cursors do
+      [
+        %{from: nil, to: "x", count: 2, first: "c-1", last: "c-5"},
+        %{from: "x", to: "y", count: 2, first: "c-10", last: "c-12"},
+        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+      ]
+    end
+
+    # A scan that stopped before the missing block: nothing brackets it, which is what a slow read
+    # looks like and must never be confirmed as a skip.
+    defp stopped_early_pages, do: [%{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"}]
+
+    test "the same boundary in both scans confirms the skip, cursors notwithstanding" do
+      # Compared by sequence number, not by cursor: the two scans above share no cursor at all, and a
+      # comparison on cursors would never confirm anything.
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), same_skip_fresh_cursors(), missing_block()) ==
+               true
+    end
+
+    test "a boundary that is gone from the second scan is not confirmed" do
+      # The second read walked the block contiguously (c-1..c-12 in two pages with no gap), which is
+      # what a transient short page looks like on the next try. That is the revisit's territory.
+      contiguous = [
+        %{from: nil, to: "x", count: 5, first: "c-1", last: "c-5"},
+        %{from: "x", to: "y", count: 7, first: "c-6", last: "c-12"},
+        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+      ]
+
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), contiguous, missing_block()) == false
+    end
+
+    test "no boundary in either scan is not confirmed" do
+      # Both scans simply stopped early: nothing brackets the missing values, so there is no skip to
+      # confirm, and inventing one would be the wrong verdict for a slow scan.
+      assert ChaosChecker.skip_confirmed?(stopped_early_pages(), stopped_early_pages(), missing_block()) == false
+      assert ChaosChecker.skip_confirmed?([], [], missing_block()) == false
+    end
+
+    test "a boundary in the first scan alone is not confirmed" do
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), stopped_early_pages(), missing_block()) == false
+    end
+
+    test "a different boundary in the second scan is not confirmed" do
+      # Both scans skip the block, but not at the same place: the second one ends its first page at
+      # c-4 and resumes at c-11. Two different skips are two observations of something moving, not
+      # one persistent structure, so the measurement is not repeated and the verdict is not taken.
+      other_boundary = [
+        %{from: nil, to: "x", count: 4, first: "c-1", last: "c-4"},
+        %{from: "x", to: "y", count: 2, first: "c-11", last: "c-12"},
+        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+      ]
+
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), other_boundary, missing_block()) == false
+    end
+
+    test "a boundary whose only difference is one side is still a different boundary" do
+      # Same lower edge (c-5), different upper edge (c-11): half a match is no match, since the
+      # cursor landed somewhere else the second time.
+      upper_moved = [
+        %{from: nil, to: "x", count: 2, first: "c-1", last: "c-5"},
+        %{from: "x", to: "y", count: 2, first: "c-11", last: "c-12"},
+        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+      ]
+
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), upper_moved, missing_block()) == false
+    end
+
+    test "the mirror of that: the lower edge alone moving is a different boundary too" do
+      # Same upper edge (c-10), different lower edge (c-4). The comparison is on the PAIR, so neither
+      # side may be the one that carries it: a check that only watched where the cursor resumed would
+      # confirm this and call a moving boundary structural.
+      lower_moved = [
+        %{from: nil, to: "x", count: 4, first: "c-1", last: "c-4"},
+        %{from: "x", to: "y", count: 2, first: "c-10", last: "c-12"},
+        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+      ]
+
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), lower_moved, missing_block()) == false
+    end
+
+    test "a missing set mixing sequence numbers with anything else confirms on the lowest NUMBER" do
+      # The set is a difference of two files read from disk, not a range the checker built, so a value
+      # that does not parse as c-N can be in it. It is dropped when picking the lowest rather than
+      # dropping the set that carries it, which would turn a real skip into no boundary at all.
+      mixed = MapSet.new(["surprise", "c-6", "c-7", "c-8", "c-9"])
+
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), same_skip_fresh_cursors(), mixed) == true
+    end
+
+    test "a second read that found the values leaves nothing to confirm" do
+      # The flow recomputes the missing set from both reads before asking. Once it is empty there is
+      # no lowest missing value, so no boundary can bracket it in either scan.
+      assert ChaosChecker.skip_confirmed?(skipping_pages(), skipping_pages(), MapSet.new()) == false
+    end
+  end
+
+  describe "confirmed_boundary/3 (only a read that reached the end can confirm anything)" do
+    test "a settled second read showing the same boundary confirms it, and hands back the bracket" do
+      # Returned rather than recomputed where it is printed: the verdict and the evidence under it
+      # come from one decision, so no later change can leave them describing different boundaries.
+      assert {:ok, {before, following}} =
+               ChaosChecker.confirmed_boundary(
+                 skipping_pages(),
+                 %{status: :settled, pages: same_skip_fresh_cursors()},
+                 missing_block()
+               )
+
+      assert {before.last, following.first} == {"c-5", "c-10"}
+    end
+
+    test "the very same pages, from a read cut short by its budget, confirm nothing" do
+      # The bug this pins: the verdict claims the values are "still missing after two full reads", and
+      # a read stopped by its ceiling is not a full read. It saw a prefix of the topic, so it neither
+      # agreed nor disagreed, and `verdict/2` refuses to read a truncated scan as loss for that exact
+      # reason. `:no` sends the set to the revisit, which ends INCONCLUSIVE: what a read that
+      # established nothing is worth.
+      assert ChaosChecker.confirmed_boundary(
+               skipping_pages(),
+               %{status: :timeout, pages: same_skip_fresh_cursors()},
+               missing_block()
+             ) == :no
+    end
+
+    test "a settled second read with no boundary at all is not a confirmation" do
+      assert ChaosChecker.confirmed_boundary(
+               skipping_pages(),
+               %{status: :settled, pages: stopped_early_pages()},
+               missing_block()
+             ) == :no
+    end
+  end
+
+  describe "unreachable_line/2 (a verdict that claims only what two reads measured)" do
+    test "names the confirmed bracket rather than calling the whole missing set unreachable" do
+      # The overstatement this pins: the count is every value still absent after two reads, which can
+      # include a tail that merely arrived above the last page. Only the block between the two
+      # bracketing pages was measured as unreachable, and the line has to say which is which.
+      [before, following, _empty] = skipping_pages()
+
+      assert ChaosChecker.unreachable_line(6, {before, following}) ==
+               "VERIFY FAILED: 6 acknowledged values are still missing after two full reads, " <>
+                 "of which at least the block between c-5 and c-10 is unreachable " <>
+                 "(both reads skipped it at the same page boundary)"
+    end
+
+    test "a single missing value keeps the plural, so the harness has one shape to match" do
+      # A block of exactly one record behind the boundary is as legitimate an outcome as five hundred,
+      # and the count is the size of a set rather than a sentence being conjugated. Pinned because a
+      # helpful "1 acknowledged value is" would be a second wording for `chaos_lib.sh` to grep for.
+      [before, following, _empty] = skipping_pages()
+
+      assert ChaosChecker.unreachable_line(1, {before, following}) ==
+               "VERIFY FAILED: 1 acknowledged values are still missing after two full reads, " <>
+                 "of which at least the block between c-5 and c-10 is unreachable " <>
+                 "(both reads skipped it at the same page boundary)"
+    end
+
+    test "keeps the shape the shell harness matches on" do
+      # chaos_lib.sh routes this verdict away from the generic loss branch by grepping
+      # `VERIFY FAILED: .* unreachable`, so a rewording that drops either end silently turns an
+      # unreachable block back into a reported lost write.
+      [before, following, _empty] = skipping_pages()
+      line = ChaosChecker.unreachable_line(519, {before, following})
+
+      assert String.starts_with?(line, "VERIFY FAILED: ")
+      assert line =~ ~r/^VERIFY FAILED: .* unreachable/
+      assert line =~ "519 acknowledged values"
+    end
+  end
+
   describe "drain/4 records the pages it walked" do
     test "one entry per fetch, in order, carrying the values it returned" do
       {fetch, _agent} = scripted([["c-1", "c-2"], ["c-3"], []])

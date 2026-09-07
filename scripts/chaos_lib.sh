@@ -130,6 +130,12 @@ verify_acked() {
     # missing. Still a failed run, since the invariant went unverified, but calling it lost data would
     # be an accusation the evidence does not support.
     fail "the durability invariant could not be verified (see verify output above); this is not evidence of data loss"
+  elif grep -q "VERIFY FAILED: .* unreachable" "$WORK/verify.log"; then
+    # Two full reads skipped the same block at the same page boundary. The values were acknowledged
+    # and are not readable through the API, which is a failure in its own right and a different bug
+    # from a lost write: the records may well be on disk, under a segment the scan cannot reach.
+    # Checked before the generic branch so it is never reported as loss.
+    fail "acknowledged writes are unreachable: the scan skipped over them (see the page trace above)"
   else
     fail "acked writes were lost (see verify output above)"
   fi

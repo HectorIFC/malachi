@@ -23,6 +23,28 @@
 # only ends the scan after it keeps coming back empty for `@drain_settle_ms`, and a missing set is
 # re-read for `@revisit_ms` before any verdict, with the outcome naming which of the two it was.
 #
+# There is a third thing, and it is neither of those: an acknowledged write that EXISTS on disk but
+# cannot be reached through the API. Two segments owning the same offsets (a sealed segment whose log
+# kept growing under a stale primary, and the next segment starting where the seal said the first one
+# ended) make a scan deliver one owner's records for those offsets and hand out a cursor past the
+# other's. Re-reading never helps: every pass returns the same pages, so the revisit would spend its
+# whole budget and report inconclusive, wording that says the opposite of what happened. That case
+# has a signature a lag cannot produce, a contiguous block of missing values strictly between two
+# consecutive delivered pages of a scan that reached the end, and it is measured twice, by two reads
+# that both reached the end, before it is called: see `confirmed_boundary/3`.
+#
+# So verify ends in one of these, and the line it prints names which:
+#
+#   VERIFY OK            every acknowledged value was read (possibly after waiting out a lag).
+#   VERIFY INCONCLUSIVE  the scan was cut short by its ceiling, so unread values are unread, not lost.
+#   VERIFY FAILED ... unreachable
+#                        a settled scan skipped a block at a page boundary and a second read that
+#                        also reached the end skipped the same one: the values are behind the API,
+#                        not behind a clock.
+#   VERIFY FAILED, missing ...
+#                        a settled re-read within the budget still could not find them, and no page
+#                        boundary explains it: the values are gone.
+#
 # topology mode: queries the dashboard's /topic drill-down and prints one SEGMENT line per segment
 # with its range/seq (which name the on-disk directory), state, primary and replica set. The
 # storage-chaos harness uses it to pick a FOLLOWER copy to damage: primary damage is seal-on-failure
@@ -94,14 +116,16 @@ defmodule ChaosChecker do
         System.halt(0)
 
       :inconclusive ->
-        report_scan(scan, missing)
-        report_topology(hosts, topic)
+        report_evidence(scan, missing, hosts, topic)
         report_inconclusive(missing, @verify_scan_ms)
 
       :missing ->
         # The FIRST scan's trace, not a later one: it is the pass where a skip first happened, and the
         # revisit re-reads from the start, so its own pages describe a topic that has since moved on.
-        revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms), scan)
+        case skipped_at(scan.pages, missing) do
+          nil -> revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms), scan)
+          _boundary -> confirm_skip(conn, hosts, topic, acked, read, scan, scan_ms)
+        end
     end
   end
 
@@ -177,12 +201,28 @@ defmodule ChaosChecker do
   false alarm this checker was rewritten to stop making, only with a different cause, so it is
   reported as an inconclusive verification instead. A scan that settled did reach the end, so anything
   still absent is worth the alarm.
+
+  `:missing` is where the alarm starts, not what it says. A settled scan with values absent is
+  followed by one of these verdict lines, and what separates them is what the page trace shows:
+
+    * `VERIFY OK`: the values turned up on a re-read, so they were late to this node, not lost.
+    * `VERIFY FAILED ... unreachable`: the first scan skipped a block at a page boundary and a second
+      read that also reached the end skipped the same one (`confirmed_boundary/3`). The values are
+      acknowledged and cannot be read through the API, and no amount of waiting changes that.
+    * `VERIFY INCONCLUSIVE`: only ever a scan that was cut short, either this one or the revisit's
+      last pass. Nothing was established either way.
+    * `VERIFY FAILED, missing ...`: a settled re-read within the budget still could not find them and
+      no page boundary explains it, so the values are gone.
   """
   @spec verdict(non_neg_integer(), :settled | :timeout) :: :ok | :inconclusive | :missing
   def verdict(0, _status), do: :ok
   def verdict(_missing, :timeout), do: :inconclusive
   def verdict(_missing, :settled), do: :missing
 
+  # Only a scan that hit its ceiling ends here, never one that reached the end: a truncated read
+  # leaves a suffix unread and proves nothing about it, which is why the wording refuses to call it
+  # loss. A settled scan whose values are still absent is reported by `report_unreachable/2` (the
+  # trace shows a skip that persisted) or as lost (it does not), never as inconclusive.
   defp report_inconclusive(missing, budget_ms) do
     IO.puts(
       "VERIFY INCONCLUSIVE: the scan hit its #{budget_ms}ms ceiling with #{MapSet.size(missing)} " <>
@@ -193,6 +233,85 @@ defmodule ChaosChecker do
 
     IO.puts("missing #{describe(missing)}")
     System.halt(1)
+  end
+
+  # The verdict for a skip that survived a second full read. A failure, not an inconclusive: the
+  # values were acknowledged, both scans reached the end, and both handed out a cursor past them, so
+  # the API cannot return them. Wording chosen so the shell harness can tell it from the lost case,
+  # which is a different bug with a different owner.
+  defp report_unreachable(missing, boundary) do
+    IO.puts(unreachable_line(MapSet.size(missing), boundary))
+    IO.puts("missing #{describe(missing)}")
+    report_missing_sample(missing)
+    System.halt(1)
+  end
+
+  @doc """
+  The `VERIFY FAILED ... unreachable` line for a `missing` set whose skip was confirmed, given the
+  `boundary` (the two bracketing pages `skipped_at/2` returned) the two reads agreed on.
+
+  Built around the bracket rather than around the count, because the two are not the same claim. What
+  the second read established is that the block between those pages cannot be reached; a value missing
+  ABOVE the last page is in the same set for a duller reason (it landed after the scan walked past
+  that position), and putting the whole count behind the word "unreachable" would state more than was
+  measured, in the one verdict that has to be trusted on its evidence.
+  """
+  @spec unreachable_line(non_neg_integer(), {map(), map()}) :: String.t()
+  def unreachable_line(missing_count, {before, following}) do
+    "VERIFY FAILED: #{missing_count} acknowledged values are still missing after two full reads, " <>
+      "of which at least the block between #{before.last} and #{following.first} is unreachable " <>
+      "(both reads skipped it at the same page boundary)"
+  end
+
+  # The pass that makes the verdict. Re-reads the topic with a deadline of its own, so the revisit
+  # that may follow still gets its full budget, and asks one question: is the same boundary there
+  # again? Yes means the block is unreachable and re-reading further would only delay saying so. No
+  # means the first scan's boundary was a moment (or the second read found the values, or this read
+  # never reached the end), and the revisit takes over exactly as if the boundary had never been
+  # seen. `read` carries both passes forward either way, since a value delivered once is not missing.
+  #
+  # A budget of its own is what makes the worst case here the first scan plus TWICE
+  # `revisit_budget_ms/1`: one full budget confirming, and, when the boundary turns out to have been
+  # transient, another one revisiting. Paid rather than shared, because halving the two would leave
+  # each too short to reach the end of the topic, which is the one thing either pass must do to
+  # conclude anything, and the transient case is rare by construction: a boundary that gets this far
+  # has already been observed once.
+  defp confirm_skip(conn, hosts, topic, acked, read, first_scan, scan_ms) do
+    IO.puts("scan trace shows a page boundary over the missing values; re-reading once to confirm it")
+    budget_ms = revisit_budget_ms(scan_ms)
+    started = System.monotonic_time(:millisecond)
+    {fresh, conn, second} = drain(&fetch_page/3, conn, topic, deadline: started + budget_ms)
+    elapsed_ms = System.monotonic_time(:millisecond) - started
+    read = MapSet.union(read, fresh)
+    missing = MapSet.difference(acked, read)
+
+    if MapSet.size(missing) == 0 do
+      report_ok(acked, elapsed_ms)
+    else
+      # Decided once and carried into the verdict that prints it. Recomputing the bracket where it
+      # gets reported worked only because a confirmed skip guarantees the recomputation finds one, a
+      # coupling nothing in the code stated, in the one path that has to be reliable.
+      case confirmed_boundary(first_scan.pages, second, missing) do
+        {:ok, boundary} ->
+          report_evidence(first_scan, missing, hosts, topic)
+          report_unreachable(missing, boundary)
+
+        :no ->
+          revisit(conn, hosts, topic, acked, read, missing, budget_ms, first_scan)
+      end
+    end
+  end
+
+  # Everything the cluster acknowledged is present, so the durability invariant held. The lag is
+  # reported rather than swallowed: it is a real property of reading a write acknowledged through
+  # another node, and a growing one would be worth investigating on its own.
+  defp report_ok(acked, elapsed_ms) do
+    IO.puts(
+      "VERIFY OK: every acknowledged write survived " <>
+        "(#{MapSet.size(acked)} values, the last of them visible on this node after #{elapsed_ms}ms)"
+    )
+
+    System.halt(0)
   end
 
   @doc """
@@ -264,6 +383,66 @@ defmodule ChaosChecker do
 
   defp brackets?(_last, _first, _lowest), do: false
 
+  @doc """
+  Whether the skip `skipped_at/2` found in a first scan is still there in a second one: the same page
+  boundary, a page ending at the same sequence number followed by one starting at the same sequence
+  number, brackets the lowest value of `missing` in both `first_pages` and `second_pages`.
+
+  Measured twice on purpose. One scan's boundary could in principle be a single transient page (a
+  fetch that came back short for a reason of the moment, with the cursor placed after it), and a
+  verdict as strong as "unreachable" must not rest on one observation. A boundary that comes back
+  identical from a fresh read started at the beginning of the topic is not a moment: it is how the
+  server answers that position, which is what makes the values behind it unreachable rather than
+  late. Compared by sequence number and not by cursor, because a fresh read hands out cursors of its
+  own, so the two scans never share one even when they walked the same pages.
+
+  This is the question stated over the two page traces alone, its readable form. The flow itself
+  calls `confirmed_boundary/3`, which takes the second SCAN instead: whether that read reached the
+  end of the topic is half the evidence, and a page trace cannot carry it.
+  """
+  @spec skip_confirmed?([map()], [map()], MapSet.t()) :: boolean()
+  def skip_confirmed?(first_pages, second_pages, missing) do
+    confirmed_boundary(first_pages, %{status: :settled, pages: second_pages}, missing) != :no
+  end
+
+  @doc """
+  The boundary two full reads agreed on: `{:ok, {before, following}}` when the first scan's
+  `first_pages` and the `second` scan (as `drain/4` returned it) both skip the lowest value of
+  `missing` at the same pair of sequence numbers, `:no` otherwise.
+
+  The bracket handed back is the FIRST scan's, because that is the pass whose trace the failure
+  report prints, and it is returned rather than recomputed at the point of printing so that the
+  verdict and the evidence behind it cannot drift apart.
+
+  Takes the whole second scan because a truncated read confirms nothing. It stopped somewhere in the
+  middle of the topic, so a boundary it did not reach is not a boundary it disagreed with, and one it
+  did reach was never followed to the end: it read a PREFIX, which is exactly what `verdict/2`
+  refuses to read as loss. `:no` sends the missing set to the revisit instead, where a read that
+  established nothing ends INCONCLUSIVE. The first scan needs no such guard: only a settled one gets
+  this far (see `verdict/2`).
+  """
+  @spec confirmed_boundary([map()], %{status: :settled | :timeout, pages: [map()]}, MapSet.t()) ::
+          {:ok, {map(), map()}} | :no
+  def confirmed_boundary(first_pages, %{status: :settled, pages: second_pages}, missing) do
+    case {skipped_at(first_pages, missing), skipped_at(second_pages, missing)} do
+      {{before, following}, {again_before, again_following}} ->
+        if boundary(before, following) == boundary(again_before, again_following) do
+          {:ok, {before, following}}
+        else
+          :no
+        end
+
+      _absent_in_at_least_one ->
+        :no
+    end
+  end
+
+  def confirmed_boundary(_first_pages, %{status: :timeout}, _missing), do: :no
+
+  defp boundary(before, following) do
+    {sequence_number(before.last), sequence_number(following.first)}
+  end
+
   defp lowest_sequence(values) do
     values |> Enum.map(&sequence_number/1) |> Enum.reject(&is_nil/1) |> Enum.min(fn -> nil end)
   end
@@ -283,6 +462,21 @@ defmodule ChaosChecker do
       nil ->
         IO.puts("scan trace does not show a page boundary over the missing values")
     end
+  end
+
+  # Everything a non-OK verdict leaves behind, in one order: the trace of the scan that came up short,
+  # then the segment map as it was at that moment. Emitted from here rather than from each verdict so
+  # the two FAILED lines cannot end up describing the same run differently, which is the failure mode
+  # of evidence assembled at four call sites.
+  defp report_evidence(first_scan, missing, hosts, topic) do
+    report_scan(first_scan, missing)
+    report_topology(hosts, topic)
+  end
+
+  # Names under the count. `describe/1` says how many and how far apart, which is the shape of the
+  # finding but nothing anyone can go and grep a log for; the first few names are.
+  defp report_missing_sample(missing) do
+    IO.puts("first missing: #{missing |> Enum.take(10) |> inspect()}")
   end
 
   @doc """
@@ -317,7 +511,9 @@ defmodule ChaosChecker do
   defp sequence_number(_other), do: nil
 
   # A missing set is not yet a verdict. Re-read the whole topic until either the missing values turn up
-  # (they were late to this node, not lost) or the budget runs out (they are gone).
+  # (they were late to this node, not lost) or the budget runs out (they are gone). Reached only once
+  # `confirm_skip/7` has ruled out a persistent page boundary, because re-reading cannot find values
+  # the API skips on every pass, and spending the budget on them would end in the wrong verdict.
   defp revisit(conn, hosts, topic, acked, read, missing, budget_ms, first_scan) do
     IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{budget_ms}ms")
     started = System.monotonic_time(:millisecond)
@@ -326,27 +522,17 @@ defmodule ChaosChecker do
 
     cond do
       MapSet.size(missing) > 0 and status == :timeout ->
-        report_scan(first_scan, missing)
-        report_topology(hosts, topic)
+        report_evidence(first_scan, missing, hosts, topic)
         report_inconclusive(missing, budget_ms)
 
       MapSet.size(missing) > 0 ->
         IO.puts("VERIFY FAILED, missing #{describe(missing)}")
-        IO.puts("first missing: #{missing |> Enum.take(10) |> inspect()}")
-        report_scan(first_scan, missing)
-        report_topology(hosts, topic)
+        report_missing_sample(missing)
+        report_evidence(first_scan, missing, hosts, topic)
         System.halt(1)
 
       true ->
-        # Everything the cluster acknowledged is present, so the durability invariant held. The lag is
-        # reported rather than swallowed: it is a real property of reading a write acknowledged through
-        # another node, and a growing one would be worth investigating on its own.
-        IO.puts(
-          "VERIFY OK: every acknowledged write survived " <>
-            "(#{MapSet.size(acked)} values, the last of them visible on this node after #{elapsed_ms}ms)"
-        )
-
-        System.halt(0)
+        report_ok(acked, elapsed_ms)
     end
   end
 
