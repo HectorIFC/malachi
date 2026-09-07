@@ -543,16 +543,37 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  The roll for one range's active segment, on demand (a split or a merge retiring the range), or
-  `:none` when the range has no open segment. Does not mutate: the caller fences and records in one
-  step, so nothing is owed if it never gets that far.
+  The roll for one range's write head, on demand (a split or a merge retiring the range), or `:none`
+  when the range has none. Does not mutate: the caller fences and records in one step, so nothing is
+  owed if it never gets that far.
+
+  The head comes from the CONTROL PLANE, and falls back to this frontend's cache only when the metadata
+  has nothing to say. Reading it from the cache instead was issue #41: a split is performed on whichever
+  node the operator reached, which is usually NOT the node producing to the range, so a fence
+  conditional on the caller having written there fences nothing on exactly the node where it matters,
+  and reports success. What that leaves behind is not a bounded window: the split seals the RANGE and
+  not its segments, and nothing else ever closes an active segment on a sealed range (failover only
+  seals segments whose primary is dead, retention and healing only touch sealed ones), so every
+  frontend still caching it keeps appending to the parent forever, and a child reads those records
+  ahead of its own.
   """
   @spec active_roll(t(), Metadata.range_id()) :: roll() | :none
   def active_roll(%__MODULE__{} = broker, range_id) do
-    case Map.fetch(broker.segments, range_id) do
-      :error -> :none
-      {:ok, active} -> roll_of(range_id, active)
+    case registered_active_segment(broker, range_id) || Map.get(broker.segments, range_id) do
+      nil -> :none
+      active -> roll_of(range_id, active)
     end
+  end
+
+  # The range's write head as the metadata records it. A segment with an empty replica set is skipped
+  # rather than returned: there is no primary to fence, and `primary/1` would raise inside the broker
+  # loop. Shared with `adopt_active_segment/2` so the fence and the adopt cannot disagree about which
+  # segment a range's writes belong to.
+  @spec registered_active_segment(t(), Metadata.range_id()) :: map() | nil
+  defp registered_active_segment(%__MODULE__{} = broker, range_id) do
+    broker.dsrsm
+    |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+    |> Enum.find(&match?(%{state: :active, replica_set: [_ | _]}, &1))
   end
 
   @doc """
@@ -652,9 +673,27 @@ defmodule Malachi.Broker do
           forget_sealed(acc, range_id, active.id, start_offset + length)
 
         _still_active_or_unknown ->
-          acc
+          drop_if_range_retired(acc, range_id)
       end
     end)
+  end
+
+  # Defence in depth for a fence that never happened: a segment the metadata still calls ACTIVE whose
+  # RANGE has been retired by a split or a merge. That state should be unreachable, since the control
+  # plane now refuses to retire a range with a write head, but if it is ever reached the segment is
+  # never closed by anything (failover only seals segments whose primary is dead, retention and healing
+  # only touch sealed ones), so a frontend caching it would append to a range that is already history
+  # for as long as it lived. Dropping the cache bounds that to one refresh: the next produce routes to
+  # the children, and any attempt to register on the retired range is refused authoritatively.
+  #
+  # A plain eviction, NOT `forget_sealed/4`: that segment's end is precisely what nobody knows here, and
+  # moving the range's offset counter to a guess is the class of mistake the sealed length exists to
+  # avoid.
+  defp drop_if_range_retired(broker, range_id) do
+    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
+      %{state: :sealed} -> %{broker | segments: Map.delete(broker.segments, range_id)}
+      _active_or_unknown -> broker
+    end
   end
 
   # Whether `segment_id` is what this frontend currently treats as the range's write head: the cached
@@ -977,12 +1016,7 @@ defmodule Malachi.Broker do
   # jumps past the adopted id so a later local roll never reuses it, and the offset counter jumps to at
   # least the segment's start (the primary-assigned results correct it further on the first produce).
   defp adopt_active_segment(broker, range_id) do
-    active_meta =
-      broker.dsrsm
-      |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
-      |> Enum.find(&(&1.state == :active))
-
-    case active_meta do
+    case registered_active_segment(broker, range_id) do
       nil ->
         :none
 

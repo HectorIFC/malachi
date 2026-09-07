@@ -545,6 +545,7 @@ All dashboard responses include comprehensive security headers:
 - **X-Content-Type-Options**: Prevents MIME-sniffing
 - **X-XSS-Protection**: Legacy XSS protection
 - **Referrer-Policy**: Controls referrer information
+- **Permissions-Policy**: Denies every powerful browser feature (camera, microphone, geolocation, USB, payment and the rest), none of which the dashboard uses
 - **Strict-Transport-Security (HSTS)**: Enforces HTTPS (when TLS enabled)
 
 ### CORS Configuration
