@@ -23,6 +23,13 @@ defmodule Malachi.Log do
   consumer paging pattern). Sealed segments are opened read-only on demand using their
   persisted sparse index, then closed.
 
+  ## Sealing a file versus sealing the log
+
+  Rolling seals one segment *file* and opens another; the log stays open. `seal/1` closes the **log**,
+  and records that on disk (`seal_marker_path/1`) so it survives a reopen. That is the durable record a
+  fence is built on: `Malachi.Cluster.ReplicationServer` refuses writes to a sealed log and answers
+  where it ended, which is how a control-plane segment gets a sealed length it cannot outgrow.
+
   Like `Malachi.Storage.ElixirStore`, this is a functional module over an immutable
   handle (no GenServer). Time-based flushing and concurrency belong in a layer on top.
   """
@@ -40,6 +47,7 @@ defmodule Malachi.Log do
           active_base_offset: non_neg_integer() | nil,
           next_offset: non_neg_integer(),
           segment_opts: keyword(),
+          sealed?: boolean(),
           integrity: :ok | map()
         }
 
@@ -50,6 +58,10 @@ defmodule Malachi.Log do
             active_base_offset: nil,
             next_offset: 0,
             segment_opts: [],
+            # Whether the log as a WHOLE is closed (see `seal/1`), as opposed to the routine sealing of
+            # one segment FILE inside a live log. Recovered from the on-disk marker, so the latch
+            # survives a restart.
+            sealed?: false,
             # What recovery concluded about the ONE segment it scanned (the last/active one), carried
             # here because a sealed handle is closed immediately below and the verdict would be lost
             # with it. `verify/2` is the whole-directory answer; this is the free one, computed by a
@@ -88,11 +100,13 @@ defmodule Malachi.Log do
     segment_opts = Keyword.drop(opts, [:base_offset, :store])
 
     base_offsets = base_offsets_in(directory)
+    sealed? = File.exists?(seal_marker_path(directory))
 
     if base_offsets == [] do
-      open(directory, opts)
+      {:ok, log} = open(directory, opts)
+      {:ok, %{log | sealed?: sealed?}}
     else
-      recover_with_segments(directory, store, segment_opts, base_offsets)
+      recover_with_segments(directory, store, segment_opts, base_offsets, sealed?)
     end
   end
 
@@ -129,6 +143,41 @@ defmodule Malachi.Log do
   @spec roll(t()) :: {:ok, t()}
   def roll(%__MODULE__{active: nil} = log), do: {:ok, log}
   def roll(%__MODULE__{} = log), do: do_roll(log)
+
+  @doc """
+  Seals the whole log: flushes and fsyncs, seals and closes whatever segment file is still open, and
+  records the seal on disk so a reopened log comes back sealed. Idempotent.
+
+  The flag is the durable RECORD of the seal, not its enforcement. `Malachi.Cluster.ReplicationServer`
+  is what refuses a write to a sealed segment, because repair must still be able to write into one:
+  its `follow/4` copies records that already carry their assigned offsets, bounded by the sealed end,
+  so it can never hand out a new offset, which is the only thing a fence has to prevent.
+  """
+  @spec seal(t()) :: {:ok, t()}
+  def seal(%__MODULE__{sealed?: true} = log), do: {:ok, log}
+
+  def seal(%__MODULE__{} = log) do
+    {:ok, log} = sync(log)
+    {:ok, log} = roll(log)
+    # Written after the fsync above, so a marker on disk always means the records it closes over are
+    # durable. Empty on purpose: `recover/2` derives `next_offset` from the files, so a marker
+    # carrying an end offset would be redundant state that can disagree with them.
+    File.touch!(seal_marker_path(log.directory))
+    {:ok, %{log | sealed?: true}}
+  end
+
+  @doc "Whether the log as a whole is sealed (no further append will ever be accepted for it)."
+  @spec sealed?(t()) :: boolean()
+  def sealed?(%__MODULE__{sealed?: sealed?}), do: sealed?
+
+  @doc """
+  Where a log records that it is closed as a whole, one level above `Malachi.Log.Segment.seal_marker_path/1`.
+
+  A separate marker on purpose: `sync/1` seals FILES routinely on `:max_bytes`/`:max_age_ms` inside a
+  live log, so "the last file is sealed" says nothing about whether the log is closed.
+  """
+  @spec seal_marker_path(Path.t()) :: Path.t()
+  def seal_marker_path(directory), do: Path.join(directory, "SEALED")
 
   @doc """
   Reads up to `max_records` committed records from the segment containing `offset`.
@@ -249,7 +298,7 @@ defmodule Malachi.Log do
     |> Enum.sort()
   end
 
-  defp recover_with_segments(directory, store, segment_opts, base_offsets) do
+  defp recover_with_segments(directory, store, segment_opts, base_offsets, sealed?) do
     last_base_offset = List.last(base_offsets)
 
     {:ok, handle} =
@@ -262,6 +311,7 @@ defmodule Malachi.Log do
       store: store,
       segment_opts: segment_opts,
       next_offset: next_offset,
+      sealed?: sealed?,
       integrity: store.integrity(handle)
     }
 

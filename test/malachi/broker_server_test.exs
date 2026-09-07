@@ -18,6 +18,14 @@ defmodule Malachi.BrokerServerTest do
 
   defp record(value, key), do: Record.new(value, key: key)
 
+  # A primary that serves everything but the fence, so a FAILED fence can be told apart from a dead
+  # primary (which would fail the produce too and make the two outcomes indistinguishable).
+  defp start_unfenceable(id) do
+    directory = Path.join(System.tmp_dir!(), "malachi_unfenceable_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    start_supervised!({Malachi.Test.UnfenceablePrimary, directory: directory}, id: id)
+  end
+
   defp start(directory, opts \\ []) do
     {:ok, server} = BrokerServer.start_link(directory, opts)
     on_exit(fn -> stop_quietly(server) end)
@@ -262,6 +270,197 @@ defmodule Malachi.BrokerServerTest do
     test "producing to an unknown topic fails", %{tmp_dir: directory} do
       server = start(directory)
       assert BrokerServer.produce(server, "nope", [record("a", "k")]) == {:error, :no_such_topic}
+    end
+  end
+
+  # The seal path end to end, in BOTH produce modes: `:group_commit` false is the default and is where
+  # the 519-record loss reproduced, and true takes a different code path to the same fence.
+  for group_commit <- [false, true] do
+    describe "fenced seals (group_commit: #{group_commit})" do
+      @describetag group_commit: group_commit
+
+      defp seal_opts(unquote(group_commit), directory) do
+        one_record = Record.encoded_size(Record.new("value", key: "key"))
+
+        {directory, [segment_max_bytes: one_record, group_commit: unquote(group_commit), group_commit_interval_ms: 5]}
+      end
+
+      test "every acknowledged offset is served exactly once across many rolls", %{tmp_dir: directory} do
+        # THE REGRESSION, with the chaos harness's randomness removed. A sealed length that outran or
+        # fell short of the store put acknowledged records in offsets the next segment owned, and the
+        # consume cursor stepped over them without ever delivering them.
+        {directory, opts} = seal_opts(unquote(group_commit), directory)
+        {server, root_id} = with_topic(directory, opts)
+
+        acked =
+          Enum.flat_map(0..19, fn index ->
+            records = [record("v#{index}a", "k#{index}a"), record("v#{index}b", "k#{index}b")]
+            {:ok, placements} = BrokerServer.produce(server, "events", records)
+            {first, last} = Map.fetch!(placements, root_id)
+            Enum.to_list(first..last)
+          end)
+
+        segments = Metadata.segments_of_range(BrokerServer.metadata(server), root_id)
+        assert length(segments) > 1, "the threshold must actually have rolled several segments"
+
+        served = server |> read_all(root_id) |> Enum.map(& &1.offset)
+        assert served == Enum.sort(acked)
+        assert served == Enum.uniq(served)
+      end
+
+      test "the sealed length and byte size are what the fence answered", %{tmp_dir: directory} do
+        # The property the whole design turns on: the control plane's numbers are the store's, not a
+        # frontend's tally. The byte half is what finally lets SelfHealing's integrity probe compare
+        # like with like, since it measures `stored_bytes/3` on the other side.
+        {directory, opts} = seal_opts(unquote(group_commit), directory)
+        {server, root_id} = with_topic(directory, opts)
+
+        for index <- 0..4 do
+          {:ok, _placements} = BrokerServer.produce(server, "events", [record("value", "key#{index}")])
+        end
+
+        replication = BrokerServer.replication_ref(server)
+
+        sealed =
+          BrokerServer.metadata(server)
+          |> Metadata.segments_of_range(root_id)
+          |> Enum.filter(&(&1.state == :sealed))
+
+        assert sealed != []
+
+        for segment <- sealed do
+          durable = ReplicationServer.durable_end(replication, segment.id, segment.start_offset)
+          assert segment.length == durable - segment.start_offset
+          assert segment.byte_size == ReplicationServer.stored_bytes(replication, segment.id)
+        end
+      end
+
+      test "a segment sealed short is impossible when another frontend interleaved", %{tmp_dir: directory} do
+        # THE REGRESSION, and it needs TWO frontends to exist at all. With one frontend the tally and the
+        # store's end agree by construction, so a single-frontend version of this test passes even on a
+        # tree with the bug: it witnesses nothing. The divergence the bug needs is a frontend that seals
+        # a segment whose records it did not all produce.
+        #
+        # A and B share one primary, and their segment ids are deterministic, so both address the same
+        # segment while counting separately. A produces 2, B produces 3 (the primary assigns them above
+        # A's, and A never counts them), then A produces 3 more and crosses its own threshold. A's tally
+        # says 5; the store holds 8. Sealing on the tally recorded length 5 and put three acknowledged
+        # records above the sealed edge, where the next segment owns their offsets and no read can reach
+        # them. Sealing on the counter the primary corrected records 8.
+        # Measured from the record shape this test produces, not from a larger one: a threshold taken
+        # from a bigger record is never crossed and the test passes without ever rolling a segment.
+        one_record = Record.encoded_size(record("v0", "k0"))
+        repl = start_repl(directory, 1)
+
+        opts = [
+          brokers: [repl],
+          segment_max_bytes: 5 * one_record,
+          group_commit: unquote(group_commit),
+          group_commit_interval_ms: 5
+        ]
+
+        front_a = start(Path.join(directory, "a"), opts)
+        front_b = start(Path.join(directory, "b"), opts)
+        {:ok, root_id} = BrokerServer.create_topic(front_a, "events", 4)
+        {:ok, ^root_id} = BrokerServer.create_topic(front_b, "events", 4)
+
+        {:ok, first} = BrokerServer.produce(front_a, "events", for(i <- 0..1, do: record("v#{i}", "k#{i}")))
+        {:ok, _} = BrokerServer.produce(front_b, "events", for(i <- 2..4, do: record("v#{i}", "k#{i}")))
+        {:ok, third} = BrokerServer.produce(front_a, "events", for(i <- 5..7, do: record("v#{i}", "k#{i}")))
+
+        # A produced 5 of the segment's 8 records, and B's three sit between them. That is what makes
+        # the assertion below non-vacuous: 8 is a number A cannot reach by counting its own work, so a
+        # seal derived from a per-frontend tally records 5 and this test fails.
+        assert Map.fetch!(first, root_id) == {0, 1}
+        assert Map.fetch!(third, root_id) == {5, 7}
+
+        [sealed] =
+          BrokerServer.metadata(front_a)
+          |> Metadata.segments_of_range(root_id)
+          |> Enum.filter(&(&1.state == :sealed))
+
+        # 8, the store's end, not 5, A's tally. This is the assertion a baseline tree fails.
+        assert sealed.length == 8
+        assert sealed.start_offset == 0
+
+        # And the three records above A's tally are still reachable, which is what the length being
+        # wrong actually cost: with the read clamped to the sealed length, a short seal hides them.
+        assert {:ok, [%{offset: 5, value: "v5"} | _rest]} = BrokerServer.read(front_a, root_id, 5, 100)
+        assert front_a |> read_all(root_id) |> Enum.map(& &1.value) == Enum.map(0..7, &"v#{&1}")
+      end
+    end
+  end
+
+  describe "fenced seals (failure paths)" do
+    test "a primary that never answers a fence does not delay or block the produce roll", %{tmp_dir: directory} do
+      # The regression guard for putting a network call on the produce path. This double answers every
+      # request except the fence, which it swallows forever, so if the roll seal depended on a fence the
+      # segment below could never close: it would stay active, every produce would pay the fence timeout
+      # first, and the frontend would degrade to roughly one produce per timeout for every owed roll,
+      # stalling clients of unrelated topics behind the same loop. The roll seal is a metadata command
+      # derived from the counter the primary has already corrected, so a mute fence costs it nothing.
+      one_record = Record.encoded_size(Record.new("value", key: "key"))
+      unfenceable = start_unfenceable(:unfenceable_roll)
+
+      {server, root_id} = with_topic(directory, brokers: [unfenceable], segment_max_bytes: one_record)
+
+      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("value", "key0")])
+      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("value", "key1")])
+
+      # Both sealed, despite the fence never answering: with the threshold at one record each produce
+      # closes its own segment. The lengths are the primary's, and they tile the range without a gap.
+      assert [%{state: :sealed, start_offset: 0, length: 1}, %{state: :sealed, start_offset: 1, length: 1}] =
+               BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+
+      # And nothing is left owed, so no later produce inherits a retry against the mute primary.
+      assert :sys.get_state(server).broker |> Broker.due_rolls() == []
+    end
+
+    test "split_range/2 fences the parent before the split, and reports a fence failure", %{tmp_dir: directory} do
+      {server, root_id} = with_topic(directory)
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("v", "k")])
+
+      replication = BrokerServer.replication_ref(server)
+      [segment] = BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+
+      assert {:ok, _left, _right} = BrokerServer.split_range(server, root_id)
+
+      # Fenced before either child existed: a node that has not seen the split can no longer get a
+      # record into the parent, which is the write half of the split gap.
+      assert %{state: :sealed, length: 1} = BrokerServer.metadata(server) |> Metadata.get_segment(segment.id)
+
+      assert {:error, {:sealed, 1}} =
+               ReplicationServer.append(replication, segment.id, segment.replica_set, 0, [record("late", "k")])
+    end
+
+    test "split_range/2 refuses the split when the parent cannot be fenced", %{tmp_dir: directory} do
+      unfenceable = start_unfenceable(:unfenceable_split)
+      {server, root_id} = with_topic(directory, brokers: [unfenceable], fence_timeout: 50)
+
+      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("v", "k")])
+      assert Broker.active_roll(:sys.get_state(server).broker, root_id) != :none
+
+      assert {:error, {:fence_failed, :unreachable}} = BrokerServer.split_range(server, root_id)
+
+      # And the range is intact: no children, parent still active.
+      assert BrokerServer.active_range_ids(server, "events") == [root_id]
+    end
+
+    test "a reconcile evicts a cached segment another node sealed", %{tmp_dir: directory} do
+      # Level-triggered convergence: before this, only the node running the heal coordinator dropped
+      # such a segment, so every other frontend kept routing produces at a segment the metadata had
+      # already sealed.
+      {server, root_id} = with_topic(directory)
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("v", "k")])
+
+      broker = :sys.get_state(server).broker
+      [segment] = BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+
+      {dsrsm, :ok} = DSRSM.command(broker.dsrsm, "events", {:seal_segment, segment.id, 1, 4, 900})
+      converged = Broker.drop_stale_active_segments(%{broker | dsrsm: dsrsm})
+
+      refute Map.has_key?(converged.segments, root_id)
+      assert converged.offsets[root_id] == 1
     end
   end
 

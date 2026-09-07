@@ -238,6 +238,64 @@ defmodule Malachi.MetadataTest do
                Metadata.apply(state, {:register_segment, root_id, "seg3", [:b1], 0})
     end
 
+    test "re-sealing at the same length is an idempotent no-op" do
+      # The fence answers the same numbers every time, so a caller whose command timed out re-issues it.
+      # Nothing may be rewritten: retention expires by `sealed_at`, and moving that clock on a retry
+      # would quietly extend a segment's life every time a command was retried.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+
+      sealed = Metadata.get_segment(state, "seg1")
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 999, 1_800_000_000_000})
+
+      assert Metadata.get_segment(state, "seg1") == sealed
+    end
+
+    test "re-sealing at a different length is refused and reports the existing one" do
+      # Two authorities decided different edges for one segment (a roll fence racing a failover seal).
+      # Overwriting would move the sealed edge after a successor may already have registered at the old
+      # one, breaking the tiling rule; a SHRUNK length is worse still, because the read budget caps at
+      # the sealed edge and would hide acknowledged records. The existing length travels back so the
+      # loser converges on the winner instead of wedging its range.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 1_700_000_000_000})
+
+      sealed = Metadata.get_segment(state, "seg1")
+
+      assert {state, {:error, {:already_sealed, 5}}} =
+               Metadata.apply(state, {:seal_segment, "seg1", 9, 900, 1_800_000_000_000})
+
+      assert {_state, {:error, {:already_sealed, 5}}} =
+               Metadata.apply(state, {:seal_segment, "seg1", 2, 200, 1_800_000_000_000})
+
+      assert Metadata.get_segment(state, "seg1") == sealed
+    end
+
+    test "a successor registers exactly at the sealed end, and nowhere else" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 5, 500, 0})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 4})
+
+      assert {_state, {:error, :segment_overlap}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 6})
+
+      assert {_state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 5})
+    end
+
+    test "seal_command/4 derives the length from the segment's own start offset" do
+      # One constructor for both seal paths, so the subtraction cannot drift between the produce roll
+      # and failover.
+      segment = %{id: "seg1", start_offset: 40}
+
+      assert Metadata.seal_command(segment, 47, 1024, 900) == {:seal_segment, "seg1", 7, 1024, 900}
+      assert Metadata.seal_command(segment, 40, 0, 900) == {:seal_segment, "seg1", 0, 0, 900}
+    end
+
     test "errors sealing/reassigning an unknown segment" do
       {state, _root_id} = create_topic()
       assert {_state, {:error, :no_such_segment}} = Metadata.apply(state, {:seal_segment, "nope", 1, 0, 0})

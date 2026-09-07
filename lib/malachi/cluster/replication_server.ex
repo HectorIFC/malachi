@@ -32,6 +32,14 @@ defmodule Malachi.Cluster.ReplicationServer do
   gap, backfills, and converges on the moving head as later fan-outs re-trigger. Sealed-segment
   re-replication and primary failover live in their own modules (`Malachi.Cluster.SelfHealing` driven
   by the heal coordinator, and `Malachi.Cluster.Failover`), not here.
+
+  ## Closing a segment
+
+  `seal/4` is the write fence: it seals the segment's log durably and answers where it ended. Afterwards
+  every write entry point here refuses that segment with `{:error, {:sealed, end_offset}}`, across
+  restarts, while reads and repair (`follow/4`) keep working. That is what makes a control-plane sealed
+  length a consequence of closing the segment rather than a number measured beside a log that is still
+  growing.
   """
 
   use GenServer
@@ -253,16 +261,51 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @doc """
-  What this server holds for `segment_id`, as `{end_offset, byte_size}` taken from the **same** handle
-  in one call: `durable_end/4`'s offset plus the bytes those records occupy. Failover seals a segment
-  with a length and a size, and reading them separately (or from different replicas) would record a
-  segment that never existed, so they are answered together. Same recovery behavior as
-  `durable_end/4`: `base_offset` seats a missing or empty log at the segment's base.
+  What this server durably holds for `segment_id`, as `{end_offset, byte_size}`, WITHOUT fencing it.
+
+  The measuring half of `seal/4`, kept separate because the two answer different questions and only one
+  of them has consequences. A failover pass has to learn what its replicas hold before it knows whether
+  a majority answered, and fencing to find that out would close replicas of a segment the pass then
+  declines to seal: a fence has no inverse, so those replicas keep refusing writes after their primary
+  returns, and the range never recovers. So the pass measures first with this, and fences with `seal/4`
+  only once it knows it is going to seal.
+
+  Flushes before answering, for the same reason `seal/4` does: a log's next offset counts buffered
+  records while the store serves only committed ones, so an unflushed answer describes records a read
+  cannot return. `base_offset` seats a missing or empty log at the segment's base.
   """
   @spec durable_stats(term(), term(), non_neg_integer(), timeout()) ::
-          {non_neg_integer(), non_neg_integer()}
+          {:ok, non_neg_integer(), non_neg_integer()} | {:error, term()}
   def durable_stats(ref, segment_id, base_offset, timeout \\ 5_000) do
     GenServer.call(ref, {:durable_stats, segment_id, base_offset}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Seals `segment_id` on this server and reports what it durably holds: `{:ok, end_offset, byte_size}`.
+
+  The write fence. After it returns, `replicate/5`, `replicate_async/7`, `append/5` and the primary's
+  `:replica_append` fan-out are all refused here with `{:error, {:sealed, end_offset}}`, and again after
+  a restart, so the segment's log can never grow past the offset reported. That is what lets a caller
+  RECORD the returned end as the sealed length instead of measuring one beside it: the length becomes a
+  consequence of closing the segment rather than a number racing it.
+
+  Idempotent and cheap on an already-fenced segment (no fsync, the same pair). `base_offset` seats a
+  missing or empty log at the segment's base, so fencing a segment this server never stored succeeds at
+  `{:ok, base_offset, 0}` and refuses a later stray append rather than silently accepting it. Reads
+  (`read/4`) and repair (`follow/4`) still work on a fenced segment.
+
+  A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller, as
+  `read/4` and `delete/2` already do: the caller is the broker loop, and letting it exit would take a
+  node's writes down with one segment.
+  """
+  @spec seal(term(), term(), non_neg_integer(), timeout()) ::
+          {:ok, non_neg_integer(), non_neg_integer()} | {:error, term()}
+  def seal(ref, segment_id, base_offset, timeout \\ 5_000) do
+    GenServer.call(ref, {:seal, segment_id, base_offset}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   # --- GenServer ---
@@ -336,13 +379,19 @@ defmodule Malachi.Cluster.ReplicationServer do
       # The span covers the primary's local durable append; the follower fan-out completes
       # asynchronously (see the :replica_ack handler), so it is not inside this span.
       Tracer.with_span "malachi.replication.commit" do
-        if hd(replica_set) == state.ref do
-          case do_replicate(state, {:call, from}, segment_id, replica_set, base_offset, records) do
-            {:done, result, state} -> {:reply, result, state}
-            {:parked, state} -> {:noreply, state}
-          end
-        else
-          {:reply, {:error, :not_primary}, state}
+        cond do
+          fenced?(state, segment_id) ->
+            {state, end_offset} = fenced_end(state, segment_id, base_offset)
+            {:reply, {:error, {:sealed, end_offset}}, state}
+
+          hd(replica_set) == state.ref ->
+            case do_replicate(state, {:call, from}, segment_id, replica_set, base_offset, records) do
+              {:done, result, state} -> {:reply, result, state}
+              {:parked, state} -> {:noreply, state}
+            end
+
+          true ->
+            {:reply, {:error, :not_primary}, state}
         end
       end
     after
@@ -363,15 +412,21 @@ defmodule Malachi.Cluster.ReplicationServer do
     # is no follower fan-out here; the broker routes multi-replica sets through `:replicate` instead.
     replica_set = Enum.map(replica_set, &canonical_ref/1)
 
-    if hd(replica_set) == state.ref do
-      {state, log} = fetch_or_open(state, segment_id, base_offset)
+    cond do
+      fenced?(state, segment_id) ->
+        {state, end_offset} = fenced_end(state, segment_id, base_offset)
+        {:reply, {:error, {:sealed, end_offset}}, state}
 
-      case Log.append(log, records) do
-        {:ok, log, _first, last} -> {:reply, {:ok, last}, put_log(state, segment_id, log)}
-        {:error, reason} -> {:reply, {:error, reason}, state}
-      end
-    else
-      {:reply, {:error, :not_primary}, state}
+      hd(replica_set) == state.ref ->
+        {state, log} = fetch_or_open(state, segment_id, base_offset)
+
+        case Log.append(log, records) do
+          {:ok, log, _first, last} -> {:reply, {:ok, last}, put_log(state, segment_id, log)}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      true ->
+        {:reply, {:error, :not_primary}, state}
     end
   end
 
@@ -456,22 +511,23 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @impl true
-  def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
+  def handle_call({:seal, segment_id, base_offset}, _from, state) do
+    # `Log.seal/1` fsyncs before it writes its marker, so the numbers below describe records that can
+    # actually be READ back. A log's next offset counts buffered records too, and the store serves only
+    # committed ones, so answering unflushed would seal a segment at a length its own replicas cannot
+    # serve: the metadata would promise records that read as :eof and the range's reads would stop dead.
     {state, log} = fetch_or_open(state, segment_id, base_offset)
+    {:ok, log} = Log.seal(log)
+    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
+  end
 
-    # Flush before answering, so the numbers describe records that can actually be READ back. A log's
-    # next offset counts buffered records too, and the store serves only committed ones, so reporting
-    # it unflushed would let failover seal a segment at a length its own replicas cannot serve: the
-    # metadata would promise records that read as :eof, and a range's reads would stop dead there.
-    # Making it durable first is also the honest thing for a seal point to mean.
+  def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
+    # The same measurement as the seal above, without the latch: flush so the answer describes readable
+    # records, then report. Sharing the flush matters more than sharing the code, since a probe that
+    # answered unflushed would hand a failover pass a seal point its own replicas could not serve.
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
     log = if Log.pending?(log), do: elem(Log.sync(log), 1), else: log
-    state = put_log(state, segment_id, log)
-
-    # Bytes read off disk rather than from the active handle: a log that rolled internally counts its
-    # sealed segments in `next_offset`, so asking the active handle alone would answer a size that
-    # describes fewer records than the length beside it, and a fresh segment would answer zero. After
-    # the sync above the files hold everything the offset counts.
-    {:reply, {log.next_offset, bytes_on_disk(state, segment_id)}, state}
+    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
@@ -496,18 +552,25 @@ defmodule Malachi.Cluster.ReplicationServer do
       # As in the call path, the span covers the primary's local durable append; the fan-out completes
       # asynchronously.
       Tracer.with_span "malachi.replication.commit" do
-        if hd(replica_set) == state.ref do
-          case do_replicate(state, {:notify, pid, tag}, segment_id, replica_set, base_offset, records) do
-            {:done, result, state} ->
-              notify_result(notify, result)
-              {:noreply, state}
+        cond do
+          fenced?(state, segment_id) ->
+            {state, end_offset} = fenced_end(state, segment_id, base_offset)
+            notify_result(notify, {:error, {:sealed, end_offset}})
+            {:noreply, state}
 
-            {:parked, state} ->
-              {:noreply, state}
-          end
-        else
-          notify_result(notify, {:error, :not_primary})
-          {:noreply, state}
+          hd(replica_set) == state.ref ->
+            case do_replicate(state, {:notify, pid, tag}, segment_id, replica_set, base_offset, records) do
+              {:done, result, state} ->
+                notify_result(notify, result)
+                {:noreply, state}
+
+              {:parked, state} ->
+                {:noreply, state}
+            end
+
+          true ->
+            notify_result(notify, {:error, :not_primary})
+            {:noreply, state}
         end
       end
     after
@@ -522,6 +585,12 @@ defmodule Malachi.Cluster.ReplicationServer do
     {state, log} = fetch_or_open(state, segment_id, base)
 
     cond do
+      # Fenced here: ack an ERROR rather than stay silent, so the primary simply does not count this
+      # replica toward the quorum instead of waiting out the follow timeout for an ack that can never come.
+      Log.sealed?(log) ->
+        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, :sealed}})
+        {:noreply, state}
+
       log.next_offset == expected_first and state.group_commit ->
         # Group commit on the follower: buffer the append and defer the durable ack to the next flush
         # tick, so one fsync (and one cumulative ack per primary) covers every batch since the last.
@@ -949,6 +1018,27 @@ defmodule Malachi.Cluster.ReplicationServer do
       true ->
         Logger.warning(message <> ": active segment, damage past a complete frame")
     end
+  end
+
+  # Cheap when the log is open, which is the hot case. The marker check is the cold one (a restarted
+  # server that has not touched this segment yet) and is what makes the fence survive a restart. The
+  # guard sits here, not in `Log.append/2`, because repair must still be able to write into a fenced
+  # segment: `follow/4` appends records that already carry their offsets, bounded above by the source's
+  # end, and a fenced source's end IS the sealed edge, so a repair cannot overshoot it. Keeping
+  # `Log.append/2` permissive also keeps `append_durably/2`'s hard match honest: a fenced append here
+  # would raise inside the loop and take down every segment this server hosts.
+  defp fenced?(state, segment_id) do
+    case Map.fetch(state.logs, segment_id) do
+      {:ok, log} -> Log.sealed?(log)
+      :error -> File.exists?(Log.seal_marker_path(segment_directory(state.directory, segment_id)))
+    end
+  end
+
+  # The end a refused writer should seat itself at, so its retry opens the successor where this segment
+  # closed instead of racing the control plane's tiling rule.
+  defp fenced_end(state, segment_id, base_offset) do
+    {state, log} = fetch_or_open(state, segment_id, base_offset)
+    {state, log.next_offset}
   end
 
   defp append_durably(log, records) do

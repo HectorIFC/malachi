@@ -17,6 +17,16 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
 
+  # The same measure `stored_bytes/3` and the fence report: every `*.log` file of the segment.
+  defp segment_bytes(ref, segment), do: ReplicationServer.stored_bytes(ref, segment)
+
+  defp stop_quietly(name) do
+    case Process.whereis(name) do
+      nil -> :ok
+      pid -> GenServer.stop(pid)
+    end
+  end
+
   defp read_values(ref, segment, offset \\ 0) do
     case ReplicationServer.read(ref, segment, offset, 100) do
       {:ok, records} -> Enum.map(records, & &1.value)
@@ -658,21 +668,137 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
-  describe "durable_stats/4" do
-    test "reports only what a read can serve, flushing first so a seal cannot promise :eof" do
-      # The numbers this returns become a sealed segment's length and byte size. A log's next offset
+  describe "seal/4 (the write fence)" do
+    test "answers the end and bytes of everything buffered, flushing first" do
+      # The numbers this returns become the segment's sealed length and byte size. A log's next offset
       # counts buffered records and `read/3` serves only committed ones, so answering without flushing
-      # would let failover seal a segment at a length its own replicas cannot serve: reads of that
-      # range stop dead at the boundary, which is how a cluster ends up with acknowledged writes that
-      # are durable and unreadable at the same time.
+      # would seal a segment at a length its own replicas cannot serve: reads of that range stop dead
+      # at the boundary, which is how a cluster ends up with acknowledged writes that are durable and
+      # unreadable at the same time.
       server = start_broker(group_commit: true, group_commit_interval_ms: 60_000)
-      {:ok, _} = ReplicationServer.append(server, @segment, [server], 0, records(["buffered"]))
+      {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(["buffered"]))
 
-      assert {1, bytes} = ReplicationServer.durable_stats(server, @segment, 0)
+      assert {:ok, 1, bytes} = ReplicationServer.seal(server, @segment, 0)
+      assert bytes == segment_bytes(server, @segment)
       assert bytes > 0
 
-      # Everything the probe counted is readable, which is the property the seal depends on.
+      # Everything the fence counted is readable, which is the property the seal depends on.
       assert {:ok, [%{value: "buffered"}]} = ReplicationServer.read(server, @segment, 0, 10)
+    end
+
+    test "a batch cast before the fence is inside its answer; one cast after is refused" do
+      # This is what proves the produce path's ordering. Both the cast and the fence call travel from
+      # THIS process to the SAME server, and Erlang orders signals between a fixed pair of processes, so
+      # the server appends the batch before it takes the seal point. Reversing the two reverses the
+      # outcome, which is why `Malachi.BrokerServer` settles rolls AFTER it fires its dispatches.
+      server = start_broker()
+      ReplicationServer.replicate_async(server, @segment, [server], 0, records(["a", "b"]), self(), :tag)
+      assert_receive {:replicate_result, :tag, {:ok, 1}}
+
+      assert {:ok, 2, _bytes} = ReplicationServer.seal(server, @segment, 0)
+
+      ReplicationServer.replicate_async(server, @segment, [server], 0, records(["c"]), self(), :late)
+      assert_receive {:replicate_result, :late, {:error, {:sealed, 2}}}
+      assert read_values(server, @segment) == ["a", "b"]
+    end
+
+    test "every write entry point is refused and the server survives all of them" do
+      # A missed guard would turn a benign refusal into a MatchError inside the loop, losing every
+      # segment this server hosts (both `append_durably/2` and the non-group-commit `:replica_append`
+      # branch hard-match `Log.append`). So each entry point is driven at a fenced segment and the
+      # server is asserted alive after every one of them.
+      server = start_broker()
+      source = start_broker()
+      {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(["a"]))
+      assert {:ok, 1, _bytes} = ReplicationServer.seal(server, @segment, 0)
+
+      pid = Process.whereis(server)
+
+      assert {:error, {:sealed, 1}} = ReplicationServer.replicate(server, @segment, [server], 0, records(["b"]))
+      assert Process.alive?(pid)
+
+      assert {:error, {:sealed, 1}} = ReplicationServer.append(server, @segment, [server], 0, records(["b"]))
+      assert Process.alive?(pid)
+
+      ReplicationServer.replicate_async(server, @segment, [server], 0, records(["b"]), self(), :async)
+      assert_receive {:replicate_result, :async, {:error, {:sealed, 1}}}
+      assert Process.alive?(pid)
+
+      # The primary's fan-out: it must ACK an error rather than stay silent, so the source simply does
+      # not count this replica toward its quorum instead of waiting out the follow timeout.
+      GenServer.cast(server, {:replica_append, @segment, 0, 1, records(["b"]), 0, {source, node()}})
+      assert eventually(fn -> read_values(server, @segment) == ["a"] end)
+      assert Process.alive?(pid)
+    end
+
+    test "reads and repair still work on a fenced segment" do
+      # `follow/4` is deliberately NOT fenced: `Catchup` and `SelfHealing` repair SEALED segments as
+      # their whole job, and a `follow` cannot overshoot because it requires `expected_first` to equal
+      # the target's current end and is bounded above by the source's own (fenced) end.
+      server = start_broker()
+      {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(["a"]))
+      assert {:ok, 1, _bytes} = ReplicationServer.seal(server, @segment, 0)
+
+      assert {:ok, 1} = ReplicationServer.follow(server, @segment, 1, records(["repaired"]))
+
+      # `read/4` serves one segment file per call (the consumer paging pattern), and the repair opened a
+      # new one above the fence, so both halves are asked for by offset.
+      assert read_values(server, @segment) == ["a"]
+      assert read_values(server, @segment, 1) == ["repaired"]
+    end
+
+    test "the fence survives a restart, before the log is ever opened" do
+      directory = Path.join(System.tmp_dir!(), "malachi_fence_#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(directory) end)
+
+      first = :"repl_fence_a_#{System.unique_integer([:positive])}"
+      {:ok, pid} = ReplicationServer.start_link(name: first, directory: directory)
+      {:ok, _last} = ReplicationServer.append(first, @segment, [first], 0, records(["a"]))
+      assert {:ok, 1, _bytes} = ReplicationServer.seal(first, @segment, 0)
+      GenServer.stop(pid)
+
+      # A different server over the same directory, which has never touched this segment: the on-disk
+      # marker is what makes the refusal survive, since there is no open log to ask.
+      second = :"repl_fence_b_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = ReplicationServer.start_link(name: second, directory: directory)
+      on_exit(fn -> stop_quietly(second) end)
+
+      assert {:error, {:sealed, 1}} = ReplicationServer.replicate(second, @segment, [second], 0, records(["b"]))
+    end
+
+    test "a segment this server never stored fences at its base and refuses a stray append" do
+      server = start_broker()
+
+      assert {:ok, 7, 0} = ReplicationServer.seal(server, @segment, 7)
+      assert {:error, {:sealed, 7}} = ReplicationServer.append(server, @segment, [server], 7, records(["a"]))
+    end
+
+    test "sealing twice answers the same pair" do
+      server = start_broker()
+      {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+
+      assert {:ok, end_offset, bytes} = ReplicationServer.seal(server, @segment, 0)
+      assert {:ok, ^end_offset, ^bytes} = ReplicationServer.seal(server, @segment, 0)
+    end
+
+    test "under group commit a fence covers the buffered batch and the parked produce still replies" do
+      server = start_broker(group_commit: true, group_commit_interval_ms: 10)
+      follower = start_broker(group_commit: true, group_commit_interval_ms: 10)
+      replica_set = [server, follower]
+
+      ReplicationServer.replicate_async(server, @segment, replica_set, 0, records(["a", "b"]), self(), :gc)
+      assert_receive {:replicate_result, :gc, {:ok, 1}}, 2_000
+
+      assert {:ok, 2, _bytes} = ReplicationServer.seal(server, @segment, 0)
+      assert read_values(server, @segment) == ["a", "b"]
+    end
+
+    test "a dead server answers :unreachable instead of exiting the caller" do
+      server = start_broker()
+      pid = Process.whereis(server)
+      GenServer.stop(pid)
+
+      assert {:error, :unreachable} = ReplicationServer.seal(server, @segment, 0, 100)
     end
   end
 

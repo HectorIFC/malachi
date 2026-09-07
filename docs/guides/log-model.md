@@ -71,8 +71,10 @@ flowchart TD
   position lands in exactly one range. Ranges **split** as they grow, which is how a topic scales without
   the client choosing a partition count up front.
 - **Segment.** Each range is a series of segments. The active segment takes appends until it crosses its
-  size threshold, then it is **sealed** and a new one rolls. Sealed segments are immutable, which is what
-  makes re-replicating them safe.
+  size threshold, then it is **sealed** and a new one rolls. Sealing is a fence, not a label: the store is
+  closed first and reports where it ended, and that answer becomes the segment's recorded length, so a
+  sealed segment's extent can never disagree with what its replicas hold. Sealed segments are immutable,
+  which is what makes re-replicating them safe.
 - **Replica set.** Each segment is replicated across nodes chosen by rendezvous (HRW) hashing. A write is
   acknowledged when a **quorum** has it durably (fsync before counting), so the system tolerates
   ⌊(N-1)/2⌋ slow or failed replicas.
@@ -166,8 +168,10 @@ them are covered by the guarantee:
   segment, which is what NorthGuard does, and it is what keeps an offset from being issued twice: a
   batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
   promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
-  removes the possibility instead of detecting it, and the store refuses appends to a sealed segment, so
-  the seal also fences an old primary that comes back. The seal goes at the **highest** durable end
+  removes the possibility instead of detecting it. The probe that finds the seal point is itself the
+  **fence**: it seals each answering replica's copy before the control plane records anything, so an old
+  primary that comes back appends to its own log and finds no quorum, because every follower it reaches
+  refuses the push. The seal goes at the **highest** durable end
   reported, once a **majority** of the replica set has answered. Why that covers everything
   acknowledged: take any acknowledged record, at offset `o`. It lives on a majority, the answering
   replicas are a majority, and two majorities of a set always intersect, so **some** answering replica
@@ -178,9 +182,11 @@ them are covered by the guarantee:
   majority of them agree on; that lower point can sit below a record the dead primary acknowledged
   with a single survivor. Without a majority answering there is no intersection to argue from, so the
   segment is left alone and its range stops accepting writes until one answers again.
-- **One known gap is open, and it is a gap, not intent.** For up to one metadata refresh after a split,
-  a node that has not yet seen it keeps writing to the sealed parent, and those records read before the
-  children's ([#41](https://github.com/HectorIFC/malachi/issues/41)).
+- **The write half of the split gap is closed; the read half is not.** A split fences the parent's
+  segment before either child exists, so a node that has not yet seen the split can no longer get a
+  record INTO the parent: its produce is refused, it seats itself at the fenced edge and retries against
+  the successor. Its READS still go to the parent for up to one metadata refresh, which is correct
+  cross-epoch behavior rather than a gap ([#41](https://github.com/HectorIFC/malachi/issues/41)).
 
 ## Where this is going
 

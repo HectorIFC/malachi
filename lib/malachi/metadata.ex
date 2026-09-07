@@ -157,6 +157,22 @@ defmodule Malachi.Metadata do
   def new, do: %__MODULE__{}
 
   @doc """
+  The seal command for `segment` ending at `end_offset` with `byte_size` bytes on disk, at `at`.
+
+  One constructor rather than two, because both seal paths (the produce roll in `Malachi.Broker` and
+  primary failover in `Malachi.Cluster.Failover`) turn an END OFFSET into a LENGTH the same way, and a
+  second copy of that subtraction is a copy that can drift.
+  """
+  @spec seal_command(
+          %{:id => segment_id(), :start_offset => non_neg_integer(), optional(atom()) => any()},
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: command()
+  def seal_command(segment, end_offset, byte_size, at),
+    do: {:seal_segment, segment.id, end_offset - segment.start_offset, byte_size, at}
+
+  @doc """
   The topic a command belongs to, for **routing** it to the owning vnode, or `nil` if it names none.
 
   Structural, no state: a topic command names its topic; a `range_id` is `{topic, seq}` and a
@@ -341,9 +357,28 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
-    update_segment(state, segment_id, fn segment ->
-      %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
-    end)
+    case Map.fetch(state.segments, segment_id) do
+      :error ->
+        {state, {:error, :no_such_segment}}
+
+      # An idempotent retry: the fence that produced this length answers the same number every time, and
+      # a caller whose command timed out re-issues it. Nothing is rewritten, so retention's clock
+      # (`sealed_at`) does not move on a retry.
+      {:ok, %{state: :sealed, length: ^length}} ->
+        {state, :ok}
+
+      # Two authorities decided different edges for one segment (a roll fence racing a failover seal).
+      # Overwriting would move the sealed edge after a successor may already have registered at the old
+      # one, breaking the tiling rule, and under `Malachi.Broker`'s read budget a shrunk length HIDES
+      # acknowledged records. The existing length travels back so the loser converges on the winner
+      # instead of wedging its range.
+      {:ok, %{state: :sealed, length: existing}} ->
+        {state, {:error, {:already_sealed, existing}}}
+
+      {:ok, segment} ->
+        sealed = %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
+        {%{state | segments: Map.put(state.segments, segment_id, sealed)}, :ok}
+    end
   end
 
   defp do_apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do

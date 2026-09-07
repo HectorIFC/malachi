@@ -10,9 +10,17 @@ defmodule Malachi.Cluster.Failover do
   different records under the same offset, which nothing downstream detects: the `expected_first` chain
   in replication rejects a gap rather than a conflict, and the integrity scrub verifies each copy
   against itself. Sealing removes that possibility **by construction**, because an offset the sealed
-  segment already assigned is never handed out again. The segment store refuses an append to a sealed
-  segment, so the seal also fences a returning old primary, and the freshly sealed segment is
-  picked up by `Malachi.Cluster.SelfHealing`, which already re-replicates sealed segments.
+  segment already assigned is never handed out again. The freshly sealed segment is then picked up by
+  `Malachi.Cluster.SelfHealing`, which already re-replicates sealed segments.
+
+  The fence is what makes the seal binding rather than advisory. `Malachi.Cluster.HealCoordinator`
+  probes by calling `Malachi.Cluster.ReplicationServer.seal/4`, which SEALS each answering replica's copy
+  and reports where it ended, so the seal point is recorded after every answering replica has stopped
+  accepting writes. A returning old primary is then refused an append by every replica it reaches,
+  including its own store after a restart, and cannot close a quorum. Note what this does not claim: a
+  replica the probe never reached is not fenced, and a pass that does not reach a majority still leaves
+  the replicas it did reach fenced, which is safe (the primary is dead by the candidate condition, so
+  those replicas were taking no writes anyway) and is what lets the next pass answer the same numbers.
 
   ## The seal point, and when a range is left blocked
 
@@ -109,7 +117,7 @@ defmodule Malachi.Cluster.Failover do
         Enum.max_by(answers, fn {_replica, {offset, _bytes}} -> offset end)
 
       [
-        {:seal_segment, segment_id, end_offset - segment.start_offset, byte_size, now_ms},
+        Metadata.seal_command(segment, end_offset, byte_size, now_ms),
         # Reads route to the head of the replica set, and the head here is the broker that just died,
         # so the sealed segment would answer `:unreachable` until re-replication got to it. Moving a
         # replica that holds everything the seal promised to the head restores reads at once.

@@ -108,6 +108,22 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
 
     {:ok, root} = BrokerServer.create_topic(control, "events", 4)
 
+    # A heal coordinator, because a segment whose primary is dead can no longer be rolled away from by
+    # the produce path: the seal is the fence's answer, and a dead primary answers nothing. Failover is
+    # the mechanism that closes such a segment, so writing can roll to a fresh one placed on the live
+    # brokers, which is what this test is about.
+    {:ok, _coordinator} =
+      start_supervised(
+        {HealCoordinator,
+         live_brokers: fn -> Agent.get(live_agent, & &1) end,
+         metadata_source: fn -> BrokerServer.metadata(control) end,
+         apply_command: fn command -> BrokerServer.apply_heal(control, [command]) end,
+         replication_factor: 3,
+         probe_timeout: 200,
+         interval: 50},
+        id: :heal2
+      )
+
     # r3 dies and is dropped from the live set
     Agent.update(live_agent, fn _ -> [r1, r2, r4] end)
     :ok = GenServer.stop(r3)

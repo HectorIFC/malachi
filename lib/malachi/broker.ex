@@ -11,8 +11,14 @@ defmodule Malachi.Broker do
   owns its key (hashed with `Malachi.Keyspace`). Within a range the data is divided into
   **segments**. NorthGuard's unit of replication: each active range has one open segment, whose
   ordered `replica_set` is chosen by `Malachi.Cluster.Placement`. The broker registers segments,
-  tallies bytes, and seals/rolls the active one once it reaches `:segment_max_bytes`. Offsets are
+  tallies bytes, and REQUESTS a roll of the active one once it reaches `:segment_max_bytes`. Offsets are
   contiguous *per range* (a segment is a window `[start_offset, ...)` of its range).
+
+  Sealing is the one lifecycle step this module cannot finish on its own, because a sealed length must be
+  what closing the segment ANSWERS rather than a number this frontend measured beside a log that is still
+  growing. So a threshold crossing only records a `roll` here (`due_rolls/1`); the caller
+  (`Malachi.BrokerServer`) fences the segment's store, learns its true end, and hands it back through
+  `record_seal/5`, which is what emits the `:seal_segment` command.
 
   Effects are injected, never performed here:
 
@@ -33,21 +39,34 @@ defmodule Malachi.Broker do
   alias Malachi.Log.Record
   alias Malachi.Metadata
 
-  # 64 MiB: the active segment seals once it reaches this many encoded bytes (soft threshold,
-  # checked at produce-batch boundaries, see `commit_batch/4`).
+  # 64 MiB: the active segment asks to roll once it reaches this many encoded bytes (soft threshold,
+  # checked at produce-batch boundaries, see `tally_bytes/3`).
   @default_segment_max_bytes 64 * 1024 * 1024
 
   @typedoc "The broker's view of the open (unsealed) segment of a range."
   @type active_segment :: %{
           id: Metadata.segment_id(),
           start_offset: non_neg_integer(),
-          records: non_neg_integer(),
           bytes: non_neg_integer(),
           replica_set: [Metadata.broker()]
         }
 
   @typedoc "Maps a range id to the `{first_offset, last_offset}` a produce placed there."
   @type placements :: %{Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}
+
+  @typedoc """
+  A segment whose fence the caller still owes before the control plane can seal it.
+
+  A map of rolls rather than a set of range ids, because `record_seal/5` can fail (an ra timeout) after
+  the cached segment is already gone, and the retry needs the segment id, its primary and its start
+  offset. A set would lose them.
+  """
+  @type roll :: %{
+          range_id: Metadata.range_id(),
+          segment_id: Metadata.segment_id(),
+          primary: Metadata.broker(),
+          start_offset: non_neg_integer()
+        }
 
   @typedoc "Appends/replicates a batch to a segment, returning the last offset stored."
   @type replicate_fun ::
@@ -75,7 +94,8 @@ defmodule Malachi.Broker do
           segment_max_bytes: pos_integer(),
           segments: %{Metadata.range_id() => active_segment()},
           segment_seq: %{Metadata.range_id() => non_neg_integer()},
-          offsets: %{Metadata.range_id() => non_neg_integer()}
+          offsets: %{Metadata.range_id() => non_neg_integer()},
+          rolling: %{Metadata.range_id() => roll()}
         }
 
   defstruct dsrsm: nil,
@@ -95,7 +115,11 @@ defmodule Malachi.Broker do
             placement_policy: :soft,
             segments: %{},
             segment_seq: %{},
-            offsets: %{}
+            offsets: %{},
+            # Ranges whose active segment crossed `:segment_max_bytes` and still owes a fence. A REQUEST,
+            # not a barrier: the range keeps taking writes, and whatever lands meanwhile is inside the end
+            # the fence eventually reports. See `due_rolls/1` and `record_seal/5`.
+            rolling: %{}
 
   @doc """
   Opens an empty broker.
@@ -257,16 +281,27 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping. The range's
-  primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so when several
-  broker frontends produce to the same range their interleaving makes a frontend's precomputed offsets
-  diverge from what the primary assigned; the frontend then adopts the primary's truth instead of
-  failing. The counter only moves forward (`max`), so this frontend's own in-flight batches keep their
-  reservations; a later collision just adopts again.
+  Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping, when the
+  dispatch still describes the range's write head. The range's primary serializes appends and assigns
+  the REAL offsets (the NorthGuard invariant), so when several broker frontends produce to the same
+  range their interleaving makes a frontend's precomputed offsets diverge from what the primary
+  assigned; the frontend then adopts the primary's truth instead of failing. The counter only moves
+  forward (`max`), so this frontend's own in-flight batches keep their reservations; a later collision
+  just adopts again.
+
+  Guarded on the segment id: an answer that arrives after the range's head was closed describes a
+  segment that no longer owns the range's end, and raising the counter past the fenced edge would make
+  the next `register_segment` fail with `:segment_overlap` and block the range.
   """
-  @spec adopt_offsets(t(), Metadata.range_id(), non_neg_integer()) :: t()
-  def adopt_offsets(%__MODULE__{} = broker, range_id, actual_last) do
-    %{broker | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1))}
+  @spec adopt_offsets(t(), Metadata.range_id(), Metadata.segment_id(), non_neg_integer()) :: t()
+  def adopt_offsets(%__MODULE__{} = broker, range_id, segment_id, actual_last) do
+    case Map.get(broker.segments, range_id) do
+      %{id: ^segment_id} ->
+        %{broker | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1))}
+
+      _closed_or_rolled ->
+        broker
+    end
   end
 
   defp plan_group(broker, range_id, records, placements, dispatches) do
@@ -278,7 +313,13 @@ defmodule Malachi.Broker do
         first = next_offset(opened, range_id)
         count = length(records)
         last = first + count - 1
-        committed = commit_batch(opened, range_id, count, batch_bytes(records))
+
+        # Offsets first, then bytes and the roll threshold: the reservation must be taken from the
+        # counter before a roll request can be recorded against the segment it lands in.
+        committed =
+          opened
+          |> reserve_offsets(range_id, count)
+          |> tally_bytes(range_id, batch_bytes(records))
 
         dispatch = %{
           range_id: range_id,
@@ -311,19 +352,55 @@ defmodule Malachi.Broker do
       {:ok, segment} ->
         # Never below the segment's base: `locate_segment/3` steps up when the requested offset falls
         # in a hole, and asking a segment for an offset it never held is not a question it can answer.
-        read_fun.(primary(segment), segment.id, max(offset, segment.start_offset), max_records)
+        start = max(offset, segment.start_offset)
+
+        case read_budget(segment, start, max_records) do
+          :eof -> :eof
+          budget -> read_fun.(primary(segment), segment.id, start, budget)
+        end
     end
   end
 
+  # How many records a read starting at `start` may take from `segment`.
+  #
+  # An active segment is the write head: nothing above its start belongs to anyone else, so the
+  # caller's budget stands. A sealed segment's length is the control plane's truth about it, and the
+  # store can hold more: a stale frontend keeps appending through a primary that never heard of the
+  # seal, so the log grows past the offset where the NEXT segment was opened. Serving that surplus
+  # hands out offsets the next segment owns, and since the consume cursor moves to the last offset
+  # served plus one, it lands past the next segment's head without ever delivering it. The surplus
+  # itself sits at the top of the page, where the cursor never comes back for it. So the read is
+  # capped at the sealed edge: records a store holds beyond the sealed length are, by contract, not
+  # part of the log, and the fence on the write side is what keeps them from being acknowledged.
+  defp read_budget(%{length: length} = segment, start, max_records) when is_integer(length) do
+    remaining = sealed_end(segment) - start
+
+    # A non-positive remainder means the read starts at or above the sealed edge, which for a segment
+    # `locate_segment/3` handed back can only be a zero-length seal reached through
+    # `next_segment_above/2` (which steps over a hole without asking `serves?/2`). An ordinary outcome:
+    # a split or a failover can close a segment that was registered and never written. Kept as :eof
+    # rather than a zero or negative budget, because a read_fun given one would answer with whatever it
+    # holds and undo the cap.
+    if remaining > 0, do: min(max_records, remaining), else: :eof
+  end
+
+  defp read_budget(_active_segment, _start, max_records), do: max_records
+
   @doc """
-  Splits a range: the control plane seals the parent and creates two children; the parent's
-  active segment is sealed. Returns `{broker, {:ok, left_id, right_id}}` or a `Metadata` error.
+  Splits a range: the control plane seals the parent and creates two children. Returns
+  `{broker, {:ok, left_id, right_id}}` or a `Metadata` error.
+
+  Metadata only. The caller must FENCE the parent's active segment and record its seal (through
+  `active_roll/2` and `record_seal/5`) BEFORE calling, because a segment's sealed length has to be what
+  closing it answered: sealing it here, from this frontend's counter, is the guess this design removes.
+  Fencing first is also what closes the write half of the split gap, since a node that has not seen the
+  split can no longer get a record into the parent once its store is fenced.
   """
   @spec split_range(t(), Metadata.range_id()) :: {t(), term()}
   def split_range(%__MODULE__{} = broker, range_id) do
     case apply_metadata(broker, {:split_range, range_id}) do
       {dsrsm, {:ok, _left, _right} = reply} ->
-        {seal_active_segment(%{broker | dsrsm: dsrsm}, range_id), reply}
+        {%{broker | dsrsm: dsrsm}, reply}
 
       {_dsrsm, {:error, _reason} = error} ->
         {broker, error}
@@ -331,15 +408,17 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  Merges two buddy ranges: the control plane seals both and creates a child; both parents'
-  active segments are sealed. Returns `{broker, {:ok, child_id}}` or a `Metadata` error.
+  Merges two buddy ranges: the control plane seals both and creates a child. Returns
+  `{broker, {:ok, child_id}}` or a `Metadata` error.
+
+  Metadata only, for the same reason as `split_range/2`: the caller fences and records both parents'
+  active segments first.
   """
   @spec merge_ranges(t(), Metadata.range_id(), Metadata.range_id()) :: {t(), term()}
   def merge_ranges(%__MODULE__{} = broker, range_id_a, range_id_b) do
     case apply_metadata(broker, {:merge_ranges, range_id_a, range_id_b}) do
       {dsrsm, {:ok, _child} = reply} ->
-        broker = %{broker | dsrsm: dsrsm}
-        {seal_active_segment(seal_active_segment(broker, range_id_a), range_id_b), reply}
+        {%{broker | dsrsm: dsrsm}, reply}
 
       {_dsrsm, {:error, _reason} = error} ->
         {broker, error}
@@ -370,13 +449,27 @@ defmodule Malachi.Broker do
   end
 
   # Failover seals an active segment whose primary died (`Malachi.Cluster.Failover`), so the cached
-  # entry must go with it: the store refuses an append to a sealed segment, and a broker still holding
-  # it in `segments` would keep routing produces at a segment that can no longer take them. Dropping it
-  # is what makes the next produce open a fresh one, the same roll `seal_active_segment/2` performs.
+  # entry must go with it: the store refuses an append to a fenced segment, and a broker still holding
+  # it in `segments` would keep routing produces at a segment that can no longer take them.
+  #
+  # The counter is seated from the length the metadata ended up with (not from the command's, which a
+  # conflicting re-seal can reject), and any roll this frontend owed for the same segment is cleared.
+  # That is how a failover seal performed on another node unblocks a frontend caught mid-roll: without
+  # it the frontend keeps re-fencing a segment somebody else already closed.
   defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
     {dsrsm, _reply} = apply_metadata(broker, command)
     broker = %{broker | dsrsm: dsrsm}
-    forget_active_segment(broker, segment_id)
+    {range_id, _seq} = segment_id
+
+    case DSRSM.get_segment(broker.dsrsm, topic_of_segment(segment_id), segment_id) do
+      %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
+        forget_sealed(broker, range_id, segment_id, start_offset + length)
+
+      # The segment is gone or the seal did not land: there is no edge to seat the counter at, so only
+      # the cache eviction (which is safe on its own) happens.
+      _no_sealed_extent ->
+        forget_active_segment(broker, segment_id)
+    end
   end
 
   defp apply_replica_command(command, broker) do
@@ -403,6 +496,185 @@ defmodule Malachi.Broker do
         broker
     end
   end
+
+  @doc """
+  The fences this broker owes: ranges whose active segment crossed `:segment_max_bytes`.
+
+  The caller fences each one's primary and hands the answer back through `record_seal/5`. Until it
+  does, the range stays writable and the segment simply overshoots its soft threshold.
+  """
+  @spec due_rolls(t()) :: [roll()]
+  def due_rolls(%__MODULE__{rolling: rolling}), do: Map.values(rolling)
+
+  @doc """
+  Seals every segment whose roll was requested and whose range's write head is still that segment.
+
+  Pure: no replica is contacted. The length is `next_offset - start_offset`, so the CALLER must have
+  seated the counter on the primary's answer first (`adopt_offsets/4`), which is the whole reason the
+  seal is deferred rather than taken where the byte threshold trips. At that moment the frontend holds
+  only a reservation, and recording it would seal a length the primary never agreed to: short when
+  another frontend interleaved, long when the batch then failed.
+
+  Call it only after a produce that SUCCEEDED. On a failure the reservation stands above what the
+  primary actually stored, and sealing there would promise records that do not exist, which reads worse
+  than a short seal: `read/5` would answer fewer records than the length claims and a consume cursor
+  would stall at the sealed edge with nothing to advance it.
+
+  A roll whose segment is no longer the range's head is dropped rather than applied: something else
+  (a failover seal, another frontend) already closed it, and its length is not this frontend's to say.
+  """
+  @spec settle_rolls(t()) :: t()
+  def settle_rolls(%__MODULE__{rolling: rolling} = broker) when map_size(rolling) == 0, do: broker
+
+  def settle_rolls(%__MODULE__{} = broker) do
+    Enum.reduce(Map.values(broker.rolling), broker, &settle_requested_roll(&2, &1))
+  end
+
+  defp settle_requested_roll(broker, roll) do
+    case Map.get(broker.segments, roll.range_id) do
+      %{id: id, bytes: bytes} when id == roll.segment_id ->
+        end_offset = next_offset(broker, roll.range_id)
+        {broker, _reply} = record_seal(broker, roll, end_offset, bytes, System.system_time(:millisecond))
+        broker
+
+      _head_moved_on ->
+        clear_roll(broker, roll.range_id, roll.segment_id)
+    end
+  end
+
+  @doc """
+  The roll for one range's active segment, on demand (a split or a merge retiring the range), or
+  `:none` when the range has no open segment. Does not mutate: the caller fences and records in one
+  step, so nothing is owed if it never gets that far.
+  """
+  @spec active_roll(t(), Metadata.range_id()) :: roll() | :none
+  def active_roll(%__MODULE__{} = broker, range_id) do
+    case Map.fetch(broker.segments, range_id) do
+      :error -> :none
+      {:ok, active} -> roll_of(range_id, active)
+    end
+  end
+
+  @doc """
+  Records a fenced seal. `end_offset` and `byte_size` are what the fence ANSWERED, so the sealed length
+  is a consequence of closing the segment rather than a measurement racing it.
+
+  All or nothing: on `:ok` the metadata command landed, the cached active segment is dropped, the roll
+  is cleared, and the range's next offset is SET to exactly `end_offset`; on any other reply the broker
+  is returned untouched and the roll stays owed, so the next pass re-fences (idempotent, the same
+  numbers) and re-issues the same command.
+
+  Set, not `max`. A batch the fence refused, or one that never reached the primary at all, burned
+  reserved offsets, so the local counter can sit ABOVE the fence's end; opening the next segment there
+  would be rejected by the tiling rule and the range would wedge. The rewind is invisible to clients,
+  because positions travel in opaque cursors and every burned offset belonged to a produce that
+  returned an error. It is safe precisely because the fence is a latch: after it, nothing can land in
+  this segment.
+
+  A `{:already_sealed, existing}` conflict (a roll fence racing a failover seal) converges on the
+  winner rather than wedging: this broker adopts `existing` as the length and reports `:ok`.
+  """
+  @spec record_seal(t(), roll(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+          {t(), :ok | {:error, term()}}
+  def record_seal(%__MODULE__{} = broker, roll, end_offset, byte_size, sealed_at) do
+    start_offset = recorded_start_offset(broker, roll)
+    segment = %{id: roll.segment_id, start_offset: start_offset}
+
+    case apply_metadata(broker, Metadata.seal_command(segment, end_offset, byte_size, sealed_at)) do
+      {dsrsm, :ok} ->
+        {settle_roll(%{broker | dsrsm: dsrsm}, roll, end_offset), :ok}
+
+      {dsrsm, {:error, {:already_sealed, existing}}} ->
+        {settle_roll(%{broker | dsrsm: dsrsm}, roll, start_offset + existing), :ok}
+
+      {_dsrsm, {:error, _reason} = error} ->
+        {broker, error}
+
+      {_dsrsm, other} ->
+        {broker, {:error, {:unexpected_seal_reply, other}}}
+    end
+  end
+
+  # The control plane's own start offset for the segment, which is what the successor's registration
+  # will be checked against. `roll.start_offset` is the fallback for a segment the metadata no longer
+  # carries (retention dropped it between the fence and the command).
+  defp recorded_start_offset(broker, roll) do
+    case DSRSM.get_segment(broker.dsrsm, topic_of_segment(roll.segment_id), roll.segment_id) do
+      %{start_offset: start_offset} -> start_offset
+      nil -> roll.start_offset
+    end
+  end
+
+  # Drops the cached segment (guarded on the id, so a late seal cannot evict a newer one), clears the
+  # roll and seats the range at the sealed edge.
+  defp settle_roll(broker, roll, end_offset) do
+    broker
+    |> forget_active_segment(roll.segment_id)
+    |> clear_roll(roll.range_id, roll.segment_id)
+    |> put_offset(roll.range_id, end_offset)
+  end
+
+  @doc """
+  Seats this frontend behind a seal somebody else performed (a `{:sealed, end_offset}` refusal): drops
+  the cached active segment for `segment_id`, clears any roll naming it, and moves the range's next
+  offset to `end_offset`, so the retry opens or adopts the successor exactly where this segment closed
+  instead of racing `:segment_overlap`.
+
+  Guarded on the id, like the seal command's own cache eviction: a refusal naming an older segment must
+  not evict the one currently open.
+  """
+  @spec forget_sealed(t(), Metadata.range_id(), Metadata.segment_id(), non_neg_integer()) :: t()
+  def forget_sealed(%__MODULE__{} = broker, range_id, segment_id, end_offset) do
+    if names_range_head?(broker, range_id, segment_id) do
+      broker
+      |> forget_active_segment(segment_id)
+      |> clear_roll(range_id, segment_id)
+      |> put_offset(range_id, end_offset)
+    else
+      broker
+    end
+  end
+
+  @doc """
+  Drops cached active segments the control plane has already sealed, seating each range's next offset
+  at the sealed edge. Called on every metadata refresh, right after `put_cache/3`.
+
+  Only `apply_heal/2`, on the node running the heal coordinator, used to evict such a segment, so every
+  other frontend kept routing produces at a segment the metadata had sealed and only learned otherwise
+  when the store refused a batch. This makes the convergence level-triggered on every node instead,
+  bounded by the reconcile interval.
+  """
+  @spec drop_stale_active_segments(t()) :: t()
+  def drop_stale_active_segments(%__MODULE__{} = broker) do
+    Enum.reduce(broker.segments, broker, fn {range_id, active}, acc ->
+      case DSRSM.get_segment(acc.dsrsm, topic_of_segment(active.id), active.id) do
+        %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
+          forget_sealed(acc, range_id, active.id, start_offset + length)
+
+        _still_active_or_unknown ->
+          acc
+      end
+    end)
+  end
+
+  # Whether `segment_id` is what this frontend currently treats as the range's write head: the cached
+  # active segment, or the segment a pending roll names when the cache is already gone.
+  defp names_range_head?(broker, range_id, segment_id) do
+    case {Map.get(broker.segments, range_id), Map.get(broker.rolling, range_id)} do
+      {%{id: ^segment_id}, _roll} -> true
+      {_cached, %{segment_id: ^segment_id}} -> true
+      _other -> false
+    end
+  end
+
+  defp clear_roll(broker, range_id, segment_id) do
+    case Map.get(broker.rolling, range_id) do
+      %{segment_id: ^segment_id} -> %{broker | rolling: Map.delete(broker.rolling, range_id)}
+      _other -> broker
+    end
+  end
+
+  defp put_offset(broker, range_id, offset), do: %{broker | offsets: Map.put(broker.offsets, range_id, offset)}
 
   @doc """
   The current metadata as one flat view: the union of the sharded vnodes (see
@@ -649,25 +921,24 @@ defmodule Malachi.Broker do
   end
 
   defp replicate_to_segment(broker, opened, segment, range_id, records, placements, replicate_fun) do
-    first = next_offset(opened, range_id)
     count = length(records)
-    last = first + count - 1
 
     case replicate_fun.(primary(segment), segment.id, segment.replica_set, segment.start_offset, records) do
-      {:ok, ^last} ->
-        committed = commit_batch(opened, range_id, count, batch_bytes(records))
-        {:cont, {committed, Map.put(placements, range_id, {first, last})}}
-
-      # Another frontend interleaved on this range: the primary serializes appends and assigned
-      # different offsets (the NorthGuard invariant: the primary owns the truth). Adopt them: this
-      # batch occupies the actual contiguous span, and the local counter follows the primary.
+      # The primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so the
+      # counter follows its answer rather than a local reservation. A matching answer and an interleaved
+      # one were always the same case: adopting an answer that agrees is a no-op.
       {:ok, actual} ->
         committed =
           opened
-          |> commit_batch(range_id, count, batch_bytes(records))
-          |> adopt_offsets(range_id, actual)
+          |> adopt_offsets(range_id, segment.id, actual)
+          |> tally_bytes(range_id, batch_bytes(records))
 
         {:cont, {committed, Map.put(placements, range_id, {actual - count + 1, actual})}}
+
+      # The write head moved under us (another frontend, or a failover, closed this segment). Seat this
+      # frontend at the fenced end so the retry opens the successor instead of racing :segment_overlap.
+      {:error, {:sealed, end_offset}} ->
+        {:halt, {:error, {:sealed, end_offset}, forget_sealed(broker, range_id, segment.id, end_offset)}}
 
       # On failure, discard the just-opened segment by returning the pre-open broker (immutable
       # value = free rollback), so a failed produce leaves no phantom segment and a retry re-places.
@@ -701,10 +972,10 @@ defmodule Malachi.Broker do
   end
 
   # Adopts the range's active segment from the (shared) metadata into the local cache: id, replica set
-  # and start offset come from the registrant; the byte/record tallies restart at zero (they only steer
-  # this frontend's seal pressure). The seq counter jumps past the adopted id so a later local roll
-  # never reuses it, and the offset counter jumps to at least the segment's start (the primary-assigned
-  # results correct it further on the first produce).
+  # and start offset come from the registrant; the byte tally restarts at zero (it only steers this
+  # frontend's roll pressure, never the sealed length, which is the fence's answer). The seq counter
+  # jumps past the adopted id so a later local roll never reuses it, and the offset counter jumps to at
+  # least the segment's start (the primary-assigned results correct it further on the first produce).
   defp adopt_active_segment(broker, range_id) do
     active_meta =
       broker.dsrsm
@@ -716,7 +987,7 @@ defmodule Malachi.Broker do
         :none
 
       meta ->
-        active = %{id: meta.id, start_offset: meta.start_offset, records: 0, bytes: 0, replica_set: meta.replica_set}
+        active = %{id: meta.id, start_offset: meta.start_offset, bytes: 0, replica_set: meta.replica_set}
         {_range, seq} = meta.id
 
         broker = %{
@@ -750,7 +1021,7 @@ defmodule Malachi.Broker do
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
     case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
       {dsrsm, :ok} ->
-        active = %{id: segment_id, start_offset: start_offset, records: 0, bytes: 0, replica_set: replica_set}
+        active = %{id: segment_id, start_offset: start_offset, bytes: 0, replica_set: replica_set}
 
         broker = %{
           broker
@@ -785,41 +1056,36 @@ defmodule Malachi.Broker do
     end
   end
 
-  # Advances the range's offset and the active segment's tallies, sealing the segment (soft
-  # threshold checked at the batch boundary, so it may overshoot by at most one batch) once it
-  # reaches the byte limit. The next produce to this range opens a fresh segment.
-  defp commit_batch(broker, range_id, count, bytes) do
+  # Reserves `count` offsets for a batch. Optimistic on the plan path (`produce_plan/3` needs a first
+  # offset for the next group before the primary has answered); on the executing path the primary's
+  # answer is adopted instead and this is not used, which is why the two are separate steps.
+  defp reserve_offsets(broker, range_id, count) do
+    %{broker | offsets: Map.put(broker.offsets, range_id, next_offset(broker, range_id) + count)}
+  end
+
+  # Advances the active segment's byte tally and REQUESTS a roll once it crosses the soft threshold.
+  # The request does not close the segment: the range keeps taking writes, and whatever lands before
+  # the fence answers is inside the end the fence reports. Sealing on the decision instead would have
+  # to guess a length, which is the defect this design exists to remove.
+  defp tally_bytes(broker, range_id, bytes) do
     active = Map.fetch!(broker.segments, range_id)
-    active = %{active | records: active.records + count, bytes: active.bytes + bytes}
+    active = %{active | bytes: active.bytes + bytes}
+    broker = %{broker | segments: Map.put(broker.segments, range_id, active)}
 
-    broker = %{
-      broker
-      | offsets: Map.put(broker.offsets, range_id, next_offset(broker, range_id) + count),
-        segments: Map.put(broker.segments, range_id, active)
-    }
+    if active.bytes >= broker.segment_max_bytes, do: request_roll(broker, range_id), else: broker
+  end
 
-    if active.bytes >= broker.segment_max_bytes do
-      seal_active_segment(broker, range_id)
-    else
-      broker
+  # `Map.put_new`: a range whose fence has not answered yet must keep the roll it already owes, not a
+  # fresh one built from a segment that may since have been rolled out of the cache.
+  defp request_roll(broker, range_id) do
+    case Map.fetch(broker.segments, range_id) do
+      :error -> broker
+      {:ok, active} -> %{broker | rolling: Map.put_new(broker.rolling, range_id, roll_of(range_id, active))}
     end
   end
 
-  # Seals the range's active segment (recording its record count as the length) and forgets it,
-  # so the next produce opens a new one. No-op if the range has no open segment.
-  defp seal_active_segment(broker, range_id) do
-    case Map.fetch(broker.segments, range_id) do
-      :error ->
-        broker
-
-      {:ok, active} ->
-        # sealed_at is generated here (like Record timestamps) and carried in the command, so every
-        # replica applies the same value deterministically. Retention uses byte_size + sealed_at.
-        sealed_at = System.system_time(:millisecond)
-        command = {:seal_segment, active.id, active.records, active.bytes, sealed_at}
-        {dsrsm, _reply} = apply_metadata(broker, command)
-        %{broker | dsrsm: dsrsm, segments: Map.delete(broker.segments, range_id)}
-    end
+  defp roll_of(range_id, active) do
+    %{range_id: range_id, segment_id: active.id, primary: primary(active), start_offset: active.start_offset}
   end
 
   # Applies a metadata mutation via the configured command function (in-memory by default, or
@@ -895,17 +1161,30 @@ defmodule Malachi.Broker do
     else
       segments = DSRSM.segments_of_range(broker.dsrsm, topic_of_range(range_id), range_id)
 
-      case Enum.find(Enum.sort_by(segments, & &1.start_offset, :desc), &(&1.start_offset <= offset)) do
+      below =
+        segments
+        |> Enum.filter(&(&1.start_offset <= offset))
+        |> Enum.sort_by(& &1.start_offset, :desc)
+
+      # Among the segments starting at or below `offset`, the one that actually SERVES it. Checking only
+      # the greatest start misses a zero-length seal sharing a start with its successor: the zero-length
+      # one can win the sort, serves nothing, and `next_segment_above/2` (strictly greater) cannot see
+      # the successor, so the read answers :eof and the range's consumers wedge there permanently.
+      case Enum.find(below, &serves?(&1, offset)) do
         nil -> next_segment_above(segments, offset)
-        segment -> if serves?(segment, offset), do: {:ok, segment}, else: next_segment_above(segments, offset)
+        segment -> {:ok, segment}
       end
     end
   end
 
+  # One offset past the last one a sealed segment owns. The read budget and `serves?/2` both fence
+  # on this edge, so they share the arithmetic rather than each encoding it.
+  defp sealed_end(%{start_offset: start, length: length}) when is_integer(length), do: start + length
+
   # Whether a segment's own extent covers `offset`. An active segment has no recorded length: it is
   # the write head, so everything from its start upward is its to serve.
-  defp serves?(%{length: length, start_offset: start}, offset) when is_integer(length) do
-    offset < start + length
+  defp serves?(%{length: length} = segment, offset) when is_integer(length) do
+    offset < sealed_end(segment)
   end
 
   defp serves?(_active_segment, _offset), do: true
@@ -950,15 +1229,25 @@ defmodule Malachi.Broker do
         source_offset = max(source_offset, earliest_offset(broker, source_range_id))
 
         case read(broker, source_range_id, source_offset, max_records, read_fun) do
-          :eof ->
-            read_history_page(broker, sources, source_index + 1, 0, max_records, read_fun)
+          {:ok, [_ | _] = records} ->
+            # From the records' own offsets, not from the offset asked for, mirroring `consume_page/8`.
+            # `read/5` can start ABOVE the request when `locate_segment/3` steps over a hole (a segment
+            # dropped by retention or by an operator), and counting from the request puts the cursor
+            # back inside that hole, so the same page is delivered again on every call.
+            {:ok, filter_records(records, filter_range), {source_index, last_offset(records, source_offset) + 1}}
 
-          {:ok, records} ->
-            filtered = filter_records(records, filter_range)
-            {:ok, filtered, {source_index, source_offset + length(records)}}
-
+          # Before the catch-all, or a read error is silently taken for the end of a source: a failed
+          # read is not an empty log, which is the mistake this whole area has already made once.
           {:error, _reason} = error ->
             error
+
+          # `:eof` and an empty page are the same thing here: this source has nothing more to give at
+          # this position. The empty case used to fall into the first clause, which returned the cursor
+          # unchanged, and `drain_history/5` then asked the identical question forever. The trade is
+          # explicit: an administrative history read now ends early on a transient empty page rather
+          # than hanging, which is the same choice `:eof` already made beside it.
+          _eof_or_empty ->
+            read_history_page(broker, sources, source_index + 1, 0, max_records, read_fun)
         end
     end
   end
