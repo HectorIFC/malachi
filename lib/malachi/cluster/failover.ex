@@ -13,14 +13,24 @@ defmodule Malachi.Cluster.Failover do
   segment already assigned is never handed out again. The freshly sealed segment is then picked up by
   `Malachi.Cluster.SelfHealing`, which already re-replicates sealed segments.
 
-  The fence is what makes the seal binding rather than advisory. `Malachi.Cluster.HealCoordinator`
-  probes by calling `Malachi.Cluster.ReplicationServer.seal/4`, which SEALS each answering replica's copy
-  and reports where it ended, so the seal point is recorded after every answering replica has stopped
-  accepting writes. A returning old primary is then refused an append by every replica it reaches,
-  including its own store after a restart, and cannot close a quorum. Note what this does not claim: a
-  replica the probe never reached is not fenced, and a pass that does not reach a majority still leaves
-  the replicas it did reach fenced, which is safe (the primary is dead by the candidate condition, so
-  those replicas were taking no writes anyway) and is what lets the next pass answer the same numbers.
+  The fence is what makes the seal binding rather than advisory, and `Malachi.Cluster.HealCoordinator`
+  applies it in two steps, in this order. It first MEASURES every live replica with
+  `Malachi.Cluster.ReplicationServer.durable_stats/4`, which reports what a replica holds and leaves it
+  writable. Only if those answers reach a majority does it FENCE them with
+  `Malachi.Cluster.ReplicationServer.seal/4`, and the fence answers are what `plan/4` then seals on, so
+  the point is recorded after every replica behind it has stopped accepting writes. A returning old
+  primary is refused an append by each fenced replica it reaches, including by its own store after a
+  restart, and so cannot close a quorum.
+
+  Measuring before fencing is not a nicety. A fence has no inverse: nothing unseals a replica's store.
+  Fencing whatever answers, before knowing whether a majority did, therefore closes replicas of a
+  segment this pass may then decline to seal, and they keep refusing writes after their primary comes
+  back. With `replication_factor: 2` that is terminal: one live follower is never a majority, so nothing
+  is sealed, and once the primary returns the segment is no longer a candidate, so no later pass ever
+  finishes while every produce fails quorum against a replica nothing can reopen. Below a majority the
+  pass therefore leaves every replica untouched, and the range stays blocked until one returns.
+
+  Note what this still does not claim: a replica the pass never reached is not fenced.
 
   ## The seal point, and when a range is left blocked
 

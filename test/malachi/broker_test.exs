@@ -693,7 +693,7 @@ defmodule Malachi.BrokerTest do
     # The invariant the 519-record bug violated, as a property rather than a fixture: whatever order
     # produces, primary-assigned adoptions and fenced seals arrive in, a range's segments must tile
     # `[0, next_offset)` exactly, and the counter must end on the last fence's answer.
-    property "a range's segments tile its offsets with no gap and no overlap", %{store: store} do
+    property "a range's segments tile its offsets with no gap and no overlap" do
       check all(steps <- list_of(step(), min_length: 1, max_length: 24), max_runs: 60) do
         {:ok, store} = FakeSegmentStore.start_link()
         one_record = Record.encoded_size(record("v0", "k0"))

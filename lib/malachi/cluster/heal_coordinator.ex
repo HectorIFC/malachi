@@ -27,16 +27,25 @@ defmodule Malachi.Cluster.HealCoordinator do
   returns the combined result, for tests and manual triggers.
 
   Failover needs to know what each surviving replica holds, which no pure function can answer, so this
-  pass does the probing: `Failover.candidates/2` names the segments, each live replica is FENCED (its
-  copy of the segment sealed, which is what makes the answer final), and the answers go to
-  `Failover.plan/4`. A replica that does not answer in time simply does not count, which is what leaves
-  a segment below a majority unsealed and its range blocked; that case is logged every pass, because a
-  blocked range that says nothing is the failure mode worth avoiding.
+  pass does the probing, in two steps whose order carries the safety. `Failover.candidates/2` names the
+  segments; each live replica is MEASURED (`:probe`), which leaves it writable; and only once those
+  answers reach a majority is each answering replica FENCED (`:fence`), which is what makes its answer
+  final. The fence answers go to `Failover.plan/4`, which applies the majority rule again to them, so a
+  fence that fails on enough replicas still declines rather than sealing on a minority.
+
+  Fencing before knowing whether a majority answered would close replicas of a segment the pass then
+  declines to seal, and nothing unseals a store: see `Malachi.Cluster.Failover`'s moduledoc for why that
+  is terminal at `replication_factor: 2`. A replica that does not answer in time simply does not count,
+  which is what leaves a segment below a majority unsealed and its range blocked; that case is logged
+  every pass, because a blocked range that says nothing is the failure mode worth avoiding.
 
     * `:probe` - `((replica, segment_id, base_offset) -> {end_offset, byte_size} | :error)`, how a
-      replica is asked (default `Malachi.Cluster.ReplicationServer.seal/4` with a short timeout, so an
-      unreachable replica cannot stall the pass);
-    * `:probe_timeout` - ms for that default probe (default 1000).
+      replica is MEASURED (default `Malachi.Cluster.ReplicationServer.durable_stats/4` with a short
+      timeout, so an unreachable replica cannot stall the pass);
+    * `:fence` - the same shape, how a replica is CLOSED once a majority has answered (default
+      `Malachi.Cluster.ReplicationServer.seal/4`). Separate from `:probe` so a test can watch a pass
+      measure without fencing, which is the property that must hold below a majority;
+    * `:probe_timeout` - ms for both defaults (default 1000).
   """
 
   use GenServer

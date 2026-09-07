@@ -863,7 +863,7 @@ defmodule Malachi.BrokerServer do
         end
 
       {:error, reason} ->
-        Logger.warning("fence for #{inspect(roll.segment_id)} failed: #{inspect(reason)}; the parent stays open")
+        Logger.warning(I18n.t(:fence_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
         {:error, reason, state}
     end
   end

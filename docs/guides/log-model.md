@@ -168,11 +168,14 @@ them are covered by the guarantee:
   segment, which is what NorthGuard does, and it is what keeps an offset from being issued twice: a
   batch is acknowledged once a majority holds it, so a replica outside that majority can be behind, and
   promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
-  removes the possibility instead of detecting it. The probe that finds the seal point is itself the
-  **fence**: it seals each answering replica's copy before the control plane records anything, so an old
-  primary that comes back appends to its own log and finds no quorum, because every follower it reaches
-  refuses the push. The seal goes at the **highest** durable end
-  reported, once a **majority** of the replica set has answered. Why that covers everything
+  removes the possibility instead of detecting it. Finding the seal point and making it binding are two
+  steps, in this order: the pass first **measures** every live replica, leaving it writable, and only
+  once those answers reach a majority does it **fence** them, sealing each answering copy before the
+  control plane records anything. An old primary that comes back then appends to its own log and finds
+  no quorum, because every follower it reaches refuses the push. The order matters because a fence has
+  no inverse: closing replicas of a segment the pass then declines to seal would leave them refusing
+  writes forever, which at a replication factor of 2 blocks the range for good. The seal goes at the
+  **highest** durable end reported, once a **majority** of the replica set has answered. Why that covers everything
   acknowledged: take any acknowledged record, at offset `o`. It lives on a majority, the answering
   replicas are a majority, and two majorities of a set always intersect, so **some** answering replica
   holds it. A replica's log is contiguous, so that replica's durable end is above `o`, and the highest

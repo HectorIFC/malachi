@@ -25,6 +25,12 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       nil -> :ok
       pid -> GenServer.stop(pid)
     end
+  catch
+    # Living up to the name. The lookup and the stop are two steps, and ExUnit runs `on_exit` AFTER the
+    # test process has died, which is exactly when the servers linked to it are being taken down: the
+    # pid found a moment ago can already be gone by the time the stop lands. That is a clean shutdown,
+    # not a failure, and letting it exit fails a test whose every assertion passed.
+    :exit, _reason -> :ok
   end
 
   defp read_values(ref, segment, offset \\ 0) do
@@ -787,9 +793,15 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       replica_set = [server, follower]
 
       ReplicationServer.replicate_async(server, @segment, replica_set, 0, records(["a", "b"]), self(), :gc)
-      assert_receive {:replicate_result, :gc, {:ok, 1}}, 2_000
 
+      # Fence FIRST, while the batch is still parked: waiting for the reply before sealing would have
+      # let the group flush resolve it, and the test would then only repeat what the buffered-log fence
+      # test above already covers. The lifecycle under test is the parked one, so the seal has to race
+      # it. The fence's own fsync is what makes the parked records durable and counts them in the end
+      # it reports, and the parked producer must still get its reply rather than waiting forever on a
+      # segment that closed underneath it.
       assert {:ok, 2, _bytes} = ReplicationServer.seal(server, @segment, 0)
+      assert_receive {:replicate_result, :gc, {:ok, 1}}, 2_000
       assert read_values(server, @segment) == ["a", "b"]
     end
 
