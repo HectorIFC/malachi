@@ -116,7 +116,7 @@ export MALACHI_GC_THRESHOLD_MB=500
 - Message size limits (10MB max payload)
 - Credit-window flow control (backpressure) on streaming reads
 - Comprehensive audit logging (JSON format, file rotation, multiple output modes)
-- Security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy)
+- Security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy)
 - CORS with origin whitelisting
 - Memory monitoring with automatic GC triggers
 - Atom exhaustion prevention (BEAM atom table monitoring)

@@ -9,8 +9,22 @@ defmodule Malachi.Dashboard.SecurityHeaders do
   - X-Content-Type-Options (MIME sniffing prevention)
   - X-XSS-Protection
   - Referrer-Policy
+  - Permissions-Policy (powerful browser features)
   - CORS (Cross-Origin Resource Sharing)
   """
+
+  # The dashboard's own JavaScript only issues fetch and EventSource calls, so it needs none of these
+  # browser features. Denying every one of them keeps an injected script from reaching the camera, the
+  # credential API or geolocation on the dashboard's origin. Deprecated names (interest-cohort) are left
+  # out on purpose: browsers that dropped them answer with an unrecognized-feature console warning.
+  @permissions_policy Enum.map_join(
+                        ~w(accelerometer autoplay camera display-capture encrypted-media fullscreen
+                           geolocation gyroscope magnetometer microphone midi payment
+                           picture-in-picture publickey-credentials-get screen-wake-lock usb
+                           xr-spatial-tracking),
+                        ", ",
+                        &"#{&1}=()"
+                      )
 
   @doc """
   Adds security headers to an HTTP response string.
@@ -26,16 +40,22 @@ defmodule Malachi.Dashboard.SecurityHeaders do
 
   ## Examples
 
-      iex> response = "HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\n\\r\\n<html>..."
-      iex> SecurityHeaders.add_security_headers(response, "/")
-      "HTTP/1.1 200 OK\\r\\nX-Frame-Options: DENY\\r\\nContent-Type: text/html\\r\\n\\r\\n<html>..."
+      iex> response = "HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\n\\r\\n<html>"
+      iex> with_headers = Malachi.Dashboard.SecurityHeaders.add_security_headers(response, "/")
+      iex> String.contains?(with_headers, "Permissions-Policy: accelerometer=(), autoplay=()")
+      true
+
+  The full response carries every header this module builds; the exact set depends on configuration
+  (the CSP is configurable, HSTS only appears under TLS), which is why the example asserts one line
+  instead of spelling the whole response out.
   """
   def add_security_headers(response, request_path, request_origin \\ nil) do
     base_headers = [
       {"x-content-type-options", "nosniff"},
       {"x-frame-options", "DENY"},
       {"x-xss-protection", "1; mode=block"},
-      {"referrer-policy", "no-referrer"}
+      {"referrer-policy", "no-referrer"},
+      {"permissions-policy", @permissions_policy}
     ]
 
     csp_header = build_csp_header()
@@ -170,7 +190,7 @@ defmodule Malachi.Dashboard.SecurityHeaders do
 
       iex> response = "HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\n\\r\\nBody"
       iex> headers = [{"x-frame-options", "DENY"}]
-      iex> prepend_headers(response, headers)
+      iex> Malachi.Dashboard.SecurityHeaders.prepend_headers(response, headers)
       "HTTP/1.1 200 OK\\r\\nX-Frame-Options: DENY\\r\\nContent-Type: text/html\\r\\n\\r\\nBody"
   """
   def prepend_headers(response, headers) do

@@ -214,22 +214,11 @@ defmodule DashboardSecurityBenchmark do
   end
 
   defp generate_security_headers do
-    # Simulate security header generation
+    # The real code path, not a copy of it: a hand-written list drifts from the module (this one had lost
+    # HSTS, CORS and the configured CSP), and then the benchmark measures something the server never runs.
     response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html></html>"
-    
-    # This would call the actual function, but we simulate for benchmark
-    headers = [
-      {"x-content-type-options", "nosniff"},
-      {"x-frame-options", "DENY"},
-      {"x-xss-protection", "1; mode=block"},
-      {"referrer-policy", "no-referrer"},
-      {"content-security-policy", "default-src 'self'"}
-    ]
-    
-    # Simulate header prepending
-    Enum.reduce(headers, response, fn {key, value}, resp ->
-      "#{key}: #{value}\r\n" <> resp
-    end)
+
+    Malachi.Dashboard.SecurityHeaders.add_security_headers(response, "/")
   end
 
   defp validate_token(token) do
