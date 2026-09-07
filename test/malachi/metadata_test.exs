@@ -49,6 +49,45 @@ defmodule Malachi.MetadataTest do
   end
 
   describe "split_range" do
+    test "refuses to retire a range that still has a write head" do
+      # The obligation the data-plane fence carries, made binding where it is authoritative. A caller
+      # reads which head to fence from a metadata cache, so a stale or raced view makes it fence nothing
+      # and split anyway. That is not a bounded window: the split seals the RANGE and not its segments,
+      # and nothing ever closes an active segment on a sealed range (failover only seals segments whose
+      # primary is dead, retention and healing only touch sealed ones), so every frontend caching it
+      # keeps appending to a range that is already history and a child reads those records ahead of its
+      # own (issue #41). Refusing turns that into an error the operator retries.
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+
+      assert {^state, {:error, :active_segment_exists}} = Metadata.apply(state, {:split_range, root_id})
+
+      # Sealing the head is what makes room to retire the range, which is what the fence does first.
+      {state, :ok} = apply!(state, {:seal_segment, "seg1", 3, 300, 1_700_000_000_000})
+      assert {_state, {:ok, _left, _right}} = Metadata.apply(state, {:split_range, root_id})
+    end
+
+    test "refuses a merge while EITHER parent still has a write head" do
+      # A merged child reads BOTH parents ahead of itself, so an append to either one after the merge
+      # inverts the child's order just as a split's parent does.
+      {state, root_id} = create_topic()
+      {state, {:ok, left_id, right_id}} = apply!(state, {:split_range, root_id})
+      {state, :ok} = apply!(state, {:register_segment, left_id, "left1", [:b1], 0})
+
+      assert {^state, {:error, :active_segment_exists}} =
+               Metadata.apply(state, {:merge_ranges, left_id, right_id})
+
+      # And the same when it is the OTHER parent that is open, so neither is checked by accident.
+      {state, :ok} = apply!(state, {:seal_segment, "left1", 2, 200, 1_700_000_000_000})
+      {state, :ok} = apply!(state, {:register_segment, right_id, "right1", [:b1], 0})
+
+      assert {^state, {:error, :active_segment_exists}} =
+               Metadata.apply(state, {:merge_ranges, left_id, right_id})
+
+      {state, :ok} = apply!(state, {:seal_segment, "right1", 2, 200, 1_700_000_000_000})
+      assert {_state, {:ok, _child}} = Metadata.apply(state, {:merge_ranges, left_id, right_id})
+    end
+
     test "seals the parent and creates two buddy children" do
       {state, root_id} = create_topic()
       {state, {:ok, left_id, right_id}} = apply!(state, {:split_range, root_id})

@@ -440,7 +440,7 @@ defmodule Malachi.BrokerServerTest do
       assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("v", "k")])
       assert Broker.active_roll(:sys.get_state(server).broker, root_id) != :none
 
-      assert {:error, {:fence_failed, :unreachable}} = BrokerServer.split_range(server, root_id)
+      assert {:error, {:fence_failed, ^root_id, :unreachable}} = BrokerServer.split_range(server, root_id)
 
       # And the range is intact: no children, parent still active.
       assert BrokerServer.active_range_ids(server, "events") == [root_id]

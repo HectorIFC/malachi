@@ -243,6 +243,30 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "active_roll/2 (the write head a split must fence)" do
+    test "finds a write head this frontend never opened", %{store: store} do
+      # The lookup on its own, without a split around it. A frontend that has produced nothing holds an
+      # empty `segments` cache, and reading the head from there answered :none, so a split through it
+      # fenced nothing and said it had succeeded (issue #41).
+      {producer, root_id} = broker_with_topic()
+      {producer, {:ok, _placements}} = produce(producer, store, "events", [record("v", "k")])
+      [segment] = segments(producer, root_id)
+
+      # Same control-plane view, empty cache: the shape of a node the operator reached to run a split.
+      bystander = %{producer | segments: %{}, rolling: %{}}
+
+      assert %{range_id: ^root_id, start_offset: 0} = roll = Broker.active_roll(bystander, root_id)
+      assert roll.segment_id == segment.id
+      assert roll.primary == hd(segment.replica_set)
+    end
+
+    test "answers :none for a range with no write head at all", %{store: _store} do
+      # Nothing produced anywhere, so there is genuinely nothing to fence, and a split may proceed.
+      {broker, root_id} = broker_with_topic()
+      assert Broker.active_roll(broker, root_id) == :none
+    end
+  end
+
   describe "split routes records to children (control plane drives data plane)" do
     test "after a split, records route to the correct child range", %{store: store} do
       {broker, root_id} = broker_with_topic()
@@ -265,6 +289,9 @@ defmodule Malachi.BrokerTest do
 
       records = for index <- 0..4, do: record("v#{index}", "k#{index}")
       {broker, {:ok, _placements}} = produce(broker, store, "events", records)
+      # Fence the parent's write head before retiring the range, which is what the real split path does
+      # and what the control plane now requires.
+      broker = seal_active(broker, store, root_id)
       {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
 
       assert broker |> read_all(store, root_id) |> Enum.map(& &1.value) == Enum.map(records, & &1.value)
@@ -318,6 +345,7 @@ defmodule Malachi.BrokerTest do
 
       parent_records = for index <- 0..19, do: record("v#{index}", "k#{index}")
       {broker, {:ok, _placements}} = produce(broker, store, "events", parent_records)
+      broker = seal_active(broker, store, root_id)
       {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
 
       child_records = for index <- 20..39, do: record("v#{index}", "k#{index}")
@@ -353,6 +381,7 @@ defmodule Malachi.BrokerTest do
       # produced before the split: these live in the parent's segments, which leave active_range_ids
       parent_records = for index <- 0..19, do: record("v#{index}", "k#{index}")
       {broker, {:ok, _placements}} = produce(broker, store, "events", parent_records)
+      broker = seal_active(broker, store, root_id)
       {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
 
       child_records = for index <- 20..39, do: record("v#{index}", "k#{index}")
@@ -415,11 +444,13 @@ defmodule Malachi.BrokerTest do
       records = for index <- 0..29, do: record("v#{index}", "k#{index}")
       {broker, {:ok, _placements}} = produce(broker, store, "events", records)
 
-      # The merge itself seals no segment: both parents are still open right up to the fence.
-      {metadata_only, {:ok, _child_id}} = Broker.merge_ranges(broker, left_id, right_id)
+      # The merge is REFUSED while either parent still has a write head, for the same reason a split is:
+      # it would seal the ranges and leave their segments open, and a merged child reads BOTH parents
+      # ahead of itself, so a later append to either one reads ahead of records the child already holds.
+      assert {^broker, {:error, :active_segment_exists}} = Broker.merge_ranges(broker, left_id, right_id)
 
       for parent_id <- [left_id, right_id] do
-        assert Enum.any?(segments(metadata_only, parent_id), &(&1.state == :active))
+        assert Enum.any?(segments(broker, parent_id), &(&1.state == :active))
       end
 
       broker = Enum.reduce([left_id, right_id], broker, &seal_active(&2, store, &1))
@@ -870,10 +901,13 @@ defmodule Malachi.BrokerTest do
 
       assert [%{state: :active}] = segments(broker, root_id)
 
-      # The split on its own leaves the parent's segment open, because its sealed length has to be what
-      # the fence answered rather than a number this frontend derived from its own counter.
-      {unsealed, {:ok, _left, _right}} = Broker.split_range(broker, root_id)
-      assert [%{state: :active, length: nil}] = segments(unsealed, root_id)
+      # The split is REFUSED while the range still has a write head, because a split that proceeded
+      # would seal the RANGE and leave the segment open, and nothing in the system ever closes an
+      # active segment on a sealed range: every frontend caching it would keep appending to a range
+      # that is already history (issue #41). The caller must fence and record the seal first, which is
+      # also where the sealed length has to come from.
+      assert {^broker, {:error, :active_segment_exists}} = Broker.split_range(broker, root_id)
+      assert [%{state: :active, length: nil}] = segments(broker, root_id)
 
       broker = seal_active(broker, store, root_id)
       {broker, {:ok, _left, _right}} = Broker.split_range(broker, root_id)

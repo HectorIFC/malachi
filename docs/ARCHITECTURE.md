@@ -30,8 +30,10 @@ free to reshape ranges without invalidating it.
 This is the departure from partition-and-offset systems like Kafka, where the client-visible partition is
 `hash(key) mod partitions`, so raising the partition count relocates a key and breaks its per-key ordering.
 Here **same-key ordering survives resharding**. The key hashes to a fixed range whose single primary
-serializes appends; a split applies a **seal-first fence** (the parent range is sealed before either child
-accepts a write), and a read of a child chains **cross-epoch**, draining the parent's sealed slice of the
+serializes appends; a split applies a **seal-first fence** in two layers, the parent range sealed in the
+metadata (atomic, inside the split command) and the parent's write head closed in the **data plane** before
+either child accepts a write, so a node that has not yet seen the split is refused rather than writing into
+a range that is already history; and a read of a child chains **cross-epoch**, draining the parent's sealed slice of the
 keyspace oldest-first before the child's own records. So a key stays in one child and its history reads in
 order straight through the split, with no partition count for a client to have frozen into its assumptions.
 

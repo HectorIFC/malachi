@@ -185,11 +185,20 @@ them are covered by the guarantee:
   majority of them agree on; that lower point can sit below a record the dead primary acknowledged
   with a single survivor. Without a majority answering there is no intersection to argue from, so the
   segment is left alone and its range stops accepting writes until one answers again.
-- **The write half of the split gap is closed; the read half is not.** A split fences the parent's
-  segment before either child exists, so a node that has not yet seen the split can no longer get a
-  record INTO the parent: its produce is refused, it seats itself at the fenced edge and retries against
-  the successor. Its READS still go to the parent for up to one metadata refresh, which is correct
-  cross-epoch behavior rather than a gap ([#41](https://github.com/HectorIFC/malachi/issues/41)).
+- **The write half of the split gap is closed; the read half needs no closing.** Before a split (or a
+  merge) the parent's write head is **fenced in the data plane**: its primary seals the segment's log
+  and refuses every later append with `{:error, {:sealed, end_offset}}`, durably, so it refuses again
+  after a restart. A frontend that has not yet seen the split is refused, seats itself at the fenced
+  edge, and retries against the successor. The head is found in the **control plane**, not in the
+  splitting node's own cache, so the fence does not depend on that node having produced to the range and
+  an operator can split from any node ([#41](https://github.com/HectorIFC/malachi/issues/41)).
+
+  What the fence does **not** claim. It closes the segment's **primary**, which is enough because an
+  append is only accepted by the head of the replica set, and once the segment is sealed no failover can
+  promote a new head (failover seals rather than promotes). It does not stop **reads** of the parent,
+  which keep working and are correct cross-epoch behavior rather than a gap. And it can only fence a
+  head the control plane knows about, which is why a split of a range that still shows a write head is
+  **refused** rather than performed unfenced.
 
 ## Where this is going
 

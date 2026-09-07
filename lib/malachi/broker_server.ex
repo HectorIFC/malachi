@@ -51,7 +51,7 @@ defmodule Malachi.BrokerServer do
 
   # Bounds the split/merge fence. Deliberately not reachable from the produce path: see
   # `fence_and_seal/2` for why a network call belongs on one and not the other.
-  @fence_timeout 1_000
+  @default_fence_timeout 1_000
   # Produce call timeout: must exceed every server-side completion path (replication no_quorum ~5s,
   # the async-produce safety timer at 6s), so callers get a real error reply, never a call exit.
   @produce_call_timeout 10_000
@@ -74,6 +74,8 @@ defmodule Malachi.BrokerServer do
       set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
       currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
+    * `:fence_timeout` - ms a split's or a merge's store fence may take before the operation is
+      refused (default 1000). Not on the produce path: see `fence_and_seal/2`.
     * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
       authoritative via that `ra` cluster (mutations go through the log; reads come from a local
       cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
@@ -301,6 +303,7 @@ defmodule Malachi.BrokerServer do
     {min_domains, opts} = Keyword.pop(opts, :min_domains)
     {placement_policy, opts} = Keyword.pop(opts, :placement_policy)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
+    {fence_timeout, opts} = Keyword.pop(opts, :fence_timeout, @default_fence_timeout)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
     {metadata_vnodes, opts} = Keyword.pop(opts, :metadata_vnodes)
@@ -341,6 +344,7 @@ defmodule Malachi.BrokerServer do
       live_brokers: live_brokers,
       broker_attributes: broker_attributes,
       refresh_interval: refresh_interval,
+      fence_timeout: fence_timeout,
       # Re-seeds the local metadata cache from the authoritative ra clusters (fills vnodes not yet ready
       # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. See
       # `reconcile_metadata/1`.
@@ -457,16 +461,18 @@ defmodule Malachi.BrokerServer do
   # Fence the parent's segment BEFORE the metadata split, which is the order the seal rule requires (the
   # length must be what closing the segment answered) and which also closes the write half of the split
   # gap: a node that has not seen the split can no longer get a record into the parent, because the
-  # parent's store is physically fenced before either child exists. Its READS still go to the parent,
-  # which is correct cross-epoch behavior.
+  # parent's store is physically fenced before either child exists. The head to fence comes from the
+  # CONTROL PLANE (`Broker.active_roll/2`), not from this node's cache, so the fence does not depend on
+  # the splitting node having produced to the range: an operator can split from anywhere. Its READS
+  # still go to the parent, which is correct cross-epoch behavior.
   def handle_call({:split_range, range_id}, _from, state) do
     case fence_parent(state, range_id) do
       {:ok, state} ->
         {broker, reply} = Broker.split_range(state.broker, range_id)
         {:reply, reply, %{state | broker: broker}}
 
-      {:error, reason, state} ->
-        {:reply, {:error, {:fence_failed, reason}}, state}
+      {:error, {^range_id, reason}, state} ->
+        {:reply, {:error, {:fence_failed, range_id, reason}}, state}
     end
   end
 
@@ -479,7 +485,7 @@ defmodule Malachi.BrokerServer do
       {broker, reply} = Broker.merge_ranges(state.broker, range_id_a, range_id_b)
       {:reply, reply, %{state | broker: broker}}
     else
-      {:error, reason, state} -> {:reply, {:error, {:fence_failed, reason}}, state}
+      {:error, {range_id, reason}, state} -> {:reply, {:error, {:fence_failed, range_id, reason}}, state}
     end
   end
 
@@ -833,12 +839,22 @@ defmodule Malachi.BrokerServer do
     :exit, _reason -> :unreachable
   end
 
-  # Fences and seals a range's active segment on demand, for a split or a merge retiring it. A range
-  # with no open segment has nothing to fence, which is a success: there is no length to get wrong.
+  # Fences and seals a range's write head on demand, for a split or a merge retiring it. A range with no
+  # head THE CONTROL PLANE KNOWS OF has nothing to fence, which is a success: there is no length to get
+  # wrong. That is a stronger statement than the one this used to make, which was about this frontend's
+  # own cache and so held on the very node where it did not matter (issue #41).
   defp fence_parent(state, range_id) do
     case Broker.active_roll(state.broker, range_id) do
-      :none -> {:ok, state}
-      roll -> fence_and_seal(state, roll)
+      :none ->
+        {:ok, state}
+
+      roll ->
+        # The range travels with the failure. A merge fences TWO parents, and an operator told only
+        # that "the fence failed" cannot tell which one to look at.
+        case fence_and_seal(state, roll) do
+          {:ok, state} -> {:ok, state}
+          {:error, reason, state} -> {:error, {range_id, reason}, state}
+        end
     end
   end
 
@@ -850,7 +866,7 @@ defmodule Malachi.BrokerServer do
   # that serializes every client of this node, retried on every produce with no backoff. It seals from
   # the counter the primary has already corrected instead (`Broker.settle_rolls/1`).
   defp fence_and_seal(state, roll) do
-    case ReplicationServer.seal(roll.primary, roll.segment_id, roll.start_offset, @fence_timeout) do
+    case ReplicationServer.seal(roll.primary, roll.segment_id, roll.start_offset, state.fence_timeout) do
       {:ok, end_offset, byte_size} ->
         case Broker.record_seal(state.broker, roll, end_offset, byte_size, System.system_time(:millisecond)) do
           {broker, :ok} ->

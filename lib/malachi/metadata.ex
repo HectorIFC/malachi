@@ -328,10 +328,10 @@ defmodule Malachi.Metadata do
         {state, error}
 
       {:ok, range} ->
-        if Keyspace.splittable?(range.key_start, range.key_end) do
-          do_split_range(state, range)
-        else
-          {state, {:error, :cannot_split}}
+        cond do
+          active_segment?(state, range_id) -> {state, {:error, :active_segment_exists}}
+          not Keyspace.splittable?(range.key_start, range.key_end) -> {state, {:error, :cannot_split}}
+          true -> do_split_range(state, range)
         end
     end
   end
@@ -339,6 +339,8 @@ defmodule Malachi.Metadata do
   defp do_apply(%__MODULE__{} = state, {:merge_ranges, range_id_a, range_id_b}) do
     with {:ok, range_a} <- fetch_active_range(state, range_id_a),
          {:ok, range_b} <- fetch_active_range(state, range_id_b),
+         :ok <- no_write_head(state, range_id_a),
+         :ok <- no_write_head(state, range_id_b),
          :ok <- check_mergeable(range_a, range_b) do
       do_merge_ranges(state, range_a, range_b)
     else
@@ -466,6 +468,25 @@ defmodule Malachi.Metadata do
   # deterministically (and again on replay), e.g. an older replica seeing a newer
   # command during a rolling upgrade. Keep the replica alive and surface the problem.
   defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
+
+  # Retiring a range requires its write head to be closed FIRST, and this is the only place that
+  # requirement can be made binding.
+  #
+  # The caller fences the head in the data plane and records the seal, which is where the sealed length
+  # has to come from (`Malachi.Broker.split_range/2` says so in its own doc). But the caller reads which
+  # head to fence from a metadata cache, so a stale or raced view makes it fence nothing and split
+  # anyway. What that leaves is not a bounded window: the split seals the RANGE and not its segments,
+  # and nothing else ever closes an active segment on a sealed range, since failover only seals segments
+  # whose primary is dead and retention and healing only touch sealed ones. Every frontend still caching
+  # it keeps appending to a range that is already history, and a child reads those records ahead of its
+  # own (issue #41).
+  #
+  # Refusing turns every such staleness into an error the operator retries, which costs a retry on an
+  # action nothing in the system takes automatically. It is the same rule `register_segment` already
+  # applies to a range that still has a head.
+  defp no_write_head(state, range_id) do
+    if active_segment?(state, range_id), do: {:error, :active_segment_exists}, else: :ok
+  end
 
   defp register_into_range(state, range_id, segment_id, replica_set, start_offset) do
     cond do
