@@ -338,4 +338,118 @@ defmodule Malachi.BrokerServerRaTest do
 
     :ok = BrokerServer.stop(control)
   end
+
+  test "a split fences the parent even when the splitting frontend never wrote to it" do
+    # ISSUE #41. A frontend produces straight into its cached active segment, and the fence a split
+    # performs used to be read out of that same cache (`Broker.active_roll/2`). So a split run on a node
+    # that had never produced to the parent fenced NOTHING and reported success, while the node holding
+    # the segment kept appending to the now-sealed parent.
+    #
+    # That inverts per-key order, because a child reads its ancestors FIRST (`history_sources/2`): a
+    # record written to the parent AFTER the split is served BEFORE a record the child already holds.
+    # And it is not the one-refresh-interval window the issue estimated. The split seals the RANGE and
+    # not its segments, and nothing else ever closes an active segment on a sealed range: failover only
+    # seals segments whose primary is DEAD, retention and healing only touch sealed ones, and
+    # `drop_stale_active_segments/1` matches on the SEGMENT's state. So the parent stays writable, and
+    # the inversion grows for as long as that frontend keeps producing.
+    cluster = :"bs_fence41_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    # A REGISTERED replication server, so both frontends address the same primary by `{name, node()}`
+    # and place segments on a ref that compares equal on both sides.
+    name = :"fence41_repl_#{System.unique_integer([:positive])}"
+    directory = Path.join(System.tmp_dir!(), "malachi_fence41_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    # One shared primary and one shared control plane, two frontends. The refresh interval is long
+    # enough that nothing reconciles on its own, so every convergence below is driven explicitly and the
+    # window the bug lives in is deterministic rather than timed.
+    opts = [
+      brokers: [{name, node()}],
+      metadata_cluster: cluster,
+      group_commit: false,
+      brokers_refresh_interval: 60_000
+    ]
+
+    {:ok, writer} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(writer) end)
+    {:ok, splitter} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(splitter) end)
+
+    {:ok, root} = BrokerServer.create_topic(writer, "events", 4)
+
+    # ONE key throughout, so per-key order is exactly what the child's history has to preserve.
+    key = "k"
+    assert {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("early", key: key)])
+
+    # The asymmetry that IS issue #41: the splitter can see the parent's write head in the CONTROL
+    # PLANE, and holds nothing for it in its own cache, having never produced.
+    reconcile!(splitter)
+    [parent_segment] = Metadata.segments_of_range(BrokerServer.metadata(splitter), root)
+    assert parent_segment.state == :active
+
+    assert :sys.get_state(splitter).broker.segments == %{},
+           "the splitting frontend must not hold the parent's segment: that is the whole scenario"
+
+    assert {:ok, left, right} = BrokerServer.split_range(splitter, root)
+
+    # A write to the CHILD, through the frontend that performed the split.
+    assert {:ok, placements} = BrokerServer.produce(splitter, "events", [Record.new("mid", key: key)])
+    [child] = Map.keys(placements)
+    assert child in [left, right]
+
+    # And the write that used to invert the order. The writer has not reconciled, so it still routes
+    # this key at its cached PARENT segment.
+    late = BrokerServer.produce(writer, "events", [Record.new("late", key: key)])
+
+    assert {:error, {:sealed, 1}} = late,
+           "the parent's primary must refuse the write and seat the frontend at the fenced edge"
+
+    reconcile!(splitter)
+    values = splitter |> drain_history(child) |> Enum.map(& &1.value)
+
+    assert values == ["early", "mid"],
+           "per-key order inverted: a record produced to the sealed parent after the split reads " <>
+             "ahead of the child's own records (issue #41); got #{inspect(values)}"
+
+    # The STORE is fenced, not merely this frontend's bookkeeping: a direct append is refused too, so a
+    # node that never learns about the split still cannot get a record into the parent.
+    assert {:error, {:sealed, 1}} =
+             ReplicationServer.append(
+               {name, node()},
+               parent_segment.id,
+               parent_segment.replica_set,
+               parent_segment.start_offset,
+               [Record.new("direct", key: key)]
+             )
+
+    # And the refusal converges rather than wedging: once the writer sees the split it routes to the
+    # child, and the retried record lands AFTER "mid", which is the order the client wrote them in.
+    reconcile!(writer)
+    assert {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("late", key: key)])
+    reconcile!(splitter)
+
+    assert splitter |> drain_history(child) |> Enum.map(& &1.value) == ["early", "mid", "late"]
+
+    :ok = BrokerServer.stop(writer)
+    :ok = BrokerServer.stop(splitter)
+  end
+
+  # Drives one metadata reconcile and waits for it to land. `:sys.get_state/1` is a system message
+  # queued behind `:reconcile` in the same mailbox, so when it answers the reconcile has been applied:
+  # deterministic where a sleep would be timing-dependent.
+  defp reconcile!(server) do
+    send(server, :reconcile)
+    _ = :sys.get_state(server)
+    :ok
+  end
+
+  defp drain_history(server, range_id, cursor \\ :start, accumulated \\ []) do
+    case BrokerServer.stream_history(server, range_id, cursor, 3) do
+      {:ok, records, :done} -> [records | accumulated] |> Enum.reverse() |> List.flatten()
+      {:ok, records, next} -> drain_history(server, range_id, next, [records | accumulated])
+    end
+  end
 end
