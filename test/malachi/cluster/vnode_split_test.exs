@@ -13,6 +13,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Cluster.VnodeSplit
   alias Malachi.Metadata
 
@@ -33,6 +34,12 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     {:ok, pid} = MembershipServer.start_link(name: name, peers: [], topology: topology, protocol_period: 3_600_000)
     on_exit(fn -> stop_quietly(pid) end)
     name
+  end
+
+  # The split machinery's own tests are about the migration, not about durability, so they publish
+  # straight to the membership. The durable store is covered by RingServerTest and the restart test.
+  defp split_opts(membership, lease \\ fn -> {:ok, 0} end) do
+    [publish: TopologyPublisher.gossip_only(membership), lease: lease]
   end
 
   # ra may need a moment to elect after cluster start; retry the command until it lands.
@@ -61,10 +68,11 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     token = :erlang.phash2("orders", Integer.pow(2, 32))
 
     # a non-leader refuses (only the lease holder splits)
-    assert VnodeSplit.split(membership, dest, token, [node()], fn -> false end) == {:error, :not_leader}
+    assert VnodeSplit.split(membership, dest, token, [node()], split_opts(membership, fn -> :error end)) ==
+             {:error, :not_leader}
 
     # the leader splits end to end
-    assert :ok = VnodeSplit.split(membership, dest, token, [node()], fn -> true end)
+    assert :ok = VnodeSplit.split(membership, dest, token, [node()], split_opts(membership))
 
     # the topology bumped twice: begin_split (v1, intent recorded) then advance (v2, split complete) - and
     # the completed topology has the new vnode with the intent cleared, published back to the membership
@@ -95,7 +103,8 @@ defmodule Malachi.Cluster.VnodeSplitTest do
 
     # the new vnode's ra cluster can't form on an unreachable node -> split_vnode fails; do_split records the
     # intent (v1) then, seeing the failure, clears it (v2). No crash happened, so nothing is left pending.
-    assert {:error, _reason} = VnodeSplit.split(membership, dest, token, [:"nonexistent@127.0.0.1"], fn -> true end)
+    assert {:error, _reason} =
+             VnodeSplit.split(membership, dest, token, [:"nonexistent@127.0.0.1"], split_opts(membership))
 
     topo = MembershipServer.topology(membership)
     assert topo.version == 2
@@ -123,8 +132,8 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     membership = start_membership(RingTopology.begin_split(base, dest, token, [node()]))
 
     # a non-leader does not reconcile; the leader drives the interrupted split *forward* to completion
-    assert VnodeSplit.reconcile(membership, fn -> false end) == {:error, :not_leader}
-    assert :ok = VnodeSplit.reconcile(membership, fn -> true end)
+    assert VnodeSplit.reconcile(membership, split_opts(membership, fn -> :error end)) == {:error, :not_leader}
+    assert :ok = VnodeSplit.reconcile(membership, split_opts(membership))
 
     # the completed topology was published: version advanced (v2), intent cleared, ring grown with the new vnode
     topo = MembershipServer.topology(membership)
@@ -161,7 +170,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     pending = RingTopology.begin_split(base, :"vsplit_unreach_dst_#{unique}", token, [:"nonexistent@127.0.0.1"])
     membership = start_membership(pending)
 
-    assert :ok = VnodeSplit.reconcile(membership, fn -> true end)
+    assert :ok = VnodeSplit.reconcile(membership, split_opts(membership))
 
     # the intent is still pending (v1, unchanged) for a later reconcile; the source is untouched
     topo = MembershipServer.topology(membership)

@@ -246,6 +246,30 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"
     },
+    ring_env_ignored: %{
+      "pt_BR" =>
+        "⚠️ O anel durável (versão %{version}, %{durable} vnodes) vence MALACHI_LOG_VNODES=%{env}; " <>
+          "a env foi ignorada. Veja `mix malachi.ring --show`",
+      "en_US" =>
+        "⚠️ The durable ring (version %{version}, %{durable} vnodes) wins over MALACHI_LOG_VNODES=%{env}; " <>
+          "the environment was ignored. See `mix malachi.ring --show`"
+    },
+    ring_seeded: %{
+      "pt_BR" => "Anel semeado a partir de MALACHI_LOG_VNODES=%{env}: nenhum anel durável existia",
+      "en_US" => "Seeded the ring from MALACHI_LOG_VNODES=%{env}: no durable ring existed"
+    },
+    ring_seed_race_lost: %{
+      "pt_BR" => "Outro nó semeou o anel primeiro (versão %{version}, %{durable} vnodes); adotando o dele",
+      "en_US" => "Another node seeded the ring first (version %{version}, %{durable} vnodes); adopting it"
+    },
+    ring_unreadable: %{
+      "pt_BR" =>
+        "O anel durável não pôde ser lido em %{timeout}ms (%{reason}). Recusando o boot em vez de " <>
+          "servir um anel possivelmente errado; ajuste MALACHI_LOG_RING_BOOT_TIMEOUT_MS ou suba os demais nós",
+      "en_US" =>
+        "The durable ring could not be read within %{timeout}ms (%{reason}). Refusing to boot rather " <>
+          "than serving a possibly wrong ring; raise MALACHI_LOG_RING_BOOT_TIMEOUT_MS or start the other nodes"
+    },
     # Audit log translations
     audit_log_file_enabled: %{
       "pt_BR" => "Saída de auditoria em arquivo habilitada: %{path} (max: %{max_mb}MB)",

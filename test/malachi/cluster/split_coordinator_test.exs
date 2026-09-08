@@ -7,13 +7,23 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.SplitCoordinator
+  alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Cluster.VnodeSplit
 
-  defp start_coordinator(leader?, membership) do
-    {:ok, pid} = SplitCoordinator.start_link(membership: membership, leader?: leader?)
+  defp start_coordinator(lease, membership) do
+    {:ok, pid} =
+      SplitCoordinator.start_link(
+        membership: membership,
+        publish: TopologyPublisher.gossip_only(membership),
+        lease: lease
+      )
+
     on_exit(fn -> stop_quietly(pid) end)
     pid
   end
+
+  defp held(fence \\ 0), do: fn -> {:ok, fence} end
+  defp lost, do: fn -> :error end
 
   # a lone membership server (no gossip ticks); the split reads/publishes its topology
   defp start_membership(topology \\ nil) do
@@ -24,12 +34,12 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
   end
 
   test "refuses to split unless this node holds the lease" do
-    coord = start_coordinator(fn -> false end, start_membership())
+    coord = start_coordinator(lost(), start_membership())
     assert SplitCoordinator.split(coord, :v1, 100, [node()]) == {:error, :not_leader}
   end
 
   test "as the lease holder, delegates to VnodeSplit: no baseline topology yields :no_topology" do
-    coord = start_coordinator(fn -> true end, start_membership())
+    coord = start_coordinator(held(), start_membership())
     assert SplitCoordinator.split(coord, :v1, 100, [node()]) == {:error, :no_topology}
   end
 
@@ -37,18 +47,19 @@ defmodule Malachi.Cluster.SplitCoordinatorTest do
     {:ok, ring} = HashRing.add_vnode(HashRing.new(), :v0, 0)
     membership = start_membership(RingTopology.new(ring, %{v0: [node()]}))
 
-    assert VnodeSplit.reconcile(membership, fn -> true end) == :ok
+    assert VnodeSplit.reconcile(membership, publish: TopologyPublisher.gossip_only(membership), lease: held()) == :ok
     topo = MembershipServer.topology(membership)
     assert topo.version == 0
     assert topo.pending == nil
   end
 
   test "reconcile refuses when this node does not hold the lease" do
-    assert VnodeSplit.reconcile(start_membership(), fn -> false end) == {:error, :not_leader}
+    assert VnodeSplit.reconcile(start_membership(), publish: fn _t, _v, _f -> :ok end, lease: lost()) ==
+             {:error, :not_leader}
   end
 
   test "the coordinator reconciles on start and on cast, staying healthy when nothing is pending" do
-    coord = start_coordinator(fn -> true end, start_membership())
+    coord = start_coordinator(held(), start_membership())
 
     # init already cast a reconcile; another explicit cast is also a no-op with no pending split
     assert SplitCoordinator.reconcile(coord) == :ok
