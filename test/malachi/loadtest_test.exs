@@ -58,6 +58,9 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
       assert r.dropped == 0
       assert r.overloaded == 0
+      # A healthy run is under any configured quota. This is also what keeps a refused produce from
+      # hiding: the generator counts it here rather than folding it into `errors`.
+      assert r.rate_limited == 0
       assert r.reconnects == 0
       assert r.ops > 0
       assert r.records == r.ops * 5

@@ -7,14 +7,56 @@ defmodule Malachi.RateLimiter do
 
   The ETS table stores three types of entries:
 
-  - `{{identifier, action}, {count, last_refill_ms, window_start_ms}}` - Token buckets
+  - `{{identifier, action}, {count, last_refill_ms, window_start_ms}}` - Token buckets (`check_limit/3`)
+  - `{{identifier, action, window_start_ms, shard}, used}` - Sharded window counters
+    (`check_limit_in_caller/3`)
   - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
   ## Actions
 
-  - `:auth` - Authentication attempts (tracked by IP)
-  - `:publish` - Message publishing (tracked by username)
-  - `:subscribe` - Queue subscriptions (tracked by username)
+  - `:auth` - TCP authentication attempts (tracked by IP)
+  - `:dashboard_auth` - Dashboard login attempts (tracked by IP)
+  - `:publish` - Produce requests (tracked by authenticated username)
+  - `:subscribe` - Subscribe requests (tracked by authenticated username)
+
+  All four are **enforced**, per node. `:publish` and `:subscribe` are off by default (limit `0`); an
+  operator opts in by configuring a limit. Enforcement is per node, not a cluster-wide quota, and a
+  produce costs one token per request, not per record.
+
+  ## Two doors, on purpose
+
+  `check_limit/3` is the token bucket above, read and written **through the GenServer**, so the
+  read-modify-write is serialized and the limit is exact. The auth paths use it: they are cold (one check
+  per connection or per login) and they are security controls, so exactness is worth a round-trip.
+
+  `check_limit_in_caller/3` is a different algorithm for a different problem. Produce is the hottest path
+  in the system, and the publish quota is keyed by **user**, so every connection belonging to one client
+  contends for one quota. The obvious implementation (this module's own bucket body, just run in the caller
+  instead of the GenServer) is the wrong answer, because `write_concurrency` buys nothing when every caller
+  writes the SAME key. Measured on an 8-core machine against one hot key, at 64 concurrent processes:
+
+      bucket lookup + insert, in the caller     120k checks/s   <- seven times WORSE than the GenServer
+      bucket through the GenServer              868k checks/s
+      one atomic update_counter, one key        229k checks/s
+      update_counter, sharded per scheduler    23.8M checks/s
+
+  So this door counts a **fixed window sharded per scheduler**: the key carries
+  `:erlang.system_info(:scheduler_id)`, so racing callers land on different ETS keys and the check scales
+  with cores instead of against them. Each shard holds its slice of the quota; a caller whose own shard is
+  exhausted sweeps the others before rejecting, so an unevenly spread load does not reject early.
+
+  End to end (`benchmark/rate_limit_bench.exs`, the whole public function rather than the bare ETS op) this
+  door measures 4.2M checks/s at 64 concurrent processes against the serialized door's 868k, and an
+  unconfigured action, the shipped default, costs 51ns because it never reaches the table at all.
+
+  Every token is still claimed by one atomic `update_counter`, and the shard caps sum to exactly `limit`
+  (the remainder is spread across the low shards, not dropped), so the count itself is exact: measured at
+  200 concurrent callers, a limit of `n` admits exactly `n`.
+
+  What this door gives up is the *shape* of the limit, not its arithmetic. A fixed window does not refill
+  gradually, so a client can spend the tail of one window and the head of the next back to back and burst
+  to 2x the limit across a boundary; the token bucket smooths that. Bursting is acceptable for a
+  throughput quota and not for an auth control, which is why the two doors exist rather than one.
 
   ## Configuration
 
@@ -23,9 +65,9 @@ defmodule Malachi.RateLimiter do
   - `rate_limit_enabled` - Enable/disable rate limiting (default: true)
   - `auth_rate_limit` - Max auth attempts per window (default: 10)
   - `auth_rate_window_ms` - Auth window duration (default: 60000)
-  - `publish_rate_limit` - Max publish per window (default: 1000)
+  - `publish_rate_limit` - Max produce requests per window (default: 0, meaning no limit)
   - `publish_rate_window_ms` - Publish window duration (default: 1000)
-  - `subscribe_rate_limit` - Max subscribe per window (default: 100)
+  - `subscribe_rate_limit` - Max subscribe requests per window (default: 0, meaning no limit)
   - `subscribe_rate_window_ms` - Subscribe window duration (default: 60000)
   - `rate_limit_cleanup_interval_ms` - Cleanup interval (default: 300000)
   """
@@ -67,12 +109,48 @@ defmodule Malachi.RateLimiter do
       #=> {:error, :rate_limit_exceeded, 850}
   """
   def check_limit(identifier, action, config) do
-    if cfg(:rate_limit_enabled, true) do
+    if enabled?() do
       GenServer.call(__MODULE__, {:check_limit, identifier, action, config})
     else
       :ok
     end
   end
+
+  @doc """
+  Like `check_limit/3` in contract, but built for a hot path: a fixed window counted in per-scheduler
+  shards, read and written in the **calling process** so concurrent callers do not serialize on one ETS
+  key or on the limiter process.
+
+  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. It admits slightly over
+  the limit under concurrency and across a window boundary, and never under it. See "Two doors, on
+  purpose" above.
+  """
+  @spec check_limit_in_caller(term(), atom(), %{limit: pos_integer(), window_ms: pos_integer()}) ::
+          :ok | {:error, :rate_limit_exceeded, non_neg_integer()}
+  def check_limit_in_caller(identifier, action, %{limit: limit, window_ms: window_ms}) do
+    if enabled?() do
+      do_check_sharded(identifier, action, limit, window_ms)
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  The configured limit for an opt-in action, or `nil` when that action is not limited.
+
+  `:publish` and `:subscribe` are off unless an operator configures a positive limit and window, so a
+  limit of `0` (the default) means "no limit" and reads back as `nil`. This is the single reader of
+  those config keys: the enforcement path and the dashboard both go through it so they cannot diverge.
+
+  ## Examples
+
+      action_config(:publish)
+      #=> nil                              # unconfigured, the default
+      #=> %{limit: 1000, window_ms: 1000}  # MALACHI_PUBLISH_RATE_LIMIT=1000
+  """
+  @spec action_config(:publish | :subscribe) :: %{limit: pos_integer(), window_ms: pos_integer()} | nil
+  def action_config(:publish), do: build_action_config(:publish_rate_limit, :publish_rate_window_ms)
+  def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, :subscribe_rate_window_ms)
 
   @doc """
   Reset bucket for specific identifier and action.
@@ -127,8 +205,7 @@ defmodule Malachi.RateLimiter do
 
   @impl true
   def handle_call({:check_limit, identifier, action, config}, _from, state) do
-    result = do_check_limit(identifier, action, config)
-    {:reply, result, state}
+    {:reply, do_check_limit(identifier, action, config), state}
   end
 
   @impl true
@@ -182,6 +259,79 @@ defmodule Malachi.RateLimiter do
   # PRIVATE FUNCTIONS
   # ============================================================
 
+  # A limit is in force only when both the limit and its window are positive integers; anything else
+  # (0, a negative, a non-integer from a malformed env var) reads as "not limited".
+  defp build_action_config(limit_key, window_key) do
+    limit = cfg(limit_key, 0)
+    window_ms = cfg(window_key, 0)
+
+    if positive_integer?(limit) and positive_integer?(window_ms) do
+      %{limit: limit, window_ms: window_ms}
+    end
+  end
+
+  defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  # A fixed window sharded per scheduler. The window is identified by its START in wall-clock ms, derived
+  # from the clock rather than from stored state, so a new window needs no reset: its counters simply live
+  # under a new key, and the periodic cleanup reaps the old ones by age.
+  #
+  # The fast path is a single atomic `update_counter` on this scheduler's own shard, which is why this
+  # scales with cores.
+  defp do_check_sharded(identifier, action, limit, window_ms) do
+    shards = shard_count()
+    now = System.system_time(:millisecond)
+    elapsed_in_window = rem(now, window_ms)
+    window_start = now - elapsed_in_window
+    shard = rem(:erlang.system_info(:scheduler_id), shards)
+
+    if take_token(identifier, action, window_start, shard, shard_cap(limit, shards, shard)) do
+      :ok
+    else
+      steal_token_or_block(identifier, action, window_start, shard, shards, limit, window_ms - elapsed_in_window)
+    end
+  end
+
+  # How much of the quota one shard holds. The remainder is spread over the low shards rather than
+  # dropped, so the caps sum to EXACTLY `limit`: rounding down would make the sharded window reject
+  # before the configured limit was reached, which is the one direction this path must never err in.
+  # It also means a limit smaller than the scheduler count leaves some shards at zero, which is correct
+  # (they hold none of it) and costs only a sweep, on a limit too small for throughput to matter.
+  defp shard_cap(limit, shards, shard) do
+    div(limit, shards) + if(shard < rem(limit, shards), do: 1, else: 0)
+  end
+
+  # Claims one token from a shard's window counter: true when there was room. The counter pins at
+  # `cap + 1` rather than at `cap`, so "used exactly the whole shard" (`cap`) stays distinguishable from
+  # "asked once too often" (`cap + 1`) while a rejected caller retrying cannot run the counter away.
+  # A shard holding none of the quota (`cap == 0`) always answers false, and the sweep finds the rest.
+  defp take_token(identifier, action, window_start, shard, cap) do
+    key = {identifier, action, window_start, shard}
+    :ets.update_counter(@table, key, {2, 1, cap, cap + 1}, {key, 0}) <= cap
+  end
+
+  # This scheduler's shard is empty, but the quota is spread across all of them and the load need not be:
+  # sweep the siblings before rejecting, so an uneven spread does not reject while quota is still unused.
+  # Only reached once a shard is exhausted, so the cost sits on the rejection path, not the hot one.
+  defp steal_token_or_block(identifier, action, window_start, shard, shards, limit, retry_after_ms) do
+    stolen? =
+      Enum.any?(0..(shards - 1), fn other ->
+        other != shard and take_token(identifier, action, window_start, other, shard_cap(limit, shards, other))
+      end)
+
+    if stolen? do
+      :ok
+    else
+      increment_blocked_counter(identifier, action)
+      # Time left in the current window: the whole quota comes back when it rolls over.
+      {:error, :rate_limit_exceeded, retry_after_ms}
+    end
+  end
+
+  # One shard per scheduler: the point is that concurrent callers write DIFFERENT keys, and the scheduler
+  # id is the cheapest identifier that already tracks how much concurrency there actually is.
+  defp shard_count, do: :erlang.system_info(:schedulers_online)
+
   defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) do
     now = System.monotonic_time(:millisecond)
     key = {identifier, action}
@@ -233,12 +383,25 @@ defmodule Malachi.RateLimiter do
     now = System.monotonic_time(:millisecond)
     # 1 hour
     bucket_ttl = 3_600_000
+    # A sharded window counter is dead the moment its window rolls over. Its key carries the window's
+    # start in wall-clock ms, so it is reaped on the same TTL as a token bucket, without this fold having
+    # to know how wide each action's window was.
+    stale_window_before = System.system_time(:millisecond) - bucket_ttl
 
     expired_count =
       :ets.foldl(
         fn
           {{_identifier, _action} = key, {_count, last_refill, _window_start}}, acc ->
             if now - last_refill > bucket_ttl do
+              :ets.delete(@table, key)
+              acc + 1
+            else
+              acc
+            end
+
+          # Sharded window counters: the key carries its window start, so staleness is readable directly.
+          {{_identifier, _action, window_start, _shard} = key, _used}, acc when is_integer(window_start) ->
+            if window_start < stale_window_before do
               :ets.delete(@table, key)
               acc + 1
             else
@@ -262,6 +425,8 @@ defmodule Malachi.RateLimiter do
     interval = cfg(:rate_limit_cleanup_interval_ms, 300_000)
     Process.send_after(self(), :cleanup, interval)
   end
+
+  defp enabled?, do: cfg(:rate_limit_enabled, true)
 
   defp cfg(key, default) do
     Application.get_env(:malachi, key, default)

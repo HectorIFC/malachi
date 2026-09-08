@@ -942,6 +942,11 @@ defmodule Malachi.Dashboard do
     end
   end
 
+  # The enforced limit for an opt-in action, or nulls when it is not limited.
+  defp action_config_json(action) do
+    RateLimiter.action_config(action) || %{limit: nil, window_ms: nil}
+  end
+
   defp serve_rate_limits(socket) do
     rate_limits = %{
       enabled: Application.get_env(:malachi, :rate_limit_enabled, true),
@@ -957,14 +962,10 @@ defmodule Malachi.Dashboard do
           limit: Application.get_env(:malachi, :auth_rate_limit, 10),
           window_ms: Application.get_env(:malachi, :auth_rate_window_ms, 60_000)
         },
-        publish: %{
-          limit: Application.get_env(:malachi, :publish_rate_limit, 1_000),
-          window_ms: Application.get_env(:malachi, :publish_rate_window_ms, 1_000)
-        },
-        subscribe: %{
-          limit: Application.get_env(:malachi, :subscribe_rate_limit, 100),
-          window_ms: Application.get_env(:malachi, :subscribe_rate_window_ms, 60_000)
-        }
+        # Read through the limiter so the dashboard cannot disagree with what is actually enforced;
+        # an unconfigured action reports a null limit rather than a default nobody applies.
+        publish: action_config_json(:publish),
+        subscribe: action_config_json(:subscribe)
       }
     }
 

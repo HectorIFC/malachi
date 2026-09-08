@@ -25,8 +25,9 @@ DUR="${DUR:-4}"
 WARM="${WARM:-1}"
 
 # Extract "rec/s ops/s p50 p99 err drop over recon" from a --json report line on stdin. The backpressure
-# fields (dropped/overloaded/reconnects) are surfaced alongside throughput so they can never hide a run.
-READ_JSON='let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const line=s.split("\n").find(l=>l.trim().startsWith("{"));if(!line){process.stdout.write("       (no json)");return}const d=JSON.parse(line);const l=d.latency_ms;process.stdout.write(`${String(d.records_per_s).padStart(8)} rec/s ${String(d.ops_per_s).padStart(6)} ops/s  p50=${String(l.p50).padStart(6)} p99=${String(l.p99).padStart(6)}  err=${d.errors} drop=${d.dropped} over=${d.overloaded} recon=${d.reconnects}`)})'
+# fields (dropped/overloaded/rate_limited/reconnects) are surfaced alongside throughput so they can never
+# hide a run.
+READ_JSON='let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const line=s.split("\n").find(l=>l.trim().startsWith("{"));if(!line){process.stdout.write("       (no json)");return}const d=JSON.parse(line);const l=d.latency_ms;process.stdout.write(`${String(d.records_per_s).padStart(8)} rec/s ${String(d.ops_per_s).padStart(6)} ops/s  p50=${String(l.p50).padStart(6)} p99=${String(l.p99).padStart(6)}  err=${d.errors} drop=${d.dropped} over=${d.overloaded} rl=${d.rate_limited} recon=${d.reconnects}`)})'
 
 matrix() { # label SRV_CPUSET LT_CPUSET
   local label="$1"
