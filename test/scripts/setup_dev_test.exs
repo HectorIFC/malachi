@@ -84,6 +84,30 @@ defmodule SetupDevTest do
       refute File.exists?(Path.join(ctx.dir, ".lefthook-installed"))
     end
 
+    test "replaces a tampered cached binary instead of running it", ctx do
+      # The cached-binary fast path used to accept whatever `.lefthook/bin/lefthook` reported as its
+      # version, which meant EXECUTING an unverified binary to ask. Caught by review on PR #132. The
+      # fixture writes a marker on any invocation, so the assertion is that it never ran at all.
+      write_checksums!(ctx, ctx.raw, ctx.gz)
+      stub_curl!(ctx, :serve)
+
+      bin = Path.join(ctx.dir, ".lefthook/bin/lefthook")
+      File.mkdir_p!(Path.dirname(bin))
+
+      File.write!(bin, """
+      #!/bin/sh
+      : > tampered-was-executed
+      echo "#{@version}"
+      """)
+
+      File.chmod!(bin, 0o755)
+
+      assert {output, 0} = run(ctx)
+      assert output =~ "does not match the pinned release"
+      refute File.exists?(Path.join(ctx.dir, "tampered-was-executed"))
+      assert File.read!(bin) == fake_lefthook()
+    end
+
     test "aborts when the checksum table has no line for the asset", ctx do
       File.write!(checksums_path(ctx), "#{sha256(ctx.gz)}  some_unrelated_artifact.gz\n")
       stub_curl!(ctx, :serve)

@@ -6,15 +6,28 @@
 # people not to do it only works if somebody reads the comment, so CI checks instead.
 #
 # Two shapes are rejected:
-#   1. a download whose output is piped into sh/bash/zsh/ksh/dash/ash, with or without sudo or env
+#   1. a download whose output is piped into sh/bash/zsh/ksh/dash/ash, however it is spelled: with or
+#      without sudo or env, and with or without a leading path (`bash`, `/bin/bash`, `/usr/bin/env sh`)
 #   2. process substitution feeding the same interpreters
 #
 # Usage: scripts/check-no-pipe-to-shell.sh [file ...]
 # With no arguments it scans this repository's shell entrypoints, Makefile and Dockerfile.
 set -euo pipefail
 
-PIPED='(curl|wget)[^|]*\|[[:space:]]*(sudo([[:space:]]+-[A-Za-z]+)*[[:space:]]+)?(env[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(ba|z|k|da|a)?sh([[:space:]]|$)'
-SUBSTITUTED='(ba|z|k|da|a)?sh[[:space:]]+<\([[:space:]]*(curl|wget)'
+# Built from named parts because the whole expression is unreadable in one line, and an unreadable guard
+# is one nobody notices a hole in. PATH_PREFIX is what made `curl ... | /bin/bash` slip through the first
+# version: a command can be written with or without a leading path.
+PATH_PREFIX='([A-Za-z0-9_.~/-]*/)?'
+SUDO="(${PATH_PREFIX}sudo([[:space:]]+-[A-Za-z]+)*[[:space:]]+)?"
+ENV="(${PATH_PREFIX}env([[:space:]]+-[A-Za-z]+)*[[:space:]]+)?"
+ASSIGNMENTS='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+INTERPRETER="${PATH_PREFIX}"'(ba|z|k|da|a)?sh([[:space:]]|$)'
+
+PIPED='(curl|wget)[^|]*\|[[:space:]]*'"${SUDO}${ENV}${ASSIGNMENTS}${INTERPRETER}"
+# Known limit, stated rather than papered over: grep is line-based, so a pipeline split across lines with a
+# trailing backslash is not detected. Joining continuations first would cost the line numbers that make this
+# report actionable, and a reintroduction by tidy-up arrives on one line, not folded over two.
+SUBSTITUTED="${PATH_PREFIX}"'(ba|z|k|da|a)?sh[[:space:]]+<\([[:space:]]*(curl|wget)'
 
 die() {
   echo "❌ $*" >&2

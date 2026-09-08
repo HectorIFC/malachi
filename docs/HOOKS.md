@@ -96,8 +96,9 @@ Re-run the setup script:
 ./scripts/setup-dev.sh
 ```
 
-It is idempotent: with the pinned version already in `.lefthook/bin/`, it re-installs the hooks without
-downloading anything.
+It is idempotent: when `.lefthook/bin/lefthook` already hashes to the pinned release, it re-installs the
+hooks without downloading anything. The cached binary is checked by hash rather than by asking it for its
+version, because asking would mean running it.
 
 ### Checksum mismatch during setup
 The download did not match the pinned release, and nothing was installed. Retry once in case the transfer was

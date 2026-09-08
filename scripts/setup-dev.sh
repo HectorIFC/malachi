@@ -97,13 +97,26 @@ verify_sha() {
 }
 
 ensure_lefthook() {
-  if [ -x "$BIN" ] && [ "$("$BIN" version 2>/dev/null | head -1)" = "$LEFTHOOK_VERSION" ]; then
-    echo "✅ Lefthook $LEFTHOOK_VERSION already installed at $BIN"
-    return
+  local asset url expected
+  asset="$(asset_for_platform)"
+  expected="$(expected_sha "$asset")"
+
+  # The already-installed check hashes the cached binary instead of asking it for its version. Asking
+  # means EXECUTING it, and running an unverified binary is the one thing this script exists to avoid;
+  # a tampered cache that prints the expected version would have been trusted. The hash answers the
+  # version question anyway, because only the pinned asset has this hash.
+  if [ -x "$BIN" ]; then
+    local actual
+    actual="$(sha256_of "$BIN")"
+
+    if [ "$actual" = "$expected" ]; then
+      echo "✅ Lefthook $LEFTHOOK_VERSION already installed at $BIN"
+      return
+    fi
+
+    echo "⚠️  $BIN does not match the pinned release, replacing it."
   fi
 
-  local asset url
-  asset="$(asset_for_platform)"
   url="https://github.com/evilmartians/lefthook/releases/download/v${LEFTHOOK_VERSION}/${asset}.gz"
 
   WORK="$(mktemp -d)"
