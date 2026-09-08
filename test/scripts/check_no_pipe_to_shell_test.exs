@@ -21,7 +21,7 @@ defmodule CheckNoPipeToShellTest do
 
       assert {output, status} = run([file])
       assert status == 1
-      assert output =~ "piped into a shell interpreter"
+      assert output =~ "reaches a shell interpreter"
       assert output =~ Path.basename(file)
     end
 
@@ -59,8 +59,44 @@ defmodule CheckNoPipeToShellTest do
       assert {_output, 1} = run([file])
     end
 
-    test "process substitution feeding the interpreter", ctx do
-      file = fixture(ctx, "bash <(curl -sL https://example.com/install)")
+    test "process substitution feeding the interpreter, attached or through stdin", ctx do
+      # `< <(...)` was the second half of the PR #132 review follow-up: the pattern required the
+      # substitution to sit directly against the interpreter.
+      attached = fixture(ctx, "bash <(curl -sL https://example.com/install)")
+      redirected = fixture(ctx, "bash < <(curl -sL https://example.com/install)")
+
+      assert {_output, 1} = run([attached])
+      assert {_output, 1} = run([redirected])
+    end
+
+    test "env with the bare -- terminator", ctx do
+      file = fixture(ctx, "curl -fsSL https://example.com/i | env -- bash")
+
+      assert {_output, 1} = run([file])
+    end
+
+    test "the download sourced into the current shell", ctx do
+      with_source = fixture(ctx, "source <(curl -sL https://example.com/i)")
+      with_dot = fixture(ctx, ". <(curl -sL https://example.com/i)")
+
+      assert {_output, 1} = run([with_source])
+      assert {_output, 1} = run([with_dot])
+    end
+
+    test "the download taken as a command substitution argument", ctx do
+      # `sh -c "$(curl ...)"` and `eval "$(curl ...)"` are the two spellings that show up in real install
+      # instructions, and neither is a pipe.
+      evaled = fixture(ctx, ~S|eval "$(curl -sL https://example.com/i)"|)
+      dash_c = fixture(ctx, ~S|bash -c "$(curl -fsSL https://example.com/i)"|)
+      backticked = fixture(ctx, "eval `curl -sL https://example.com/i`")
+
+      assert {_output, 1} = run([evaled])
+      assert {_output, 1} = run([dash_c])
+      assert {_output, 1} = run([backticked])
+    end
+
+    test "an intermediate stage in the pipeline", ctx do
+      file = fixture(ctx, "curl -sL https://example.com/i | tac | bash")
 
       assert {_output, 1} = run([file])
     end
@@ -75,10 +111,13 @@ defmodule CheckNoPipeToShellTest do
         curl -fsSL "$url" -o "$dest" || die "download failed: $url"
         curl -s https://example.com/x | /usr/local/bin/fish
         curl -s https://example.com/x | tee /tmp/notes.sh
+        sh script.sh; echo "$(curl -s https://example.com/x)"
+        version="$(curl -s https://example.com/v)"
+        diff <(curl -s https://example.com/a) <(curl -s https://example.com/b)
         """)
 
       assert {output, 0} = run([file])
-      assert output =~ "no download is piped"
+      assert output =~ "no download reaches"
     end
 
     test "the repository's own scripts, Makefile and Dockerfile" do
