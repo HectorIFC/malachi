@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # No later step does authenticated git, and this job then runs repo code (deps + the benchmark),
         # so do not leave the GitHub token in the local git config.
         with:
