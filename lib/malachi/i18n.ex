@@ -238,6 +238,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Cerca do segmento %{segment_id} falhou: %{reason}; o segmento pai segue aberto",
       "en_US" => "⚠️ Fence for segment %{segment_id} failed: %{reason}; the parent stays open"
     },
+    seal_record_failed: %{
+      "pt_BR" =>
+        "❌ Segmento %{segment_id} foi cercado mas o selo no control plane falhou: %{reason}; o range " <>
+          "não aceita escrita até um passe de heal reconciliar",
+      "en_US" =>
+        "❌ Segment %{segment_id} was fenced but recording its seal failed: %{reason}; the range takes " <>
+          "no write until a heal pass reconciles it"
+    },
     group_flush_failed: %{
       "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
       "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"

@@ -101,6 +101,29 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records one segment whose store was fenced while recording its seal in the control plane failed, so
+  it is closed to writes while the metadata still calls it active and its range accepts nothing.
+
+  Counted separately from `record_fences_reconciled/1` because it is the RATIO that carries the
+  meaning: a detection that a later pass reconciles is a split that recovered, and a detection nothing
+  reconciles is a range that is stuck. One counter could not tell those apart.
+  """
+  def record_orphaned_fence do
+    :ets.update_counter(@metrics_table, :orphaned_fences, {2, 1}, {:orphaned_fences, 0})
+    :ok
+  end
+
+  @doc """
+  Records that a heal pass finished the seal for `count` segments whose store was already fenced,
+  which is what lets their ranges take writes again. See `record_orphaned_fence/0` for why both halves
+  are counted.
+  """
+  def record_fences_reconciled(count) do
+    :ets.update_counter(@metrics_table, :fences_reconciled, {2, count}, {:fences_reconciled, 0})
+    :ok
+  end
+
+  @doc """
   Increment failed authentication attempt counter.
   """
   def increment_failed_auth_attempt do
@@ -271,7 +294,9 @@ defmodule Malachi.Metrics do
         integrity_bad_index: get_counter({:integrity_failure, :bad_index}),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
         scrub_segments_repaired: get_counter(:scrub_segments_repaired),
-        scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable)
+        scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),
+        orphaned_fences: get_counter(:orphaned_fences),
+        fences_reconciled: get_counter(:fences_reconciled)
       },
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()

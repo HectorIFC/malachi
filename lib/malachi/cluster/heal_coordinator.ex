@@ -45,7 +45,25 @@ defmodule Malachi.Cluster.HealCoordinator do
     * `:fence` - the same shape, how a replica is CLOSED once a majority has answered (default
       `Malachi.Cluster.ReplicationServer.seal/4`). Separate from `:probe` so a test can watch a pass
       measure without fencing, which is the property that must hold below a majority;
-    * `:probe_timeout` - ms for both defaults (default 1000).
+    * `:seal_state` - `((replica, [{segment_id, base_offset}]) -> %{segment_id => {end_offset, byte_size}})`,
+      which of a replica's segments are ALREADY fenced (default
+      `Malachi.Cluster.ReplicationServer.fenced_segments/3`, answering `%{}` on any error). See the
+      orphaned-fence pass below;
+    * `:probe_timeout` - ms for all three defaults (default 1000).
+
+  ## The orphaned-fence pass
+
+  Alongside failover, each pass reconciles the state where a segment's store is FENCED while the
+  control plane still calls it active, which stops its range from taking any write and which nothing
+  else converges (`Malachi.Cluster.OrphanedFence` documents how it arises and why it is terminal).
+  `OrphanedFence.candidates/2` names the segments, `:seal_state` asks each primary which of them are
+  fenced, and `OrphanedFence.plan/3` turns the answers into seal commands applied like every other.
+
+  Three seams rather than two, because this one differs from `:probe` on both axes that matter. It is
+  asked about EVERY active segment on every pass rather than a handful of failover candidates, so it is
+  batched per primary and its default answers from a marker check rather than opening and flushing each
+  log. And like `:probe` it must never fence: this pass visits the whole workload, so a probe that
+  fenced here would be the `replication_factor: 2` wedge described below, multiplied by every range.
   """
 
   use GenServer
@@ -53,8 +71,10 @@ defmodule Malachi.Cluster.HealCoordinator do
   require Logger
 
   alias Malachi.Cluster.Failover
+  alias Malachi.Cluster.OrphanedFence
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SelfHealing
+  alias Malachi.Telemetry
 
   @default_interval 5_000
 
@@ -88,7 +108,10 @@ defmodule Malachi.Cluster.HealCoordinator do
       # the replica writable, `:fence` closes it. Injectable separately so a test can watch a pass
       # measure without fencing, which is exactly the case that must hold below a majority.
       probe: Keyword.get(opts, :probe, default_probe(Keyword.get(opts, :probe_timeout, 1_000))),
-      fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000)))
+      fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000))),
+      # The third seam. Read-only like `:probe`, batched per primary unlike either, and asked about
+      # every active segment rather than a failover candidate. See the moduledoc.
+      seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000)))
     }
 
     schedule(state)
@@ -111,12 +134,17 @@ defmodule Malachi.Cluster.HealCoordinator do
     live = state.live_brokers.()
     metadata = state.metadata_source.()
 
+    now_ms = System.system_time(:millisecond)
+
     heal_opts = put_spread(state.heal_opts, state.spread.())
     healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
-    seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live), System.system_time(:millisecond))
+    seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live), now_ms)
+    orphans = OrphanedFence.plan(metadata, probe_fences(state, metadata, live), now_ms)
 
-    applied = healed.applied ++ seals
+    applied = healed.applied ++ seals ++ orphans
     Enum.each(applied, state.apply_command)
+
+    report_orphans(orphans, state)
 
     # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
     # discard the result, making persistent failures invisible until something else broke.
@@ -130,6 +158,57 @@ defmodule Malachi.Cluster.HealCoordinator do
   # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).
   defp put_spread(opts, nil), do: opts
   defp put_spread(opts, spread), do: Keyword.put(opts, :spread, spread)
+
+  # Asks each live primary which of its active segments are already fenced. The impure half of the
+  # orphaned-fence decision, and the mirror of `probe_candidates/3` for failover: one batched call per
+  # primary, and `state.fence` is deliberately not reachable from here.
+  defp probe_fences(state, metadata, live) do
+    metadata
+    |> OrphanedFence.candidates(live)
+    |> Enum.reduce(%{}, fn {primary, segments}, acc ->
+      Map.merge(acc, state.seal_state.(primary, segments))
+    end)
+  end
+
+  # Loud on both halves: the seal that never landed is reported where it failed
+  # (`Malachi.BrokerServer.fence_and_seal/2`), and this is the other end of that pair, so an operator
+  # can tell a divergence that healed from a range that is still refusing writes.
+  #
+  # Counted from what LANDED, re-read from the control plane, not from what was planned. A seal applied
+  # here can fail on the very timeout that created the divergence, and counting a planned seal as a
+  # reconciled one would put `fence_reconciled` above `orphaned_fence` while the range was still
+  # refusing every write, inverting the one signal this pair exists to give. The extra read costs a
+  # round trip only on the passes that found something, which is the rare case.
+  defp report_orphans([], _state), do: :ok
+
+  defp report_orphans(orphans, state) do
+    metadata = state.metadata_source.()
+    {landed, pending} = Enum.split_with(orphans, &sealed_now?(metadata, &1))
+
+    if landed != [] do
+      Telemetry.fence_reconciled(length(landed))
+
+      Logger.warning(
+        "reconciled #{length(landed)} segment(s) whose store was fenced while the control plane still " <>
+          "called them active: #{inspect(Enum.map(landed, &elem(&1, 1)))}. Their ranges were refusing " <>
+          "every write until now, so a fence's seal failing to land is worth investigating upstream"
+      )
+    end
+
+    # Retried next pass (level-triggered), but silence here is what let the original divergence go
+    # unnoticed, so a seal this pass could not land says so.
+    if pending != [] do
+      Logger.error(
+        "could not record the seal for #{length(pending)} fenced segment(s): " <>
+          "#{inspect(Enum.map(pending, &elem(&1, 1)))}. Their ranges take no write until a later pass " <>
+          "succeeds, so the control plane is the thing to look at"
+      )
+    end
+  end
+
+  defp sealed_now?(metadata, {:seal_segment, segment_id, _length, _bytes, _at}) do
+    match?(%{state: :sealed}, Map.get(metadata.segments, segment_id))
+  end
 
   # Asks every live replica of every failover candidate what it holds. The impure half of the
   # failover decision: `Failover` stays a pure function of these answers.
@@ -201,6 +280,18 @@ defmodule Malachi.Cluster.HealCoordinator do
   # move afterwards: the seal point becomes a consequence of closing the segment rather than a number
   # racing it, which is what the `Malachi.Cluster.Failover` moduledoc claims.
   defp default_fence(timeout), do: answer_fun(&ReplicationServer.seal/4, timeout)
+
+  # Read-only too, and batched: one call per primary, whatever the number of segments. `%{}` on any
+  # error (including an unreachable replica) is the same rule the other two defaults follow, and it is
+  # what a segment nothing could be learned about deserves: no answer means no seal.
+  defp default_seal_state(timeout) do
+    fn replica, segments ->
+      case ReplicationServer.fenced_segments(replica, segments, timeout) do
+        {:ok, fenced} -> fenced
+        {:error, _reason} -> %{}
+      end
+    end
+  end
 
   # Both calls answer `{:ok, end_offset, byte_size}` or an error, and both catch an unreachable replica
   # themselves, so a silent one costs the pass a timeout rather than a crash.
