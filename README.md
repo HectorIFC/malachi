@@ -860,9 +860,13 @@ After cloning the repository, run the setup script to install git hooks:
 ```
 
 This will:
-- Install [Lefthook](https://github.com/evilmartians/lefthook) (git hooks manager)
+- Download a pinned [Lefthook](https://github.com/evilmartians/lefthook) release into `.lefthook/bin/`
+  (gitignored) and verify its SHA-256 before running it, with no `sudo` and no package manager
 - Configure a pre-commit hook that runs `mix format`
 - Ensure all developers have consistent git hooks
+
+Prefer to manage Lefthook yourself? Skip the script and run `lefthook install` from the repository root. See
+[docs/HOOKS.md](docs/HOOKS.md) for how the install is verified and how to bump the pinned version.
 
 The pre-commit hook runs `mix format` and re-stages any `.ex`/`.exs` files it reformats. To skip: `git commit --no-verify`
 

@@ -807,8 +807,12 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     test "a dead server answers :unreachable instead of exiting the caller" do
       server = start_broker()
-      pid = Process.whereis(server)
-      GenServer.stop(pid)
+
+      # Taken out of the supervision tree rather than merely stopped. The child is `:permanent`, so a
+      # plain `GenServer.stop/1` races the test supervisor, which restarts it under the SAME registered
+      # name; the seal below then lands on a fresh empty server and is answered `{:ok, 0, 0}`. The call
+      # still goes by name, which is the real scenario being pinned: a stale `{name, node}` ref.
+      stop_supervised!(server)
 
       assert {:error, :unreachable} = ReplicationServer.seal(server, @segment, 0, 100)
     end
