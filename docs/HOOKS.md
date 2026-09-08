@@ -11,9 +11,41 @@ Run the setup script after cloning the repository:
 ```
 
 This will:
-1. Install Lefthook (if not already installed)
+1. Download the pinned Lefthook release into `.lefthook/bin/` (gitignored) and verify its SHA-256
 2. Install git hooks from `lefthook.yml`
 3. Configure the pre-commit hook
+
+No `sudo`, no package manager, and nothing written outside the working copy.
+
+### How the install is verified
+
+The script downloads a **pinned** release binary from GitHub and checks its SHA-256 against
+`scripts/lefthook.checksums`, a byte-for-byte copy of the checksum file published with that release, before
+it unpacks or runs anything. A mismatch, a missing checksum line, or a machine without `sha256sum`/`shasum`
+all abort the setup rather than install something unverified.
+
+It used to pipe a remote setup script straight into `sudo bash`, which handed anyone controlling that URL
+(or holding a TLS-stripping network position) root on a contributor's laptop. That is
+[issue #69](https://github.com/HectorIFC/malachi/issues/69). The safe form is longer than the unsafe one, so
+CI runs `scripts/check-no-pipe-to-shell.sh` to keep it from being tidied back.
+
+### Bumping the pinned version
+
+Change `LEFTHOOK_VERSION` at the top of `scripts/setup-dev.sh`, then replace the checksum table wholesale:
+
+```bash
+curl -fsSL https://github.com/evilmartians/lefthook/releases/download/v<version>/lefthook_checksums.txt \
+  -o scripts/lefthook.checksums
+```
+
+The vendored copy deliberately drops the `.txt` extension: `.gitignore` ignores `*.txt` repo-wide, so a file
+named `lefthook_checksums.txt` would be silently untracked.
+
+### Prefer your own Lefthook?
+
+The script does not consult a Lefthook on `PATH`: pinning a version and then running whatever happens to be
+installed would be decorative pinning. If you manage Lefthook yourself (Homebrew, `go install`, a distro
+package), skip the script and run `lefthook install` from the repository root instead.
 
 ## Hooks Configuration
 
@@ -63,6 +95,15 @@ Re-run the setup script:
 ```bash
 ./scripts/setup-dev.sh
 ```
+
+It is idempotent: when `.lefthook/bin/lefthook` already hashes to the pinned release, it re-installs the
+hooks without downloading anything. The cached binary is checked by hash rather than by asking it for its
+version, because asking would mean running it.
+
+### Checksum mismatch during setup
+The download did not match the pinned release, and nothing was installed. Retry once in case the transfer was
+truncated; if it persists, do not work around it. Either the pinned version and `scripts/lefthook.checksums`
+disagree (someone bumped one without the other) or the artifact is not what upstream published.
 
 ### Hooks not running
 Reinstall hooks:

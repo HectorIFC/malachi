@@ -207,13 +207,25 @@ jobs:
         with:
           sarif_file: 'trivy-docker-results.sarif'
 
+  shell-hygiene:
+    name: Shell Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap and specific on purpose: it asks one question, "does any entrypoint download something and
+      # feed it straight to an interpreter", which is what scripts/setup-dev.sh used to do (issue #69). The
+      # safe form is longer than the unsafe one, so a comment alone would not survive a tidy-up.
+      - name: Check for downloads piped into a shell
+        run: ./scripts/check-no-pipe-to-shell.sh
+
   security-summary:
     name: Security Summary
     # docker-scan included: it runs on every pull request now, and a table headed Security Scan
     # Results that omits one of the scans is worse than no table. `always()` keeps this job running
     # when that one is skipped (the nightly), and the row then reads `skipped`, which is the honest
     # answer rather than a gap.
-    needs: [sobelow, dependency-audit, secret-scanning, trivy-scan, docker-scan]
+    needs: [sobelow, dependency-audit, secret-scanning, trivy-scan, docker-scan, shell-hygiene]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -229,4 +241,5 @@ jobs:
             echo "| Secret Scanning | ${{ needs.secret-scanning.result }} |"
             echo "| Trivy Scan (filesystem) | ${{ needs.trivy-scan.result }} |"
             echo "| Docker Image Scan | ${{ needs.docker-scan.result }} |"
+            echo "| Shell Hygiene | ${{ needs.shell-hygiene.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"

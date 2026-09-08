@@ -1,6 +1,10 @@
 # Lefthook configuration
 # See: https://github.com/evilmartians/lefthook
 
+# Point the hooks at the pinned, checksum-verified binary that scripts/setup-dev.sh installs, instead of
+# whatever `lefthook` happens to be on PATH. See the comments in that file.
+rc: scripts/lefthook-rc.sh
+
 # Skip installation prompt
 skip_output:
   - meta
