@@ -6,10 +6,11 @@ defmodule Malachi.Loadtest do
 
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
   lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
-  server-shed `overloaded` produces, and reconnects) and a `Malachi.Loadtest.Histogram` for latency. A
-  worker connects and authenticates, waits at a barrier so all connections start together, runs its
-  scenario for `warmup + duration`, and records only during the measured window. It is resilient: a shed
-  produce backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
+  server-shed `overloaded` produces, quota-refused `rate_limited` produces, and reconnects) and a
+  `Malachi.Loadtest.Histogram` for latency. A worker connects and authenticates, waits at a barrier so all
+  connections start together, runs its scenario for `warmup + duration`, and records only during the
+  measured window. It is resilient: a shed produce backs off and continues, and a dropped connection
+  reconnects (capped) rather than aborting.
 
   How the connections are OPENED is a strategy (`:connect_strategy`), because each one pays a full
   credential verification on the server and opening hundreds at once is a self-inflicted auth storm:
@@ -45,12 +46,15 @@ defmodule Malachi.Loadtest do
   @dropped 4
   @overloaded 5
   @reconnects 6
-  @counters 6
+  @rate_limited 7
+  @counters 7
 
-  # Backpressure: on an `:overloaded` shed the worker backs off briefly and keeps going; on a dropped
+  # Backpressure: on a shed produce the worker backs off briefly and keeps going; on a dropped
   # connection it reconnects with a short backoff, capped so a server that is truly down stops the worker
-  # instead of spinning.
-  @overloaded_backoff_ms 5
+  # instead of spinning. A shed is either `:overloaded` (the broker's group-commit valve) or
+  # `:rate_limited` (this user over the configured publish quota); they are counted apart because they
+  # tell an operator different things, and a run that hides one behind the other is a silent zero.
+  @shed_backoff_ms 5
   @reconnect_backoff_ms 20
   @max_reconnect_tries 10
 
@@ -396,9 +400,9 @@ defmodule Malachi.Loadtest do
       measuring = now >= m.warmup_end
 
       case status do
-        # The server shed this produce (backpressure): back off briefly and keep the connection.
-        :overloaded ->
-          shed(m, measuring)
+        # The server refused this produce (backpressure or quota): back off briefly, keep the connection.
+        shed_status when shed_status in [:overloaded, :rate_limited] ->
+          shed(m, shed_status, measuring)
           closed_loop(conn, ctx, m, corr + 1)
 
         # Transport error: the connection dropped. Reconnect and keep going within the window.
@@ -452,8 +456,8 @@ defmodule Malachi.Loadtest do
         measuring = now >= m.warmup_end
         {t0, inflight} = Map.pop(inflight, corr)
         status = produce_status(code, resp)
-        if status == :overloaded, do: shed(m, measuring)
-        if t0 && status != :overloaded, do: record(m, status, mono_us() - t0, measuring)
+        if shed?(status), do: shed(m, status, measuring)
+        if t0 && not shed?(status), do: record(m, status, mono_us() - t0, measuring)
 
         refill =
           if now < m.measure_end do
@@ -596,11 +600,19 @@ defmodule Malachi.Loadtest do
   defp produce_status(0, <<count::32>>), do: {:ok, count}
   defp produce_status(_code, resp), do: error_status(resp)
 
-  # An error response is either the server's backpressure shed (`:overloaded`, a light event the worker
-  # backs off on) or a genuine error (`:error`).
+  # An error response is one of the server's two refusals, both light events the worker backs off on
+  # (`:overloaded` from the group-commit valve, `:rate_limited` from the configured publish quota), or a
+  # genuine error (`:error`).
   defp error_status(resp) do
-    if Wire.decode_error_reason(resp) == "overloaded", do: :overloaded, else: :error
+    case Wire.decode_error_reason(resp) do
+      "overloaded" -> :overloaded
+      "rate_limited" -> :rate_limited
+      _genuine -> :error
+    end
   end
+
+  # A refusal the worker retries through, as opposed to a completed op or a genuine error.
+  defp shed?(status), do: status in [:overloaded, :rate_limited]
 
   # --- recording ---
 
@@ -614,12 +626,15 @@ defmodule Malachi.Loadtest do
 
   defp record(m, :error, _dt, true), do: :counters.add(m.ops, @errors, 1)
 
-  # The server shed a produce under backpressure: count it (during the measured window) and back off
-  # briefly so the worker does not immediately re-flood the overloaded broker.
-  defp shed(m, measuring) do
-    if measuring, do: :counters.add(m.ops, @overloaded, 1)
-    Process.sleep(@overloaded_backoff_ms)
+  # The server refused a produce: count it under its own reason (during the measured window) and back off
+  # briefly so the worker does not immediately re-flood the broker.
+  defp shed(m, status, measuring) do
+    if measuring, do: :counters.add(m.ops, shed_counter(status), 1)
+    Process.sleep(@shed_backoff_ms)
   end
+
+  defp shed_counter(:overloaded), do: @overloaded
+  defp shed_counter(:rate_limited), do: @rate_limited
 
   # A transport error dropped the connection. Count the drop (always visible, an event not a rate) and try
   # to recover: `{:ok, conn}` with a fresh authenticated connection to continue on, or `:give_up` when the
@@ -671,6 +686,7 @@ defmodule Malachi.Loadtest do
     errors = :counters.get(ops, @errors)
     dropped = :counters.get(ops, @dropped)
     overloaded = :counters.get(ops, @overloaded)
+    rate_limited = :counters.get(ops, @rate_limited)
     reconnects = :counters.get(ops, @reconnects)
     secs = cfg.duration
 
@@ -685,6 +701,7 @@ defmodule Malachi.Loadtest do
       errors: errors,
       dropped: dropped,
       overloaded: overloaded,
+      rate_limited: rate_limited,
       reconnects: reconnects,
       ops_per_s: round(op_count / secs),
       records_per_s: round(records / secs),
@@ -910,7 +927,8 @@ defmodule Malachi.Loadtest do
 
     #{r.scenario} (#{r.connections} conns, pipeline #{r.pipeline}) over #{r.duration_s}s
       #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s
-      errors=#{r.errors}  dropped=#{r.dropped}  overloaded=#{r.overloaded}  reconnects=#{r.reconnects}
+      errors=#{r.errors}  dropped=#{r.dropped}  reconnects=#{r.reconnects}
+      server-refused: overloaded=#{r.overloaded}  rate_limited=#{r.rate_limited}
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}
     """)
 

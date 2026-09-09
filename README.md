@@ -315,9 +315,9 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_RATE_LIMIT_ENABLED` | true | Enable rate limiting |
 | `MALACHI_AUTH_RATE_LIMIT` | 10 | Auth attempts per window |
 | `MALACHI_AUTH_RATE_WINDOW_MS` | 60000 | Auth rate limit window (ms) |
-| `MALACHI_PUBLISH_RATE_LIMIT` | 1000 | Publish messages per window |
+| `MALACHI_PUBLISH_RATE_LIMIT` | 0 | Produce requests per window per user, per node; 0 = no limit |
 | `MALACHI_PUBLISH_RATE_WINDOW_MS` | 1000 | Publish rate limit window (ms) |
-| `MALACHI_SUBSCRIBE_RATE_LIMIT` | 100 | Subscribe requests per window |
+| `MALACHI_SUBSCRIBE_RATE_LIMIT` | 0 | Subscribe requests per window per user, per node; 0 = no limit |
 | `MALACHI_SUBSCRIBE_RATE_WINDOW_MS` | 60000 | Subscribe rate limit window (ms) |
 | `MALACHI_MAX_CONN_PER_IP` | 100 | Max connections per IP |
 | `MALACHI_MAX_TOTAL_CONN` | 10000 | Max total connections |

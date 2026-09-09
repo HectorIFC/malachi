@@ -58,10 +58,37 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
       assert r.dropped == 0
       assert r.overloaded == 0
+      # A healthy run is under any configured quota. This is also what keeps a refused produce from
+      # hiding: the generator counts it here rather than folding it into `errors`.
+      assert r.rate_limited == 0
       assert r.reconnects == 0
       assert r.ops > 0
       assert r.records == r.ops * 5
       assert r.records_per_s > 0
+    end
+
+    test "a produce refused by the publish quota is counted apart from a genuine error" do
+      # The generator's whole reason for telling `rate_limited` from `errors` is that an operator reading
+      # a run must be able to see a quota biting rather than a broker misbehaving. Without a case that
+      # actually gets refused, `error_status/1` and the counter it feeds are only ever exercised on the
+      # path where nothing is refused, and a regression that folded refusals back into `errors` (or
+      # dropped them entirely) would not be noticed.
+      for key <- [:publish_rate_limit, :publish_rate_window_ms] do
+        prior = Application.get_env(:malachi, key)
+        on_exit(fn -> Application.put_env(:malachi, key, prior) end)
+      end
+
+      # A handful of produce requests are admitted and the rest of the second is refused. The quota is
+      # keyed by user and the generator authenticates as admin, so every connection shares this bucket.
+      Application.put_env(:malachi, :publish_rate_limit, 5)
+      Application.put_env(:malachi, :publish_rate_window_ms, 60_000)
+      Malachi.RateLimiter.reset_bucket("admin", :publish)
+
+      r = run(scenario: :produce, connections: 2, batch: 1, topic: topic("quota"))
+
+      assert r.rate_limited > 0, "the quota never bit, so this case proves nothing"
+      assert r.errors == 0, "refusals were counted as errors, which is exactly what the split prevents"
+      assert r.overloaded == 0, "a quota refusal must not be reported as broker saturation"
     end
 
     test "pipelining keeps zero errors and still produces" do

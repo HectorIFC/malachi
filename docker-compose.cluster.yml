@@ -51,8 +51,17 @@ x-malachi-node: &malachi-node
     # Parameterized (default 2, the benchmark tuning) so the config-deploy chaos drill has a
     # harmless setting to roll across the nodes while verifying availability between steps.
     MALACHI_GROUP_COMMIT_INTERVAL_MS: "${MALACHI_GROUP_COMMIT_INTERVAL_MS:-2}"
-    # Admission limits off so the sweep is not capped (they gate connections/auth, not the produce path).
-    MALACHI_RATE_LIMIT_ENABLED: "false"
+    # Admission limits off by default so the sweep is not capped. Parameterized because the publish quota
+    # IS on the produce path now, and benchmark/docker-ratelimit.sh has to be able to switch it on to
+    # measure what checking it costs.
+    MALACHI_RATE_LIMIT_ENABLED: "${MALACHI_RATE_LIMIT_ENABLED:-false}"
+    MALACHI_PUBLISH_RATE_LIMIT: "${MALACHI_PUBLISH_RATE_LIMIT:-0}"
+    MALACHI_PUBLISH_RATE_WINDOW_MS: "${MALACHI_PUBLISH_RATE_WINDOW_MS:-1000}"
+    # The load generator opens dozens of connections from ONE ip, which the shipped auth limit (10 per
+    # minute per ip) is designed to stop. Whenever the limiter is switched on here it is to measure the
+    # PUBLISH quota, so the auth limit has to be lifted out of the way or it silently starves the run of
+    # connections instead.
+    MALACHI_AUTH_RATE_LIMIT: "${MALACHI_AUTH_RATE_LIMIT:-100000}"
     MALACHI_CONNECTION_LIMIT_ENABLED: "false"
     # Data root: /tmp (tmpfs, RAM) by default so fsync cost is uniform for BENCHMARKS. The chaos
     # certification overrides MALACHI_DATA_ROOT=/data (a per-node named volume) because tmpfs is
