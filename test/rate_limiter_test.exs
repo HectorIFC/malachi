@@ -495,6 +495,19 @@ defmodule Malachi.RateLimiterTest do
     # asserts on, so it is exercised here by hand.
     @table :malachi_rate_limits
 
+    setup do
+      keys = [:publish_rate_limit, :publish_rate_window_ms, :subscribe_rate_limit, :subscribe_rate_window_ms]
+      original = for key <- keys, into: %{}, do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- original do
+          if value == nil, do: Application.delete_env(:malachi, key), else: Application.put_env(:malachi, key, value)
+        end
+      end)
+
+      :ok
+    end
+
     defp run_cleanup do
       send(Process.whereis(RateLimiter), :cleanup)
       # the cleanup is a cast-like info message; a sync call flushes it
@@ -509,13 +522,13 @@ defmodule Malachi.RateLimiterTest do
 
       stale = {"stale_#{tag}", :publish, now - hour_ms - 60_000, 0}
       live = {"live_#{tag}", :publish, now, 0}
-      :ets.insert(@table, {stale, 5})
-      :ets.insert(@table, {live, 5})
+      :ets.insert(@table, {stale, 5, 1_000})
+      :ets.insert(@table, {live, 5, 1_000})
 
       run_cleanup()
 
       assert :ets.lookup(@table, stale) == []
-      assert [{^live, 5}] = :ets.lookup(@table, live)
+      assert [{^live, 5, _window_ms}] = :ets.lookup(@table, live)
     end
 
     test "reaps stale token buckets and keeps live ones" do
@@ -531,6 +544,60 @@ defmodule Malachi.RateLimiterTest do
 
       assert :ets.lookup(@table, stale) == []
       assert [{^live, _}] = :ets.lookup(@table, live)
+    end
+
+    test "keeps a live counter whose window is wider than the token bucket's hour" do
+      # A quota measured over more than an hour (a subscribe allowance per day, say) has windows that
+      # outlive the flat hour a token bucket is reaped on. Aging those counters on that hour would delete
+      # the CURRENT window's counters and hand the user its whole quota back mid-window. They must be
+      # aged against the window they actually count.
+      tag = :rand.uniform(1_000_000)
+      window_ms = 7_200_000
+      Application.put_env(:malachi, :subscribe_rate_limit, 2)
+      Application.put_env(:malachi, :subscribe_rate_window_ms, window_ms)
+
+      identifier = "live_wide_#{tag}"
+      # 90 minutes into a 2-hour window: past the hour, but the window is still the current one.
+      live_window_start = System.system_time(:millisecond) - 90 * 60_000
+      key = {identifier, :subscribe, live_window_start, 0}
+      :ets.insert(@table, {key, 9_999, window_ms})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) != [], "a live window's counter was reaped, refunding the quota"
+    end
+
+    test "reaps a rolled-over counter promptly rather than holding it for an hour" do
+      # The other direction of the same rule. A 1-second publish window turns over 3600 times an hour,
+      # and each turn leaves a counter per shard per user behind. Holding those for a flat hour is what
+      # would make the hot path's sharding expensive in memory.
+      tag = :rand.uniform(1_000_000)
+      Application.put_env(:malachi, :publish_rate_limit, 100)
+      Application.put_env(:malachi, :publish_rate_window_ms, 1_000)
+
+      identifier = "rolled_#{tag}"
+      # Ten seconds back: ten windows ago, long dead, but nowhere near an hour old.
+      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
+      :ets.insert(@table, {key, 100, 1_000})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == [], "a counter ten windows old was kept"
+    end
+
+    test "still reaps counters of an action that has since been switched off" do
+      # With no config left there is no window to measure against, so these fall back to the flat hour
+      # rather than leaking forever.
+      tag = :rand.uniform(1_000_000)
+      Application.put_env(:malachi, :publish_rate_limit, 0)
+
+      identifier = "switched_off_#{tag}"
+      key = {identifier, :publish, System.system_time(:millisecond) - 3_600_000 - 60_000, 0}
+      :ets.insert(@table, {key, 5, 1_000})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == []
     end
 
     test "never reaps blocked counters, whatever their age" do

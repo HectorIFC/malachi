@@ -927,7 +927,8 @@ defmodule Malachi.Loadtest do
 
     #{r.scenario} (#{r.connections} conns, pipeline #{r.pipeline}) over #{r.duration_s}s
       #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s
-      errors=#{r.errors}  dropped=#{r.dropped}  overloaded=#{r.overloaded}  rate_limited=#{r.rate_limited}  reconnects=#{r.reconnects}
+      errors=#{r.errors}  dropped=#{r.dropped}  reconnects=#{r.reconnects}
+      server-refused: overloaded=#{r.overloaded}  rate_limited=#{r.rate_limited}
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}
     """)
 

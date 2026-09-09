@@ -8,8 +8,9 @@ defmodule Malachi.RateLimiter do
   The ETS table stores three types of entries:
 
   - `{{identifier, action}, {count, last_refill_ms, window_start_ms}}` - Token buckets (`check_limit/3`)
-  - `{{identifier, action, window_start_ms, shard}, used}` - Sharded window counters
-    (`check_limit_in_caller/3`)
+  - `{{identifier, action, window_start_ms, shard}, used, window_ms}` - Sharded window counters
+    (`check_limit_in_caller/3`); the entry carries the window it was counted under so the cleanup can
+    age it without having to re-read config that may since have changed
   - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
   ## Actions
@@ -77,6 +78,11 @@ defmodule Malachi.RateLimiter do
   alias Malachi.I18n
 
   @table :malachi_rate_limits
+
+  # How long an entry may sit untouched before the periodic cleanup reaps it. This is the right rule for a
+  # token bucket, which has fully refilled after an hour of idleness under any window shorter than that.
+  # A sharded window counter is measured against its own action's window instead (see `sharded_ttl/1`).
+  @bucket_ttl 3_600_000
 
   # ============================================================
   # PUBLIC API
@@ -285,10 +291,10 @@ defmodule Malachi.RateLimiter do
     window_start = now - elapsed_in_window
     shard = rem(:erlang.system_info(:scheduler_id), shards)
 
-    if take_token(identifier, action, window_start, shard, shard_cap(limit, shards, shard)) do
+    if take_token(identifier, action, window_start, shard, shard_cap(limit, shards, shard), window_ms) do
       :ok
     else
-      steal_token_or_block(identifier, action, window_start, shard, shards, limit, window_ms - elapsed_in_window)
+      steal_token_or_block(identifier, action, window_start, shard, shards, limit, window_ms, elapsed_in_window)
     end
   end
 
@@ -305,18 +311,24 @@ defmodule Malachi.RateLimiter do
   # `cap + 1` rather than at `cap`, so "used exactly the whole shard" (`cap`) stays distinguishable from
   # "asked once too often" (`cap + 1`) while a rejected caller retrying cannot run the counter away.
   # A shard holding none of the quota (`cap == 0`) always answers false, and the sweep finds the rest.
-  defp take_token(identifier, action, window_start, shard, cap) do
+  #
+  # The third element of the entry is the window this counter was written under. It is never updated (the
+  # counter op targets position 2 only) and exists so `cleanup_expired_buckets/0` can age the entry
+  # against its OWN window rather than re-reading configuration that may have changed, or that the caller
+  # may never have taken from the configuration in the first place.
+  defp take_token(identifier, action, window_start, shard, cap, window_ms) do
     key = {identifier, action, window_start, shard}
-    :ets.update_counter(@table, key, {2, 1, cap, cap + 1}, {key, 0}) <= cap
+    :ets.update_counter(@table, key, {2, 1, cap, cap + 1}, {key, 0, window_ms}) <= cap
   end
 
   # This scheduler's shard is empty, but the quota is spread across all of them and the load need not be:
   # sweep the siblings before rejecting, so an uneven spread does not reject while quota is still unused.
   # Only reached once a shard is exhausted, so the cost sits on the rejection path, not the hot one.
-  defp steal_token_or_block(identifier, action, window_start, shard, shards, limit, retry_after_ms) do
+  defp steal_token_or_block(identifier, action, window_start, shard, shards, limit, window_ms, elapsed) do
     stolen? =
       Enum.any?(0..(shards - 1), fn other ->
-        other != shard and take_token(identifier, action, window_start, other, shard_cap(limit, shards, other))
+        other != shard and
+          take_token(identifier, action, window_start, other, shard_cap(limit, shards, other), window_ms)
       end)
 
     if stolen? do
@@ -324,7 +336,7 @@ defmodule Malachi.RateLimiter do
     else
       increment_blocked_counter(identifier, action)
       # Time left in the current window: the whole quota comes back when it rolls over.
-      {:error, :rate_limit_exceeded, retry_after_ms}
+      {:error, :rate_limit_exceeded, window_ms - elapsed}
     end
   end
 
@@ -379,29 +391,31 @@ defmodule Malachi.RateLimiter do
     :ets.update_counter(@table, key, {2, 1}, {key, 0})
   end
 
+  # A token bucket is reaped after a flat hour of idleness; a sharded window counter is reaped a full
+  # window after its own window stopped being current. The flat hour is wrong for the sharded entries in
+  # BOTH directions, which is why they carry their width: too long for a narrow window (a 1-second
+  # publish limit would keep an hour of dead counters, one per shard per window per user, for nothing)
+  # and too short for a wide one (a window over an hour would have its LIVE counters deleted, refunding
+  # the quota mid-window).
   defp cleanup_expired_buckets do
     now = System.monotonic_time(:millisecond)
-    # 1 hour
-    bucket_ttl = 3_600_000
-    # A sharded window counter is dead the moment its window rolls over. Its key carries the window's
-    # start in wall-clock ms, so it is reaped on the same TTL as a token bucket, without this fold having
-    # to know how wide each action's window was.
-    stale_window_before = System.system_time(:millisecond) - bucket_ttl
+    now_ms = System.system_time(:millisecond)
 
     expired_count =
       :ets.foldl(
         fn
           {{_identifier, _action} = key, {_count, last_refill, _window_start}}, acc ->
-            if now - last_refill > bucket_ttl do
+            if now - last_refill > @bucket_ttl do
               :ets.delete(@table, key)
               acc + 1
             else
               acc
             end
 
-          # Sharded window counters: the key carries its window start, so staleness is readable directly.
-          {{_identifier, _action, window_start, _shard} = key, _used}, acc when is_integer(window_start) ->
-            if window_start < stale_window_before do
+          # Sharded window counters: the entry carries both the start and the width of the window it
+          # counted, so each one is aged against that window and nothing else.
+          {{_identifier, _action, window_start, _shard} = key, _used, window_ms}, acc ->
+            if window_start < now_ms - 2 * window_ms do
               :ets.delete(@table, key)
               acc + 1
             else
