@@ -12,7 +12,11 @@ defmodule Malachi.LoggerI18nTest do
 
   alias Malachi.I18n
 
-  @logger_call ~r/Logger\.(debug|info|warning|warn|error)\(/
+  # Every API that can emit a message, not just the four levels this codebase happens to use today. A
+  # raw string through Logger.notice/2 would bypass a narrower matcher, and the point of the guard is
+  # that the next call site cannot slip past it by picking a different severity. `log/3` and
+  # `bare_log/3` take the level as an argument, so they are named here too.
+  @logger_call ~r/Logger\.(debug|info|notice|warning|warn|error|critical|alert|emergency|log|bare_log)\(/
 
   # The one deliberate exception, with its reason. `raise_or_warn/2` receives an already-translated
   # message because the same text is either raised or logged depending on the environment; translating
@@ -24,12 +28,20 @@ defmodule Malachi.LoggerI18nTest do
 
   # A Logger call spans several lines, so the check has to look at the whole call rather than the line
   # the macro starts on: a message on the next line would otherwise read as untranslated.
-  defp logger_calls(file) do
-    lines = file |> File.read!() |> String.split("\n")
+  defp logger_calls(file), do: file |> File.read!() |> scan()
+
+  # Split from the file read so the matcher itself can be exercised against fixtures. A guard whose
+  # only input is the tree it guards proves nothing about the calls that are not there yet.
+  defp scan(source) do
+    lines = String.split(source, "\n")
 
     for {line, index} <- Enum.with_index(lines), Regex.match?(@logger_call, line) do
       {index + 1, call_text(lines, index)}
     end
+  end
+
+  defp untranslated(source) do
+    for {_line, text} <- scan(source), not String.contains?(text, "I18n.t"), do: text
   end
 
   # Consumes lines until the parentheses opened by the macro close again. The first line always leaves
@@ -108,5 +120,46 @@ defmodule Malachi.LoggerI18nTest do
 
   test "the sweep left exactly one documented exception, so the allowlist cannot quietly grow" do
     assert map_size(@translated_by_caller) == 1
+  end
+
+  describe "the matcher itself" do
+    @emitters ~w(debug info notice warning warn error critical alert emergency)
+
+    test "catches a raw string through any severity, not just the four this codebase uses today" do
+      for level <- @emitters do
+        assert untranslated(~s|    Logger.#{level}("a raw string")|) != [],
+               "Logger.#{level}/2 can emit a message and must not bypass the guard"
+      end
+    end
+
+    test "catches log/3 and bare_log/3, where the level is an argument" do
+      assert untranslated(~s|    Logger.log(:info, "a raw string")|) != []
+      assert untranslated(~s|    Logger.bare_log(:info, "a raw string")|) != []
+    end
+
+    test "accepts a translated call at any severity" do
+      for level <- @emitters do
+        assert untranslated(~s|    Logger.#{level}(I18n.t(:some_key))|) == [],
+               "a translated Logger.#{level}/2 must not be reported"
+      end
+    end
+
+    test "reads a call whose message sits on later lines as one unit" do
+      translated = """
+          Logger.warning(
+            I18n.t(:some_key, binding: value)
+          )
+      """
+
+      raw = """
+          Logger.warning(
+            "a raw string " <>
+              "continued on another line"
+          )
+      """
+
+      assert untranslated(translated) == []
+      assert untranslated(raw) != []
+    end
   end
 end

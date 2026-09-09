@@ -10,13 +10,13 @@ defmodule Malachi.CLI.Options do
   recovery: the command succeeds against a **different cluster** and reports the answer as yours.
 
   Kept free of `Mix.*` for the same reason as `Malachi.CLI.Rpc`: it returns `{:error, message}` rather
-  than raising, so the tasks own their own output and exit behaviour and this stays testable without a
+  than raising, so the tasks own their own output and exit behavior and this stays testable without a
   Mix shell.
   """
 
   @doc """
   Parses `argv` against `switches` (strict), returning `{:ok, {opts, args}}` or an `{:error, message}`
-  naming the options that were not recognised. Positional arguments are returned untouched: whether a
+  naming the options that were not recognized. Positional arguments are returned untouched: whether a
   task accepts any is the task's own business.
   """
   @spec parse([String.t()], keyword()) :: {:ok, {keyword(), [String.t()]}} | {:error, String.t()}

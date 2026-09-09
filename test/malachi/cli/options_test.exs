@@ -10,7 +10,7 @@ defmodule Malachi.CLI.OptionsTest do
 
   @switches [node: :string, cookie: :string, to: :integer, show: :boolean]
 
-  test "returns the parsed options and positional arguments when everything is recognised" do
+  test "returns the parsed options and positional arguments when everything is recognized" do
     assert Options.parse(["--node", "malachi@h", "grant", "alice"], @switches) ==
              {:ok, {[node: "malachi@h"], ["grant", "alice"]}}
   end
@@ -24,7 +24,7 @@ defmodule Malachi.CLI.OptionsTest do
     assert message =~ "unknown option(s): --nod"
   end
 
-  test "every unrecognised option is named, not just the first" do
+  test "every unrecognized option is named, not just the first" do
     assert {:error, message} = Options.parse(["--nod", "x", "--cooky", "y"], @switches)
     assert message =~ "--nod"
     assert message =~ "--cooky"
@@ -36,7 +36,7 @@ defmodule Malachi.CLI.OptionsTest do
     assert message =~ "--to"
   end
 
-  test "a recognised boolean switch parses without a value" do
+  test "a recognized boolean switch parses without a value" do
     assert {:ok, {opts, []}} = Options.parse(["--show"], @switches)
     assert opts[:show] == true
   end
