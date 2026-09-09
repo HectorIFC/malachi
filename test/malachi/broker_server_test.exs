@@ -446,6 +446,66 @@ defmodule Malachi.BrokerServerTest do
       assert BrokerServer.active_range_ids(server, "events") == [root_id]
     end
 
+    test "a fence whose seal command fails is reported loudly, not swallowed (issue #121)", %{tmp_dir: directory} do
+      # The store is fenced and the metadata is not, which stops the range from accepting any write at
+      # all until `Malachi.Cluster.OrphanedFence` reconciles it. `Broker.record_seal/5` returns the
+      # broker UNCHANGED on this branch, so nothing here retries and nothing else notices: reporting
+      # only that the split failed left an operator unable to tell this apart from a split that
+      # changed nothing.
+      {server, root_id} = with_topic(directory)
+      {:ok, _placements} = BrokerServer.produce(server, "events", [record("v", "k")])
+      [segment] = BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+
+      # An `ra` timeout on the seal command, injected into the RUNNING broker's own `:command_fun`
+      # seam. `BrokerServer` builds its broker options itself rather than forwarding the caller's, and
+      # widening its option list to reach one failure mode from a test would put a seam in production
+      # code that only tests use.
+      failing = fn dsrsm, topic, command ->
+        case command do
+          {:seal_segment, _id, _length, _bytes, _at} -> {dsrsm, {:error, :ra_timeout}}
+          _other -> DSRSM.command(dsrsm, topic, command)
+        end
+      end
+
+      :sys.replace_state(server, fn state -> put_in(state.broker.command_fun, failing) end)
+
+      handler = "orphaned-fence-test-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:malachi, :cluster, :orphaned_fence],
+        fn _event, measurements, metadata, _config -> send(test_pid, {:orphaned, measurements, metadata}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:fence_failed, ^root_id, :ra_timeout}} = BrokerServer.split_range(server, root_id)
+        end)
+
+      assert log =~ inspect(segment.id)
+      assert log =~ "ra_timeout"
+
+      assert_received {:orphaned, %{count: 1}, %{segment: segment_id, reason: :ra_timeout}}
+      assert segment_id == segment.id
+
+      # The state the report describes, pinned: the store refuses writes while the control plane still
+      # calls the segment active, which is precisely what the reconciling pass looks for.
+      assert %{state: :active} = BrokerServer.metadata(server) |> Metadata.get_segment(segment.id)
+
+      assert {:error, {:sealed, 1}} =
+               ReplicationServer.append(
+                 BrokerServer.replication_ref(server),
+                 segment.id,
+                 segment.replica_set,
+                 0,
+                 [record("late", "k")]
+               )
+    end
+
     test "a reconcile evicts a cached segment another node sealed", %{tmp_dir: directory} do
       # Level-triggered convergence: before this, only the node running the heal coordinator dropped
       # such a segment, so every other frontend kept routing produces at a segment the metadata had

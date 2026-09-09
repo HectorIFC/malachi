@@ -5,6 +5,7 @@ defmodule Malachi.BrokerServerRaTest do
   import Malachi.Test.TeardownHelper
 
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
@@ -435,6 +436,98 @@ defmodule Malachi.BrokerServerRaTest do
 
     :ok = BrokerServer.stop(writer)
     :ok = BrokerServer.stop(splitter)
+  end
+
+  test "a fence whose control-plane seal never landed stops wedging the range (issue #121)" do
+    # THE REPRODUCTION. `BrokerServer.fence_and_seal/2` closes the segment on the primary and only then
+    # records the seal. On a generic error from that second step (an `ra` timeout is the ordinary way to
+    # get one) `Broker.record_seal/5` returns the broker UNCHANGED: no new metadata, and no roll owed,
+    # so nothing retries. The store is closed, the control plane still calls the segment active, and the
+    # produce path loops forever between adopting that segment and being refused by its store.
+    #
+    # Nothing else rescued it. `Failover` requires the primary to be DEAD and here it is alive and
+    # answering; healing and retention only touch sealed segments; `drop_stale_active_segments/1` keys
+    # off the segment being sealed in the metadata, which is exactly what did not happen.
+    cluster = :"bs_orphan121_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    name = :"orphan121_repl_#{System.unique_integer([:positive])}"
+    directory = Path.join(System.tmp_dir!(), "malachi_orphan121_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+    on_exit(fn -> stop_quietly(repl) end)
+    primary = {name, node()}
+
+    {:ok, broker} =
+      BrokerServer.start_link("unused",
+        brokers: [primary],
+        metadata_cluster: cluster,
+        group_commit: false,
+        brokers_refresh_interval: 60_000
+      )
+
+    on_exit(fn -> stop_quietly(broker) end)
+
+    {:ok, root} = BrokerServer.create_topic(broker, "events", 4)
+    assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("early", key: "k")])
+
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(broker), root)
+
+    # Put the data plane in exactly that state: fence the store, leave the metadata alone. Then drop
+    # this frontend's cache, which is what a restart (or any other node) would face.
+    assert {:ok, 1, sealed_bytes} = ReplicationServer.seal(primary, segment.id, segment.start_offset)
+    reconcile!(broker)
+    assert Metadata.get_segment(BrokerServer.metadata(broker), segment.id).state == :active
+
+    # The loop, verbatim from the issue: every produce readopts the segment the metadata still calls
+    # active, and every one of them is refused at the same offset. A successor is never opened.
+    for _attempt <- 1..3 do
+      assert {:error, {:sealed, 1}} = BrokerServer.produce(broker, "events", [Record.new("blocked", key: "k")])
+    end
+
+    assert [{_id, :active}] =
+             BrokerServer.metadata(broker)
+             |> Metadata.segments_of_range(root)
+             |> Enum.map(&{&1.id, &1.state})
+
+    # One reconciling pass, wired exactly as `Malachi.Application` wires it.
+    coordinator =
+      start_supervised!(
+        {HealCoordinator,
+         live_brokers: fn -> [primary] end,
+         metadata_source: fn -> BrokerServer.metadata(broker) end,
+         apply_command: fn command -> BrokerServer.apply_heal(broker, [command]) end,
+         replication_factor: 1,
+         interval: 60_000},
+        id: {:heal121, System.unique_integer([:positive])}
+      )
+
+    assert [{:seal_segment, segment_id, 1, ^sealed_bytes, _at}] = HealCoordinator.heal_now(coordinator).applied
+    assert segment_id == segment.id
+
+    # Convergence, which is what the issue asks for in place of the three refusals: the parent is
+    # sealed at the end its own store reported, and the next produce opens a SUCCESSOR there.
+    parent = Metadata.get_segment(BrokerServer.metadata(broker), segment.id)
+    assert parent.state == :sealed
+    assert parent.length == 1
+
+    # And in the RAFT LOG, not only in this frontend's cache. That distinction is the whole reason the
+    # reconciliation is a level-triggered pass rather than a retry at the source: a retry converges only
+    # while the process that owed the seal is alive, and what makes the pass hold across a restart is
+    # that its seal is replicated. A consistent query reads it from the leader rather than from a copy.
+    {:ok, replicated} = MetadataServer.query({cluster, node()}, &Function.identity/1)
+    assert %{state: :sealed, length: 1} = Metadata.get_segment(replicated, segment.id)
+
+    assert {:ok, placements} = BrokerServer.produce(broker, "events", [Record.new("after", key: "k")])
+    assert %{^root => {1, 1}} = placements
+
+    successor = Metadata.segments_of_range(BrokerServer.metadata(broker), root) |> Enum.find(&(&1.state == :active))
+    assert successor.id != segment.id
+    assert successor.start_offset == 1
+
+    # And the range reads as one contiguous history across the fence, which is the point of sealing at
+    # the store's own answer rather than at a number measured beside it.
+    assert broker |> drain_history(root) |> Enum.map(& &1.value) == ["early", "after"]
   end
 
   # Drives one metadata reconcile and waits for it to land. `:sys.get_state/1` is a system message
