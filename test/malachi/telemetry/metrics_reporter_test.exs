@@ -75,4 +75,21 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.scrub_segments_repaired == before.scrub_segments_repaired + 1
     assert ops.scrub_segments_unrepairable == before.scrub_segments_unrepairable + 1
   end
+
+  test "an orphaned fence and its reconciliation are counted as a pair" do
+    # A fence whose control-plane seal failed closes a range to writes until something reconciles it.
+    # The detection alone says a split hit an `ra` error, which is survivable; it is detections that
+    # nothing reconciles that mean a range is stuck, and only both counters together can say so.
+    before = Metrics.get_system_metrics().operations
+
+    Telemetry.orphaned_fence({{"events", 0}, 0}, :ra_timeout)
+
+    assert Metrics.get_system_metrics().operations.orphaned_fences == before.orphaned_fences + 1
+    assert Metrics.get_system_metrics().operations.fences_reconciled == before.fences_reconciled
+
+    # A pass reconciles more than one segment at a time, so this counter advances by the measurement.
+    Telemetry.fence_reconciled(2)
+
+    assert Metrics.get_system_metrics().operations.fences_reconciled == before.fences_reconciled + 2
+  end
 end

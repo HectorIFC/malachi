@@ -25,15 +25,19 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Cluster.RingBoot
+  alias Malachi.Cluster.RingServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.Scrubber
   alias Malachi.Cluster.SplitCoordinator
   alias Malachi.Cluster.Topology
+  alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Cluster.VnodeCoordinatorManager
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
@@ -217,9 +221,16 @@ defmodule Malachi.Application do
     cluster = Application.get_env(:malachi, :log_cluster)
     nodes = configured_nodes()
 
-    # The sharded vnode placement (or nil): the metadata's initial ring, also seeded into the membership
-    # gossip as the version-0 `RingTopology` so a later split advances from it and every node converges.
-    vnodes = vnode_placement(cluster, nodes)
+    # The routing topology this node boots with, resolved ONCE. For a clustered control plane it comes
+    # from the durable ring, which outranks `MALACHI_LOG_VNODES` (see `boot_topology/2`); unclustered
+    # deployments have no ring at all. It is also what seeds the membership gossip, so a later split
+    # advances from it and every node converges.
+    #
+    # Resolving once matters now that this reads `ra`: the placement used to be a pure function of the
+    # environment and was recomputed wherever it was needed, but two reads of a live store can disagree,
+    # which would leave the broker routing by one ring and the coordinators by another.
+    topology = boot_topology(cluster, nodes)
+    vnodes = boot_vnodes(topology)
 
     log_stack =
       if cluster do
@@ -231,9 +242,10 @@ defmodule Malachi.Application do
         end
 
         [
-          membership_child(nodes, vnodes),
+          ring_reconciler_child(nodes),
+          membership_child(nodes, topology),
           replication_child(),
-          log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir())
+          log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
         ] ++ scrubber_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
@@ -241,13 +253,89 @@ defmodule Malachi.Application do
         # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
         # the scrubber asks for its replication server.
         Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [log_broker_child(nil, nodes, name, dir) | scrubber_children(name, dir)]
+          [log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
         end)
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
     # the sharded control plane also gets the lease + manual rebalancing coordinator (R3-b-iii).
     log_stack ++ coordinator_children(cluster, vnodes) ++ rebalance_children(nodes, vnodes)
+  end
+
+  @log_ring Malachi.LogRing
+
+  @doc """
+  The routing topology a clustered node boots with. This is the precedence rule of issue #32: the ring
+  recorded in `Malachi.Cluster.RingServer` wins over `MALACHI_LOG_VNODES`, and the environment only ever
+  seeds a cluster the store **affirms** has never had a ring.
+
+  Before this, the ring was gossiped state only, so a full-cluster restart reseeded it from the
+  environment. The environment's even geometry does not match a ring grown by splitting, so a cluster
+  that had been resharded came back routing topics to vnodes that no longer held their metadata.
+
+  The ring cluster is formed here, before the read, and its membership comes from the static
+  `MALACHI_LOG_NODES`, never from the ring itself. That is what keeps the bootstrap acyclic: this Raft
+  group does not live in the vnodes it describes.
+
+  Returns `nil` for an unclustered node (no ring exists) and for a clustered one that is genuinely
+  unsharded. **Raises** when the store cannot be read within `MALACHI_LOG_RING_BOOT_TIMEOUT_MS`:
+  refusing to boot is deliberate, because a node that cannot see the ring cannot know which vnode owns
+  which arc, and serving on a guess is the corruption being fixed.
+  """
+  @spec boot_topology(atom() | nil, [node()]) :: RingTopology.t() | nil
+  def boot_topology(nil, _nodes), do: nil
+
+  def boot_topology(cluster, nodes) do
+    _ = RingServer.start(@log_ring, nodes)
+    server_id = {@log_ring, RaCluster.member_node(nodes)}
+    timeout_ms = Application.get_env(:malachi, :log_ring_boot_timeout_ms, 60_000)
+    read = RingBoot.read_until(fn -> RingServer.topology(server_id) end, timeout_ms: timeout_ms)
+
+    case RingBoot.resolve(read, env_topology(cluster, nodes)) do
+      {:durable, topology} -> topology
+      {:seed, seed} -> plant_seed(server_id, seed)
+      :unsharded -> nil
+      {:error, reason} -> raise RingBoot.unreadable_message(reason, timeout_ms)
+    end
+  end
+
+  # Writes the first-boot seed through, adopting the winner if another node planted one concurrently. A
+  # seed that did not land at all is fatal for the same reason an unreadable store is: this node would
+  # otherwise serve a ring the cluster never agreed on.
+  defp plant_seed(server_id, seed) do
+    case RingBoot.confirm_seed(seed, &RingServer.init(server_id, &1)) do
+      {:ok, topology} -> topology
+      # its own message: this is a rejected WRITE, and the read timeout knob is not the way out of it
+      {:error, reason} -> raise RingBoot.unseeded_message(reason)
+    end
+  end
+
+  @doc """
+  The sharded vnode placement (`[{vnode_id, token, nodes}]`) described by a boot topology, or `nil` when
+  there is nothing to shard. This is the shape the rest of the sharded wiring already speaks, so a ring
+  restored from the durable store drops into exactly the path an environment-derived one used to take.
+  """
+  @spec boot_vnodes(RingTopology.t() | nil) :: [{atom(), non_neg_integer(), [node()]}] | nil
+  def boot_vnodes(nil), do: nil
+
+  def boot_vnodes(%RingTopology{} = topology) do
+    case RingTopology.vnode_placement(topology) do
+      [] -> nil
+      vnodes -> vnodes
+    end
+  end
+
+  # Keeps this node joined to the ring cluster, so a staggered boot converges to a fully-replicated ring.
+  # Runs for every clustered node, including an unsharded one whose ring store is still empty: the point
+  # is that when a reshard eventually happens, every node is already a member of the store recording it.
+  defp ring_reconciler_child(nodes) do
+    opts = [
+      name: Malachi.LogRingReconciler,
+      reconcile: fn -> RingServer.reconcile(@log_ring, nodes) end,
+      interval: Application.get_env(:malachi, :lease_reconcile_interval_ms, 30_000)
+    ]
+
+    %{id: Malachi.LogRingReconciler, start: {LeaseReconciler, :start_link, [opts]}}
   end
 
   @log_lease Malachi.LogLease
@@ -266,18 +354,21 @@ defmodule Malachi.Application do
       lease_reconciler_child(nodes),
       lease_holder_child(),
       rebalance_coordinator_child(nodes, vnodes),
-      split_coordinator_child(),
+      split_coordinator_child(nodes),
       reshard_coordinator_child()
     ] ++ auto_rebalancer_children()
   end
 
   # The vnode-split coordinator (operator-driven, lease-gated): only the lease holder splits, one at a time.
   # Reads/publishes the ring topology through the membership; gossip then propagates the new ring cluster-wide.
-  defp split_coordinator_child do
+  defp split_coordinator_child(nodes) do
     opts = [
       name: Malachi.LogSplitCoordinator,
       membership: Malachi.LogMembership,
-      leader?: fn -> LeaseHolder.leader?(@log_lease_holder) end
+      # persist-then-gossip: the ring is recorded durably before it is disseminated, so a reshard
+      # survives a full-cluster restart (issue #32)
+      publish: TopologyPublisher.seam({@log_ring, RaCluster.member_node(nodes)}, Malachi.LogMembership),
+      lease: fn -> LeaseHolder.lease(@log_lease_holder) end
     ]
 
     %{id: Malachi.LogSplitCoordinator, start: {SplitCoordinator, :start_link, [opts]}}
@@ -525,7 +616,7 @@ defmodule Malachi.Application do
 
   defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
-  defp membership_child(nodes, vnodes) do
+  defp membership_child(nodes, topology) do
     opts =
       [
         name: Malachi.LogMembership,
@@ -534,24 +625,35 @@ defmodule Malachi.Application do
         attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
         # adopt a gossiped ring change locally: point consumer-group routing at the new topology
         on_topology: &adopt_ring_topology/1
-      ] ++ initial_topology_opt(vnodes)
+      ] ++ initial_topology_opt(topology)
 
     %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
   end
 
-  # Seed the membership with the version-0 routing topology (the boot ring) when sharded, so gossip carries
-  # it and a split advances from it. A single vnode (or unclustered) has nothing to route, no topology.
+  # Seed the membership with the routing topology this node resolved at boot, so gossip carries it and a
+  # split advances from it. A single vnode (or unclustered) has nothing to route, so no topology. Note the
+  # seed may already be at a high version: a durable ring restored after a reshard keeps the version it
+  # reached, which is what makes it outrank a peer still gossiping an older one.
   defp initial_topology_opt(nil), do: []
+  defp initial_topology_opt(%RingTopology{} = topology), do: [topology: topology]
 
-  defp initial_topology_opt(vnodes) do
-    ring =
-      Enum.reduce(vnodes, HashRing.new(), fn {vnode_id, token, _nodes}, ring ->
-        {:ok, ring} = HashRing.add_vnode(ring, vnode_id, token)
-        ring
-      end)
+  # The version-0 topology described by `MALACHI_LOG_VNODES`, or nil when the environment asks for no
+  # sharding. This is only ever a *candidate*: it seeds a genuinely fresh cluster and loses to a durable
+  # ring otherwise (`Malachi.Cluster.RingBoot`).
+  defp env_topology(cluster, nodes) do
+    case vnode_placement(cluster, nodes) do
+      nil ->
+        nil
 
-    placements = Map.new(vnodes, fn {vnode_id, _token, nodes} -> {vnode_id, nodes} end)
-    [topology: RingTopology.new(ring, placements)]
+      vnodes ->
+        ring =
+          Enum.reduce(vnodes, HashRing.new(), fn {vnode_id, token, _nodes}, ring ->
+            {:ok, ring} = HashRing.add_vnode(ring, vnode_id, token)
+            ring
+          end)
+
+        RingTopology.new(ring, Map.new(vnodes, fn {vnode_id, _token, nodes} -> {vnode_id, nodes} end))
+    end
   end
 
   # Applies a newly-adopted `RingTopology` (a vnode split's ring change, learned via gossip) to this
@@ -789,12 +891,13 @@ defmodule Malachi.Application do
   # The per-vnode leader gate: true only while this node leads the vnode's ra group.
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
 
-  defp log_broker_child(cluster, nodes, name, dir) do
+  defp log_broker_child(cluster, nodes, name, dir, vnodes) do
     # log_roll_opts reaches the single-node broker too: without an external broker set it starts its own
     # replication server, and the roll thresholds are what make sidecars exist there as well.
     opts =
       [name: name] ++
-        segment_opts() ++ log_roll_opts() ++ metadata_opts(cluster, nodes) ++ data_plane_opts(cluster, nodes)
+        segment_opts() ++
+        log_roll_opts() ++ metadata_opts(cluster, nodes, vnodes) ++ data_plane_opts(cluster, nodes)
 
     %{id: name, start: {Malachi.BrokerServer, :start_link, [dir, opts]}}
   end
@@ -808,18 +911,17 @@ defmodule Malachi.Application do
     end
   end
 
-  # Single ra cluster by default; with `:log_vnodes` > 1 (and a clustered control plane) the metadata is
-  # sharded across that many vnodes, each its own ra cluster placed on a subset of `nodes` (rendezvous,
-  # `:log_vnode_replication_factor` members), routed by topic. A single deterministic seed node
-  # bootstraps them; the others only route.
-  defp metadata_opts(cluster, nodes) do
-    case vnode_placement(cluster, nodes) do
-      nil ->
-        metadata_cluster_opts(cluster, nodes)
+  # Single ra cluster when there is no ring (unclustered, or a clustered control plane the durable store
+  # and the environment both say is unsharded). Otherwise the metadata is sharded across `vnodes`, each
+  # its own ra cluster placed on a subset of nodes, routed by topic; a single deterministic seed node
+  # bootstraps them and the rest only route.
+  #
+  # `vnodes` is resolved once in `log_children/0` and passed in, rather than recomputed here: it now
+  # comes from a live `ra` read, and two reads can disagree.
+  defp metadata_opts(cluster, nodes, nil), do: metadata_cluster_opts(cluster, nodes)
 
-      vnodes ->
-        [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
-    end
+  defp metadata_opts(_cluster, _nodes, vnodes) do
+    [metadata_vnodes: vnodes, bootstrap_orchestrator: membership_leader(Malachi.LogMembership)]
   end
 
   # The sharded-control-plane vnode placement (`[{vnode_id, token, nodes}]`), or `nil` when the control

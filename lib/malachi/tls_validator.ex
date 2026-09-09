@@ -438,6 +438,9 @@ defmodule Malachi.TLSValidator do
     raise message
   end
 
+  # The one Logger call in the codebase that does not name an I18n key, and deliberately so: every
+  # caller passes an already-translated `I18n.t/2` result, because the same message is either raised
+  # or logged depending on the environment. Translating here would translate it twice.
   defp raise_or_warn(_env, message) do
     Logger.warning(message)
   end

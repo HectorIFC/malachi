@@ -45,6 +45,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Telemetry
   alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
@@ -874,7 +875,17 @@ defmodule Malachi.BrokerServer do
 
           # The store is fenced but the metadata is not: the parent is closed to writes and the split
           # must not proceed on a range whose end the control plane does not know.
+          #
+          # Loud, because the two halves have come apart and the damage outlives this call. A fence has
+          # no inverse, so the segment cannot be reopened, and `Broker.record_seal/5` returns the broker
+          # UNCHANGED on this branch, so no roll is owed and nothing here retries. The range accepts no
+          # write at all until `Malachi.Cluster.OrphanedFence` reconciles it, and reporting only
+          # "the split failed" left an operator with no way to tell that apart from a split that
+          # changed nothing.
           {broker, {:error, reason}} ->
+            Logger.error(I18n.t(:seal_record_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
+
+            Telemetry.orphaned_fence(roll.segment_id, reason)
             {:error, reason, %{state | broker: broker}}
         end
 

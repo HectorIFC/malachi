@@ -68,6 +68,7 @@ defmodule Malachi.Cluster.Scrubber do
 
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.I18n
   alias Malachi.Log
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
@@ -180,7 +181,7 @@ defmodule Malachi.Cluster.Scrubber do
     # user data must not end up in by accident. Truncating the text is not enough for that: a bounded
     # prefix of a payload is still a payload. The shape is what makes the line worth having, since it
     # is what identifies the sender.
-    Logger.warning("scrubber ignoring unexpected message: #{inspect(message, limit: 3, printable_limit: 0)}")
+    Logger.warning(I18n.t(:scrubber_unexpected_message, message: inspect(message, limit: 3, printable_limit: 0)))
 
     {:noreply, state}
   end
@@ -197,10 +198,7 @@ defmodule Malachi.Cluster.Scrubber do
   defp usable_interval(interval) when is_integer(interval) and interval > 0, do: interval
 
   defp usable_interval(interval) do
-    Logger.warning(
-      "scrub interval #{inspect(interval)} is not a positive number of milliseconds, " <>
-        "using the default of #{@default_interval}ms"
-    )
+    Logger.warning(I18n.t(:scrubber_invalid_interval, interval: inspect(interval), default: @default_interval))
 
     @default_interval
   end
@@ -427,8 +425,12 @@ defmodule Malachi.Cluster.Scrubber do
   defp log_result(result) do
     for {segment_id, verdict} <- result.damaged do
       Logger.warning(
-        "scrub found #{inspect(segment_id)} damaged (#{verdict.reason} at byte #{verdict.position})" <>
-          repair_outcome(result, segment_id)
+        I18n.t(:scrub_segment_damaged,
+          segment_id: inspect(segment_id),
+          reason: verdict.reason,
+          position: verdict.position,
+          outcome: repair_outcome(result, segment_id)
+        )
       )
     end
 
@@ -438,7 +440,7 @@ defmodule Malachi.Cluster.Scrubber do
   defp repair_outcome(result, segment_id) do
     cond do
       segment_id in result.repaired ->
-        ": repaired from an intact replica"
+        I18n.t(:scrub_repair_succeeded)
 
       entry = List.keyfind(result.unrepairable, segment_id, 0) ->
         not_repaired(elem(entry, 1))
@@ -452,10 +454,10 @@ defmodule Malachi.Cluster.Scrubber do
   # the refetch leaves the damaged bytes on disk to salvage by hand, while a failure during it leaves
   # a copy that is merely incomplete, which a later pass finds as short and repairs again on its own.
   defp not_repaired({:refetch, reason}) do
-    ": repair FAILED mid-refetch (#{inspect(reason)}), this copy is incomplete until a later pass finishes it"
+    I18n.t(:scrub_repair_failed_refetch, reason: inspect(reason))
   end
 
   defp not_repaired(reason) do
-    ": NOT repaired (#{inspect(reason)}), this copy stays damaged and its bytes are still on disk"
+    I18n.t(:scrub_repair_not_done, reason: inspect(reason))
   end
 end
