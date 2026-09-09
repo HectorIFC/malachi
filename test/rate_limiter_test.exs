@@ -14,6 +14,25 @@ defmodule Malachi.RateLimiterTest do
     :ok
   end
 
+  # Runs `fun` and returns its result, guaranteeing the whole run happened inside ONE fixed window.
+  #
+  # The sharded window is aligned to the epoch, not to the test, so a run that straddles a boundary is
+  # handed a fresh quota partway through and legitimately admits more than the limit. That is the limiter
+  # working, but it would surface as a rare flaky failure in any exact-equality assertion below. Skipping
+  # the assertion when it happens would be worse than the flake, since a test that silently stops
+  # asserting reports success either way, so the measurement is retried on a fresh window instead.
+  defp within_one_window(window_ms, fun, attempts \\ 5) do
+    window_before = div(System.system_time(:millisecond), window_ms)
+    result = fun.()
+    window_after = div(System.system_time(:millisecond), window_ms)
+
+    cond do
+      window_before == window_after -> result
+      attempts > 1 -> within_one_window(window_ms, fun, attempts - 1)
+      true -> flunk("every attempt straddled a #{window_ms}ms window boundary; the measurement never ran clean")
+    end
+  end
+
   describe "token bucket algorithm" do
     test "allows requests within limit" do
       identifier = "test_user_#{:rand.uniform(1_000_000)}"
@@ -437,12 +456,17 @@ defmodule Malachi.RateLimiterTest do
       # smaller than the scheduler count) is where a rounding mistake would silently reject early. Nothing
       # here may admit fewer than the configured limit.
       for limit <- [1, 2, 3, 7, 8, 9, 50, 1000] do
-        identifier = "exact_#{limit}_#{:rand.uniform(1_000_000)}"
-        config = %{limit: limit, window_ms: 60_000}
+        window_ms = 60_000
 
         admitted =
-          Enum.count(1..(limit * 2 + 32), fn _ ->
-            RateLimiter.check_limit_in_caller(identifier, :publish, config) == :ok
+          within_one_window(window_ms, fn ->
+            # a fresh identifier per attempt, so a retry never inherits a half-spent quota
+            identifier = "exact_#{limit}_#{:rand.uniform(1_000_000)}"
+            config = %{limit: limit, window_ms: window_ms}
+
+            Enum.count(1..(limit * 2 + 32), fn _ ->
+              RateLimiter.check_limit_in_caller(identifier, :publish, config) == :ok
+            end)
           end)
 
         assert admitted == limit, "limit #{limit} admitted #{admitted}"
@@ -517,14 +541,20 @@ defmodule Malachi.RateLimiterTest do
       # the property that would break first if the sharding were reworked.
       limit = 50
       attempts = 400
-      identifier = "race_#{:rand.uniform(1_000_000)}"
-      config = %{limit: limit, window_ms: 60_000}
+      window_ms = 60_000
 
       admitted =
-        1..attempts
-        |> Enum.map(fn _ -> Task.async(fn -> RateLimiter.check_limit_in_caller(identifier, :publish, config) end) end)
-        |> Task.await_many(30_000)
-        |> Enum.count(&(&1 == :ok))
+        within_one_window(window_ms, fn ->
+          identifier = "race_#{:rand.uniform(1_000_000)}"
+          config = %{limit: limit, window_ms: window_ms}
+
+          1..attempts
+          |> Enum.map(fn _ ->
+            Task.async(fn -> RateLimiter.check_limit_in_caller(identifier, :publish, config) end)
+          end)
+          |> Task.await_many(30_000)
+          |> Enum.count(&(&1 == :ok))
+        end)
 
       assert admitted == limit, "#{attempts} concurrent callers admitted #{admitted}, expected #{limit}"
     end
@@ -627,19 +657,27 @@ defmodule Malachi.RateLimiterTest do
       assert :ets.lookup(@table, key) == [], "a counter ten windows old was kept"
     end
 
-    test "still reaps counters of an action that has since been switched off" do
-      # With no config left there is no window to measure against, so these fall back to the flat hour
-      # rather than leaking forever.
+    test "ages an entry by its stored window, never by the current configuration" do
+      # This is the property that makes the other two cleanup tests mean anything, and the one that was
+      # got wrong once: an earlier version of the cleanup read the action's window back from config, which
+      # is a second source of truth that can disagree with what the caller actually counted under.
+      #
+      # The setup makes the two answers point in OPPOSITE directions. The entry is ten of ITS OWN windows
+      # old, so by its stored width it is long dead. The configured window is a full day and the action
+      # is switched off entirely, so anything consulting configuration would either keep the entry or
+      # have no window to judge it by. It must be reaped, and only the stored width says so.
       tag = :rand.uniform(1_000_000)
       Application.put_env(:malachi, :publish_rate_limit, 0)
+      Application.put_env(:malachi, :publish_rate_window_ms, 86_400_000)
 
-      identifier = "switched_off_#{tag}"
-      key = {identifier, :publish, System.system_time(:millisecond) - 3_600_000 - 60_000, 0}
+      identifier = "stored_window_#{tag}"
+      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
       :ets.insert(@table, {key, 5, 1_000})
 
       run_cleanup()
 
-      assert :ets.lookup(@table, key) == []
+      assert :ets.lookup(@table, key) == [],
+             "the entry was judged by configuration rather than by the window it was counted under"
     end
 
     test "keeps an exhausted bucket whose window is wider than the flat hour" do
