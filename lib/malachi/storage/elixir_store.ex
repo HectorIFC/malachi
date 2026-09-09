@@ -425,7 +425,14 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def sync(%__MODULE__{pending_count: 0} = store) do
-    :ok = :file.sync(store.file_descriptor)
+    # Nothing buffered means nothing to make durable: the only write to this descriptor is the
+    # pwrite in the clause below, which is followed by its datasync in the same breath, so no
+    # written byte is ever left unsynced for this clause to catch up on.
+    #
+    # `recover/3` truncates a torn tail without syncing, and this clause used to make that
+    # truncation durable by accident. Losing it is safe because recovery is deterministic and
+    # idempotent: the scan stops at the last CRC-valid frame, so a crash before the truncation
+    # reaches the disk simply has the next recovery compute the same boundary again.
     {:ok, store}
   end
 

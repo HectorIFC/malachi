@@ -47,7 +47,11 @@ defmodule Malachi.Storage.SegmentStore do
               {:ok, handle(), first :: non_neg_integer(), last :: non_neg_integer()}
               | {:error, term()}
 
-  @doc "Flushes buffered records and fsyncs. After this, appended records are committed and readable."
+  @doc """
+  Flushes buffered records and makes them durable. After this, appended records are committed and
+  readable. An implementation may skip the sync when nothing is buffered, so callers must not use
+  this as a barrier for writes made through anything but `append/2`.
+  """
   @callback sync(handle()) :: {:ok, handle()} | {:error, term()}
 
   @doc """
