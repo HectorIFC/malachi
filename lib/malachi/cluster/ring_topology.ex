@@ -61,6 +61,24 @@ defmodule Malachi.Cluster.RingTopology do
   end
 
   @doc """
+  The topology as the **vnode placement** the boot path speaks: `[{vnode_id, token, nodes}]`, one
+  entry per vnode on the ring, ordered by token so it is stable across nodes.
+
+  This is the shape `Malachi.Application` already threads through the sharded control plane (it is
+  what `place_vnodes/4` returns), so a ring restored from the durable store drops straight into the
+  same wiring that an environment-derived one does. A vnode on the ring with no recorded placement is
+  skipped: there is no cluster to address it through, the same rule `servers/1` applies.
+  """
+  @spec vnode_placement(t()) :: [{term(), HashRing.token(), [node()]}]
+  def vnode_placement(%__MODULE__{ring: nil}), do: []
+
+  def vnode_placement(%__MODULE__{ring: ring, placements: placements}) do
+    for {token, vnode_id} <- ring.sorted,
+        match?([_ | _], Map.get(placements, vnode_id)),
+        do: {vnode_id, token, Map.fetch!(placements, vnode_id)}
+  end
+
+  @doc """
   A new topology at `version + 1` with `ring`/`placements`: the single-writer bump the rebalancing leader
   applies to **complete** a split (or any ring change). The monotonic version is what makes `merge/2`
   converge. Completing a ring change also **clears** any pending-split intent: the split it recorded is now

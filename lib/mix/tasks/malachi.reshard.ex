@@ -16,9 +16,9 @@ defmodule Mix.Tasks.Malachi.Reshard do
   the current ring: the splits already done are reflected in it. Only **growing** is supported; a target
   below the current count is rejected.
 
-  > #### Runtime operation {: .warning}
-  > The ring is gossiped cluster state, not durable across a **full-cluster** restart (it reseeds from
-  > `MALACHI_LOG_VNODES`). Treat a reshard as effective while the cluster is up.
+  The grown ring is **durable**: each step records it in the cluster's ring store before gossiping it,
+  and at boot that record outranks `MALACHI_LOG_VNODES`, so a reshard survives a full-cluster restart.
+  `mix malachi.ring --show` prints what is recorded.
 
   Options:
 
@@ -31,6 +31,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
   """
   use Mix.Task
 
+  alias Malachi.CLI.Options
   alias Malachi.CLI.Rpc
 
   @coordinator Malachi.LogReshardCoordinator
@@ -38,7 +39,15 @@ defmodule Mix.Tasks.Malachi.Reshard do
 
   @impl Mix.Task
   def run(argv) do
-    {opts, args, _invalid} = OptionParser.parse(argv, strict: @switches)
+    case Options.parse(argv, @switches) do
+      # refuse before resolving or connecting: an unknown option is absent from `opts`, so falling
+      # through would target $MALACHI_NODE (or the default) as though it had been asked for
+      {:ok, {opts, args}} -> connect_and_run(args, opts)
+      {:error, message} -> Mix.raise(message <> "\n\n" <> usage())
+    end
+  end
+
+  defp connect_and_run(args, opts) do
     node = Rpc.target_node(opts)
 
     case Rpc.connect(node, opts[:cookie]) do

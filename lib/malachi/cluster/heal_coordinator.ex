@@ -74,6 +74,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   alias Malachi.Cluster.OrphanedFence
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SelfHealing
+  alias Malachi.I18n
   alias Malachi.Telemetry
 
   @default_interval 5_000
@@ -149,7 +150,7 @@ defmodule Malachi.Cluster.HealCoordinator do
     # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
     # discard the result, making persistent failures invisible until something else broke.
     if healed.failed != [] do
-      Logger.warning("healing pass could not repair #{length(healed.failed)}: #{inspect(healed.failed)}")
+      Logger.warning(I18n.t(:heal_repair_failed, count: length(healed.failed), failures: inspect(healed.failed)))
     end
 
     %{applied: applied, failed: healed.failed, repaired: healed.repaired}
@@ -189,9 +190,10 @@ defmodule Malachi.Cluster.HealCoordinator do
       Telemetry.fence_reconciled(length(landed))
 
       Logger.warning(
-        "reconciled #{length(landed)} segment(s) whose store was fenced while the control plane still " <>
-          "called them active: #{inspect(Enum.map(landed, &elem(&1, 1)))}. Their ranges were refusing " <>
-          "every write until now, so a fence's seal failing to land is worth investigating upstream"
+        I18n.t(:heal_orphaned_fence_reconciled,
+          count: length(landed),
+          segments: inspect(Enum.map(landed, &elem(&1, 1)))
+        )
       )
     end
 
@@ -199,9 +201,10 @@ defmodule Malachi.Cluster.HealCoordinator do
     # unnoticed, so a seal this pass could not land says so.
     if pending != [] do
       Logger.error(
-        "could not record the seal for #{length(pending)} fenced segment(s): " <>
-          "#{inspect(Enum.map(pending, &elem(&1, 1)))}. Their ranges take no write until a later pass " <>
-          "succeeds, so the control plane is the thing to look at"
+        I18n.t(:heal_orphaned_fence_unrecorded,
+          count: length(pending),
+          segments: inspect(Enum.map(pending, &elem(&1, 1)))
+        )
       )
     end
   end
@@ -263,9 +266,11 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp warn_if_blocked(segment_id, answers, replica_set) do
     unless Failover.majority?(map_size(answers), replica_set) do
       Logger.warning(
-        "segment #{inspect(segment_id)} cannot be sealed for failover: #{map_size(answers)} of " <>
-          "#{length(replica_set)} replicas answered, no majority. Its range is blocked for writes " <>
-          "until a majority returns, because sealing on a minority could discard acknowledged writes"
+        I18n.t(:heal_seal_no_majority,
+          segment_id: inspect(segment_id),
+          answered: map_size(answers),
+          replicas: length(replica_set)
+        )
       )
     end
   end

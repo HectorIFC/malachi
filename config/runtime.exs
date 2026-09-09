@@ -227,6 +227,12 @@ config :malachi,
   # Replicas per control-plane vnode: each vnode's ra cluster is placed on this many nodes (rendezvous,
   # clamped to the node count) for HA per vnode. Default 3.
   log_vnode_replication_factor: String.to_integer(System.get_env("MALACHI_LOG_VNODE_REPLICATION_FACTOR") || "3"),
+  # How long a clustered node waits at boot for the durable ring to become readable before refusing to
+  # start. The ring outranks :log_vnodes, so a node that cannot read it does not know which vnode owns
+  # which arc, and booting on the environment instead is exactly the corruption this store prevents.
+  # The wait exists for the ordinary full-cluster restart, where the first node up has no quorum until a
+  # second joins; raise it for clusters that stagger their boots more than a minute apart.
+  log_ring_boot_timeout_ms: parse_int.(System.get_env("MALACHI_LOG_RING_BOOT_TIMEOUT_MS"), 60_000),
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),
