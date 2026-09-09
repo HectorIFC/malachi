@@ -217,9 +217,19 @@ The two client surfaces report a rate limit differently.
 **TCP wire protocol.** The broker answers with a binary error frame built by
 `Wire.encode_error(correlation_id, reason)`, where `reason` is an atom serialized as a string. The rate
 limiter computes a `retry_after_ms` internally, but the wire error carries only the reason, so a TCP client
-does not receive that value. When rate limited the reason is `rate_limit_exceeded`; when a connection cap
-is hit it is `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total cap), sent
-just before the socket is closed.
+does not receive that value (carrying it would need a new `api_key`; see "What a client sees").
+
+The two rate-limit reasons are **not** the same word, because they happen at different points and mean
+different things to a client:
+
+| reason | when | what the client should do |
+|---|---|---|
+| `rate_limit_exceeded` | the auth handshake, per IP | stop reconnecting; the connection was never established |
+| `rate_limited` | a `produce` or `subscribe`, per authenticated user | back off until the window rolls over |
+| `overloaded` | a `produce`, when the broker is saturated | back off briefly and retry |
+
+A connection cap answers `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total
+cap), sent just before the socket is closed.
 
 **Dashboard HTTP.** The dashboard replies with `HTTP/1.1 429 Too Many Requests`, a `Retry-After` header in
 seconds, and a JSON body:
@@ -238,9 +248,10 @@ seconds, and a JSON body:
 2. **TCP authentication** → RateLimiter checks the `:auth` limit by IP
 3. **Dashboard authentication** → RateLimiter checks the `:dashboard_auth` limit by IP before validating the
    login or the session token
-4. **Publish/Subscribe** → not rate limited today (the `:publish` / `:subscribe` limits are configured but
-   not applied; see Enforcement status)
-5. **Metrics** → Blocked counters incremented for the enforced actions
+4. **Publish/Subscribe** → RateLimiter checks the `:publish` / `:subscribe` limit by authenticated
+   username, after the permission check, on the `produce` and `subscribe` frames. Skipped entirely when
+   the action is unconfigured, which is the default
+5. **Metrics** → Blocked counters incremented for every action that blocked
 6. **Cleanup** → Process death triggers automatic connection decrement
 
 ## Dashboard
@@ -272,16 +283,21 @@ Returns JSON with rate limiting statistics:
       "window_ms": 1000
     },
     "subscribe": {
-      "limit": 100,
-      "window_ms": 60000
+      "limit": null,
+      "window_ms": null
     }
   }
 }
 ```
 
 `top_blocked` always carries all five action keys (`auth`, `publish`, `subscribe`, `channel_publish`,
-`channel_subscribe`), but only `auth` is ever populated: nothing blocks on the other four, so they stay empty
-(see Enforcement status). The `config` object lists only the `auth`, `publish`, and `subscribe` limits.
+`channel_subscribe`). Three of them can be populated: `auth`, and `publish` / `subscribe` once an operator
+configures those quotas. `channel_publish` and `channel_subscribe` are vestigial and stay empty, since
+nothing blocks on them.
+
+The `config` object lists the `auth`, `publish`, and `subscribe` limits, read through the same
+`RateLimiter.action_config/1` the enforcement path uses so the two can never disagree. An **unconfigured**
+action reports `null` for both fields, as `subscribe` does above, rather than a default nobody applies.
 
 ### GET /metrics
 
@@ -300,10 +316,13 @@ System metrics include rate limiting section:
 }
 ```
 
-`publish_blocked` and `subscribe_blocked` are always `0`: nothing increments them because publish/subscribe
-are not rate limited (see Enforcement status). `rate_limiting.auth_blocked` counts only the TCP `:auth`
-blocks; dashboard `:dashboard_auth` blocks are counted separately and exposed under
-`system.dashboard.auth_blocked`.
+`publish_blocked` and `subscribe_blocked` move once an operator configures those quotas and a client
+exceeds one. They read `0` while the quotas are unconfigured, which is the default, so on a stock
+deployment a zero means "no quota is set" rather than "nobody hit it": `config.publish.limit` in
+`/rate_limits` is what tells the two apart.
+
+`rate_limiting.auth_blocked` counts only the TCP `:auth` blocks; dashboard `:dashboard_auth` blocks are
+counted separately and exposed under `system.dashboard.auth_blocked`.
 
 ## Testing
 

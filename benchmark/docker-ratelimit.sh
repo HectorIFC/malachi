@@ -100,7 +100,11 @@ for round in $(seq 1 "$REPEATS"); do
     json=$(run_case)
 
     if [ -z "$json" ]; then
+      # A run that produced no JSON did not happen: the client crashed, or the server never came up. That
+      # is not the run-to-run noise best-of-N exists to absorb, so it fails the sweep even when a sibling
+      # repeat succeeds. Otherwise a crashed run is reported in the table and still exits 0.
       nojson[$case_name]=$(( ${nojson[$case_name]} + 1 ))
+      FAILED=1
       continue
     fi
 
