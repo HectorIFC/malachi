@@ -11,8 +11,9 @@ defmodule Malachi.Storage.SegmentStore do
 
   ## Durability contract
 
-  `append/2` only buffers; records become durable and readable after `sync/1`, which
-  must fsync before returning. `read/3` serves only committed (synced) records, never
+  `append/2` only buffers; records become durable and readable after `sync/1`, which must reach
+  stable storage before returning (`fdatasync` is enough for an append-only segment, and is what
+  the pure-Elixir store uses; the contract is durability, not a particular syscall). `read/3` serves only committed (synced) records, never
   buffered-but-unsynced data, matching NorthGuard's "ack only committed records".
   """
 
@@ -56,7 +57,7 @@ defmodule Malachi.Storage.SegmentStore do
   @callback read(handle(), offset :: non_neg_integer(), max_records :: pos_integer()) ::
               {:ok, [Record.t()]} | :eof | {:error, term()}
 
-  @doc "Flushes, fsyncs, and seals the segment (immutable). Subsequent `append/2` must fail."
+  @doc "Flushes durably and seals the segment (immutable). Subsequent `append/2` must fail."
   @callback seal(handle()) :: {:ok, handle()} | {:error, term()}
 
   @doc "The logical offset the next appended record will receive."

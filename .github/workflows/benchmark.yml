@@ -5,6 +5,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      sync_ab:
+        description: 'Also run the paired fsync-vs-fdatasync experiment (issue #82). Minutes, not seconds.'
+        type: boolean
+        default: false
+      sync_ab_reps:
+        description: 'Interleaved repetitions per arm'
+        type: string
+        default: '15'
 
 permissions:
   contents: read
@@ -59,3 +68,23 @@ jobs:
       # the script only needs :crypto (loaded on demand) and file I/O.
       - name: Run storage viability benchmark
         run: mix run --no-start benchmark/storage_viability.exs
+
+      # The measurement behind issue #82, opt-in because it takes minutes and every push runs this
+      # job. It needs a real filesystem to mean anything: fsync and fdatasync cost the same on tmpfs,
+      # and on macOS neither reaches stable media. The runner's /tmp is ext4 on a real disk, which is
+      # the platform the decision is actually about.
+      - name: Run the fsync vs fdatasync A/B experiment
+        if: ${{ inputs.sync_ab }}
+        env:
+          SYNC_AB: '1'
+          SYNC_AB_REPS: ${{ inputs.sync_ab_reps }}
+          SYNC_AB_OUT: ${{ runner.temp }}/sync-ab.json
+        run: mix run --no-start benchmark/storage_viability.exs
+
+      - name: Upload the A/B measurement
+        if: ${{ inputs.sync_ab }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sync-ab-measurement
+          path: ${{ runner.temp }}/sync-ab.json
+          if-no-files-found: error

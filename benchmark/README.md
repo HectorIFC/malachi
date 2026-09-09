@@ -81,6 +81,34 @@ the one the CI benchmark workflow runs.
 mix run benchmark/storage_viability.exs
 ```
 
+#### The sync A/B mode (issue #82)
+
+`SYNC_AB=1` adds a paired `fsync`-vs-`fdatasync` experiment. It exists because a performance decision
+here carries a benchmark, and a single before/after run cannot carry one: the published ceiling sweep
+moves by more than 30% run to run on unchanged code, while any fdatasync win is a few percent.
+
+Three things separate it from a naive before/after:
+
+- **Interleaved arms.** `A, B, A, B, ...` in one process on one filesystem, so a thermal blip or a
+  noisy neighbour on a shared runner hits both arms rather than landing on whichever ran second.
+- **An A-A control.** Two arms that are both plain `fsync`, labelled as if they differed. Its spread
+  is the harness's noise floor, measured instead of assumed. A datasync delta smaller than the
+  fsync-vs-fsync delta is noise by construction.
+- **A bootstrapped 95% CI** of the difference of medians, so the answer is an interval.
+
+The verdict rule is fixed in the script, before any number exists: signal requires the A/B delta to
+exceed the A-A control delta **and** the interval to exclude zero. "Noise in every case" is a
+complete answer, not a failed run.
+
+It needs a real filesystem to mean anything. `fsync` and `fdatasync` cost the same on tmpfs, which is
+what every Docker compose in this repo deliberately uses, and on macOS neither reaches stable media
+(`:file.sync` there does not use `F_FULLFSYNC`). Run it on the CI runner, whose `/tmp` is ext4 on a
+real disk: `Performance Benchmarks` > `Run workflow` > `sync_ab`.
+
+```bash
+SYNC_AB=1 SYNC_AB_REPS=15 SYNC_AB_OUT=/tmp/sync-ab.json mix run --no-start benchmark/storage_viability.exs
+```
+
 ### `dashboard_security_benchmark.exs`
 
 Measures the overhead that authentication, security headers, and audit logging add

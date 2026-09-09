@@ -2,10 +2,11 @@ defmodule Malachi.Storage.ElixirStore do
   @moduledoc """
   Pure-Elixir `Malachi.Storage.SegmentStore` implementation.
 
-  File-per-segment, append-only, with batched writes and an fsync-before-ack durability
-  contract. `append/2` buffers; the buffer is flushed and fsynced on an explicit `sync/1`
+  File-per-segment, append-only, with batched writes and a sync-before-ack durability
+  contract. `append/2` buffers; the buffer is flushed and made durable on an explicit `sync/1`
   or automatically once it reaches `:flush_bytes` (default 10MB) or `:flush_count` records
-  (default 20k): NorthGuard's size and count triggers. Maintains an in-memory sparse index
+  (default 20k): NorthGuard's size and count triggers. The flush syncs with `fdatasync`, which
+  is exactly as durable as a full `fsync` for an append-only file (see `sync/1`). Maintains an in-memory sparse index
   (`{offset, file_position}` every `:index_interval` bytes) for seeking, kept in an `:array`
   sorted by offset so a lookup is an O(log n) binary search; the index is persisted to a
   sidecar on `seal/1` and rebuilt by scanning on `recover/3`.
@@ -403,7 +404,7 @@ defmodule Malachi.Storage.ElixirStore do
   def append(%__MODULE__{} = store, []), do: {:ok, store, store.next_offset, store.next_offset - 1}
 
   # NorthGuard's size and count triggers: once the buffer reaches `:flush_bytes` or
-  # `:flush_count` records, flush+fsync it automatically without waiting for `sync/1`.
+  # `:flush_count` records, flush and sync it automatically without waiting for `sync/1`.
   defp flush_if_full(
          %__MODULE__{
            pending_bytes: pending_bytes,
@@ -453,7 +454,13 @@ defmodule Malachi.Storage.ElixirStore do
     flushed_bytes = end_position - store.write_position
     started_us = System.monotonic_time(:microsecond)
     :ok = :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata))
-    :ok = :file.sync(store.file_descriptor)
+    # datasync, not sync: fdatasync(2) flushes the data plus only the metadata needed to read it
+    # back, which for an append is the file-size change. A full fsync additionally journals mtime
+    # and atime, and nothing that reads a segment consults either: recovery scans frames by magic
+    # and CRC, and the sparse index is rebuilt from the bytes. So this is the same durability for
+    # strictly less work, which is why WAL implementations default to it. Segment preallocation
+    # (issue #83) removes the size change too, at which point this becomes a pure data flush.
+    :ok = :file.datasync(store.file_descriptor)
 
     Telemetry.storage_flush(
       System.monotonic_time(:microsecond) - started_us,
