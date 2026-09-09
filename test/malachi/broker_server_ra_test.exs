@@ -511,6 +511,13 @@ defmodule Malachi.BrokerServerRaTest do
     assert parent.state == :sealed
     assert parent.length == 1
 
+    # And in the RAFT LOG, not only in this frontend's cache. That distinction is the whole reason the
+    # reconciliation is a level-triggered pass rather than a retry at the source: a retry converges only
+    # while the process that owed the seal is alive, and what makes the pass hold across a restart is
+    # that its seal is replicated. A consistent query reads it from the leader rather than from a copy.
+    {:ok, replicated} = MetadataServer.query({cluster, node()}, &Function.identity/1)
+    assert %{state: :sealed, length: 1} = Metadata.get_segment(replicated, segment.id)
+
     assert {:ok, placements} = BrokerServer.produce(broker, "events", [Record.new("after", key: "k")])
     assert %{^root => {1, 1}} = placements
 
