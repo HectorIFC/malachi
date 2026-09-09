@@ -103,7 +103,11 @@ for round in $(seq 1 "$REPEATS"); do
     json=$(run_case)
 
     if [ -z "$json" ]; then
+      # A run that produced no result did not happen: the client crashed, or the server never answered.
+      # Counting it in the table is not enough, because best-of-N then reports a sibling repeat's number
+      # and the script still exits 0. Best-of-N exists to absorb run-to-run NOISE, not a missing run.
       dropped[$case_name]=$(( ${dropped[$case_name]} + 1 ))
+      FAILED=1
       continue
     fi
 

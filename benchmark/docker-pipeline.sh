@@ -29,6 +29,10 @@ SHARDS="${SHARDS:-1 4}"
 BATCHES="${BATCHES:-1 100}"
 PIPELINES="${PIPELINES:-1 4 16}"
 export SRV_CPUSET="4,5,6,7" LT_CPUSET="0,1,2,3"
+# Any cell that could not be measured fails the whole sweep. A grid where some cells silently did not run
+# is not a slower sweep, it is a sweep with holes in it, and the numbers next to those holes get compared
+# against each other as if the grid were complete.
+FAILED=0
 
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
@@ -42,6 +46,7 @@ for s in $SHARDS; do
       if ! DATA_SHARDS="$s" $COMPOSE up -d --wait --force-recreate malachi >/tmp/dp_up.log 2>&1; then
         echo "  server did not come up healthy (shards=$s); see /tmp/dp_up.log"; cat /tmp/dp_up.log
         DATA_SHARDS="$s" $COMPOSE down >/dev/null 2>&1
+        FAILED=1
         continue
       fi
 
@@ -53,7 +58,7 @@ for s in $SHARDS; do
       DATA_SHARDS="$s" $COMPOSE down >/dev/null 2>&1
 
       if [ -z "$json" ]; then
-        printf "%-7s %-6s %-6s | %s\n" "$s" "$b" "$p" "(no json)"; continue
+        printf "%-7s %-6s %-6s | %s\n" "$s" "$b" "$p" "(no json)"; FAILED=1; continue
       fi
       read -r recs p50 p99 err drop over recon < <(echo "$json" \
         | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv')
@@ -64,4 +69,8 @@ for s in $SHARDS; do
 done
 
 echo
+if [ "$FAILED" != "0" ]; then
+  echo "done, WITH CELLS THAT DID NOT RUN (see above); the grid is incomplete"
+  exit 1
+fi
 echo "done (batch=1 pipe=1 is closed-loop; batch=100 pipe>1 is the competitor regime; compare shards 1 vs 4)"
