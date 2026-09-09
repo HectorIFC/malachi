@@ -888,8 +888,13 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     test "a dead server answers :unreachable instead of exiting the caller" do
       # The caller is a coordinator loop that asks every primary on every pass. Exiting on the first
       # replica that has left would take the pass, and with it the healing of every other segment.
+      #
+      # Taken out of the supervision tree rather than merely stopped, for the same reason as the
+      # `seal/4` case above: the child is `:permanent`, so a plain stop races the test supervisor
+      # restarting it under the SAME registered name, and the call would then be answered by a fresh
+      # empty server instead of failing to reach one.
       server = start_broker()
-      GenServer.stop(Process.whereis(server))
+      stop_supervised!(server)
 
       assert {:error, :unreachable} = ReplicationServer.fenced_segments(server, [{@segment, 0}], 100)
     end
