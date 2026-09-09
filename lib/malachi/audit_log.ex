@@ -494,7 +494,7 @@ defmodule Malachi.AuditLog do
     if state.output_mode in [:stdout, :both] do
       Enum.each(events, fn event ->
         json = safe_encode(event)
-        Logger.info("[AUDIT] #{json}")
+        Logger.info(I18n.t(:audit_log_line, json: json))
       end)
     end
 

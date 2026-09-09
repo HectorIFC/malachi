@@ -40,6 +40,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   restarts, while reads and repair (`follow/4`) keep working. That is what makes a control-plane sealed
   length a consequence of closing the segment rather than a number measured beside a log that is still
   growing.
+
+  `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
+  without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
+  landed and finish it.
   """
 
   use GenServer
@@ -49,6 +53,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
+  alias Malachi.I18n
   alias Malachi.Log
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
@@ -308,6 +313,32 @@ defmodule Malachi.Cluster.ReplicationServer do
     :exit, _reason -> {:error, :unreachable}
   end
 
+  @doc """
+  Which of `segments` this server has already FENCED, as `%{segment_id => {end_offset, byte_size}}`.
+  Never fences anything: it reports a latch somebody else already closed.
+
+  `segments` is a list of `{segment_id, base_offset}` pairs, batched into one call on purpose. The
+  caller (`Malachi.Cluster.HealCoordinator`) asks about EVERY active segment on every pass, which is a
+  different shape of question from `durable_stats/4`'s: that one is asked about a handful of failover
+  candidates and pays an open plus a flush per segment, and paying that for every active segment of a
+  cluster would put descriptors and I/O on a poll where there is none today.
+
+  A segment that is not fenced is simply absent from the answer and costs a map lookup, or a `File.exists?`
+  of the seal marker when this server has not opened it since booting (the same test `replicate/5` itself
+  applies). Only the fenced ones, which is the rare case this exists to find, pay an open.
+
+  A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller, as
+  `durable_stats/4` and `seal/4` do: the caller is a coordinator loop that must survive a replica it
+  cannot reach.
+  """
+  @spec fenced_segments(term(), [{term(), non_neg_integer()}], timeout()) ::
+          {:ok, %{optional(term()) => {non_neg_integer(), non_neg_integer()}}} | {:error, term()}
+  def fenced_segments(ref, segments, timeout \\ 5_000) do
+    GenServer.call(ref, {:fenced_segments, segments}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
   # --- GenServer ---
 
   @impl true
@@ -519,6 +550,24 @@ defmodule Malachi.Cluster.ReplicationServer do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {:ok, log} = Log.seal(log)
     {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
+  end
+
+  # The batched fence report. Read-only by construction: `fenced?/2` is the same test the write paths
+  # use, and only a segment it answers TRUE for is opened (to report where it ended). A segment that is
+  # merely active is never touched, which is the property that keeps this safe to run over every active
+  # segment: a pass that fenced while probing is what wedged a range at `replication_factor: 2` before.
+  def handle_call({:fenced_segments, segments}, _from, state) do
+    {state, fenced} =
+      Enum.reduce(segments, {state, %{}}, fn {segment_id, base_offset}, {acc_state, acc} ->
+        if fenced?(acc_state, segment_id) do
+          {acc_state, end_offset} = fenced_end(acc_state, segment_id, base_offset)
+          {acc_state, Map.put(acc, segment_id, {end_offset, bytes_on_disk(acc_state, segment_id)})}
+        else
+          {acc_state, acc}
+        end
+      end)
+
+    {:reply, {:ok, fenced}, state}
   end
 
   def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
@@ -939,7 +988,14 @@ defmodule Malachi.Cluster.ReplicationServer do
         {:error, reason} ->
           # A failed catch-up leaves the replica behind; the offset check in `follow` re-triggers it on
           # the next fan-out. Log it so a persistently failing catch-up is visible rather than silent.
-          Logger.warning("catch-up for #{inspect(segment_id)} (#{from}..#{to}) failed: #{inspect(reason)}")
+          Logger.warning(
+            I18n.t(:replication_catchup_failed,
+              segment_id: inspect(segment_id),
+              from: from,
+              to: to,
+              reason: inspect(reason)
+            )
+          )
       end
     end
   end
@@ -998,25 +1054,35 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp report_integrity(verdict, segment_id) do
     Telemetry.storage_integrity(verdict, segment_id, :recover)
 
-    message =
-      "segment #{inspect(segment_id)} failed verification at byte #{verdict.position} " <>
-        "(#{verdict.reason}, #{verdict.unreadable_bytes} bytes unreadable)"
+    # Three separate keys rather than one shared stem with an appended clause: a translated sentence
+    # cannot be assembled by concatenating a fragment onto a stem and stay grammatical.
+    bindings = [
+      segment_id: inspect(segment_id),
+      position: verdict.position,
+      reason: verdict.reason,
+      bytes: verdict.unreadable_bytes
+    ]
 
     cond do
       # Immutable and fully durable when it was sealed, so a short scan is corruption at rest. The
       # copy now serves only its valid prefix and needs repair from a peer.
       verdict.sealed? ->
-        Logger.warning(message <> ": sealed segment, this copy needs repair from an intact replica")
+        Logger.warning(I18n.t(:replication_sealed_segment_damaged, bindings))
 
       # A torn frame at the end of an active segment is ordinary crash recovery: those bytes were
       # never acked. Worth a line because it quantifies what the crash cost, not an alarm.
       verdict.reason == :incomplete ->
-        Logger.info("segment #{inspect(segment_id)} dropped #{verdict.unreadable_bytes} bytes of a partial write")
+        Logger.info(
+          I18n.t(:replication_partial_write_dropped,
+            segment_id: inspect(segment_id),
+            bytes: verdict.unreadable_bytes
+          )
+        )
 
       # A full frame that fails its checksum was written completely and is wrong: rot or a bug, not
       # a torn write, even though the segment is still active.
       true ->
-        Logger.warning(message <> ": active segment, damage past a complete frame")
+        Logger.warning(I18n.t(:replication_active_segment_damaged, bindings))
     end
   end
 

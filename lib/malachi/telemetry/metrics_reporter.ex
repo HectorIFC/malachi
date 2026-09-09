@@ -16,7 +16,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :auth],
     [:malachi, :replication, :commit],
     [:malachi, :storage, :integrity],
-    [:malachi, :storage, :scrub]
+    [:malachi, :storage, :scrub],
+    [:malachi, :cluster, :orphaned_fence],
+    [:malachi, :cluster, :fence_reconciled]
   ]
 
   @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
@@ -59,5 +61,16 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :storage, :scrub], measurements, _metadata, _config) do
     Metrics.record_scrub_pass(measurements.verified, measurements.repaired, measurements.unrepairable)
+  end
+
+  # Counted as a pair rather than one series: the detection alone says a split hit an `ra` error, which
+  # is survivable, and the reconciliation alone says a pass had work to do. It is detections without
+  # reconciliations that means a range is stuck, and only both counters can express that.
+  def handle_event([:malachi, :cluster, :orphaned_fence], _measurements, _metadata, _config) do
+    Metrics.record_orphaned_fence()
+  end
+
+  def handle_event([:malachi, :cluster, :fence_reconciled], %{count: count}, _metadata, _config) do
+    Metrics.record_fences_reconciled(count)
   end
 end

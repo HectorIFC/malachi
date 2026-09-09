@@ -42,7 +42,10 @@ x-malachi-node: &malachi-node
     MALACHI_CLUSTER_STRATEGY: "${MALACHI_CLUSTER_STRATEGY:-epmd}"
     MALACHI_LOG_CLUSTER: "malachi_log"
     MALACHI_LOG_NODES: "malachi@malachi1,malachi@malachi2,malachi@malachi3"
-    MALACHI_LOG_VNODES: "1"
+    # Parameterized (default 1, a single metadata Raft group) so the reshard-restart chaos drill can
+    # bring the cluster up already sharded, grow the ring with `mix malachi.reshard`, and then prove the
+    # grown ring survives every node going down.
+    MALACHI_LOG_VNODES: "${MALACHI_LOG_VNODES:-1}"
     MALACHI_LOG_REPLICATION_FACTOR: "${RF:-1}"
     MALACHI_GROUP_COMMIT: "true"
     # Parameterized (default 2, the benchmark tuning) so the config-deploy chaos drill has a

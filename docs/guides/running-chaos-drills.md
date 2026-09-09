@@ -83,6 +83,33 @@ Two events, with the durability checker producing through both:
   crash-loop and never go healthy, while the other two keep serving quorum writes; rolling the
   environment back must bring it home.
 
+## Reshard durability
+
+```bash
+scripts/docker-reshard-restart-chaos.sh
+```
+
+Two events, with the durability checker producing through both:
+
+- **grow the ring while serving**: the cluster boots with `MALACHI_LOG_VNODES=4` and
+  `mix malachi.reshard --to 6` runs against it. The reshard must complete, the recorded ring must
+  report six vnodes with two of them created by splitting, and acks must keep flowing through the
+  metadata migrations.
+- **full-cluster restart**: all three nodes are stopped **together**, so no node survives to gossip
+  the ring, and then started again. The recorded ring must come back with exactly the same six
+  vnodes, split-created ones included, even though `MALACHI_LOG_VNODES` still says four.
+
+This is the drill an in-process test cannot stand in for: it takes away the operating-system
+processes and every copy of the ring held in memory. Before the ring was durable, the second event
+came back believing the environment and orphaned the metadata the reshard had moved.
+
+> **Currently red, and not because of the ring.** The two shared closing invariants below (acked-write
+> survival and the post-chaos produce) fail on this drill today: a sharded control plane returns from a
+> full-cluster restart healthy but unable to serve metadata writes. That is
+> [#136](https://github.com/HectorIFC/malachi/issues/136), which reproduces on `main`, reproduces with
+> no reshard involved, and does not reproduce on an unsharded cluster. The two events above, which are
+> what this drill certifies, pass.
+
 ## Recording a result
 
 Set `CHAOS_RESULT_FILE` and the harness writes the whole run as JSON alongside its console output:

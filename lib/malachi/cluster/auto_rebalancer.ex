@@ -23,6 +23,7 @@ defmodule Malachi.Cluster.AutoRebalancer do
 
   use GenServer
   require Logger
+  alias Malachi.I18n
 
   @default_interval 30_000
   @default_stabilization 3
@@ -99,10 +100,13 @@ defmodule Malachi.Cluster.AutoRebalancer do
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 
   defp log_result({:ok, []}), do: :ok
-  defp log_result({:ok, applied}), do: Logger.info("auto-rebalance committed: #{inspect(applied)}")
+
+  defp log_result({:ok, applied}),
+    do: Logger.info(I18n.t(:auto_rebalance_committed, applied: inspect(applied)))
+
   defp log_result({:error, :not_leader}), do: :ok
 
   defp log_result({:error, {applied, failure}}) do
-    Logger.warning("auto-rebalance partial: applied=#{inspect(applied)} failure=#{inspect(failure)}")
+    Logger.warning(I18n.t(:auto_rebalance_partial, applied: inspect(applied), failure: inspect(failure)))
   end
 end

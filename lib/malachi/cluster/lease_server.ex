@@ -1,9 +1,13 @@
 defmodule Malachi.Cluster.LeaseServer do
   @moduledoc """
-  A thin wrapper around `ra` for the cluster's lease (`Malachi.Cluster.LeaseMachine`): start the
+  A thin named facade over `Malachi.Cluster.RaCluster` for the cluster's lease (`Malachi.Cluster.LeaseMachine`): start the
   dedicated Raft cluster, submit `acquire_or_renew`/`release` commands through the log, and run a
   consistent (linearizable) query of the lease state. Mirrors `MetadataServer`; `ra` must already be
   running (`:ra.start_in/1`). This module owns only the lease cluster, not ra's lifecycle.
+
+  Until issue #32 this was the one store that formed without resuming first: `start/2` called
+  `:ra.start_cluster` directly, so a returning member could be re-created over its registered uid and
+  come back amnesiac. Going through `RaCluster` fixes that here by construction.
 
   Commands return `{:ok, machine_reply}` (the machine reply is `{:ok, fence}` on grant or
   `{:error, {:held, holder}}` on refusal) or `{:error, reason}` when the cluster is unreachable, the
@@ -13,8 +17,7 @@ defmodule Malachi.Cluster.LeaseServer do
 
   alias Malachi.Cluster.Lease
   alias Malachi.Cluster.LeaseMachine
-
-  @system :default
+  alias Malachi.Cluster.RaCluster
 
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
@@ -25,17 +28,7 @@ defmodule Malachi.Cluster.LeaseServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
-    server_ids = Enum.map(nodes, &{cluster_name, &1})
-    machine = {:module, LeaseMachine, %{}}
-
-    case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} -> {:ok, {cluster_name, member_node(nodes)}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp member_node(nodes) do
-    if node() in nodes, do: node(), else: hd(nodes)
+    RaCluster.start(LeaseMachine, cluster_name, nodes)
   end
 
   @doc """
@@ -48,29 +41,7 @@ defmodule Malachi.Cluster.LeaseServer do
   Meant to be called periodically by `Malachi.Cluster.LeaseReconciler` until the node has joined.
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
-  def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
-    # formed cluster, which ra logs as a (harmless but noisy) "failed to form" error and needlessly churns
-    # the shared ra system. Only a node that has not yet joined tries to form/join. Mirrors
-    # `UserServer.reconcile/2` and `LockoutServer.reconcile/2`.
-    case :ra.members({cluster_name, node()}) do
-      {:ok, _members, _leader} ->
-        :ok
-
-      _not_running ->
-        _ = start(cluster_name, nodes)
-        ensure_local_server(cluster_name, nodes)
-    end
-  end
-
-  # Best-effort: starts the local lease server so it (re)joins the cluster. Any error (already started, or
-  # the cluster not yet formed) is ignored, reconcile is idempotent and LeaseReconciler retries.
-  defp ensure_local_server(cluster_name, nodes) do
-    server_ids = Enum.map(nodes, &{cluster_name, &1})
-    machine = {:module, LeaseMachine, %{}}
-    _ = :ra.start_server(@system, cluster_name, {cluster_name, node()}, machine, server_ids)
-    :ok
-  end
+  def reconcile(cluster_name, nodes), do: RaCluster.reconcile(LeaseMachine, cluster_name, nodes)
 
   @doc """
   Acquires the lease for `candidate` (or renews it if already held), for `duration_ms`. Returns
@@ -94,25 +65,18 @@ defmodule Malachi.Cluster.LeaseServer do
   """
   @spec get(server_id()) :: {:ok, Lease.t()} | {:error, term()}
   def get(server_id) do
-    case :ra.consistent_query(server_id, {Function, :identity, []}) do
-      {:ok, %Lease{} = lease, _leader} -> {:ok, lease}
+    case RaCluster.query(server_id) do
+      {:ok, %Lease{} = lease} -> {:ok, lease}
       {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
     end
   end
 
   @doc "Stops and deletes the lease's Raft cluster (removing its on-disk state)."
   @spec delete(cluster_name()) :: :ok
   def delete(cluster_name) do
-    :ra.delete_cluster([{cluster_name, node()}])
+    _ = RaCluster.delete(cluster_name)
     :ok
   end
 
-  defp command(server_id, command) do
-    case :ra.process_command(server_id, command) do
-      {:ok, reply, _leader} -> {:ok, reply}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
-  end
+  defp command(server_id, command), do: RaCluster.command(server_id, command)
 end

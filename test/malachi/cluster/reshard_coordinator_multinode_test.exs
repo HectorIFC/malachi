@@ -16,6 +16,7 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.SplitCoordinator
+  alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Metadata
 
   setup_all do
@@ -49,7 +50,12 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
   end
 
   defp start_coordinators(membership) do
-    {:ok, splits} = SplitCoordinator.start_link(membership: membership, leader?: fn -> true end)
+    {:ok, splits} =
+      SplitCoordinator.start_link(
+        membership: membership,
+        publish: TopologyPublisher.gossip_only(membership),
+        lease: fn -> {:ok, 0} end
+      )
 
     # The reshard names its vnodes from the ring token, so they cannot be known up front. Record each one as
     # it is created and register the cleanup *before* running, so a test that fails midway still deletes the

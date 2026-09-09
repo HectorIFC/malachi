@@ -21,6 +21,13 @@ defmodule Malachi.Telemetry do
       read. `position` is the byte where the damage starts, `sealed` whether the segment was
       immutable (damage there is corruption at rest, not a crash mid-write), and `source` where the
       verdict came from (`:recover` when a segment was opened, `:scrub` from the background pass).
+    * `[:malachi, :cluster, :orphaned_fence]`. `%{count: 1}` / `%{segment, reason}` - a segment's store
+      was fenced but the control-plane seal that had to follow it FAILED, so the segment is closed to
+      writes while the metadata still calls it active and its range accepts nothing until a heal pass
+      reconciles the two. Alert on this rising while `[:malachi, :cluster, :fence_reconciled]` stays
+      flat: that pair is the difference between a divergence that healed and a range that is stuck.
+    * `[:malachi, :cluster, :fence_reconciled]`. `%{count}` / `%{}` - a heal pass finished the seal for
+      `count` such segments, which is what unblocks their ranges.
     * `[:malachi, :storage, :scrub]`. `%{verified, damaged, repaired, unrepairable}` / `%{}` - one
       background verification pass finished, with how many segments it covered. Steady progress
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
@@ -65,6 +72,21 @@ defmodule Malachi.Telemetry do
       %{position: verdict.position, unreadable_bytes: verdict.unreadable_bytes},
       %{result: verdict.reason, sealed: verdict.sealed?, source: source, segment: segment_id}
     )
+  end
+
+  @doc """
+  A segment's store was fenced but recording the seal in the control plane failed, leaving the segment
+  closed to writes while the metadata still calls it active. `reason` is what the command answered.
+  """
+  @spec orphaned_fence(term(), term()) :: :ok
+  def orphaned_fence(segment_id, reason) do
+    :telemetry.execute([:malachi, :cluster, :orphaned_fence], %{count: 1}, %{segment: segment_id, reason: reason})
+  end
+
+  @doc "A heal pass recorded the seal for `count` segments whose store was already fenced."
+  @spec fence_reconciled(non_neg_integer()) :: :ok
+  def fence_reconciled(count) do
+    :telemetry.execute([:malachi, :cluster, :fence_reconciled], %{count: count}, %{})
   end
 
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."

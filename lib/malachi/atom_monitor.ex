@@ -143,11 +143,7 @@ defmodule Malachi.AtomMonitor do
       usage_ratio >= state.critical_threshold and not state.critical_sent ->
         usage_pct = Float.round(usage_ratio * 100, 1)
 
-        Logger.error(
-          "CRITICAL: Atom table usage at #{usage_pct}% " <>
-            "(#{atom_count}/#{@atom_limit}). " <>
-            "Possible atom exhaustion attack or dynamic atom leak."
-        )
+        Logger.error(I18n.t(:atom_usage_critical, usage: usage_pct, count: atom_count, limit: @atom_limit))
 
         try_audit_log(
           :security_violation,
@@ -162,11 +158,7 @@ defmodule Malachi.AtomMonitor do
       usage_ratio >= state.warning_threshold and not state.warning_sent ->
         usage_pct = Float.round(usage_ratio * 100, 1)
 
-        Logger.warning(
-          "WARNING: Atom table usage at #{usage_pct}% " <>
-            "(#{atom_count}/#{@atom_limit}). " <>
-            "Monitor for potential atom leaks."
-        )
+        Logger.warning(I18n.t(:atom_usage_warning, usage: usage_pct, count: atom_count, limit: @atom_limit))
 
         try_audit_log(
           :security_violation,
