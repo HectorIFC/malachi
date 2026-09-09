@@ -138,7 +138,7 @@ defmodule Malachi.Cluster.RingBoot do
   end
 
   @doc """
-  The message for a durable ring that could not be read within `timeout_ms`. Refusing to boot is the
+  The message for a durable ring that could not be **read** within `timeout_ms`. Refusing to boot is the
   deliberate choice: a node that cannot see the ring cannot know which vnodes own which arcs, and
   serving on a guess is precisely the corruption being fixed.
   """
@@ -146,6 +146,14 @@ defmodule Malachi.Cluster.RingBoot do
   def unreadable_message(reason, timeout_ms) do
     I18n.t(:ring_unreadable, reason: inspect(reason), timeout: timeout_ms)
   end
+
+  @doc """
+  The message for a first-boot seed that could not be **written**. Deliberately separate from
+  `unreadable_message/2`: that one names `MALACHI_LOG_RING_BOOT_TIMEOUT_MS`, which bounds the read and
+  has nothing to do with a rejected write, so reusing it would send an operator to the wrong knob.
+  """
+  @spec unseeded_message(term()) :: String.t()
+  def unseeded_message(reason), do: I18n.t(:ring_unseeded, reason: inspect(reason))
 
   @doc "The number of vnodes a topology's ring carries."
   @spec vnode_count(RingTopology.t()) :: non_neg_integer()

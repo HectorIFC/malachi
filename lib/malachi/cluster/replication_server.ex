@@ -49,6 +49,7 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicaTracker
+  alias Malachi.I18n
   alias Malachi.Log
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
@@ -939,7 +940,14 @@ defmodule Malachi.Cluster.ReplicationServer do
         {:error, reason} ->
           # A failed catch-up leaves the replica behind; the offset check in `follow` re-triggers it on
           # the next fan-out. Log it so a persistently failing catch-up is visible rather than silent.
-          Logger.warning("catch-up for #{inspect(segment_id)} (#{from}..#{to}) failed: #{inspect(reason)}")
+          Logger.warning(
+            I18n.t(:replication_catchup_failed,
+              segment_id: inspect(segment_id),
+              from: from,
+              to: to,
+              reason: inspect(reason)
+            )
+          )
       end
     end
   end
@@ -998,25 +1006,35 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp report_integrity(verdict, segment_id) do
     Telemetry.storage_integrity(verdict, segment_id, :recover)
 
-    message =
-      "segment #{inspect(segment_id)} failed verification at byte #{verdict.position} " <>
-        "(#{verdict.reason}, #{verdict.unreadable_bytes} bytes unreadable)"
+    # Three separate keys rather than one shared stem with an appended clause: a translated sentence
+    # cannot be assembled by concatenating a fragment onto a stem and stay grammatical.
+    bindings = [
+      segment_id: inspect(segment_id),
+      position: verdict.position,
+      reason: verdict.reason,
+      bytes: verdict.unreadable_bytes
+    ]
 
     cond do
       # Immutable and fully durable when it was sealed, so a short scan is corruption at rest. The
       # copy now serves only its valid prefix and needs repair from a peer.
       verdict.sealed? ->
-        Logger.warning(message <> ": sealed segment, this copy needs repair from an intact replica")
+        Logger.warning(I18n.t(:replication_sealed_segment_damaged, bindings))
 
       # A torn frame at the end of an active segment is ordinary crash recovery: those bytes were
       # never acked. Worth a line because it quantifies what the crash cost, not an alarm.
       verdict.reason == :incomplete ->
-        Logger.info("segment #{inspect(segment_id)} dropped #{verdict.unreadable_bytes} bytes of a partial write")
+        Logger.info(
+          I18n.t(:replication_partial_write_dropped,
+            segment_id: inspect(segment_id),
+            bytes: verdict.unreadable_bytes
+          )
+        )
 
       # A full frame that fails its checksum was written completely and is wrong: rot or a bug, not
       # a torn write, even though the segment is still active.
       true ->
-        Logger.warning(message <> ": active segment, damage past a complete frame")
+        Logger.warning(I18n.t(:replication_active_segment_damaged, bindings))
     end
   end
 

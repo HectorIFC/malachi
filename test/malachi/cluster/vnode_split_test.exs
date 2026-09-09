@@ -4,6 +4,7 @@ defmodule Malachi.Cluster.VnodeSplitTest do
   # publishes the topology. Tagged so it can be excluded where multi-node networking is unavailable.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import Malachi.Test.TeardownHelper
 
   @moduletag :multinode
@@ -87,6 +88,44 @@ defmodule Malachi.Cluster.VnodeSplitTest do
     assert ReplicatedDSRSM.vnode_for(grown, "orders") == {:ok, dest}
     {:ok, dest_meta} = ReplicatedDSRSM.query(grown, "orders", &Function.identity/1)
     assert Metadata.get_topic(dest_meta, "orders").name == "orders"
+  end
+
+  test "a publication the ring store refuses is logged, and the caller's contract is unchanged" do
+    unique = System.unique_integer([:positive])
+    source = :"vsplit_refused_src_#{unique}"
+    dest = :"vsplit_refused_dst_#{unique}"
+    on_exit(fn -> Enum.each([source, dest], &MetadataServer.delete/1) end)
+
+    {:ok, replicated} = ReplicatedDSRSM.add_vnode(ReplicatedDSRSM.new(), source, 0, [node()])
+    {:ok, _root} = commit(replicated, "orders", {:create_topic, "orders", 4})
+
+    membership = start_membership(RingTopology.new(replicated.ring, %{source => [node()]}))
+    token = :erlang.phash2("orders", Integer.pow(2, 32))
+
+    # the intent publishes, the migration then fails (unreachable placement), and the store refuses the
+    # clear_pending that follows. That refusal is best-effort by design, so the caller still gets the
+    # migration error; what must not happen is it passing unrecorded.
+    refuse_clear = fn topology, expected_version, fence ->
+      if topology.pending == nil do
+        {:error, {:conflict, :stale_writer}}
+      else
+        TopologyPublisher.gossip_only(membership).(topology, expected_version, fence)
+      end
+    end
+
+    log =
+      capture_log(fn ->
+        assert {:error, _migration_reason} =
+                 VnodeSplit.split(membership, dest, token, [:"nonexistent@127.0.0.1"],
+                   publish: refuse_clear,
+                   lease: fn -> {:ok, 0} end
+                 )
+      end)
+
+    assert log =~ "The ring store refused the publication"
+    assert log =~ "clearing an aborted split"
+    assert log =~ inspect(dest)
+    assert log =~ "the intent stays recorded", "the operator has to be told a retry is still coming"
   end
 
   test "a logical split failure clears the intent and leaves the ring unchanged" do

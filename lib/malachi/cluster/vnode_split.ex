@@ -26,11 +26,14 @@ defmodule Malachi.Cluster.VnodeSplit do
   (VS-2b), the durable ring (issue #32), and the runtime adoption (Int-1).
   """
 
+  require Logger
+
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.TopologyPublisher
+  alias Malachi.I18n
 
   @typedoc "The lease with its fencing token: `{:ok, fence}` while this node leads, `:error` otherwise."
   @type lease :: (-> {:ok, non_neg_integer()} | :error)
@@ -95,7 +98,8 @@ defmodule Malachi.Cluster.VnodeSplit do
       {:ok, grown} ->
         # the split finished: publish the completed ring + placement (advance clears the intent)
         placements = Map.put(topology.placements, new_vnode, nodes)
-        _ = publish.(RingTopology.advance(topology, grown.ring, placements), topology.version, fence)
+        completed = RingTopology.advance(topology, grown.ring, placements)
+        log_refusal(publish.(completed, topology.version, fence), new_vnode, :ring_publish_refused_completing)
         :ok
 
       {:error, _reason} ->
@@ -131,9 +135,21 @@ defmodule Malachi.Cluster.VnodeSplit do
         # split_vnode already rolled the migration back in-process, so the ring is back to pre-split;
         # drop the now-stale intent (`clear_pending` bumps the version forward, keeping the old ring) so no
         # failover reconciler acts on an already-undone split. Only a *crash* before here leaves it pending.
-        _ = publish.(RingTopology.clear_pending(pending), pending.version, fence)
+        cleared = RingTopology.clear_pending(pending)
+        log_refusal(publish.(cleared, pending.version, fence), new_vnode_id, :ring_publish_refused_clearing)
         error
     end
+  end
+
+  # Both of these publications are best-effort by design: the caller's contract is fixed (`:ok` for the
+  # reconciler, the migration error for an abort), and the pending intent is durable, so a later lease
+  # takeover or coordinator restart retries. What must not happen is the refusal passing unrecorded: the
+  # metadata has moved while the published ring has not, and without a line here nothing says so.
+  # Retrying from here is deliberately not done, because the topology we hold is the stale one.
+  defp log_refusal(:ok, _vnode_id, _message_key), do: :ok
+
+  defp log_refusal({:error, reason}, vnode_id, message_key) do
+    Logger.warning(I18n.t(message_key, vnode: inspect(vnode_id), reason: inspect(reason)))
   end
 
   # `{:error, :not_leader}` keeps the historical contract: callers already treat it as "someone else

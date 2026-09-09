@@ -262,6 +262,142 @@ defmodule Malachi.I18n do
       "pt_BR" => "Outro nó semeou o anel primeiro (versão %{version}, %{durable} vnodes); adotando o dele",
       "en_US" => "Another node seeded the ring first (version %{version}, %{durable} vnodes); adopting it"
     },
+    memory_gc_complete: %{
+      "pt_BR" => "GC do sistema concluído: %{reclaimed} MB recuperados (%{before} MB -> %{after} MB)",
+      "en_US" => "System GC complete: reclaimed %{reclaimed} MB (%{before} MB -> %{after} MB)"
+    },
+    memory_high_usage: %{
+      "pt_BR" =>
+        "Uso de memória alto: %{total} MB no total (processos: %{processes} MB, ETS: %{ets} MB, " <>
+          "binários: %{binary} MB)",
+      "en_US" =>
+        "High memory usage: %{total} MB total (processes: %{processes} MB, ETS: %{ets} MB, " <>
+          "binary: %{binary} MB)"
+    },
+    memory_top_consumers: %{
+      "pt_BR" => "Maiores consumidores de memória: %{consumers}",
+      "en_US" => "Top memory consumers: %{consumers}"
+    },
+    atom_usage_critical: %{
+      "pt_BR" =>
+        "CRÍTICO: tabela de atoms em %{usage}% (%{count}/%{limit}). Possível ataque de exaustão de " <>
+          "atoms ou vazamento de atoms dinâmicos.",
+      "en_US" =>
+        "CRITICAL: Atom table usage at %{usage}% (%{count}/%{limit}). Possible atom exhaustion attack " <>
+          "or dynamic atom leak."
+    },
+    atom_usage_warning: %{
+      "pt_BR" => "ATENÇÃO: tabela de atoms em %{usage}% (%{count}/%{limit}). Monitore possíveis vazamentos de atoms.",
+      "en_US" => "WARNING: Atom table usage at %{usage}% (%{count}/%{limit}). Monitor for potential atom leaks."
+    },
+    # Deliberately identical in both locales: this line is parsed by log shippers, and translating the
+    # prefix or the payload would break them. It goes through I18n so the convention holds without
+    # exception, not because the text varies.
+    audit_log_line: %{
+      "pt_BR" => "[AUDIT] %{json}",
+      "en_US" => "[AUDIT] %{json}"
+    },
+    scrubber_unexpected_message: %{
+      "pt_BR" => "scrubber ignorando mensagem inesperada: %{message}",
+      "en_US" => "scrubber ignoring unexpected message: %{message}"
+    },
+    scrubber_invalid_interval: %{
+      "pt_BR" =>
+        "intervalo de scrub %{interval} não é um número positivo de milissegundos, usando o padrão de %{default}ms",
+      "en_US" =>
+        "scrub interval %{interval} is not a positive number of milliseconds, using the default of %{default}ms"
+    },
+    scrub_segment_damaged: %{
+      "pt_BR" => "scrub encontrou %{segment_id} danificado (%{reason} no byte %{position})%{outcome}",
+      "en_US" => "scrub found %{segment_id} damaged (%{reason} at byte %{position})%{outcome}"
+    },
+    scrub_repair_succeeded: %{
+      "pt_BR" => ": reparado a partir de uma réplica íntegra",
+      "en_US" => ": repaired from an intact replica"
+    },
+    scrub_repair_failed_refetch: %{
+      "pt_BR" =>
+        ": reparo FALHOU no meio do refetch (%{reason}), esta cópia fica incompleta até uma passagem posterior concluir",
+      "en_US" => ": repair FAILED mid-refetch (%{reason}), this copy is incomplete until a later pass finishes it"
+    },
+    scrub_repair_not_done: %{
+      "pt_BR" => ": NÃO reparado (%{reason}), esta cópia segue danificada e seus bytes continuam em disco",
+      "en_US" => ": NOT repaired (%{reason}), this copy stays damaged and its bytes are still on disk"
+    },
+    replication_catchup_failed: %{
+      "pt_BR" => "catch-up de %{segment_id} (%{from}..%{to}) falhou: %{reason}",
+      "en_US" => "catch-up for %{segment_id} (%{from}..%{to}) failed: %{reason}"
+    },
+    replication_sealed_segment_damaged: %{
+      "pt_BR" =>
+        "segmento %{segment_id} falhou na verificação no byte %{position} (%{reason}, %{bytes} bytes " <>
+          "ilegíveis): segmento selado, esta cópia precisa de reparo a partir de uma réplica íntegra",
+      "en_US" =>
+        "segment %{segment_id} failed verification at byte %{position} (%{reason}, %{bytes} bytes " <>
+          "unreadable): sealed segment, this copy needs repair from an intact replica"
+    },
+    replication_active_segment_damaged: %{
+      "pt_BR" =>
+        "segmento %{segment_id} falhou na verificação no byte %{position} (%{reason}, %{bytes} bytes " <>
+          "ilegíveis): segmento ativo, dano depois de um frame completo",
+      "en_US" =>
+        "segment %{segment_id} failed verification at byte %{position} (%{reason}, %{bytes} bytes " <>
+          "unreadable): active segment, damage past a complete frame"
+    },
+    replication_partial_write_dropped: %{
+      "pt_BR" => "segmento %{segment_id} descartou %{bytes} bytes de uma escrita parcial",
+      "en_US" => "segment %{segment_id} dropped %{bytes} bytes of a partial write"
+    },
+    heal_repair_failed: %{
+      "pt_BR" => "passagem de cura não conseguiu reparar %{count}: %{failures}",
+      "en_US" => "healing pass could not repair %{count}: %{failures}"
+    },
+    heal_seal_no_majority: %{
+      "pt_BR" =>
+        "segmento %{segment_id} não pode ser selado para failover: %{answered} de %{replicas} réplicas " <>
+          "responderam, sem maioria. Seu range fica bloqueado para escrita até uma maioria voltar, " <>
+          "porque selar numa minoria poderia descartar escritas já confirmadas",
+      "en_US" =>
+        "segment %{segment_id} cannot be sealed for failover: %{answered} of %{replicas} replicas " <>
+          "answered, no majority. Its range is blocked for writes until a majority returns, because " <>
+          "sealing on a minority could discard acknowledged writes"
+    },
+    auto_rebalance_committed: %{
+      "pt_BR" => "rebalanceamento automático aplicado: %{applied}",
+      "en_US" => "auto-rebalance committed: %{applied}"
+    },
+    auto_rebalance_partial: %{
+      "pt_BR" => "rebalanceamento automático parcial: aplicado=%{applied} falha=%{failure}",
+      "en_US" => "auto-rebalance partial: applied=%{applied} failure=%{failure}"
+    },
+    vnode_coordinators_down: %{
+      "pt_BR" => "coordenadores do vnode %{vnode} caíram (%{reason}); reiniciando no próximo reconcile",
+      "en_US" => "vnode %{vnode} coordinators went down (%{reason}); restarting on the next reconcile"
+    },
+    ring_publish_refused_completing: %{
+      "pt_BR" =>
+        "⚠️ O store do anel recusou a publicação ao concluir um split interrompido do vnode %{vnode} " <>
+          "(%{reason}); o anel não avançou e uma retomada do lease vai tentar de novo",
+      "en_US" =>
+        "⚠️ The ring store refused the publication while completing an interrupted split for vnode " <>
+          "%{vnode} (%{reason}); the ring was not advanced and a later lease takeover will retry"
+    },
+    ring_publish_refused_clearing: %{
+      "pt_BR" =>
+        "⚠️ O store do anel recusou a publicação ao limpar um split abortado do vnode %{vnode} " <>
+          "(%{reason}); a intenção segue registrada e uma retomada do lease vai tentar de novo",
+      "en_US" =>
+        "⚠️ The ring store refused the publication while clearing an aborted split for vnode %{vnode} " <>
+          "(%{reason}); the intent stays recorded and a later lease takeover will retry"
+    },
+    ring_unseeded: %{
+      "pt_BR" =>
+        "O anel inicial não pôde ser gravado (%{reason}). Recusando o boot em vez de servir um anel " <>
+          "que o cluster nunca aceitou; verifique se um quórum do cluster do anel está de pé",
+      "en_US" =>
+        "The initial ring could not be recorded (%{reason}). Refusing to boot rather than serving a " <>
+          "ring the cluster never accepted; check that a quorum of the ring cluster is up"
+    },
     ring_unreadable: %{
       "pt_BR" =>
         "O anel durável não pôde ser lido em %{timeout}ms (%{reason}). Recusando o boot em vez de " <>

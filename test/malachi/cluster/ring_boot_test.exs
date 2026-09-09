@@ -146,7 +146,9 @@ defmodule Malachi.Cluster.RingBootTest do
 
     test "adopts the winner when another node seeded first" do
       seed = topology(8)
-      winner = topology(8, 0)
+      # a different ring at a different version: with an identical one the assertion would pass even if
+      # confirm_seed/2 handed back the seed instead of the topology the cluster actually agreed on
+      winner = topology(6, 3)
 
       log =
         capture_log(fn ->
@@ -165,6 +167,19 @@ defmodule Malachi.Cluster.RingBootTest do
     test "counts the vnodes on the ring, and zero when there is none" do
       assert RingBoot.vnode_count(topology(5)) == 5
       assert RingBoot.vnode_count(%RingTopology{}) == 0
+    end
+
+    test "a rejected seed write gets its own message, not the read-timeout one" do
+      seeded = RingBoot.unseeded_message(:noproc)
+      read = RingBoot.unreadable_message(:noproc, 60_000)
+
+      assert seeded =~ ":noproc"
+      assert seeded =~ "could not be recorded"
+
+      refute seeded =~ "MALACHI_LOG_RING_BOOT_TIMEOUT_MS",
+             "the boot timeout bounds the read; naming it after a rejected write sends the operator to the wrong knob"
+
+      refute seeded == read
     end
 
     test "the refusal message names the reason and the knob that lengthens the wait" do

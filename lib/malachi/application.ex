@@ -293,7 +293,7 @@ defmodule Malachi.Application do
 
     case RingBoot.resolve(read, env_topology(cluster, nodes)) do
       {:durable, topology} -> topology
-      {:seed, seed} -> plant_seed(server_id, seed, timeout_ms)
+      {:seed, seed} -> plant_seed(server_id, seed)
       :unsharded -> nil
       {:error, reason} -> raise RingBoot.unreadable_message(reason, timeout_ms)
     end
@@ -302,10 +302,11 @@ defmodule Malachi.Application do
   # Writes the first-boot seed through, adopting the winner if another node planted one concurrently. A
   # seed that did not land at all is fatal for the same reason an unreadable store is: this node would
   # otherwise serve a ring the cluster never agreed on.
-  defp plant_seed(server_id, seed, timeout_ms) do
+  defp plant_seed(server_id, seed) do
     case RingBoot.confirm_seed(seed, &RingServer.init(server_id, &1)) do
       {:ok, topology} -> topology
-      {:error, reason} -> raise RingBoot.unreadable_message(reason, timeout_ms)
+      # its own message: this is a rejected WRITE, and the read timeout knob is not the way out of it
+      {:error, reason} -> raise RingBoot.unseeded_message(reason)
     end
   end
 

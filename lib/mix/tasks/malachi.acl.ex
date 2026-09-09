@@ -26,13 +26,22 @@ defmodule Mix.Tasks.Malachi.Acl do
   """
   use Mix.Task
 
+  alias Malachi.CLI.Options
   alias Malachi.CLI.Rpc
 
   @switches [node: :string, cookie: :string]
 
   @impl Mix.Task
   def run(argv) do
-    {opts, args, _invalid} = OptionParser.parse(argv, strict: @switches)
+    case Options.parse(argv, @switches) do
+      # refuse before resolving or connecting: an unknown option is absent from `opts`, so falling
+      # through would target $MALACHI_NODE (or the default) as though it had been asked for
+      {:ok, {opts, args}} -> connect_and_run(args, opts)
+      {:error, message} -> Mix.raise(message <> "\n\n" <> usage())
+    end
+  end
+
+  defp connect_and_run(args, opts) do
     node = Rpc.target_node(opts)
 
     case Rpc.connect(node, opts[:cookie]) do

@@ -88,6 +88,15 @@ defmodule Mix.Tasks.Malachi.RingTest do
     assert message =~ "rpc failed"
   end
 
+  test "an unknown option aborts with usage and never resolves or connects to a node" do
+    # `--nod` lands in OptionParser's invalid list and is absent from opts, so falling through would
+    # target $MALACHI_NODE (or the default) as though it had been asked for. A typo in `--node` is the
+    # worst case for that, since it would quietly read a different cluster's ring.
+    assert_raise Mix.Error, ~r/unknown option\(s\): --nod.*usage:/s, fn ->
+      RingTask.run(["--nod", "malachi@somewhere"])
+    end
+  end
+
   test "stray positional arguments return usage without calling the seam" do
     assert {:error, message} = RingTask.execute(["extra"], @node, recording_call({:ok, {:ok, %Ring{}}}))
     assert message =~ "usage:"

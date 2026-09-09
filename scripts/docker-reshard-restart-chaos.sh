@@ -102,9 +102,11 @@ ring_vnode_count() {
   ring_show | sed -n 's/.*, \([0-9][0-9]*\) vnodes .*/\1/p' | head -1
 }
 
-# The vnode ids on the recorded ring (second column of the placement lines).
-ring_vnode_ids() {
-  ring_show | awk '/^  [0-9]+\t/ { print $2 }' | sort
+# The recorded ring as token, vnode id and placement, one line per vnode. All three, not just the id:
+# a vnode keeping its name while its token or its placement moved would change metadata routing just as
+# surely, and comparing ids alone would call that unchanged.
+ring_vnode_topology() {
+  ring_show | awk '/^  [0-9]+\t/ { print $1 "\t" $2 "\t" $3 }' | sort
 }
 
 build_images
@@ -122,8 +124,8 @@ reshard_on_lease_holder 6 || fail "the reshard did not complete"
 require_progress "$before" "the reshard"
 
 grown_count=$(ring_vnode_count)
-ring_vnode_ids > "$WORK/vnodes_before.txt"
-split_born=$(grep -c '^vn_' "$WORK/vnodes_before.txt")
+ring_vnode_topology > "$WORK/vnodes_before.txt"
+split_born=$(awk '$2 ~ /^vn_/ { count++ } END { print count + 0 }' "$WORK/vnodes_before.txt")
 if [ "$grown_count" = "6" ] && [ "$split_born" = "2" ]; then
   echo "ring grew to 6 vnodes, 2 of them created by splitting"
 else
@@ -147,9 +149,9 @@ restored_count=$(ring_vnode_count)
 [ "$restored_count" = "6" ] || \
   fail "the ring was not durable: expected 6 vnodes after the restart, got '${restored_count:-none}' (MALACHI_LOG_VNODES is 4)"
 
-ring_vnode_ids > "$WORK/vnodes_after.txt"
+ring_vnode_topology > "$WORK/vnodes_after.txt"
 if diff -q "$WORK/vnodes_before.txt" "$WORK/vnodes_after.txt" >/dev/null; then
-  echo "the same 6 vnodes came back, split-created ones included"
+  echo "the same 6 vnodes came back with the same tokens and placements, split-created ones included"
 else
   echo "--- before"; cat "$WORK/vnodes_before.txt"
   echo "--- after";  cat "$WORK/vnodes_after.txt"
