@@ -109,6 +109,33 @@ real disk: `Performance Benchmarks` > `Run workflow` > `sync_ab`.
 SYNC_AB=1 SYNC_AB_REPS=15 SYNC_AB_OUT=/tmp/sync-ab.json mix run --no-start benchmark/storage_viability.exs
 ```
 
+##### What it found the first time (issue #82)
+
+Noise in all six cases, on `ubuntu-latest` with 15 repetitions per arm. In the case that matters
+most, batch 10 x 256B, the regime the pinned ceiling harness actually runs:
+
+| arm | median p50 | spread |
+| --- | --- | --- |
+| fsync | 341us | 329-356 |
+| fdatasync | 345us | 323-356 |
+| control A1 (fsync) | 343us | 322-391 |
+| control A2 (fsync) | 346us | 322-365 |
+
+The fsync-to-fdatasync difference is 4us; the fsync-to-**fsync** control difference is 3us. They are
+the same number, which is what the control exists to reveal. The platform was real (a 1-byte fsync
+cost 303us on that runner, where tmpfs would be single-digit microseconds), and with n=15 the method
+would have resolved a 2% effect, so this is a measured absence rather than a failure to measure.
+
+The mechanism: a segment GROWS, so every append changes the file size, and that size change is
+metadata `fdatasync` has to journal anyway. What it saves over `fsync` rides along in a commit it
+must make regardless. Segment preallocation (issue #83) is what removes the size change, which makes
+#83 a prerequisite for #82 rather than a companion to it. Re-run this against that baseline once
+preallocation lands.
+
+One known bias to fix before that re-run: the arms are interleaved but always in the order A then B,
+so any position effect lands on B every time. The A-A control carries the same bias, which is why
+the conclusion holds, but alternating the order between repetitions would be better.
+
 ### `dashboard_security_benchmark.exs`
 
 Measures the overhead that authentication, security headers, and audit logging add
