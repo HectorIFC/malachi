@@ -102,6 +102,16 @@ defmodule Malachi.Metrics.Prometheus do
           {[result: "unrepairable"], ops.scrub_segments_unrepairable}
         ]
       ),
+      metric(
+        "malachi_cluster_orphaned_fences_total",
+        :counter,
+        "Segments fenced whose control-plane seal failed, and the ones a heal pass has since reconciled " <>
+          "(detected rising while reconciled stays flat means a range is stuck for writes)",
+        [
+          {[result: "detected"], ops.orphaned_fences},
+          {[result: "reconciled"], ops.fences_reconciled}
+        ]
+      ),
       topic_metrics(topics)
     ]
   end

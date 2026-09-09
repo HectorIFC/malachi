@@ -40,6 +40,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   restarts, while reads and repair (`follow/4`) keep working. That is what makes a control-plane sealed
   length a consequence of closing the segment rather than a number measured beside a log that is still
   growing.
+
+  `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
+  without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
+  landed and finish it.
   """
 
   use GenServer
@@ -309,6 +313,32 @@ defmodule Malachi.Cluster.ReplicationServer do
     :exit, _reason -> {:error, :unreachable}
   end
 
+  @doc """
+  Which of `segments` this server has already FENCED, as `%{segment_id => {end_offset, byte_size}}`.
+  Never fences anything: it reports a latch somebody else already closed.
+
+  `segments` is a list of `{segment_id, base_offset}` pairs, batched into one call on purpose. The
+  caller (`Malachi.Cluster.HealCoordinator`) asks about EVERY active segment on every pass, which is a
+  different shape of question from `durable_stats/4`'s: that one is asked about a handful of failover
+  candidates and pays an open plus a flush per segment, and paying that for every active segment of a
+  cluster would put descriptors and I/O on a poll where there is none today.
+
+  A segment that is not fenced is simply absent from the answer and costs a map lookup, or a `File.exists?`
+  of the seal marker when this server has not opened it since booting (the same test `replicate/5` itself
+  applies). Only the fenced ones, which is the rare case this exists to find, pay an open.
+
+  A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller, as
+  `durable_stats/4` and `seal/4` do: the caller is a coordinator loop that must survive a replica it
+  cannot reach.
+  """
+  @spec fenced_segments(term(), [{term(), non_neg_integer()}], timeout()) ::
+          {:ok, %{optional(term()) => {non_neg_integer(), non_neg_integer()}}} | {:error, term()}
+  def fenced_segments(ref, segments, timeout \\ 5_000) do
+    GenServer.call(ref, {:fenced_segments, segments}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
   # --- GenServer ---
 
   @impl true
@@ -520,6 +550,24 @@ defmodule Malachi.Cluster.ReplicationServer do
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {:ok, log} = Log.seal(log)
     {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
+  end
+
+  # The batched fence report. Read-only by construction: `fenced?/2` is the same test the write paths
+  # use, and only a segment it answers TRUE for is opened (to report where it ended). A segment that is
+  # merely active is never touched, which is the property that keeps this safe to run over every active
+  # segment: a pass that fenced while probing is what wedged a range at `replication_factor: 2` before.
+  def handle_call({:fenced_segments, segments}, _from, state) do
+    {state, fenced} =
+      Enum.reduce(segments, {state, %{}}, fn {segment_id, base_offset}, {acc_state, acc} ->
+        if fenced?(acc_state, segment_id) do
+          {acc_state, end_offset} = fenced_end(acc_state, segment_id, base_offset)
+          {acc_state, Map.put(acc, segment_id, {end_offset, bytes_on_disk(acc_state, segment_id)})}
+        else
+          {acc_state, acc}
+        end
+      end)
+
+    {:reply, {:ok, fenced}, state}
   end
 
   def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do

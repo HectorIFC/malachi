@@ -238,6 +238,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Cerca do segmento %{segment_id} falhou: %{reason}; o segmento pai segue aberto",
       "en_US" => "⚠️ Fence for segment %{segment_id} failed: %{reason}; the parent stays open"
     },
+    seal_record_failed: %{
+      "pt_BR" =>
+        "❌ Segmento %{segment_id} foi cercado mas o selo no control plane falhou: %{reason}; o range " <>
+          "não aceita escrita até um passe de heal reconciliar",
+      "en_US" =>
+        "❌ Segment %{segment_id} was fenced but recording its seal failed: %{reason}; the range takes " <>
+          "no write until a heal pass reconciles it"
+    },
     group_flush_failed: %{
       "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
       "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"
@@ -351,6 +359,25 @@ defmodule Malachi.I18n do
     heal_repair_failed: %{
       "pt_BR" => "passagem de cura não conseguiu reparar %{count}: %{failures}",
       "en_US" => "healing pass could not repair %{count}: %{failures}"
+    },
+    heal_orphaned_fence_reconciled: %{
+      "pt_BR" =>
+        "%{count} segmento(s) reconciliado(s) cujo store estava cercado enquanto o control plane ainda " <>
+          "os chamava de ativos: %{segments}. Os ranges deles recusavam toda escrita até agora, então " <>
+          "um seal de cerca que não persiste merece investigação a montante",
+      "en_US" =>
+        "reconciled %{count} segment(s) whose store was fenced while the control plane still called " <>
+          "them active: %{segments}. Their ranges were refusing every write until now, so a fence's " <>
+          "seal failing to land is worth investigating upstream"
+    },
+    heal_orphaned_fence_unrecorded: %{
+      "pt_BR" =>
+        "não foi possível registrar o seal de %{count} segmento(s) cercado(s): %{segments}. Os ranges " <>
+          "deles não aceitam escrita até uma passagem posterior conseguir, então o control plane é o " <>
+          "lugar a olhar",
+      "en_US" =>
+        "could not record the seal for %{count} fenced segment(s): %{segments}. Their ranges take no " <>
+          "write until a later pass succeeds, so the control plane is the thing to look at"
     },
     heal_seal_no_majority: %{
       "pt_BR" =>
