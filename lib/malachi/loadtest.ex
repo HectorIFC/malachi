@@ -6,7 +6,7 @@ defmodule Malachi.Loadtest do
 
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
   lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
-  server-shed `overloaded` produces, and reconnects) and a `Malachi.Loadtest.Histogram` for latency. A
+  server-shed `overloaded` produces, and reconnects) and a `Malachi.Histogram` for latency. A
   worker connects and authenticates, waits at a barrier so all connections start together, runs its
   scenario for `warmup + duration`, and records only during the measured window. It is resilient: a shed
   produce backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
@@ -26,8 +26,8 @@ defmodule Malachi.Loadtest do
   of how many failed, rather than crashing a linked worker.
   """
 
+  alias Malachi.Histogram
   alias Malachi.Loadtest.Conn
-  alias Malachi.Loadtest.Histogram
   alias Malachi.Log.Record
   alias Malachi.Wire
 

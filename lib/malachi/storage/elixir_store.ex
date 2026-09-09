@@ -22,6 +22,7 @@ defmodule Malachi.Storage.ElixirStore do
   @behaviour Malachi.Storage.SegmentStore
 
   alias Malachi.Log.{Record, Segment}
+  alias Malachi.Telemetry
 
   @default_index_interval 4096
   @read_window_bytes 262_144
@@ -445,8 +446,22 @@ defmodule Malachi.Storage.ElixirStore do
           {[frame | iodata], index_entries, position + frame_size, last_indexed_position}
       end)
 
+    # Timed as one unit because the write and the sync are one durability barrier: an acknowledged
+    # produce waits for both, and splitting them would report a flush latency no caller ever sees.
+    # Only this clause emits: a sync with nothing pending wrote no records, so counting it would
+    # dilute the very percentile this measures with samples that never made anything durable.
+    flushed_bytes = end_position - store.write_position
+    started_us = System.monotonic_time(:microsecond)
     :ok = :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata))
     :ok = :file.sync(store.file_descriptor)
+
+    Telemetry.storage_flush(
+      System.monotonic_time(:microsecond) - started_us,
+      flushed_bytes,
+      store.pending_count,
+      store.segment.id,
+      store.segment.directory
+    )
 
     %Segment{} = current_segment = store.segment
 

@@ -48,6 +48,14 @@ Worth alerting on:
   recovery (a partial tail that was never acked); on a sealed segment any reason means corruption at
   rest, and that copy needs to be rebuilt from an intact replica. The matching log line names the
   segment and the byte position.
+- **`malachi_storage_flush_duration_seconds`**: the group-commit flush latency, as a summary
+  (`quantile="0.5"|"0.99"|"0.999"` plus `_sum` and `_count`). This is the write-plus-sync barrier every
+  acknowledged produce waits behind, so it is the first place to look when produce throughput drops
+  without CPU rising: an fsync-bound disk shows up here as a rising p99 long before anything else
+  moves. The quantiles are cumulative since the node booted (the histogram has no decay), so read
+  them as the node's whole life; for a windowed average use `rate(_sum) / rate(_count)` instead.
+  `malachi_storage_flushed_records_total` divided by `_count` is records per fsync, which is how
+  well group commit is coalescing: near 1 means it is not.
 - Session and auth counters. Note that `:session_expired` and `:session_hijack_attempt` are **not
   disjoint**: one validation can emit both, so summing them does not count failed validations. The hijack
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so

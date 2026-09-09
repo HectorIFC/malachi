@@ -39,12 +39,34 @@ defmodule Malachi.Metrics.PrometheusTest do
         integrity_bad_index: 4,
         scrub_segments_verified: 4200,
         scrub_segments_repaired: 3,
-        scrub_segments_unrepairable: 2
-      }
+        scrub_segments_unrepairable: 2,
+        storage_flushes: 1000,
+        storage_flushed_bytes: 2_048_000,
+        storage_flushed_records: 10_000,
+        storage_flush_duration_us: 1_500_000
+      },
+      storage_flush_latency_us: %{p50: 900.0, p99: 8700.0, p999: 41_000.0, count: 1000}
     }
   end
 
   defp render(topics), do: Prometheus.export(system(), topics) |> IO.iodata_to_binary()
+
+  # A node that has not flushed yet: the histogram is empty and every counter is zero.
+  defp system_without_flushes do
+    system = system()
+
+    %{
+      system
+      | operations: %{
+          system.operations
+          | storage_flushes: 0,
+            storage_flushed_bytes: 0,
+            storage_flushed_records: 0,
+            storage_flush_duration_us: 0
+        },
+        storage_flush_latency_us: %{p50: 0.0, p99: 0.0, p999: 0.0, count: 0}
+    }
+  end
 
   test "emits HELP/TYPE and a value line per series" do
     out = render([])
@@ -140,5 +162,36 @@ defmodule Malachi.Metrics.PrometheusTest do
       render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
 
     assert out =~ ~S(malachi_topic_ranges{topic="a\"b\\c"} 1)
+  end
+
+  describe "storage flush summary" do
+    test "renders the quantiles, sum and count as one summary in seconds" do
+      out = render([])
+
+      assert out =~ "# TYPE malachi_storage_flush_duration_seconds summary"
+      # Microseconds in, seconds out: Prometheus convention is base units.
+      assert out =~ "\nmalachi_storage_flush_duration_seconds{quantile=\"0.5\"} 0.0009\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds{quantile=\"0.99\"} 0.0087\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds{quantile=\"0.999\"} 0.041\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_sum 1.5\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_count 1000\n"
+    end
+
+    test "renders the durability totals alongside it" do
+      out = render([])
+
+      assert out =~ "# TYPE malachi_storage_flushed_bytes_total counter\nmalachi_storage_flushed_bytes_total 2048000\n"
+      assert out =~ "\nmalachi_storage_flushed_records_total 10000\n"
+    end
+
+    # A freshly booted node scrapes before its first flush. That must render zeros, not crash and not
+    # omit the series: a scraper that sees the series appear only under load cannot alert on its absence.
+    test "a node that has never flushed renders zeros rather than failing" do
+      out = Prometheus.export(system_without_flushes(), []) |> IO.iodata_to_binary()
+
+      assert out =~ "\nmalachi_storage_flush_duration_seconds{quantile=\"0.5\"} 0.0\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_sum 0.0\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_count 0\n"
+    end
   end
 end

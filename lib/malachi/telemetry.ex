@@ -11,6 +11,14 @@ defmodule Malachi.Telemetry do
     * `[:malachi, :auth]`. `%{count: 1}` / `%{result: :ok | :error}` - an authentication attempt.
     * `[:malachi, :replication, :commit]`. `%{count}` / `%{result: :ok | :no_quorum}` - a quorum
       replication of a batch (`count` = records in the batch; `result` is whether a quorum stored it).
+    * `[:malachi, :storage, :flush]`. `%{duration_us, bytes, records}` / `%{segment, directory}` -
+      one group-commit flush reached the disk: the buffered frames were written and the segment was
+      synced. This is the durability barrier every acknowledged produce waits behind, so
+      `duration_us` is the latency that bounds produce throughput on an fsync-bound disk. Only a
+      flush that actually wrote something emits, so the event count is the number of syncs the data
+      plane paid. The metadata names which segment paid it, so one slow range or one bad disk can be
+      told apart from a node-wide slowdown; it is deliberately not folded into the exported metric,
+      where it would be unbounded label cardinality.
     * `[:malachi, :storage, :integrity]`. `%{position, unreadable_bytes}` /
       `%{result, sealed, source, segment}` - a stored segment failed verification. `result` is what
       the verification found, and the list is open rather than closed, so a consumer should have a
@@ -51,6 +59,19 @@ defmodule Malachi.Telemetry do
   @spec replication_commit(non_neg_integer(), :ok | :no_quorum) :: :ok
   def replication_commit(count, result) do
     :telemetry.execute([:malachi, :replication, :commit], %{count: count}, %{result: result})
+  end
+
+  @doc """
+  One group-commit flush was made durable: `duration_us` is how long the write plus sync took, over
+  `records` records and `bytes` encoded bytes, on the segment named by `segment_id` in `directory`.
+  """
+  @spec storage_flush(non_neg_integer(), non_neg_integer(), non_neg_integer(), term(), Path.t()) :: :ok
+  def storage_flush(duration_us, bytes, records, segment_id, directory) do
+    :telemetry.execute(
+      [:malachi, :storage, :flush],
+      %{duration_us: duration_us, bytes: bytes, records: records},
+      %{segment: segment_id, directory: directory}
+    )
   end
 
   @doc """

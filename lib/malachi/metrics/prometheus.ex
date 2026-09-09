@@ -102,9 +102,55 @@ defmodule Malachi.Metrics.Prometheus do
           {[result: "unrepairable"], ops.scrub_segments_unrepairable}
         ]
       ),
+      summary(
+        "malachi_storage_flush_duration_seconds",
+        "Group-commit flush latency: the write-plus-sync barrier every acknowledged produce waits behind",
+        system.storage_flush_latency_us,
+        us_to_seconds(ops.storage_flush_duration_us),
+        ops.storage_flushes
+      ),
+      metric("malachi_storage_flushed_bytes_total", :counter, "Encoded bytes made durable by group-commit flushes", [
+        {[], ops.storage_flushed_bytes}
+      ]),
+      metric(
+        "malachi_storage_flushed_records_total",
+        :counter,
+        "Records made durable by group-commit flushes (divided by the flush count: records per fsync)",
+        [{[], ops.storage_flushed_records}]
+      ),
       topic_metrics(topics)
     ]
   end
+
+  # A Prometheus summary: the quantile series, then the `_sum` and `_count` that belong to it. The
+  # quantiles come from a live histogram read at scrape time and are cumulative since boot, so they
+  # describe the node's whole life; `_sum` over `_count` is what gives a windowed average via rate().
+  defp summary(name, help, latency, sum_seconds, count) do
+    [
+      "# HELP ",
+      name,
+      " ",
+      help,
+      "\n# TYPE ",
+      name,
+      " summary\n",
+      Enum.map(
+        [{"0.5", latency.p50}, {"0.99", latency.p99}, {"0.999", latency.p999}],
+        fn {q, us} -> [name, "{quantile=\"", q, "\"} ", value(us_to_seconds(us)), "\n"] end
+      ),
+      name,
+      "_sum ",
+      value(sum_seconds),
+      "\n",
+      name,
+      "_count ",
+      value(count),
+      "\n"
+    ]
+  end
+
+  # Prometheus convention is base units, so latencies are exposed in seconds, not microseconds.
+  defp us_to_seconds(us), do: us / 1_000_000
 
   # One block per per-topic series: a single HELP/TYPE then a sample per topic (labelled by name).
   defp topic_metrics([]), do: []

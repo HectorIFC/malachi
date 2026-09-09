@@ -134,6 +134,43 @@ kill_server() {
 }
 trap kill_server EXIT
 
+# Reads the server's own group-commit flush latency off its Prometheus endpoint. This is the second
+# observable behind issue #82, and the more useful of the two: throughput on a shared runner swings by
+# tens of percent run to run, while the latency of the sync syscall barely notices the neighbours, so a
+# few percent shows up here that would drown in rec/s.
+#
+# Cumulative since the server booted, and this script boots a fresh server per rung, so the WARM
+# seconds are in the samples alongside the measured DUR. Same regime either way, so it shifts the
+# quantiles very little, but it is a real caveat and is recorded rather than hidden.
+#
+# Best effort: a missing curl, a dashboard that never came up, or an auth refusal leaves the fields
+# out of the run json (jq renders them null) instead of failing the rung.
+DASH_PORT="${MALACHI_DASHBOARD_PORT:-4041}"
+
+scrape_flush_latency() { # -> "p50 p99 p999 count" in SECONDS, or nothing
+  command -v curl > /dev/null 2>&1 || return 1
+
+  local token
+  token="$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:$DASH_PORT/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$MALACHI_USER\",\"password\":\"$MALACHI_PASS\"}" 2> /dev/null |
+    jq -r '.token // empty' 2> /dev/null)" || return 1
+  [ -n "$token" ] || return 1
+
+  local text
+  text="$(curl -fsS --max-time 5 "http://127.0.0.1:$DASH_PORT/metrics" \
+    -H "Authorization: Bearer $token" -H 'Accept: text/plain' 2> /dev/null)" || return 1
+
+  # One awk pass over the exposition text; prints nothing unless all four series were present.
+  printf '%s\n' "$text" | awk '
+    /^malachi_storage_flush_duration_seconds\{quantile="0\.5"\}/  { p50 = $2; n++ }
+    /^malachi_storage_flush_duration_seconds\{quantile="0\.99"\}/ { p99 = $2; n++ }
+    /^malachi_storage_flush_duration_seconds\{quantile="0\.999"\}/{ p999 = $2; n++ }
+    /^malachi_storage_flush_duration_seconds_count /                { count = $2; n++ }
+    END { if (n == 4) print p50, p99, p999, count }
+  '
+}
+
 run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical fields + attribution)
   local n="$1"
   local out="$RUN_DIR/run-$n.json"
@@ -194,6 +231,12 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   [ -s "$srv_cpu_file" ] && srv_cores="$(cat "$srv_cpu_file")"
   [ -s "$gen_cpu_file" ] && gen_cores="$(cat "$gen_cpu_file")"
 
+  # Scraped while the server is still up: the counters die with it.
+  local flush_p50="null" flush_p99="null" flush_p999="null" flush_count="null" flush
+  if flush="$(scrape_flush_latency)" && [ -n "$flush" ]; then
+    read -r flush_p50 flush_p99 flush_p999 flush_count <<< "$flush"
+  fi
+
   kill_server
 
   # Stamp the attribution onto the run json (skip a point whose generator produced nothing).
@@ -201,7 +244,10 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   local tmp="$out.tmp"
   if jq --argjson srv "${srv_cores:-null}" --argjson srvb "$SRV_BUDGET" \
        --argjson gen "${gen_cores:-null}" --argjson genb "$LT_BUDGET" \
-       '. + {server_cpu_cores: $srv, server_cpu_budget: $srvb, generator_cpu_cores: $gen, generator_cpu_budget: $genb}' \
+       --argjson fp50 "${flush_p50:-null}" --argjson fp99 "${flush_p99:-null}" \
+       --argjson fp999 "${flush_p999:-null}" --argjson fcount "${flush_count:-null}" \
+       '. + {server_cpu_cores: $srv, server_cpu_budget: $srvb, generator_cpu_cores: $gen, generator_cpu_budget: $genb,
+             flush_latency_seconds: {p50: $fp50, p99: $fp99, p999: $fp999, count: $fcount}}' \
        "$out" > "$tmp"; then
     mv "$tmp" "$out"
   else

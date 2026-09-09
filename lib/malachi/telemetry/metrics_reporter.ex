@@ -15,6 +15,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :consume],
     [:malachi, :auth],
     [:malachi, :replication, :commit],
+    [:malachi, :storage, :flush],
     [:malachi, :storage, :integrity],
     [:malachi, :storage, :scrub]
   ]
@@ -42,6 +43,10 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :replication, :commit], _measurements, %{result: result}, _config) do
     Metrics.record_replication(result)
+  end
+
+  def handle_event([:malachi, :storage, :flush], measurements, _metadata, _config) do
+    Metrics.record_flush(measurements.duration_us, measurements.bytes, measurements.records)
   end
 
   # A torn frame at the END of an ACTIVE segment is ordinary crash recovery: those bytes were never

@@ -1,11 +1,15 @@
-defmodule Malachi.Loadtest.Histogram do
+defmodule Malachi.Histogram do
   @moduledoc """
-  A lock-free latency histogram for the load generator: an `:atomics` array of log-spaced buckets that
-  every connection process writes to concurrently, with no per-op allocation and no shared GenServer.
+  A lock-free latency histogram: an `:atomics` array of log-spaced buckets that many processes write
+  to concurrently, with no per-op allocation and no shared GenServer. Used by the load generator for
+  request latency and by `Malachi.Metrics` for storage flush latency.
 
   Latencies are recorded in microseconds. Bucket `b` covers `[2^((b-1)/scale), 2^(b/scale))` us, so the
   resolution is `2^(1/scale) - 1` (about 4.4% at `scale = 16`), fine enough for tail percentiles while
   keeping the array tiny. Percentiles return the representative us of the bucket the rank falls in.
+
+  Writers pay one `:atomics.add/3` on the caller, which is why this is safe on a hot path: routing the
+  samples through a GenServer would serialize every writer behind one process instead.
   """
 
   @buckets 1024

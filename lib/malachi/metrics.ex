@@ -12,10 +12,16 @@ defmodule Malachi.Metrics do
   use GenServer
   require Logger
   alias Malachi.Auth.{LockoutManager, SessionManager}
+  alias Malachi.Histogram
   alias Malachi.I18n
   alias Malachi.Telemetry.MetricsReporter
 
   @metrics_table :malachi_metrics
+  # The flush-latency histogram lives in :persistent_term rather than ETS: writers are on the storage
+  # hot path and an :atomics add on the caller costs a fraction of an ETS write, with no lock at all.
+  # Read-mostly after boot, which is exactly what persistent_term is for (a put triggers a global GC
+  # scan, so it happens once at init and never again).
+  @flush_histogram_key {__MODULE__, :flush_histogram}
 
   @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
@@ -51,6 +57,28 @@ defmodule Malachi.Metrics do
   @doc "Records `count` records consumed (from the consume telemetry event)."
   def record_consume(count) do
     :ets.update_counter(@metrics_table, :records_consumed, {2, count}, {:records_consumed, 0})
+    :ok
+  end
+
+  @doc """
+  Records one group-commit flush: `duration_us` into the latency histogram, plus running totals of
+  flushes, bytes and records made durable (from the storage flush telemetry event).
+
+  A no-op when the histogram is absent, which is the case in a node that never started `Metrics`.
+  """
+  def record_flush(duration_us, bytes, records) do
+    case :persistent_term.get(@flush_histogram_key, nil) do
+      nil -> :ok
+      hist -> Histogram.record(hist, duration_us)
+    end
+
+    :ets.update_counter(@metrics_table, :storage_flushes, {2, 1}, {:storage_flushes, 0})
+    :ets.update_counter(@metrics_table, :storage_flushed_bytes, {2, bytes}, {:storage_flushed_bytes, 0})
+    :ets.update_counter(@metrics_table, :storage_flushed_records, {2, records}, {:storage_flushed_records, 0})
+
+    # The running total behind the summary's `_sum`: with `_count` it gives the average flush latency
+    # over any window, which the quantiles alone cannot (percentiles do not average across scrapes).
+    :ets.update_counter(@metrics_table, :storage_flush_duration_us, {2, duration_us}, {:storage_flush_duration_us, 0})
     :ok
   end
 
@@ -271,11 +299,33 @@ defmodule Malachi.Metrics do
         integrity_bad_index: get_counter({:integrity_failure, :bad_index}),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
         scrub_segments_repaired: get_counter(:scrub_segments_repaired),
-        scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable)
+        scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),
+        storage_flushes: get_counter(:storage_flushes),
+        storage_flushed_bytes: get_counter(:storage_flushed_bytes),
+        storage_flushed_records: get_counter(:storage_flushed_records),
+        storage_flush_duration_us: get_counter(:storage_flush_duration_us)
       },
+      storage_flush_latency_us: flush_latency_percentiles(),
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()
     }
+  end
+
+  # Percentiles of the flush-latency histogram, read at scrape time. Cumulative since boot: the
+  # histogram has no decay, so these describe the node's whole life, not the last minute.
+  defp flush_latency_percentiles do
+    case :persistent_term.get(@flush_histogram_key, nil) do
+      nil ->
+        %{p50: 0.0, p99: 0.0, p999: 0.0, count: 0}
+
+      hist ->
+        %{
+          p50: Histogram.percentile(hist, 50),
+          p99: Histogram.percentile(hist, 99),
+          p999: Histogram.percentile(hist, 99.9),
+          count: Histogram.count(hist)
+        }
+    end
   end
 
   defp get_atom_monitor_stats do
@@ -318,6 +368,13 @@ defmodule Malachi.Metrics do
       :named_table,
       read_concurrency: true
     ])
+
+    # Created before the reporter is attached so no flush event can arrive to a missing histogram.
+    # Reused across restarts: the samples are the node's history, and dropping them on a Metrics
+    # crash would silently reset a percentile an operator is watching.
+    if :persistent_term.get(@flush_histogram_key, nil) == nil do
+      :persistent_term.put(@flush_histogram_key, Histogram.new())
+    end
 
     # Fold the telemetry hot-path events into these counters. Attached here so the ETS table exists
     # first; idempotent, so a Metrics restart re-attaches cleanly.

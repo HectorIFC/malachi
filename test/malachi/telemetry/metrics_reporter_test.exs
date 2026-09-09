@@ -75,4 +75,44 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.scrub_segments_repaired == before.scrub_segments_repaired + 1
     assert ops.scrub_segments_unrepairable == before.scrub_segments_unrepairable + 1
   end
+
+  describe "storage flush" do
+    test "a flush event advances the totals and lands in the latency histogram" do
+      before = Metrics.get_system_metrics()
+      before_ops = before.operations
+      before_count = before.storage_flush_latency_us.count
+
+      Telemetry.storage_flush(1500, 4096, 10, "segment-0", "/tmp/seg")
+      Telemetry.storage_flush(2500, 2048, 5, "segment-0", "/tmp/seg")
+
+      metrics = Metrics.get_system_metrics()
+      ops = metrics.operations
+
+      assert ops.storage_flushes == before_ops.storage_flushes + 2
+      assert ops.storage_flushed_bytes == before_ops.storage_flushed_bytes + 6144
+      assert ops.storage_flushed_records == before_ops.storage_flushed_records + 15
+      # The `_sum` behind the Prometheus summary, in microseconds until the exporter converts it.
+      assert ops.storage_flush_duration_us == before_ops.storage_flush_duration_us + 4000
+      assert metrics.storage_flush_latency_us.count == before_count + 2
+    end
+
+    test "the reported percentiles track the samples that were recorded" do
+      # A burst of slow flushes has to move the tail: a p99 that ignores them would let an
+      # fsync-bound disk look healthy in exactly the series an operator watches for it.
+      #
+      # The histogram is node-global and cumulative since boot, so the rest of the suite has already
+      # filed its own (fast) flushes in it. Enough slow samples to occupy well over the top 1% of the
+      # total, rather than a fixed count that a longer suite run would dilute below the p99.
+      before_count = Metrics.get_system_metrics().storage_flush_latency_us.count
+      slow_samples = 500 + div(before_count, 50)
+
+      for _ <- 1..slow_samples, do: Telemetry.storage_flush(80_000, 1024, 1, "segment-0", "/tmp/seg")
+
+      latency = Metrics.get_system_metrics().storage_flush_latency_us
+
+      assert latency.count >= before_count + slow_samples
+      assert latency.p99 >= 70_000, "p99 #{latency.p99} must reflect the #{slow_samples} 80ms flushes"
+      assert latency.p999 >= latency.p99, "percentiles must be monotonic"
+    end
+  end
 end

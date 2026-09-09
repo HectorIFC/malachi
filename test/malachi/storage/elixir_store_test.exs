@@ -115,6 +115,109 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "flush telemetry" do
+    # Attaches a handler for the duration of one test and returns a function that drains what it saw.
+    #
+    # Telemetry handlers are node-global while these cases are async, so the handler sees flushes
+    # from every test running beside this one. It filters on the segment's directory, which ExUnit
+    # makes unique per test: without that the drained list is whatever the scheduler interleaved.
+    defp capture_flushes(directory) do
+      test_pid = self()
+      handler_id = "flush-telemetry-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:malachi, :storage, :flush],
+        fn _event, measurements, metadata, _config ->
+          if metadata.directory == directory, do: send(test_pid, {:flush, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      fn -> drain_flushes([]) end
+    end
+
+    defp drain_flushes(acc) do
+      receive do
+        {:flush, measurements, _metadata} -> drain_flushes([measurements | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    test "an explicit sync emits one event with the records and bytes it made durable", %{tmp_dir: directory} do
+      flushes = capture_flushes(directory)
+      {:ok, store} = open(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("alpha"), rec("beta")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      assert [%{duration_us: duration, bytes: bytes, records: 2}] = flushes.()
+      assert duration >= 0
+      # The event must report the bytes this flush wrote, which is exactly the segment's growth.
+      assert bytes == store.segment.byte_size
+      assert bytes > 0
+    end
+
+    # The case that decides where the event lives: `flush_if_full/3` calls `sync/1` from inside
+    # `append/2`, never through `Malachi.Log`, so instrumenting the layer above would miss every
+    # size- and count-triggered flush. Those are the NorthGuard triggers, so missing them would
+    # leave the busiest flushes unmeasured.
+    test "a flush triggered by the size threshold emits too", %{tmp_dir: directory} do
+      flushes = capture_flushes(directory)
+      {:ok, store} = ElixirStore.open(directory, "segment-0", flush_bytes: 1)
+      {:ok, _store, _first, _last} = ElixirStore.append(store, [rec("a"), rec("b")])
+
+      assert [%{records: 2, bytes: bytes}] = flushes.()
+      assert bytes > 0
+    end
+
+    test "a sync with nothing pending emits nothing, so it cannot dilute the percentiles", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("a")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      flushes = capture_flushes(directory)
+      {:ok, _store} = ElixirStore.sync(store)
+
+      assert flushes.() == []
+    end
+
+    test "the event names the segment that paid for the flush", %{tmp_dir: directory} do
+      # Which segment was slow is the difference between one bad range and a node-wide problem, and
+      # a node-wide metric cannot tell them apart.
+      test_pid = self()
+      handler_id = "flush-metadata-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:malachi, :storage, :flush],
+        fn _event, _measurements, metadata, _config -> send(test_pid, {:metadata, metadata}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      {:ok, store} = ElixirStore.open(directory, "segment-7")
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("a")])
+      {:ok, _store} = ElixirStore.sync(store)
+
+      assert_receive {:metadata, %{segment: "segment-7", directory: ^directory}}
+    end
+
+    test "one event per flush, not one per record", %{tmp_dir: directory} do
+      flushes = capture_flushes(directory)
+      {:ok, store} = open(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("a"), rec("b"), rec("c")])
+      {:ok, store} = ElixirStore.sync(store)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("d")])
+      {:ok, _store} = ElixirStore.sync(store)
+
+      assert [%{records: 3}, %{records: 1}] = flushes.()
+    end
+  end
+
   describe "size-based auto-flush" do
     test "commits automatically once the buffer reaches flush_bytes", %{tmp_dir: directory} do
       # tiny threshold so any append triggers an automatic flush+fsync
