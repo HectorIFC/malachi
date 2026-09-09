@@ -505,9 +505,12 @@ Key metrics to monitor:
 
 ## Future Enhancements
 
-Potential improvements (not currently implemented):
+Shipped since this page was first written:
 
 - [x] Enforce the configured publish/subscribe rate limits (per-user quotas on produce/subscribe)
+
+Potential improvements (not currently implemented):
+
 - [ ] Per-record or per-byte publish quotas (today a produce costs one token whatever its batch size)
 - [ ] Carry `retry_after_ms` on the wire (needs a new `api_key`; see "What a client sees")
 - [ ] Rate limit `fetch` (today only streaming credit bounds a consumer)

@@ -232,18 +232,43 @@ defmodule Malachi.RateLimitEnforcementTest do
     end
 
     test "the publish and subscribe quotas are independent" do
+      # Both limits are POSITIVE and the subscribe runs as the SAME user whose publish quota is spent.
+      # An earlier version of this test set the subscribe limit to 0 and subscribed as a new user, so it
+      # passed for two reasons that had nothing to do with independence: the subscribe quota was never
+      # consulted, and the bucket it would have used belonged to somebody else. Verified against a mutant
+      # that counts both actions on one bucket, which this version fails and that one did not.
       limit_publish(1)
-      limit_subscribe(0)
-      {_user, socket} = connect_as_new_user()
+      limit_subscribe(1)
+
+      username = "rl_indep_#{System.unique_integer([:positive])}"
+      password = "Rate-Pass-1!"
+      Auth.add_user(username, password, [:produce, :consume])
+      on_exit(fn -> Auth.remove_user(username) end)
+
+      socket = connect_as(username, password)
       topic = new_topic()
       assert :ok = create_topic(socket, topic)
 
       assert :ok = produce(socket, topic)
       assert {:error, "rate_limited"} = produce(socket, topic)
 
-      # publish being exhausted says nothing about subscribe
-      subscriber = connect_as_new_user() |> elem(1)
-      :ok = TCPHelper.subscribe(subscriber, topic, nil, 100, 100, 7)
+      # Same user, publish quota gone: the subscribe must still be admitted on its own bucket. An accepted
+      # subscribe switches the connection to stream mode and immediately pushes the backlog, so the record
+      # produced above coming back is positive proof it was admitted, not merely an absence of refusal. A
+      # refusal would answer an error frame carrying `rate_limited` on the same correlation id.
+      streaming = connect_as(username, password)
+      :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
+
+      assert {:ok, frame_body} = TCPHelper.recv_frame(streaming, timeout: 2_000)
+      {7, code, payload} = Wire.decode_response(frame_body)
+
+      # Named rather than asserted bare, because the failure that matters here is a refusal, and the
+      # reason is only decodable once we know this IS an error frame.
+      if code != Wire.ok_code() do
+        flunk("the subscribe was refused (#{Wire.decode_error_reason(payload)}), so the quotas share a bucket")
+      end
+
+      assert {[%{value: "v"}], _cursor} = Wire.decode_fetch_resp(payload)
     end
   end
 end

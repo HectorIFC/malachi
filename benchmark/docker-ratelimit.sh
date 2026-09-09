@@ -77,7 +77,10 @@ apply_case() {
 }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# The cluster is torn down from the trap rather than at the end, because several paths (a failed
+# recreate, a cluster that never converges) exit early and would otherwise leave three containers and
+# their volumes running, which the NEXT benchmark then measures against.
+trap 'rm -rf "$WORK"; $COMPOSE down -v >/dev/null 2>&1' EXIT
 
 echo "Building images..."
 $COMPOSE build >/dev/null 2>&1 || { echo "build failed"; exit 1; }
@@ -135,6 +138,10 @@ for case_name in $CASES; do
 
   if [ "$case_name" = "off" ]; then
     delta="baseline"
+  elif [ "$baseline" = "0" ]; then
+    # Every `off` repeat failed, so there is nothing to compare against. awk aborts on the division and
+    # the column would carry its error rather than a number; say so instead.
+    delta="n/a (no baseline)"
   else
     delta=$(LC_NUMERIC=C awk -v a="$recs" -v b="$baseline" 'BEGIN{printf "%+.1f%%", (a-b)*100/b}')
   fi
@@ -148,5 +155,4 @@ for case_name in $CASES; do
   [ "${limited[$case_name]}" != "0" ] && { echo "  ^ $case_name refused produces: raise LIMIT, this row is not a throughput measurement"; FAILED=1; }
 done
 
-$COMPOSE down -v >/dev/null 2>&1
 exit "$FAILED"

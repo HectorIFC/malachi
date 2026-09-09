@@ -83,7 +83,8 @@ defmodule Malachi.RateLimiter do
 
   # How long an entry may sit untouched before the periodic cleanup reaps it. This is the right rule for a
   # token bucket, which has fully refilled after an hour of idleness under any window shorter than that.
-  # A sharded window counter is measured against its own action's window instead (see `sharded_ttl/1`).
+  # A sharded window counter is measured against the window width stored on the entry itself instead
+  # (see `cleanup_expired_buckets/0`).
   @bucket_ttl 3_600_000
 
   # ============================================================

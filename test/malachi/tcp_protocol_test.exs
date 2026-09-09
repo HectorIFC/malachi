@@ -128,10 +128,25 @@ defmodule Malachi.TCPProtocolTest do
       assert correlation(response) == 12
     end
 
-    test "a malformed frame on a subscribed connection is answered, not fatal" do
-      # The ack decoder raises on a body it cannot parse. The stream must survive that, so the rescue
-      # answers under correlation 0 (the id is not trustworthy here) and returns :ok.
+    test "a frame too short to decode at all is answered, not fatal" do
+      # This one never reaches the ack decoder: `Wire.decode_request/1` itself raises on a body with no
+      # envelope. Both failures land in the same rescue, which answers under correlation 0 (the id is not
+      # trustworthy here) and returns :ok so the stream survives.
       assert :ok = TCPProtocol.process_stream_frame(self(), <<>>, EchoTransport)
+
+      response = receive_response()
+      assert error?(response)
+      assert reason(response) == "malformed_request"
+      assert correlation(response) == 0
+    end
+
+    test "a well-formed ack envelope with an undecodable payload is answered, not fatal" do
+      # The other half, and the one a real buggy client actually sends: the envelope parses, so the frame
+      # is dispatched as an ack, and `Wire.decode_stream_ack_req/1` is what raises. Kept separate from the
+      # case above because they fail in different decoders and only this one exercises the ack path.
+      frame = <<Wire.stream_ack_key()::16, 99::32>>
+
+      assert :ok = TCPProtocol.process_stream_frame(self(), frame, EchoTransport)
 
       response = receive_response()
       assert error?(response)
