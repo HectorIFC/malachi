@@ -224,6 +224,48 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "get_stats/0 counts each entry shape" do
+    @table :malachi_rate_limits
+
+    test "counts blocked entries instead of reporting a confident zero" do
+      # The match spec used to wrap its object pattern in one tuple too many. A wrong spec does not
+      # raise, it simply never matches, so this reported 0 however many entries the table held: the same
+      # silent zero the publish and subscribe counters were fixed to stop reporting.
+      identifier = "stats_blocked_#{:rand.uniform(1_000_000)}"
+      before = RateLimiter.get_stats().total_blocked_entries
+
+      config = %{limit: 1, window_ms: 60_000}
+      assert :ok = RateLimiter.check_limit(identifier, :auth, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit(identifier, :auth, config)
+
+      assert [{_key, _count}] = :ets.lookup(@table, {:blocked, identifier, :auth})
+      assert RateLimiter.get_stats().total_blocked_entries == before + 1
+    end
+
+    test "counts sharded window counters, which are their own entry shape" do
+      identifier = "stats_window_#{:rand.uniform(1_000_000)}"
+      before = RateLimiter.get_stats().total_window_counters
+
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, %{limit: 8, window_ms: 60_000})
+
+      assert RateLimiter.get_stats().total_window_counters > before
+    end
+
+    test "keeps the three shapes apart rather than double counting" do
+      # A bucket must not be counted as a window counter, nor either as a blocked entry. Each head has to
+      # match exactly one shape, which is the property a copy-pasted spec quietly breaks.
+      tag = :rand.uniform(1_000_000)
+      stats = RateLimiter.get_stats()
+
+      assert :ok = RateLimiter.check_limit("bucket_#{tag}", :auth, %{limit: 5, window_ms: 60_000})
+      after_bucket = RateLimiter.get_stats()
+
+      assert after_bucket.total_buckets == stats.total_buckets + 1
+      assert after_bucket.total_window_counters == stats.total_window_counters
+      assert after_bucket.total_blocked_entries == stats.total_blocked_entries
+    end
+  end
+
   describe "get_stats/0" do
     test "returns statistics about buckets" do
       stats = RateLimiter.get_stats()
@@ -537,8 +579,8 @@ defmodule Malachi.RateLimiterTest do
 
       stale = {"stale_bucket_#{tag}", :auth}
       live = {"live_bucket_#{tag}", :auth}
-      :ets.insert(@table, {stale, {5, now - 3_600_000 - 60_000, now}})
-      :ets.insert(@table, {live, {5, now, now}})
+      :ets.insert(@table, {stale, {5, now - 3_600_000 - 60_000, now, 60_000}})
+      :ets.insert(@table, {live, {5, now, now, 60_000}})
 
       run_cleanup()
 
@@ -598,6 +640,30 @@ defmodule Malachi.RateLimiterTest do
       run_cleanup()
 
       assert :ets.lookup(@table, key) == []
+    end
+
+    test "keeps an exhausted bucket whose window is wider than the flat hour" do
+      # A bucket idle for a whole window has refilled anyway, so reaping it after an hour is free for any
+      # window under one. For a wider window it is a refund: the tokens are handed back before they were
+      # due. An auth allowance measured over more than an hour is the case that breaks.
+      identifier = "wide_bucket_#{:rand.uniform(1_000_000)}"
+      window_ms = 7_200_000
+      now = System.monotonic_time(:millisecond)
+      key = {identifier, :auth}
+
+      # Exhausted, last touched 61 minutes ago: past the flat hour, but only halfway through its window.
+      :ets.insert(@table, {key, {0, now - 61 * 60_000, now - 61 * 60_000, window_ms}})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) != [], "a bucket mid-window was reaped, refunding its tokens"
+
+      # A token bucket refills gradually, so being admitted here is correct: 61 minutes of a 2-hour
+      # window is worth 5 of the 10 tokens back. What must NOT happen is a reset to the full allowance,
+      # and the stored count tells the two apart. Kept: 5 refilled, 1 spent, 4 left. Reaped: the bucket
+      # is recreated at limit - 1, or 9.
+      assert :ok = RateLimiter.check_limit(identifier, :auth, %{limit: 10, window_ms: window_ms})
+      assert [{^key, {4, _last_refill, _window_start, ^window_ms}}] = :ets.lookup(@table, key)
     end
 
     test "never reaps blocked counters, whatever their age" do

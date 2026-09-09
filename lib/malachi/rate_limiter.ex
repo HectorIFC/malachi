@@ -7,7 +7,9 @@ defmodule Malachi.RateLimiter do
 
   The ETS table stores three types of entries:
 
-  - `{{identifier, action}, {count, last_refill_ms, window_start_ms}}` - Token buckets (`check_limit/3`)
+  - `{{identifier, action}, {count, last_refill_ms, window_start_ms, window_ms}}` - Token buckets
+    (`check_limit/3`); as with the sharded counters, the entry carries the window it was written under so
+    that ageing it never depends on configuration read somewhere else
   - `{{identifier, action, window_start_ms, shard}, used, window_ms}` - Sharded window counters
     (`check_limit_in_caller/3`); the entry carries the window it was counted under so the cleanup can
     age it without having to re-read config that may since have changed
@@ -224,18 +226,27 @@ defmodule Malachi.RateLimiter do
 
   @impl true
   def handle_call(:get_stats, _from, state) do
+    # Each head is `{key_pattern, value_pattern...}`, matching the whole ETS object. Getting that shape
+    # wrong does not raise, it just never matches, so a broken spec reports a confident zero: exactly what
+    # `total_blocked_entries` did before, wrapping its object pattern in one tuple too many.
     total_buckets =
       :ets.select_count(@table, [
-        {{{:_, :_}, {:_, :_, :_}}, [], [true]}
+        {{{:_, :_}, {:_, :_, :_, :_}}, [], [true]}
       ])
 
     total_blocked =
       :ets.select_count(@table, [
-        {{{{:blocked, :_, :_}, :_}}, [], [true]}
+        {{{:blocked, :_, :_}, :_}, [], [true]}
+      ])
+
+    total_window_counters =
+      :ets.select_count(@table, [
+        {{{:_, :_, :_, :_}, :_, :_}, [], [true]}
       ])
 
     stats = %{
       total_buckets: total_buckets,
+      total_window_counters: total_window_counters,
       total_blocked_entries: total_blocked
     }
 
@@ -351,10 +362,10 @@ defmodule Malachi.RateLimiter do
     case :ets.lookup(@table, key) do
       [] ->
         # New bucket - allow and initialize
-        :ets.insert(@table, {key, {limit - 1, now, now}})
+        :ets.insert(@table, {key, {limit - 1, now, now, window_ms}})
         :ok
 
-      [{^key, {count, last_refill, window_start}}] ->
+      [{^key, {count, last_refill, window_start, _window_ms}}] ->
         # Calculate tokens to add based on time passed
         refill_amount = calculate_refill(now, last_refill, window_ms, limit)
         new_count = min(limit, count + refill_amount)
@@ -362,7 +373,7 @@ defmodule Malachi.RateLimiter do
 
         if new_count > 0 do
           # Allow request and consume token
-          :ets.insert(@table, {key, {new_count - 1, now, new_window_start}})
+          :ets.insert(@table, {key, {new_count - 1, now, new_window_start, window_ms}})
           :ok
         else
           # Rate limit exceeded
@@ -391,6 +402,12 @@ defmodule Malachi.RateLimiter do
     :ets.update_counter(@table, key, {2, 1}, {key, 0})
   end
 
+  # A bucket idle for a whole window has refilled to full, so reaping it then is indistinguishable from
+  # keeping it, which is what makes the flat hour safe for every window shorter than one. It is NOT safe
+  # for a longer window: an auth allowance measured over more than an hour would have its tokens handed
+  # back after an hour of silence, well before they were due. Hence the floor.
+  defp bucket_ttl(window_ms), do: max(@bucket_ttl, window_ms)
+
   # A token bucket is reaped after a flat hour of idleness; a sharded window counter is reaped a full
   # window after its own window stopped being current. The flat hour is wrong for the sharded entries in
   # BOTH directions, which is why they carry their width: too long for a narrow window (a 1-second
@@ -404,8 +421,8 @@ defmodule Malachi.RateLimiter do
     expired_count =
       :ets.foldl(
         fn
-          {{_identifier, _action} = key, {_count, last_refill, _window_start}}, acc ->
-            if now - last_refill > @bucket_ttl do
+          {{_identifier, _action} = key, {_count, last_refill, _window_start, window_ms}}, acc ->
+            if now - last_refill > bucket_ttl(window_ms) do
               :ets.delete(@table, key)
               acc + 1
             else
