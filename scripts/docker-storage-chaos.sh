@@ -50,9 +50,13 @@ export MALACHI_SEGMENT_MAX_BYTES="${MALACHI_SEGMENT_MAX_BYTES:-4096}"
 # library default (1GB / 1h) a run of seconds has no `.idx` at all and event i would be vacuous.
 export MALACHI_LOG_ROLL_MAX_BYTES="${MALACHI_LOG_ROLL_MAX_BYTES:-2048}"
 # Preallocation ON, and small: segments are sized ahead of their contents in production (64MB), and
-# the whole point of this drill is the recovery path that a preallocated tail changes. Sized just
-# above the roll threshold so every active file really does carry unwritten space, and small enough
+# the whole point of this drill is the recovery path that a preallocated tail changes. Small enough
 # that invariant 4 can md5 the files whole.
+#
+# The effective size is clamped to the internal roll above, so the ask here is an upper bound and the
+# file is really preallocated to MALACHI_LOG_ROLL_MAX_BYTES. That is the right size: the segment
+# cannot grow past the roll, so anything more would be room it can never use, and the blank tail this
+# drill needs still exists for everything below the roll point.
 export MALACHI_SEGMENT_PREALLOC_BYTES="${MALACHI_SEGMENT_PREALLOC_BYTES:-8192}"
 # The scrub at production cadence revisits a segment about weekly, which no test window can wait
 # for, so the drill runs it aggressively: the point is to certify that it detects and repairs, not

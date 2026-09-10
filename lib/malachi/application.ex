@@ -789,7 +789,18 @@ defmodule Malachi.Application do
   #     What sets the flush size is what a producer sends per produce, or what group commit
   #     coalesces, not `:flush_bytes`, which is only a ceiling.
   defp segment_prealloc_bytes do
-    Application.get_env(:malachi, :segment_prealloc_bytes, @default_segment_prealloc_bytes)
+    configured = Application.get_env(:malachi, :segment_prealloc_bytes, @default_segment_prealloc_bytes)
+
+    # Never more than the segment will be allowed to reach. An operator who rolls at 1MB would
+    # otherwise get a 64MB file created and written for every 1MB segment, which is 64x the disk and
+    # 64x the creation cost for room that can never be used. Both thresholds bound the active file:
+    # `:segment_max_bytes` is where the broker asks for a roll, `:log_roll_max_bytes` where the log
+    # rolls internally, so the smaller of whichever are set is the real ceiling.
+    [:segment_max_bytes, :log_roll_max_bytes]
+    |> Enum.map(&Application.get_env(:malachi, &1))
+    |> Enum.filter(&is_integer/1)
+    |> Enum.min(fn -> configured end)
+    |> min(configured)
   end
 
   defp replication_child do
