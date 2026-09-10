@@ -172,7 +172,7 @@ defmodule Malachi.Log.Record do
 
   # Unwritten space, not a damaged frame. It comes up because a preallocated segment reads back as
   # zeros past its last write, and it is checked BEFORE the short-binary clause so that a couple of
-  # zero bytes at the very end of the preallocated region are still recognised for what they are.
+  # zero bytes at the very end of the preallocated region are still recognized for what they are.
   #
   # A zero magic cannot collide with a real frame (the magic is a fixed non-zero constant), so this
   # never hides damage: a frame whose header rotted to zeros is indistinguishable from unwritten

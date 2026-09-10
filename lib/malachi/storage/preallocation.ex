@@ -23,7 +23,7 @@ defmodule Malachi.Storage.Preallocation do
   | `:zeros` | no | no | no |
 
   Only `:zeros` leaves an append as a pure data write: `posix_fallocate(3)` marks the extents
-  UNWRITTEN, and converting one to written on first touch is itself a journalled metadata update.
+  UNWRITTEN, and converting one to written on first touch is itself a journaled metadata update.
   It is why PostgreSQL pre-creates WAL segments by writing zeros rather than by calling fallocate.
   That is a mechanism argument, not a measurement, which is why all three are kept here and
   `benchmark/storage_viability.exs` measures them against both syncs before one is chosen.

@@ -110,7 +110,7 @@ defmodule Malachi.Storage.ElixirStore do
     flush_bytes: @default_flush_bytes,
     flush_count: @default_flush_count,
     prealloc_bytes: @default_prealloc_bytes,
-    # How far this handle preallocated, or `nil` when it did not. It is what authorises trimming
+    # How far this handle preallocated, or `nil` when it did not. It is what authorizes trimming
     # the tail on `seal/1` and `close/1`, and it is deliberately a field rather than a test on
     # `prealloc_bytes`: a read-only handle from `open_read/3` must never be able to truncate a
     # sealed segment, whatever options it was passed.
@@ -144,7 +144,7 @@ defmodule Malachi.Storage.ElixirStore do
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
          prealloc_bytes: prealloc_bytes,
-         preallocated_to: preallocate(file_descriptor, 0, prealloc_bytes)
+         preallocated_to: preallocate(file_descriptor, prealloc_bytes)
        }}
     end
   end
@@ -173,7 +173,7 @@ defmodule Malachi.Storage.ElixirStore do
         discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
       end
 
-      preallocated_to = if sealed?, do: nil, else: preallocate(file_descriptor, valid_bytes, prealloc_bytes)
+      preallocated_to = if sealed?, do: nil, else: preallocate(file_descriptor, prealloc_bytes)
 
       segment = %Segment{
         segment
@@ -383,12 +383,32 @@ defmodule Malachi.Storage.ElixirStore do
   # follow it, the per-flush p99 went from 23.7ms growing to 72.0ms preallocated, three times worse,
   # while the p50 in the small-batch regimes was already 55% better. Paying it once, here, is what
   # keeps the cost a property of creating a segment rather than of committing to one.
-  defp preallocate(_file_descriptor, _from_byte, 0), do: nil
+  defp preallocate(_file_descriptor, 0), do: nil
 
-  defp preallocate(file_descriptor, from_byte, prealloc_bytes) do
-    :ok = Preallocation.extend(file_descriptor, from_byte, prealloc_bytes, :zeros)
-    :ok = :file.sync(file_descriptor)
-    prealloc_bytes
+  defp preallocate(file_descriptor, prealloc_bytes) do
+    # From the file's CURRENT size, never from `valid_bytes`. The bytes between the two belong to
+    # whatever recovery just decided about them, and for a `:rot` tail that decision was `:preserve`:
+    # extending from `valid_bytes` would zero the damaged frame AND every valid frame after it, so
+    # the next recovery would read unwritten space, report `:ok`, and the node would call itself
+    # healthy having silently lost the records a peer was supposed to repair.
+    {:ok, size} = Preallocation.file_size(file_descriptor)
+
+    case Preallocation.extend(file_descriptor, size, prealloc_bytes, :zeros) do
+      :ok ->
+        :ok = :file.sync(file_descriptor)
+        prealloc_bytes
+
+      # Preallocation is an optimization, and a segment works without it, so a failure here degrades
+      # to the behaviour this store had before it existed rather than failing the open. ENOSPC is the
+      # realistic trigger, and it is not hidden: claiming the space up front only moves WHEN a full
+      # volume is noticed, and the append that follows still reports it. The file is put back to the
+      # size it had first, so a partial extension cannot leave a tail behind that `seal/1` would then
+      # not trim (`preallocated_to` stays nil, which is what authorizes trimming).
+      {:error, _reason} ->
+        _ = :file.position(file_descriptor, size)
+        _ = :file.truncate(file_descriptor)
+        nil
+    end
   end
 
   # Gives back the preallocated tail, so a segment this store is no longer writing is byte-exact.
