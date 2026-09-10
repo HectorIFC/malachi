@@ -153,6 +153,47 @@ compared across machines, which is exactly the bias the A-A control exists to ex
 CI runner, whose `/tmp` is ext4 on a real disk: `Performance Benchmarks` > `Run workflow` >
 `prealloc_ab`.
 
+##### What it found (issue #83)
+
+Stage 1 on `ubuntu-latest`, OTP 28, 15 interleaved repetitions per arm, in the regime the pinned
+ceiling harness runs. The A-A control put the noise floor at **1us**:
+
+| arm | p50 | p99 |
+| --- | --- | --- |
+| grow + fsync (production today) | 316us | 632us |
+| sparse + fsync | 309us | 539us |
+| allocate + fsync | 292us | 497us |
+| **zeros + fsync** | **96us** | 381us |
+| zeros + fdatasync | 94us | 182us |
+| control A1 / A2 (identical) | 94us / 95us | |
+
+**Preallocation by written zeros takes the per-flush p50 from 316us to 96us, a 70% cut**, with a
+95% interval of [-230, -212] against a 1us noise floor. It does not need the syscall swap: `fsync`
+alone gets the whole thing.
+
+The mechanism table predicted the ordering exactly. `sparse` and `allocate` barely move, because
+they leave work for the first append (a block allocation, an unwritten-extent conversion) and both
+are journalled; only written zeros leave an append with nothing to journal. The 1-byte sync floor
+says the same thing from the other side: **257us on a growing file, 75us on a sized one**, so the
+fixed cost #82 ran into was three quarters the size change.
+
+For #82 the answer is still no in the median: `fdatasync` against `fsync` was -2us (grow), -5us
+(sparse), -5us (allocate), -2us (zeros), every interval spanning zero. But in the **tail**, with
+zeros, p99 went 381us to 182us, -52%, interval [-263, -130] against an 8us floor. Mediana untouched,
+tail halved, which is what dropping the mtime update would look like. A p99 over n=15 is a noisy
+estimator, so that is a lead for #82 to confirm, not a conclusion.
+
+Stage 2 (n=25) confirmed the main result across batch shapes, and found the one thing stage 1 could
+not: **batch 10 x 256B 445us to 199us (-55%), batch 100 x 256B 562us to 230us (-59%), and batch 1024
+x 1KB 2887us to 3421us (+18%) with p99 going 23.7ms to 72.0ms, three times worse.**
+
+That last row was the harness measuring itself. Preallocation leaves its whole region dirty in the
+page cache, and where the region is large relative to the flushes that follow it, the first flushes
+paid for that writeback instead of for their own data. Both the harness and the store now **sync
+right after preallocating**, so the cost stays a property of creating a segment rather than of
+committing to one. Creation costs 36ms for 64MB, which the saving pays back in about 164 flushes out
+of the roughly 26k a 64MB segment sees.
+
 ```bash
 # stage 1, triage
 PREALLOC_AB=1 PREALLOC_AB_REPS=15 PREALLOC_AB_OUT=/tmp/prealloc-ab.json \

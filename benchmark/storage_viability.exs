@@ -364,6 +364,11 @@ defmodule PreallocAB do
     batch = Bench.make_batch(rec_size, batch_count)
     batch_bytes = IO.iodata_length(batch)
     :ok = preallocate(fd, arm.mechanism, n_batches * batch_bytes)
+    # Synced before the timed loop, and this is load-bearing. Preallocation leaves its whole region
+    # dirty in the page cache, and an unsynced arm makes the first flushes pay for that writeback
+    # instead of for their own data, which is measuring the harness rather than the mechanism. The
+    # store syncs at the same point for the same reason.
+    :ok = :file.sync(fd)
     sync = sync_fun(arm.sync)
 
     {latencies, _position} =
