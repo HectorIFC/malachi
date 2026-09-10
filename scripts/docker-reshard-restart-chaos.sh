@@ -31,6 +31,14 @@ cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 export SRV_CPUSET="${SRV_CPUSET:-2,3,4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1}"
 export RF=3
 export MALACHI_DATA_ROOT=/data
+# Segment preallocation at the production default. These drills certify what a real deployment does
+# under failure, and preallocation changes the shape of a crashed segment: past its last write the
+# file is a tail of zeros, which recovery has to read as unwritten space rather than as corruption
+# (Malachi.Storage.ElixirStore.classify_tail/2). At 64MB the active segment never fills inside a
+# drill window, so that tail is present at every restart these harnesses inject, which is the point.
+# The compose defaults it to 0 because its own default data root is a tmpfs; here the data root is a
+# real volume, so it is set back on.
+export MALACHI_SEGMENT_PREALLOC_BYTES="${MALACHI_SEGMENT_PREALLOC_BYTES:-67108864}"
 # The cluster must boot already sharded: the ring only exists for a sharded control plane, and growing
 # it is what this drill certifies survives.
 export MALACHI_LOG_VNODES=4

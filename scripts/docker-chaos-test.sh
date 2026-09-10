@@ -26,6 +26,14 @@ export RF=3
 # Persistent per-node volumes instead of the benchmark tmpfs: durability-through-restart is exactly
 # what this harness certifies, and tmpfs is remounted empty on every container restart.
 export MALACHI_DATA_ROOT=/data
+# Segment preallocation at the production default. These drills certify what a real deployment does
+# under failure, and preallocation changes the shape of a crashed segment: past its last write the
+# file is a tail of zeros, which recovery has to read as unwritten space rather than as corruption
+# (Malachi.Storage.ElixirStore.classify_tail/2). At 64MB the active segment never fills inside a
+# drill window, so that tail is present at every restart these harnesses inject, which is the point.
+# The compose defaults it to 0 because its own default data root is a tmpfs; here the data root is a
+# real volume, so it is set back on.
+export MALACHI_SEGMENT_PREALLOC_BYTES="${MALACHI_SEGMENT_PREALLOC_BYTES:-67108864}"
 CHECKER_WINDOW_S="${CHECKER_WINDOW_S:-150}"
 CHAOS_TOPIC=chaos_acked
 source "$(dirname "$0")/chaos_lib.sh"
