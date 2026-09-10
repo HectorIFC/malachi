@@ -240,7 +240,7 @@ size held at 1KB so the only variable is bytes per flush):
 crosses zero near 173KB and the p99 near 178KB, and at 128KB the p50 delta is 17us against an 11us
 noise floor: a tie, which is what a crossover should look like.
 
-What separates the two percentiles is not where they cross but how steeply they fall afterwards.
+What separates the two percentiles is not where they cross but how steeply they fall afterward.
 Past the crossover the median drifts (+5.0%, +13.4%, +16.2%) while the tail runs away (+10.5%,
 +81.7%, +258.0%). A deployment defending a p99 therefore has far more to lose from being on the
 wrong side, even though both percentiles turn over at the same place.

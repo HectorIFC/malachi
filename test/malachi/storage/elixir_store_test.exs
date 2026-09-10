@@ -678,6 +678,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
       # last write and recovery has to know the difference between space nobody wrote and a frame
       # that was cut off mid-write. Both a bare header's worth and a couple of bytes of it count,
       # so the very end of a preallocated region is still recognized.
+      assert Record.decode_one(<<0>>) == :blank
       assert Record.decode_one(<<0, 0, 0>>) == :blank
       assert Record.decode_one(:binary.copy(<<0>>, 64)) == :blank
       assert Record.check_one(:binary.copy(<<0>>, 64)) == :blank

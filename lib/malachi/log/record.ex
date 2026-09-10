@@ -181,8 +181,10 @@ defmodule Malachi.Log.Record do
   defp split_frame(<<0::80, _rest::binary>>), do: :blank
 
   # Fewer than a full header left, which is the very end of a preallocated region. Every byte that IS
-  # there still has to be zero, on the same reasoning.
-  defp split_frame(<<0::16, rest::binary>> = binary) when byte_size(binary) < @frame_header_size do
+  # there still has to be zero, on the same reasoning. One leading zero byte is enough to enter here,
+  # not two: a region that ends a single byte past the last frame is still unwritten space, and
+  # requiring a two-byte magic made recovery call that healthy tail torn.
+  defp split_frame(<<0, rest::binary>> = binary) when byte_size(binary) < @frame_header_size do
     if all_zero?(rest), do: :blank, else: {:error, :bad_magic}
   end
 
