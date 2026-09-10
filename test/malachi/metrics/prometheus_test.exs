@@ -40,6 +40,8 @@ defmodule Malachi.Metrics.PrometheusTest do
         scrub_segments_verified: 4200,
         scrub_segments_repaired: 3,
         scrub_segments_unrepairable: 2,
+        orphaned_fences: 3,
+        fences_reconciled: 2,
         storage_flushes: 1000,
         storage_flushed_bytes: 2_048_000,
         storage_flushed_records: 10_000,
@@ -105,6 +107,11 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="verified"} 4200)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="repaired"} 3)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="unrepairable"} 2)
+
+    # The pair that says whether an orphaned fence healed: detections rising while reconciliations stay
+    # flat is a range that has stopped accepting writes, which neither series alone can express.
+    assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="detected"} 3)
+    assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="reconciled"} 2)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

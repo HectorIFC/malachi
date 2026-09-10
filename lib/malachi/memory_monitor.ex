@@ -194,8 +194,11 @@ defmodule Malachi.MemoryMonitor do
     reclaimed_mb = bytes_to_mb(reclaimed)
 
     Logger.info(
-      "System GC complete: reclaimed #{reclaimed_mb} MB " <>
-        "(#{bytes_to_mb(before)} MB → #{bytes_to_mb(after_gc)} MB)"
+      I18n.t(:memory_gc_complete,
+        reclaimed: reclaimed_mb,
+        before: bytes_to_mb(before),
+        after: bytes_to_mb(after_gc)
+      )
     )
 
     %{
@@ -209,20 +212,23 @@ defmodule Malachi.MemoryMonitor do
   defp check_high_memory(stats) do
     if stats.total_mb > 1000 do
       Logger.warning(
-        "High memory usage: #{stats.total_mb} MB total " <>
-          "(processes: #{stats.processes_mb} MB, ETS: #{stats.ets_mb} MB, " <>
-          "binary: #{stats.binary_mb} MB)"
+        I18n.t(:memory_high_usage,
+          total: stats.total_mb,
+          processes: stats.processes_mb,
+          ets: stats.ets_mb,
+          binary: stats.binary_mb
+        )
       )
 
       top_processes = get_top_memory_processes(5)
 
-      Logger.warning(
-        "Top memory consumers: " <>
-          Enum.map_join(top_processes, ", ", fn p ->
-            name = p.name || p.initial_call || p.pid
-            "#{name}=#{p.memory_mb}MB"
-          end)
-      )
+      consumers =
+        Enum.map_join(top_processes, ", ", fn p ->
+          name = p.name || p.initial_call || p.pid
+          "#{name}=#{p.memory_mb}MB"
+        end)
+
+      Logger.warning(I18n.t(:memory_top_consumers, consumers: consumers))
     end
   end
 

@@ -225,6 +225,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     rows = [
       {"Dropped connections", result["dropped"]},
       {"Server-shed produces", result["overloaded"]},
+      {"Quota-refused produces", result["rate_limited"]},
       {"Reconnects", result["reconnects"]}
     ]
 

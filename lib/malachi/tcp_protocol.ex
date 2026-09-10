@@ -4,6 +4,11 @@ defmodule Malachi.TCPProtocol do
   dispatches by `api_key` to the NorthGuard log operations (create_topic/produce/fetch/commit), and sends
   a response frame. Auth is handled by the acceptor (`TCPAcceptor`).
 
+  This is also where the configured publish/subscribe rate limits are applied (`Malachi.RateLimiter`),
+  keyed by the authenticated username and enforced per node. Both are off unless an operator configures
+  them. A rate-limited request answers `rate_limited`, deliberately distinct from the `overloaded` that
+  the group-commit valve sheds under saturation, so a client can tell a quota from a busy broker.
+
   A frame body comes from an untrusted client, so `process_frame/4` decodes inside a `try`: Wire's payload
   decoders raise on a malformed body, and the boundary answers a single error frame rather than crashing
   the connection. The client deals in `topic` + key + an **opaque cursor**, never partitions or offsets.
@@ -15,6 +20,8 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
+  alias Malachi.Metrics
+  alias Malachi.RateLimiter
   alias Malachi.Wire
 
   @coordinator_name Malachi.LogGroupCoordinator
@@ -120,23 +127,25 @@ defmodule Malachi.TCPProtocol do
     {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
 
     with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      window = stream_window(window_raw)
-      max = fetch_max(max_raw)
+      with_rate_limit(:subscribe, session, correlation_id, fn ->
+        window = stream_window(window_raw)
+        max = fetch_max(max_raw)
 
-      # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
-      result =
-        if member != nil and group != nil do
-          LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
-        else
-          LogApi.subscribe(broker_for(topic), topic, group, window, max)
+        # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
+        result =
+          if member != nil and group != nil do
+            LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
+          else
+            LogApi.subscribe(broker_for(topic), topic, group, window, max)
+          end
+
+        # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
+        # mode; the client re-resolves and re-subscribes against the new owner.
+        case result do
+          :ok -> {:stream, correlation_id}
+          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
         end
-
-      # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
-      # mode; the client re-resolves and re-subscribes against the new owner.
-      case result do
-        :ok -> {:stream, correlation_id}
-        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-      end
+      end)
     end)
   end
 
@@ -152,10 +161,12 @@ defmodule Malachi.TCPProtocol do
     {topic, records} = Wire.decode_produce_req(payload)
 
     with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      case LogApi.produce_records(broker_for(topic), topic, records) do
-        {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
-        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-      end
+      with_rate_limit(:publish, session, correlation_id, fn ->
+        case LogApi.produce_records(broker_for(topic), topic, records) do
+          {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
+          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+        end
+      end)
     end)
   end
 
@@ -309,6 +320,40 @@ defmodule Malachi.TCPProtocol do
       end)
 
     if allowed?, do: fun.(), else: Wire.encode_error(correlation_id, :permission_denied)
+  end
+
+  # Runs `fun` (which returns a response frame) only if the session's user is within the configured limit
+  # for `action`; otherwise a `rate_limited` error frame and a bump of the matching blocked counter, which
+  # is what makes `rate_limit_blocked{action=...}` able to move at all.
+  #
+  # Ordering matters: this sits INSIDE the permission check, so a request the caller was never allowed to
+  # make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is one config
+  # read. A produce spends one token per request, not per record (the batch size is already bounded by
+  # `max_frame_size`); a per-record cost would be a different quota and is left as future work.
+  #
+  # The check runs in this connection's own process (`check_limit_in_caller/3`) rather than through the
+  # limiter GenServer, which would put every connection in the system behind one process on the hottest
+  # path. The count stays exact; what that door gives up is the token bucket's smoothing, so a client can
+  # burst to 2x the limit across a window boundary. See the limiter's own docs for the measurements.
+  #
+  # `retry_after_ms` is computed by the limiter but deliberately not carried on the wire: the error frame's
+  # payload is a bare reason string, and `Malachi.Wire` freezes that encoding, so carrying it would take a
+  # new api_key.
+  defp with_rate_limit(action, session, correlation_id, fun) do
+    case RateLimiter.action_config(action) do
+      nil ->
+        fun.()
+
+      config ->
+        case RateLimiter.check_limit_in_caller(session.username, action, config) do
+          :ok ->
+            fun.()
+
+          {:error, :rate_limit_exceeded, _retry_after_ms} ->
+            Metrics.increment_rate_limit_blocked(action)
+            Wire.encode_error(correlation_id, :rate_limited)
+        end
+    end
   end
 
   defp ok_or_error(correlation_id, :ok, ok_payload), do: Wire.encode_ok(correlation_id, ok_payload)

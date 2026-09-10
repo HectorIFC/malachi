@@ -1,6 +1,6 @@
 defmodule Malachi.Cluster.MetadataServer do
   @moduledoc """
-  A thin wrapper around `ra` for running the `Malachi.Cluster.MetadataMachine` of a single
+  A thin named facade over `Malachi.Cluster.RaCluster` for running the `Malachi.Cluster.MetadataMachine` of a single
   DS-RSM vnode: start the Raft cluster, submit metadata commands through the log, and run
   consistent (linearizable) queries over the replicated state.
 
@@ -10,10 +10,8 @@ defmodule Malachi.Cluster.MetadataServer do
   """
 
   alias Malachi.Cluster.MetadataMachine
-  alias Malachi.Cluster.RaResume
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Metadata
-
-  @system :default
 
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
@@ -28,23 +26,7 @@ defmodule Malachi.Cluster.MetadataServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
-    # Resume-first (see Malachi.Cluster.RaResume): forming over a member this node has ever started
-    # would register a fresh empty uid and resurrect an amnesiac member, the control-plane wipe the
-    # storage-chaos harness caught.
-    case RaResume.resume_or(@system, {cluster_name, node()}, fn -> form(cluster_name, nodes) end) do
-      :ok -> {:ok, {cluster_name, member_node(nodes)}}
-      other -> other
-    end
-  end
-
-  defp form(cluster_name, nodes) do
-    server_ids = Enum.map(nodes, &{cluster_name, &1})
-    machine = {:module, MetadataMachine, %{}}
-
-    case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} -> {:ok, {cluster_name, member_node(nodes)}}
-      {:error, reason} -> {:error, reason}
-    end
+    RaCluster.start(MetadataMachine, cluster_name, nodes)
   end
 
   @doc """
@@ -56,29 +38,13 @@ defmodule Malachi.Cluster.MetadataServer do
   """
   @spec ensure_started(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def ensure_started(cluster_name, nodes \\ [node()]) do
-    server_id = {cluster_name, member_node(nodes)}
-
-    case :ra.members(server_id) do
-      {:ok, _members, _leader} -> {:ok, server_id}
-      _not_running -> start(cluster_name, nodes)
-    end
-  end
-
-  # A node that actually hosts a replica, to address the cluster through: the local node when it is a
-  # member (no network hop for reads), otherwise the first placement node.
-  defp member_node(nodes) do
-    if node() in nodes, do: node(), else: hd(nodes)
+    server_id = {cluster_name, RaCluster.member_node(nodes)}
+    if RaCluster.ready?(server_id), do: {:ok, server_id}, else: start(cluster_name, nodes)
   end
 
   @doc "Submits a `Malachi.Metadata` command through the Raft log; returns the machine reply."
   @spec command(server_id(), Metadata.command()) :: {:ok, term()} | {:error, term()}
-  def command(server_id, command) do
-    case :ra.process_command(server_id, command) do
-      {:ok, reply, _leader} -> {:ok, reply}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
-  end
+  def command(server_id, command), do: RaCluster.command(server_id, command)
 
   @doc """
   Reads the replicated `Metadata` state with a linearizable (consistent) read and returns
@@ -99,11 +65,7 @@ defmodule Malachi.Cluster.MetadataServer do
   @spec query(server_id(), (Metadata.t() -> result)) :: {:ok, result} | {:error, term()}
         when result: term()
   def query(server_id, query_fun) do
-    case :ra.consistent_query(server_id, {Function, :identity, []}) do
-      {:ok, metadata, _leader} -> {:ok, query_fun.(metadata)}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
+    with {:ok, metadata} <- RaCluster.query(server_id), do: {:ok, query_fun.(metadata)}
   end
 
   @doc """
@@ -111,9 +73,7 @@ defmodule Malachi.Cluster.MetadataServer do
   Used by the reconcile loop to decide if a vnode still needs bootstrapping.
   """
   @spec ready?(server_id()) :: boolean()
-  def ready?(server_id) do
-    match?({:ok, _members, _leader}, :ra.members(server_id))
-  end
+  def ready?(server_id), do: RaCluster.ready?(server_id)
 
   @doc """
   Whether `server_id` is currently the **leader** of its Raft cluster. `:ra.members` (answered by any
@@ -123,9 +83,7 @@ defmodule Malachi.Cluster.MetadataServer do
   vnode's coordinators only on the node that leads its Raft group (the NorthGuard-faithful placement).
   """
   @spec leader?(server_id()) :: boolean()
-  def leader?(server_id) do
-    match?({:ok, _members, ^server_id}, :ra.members(server_id))
-  end
+  def leader?(server_id), do: RaCluster.leader?(server_id)
 
   @doc """
   Stops and deletes the vnode's Raft cluster (removing its on-disk state). Prefer passing a `server_id`
@@ -136,14 +94,5 @@ defmodule Malachi.Cluster.MetadataServer do
   the deletion cannot be committed, instead of reporting `:ok` regardless.
   """
   @spec delete(server_id() | cluster_name()) :: :ok | {:error, term()}
-  def delete({_cluster_name, _node} = server_id) do
-    case :ra.delete_cluster([server_id]) do
-      {:ok, _leader} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  def delete(cluster_name) when is_atom(cluster_name) do
-    delete({cluster_name, node()})
-  end
+  def delete(target), do: RaCluster.delete(target)
 end

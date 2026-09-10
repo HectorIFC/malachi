@@ -167,15 +167,44 @@ Clients see `:migrating` on metadata writes touching a fenced topic. This is tra
 response is retry, which the bundled scripts already do. See
 [Produce and consume](produce-and-consume.md#two-errors-a-correct-client-handles).
 
-### The durability caveat
+### A reshard survives a restart
 
-The ring is **gossiped cluster state, not durable**. On a full-cluster restart it reseeds from
-`MALACHI_LOG_VNODES`, whose even geometry does not match a ring grown by splitting, which would orphan
-the migrated metadata.
+The ring is **durable**. It is recorded in its own Raft group, written by the same lease holder that
+performs a split, and always **before** the change is gossiped: gossip stays the fast dissemination
+channel, but it is no longer the only copy. So a reshard is effective for good, not only while the
+cluster happens to be up.
 
-So treat a reshard as **effective while the cluster is up**. This gap is pre-existing and shared with vnode
-split; making the ring durable is tracked as follow-up in
-[Architecture](../ARCHITECTURE.md).
+At boot each node reads that record, and the precedence rule has no room to guess:
+
+| what the store says | what the node does |
+|---|---|
+| a ring is recorded | **it wins**, unconditionally |
+| never held a ring (an affirmative answer) | seed from `MALACHI_LOG_VNODES`, as a fresh cluster |
+| cannot answer yet | wait, then **refuse to boot** |
+
+The third row is why the store is a Raft group rather than a file per node: a missing file cannot tell
+"fresh cluster" from "I lost the record", and only the first may fall back to the environment. A node
+that cannot read the ring does not know which vnode owns which arc, so it refuses to serve rather than
+guess. The wait before refusing is `MALACHI_LOG_RING_BOOT_TIMEOUT_MS` (default 60s), sized for the
+ordinary full-cluster restart where the first node up has no quorum until a second joins.
+
+> **The environment never wins.** If you lower `MALACHI_LOG_VNODES` after re-sharding, the recorded ring
+> is used anyway and the divergence is logged at warning level with both counts. Editing that variable
+> describes a cluster that no longer exists; honouring it is exactly what would orphan the migrated
+> metadata.
+
+To see what a node is actually routing by:
+
+```bash
+mix malachi.ring --show
+```
+
+It prints the recorded version, each vnode with its token and placement, and any split still pending.
+
+There is no bootstrap circularity here, though it looks like there could be: the ring says where the
+**metadata** vnodes live, while the group that stores the ring takes its membership from the static
+`MALACHI_LOG_NODES`. The layering is `MALACHI_LOG_NODES` → the ring store → the metadata vnodes, and
+only the first boot of a brand-new cluster seeds from `MALACHI_LOG_VNODES`.
 
 ## Rebalancing
 

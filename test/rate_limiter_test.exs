@@ -14,6 +14,25 @@ defmodule Malachi.RateLimiterTest do
     :ok
   end
 
+  # Runs `fun` and returns its result, guaranteeing the whole run happened inside ONE fixed window.
+  #
+  # The sharded window is aligned to the epoch, not to the test, so a run that straddles a boundary is
+  # handed a fresh quota partway through and legitimately admits more than the limit. That is the limiter
+  # working, but it would surface as a rare flaky failure in any exact-equality assertion below. Skipping
+  # the assertion when it happens would be worse than the flake, since a test that silently stops
+  # asserting reports success either way, so the measurement is retried on a fresh window instead.
+  defp within_one_window(window_ms, fun, attempts \\ 5) do
+    window_before = div(System.system_time(:millisecond), window_ms)
+    result = fun.()
+    window_after = div(System.system_time(:millisecond), window_ms)
+
+    cond do
+      window_before == window_after -> result
+      attempts > 1 -> within_one_window(window_ms, fun, attempts - 1)
+      true -> flunk("every attempt straddled a #{window_ms}ms window boundary; the measurement never ran clean")
+    end
+  end
+
   describe "token bucket algorithm" do
     test "allows requests within limit" do
       identifier = "test_user_#{:rand.uniform(1_000_000)}"
@@ -224,6 +243,48 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "get_stats/0 counts each entry shape" do
+    @table :malachi_rate_limits
+
+    test "counts blocked entries instead of reporting a confident zero" do
+      # The match spec used to wrap its object pattern in one tuple too many. A wrong spec does not
+      # raise, it simply never matches, so this reported 0 however many entries the table held: the same
+      # silent zero the publish and subscribe counters were fixed to stop reporting.
+      identifier = "stats_blocked_#{:rand.uniform(1_000_000)}"
+      before = RateLimiter.get_stats().total_blocked_entries
+
+      config = %{limit: 1, window_ms: 60_000}
+      assert :ok = RateLimiter.check_limit(identifier, :auth, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit(identifier, :auth, config)
+
+      assert [{_key, _count}] = :ets.lookup(@table, {:blocked, identifier, :auth})
+      assert RateLimiter.get_stats().total_blocked_entries == before + 1
+    end
+
+    test "counts sharded window counters, which are their own entry shape" do
+      identifier = "stats_window_#{:rand.uniform(1_000_000)}"
+      before = RateLimiter.get_stats().total_window_counters
+
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, %{limit: 8, window_ms: 60_000})
+
+      assert RateLimiter.get_stats().total_window_counters > before
+    end
+
+    test "keeps the three shapes apart rather than double counting" do
+      # A bucket must not be counted as a window counter, nor either as a blocked entry. Each head has to
+      # match exactly one shape, which is the property a copy-pasted spec quietly breaks.
+      tag = :rand.uniform(1_000_000)
+      stats = RateLimiter.get_stats()
+
+      assert :ok = RateLimiter.check_limit("bucket_#{tag}", :auth, %{limit: 5, window_ms: 60_000})
+      after_bucket = RateLimiter.get_stats()
+
+      assert after_bucket.total_buckets == stats.total_buckets + 1
+      assert after_bucket.total_window_counters == stats.total_window_counters
+      assert after_bucket.total_blocked_entries == stats.total_blocked_entries
+    end
+  end
+
   describe "get_stats/0" do
     test "returns statistics about buckets" do
       stats = RateLimiter.get_stats()
@@ -308,6 +369,363 @@ defmodule Malachi.RateLimiterTest do
       # Total: 10 users × 50 = ~500 successful (allow timing variance)
       ok_count = Enum.count(all_results, &(&1 == :ok))
       assert ok_count >= 490 and ok_count <= 510
+    end
+  end
+
+  describe "action_config/1" do
+    setup do
+      original =
+        for key <- [:publish_rate_limit, :publish_rate_window_ms, :subscribe_rate_limit, :subscribe_rate_window_ms],
+            into: %{},
+            do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- original, do: Application.put_env(:malachi, key, value)
+      end)
+
+      :ok
+    end
+
+    test "reads back the configured limit and window" do
+      Application.put_env(:malachi, :publish_rate_limit, 250)
+      Application.put_env(:malachi, :publish_rate_window_ms, 500)
+
+      assert %{limit: 250, window_ms: 500} = RateLimiter.action_config(:publish)
+    end
+
+    test "a limit of zero means no limit" do
+      Application.put_env(:malachi, :publish_rate_limit, 0)
+      Application.put_env(:malachi, :subscribe_rate_limit, 0)
+
+      assert RateLimiter.action_config(:publish) == nil
+      assert RateLimiter.action_config(:subscribe) == nil
+    end
+
+    test "an unset limit means no limit" do
+      Application.delete_env(:malachi, :publish_rate_limit)
+      Application.delete_env(:malachi, :subscribe_rate_limit)
+
+      assert RateLimiter.action_config(:publish) == nil
+      assert RateLimiter.action_config(:subscribe) == nil
+    end
+
+    test "a zero or missing window means no limit, even with a positive limit" do
+      Application.put_env(:malachi, :publish_rate_limit, 100)
+      Application.put_env(:malachi, :publish_rate_window_ms, 0)
+      assert RateLimiter.action_config(:publish) == nil
+
+      Application.delete_env(:malachi, :publish_rate_window_ms)
+      assert RateLimiter.action_config(:publish) == nil
+    end
+
+    test "a negative or non-integer limit means no limit rather than a broken bucket" do
+      Application.put_env(:malachi, :publish_rate_window_ms, 1_000)
+
+      for bad <- [-1, "500", nil] do
+        Application.put_env(:malachi, :publish_rate_limit, bad)
+        assert RateLimiter.action_config(:publish) == nil, "expected #{inspect(bad)} to read as unlimited"
+      end
+    end
+
+    test "publish and subscribe are read independently" do
+      Application.put_env(:malachi, :publish_rate_limit, 10)
+      Application.put_env(:malachi, :publish_rate_window_ms, 1_000)
+      Application.put_env(:malachi, :subscribe_rate_limit, 0)
+
+      assert %{limit: 10} = RateLimiter.action_config(:publish)
+      assert RateLimiter.action_config(:subscribe) == nil
+    end
+  end
+
+  describe "check_limit_in_caller/3" do
+    test "admits exactly the limit and then blocks" do
+      identifier = "caller_#{:rand.uniform(1_000_000)}"
+      config = %{limit: 5, window_ms: 60_000}
+
+      results = for _ <- 1..5, do: RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      assert Enum.all?(results, &(&1 == :ok))
+
+      assert {:error, :rate_limit_exceeded, retry_after_ms} =
+               RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+      assert is_integer(retry_after_ms) and retry_after_ms >= 0
+    end
+
+    test "the whole quota is spendable whatever the limit does to the shard arithmetic" do
+      # The quota is split across one shard per scheduler, so a limit that does not divide evenly (and one
+      # smaller than the scheduler count) is where a rounding mistake would silently reject early. Nothing
+      # here may admit fewer than the configured limit.
+      for limit <- [1, 2, 3, 7, 8, 9, 50, 1000] do
+        window_ms = 60_000
+
+        admitted =
+          within_one_window(window_ms, fn ->
+            # a fresh identifier per attempt, so a retry never inherits a half-spent quota
+            identifier = "exact_#{limit}_#{:rand.uniform(1_000_000)}"
+            config = %{limit: limit, window_ms: window_ms}
+
+            Enum.count(1..(limit * 2 + 32), fn _ ->
+              RateLimiter.check_limit_in_caller(identifier, :publish, config) == :ok
+            end)
+          end)
+
+        assert admitted == limit, "limit #{limit} admitted #{admitted}"
+      end
+    end
+
+    test "retry_after is the time left in the current window" do
+      identifier = "retry_#{:rand.uniform(1_000_000)}"
+      window_ms = 30_000
+      config = %{limit: 1, window_ms: window_ms}
+
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+      assert {:error, :rate_limit_exceeded, retry_after_ms} =
+               RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+      assert retry_after_ms > 0 and retry_after_ms <= window_ms
+    end
+
+    test "the two doors count independently: different algorithms, different entries" do
+      # check_limit/3 is a token bucket, check_limit_in_caller/3 a sharded fixed window. They deliberately
+      # do not share state, so mixing them on one identifier is not a way to spend a quota twice as fast
+      # in one direction or to be blocked early in the other.
+      identifier = "doors_#{:rand.uniform(1_000_000)}"
+      config = %{limit: 2, window_ms: 60_000}
+
+      assert :ok = RateLimiter.check_limit(identifier, :publish, config)
+      assert :ok = RateLimiter.check_limit(identifier, :publish, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit(identifier, :publish, config)
+
+      # the hot-path door still has its own full quota
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+    end
+
+    test "keeps separate buckets per identifier" do
+      config = %{limit: 1, window_ms: 60_000}
+      one = "user_one_#{:rand.uniform(1_000_000)}"
+      two = "user_two_#{:rand.uniform(1_000_000)}"
+
+      assert :ok = RateLimiter.check_limit_in_caller(one, :publish, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(one, :publish, config)
+
+      assert :ok = RateLimiter.check_limit_in_caller(two, :publish, config)
+    end
+
+    test "feeds the blocked counter that the dashboard reads" do
+      identifier = "blocked_#{:rand.uniform(1_000_000)}"
+      config = %{limit: 1, window_ms: 60_000}
+
+      RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+      assert {^identifier, 1} =
+               RateLimiter.get_top_blocked(:publish, 100) |> Enum.find(&(elem(&1, 0) == identifier))
+    end
+
+    test "is bypassed when rate limiting is disabled" do
+      Application.put_env(:malachi, :rate_limit_enabled, false)
+      identifier = "disabled_#{:rand.uniform(1_000_000)}"
+      config = %{limit: 0, window_ms: 1}
+
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+    end
+
+    @tag :concurrent
+    test "stays exact under concurrency: every token is claimed atomically" do
+      # Sharding is what makes this door fast, and the reason it is still exact is that each token is
+      # claimed by one atomic update_counter, on a shard whose caps sum to the configured limit. This is
+      # the property that would break first if the sharding were reworked.
+      limit = 50
+      attempts = 400
+      window_ms = 60_000
+
+      admitted =
+        within_one_window(window_ms, fn ->
+          identifier = "race_#{:rand.uniform(1_000_000)}"
+          config = %{limit: limit, window_ms: window_ms}
+
+          1..attempts
+          |> Enum.map(fn _ ->
+            Task.async(fn -> RateLimiter.check_limit_in_caller(identifier, :publish, config) end)
+          end)
+          |> Task.await_many(30_000)
+          |> Enum.count(&(&1 == :ok))
+        end)
+
+      assert admitted == limit, "#{attempts} concurrent callers admitted #{admitted}, expected #{limit}"
+    end
+  end
+
+  describe "cleanup" do
+    # The sharded window counters live under a NEW key every window, so without reaping they would grow
+    # without bound: one entry per user per shard per window, forever. This is the only thing standing
+    # between the hot path and an ETS table that never stops growing, and it runs on a timer nothing else
+    # asserts on, so it is exercised here by hand.
+    @table :malachi_rate_limits
+
+    setup do
+      keys = [:publish_rate_limit, :publish_rate_window_ms, :subscribe_rate_limit, :subscribe_rate_window_ms]
+      original = for key <- keys, into: %{}, do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- original do
+          if value == nil, do: Application.delete_env(:malachi, key), else: Application.put_env(:malachi, key, value)
+        end
+      end)
+
+      :ok
+    end
+
+    defp run_cleanup do
+      send(Process.whereis(RateLimiter), :cleanup)
+      # the cleanup is a cast-like info message; a sync call flushes it
+      _ = RateLimiter.get_stats()
+      :ok
+    end
+
+    test "reaps stale sharded window counters and keeps live ones" do
+      tag = :rand.uniform(1_000_000)
+      hour_ms = 3_600_000
+      now = System.system_time(:millisecond)
+
+      stale = {"stale_#{tag}", :publish, now - hour_ms - 60_000, 0}
+      live = {"live_#{tag}", :publish, now, 0}
+      :ets.insert(@table, {stale, 5, 1_000})
+      :ets.insert(@table, {live, 5, 1_000})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, stale) == []
+      assert [{^live, 5, _window_ms}] = :ets.lookup(@table, live)
+    end
+
+    test "reaps stale token buckets and keeps live ones" do
+      tag = :rand.uniform(1_000_000)
+      now = System.monotonic_time(:millisecond)
+
+      stale = {"stale_bucket_#{tag}", :auth}
+      live = {"live_bucket_#{tag}", :auth}
+      :ets.insert(@table, {stale, {5, now - 3_600_000 - 60_000, now, 60_000}})
+      :ets.insert(@table, {live, {5, now, now, 60_000}})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, stale) == []
+      assert [{^live, _}] = :ets.lookup(@table, live)
+    end
+
+    test "keeps a live counter whose window is wider than the token bucket's hour" do
+      # A quota measured over more than an hour (a subscribe allowance per day, say) has windows that
+      # outlive the flat hour a token bucket is reaped on. Aging those counters on that hour would delete
+      # the CURRENT window's counters and hand the user its whole quota back mid-window. They must be
+      # aged against the window they actually count.
+      tag = :rand.uniform(1_000_000)
+      window_ms = 7_200_000
+      Application.put_env(:malachi, :subscribe_rate_limit, 2)
+      Application.put_env(:malachi, :subscribe_rate_window_ms, window_ms)
+
+      identifier = "live_wide_#{tag}"
+      # 90 minutes into a 2-hour window: past the hour, but the window is still the current one.
+      live_window_start = System.system_time(:millisecond) - 90 * 60_000
+      key = {identifier, :subscribe, live_window_start, 0}
+      :ets.insert(@table, {key, 9_999, window_ms})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) != [], "a live window's counter was reaped, refunding the quota"
+    end
+
+    test "reaps a rolled-over counter promptly rather than holding it for an hour" do
+      # The other direction of the same rule. A 1-second publish window turns over 3600 times an hour,
+      # and each turn leaves a counter per shard per user behind. Holding those for a flat hour is what
+      # would make the hot path's sharding expensive in memory.
+      tag = :rand.uniform(1_000_000)
+      Application.put_env(:malachi, :publish_rate_limit, 100)
+      Application.put_env(:malachi, :publish_rate_window_ms, 1_000)
+
+      identifier = "rolled_#{tag}"
+      # Ten seconds back: ten windows ago, long dead, but nowhere near an hour old.
+      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
+      :ets.insert(@table, {key, 100, 1_000})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == [], "a counter ten windows old was kept"
+    end
+
+    test "ages an entry by its stored window, never by the current configuration" do
+      # This is the property that makes the other two cleanup tests mean anything, and the one that was
+      # got wrong once: an earlier version of the cleanup read the action's window back from config, which
+      # is a second source of truth that can disagree with what the caller actually counted under.
+      #
+      # The setup makes the two answers point in OPPOSITE directions. The entry is ten of ITS OWN windows
+      # old, so by its stored width it is long dead. The configured window is a full day and the action
+      # is switched off entirely, so anything consulting configuration would either keep the entry or
+      # have no window to judge it by. It must be reaped, and only the stored width says so.
+      tag = :rand.uniform(1_000_000)
+      Application.put_env(:malachi, :publish_rate_limit, 0)
+      Application.put_env(:malachi, :publish_rate_window_ms, 86_400_000)
+
+      identifier = "stored_window_#{tag}"
+      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
+      :ets.insert(@table, {key, 5, 1_000})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == [],
+             "the entry was judged by configuration rather than by the window it was counted under"
+    end
+
+    test "keeps an exhausted bucket whose window is wider than the flat hour" do
+      # A bucket idle for a whole window has refilled anyway, so reaping it after an hour is free for any
+      # window under one. For a wider window it is a refund: the tokens are handed back before they were
+      # due. An auth allowance measured over more than an hour is the case that breaks.
+      identifier = "wide_bucket_#{:rand.uniform(1_000_000)}"
+      window_ms = 7_200_000
+      now = System.monotonic_time(:millisecond)
+      key = {identifier, :auth}
+
+      # Exhausted, last touched 61 minutes ago: past the flat hour, but only halfway through its window.
+      :ets.insert(@table, {key, {0, now - 61 * 60_000, now - 61 * 60_000, window_ms}})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) != [], "a bucket mid-window was reaped, refunding its tokens"
+
+      # A token bucket refills gradually, so being admitted here is correct: 61 minutes of a 2-hour
+      # window is worth 5 of the 10 tokens back. What must NOT happen is a reset to the full allowance,
+      # and the stored count tells the two apart. Kept: 5 refilled, 1 spent, 4 left. Reaped: the bucket
+      # is recreated at limit - 1, or 9.
+      assert :ok = RateLimiter.check_limit(identifier, :auth, %{limit: 10, window_ms: window_ms})
+      assert [{^key, {4, _last_refill, _window_start, ^window_ms}}] = :ets.lookup(@table, key)
+    end
+
+    test "never reaps blocked counters, whatever their age" do
+      # These are the dashboard's evidence that a limit fired; losing them on a timer would turn a real
+      # signal back into the silent zero this enforcement exists to fix.
+      identifier = "blocked_survivor_#{:rand.uniform(1_000_000)}"
+      key = {:blocked, identifier, :publish}
+      :ets.insert(@table, {key, 42})
+
+      run_cleanup()
+
+      assert [{^key, 42}] = :ets.lookup(@table, key)
+    end
+
+    test "a live window survives cleanup, so a spent quota is not silently refunded" do
+      identifier = "refund_#{:rand.uniform(1_000_000)}"
+      config = %{limit: 1, window_ms: 60_000}
+
+      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+      run_cleanup()
+
+      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(identifier, :publish, config)
     end
   end
 

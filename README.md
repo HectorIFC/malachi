@@ -315,9 +315,9 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_RATE_LIMIT_ENABLED` | true | Enable rate limiting |
 | `MALACHI_AUTH_RATE_LIMIT` | 10 | Auth attempts per window |
 | `MALACHI_AUTH_RATE_WINDOW_MS` | 60000 | Auth rate limit window (ms) |
-| `MALACHI_PUBLISH_RATE_LIMIT` | 1000 | Publish messages per window |
+| `MALACHI_PUBLISH_RATE_LIMIT` | 0 | Produce requests per window per user, per node; 0 = no limit |
 | `MALACHI_PUBLISH_RATE_WINDOW_MS` | 1000 | Publish rate limit window (ms) |
-| `MALACHI_SUBSCRIBE_RATE_LIMIT` | 100 | Subscribe requests per window |
+| `MALACHI_SUBSCRIBE_RATE_LIMIT` | 0 | Subscribe requests per window per user, per node; 0 = no limit |
 | `MALACHI_SUBSCRIBE_RATE_WINDOW_MS` | 60000 | Subscribe rate limit window (ms) |
 | `MALACHI_MAX_CONN_PER_IP` | 100 | Max connections per IP |
 | `MALACHI_MAX_TOTAL_CONN` | 10000 | Max total connections |
@@ -332,6 +332,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_GC_THRESHOLD_MB` | 500 | Auto-GC memory threshold (MB) |
 | `MALACHI_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
 | `MALACHI_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
+| `MALACHI_LOG_RING_BOOT_TIMEOUT_MS` | 60000 | How long a clustered node waits at boot for the durable vnode ring before refusing to start |
 | `MALACHI_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
 | `MALACHI_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
 | `MALACHI_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |

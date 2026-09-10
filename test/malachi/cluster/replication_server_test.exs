@@ -818,6 +818,88 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  describe "fenced_segments/3 (the read-only fence report)" do
+    @other {{"events", 0}, 1}
+
+    test "reports the fenced segments with their end and bytes, and omits the open ones" do
+      # The answer a reconciling pass records as the sealed length, so it has to be the same pair
+      # `seal/4` itself answered: the point of the report is that the length stays a consequence of
+      # closing the segment rather than a number measured beside it.
+      server = start_broker()
+      {:ok, _last} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a", "b"]))
+      {:ok, _last} = ReplicationServer.replicate(server, @other, [server], 5, records(["c"]))
+      assert {:ok, 2, sealed_bytes} = ReplicationServer.seal(server, @segment, 0)
+
+      assert ReplicationServer.fenced_segments(server, [{@segment, 0}, {@other, 5}]) ==
+               {:ok, %{@segment => {2, sealed_bytes}}}
+    end
+
+    test "does NOT fence what it reports on: an open segment still takes writes afterwards" do
+      # The property this whole call exists for. A pass that fenced while probing is what wedged a
+      # range at `replication_factor: 2` on the failover path, and this pass visits EVERY active
+      # segment, so the same mistake here would take the whole workload down rather than one range.
+      server = start_broker()
+      {:ok, 0} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a"]))
+
+      assert {:ok, fenced} = ReplicationServer.fenced_segments(server, [{@segment, 0}])
+      assert fenced == %{}
+
+      # Accepted, not `{:error, {:sealed, _}}`, and the records are readable: the probe left the
+      # segment exactly as open as it found it.
+      assert {:ok, 1} = ReplicationServer.replicate(server, @segment, [server], 0, records(["b"]))
+      assert read_values(server, @segment) == ["a", "b"]
+      assert ReplicationServer.fenced_segments(server, [{@segment, 0}]) == {:ok, %{}}
+    end
+
+    test "asking about a segment this server never stored neither reports nor creates a fence" do
+      # Unlike `seal/4`, which fences an unknown segment at its base on purpose. Reporting one here
+      # would have a pass seal a segment at a length only its absence suggests.
+      server = start_broker()
+
+      assert ReplicationServer.fenced_segments(server, [{@segment, 7}]) == {:ok, %{}}
+      assert {:ok, 7} = ReplicationServer.replicate(server, @segment, [server], 7, records(["a"]))
+    end
+
+    test "sees a fence from the on-disk marker after a restart, with nothing open" do
+      # The case the reconciling pass exists for: the node that fenced the segment restarted before
+      # anything recorded the seal, so the only evidence left is the marker.
+      directory = Path.join(System.tmp_dir!(), "malachi_report_#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(directory) end)
+
+      first = :"repl_report_a_#{System.unique_integer([:positive])}"
+      {:ok, pid} = ReplicationServer.start_link(name: first, directory: directory)
+      {:ok, _last} = ReplicationServer.replicate(first, @segment, [first], 0, records(["a"]))
+      assert {:ok, 1, bytes} = ReplicationServer.seal(first, @segment, 0)
+      GenServer.stop(pid)
+
+      second = :"repl_report_b_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = ReplicationServer.start_link(name: second, directory: directory)
+      on_exit(fn -> stop_quietly(second) end)
+
+      assert ReplicationServer.fenced_segments(second, [{@segment, 0}]) == {:ok, %{@segment => {1, bytes}}}
+    end
+
+    test "an empty list answers an empty map without touching anything" do
+      server = start_broker()
+
+      assert ReplicationServer.fenced_segments(server, []) == {:ok, %{}}
+    end
+
+    test "a dead server answers :unreachable instead of exiting the caller" do
+      # The caller is a coordinator loop that asks every primary on every pass. Exiting on the first
+      # replica that has left would take the pass, and with it the healing of every other segment.
+      #
+      # Taken out of the supervision tree rather than merely stopped, for the same reason as the
+      # `seal/4` case above: the child is `:permanent`, so a plain stop races the test supervisor
+      # restarting it under the SAME registered name, and the call would then be answered by a fresh
+      # empty server instead of failing to reach one.
+      server = start_broker()
+      stop_supervised!(server)
+
+      assert {:error, :unreachable} = ReplicationServer.fenced_segments(server, [{@segment, 0}], 100)
+    end
+  end
+
   describe "why a behind replica must never be promoted (issue #40)" do
     test "a replica that missed an acknowledged batch reissues its offsets once it starts writing" do
       # The hazard the control plane's failover policy exists to avoid, pinned at the layer where it is

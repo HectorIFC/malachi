@@ -31,6 +31,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   use GenServer
 
   require Logger
+  alias Malachi.I18n
 
   @default_interval 5_000
 
@@ -71,10 +72,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Enum.find(state.running, fn {_vnode_id, {_pid, monitor_ref}} -> monitor_ref == ref end) do
       {vnode_id, _handle} ->
-        Logger.warning(
-          "vnode #{inspect(vnode_id)} coordinators went down (#{inspect(reason)}); " <>
-            "restarting on the next reconcile"
-        )
+        Logger.warning(I18n.t(:vnode_coordinators_down, vnode: inspect(vnode_id), reason: inspect(reason)))
 
         {:noreply, %{state | running: Map.delete(state.running, vnode_id)}}
 

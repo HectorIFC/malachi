@@ -41,6 +41,37 @@ defmodule Malachi.Cluster.LeaseHolderTest do
     refute_received {:acquired, _}
   end
 
+  test "lease/1 answers with the fencing token while this node leads, and :error otherwise" do
+    {:ok, renew} = Agent.start_link(fn -> {:ok, 7} end)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    holder = start_holder(renew, clock)
+
+    # before any tick this node is a follower and holds no token
+    assert LeaseHolder.lease(holder) == :error
+
+    assert LeaseHolder.tick_now(holder) == {:leader, 7}
+
+    # work that writes through a fenced store needs the token, not just the boolean
+    assert LeaseHolder.lease(holder) == {:ok, 7}
+    assert LeaseHolder.leader?(holder)
+  end
+
+  test "lease/1 stops answering with a token the moment leadership is lost" do
+    {:ok, renew} = Agent.start_link(fn -> {:ok, 3} end)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    holder = start_holder(renew, clock)
+
+    assert LeaseHolder.tick_now(holder) == {:leader, 3}
+    assert LeaseHolder.lease(holder) == {:ok, 3}
+
+    # the lease is taken by someone else; the next tick demotes us
+    Agent.update(renew, fn _ -> {:error, :held} end)
+    assert LeaseHolder.tick_now(holder) == {:follower, nil}
+
+    assert LeaseHolder.lease(holder) == :error,
+           "a demoted holder must not hand out a token that the store would now refuse"
+  end
+
   test "leader?/1 reports the current role without forcing a tick" do
     {:ok, renew} = Agent.start_link(fn -> {:error, :held} end)
     {:ok, clock} = Agent.start_link(fn -> 0 end)
