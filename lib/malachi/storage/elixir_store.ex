@@ -298,29 +298,24 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
-  # The verification scan. Deliberately separate from `do_scan/7`: this one uses
-  # `Malachi.Log.Record.check_one/1`, which verifies the checksum without building a record struct,
-  # and it keeps no sparse index. A scrub walks whole segments just to confirm their checksums, so
-  # the per-record allocation `do_scan/7` needs for recovery would dominate its cost.
-  defp check_scan(file_descriptor), do: do_check(file_descriptor, 0, <<>>, 0)
+  # The verification scan: `walk/4` driven by `Malachi.Log.Record.check_one/1`, which verifies the
+  # checksum without building a record struct, and an accumulator that is just a count. A scrub
+  # walks whole segments only to confirm their checksums, so the per-record allocation the recovery
+  # scan needs would dominate its cost, which is why the two share the LOOP but not the callback.
+  defp check_scan(file_descriptor) do
+    {valid_bytes, record_count, halt} =
+      walk(file_descriptor, &check_frame/1, fn _frame, _position, count -> count + 1 end, 0)
 
-  defp do_check(file_descriptor, valid_bytes, carry, record_count) do
-    case Record.check_one(carry) do
-      {:ok, frame_size, rest} ->
-        do_check(file_descriptor, valid_bytes + frame_size, rest, record_count + 1)
+    {record_count, valid_bytes, halt}
+  end
 
-      :incomplete ->
-        case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
-          {:ok, chunk} -> do_check(file_descriptor, valid_bytes, carry <> chunk, record_count)
-          :eof -> {record_count, valid_bytes, :eof}
-          # A device that cannot be read IS the damage the scrub exists to find. Raising here instead
-          # would take down `Malachi.Cluster.Scrubber`, whose process runs this scan: the detector
-          # would die of exactly the condition it was built to report.
-          {:error, reason} -> {record_count, valid_bytes, {:error, reason}}
-        end
-
-      {:error, reason} ->
-        {record_count, valid_bytes, {:error, reason}}
+  # `check_one/1` answers without a decoded frame, so it is padded to the walker's shape. One
+  # four-element tuple per frame is nothing next to the `Record` struct (with its key, value and
+  # header binaries) that using `decode_one/1` here would allocate instead.
+  defp check_frame(binary) do
+    case Record.check_one(binary) do
+      {:ok, frame_size, rest} -> {:ok, nil, frame_size, rest}
+      incomplete_or_error -> incomplete_or_error
     end
   end
 
@@ -641,50 +636,51 @@ defmodule Malachi.Storage.ElixirStore do
   # truncates; verification needs it to tell a torn tail from bit rot, and to report the offending
   # byte position. Never loads the whole file.
   defp scan_segment(file_descriptor, index_interval) do
-    do_scan(file_descriptor, index_interval, 0, <<>>, 0, -index_interval, [])
+    on_frame = fn record, position, {count, entries, last_indexed_position} ->
+      if position - last_indexed_position >= index_interval do
+        {count + 1, [{record.offset, position} | entries], position}
+      else
+        {count + 1, entries, last_indexed_position}
+      end
+    end
+
+    # Start "behind" by one interval so the segment's first record is always indexed.
+    {valid_bytes, {record_count, entries, _last_indexed_position}, halt} =
+      walk(file_descriptor, &Record.decode_one/1, on_frame, {0, [], -index_interval})
+
+    {record_count, valid_bytes, Enum.reverse(entries), halt}
   end
 
-  defp do_scan(file_descriptor, index_interval, valid_bytes, carry, record_count, last_indexed_position, entries) do
-    case Record.decode_one(carry) do
-      {:ok, record, frame_size, rest} ->
-        {entries, last_indexed_position} =
-          if valid_bytes - last_indexed_position >= index_interval do
-            {[{record.offset, valid_bytes} | entries], valid_bytes}
-          else
-            {entries, last_indexed_position}
-          end
+  # The one loop both scans run. It reads the file in bounded windows, hands every complete frame to
+  # `on_frame` with the byte position it starts at, and stops at the first thing that is not a
+  # frame, returning {valid_bytes, accumulator, halt}. Having exactly one of these matters more than
+  # the duplication it removes: `valid_bytes` is where the segment logically ends, and recovery and
+  # the scrub disagreeing about that would be a silent split brain over what a copy contains.
+  #
+  # One behaviour change comes with folding them together: the recovery scan used to have no clause
+  # for a `:file.pread/3` error and would have crashed the caller with a FunctionClauseError. It now
+  # reports the error as the halt, the way the verification scan already did, because a device that
+  # cannot be read IS the damage these scans exist to find, and the detector must not die of the
+  # condition it was built to report.
+  defp walk(file_descriptor, decode, on_frame, accumulator) do
+    do_walk(file_descriptor, decode, on_frame, 0, <<>>, accumulator)
+  end
 
-        do_scan(
-          file_descriptor,
-          index_interval,
-          valid_bytes + frame_size,
-          rest,
-          record_count + 1,
-          last_indexed_position,
-          entries
-        )
+  defp do_walk(file_descriptor, decode, on_frame, valid_bytes, carry, accumulator) do
+    case decode.(carry) do
+      {:ok, frame, frame_size, rest} ->
+        accumulator = on_frame.(frame, valid_bytes, accumulator)
+        do_walk(file_descriptor, decode, on_frame, valid_bytes + frame_size, rest, accumulator)
 
       :incomplete ->
-        read_position = valid_bytes + byte_size(carry)
-
-        case :file.pread(file_descriptor, read_position, @read_window_bytes) do
-          {:ok, chunk} ->
-            do_scan(
-              file_descriptor,
-              index_interval,
-              valid_bytes,
-              carry <> chunk,
-              record_count,
-              last_indexed_position,
-              entries
-            )
-
-          :eof ->
-            {record_count, valid_bytes, Enum.reverse(entries), :eof}
+        case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
+          {:ok, chunk} -> do_walk(file_descriptor, decode, on_frame, valid_bytes, carry <> chunk, accumulator)
+          :eof -> {valid_bytes, accumulator, :eof}
+          {:error, reason} -> {valid_bytes, accumulator, {:error, reason}}
         end
 
       {:error, reason} ->
-        {record_count, valid_bytes, Enum.reverse(entries), {:error, reason}}
+        {valid_bytes, accumulator, {:error, reason}}
     end
   end
 
