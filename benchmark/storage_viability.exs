@@ -615,6 +615,15 @@ if System.get_env("PREALLOC_AB") == "1" do
   reps = String.to_integer(System.get_env("PREALLOC_AB_REPS") || "15")
   stage = System.get_env("PREALLOC_AB_STAGE") || "1"
 
+  # Validated here, before anything runs, because both ways of getting this wrong waste a whole run.
+  # An unknown NUMBER used to fall through to stage 1 and then be recorded as itself in the report,
+  # so the artifact named a measurement that never happened; an unknown STRING ran stage 1 to
+  # completion and then raised in String.to_integer/1 while building the report, minutes of runner
+  # time for no file at all.
+  if stage not in ["1", "2", "3"] do
+    raise ArgumentError, "PREALLOC_AB_STAGE must be 1, 2 or 3, got: #{inspect(stage)}"
+  end
+
   chosen_arm = fn ->
     {String.to_existing_atom(System.get_env("PREALLOC_AB_MECHANISM") || "zeros"),
      String.to_existing_atom(System.get_env("PREALLOC_AB_SYNC") || "datasync")}

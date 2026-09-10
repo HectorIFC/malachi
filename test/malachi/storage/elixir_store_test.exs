@@ -875,13 +875,22 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
       path = Segment.path(store.segment)
       position = frame_position(path, 2)
+      logical_end = store.segment.byte_size
       :ok = :file.close(store.file_descriptor)
       corrupt_payload_byte(path, 2)
+      preserved = binary_part(File.read!(path), position, logical_end - position)
 
       {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
 
       assert %{reason: :bad_crc, position: ^position} = ElixirStore.integrity(recovered)
       assert recovered.segment.record_count == 2
+
+      # The verdict is not the point on its own: `:preserve` has to mean the BYTES are still there.
+      # Re-extending the preallocated region from `valid_bytes` instead of from the file's size used
+      # to zero exactly this range, taking the rotted frame and the two valid frames behind it, after
+      # which the next recovery saw unwritten space and called the copy healthy. Silent loss of the
+      # records a peer was meant to repair, invisible to the verdict this test used to assert alone.
+      assert binary_part(File.read!(path), position, logical_end - position) == preserved
 
       :ok = ElixirStore.close(recovered)
     end

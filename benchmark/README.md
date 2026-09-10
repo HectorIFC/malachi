@@ -175,13 +175,13 @@ alone gets the whole thing.
 
 The mechanism table predicted the ordering exactly. `sparse` and `allocate` barely move, because
 they leave work for the first append (a block allocation, an unwritten-extent conversion) and both
-are journalled; only written zeros leave an append with nothing to journal. The 1-byte sync floor
+are journaled; only written zeros leave an append with nothing to journal. The 1-byte sync floor
 says the same thing from the other side: **257us on a growing file, 75us on a sized one**, so the
 fixed cost #82 ran into was three quarters the size change.
 
 For #82 the answer is still no in the median: `fdatasync` against `fsync` was -2us (grow), -5us
 (sparse), -5us (allocate), -2us (zeros), every interval spanning zero. But in the **tail**, with
-zeros, p99 went 381us to 182us, -52%, interval [-263, -130] against an 8us floor. Mediana untouched,
+zeros, p99 went 381us to 182us, -52%, interval [-263, -130] against an 8us floor. Median untouched,
 tail halved, which is what dropping the mtime update would look like. A p99 over n=15 is a noisy
 estimator, so that is a lead for #82 to confirm, not a conclusion.
 

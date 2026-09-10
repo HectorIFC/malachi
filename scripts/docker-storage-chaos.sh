@@ -141,7 +141,14 @@ event "e2: torn write INSIDE a follower's preallocated region (the file keeps it
 # records short and restoring the length leaves exactly what an interrupted flush leaves on a
 # preallocated file, a frame that runs out into the zeros behind it. Recovery must read that as a
 # torn tail (drop it, zero it, keep the room) and NOT as bit rot, which is what event h injects.
-damage_follower active 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); truncate -s 1024 $f; truncate -s $before $f; [ "$(wc -c <$f)" = "$before" ]' &&
+#
+# The cut point is computed from the WRITTEN prefix, never a constant. A segment that has just rolled
+# holds only a few hundred bytes of records inside its preallocated region, so a fixed offset lands
+# in the blank tail, removes nothing but zeros, puts the same zeros back, and passes: the drill would
+# report a torn frame it never injected. `written` is the offset of the last non-zero byte, so
+# cutting to three quarters of it always lands inside a real frame, and the guard fails the event
+# rather than certifying a no-op.
+damage_follower active 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); written=$(od -An -v -tx1 $f | awk "{for(i=1;i<=NF;i++){n++; if(\$i!=\"00\") last=n}} END{print last+0}"); cut=$((written * 3 / 4)); [ "$cut" -gt 0 ] || { echo "no written records in $f to tear"; exit 1; }; truncate -s $cut $f; truncate -s $before $f; [ "$(wc -c <$f)" = "$before" ] && [ "$cut" -lt "$written" ]' &&
   echo "torn frame injected inside the preallocated region, size unchanged, node restarted"
 
 event "f: truncate a follower's active-segment copy to half"

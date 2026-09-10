@@ -7,12 +7,15 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   @segment {{"events", 0}, 0}
 
-  defp start_broker(opts \\ []) do
+  defp start_broker(opts \\ []), do: elem(start_broker_at(opts), 0)
+
+  # Same, but hands back the data directory too, for the tests that have to look at the files.
+  defp start_broker_at(opts) do
     name = :"repl_#{System.unique_integer([:positive])}"
     directory = Path.join(System.tmp_dir!(), "malachi_repl_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, [name: name, directory: directory] ++ opts}, id: name)
-    name
+    {name, directory}
   end
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
@@ -687,11 +690,17 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     test "stored_bytes and the seal report the same numbers with it and without it" do
       plain = start_broker()
-      preallocated = start_broker(log_opts: [prealloc_bytes: @prealloc])
+      # Straight through, not nested under :log_opts. `ReplicationServer.init/1` builds its log
+      # options with `Keyword.drop/2`, so an unknown `:log_opts` key would be forwarded to
+      # `Malachi.Log` and ignored there, leaving both servers unpreallocated and this test passing
+      # while proving nothing. The file-size assertion below is what keeps that from coming back.
+      {preallocated, directory} = start_broker_at(prealloc_bytes: @prealloc)
 
       for server <- [plain, preallocated] do
         {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(~w(a b c)))
       end
+
+      assert active_segment_file_size(directory) == @prealloc
 
       # An ACTIVE preallocated segment: its file is 256KB, and neither number may say so.
       assert ReplicationServer.durable_stats(preallocated, @segment, 0) ==
@@ -705,8 +714,17 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert segment_bytes(preallocated, @segment) == segment_bytes(plain, @segment)
     end
 
+    defp active_segment_file_size(directory) do
+      directory
+      |> Layout.segment_directory(@segment)
+      |> Path.join("*.log")
+      |> Path.wildcard()
+      |> Enum.map(&File.stat!(&1).size)
+      |> Enum.max(fn -> 0 end)
+    end
+
     test "the records survive the round trip through a preallocated segment" do
-      server = start_broker(log_opts: [prealloc_bytes: @prealloc])
+      server = start_broker(prealloc_bytes: @prealloc)
       # replicate/5, not append/5: it is the path that commits, and reading back committed records
       # out of a file whose tail is 256KB of zeros is the property under test.
       assert {:ok, 2} = ReplicationServer.replicate(server, @segment, [server], 0, records(~w(a b c)))
