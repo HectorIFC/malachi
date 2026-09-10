@@ -7,6 +7,12 @@
 #
 # This measures the LOCAL single-replica write/read hot path in pure Elixir.
 # (Replication/coordination is NOT the language-sensitive part, BEAM is strong there.)
+#
+# PREALLOC_AB=1 additionally runs the paired preallocation experiment behind issue #83 (see the
+# PreallocAB module below) and writes its result as JSON. Off by default so the CI benchmark job
+# keeps its current runtime; the A/B mode is minutes, not seconds.
+#
+#   PREALLOC_AB=1 PREALLOC_AB_OUT=/tmp/prealloc-ab.json mix run --no-start benchmark/storage_viability.exs
 
 defmodule Bench do
   @dir "/tmp/ng_bench_data"
@@ -25,11 +31,12 @@ defmodule Bench do
     pmax = (List.last(sorted) || 0) / 1000
     mbps = total_bytes / 1_048_576 / (wall_us / 1_000_000)
     recs = total_recs / (wall_us / 1_000_000)
+
     IO.puts("""
     #{label}
-      batches: #{length(lat_us)}  | wall: #{Float.round(wall_us/1_000_000,2)}s
-      per-flush latency ms:  p50=#{Float.round(p50,3)}  p99=#{Float.round(p99,3)}  max=#{Float.round(pmax,3)}
-      throughput:  #{Float.round(mbps,1)} MB/s  |  #{round(recs)} records/s
+      batches: #{length(lat_us)}  | wall: #{Float.round(wall_us / 1_000_000, 2)}s
+      per-flush latency ms:  p50=#{Float.round(p50, 3)}  p99=#{Float.round(p99, 3)}  max=#{Float.round(pmax, 3)}
+      throughput:  #{Float.round(mbps, 1)} MB/s  |  #{round(recs)} records/s
     """)
   end
 
@@ -50,6 +57,7 @@ defmodule Bench do
     batch = make_batch(rec_size, batch_count)
     batch_bytes = IO.iodata_length(batch)
     t0 = now_us()
+
     lat =
       for _ <- 1..n_batches do
         s = now_us()
@@ -57,10 +65,17 @@ defmodule Bench do
         :ok = sync_fun.(fd)
         now_us() - s
       end
+
     wall = now_us() - t0
     :file.close(fd)
-    stats("  flush size #{Float.round(batch_bytes/1_048_576,2)}MB (#{batch_count} x #{rec_size}B)",
-          lat, batch_bytes * n_batches, batch_count * n_batches, wall)
+
+    stats(
+      "  flush size #{Float.round(batch_bytes / 1_048_576, 2)}MB (#{batch_count} x #{rec_size}B)",
+      lat,
+      batch_bytes * n_batches,
+      batch_count * n_batches,
+      wall
+    )
   end
 
   # Non-durable upper bound: delayed_write, no per-batch fsync (one sync at end).
@@ -70,17 +85,25 @@ defmodule Bench do
     batch = make_batch(rec_size, batch_count)
     batch_bytes = IO.iodata_length(batch)
     t0 = now_us()
+
     lat =
       for _ <- 1..n_batches do
         s = now_us()
         :ok = :file.write(fd, batch)
         now_us() - s
       end
+
     :file.sync(fd)
     wall = now_us() - t0
     :file.close(fd)
-    stats("  buffered (delayed_write, fsync@end) #{batch_count} x #{rec_size}B",
-          lat, batch_bytes * n_batches, batch_count * n_batches, wall)
+
+    stats(
+      "  buffered (delayed_write, fsync@end) #{batch_count} x #{rec_size}B",
+      lat,
+      batch_bytes * n_batches,
+      batch_count * n_batches,
+      wall
+    )
   end
 
   def read_seq(path) do
@@ -91,7 +114,11 @@ defmodule Bench do
     wall = now_us() - t0
     :file.close(fd)
     mbps = total / 1_048_576 / (wall / 1_000_000)
-    IO.puts("  sequential read: #{Float.round(total/1_048_576,1)}MB in #{Float.round(wall/1_000_000,2)}s = #{Float.round(mbps,1)} MB/s")
+
+    IO.puts(
+      "  sequential read: #{Float.round(total / 1_048_576, 1)}MB in #{Float.round(wall / 1_000_000, 2)}s = #{Float.round(mbps, 1)} MB/s"
+    )
+
     size
   end
 
@@ -105,6 +132,7 @@ defmodule Bench do
   def fsync_floor do
     path = Path.join(@dir, "fsync_floor.log")
     {:ok, fd} = :file.open(path, [:write, :raw, :binary])
+
     lat =
       for _ <- 1..200 do
         :file.write(fd, <<0>>)
@@ -112,9 +140,13 @@ defmodule Bench do
         :file.sync(fd)
         now_us() - s
       end
+
     :file.close(fd)
     sorted = Enum.sort(lat)
-    IO.puts("  fsync() floor latency (1-byte write): p50=#{Float.round(pctl(sorted,50)/1000,3)}ms  p99=#{Float.round(pctl(sorted,99)/1000,3)}ms  max=#{Float.round(List.last(sorted)/1000,3)}ms")
+
+    IO.puts(
+      "  fsync() floor latency (1-byte write): p50=#{Float.round(pctl(sorted, 50) / 1000, 3)}ms  p99=#{Float.round(pctl(sorted, 99) / 1000, 3)}ms  max=#{Float.round(List.last(sorted) / 1000, 3)}ms"
+    )
   end
 end
 
@@ -132,17 +164,23 @@ Bench.fsync_floor()
 
 IO.puts("\n========== DURABLE: fsync-per-batch (the NorthGuard 'ack after fsync' model) ==========")
 # size-driven flushes (NorthGuard flushes at 10MB)
-Bench.durable(1024, 1024, 2000, &:file.sync/1)      # 1MB batches
-Bench.durable(1024, 4096, 1000, &:file.sync/1)      # 4MB batches
-Bench.durable(1024, 10240, 500, &:file.sync/1)      # 10MB batches (NG threshold)
+# 1MB batches
+Bench.durable(1024, 1024, 2000, &:file.sync/1)
+# 4MB batches
+Bench.durable(1024, 4096, 1000, &:file.sync/1)
+# 10MB batches (NG threshold)
+Bench.durable(1024, 10240, 500, &:file.sync/1)
 # count-driven (NorthGuard flushes at 20k records), small records
-Bench.durable(256, 20000, 300, &:file.sync/1)       # 20k x 256B ~= 5MB
+# 20k x 256B ~= 5MB
+Bench.durable(256, 20000, 300, &:file.sync/1)
 # datasync variant (fdatasync, metadata-light)
 IO.puts("  -- datasync (fdatasync) variant --")
-Bench.durable(1024, 10240, 500, &:file.datasync/1)  # 10MB w/ datasync
+# 10MB w/ datasync
+Bench.durable(1024, 10240, 500, &:file.datasync/1)
 
 IO.puts("\n========== NON-DURABLE upper bound (delayed_write) ==========")
-Bench.buffered(1024, 10240, 1000)                   # 10MB batches buffered
+# 10MB batches buffered
+Bench.buffered(1024, 10240, 1000)
 Bench.buffered(256, 20000, 500)
 
 IO.puts("\n========== READ path ==========")
@@ -153,3 +191,444 @@ IO.puts("  NorthGuard: 17 PB/day across ~10k brokers ~= 20 MB/s avg WRITE per br
 IO.puts("  (x3 replication ~= 60 MB/s). Peak higher, but this is the steady-state bar.\n")
 
 File.rm_rf!("/tmp/ng_bench_data")
+
+# ---------------------------------------------------------------------------------------------
+# PreallocAB: the paired preallocation experiment (issue #83), which subsumes the fsync-vs-
+# fdatasync one (issue #82).
+#
+# #82 measured the syscall swap and found NOTHING: fsync 341us, fdatasync 345us, and an A-A
+# control that differed by 3us, on ubuntu-latest with 15 interleaved repetitions per arm. The
+# reason is the useful part. A 1-byte fsync cost 303us there and a 2.5KB one cost 341us, so the
+# bill is almost entirely fixed cost, the journal commit rather than the transfer, and fdatasync
+# cannot remove that while the segment GROWS: every append changes the file size, that size change
+# is metadata fdatasync must journal anyway, and what it saves rides along in a commit it has to
+# make regardless.
+#
+# So preallocation is not a companion to the syscall swap, it is its PREREQUISITE, and the useful
+# observable is the PAIR: with the file already sized, does fdatasync finally beat fsync? If it
+# still ties, the fixed-cost hypothesis was wrong and that is the finding, not a failed run.
+#
+# What this keeps from the #82 harness, because it is what made a null result trustworthy:
+#
+#   1. INTERLEAVED arms in one process on one filesystem, so thermal drift or a noisy neighbour
+#      hits every arm alike instead of landing on whichever ran last.
+#   2. An A-A CONTROL: two arms that are identical, labelled as if they differed. The spread it
+#      reports is this harness's noise floor, MEASURED rather than assumed.
+#   3. A bootstrapped 95% confidence interval for the difference of medians.
+#   4. The verdict rule fixed HERE, before any number exists: signal requires BOTH that the pair's
+#      delta exceed the A-A control delta AND that the interval exclude zero.
+#
+# What it fixes and adds:
+#
+#   * ROTATED ORDER. #82's arms interleaved but always ran A before B, so any position effect
+#      landed on B every time (all six of its deltas came out positive, which has no plausible
+#      mechanism). The arm order now rotates by repetition.
+#   * FOUR MECHANISMS, not one. Growing, sparse, :file.allocate and written zeros differ in what
+#      they leave for the first append to journal, so they are not interchangeable. They run
+#      through Malachi.Storage.Preallocation, the module the store itself uses, so the benchmark
+#      measures the code that would ship.
+#   * TWO STAGES. Stage 1 triages in the one regime that matters (batch 10 x 256B, what the pinned
+#      ceiling harness runs). Stage 2 confirms only the winner against the production baseline
+#      across all three batch shapes.
+#   * CREATION COST and a per-mechanism 1-byte sync floor, which is the direct test of the
+#      fixed-cost claim and the other side of the zero-write trade-off.
+# ---------------------------------------------------------------------------------------------
+defmodule PreallocAB do
+  alias Malachi.Storage.Preallocation
+
+  @dir "/tmp/ng_prealloc_ab"
+  # Discarded before the measured repetitions: the first pass on a fresh directory pays for cold
+  # page cache and first-touch allocation, which is a property of the harness, not of the syscall.
+  @warmup_reps 1
+  @bootstrap_iterations 10_000
+  @floor_reps 200
+
+  # {label, record_size, records_per_batch, batches_per_rep}. The first is the regime that matters:
+  # the pinned ceiling harness runs batch 10 x 256B with no group commit, so it pays one sync per
+  # ~2.5KB, where the syscall's fixed cost dominates. The larger ones show the delta shrinking as
+  # data transfer takes over, which is the shape the theory predicts.
+  @triage_case {"batch 10 x 256B (the pinned ceiling regime)", 256, 10, 500}
+  @confirm_cases [
+    @triage_case,
+    {"batch 100 x 256B", 256, 100, 300},
+    {"batch 1024 x 1KB", 1024, 1024, 20}
+  ]
+
+  @mechanisms [:grow, :sparse, :allocate, :zeros]
+
+  @doc "Stage 1: every mechanism against both syncs, in the one regime that matters."
+  def triage(reps) do
+    arms = for m <- @mechanisms, sync <- [:sync, :datasync], do: arm(m, sync)
+    run([@triage_case], arms ++ control_arms(), triage_comparisons(), reps)
+  end
+
+  @doc """
+  Stage 2: only the winning mechanism against the production baseline (growing + fsync), across
+  every batch shape, so the number that gets published is not the one that chose the winner.
+  """
+  def confirm(reps, mechanism, sync) do
+    arms = [arm(:grow, :sync), arm(mechanism, sync)] ++ control_arms()
+    comparisons = [{"#{mechanism}+#{sync} vs the production baseline", key(mechanism, sync), key(:grow, :sync)}]
+    run(@confirm_cases, arms, comparisons ++ [control_comparison()], reps)
+  end
+
+  defp arm(mechanism, sync), do: %{key: key(mechanism, sync), mechanism: mechanism, sync: sync}
+
+  defp key(mechanism, sync), do: :"#{mechanism}_#{sync}"
+
+  # Both control arms are the SAME configuration, labelled as if they differed. Whatever they
+  # report as a difference is this harness lying to itself, and every real comparison has to beat
+  # it. They ride in the same rotation as the arms under test so they carry the same biases.
+  defp control_arms do
+    [
+      %{key: :control_a1, mechanism: :zeros, sync: :sync},
+      %{key: :control_a2, mechanism: :zeros, sync: :sync}
+    ]
+  end
+
+  defp control_comparison, do: {"A-A control (identical arms)", :control_a2, :control_a1}
+
+  # The four within-mechanism pairs answer "does fdatasync finally win", one per mechanism, and the
+  # last two answer "does preallocation alone move anything" and "does the PAIR beat what runs in
+  # production today", which is the observable issue #83 is actually about.
+  defp triage_comparisons do
+    within = for m <- @mechanisms, do: {"#{m}: fdatasync vs fsync", key(m, :datasync), key(m, :sync)}
+
+    within ++
+      [
+        {"zeros+fsync vs grow+fsync (preallocation alone)", key(:zeros, :sync), key(:grow, :sync)},
+        {"zeros+fdatasync vs grow+fsync (the pair vs production)", key(:zeros, :datasync), key(:grow, :sync)},
+        control_comparison()
+      ]
+  end
+
+  defp run(cases, arms, comparisons, reps) do
+    File.rm_rf!(@dir)
+    File.mkdir_p!(@dir)
+
+    results =
+      Enum.map(cases, fn {label, rec_size, batch_count, n_batches} = one_case ->
+        IO.puts("\n  case: #{label}")
+        samples = paired(one_case, arms, reps)
+        verdicts = Enum.map(comparisons, &verdict(&1, samples))
+        report(samples, verdicts)
+
+        %{
+          case: label,
+          record_bytes: rec_size,
+          records_per_batch: batch_count,
+          batches_per_rep: n_batches,
+          arms: Map.new(samples, fn {arm_key, values} -> {arm_key, summary(values)} end),
+          comparisons: verdicts
+        }
+      end)
+
+    File.rm_rf!(@dir)
+    results
+  end
+
+  # Interleaved repetitions of every arm, with the ORDER ROTATED per repetition so no arm keeps a
+  # fixed position. Returns each arm's per-rep p50/p99, which are the samples the statistics run
+  # on: one repetition is one independent observation of that arm.
+  defp paired({_label, rec_size, batch_count, n_batches}, arms, reps) do
+    for _ <- 1..@warmup_reps, arm <- arms do
+      measure(rec_size, batch_count, n_batches, arm, "warm")
+    end
+
+    1..reps
+    |> Enum.reduce(Map.new(arms, &{&1.key, []}), fn rep, acc ->
+      arms
+      |> rotate(rep)
+      |> Enum.reduce(acc, fn arm, inner ->
+        sample = summarize(measure(rec_size, batch_count, n_batches, arm, "run"))
+        Map.update!(inner, arm.key, &[sample | &1])
+      end)
+    end)
+    |> Map.new(fn {arm_key, values} -> {arm_key, Enum.reverse(values)} end)
+  end
+
+  defp rotate(list, by) do
+    at = rem(by, length(list))
+    Enum.drop(list, at) ++ Enum.take(list, at)
+  end
+
+  # One arm, one repetition: a fresh file, preallocated by this arm's mechanism, then `n_batches`
+  # write+sync cycles at explicit positions. The pwrite mirrors what Malachi.Storage.ElixirStore
+  # does, so an arm measures the shape of write the store actually issues. Preallocation happens
+  # BEFORE the timed loop on purpose: its cost is a separate measurement (creation_cost/1), and
+  # folding it in here would smear a one-off into a per-flush number.
+  defp measure(rec_size, batch_count, n_batches, arm, tag) do
+    path = Path.join(@dir, "seg_#{arm.key}_#{tag}_#{System.unique_integer([:positive])}.log")
+    File.touch!(path)
+    {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+    batch = Bench.make_batch(rec_size, batch_count)
+    batch_bytes = IO.iodata_length(batch)
+    :ok = preallocate(fd, arm.mechanism, n_batches * batch_bytes)
+    sync = sync_fun(arm.sync)
+
+    {latencies, _position} =
+      Enum.map_reduce(1..n_batches, 0, fn _batch, position ->
+        started = Bench.now_us()
+        :ok = :file.pwrite(fd, position, batch)
+        :ok = sync.(fd)
+        {Bench.now_us() - started, position + batch_bytes}
+      end)
+
+    :file.close(fd)
+    File.rm!(path)
+    latencies
+  end
+
+  defp preallocate(_fd, :grow, _bytes), do: :ok
+  defp preallocate(fd, mechanism, bytes), do: Preallocation.extend(fd, 0, bytes, mechanism)
+
+  defp sync_fun(:sync), do: &:file.sync/1
+  defp sync_fun(:datasync), do: &:file.datasync/1
+
+  @doc """
+  What creating a segment costs per mechanism, which is the other side of the zero-write trade-off:
+  the appends get cheaper only if the one-off does not eat the saving. Reported separately rather
+  than folded into the per-flush latency, because it is paid once per segment and amortised across
+  its whole life.
+  """
+  def creation_cost(bytes) do
+    File.mkdir_p!(@dir)
+
+    costs =
+      Map.new(@mechanisms, fn mechanism ->
+        path = Path.join(@dir, "create_#{mechanism}.log")
+        File.rm_rf!(path)
+        File.touch!(path)
+        {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+
+        started = Bench.now_us()
+        :ok = preallocate(fd, mechanism, bytes)
+        :ok = :file.sync(fd)
+        elapsed = Bench.now_us() - started
+
+        :file.close(fd)
+        File.rm_rf!(path)
+        IO.puts("    #{pad(mechanism)} #{Float.round(elapsed / 1000, 2)}ms to create #{div(bytes, 1_048_576)}MB")
+        {mechanism, elapsed}
+      end)
+
+    File.rm_rf!(@dir)
+    costs
+  end
+
+  @doc """
+  The 1-byte sync floor per mechanism: the direct test of the fixed-cost claim. If the bill really
+  is the journal commit rather than the transfer, then a 1-byte sync costs nearly what a full batch
+  does while the file grows, and preallocation is what should move it.
+  """
+  def sync_floor do
+    File.mkdir_p!(@dir)
+
+    combinations = for mechanism <- @mechanisms, sync <- [:sync, :datasync], do: {mechanism, sync}
+    floors = Map.new(combinations, &one_floor/1)
+
+    File.rm_rf!(@dir)
+    floors
+  end
+
+  defp one_floor({mechanism, sync}) do
+    path = Path.join(@dir, "floor_#{mechanism}_#{sync}.log")
+    File.rm_rf!(path)
+    File.touch!(path)
+    {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+    :ok = preallocate(fd, mechanism, @floor_reps)
+    sync_call = sync_fun(sync)
+
+    latencies =
+      for i <- 0..(@floor_reps - 1) do
+        :ok = :file.pwrite(fd, i, <<1>>)
+        started = Bench.now_us()
+        :ok = sync_call.(fd)
+        Bench.now_us() - started
+      end
+
+    :file.close(fd)
+    File.rm_rf!(path)
+    p50 = median(latencies)
+    IO.puts("    #{pad("#{mechanism}+#{sync}")} p50 #{Float.round(p50 / 1000, 3)}ms")
+    {key(mechanism, sync), p50}
+  end
+
+  defp summarize(latencies) do
+    sorted = Enum.sort(latencies)
+    %{p50: Bench.pctl(sorted, 50), p99: Bench.pctl(sorted, 99)}
+  end
+
+  defp summary(values) do
+    Map.new([:p50, :p99], fn stat ->
+      of_stat = Enum.map(values, & &1[stat])
+      {stat, %{median_us: median(of_stat), min_us: Enum.min(of_stat), max_us: Enum.max(of_stat)}}
+    end)
+  end
+
+  defp verdict({label, b_key, a_key}, samples) do
+    stats =
+      Map.new([:p50, :p99], fn stat ->
+        a = Enum.map(samples[a_key], & &1[stat])
+        b = Enum.map(samples[b_key], & &1[stat])
+        control_delta = control_delta(samples, stat)
+
+        delta = median(b) - median(a)
+        {low, high} = bootstrap_ci(a, b)
+
+        # Both conditions must hold. The control gate alone would call a tiny but consistent shift
+        # signal on a very quiet machine; the interval alone would call a large but erratic one
+        # signal on a noisy one. Requiring both is what keeps the answer honest either way.
+        beats_control = abs(delta) > control_delta
+        excludes_zero = (low > 0 and high > 0) or (low < 0 and high < 0)
+
+        {stat,
+         %{
+           baseline_median_us: median(a),
+           treatment_median_us: median(b),
+           delta_us: delta,
+           delta_pct: percent(delta, median(a)),
+           control_delta_us: control_delta,
+           ci95_low_us: low,
+           ci95_high_us: high,
+           beats_control: beats_control,
+           excludes_zero: excludes_zero,
+           signal: beats_control and excludes_zero
+         }}
+      end)
+
+    %{comparison: label, baseline: a_key, treatment: b_key, stats: stats}
+  end
+
+  defp control_delta(samples, stat) do
+    a = Enum.map(samples[:control_a1], & &1[stat])
+    b = Enum.map(samples[:control_a2], & &1[stat])
+    abs(median(b) - median(a))
+  end
+
+  # Percentile bootstrap of the difference of medians: resample each arm's per-rep observations
+  # with replacement, recompute the difference, and take the 2.5th/97.5th percentiles.
+  defp bootstrap_ci(a, b) do
+    diffs =
+      for _ <- 1..@bootstrap_iterations do
+        median(resample(a)) - median(resample(b))
+      end
+      |> Enum.sort()
+
+    # Negated because the statistic above is (a - b) while the reported delta is (b - a).
+    {-Bench.pctl(diffs, 97.5), -Bench.pctl(diffs, 2.5)}
+  end
+
+  defp resample(samples) do
+    count = length(samples)
+    for _ <- 1..count, do: Enum.at(samples, :rand.uniform(count) - 1)
+  end
+
+  defp median([]), do: 0.0
+
+  defp median(values) do
+    sorted = Enum.sort(values)
+    count = length(sorted)
+    middle = div(count, 2)
+
+    if rem(count, 2) == 1 do
+      Enum.at(sorted, middle) * 1.0
+    else
+      (Enum.at(sorted, middle - 1) + Enum.at(sorted, middle)) / 2
+    end
+  end
+
+  defp percent(_delta, +0.0), do: 0.0
+  defp percent(delta, base), do: Float.round(delta / base * 100, 2)
+
+  defp report(samples, verdicts) do
+    IO.puts("    -- per-arm medians --")
+
+    for {arm_key, values} <- Enum.sort_by(samples, fn {_key, values} -> median(Enum.map(values, & &1.p50)) end) do
+      of_p50 = Enum.map(values, & &1.p50)
+
+      IO.puts(
+        "    #{pad(arm_key)} p50 #{us(median(of_p50))}  (spread #{us(Enum.min(of_p50))} to #{us(Enum.max(of_p50))})"
+      )
+    end
+
+    IO.puts("    -- comparisons --")
+
+    for %{comparison: label, stats: stats} <- verdicts, stat <- [:p50, :p99] do
+      v = stats[stat]
+
+      IO.puts(
+        "    #{stat} #{label}: #{us(v.baseline_median_us)} -> #{us(v.treatment_median_us)}  " <>
+          "delta #{us(v.delta_us)} (#{v.delta_pct}%)  ci95 [#{us(v.ci95_low_us)}, #{us(v.ci95_high_us)}]  " <>
+          "noise floor #{us(v.control_delta_us)}  => #{if v.signal, do: "SIGNAL", else: "noise"}"
+      )
+    end
+  end
+
+  defp pad(value), do: String.pad_trailing("#{value}", 22)
+
+  defp us(value), do: "#{Float.round(value / 1000, 3)}ms"
+end
+
+# The paired preallocation experiment. Opt-in: it is minutes rather than seconds, and the CI
+# benchmark job runs this script on every push.
+if System.get_env("PREALLOC_AB") == "1" do
+  reps = String.to_integer(System.get_env("PREALLOC_AB_REPS") || "15")
+  stage = System.get_env("PREALLOC_AB_STAGE") || "1"
+
+  IO.puts("\n========== PREALLOCATION A/B (issue #83, blocking #82) ==========")
+  IO.puts("  #{reps} interleaved repetitions per arm, arm order rotated per repetition,")
+  IO.puts("  plus an A-A control (two identical arms) for the measured noise floor.")
+  IO.puts("  Verdict rule (fixed before the run): signal requires the delta to exceed the A-A")
+  IO.puts("  control delta AND the bootstrapped 95% CI of the difference to exclude zero.\n")
+
+  IO.puts("  -- 1-byte sync floor per mechanism (the fixed-cost claim, tested directly) --")
+  floors = PreallocAB.sync_floor()
+
+  IO.puts("\n  -- segment creation cost per mechanism --")
+  creation = PreallocAB.creation_cost(64 * 1024 * 1024)
+
+  cases =
+    case stage do
+      "2" ->
+        mechanism = String.to_existing_atom(System.get_env("PREALLOC_AB_MECHANISM") || "zeros")
+        sync = String.to_existing_atom(System.get_env("PREALLOC_AB_SYNC") || "datasync")
+        IO.puts("\n  stage 2: confirming #{mechanism}+#{sync} against the production baseline.")
+        PreallocAB.confirm(reps, mechanism, sync)
+
+      _stage_one ->
+        IO.puts("\n  stage 1: triaging every mechanism against both syncs.")
+        PreallocAB.triage(reps)
+    end
+
+  report = %{
+    schema: 1,
+    generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+    stage: String.to_integer(stage),
+    otp: :erlang.system_info(:otp_release) |> to_string(),
+    schedulers_online: :erlang.system_info(:schedulers_online),
+    os: :os.type() |> Tuple.to_list() |> Enum.map(&to_string/1) |> Enum.join("/"),
+    reps: reps,
+    sync_floor_us: floors,
+    creation_cost_us: creation,
+    cases: cases,
+    # A run where nothing shows signal is a COMPLETE answer, not a failed measurement: it says the
+    # fixed-cost hypothesis behind #82 and #83 was wrong, which is what these issues ask.
+    any_signal:
+      Enum.any?(cases, fn one_case ->
+        Enum.any?(one_case.comparisons, fn c -> c.stats.p50.signal or c.stats.p99.signal end)
+      end)
+  }
+
+  out = System.get_env("PREALLOC_AB_OUT")
+
+  if out do
+    File.mkdir_p!(Path.dirname(out))
+    File.write!(out, Jason.encode_to_iodata!(report, pretty: true))
+    IO.puts("\n  wrote #{out}")
+  else
+    IO.puts("\n#{Jason.encode!(report, pretty: true)}")
+  end
+
+  IO.puts("\n  overall: #{if report.any_signal, do: "SIGNAL in at least one comparison", else: "NOISE everywhere"}")
+end

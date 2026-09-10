@@ -5,6 +5,28 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      prealloc_ab:
+        description: 'Also run the paired preallocation experiment (issue #83). Minutes, not seconds.'
+        type: boolean
+        default: false
+      prealloc_ab_stage:
+        description: 'Stage 1 triages every mechanism; stage 2 confirms one against the baseline.'
+        type: choice
+        options: ['1', '2']
+        default: '1'
+      prealloc_ab_reps:
+        description: 'Interleaved repetitions per arm'
+        type: string
+        default: '15'
+      prealloc_ab_mechanism:
+        description: 'Stage 2 only: which mechanism to confirm (grow, sparse, allocate, zeros)'
+        type: string
+        default: 'zeros'
+      prealloc_ab_sync:
+        description: 'Stage 2 only: which sync to confirm it with (sync, datasync)'
+        type: string
+        default: 'datasync'
 
 permissions:
   contents: read
@@ -59,3 +81,30 @@ jobs:
       # the script only needs :crypto (loaded on demand) and file I/O.
       - name: Run storage viability benchmark
         run: mix run --no-start benchmark/storage_viability.exs
+
+      # The measurement behind issue #83, opt-in because it takes minutes and every push runs this job.
+      # It needs a real filesystem to mean anything: fsync and fdatasync cost the same on tmpfs, and on
+      # macOS neither reaches stable media. The runner's /tmp is ext4 on a real disk, which is the
+      # platform the decision is actually about.
+      #
+      # It also has to run SERIALLY, in one process, on one filesystem. Arms measured in parallel would
+      # contend for the same disk queue and journal, and arms split across runners would be compared
+      # across machines, which is precisely the bias the A-A control exists to expose.
+      - name: Run the preallocation A/B experiment
+        if: ${{ inputs.prealloc_ab }}
+        env:
+          PREALLOC_AB: '1'
+          PREALLOC_AB_STAGE: ${{ inputs.prealloc_ab_stage }}
+          PREALLOC_AB_REPS: ${{ inputs.prealloc_ab_reps }}
+          PREALLOC_AB_MECHANISM: ${{ inputs.prealloc_ab_mechanism }}
+          PREALLOC_AB_SYNC: ${{ inputs.prealloc_ab_sync }}
+          PREALLOC_AB_OUT: ${{ runner.temp }}/prealloc-ab.json
+        run: mix run --no-start benchmark/storage_viability.exs
+
+      - name: Upload the A/B measurement
+        if: ${{ inputs.prealloc_ab }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: prealloc-ab-measurement-stage-${{ inputs.prealloc_ab_stage }}
+          path: ${{ runner.temp }}/prealloc-ab.json
+          if-no-files-found: error

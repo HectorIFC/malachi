@@ -81,6 +81,89 @@ the one the CI benchmark workflow runs.
 mix run benchmark/storage_viability.exs
 ```
 
+#### The preallocation A/B mode (issue #83, blocking #82)
+
+`PREALLOC_AB=1` adds a paired experiment over segment **preallocation**. It exists because a
+performance decision here carries a benchmark, and a single before/after run cannot carry one: the
+published ceiling sweep moves by more than 30% run to run on unchanged code, while any win in this
+area is a few percent.
+
+**What #82 already found, and why #83 exists.** Swapping `fsync` for `fdatasync` measured *nothing*:
+noise in all six cases on `ubuntu-latest` with 15 repetitions per arm. In the case that matters
+most, batch 10 x 256B, the regime the pinned ceiling harness actually runs:
+
+| arm | median p50 | spread |
+| --- | --- | --- |
+| fsync | 341us | 329-356 |
+| fdatasync | 345us | 323-356 |
+| control A1 (fsync) | 343us | 322-391 |
+| control A2 (fsync) | 346us | 322-365 |
+
+The fsync-to-fdatasync difference is 4us; the fsync-to-**fsync** control difference is 3us. They are
+the same number, which is what the control exists to reveal. The platform was real (a 1-byte fsync
+cost 303us on that runner, where tmpfs would be single-digit microseconds), and with n=15 the method
+would have resolved a 2% effect, so this is a measured absence rather than a failure to measure.
+
+The mechanism is the useful part: a segment GROWS, so every append changes the file size, and that
+size change is metadata `fdatasync` has to journal anyway. What it saves over `fsync` rides along in
+a commit it must make regardless. Preallocation is what removes the size change, which makes **#83 a
+prerequisite for #82 rather than a companion to it**, and makes the useful observable the PAIR: with
+the file already sized, does `fdatasync` finally win?
+
+**What the harness keeps from #82**, because it is what made a null result trustworthy:
+
+- **Interleaved arms.** All arms in one process on one filesystem, so a thermal blip or a noisy
+  neighbour on a shared runner hits every arm rather than landing on whichever ran last.
+- **An A-A control.** Two arms that are identical, labelled as if they differed. Its spread is the
+  harness's noise floor, measured instead of assumed. A delta smaller than it is noise by
+  construction.
+- **A bootstrapped 95% CI** of the difference of medians, so the answer is an interval.
+- **The verdict rule fixed in the script**, before any number exists: signal requires the delta to
+  exceed the A-A control delta **and** the interval to exclude zero. "Noise everywhere" is a complete
+  answer, not a failed run.
+
+**What it fixes and adds:**
+
+- **Rotated arm order.** #82's arms interleaved but always ran A before B, so any position effect
+  landed on B every time (all six of its deltas came out positive, which has no plausible mechanism).
+  The order now rotates by repetition.
+- **Four mechanisms, not one.** Growing, `:sparse`, `:allocate` and written `:zeros` differ in what
+  they leave for the first append to journal, so they are not interchangeable:
+
+  | mechanism | changes i_size per append | allocates a block on first touch | extent conversion |
+  | --- | --- | --- | --- |
+  | growing | yes | yes | n/a |
+  | `:sparse` | no | yes | n/a |
+  | `:allocate` | no (Linux) | no | yes, unwritten to written |
+  | `:zeros` | no | no | no |
+
+  They run through `Malachi.Storage.Preallocation`, the module the store itself uses, so the
+  benchmark measures the code that would ship.
+- **Two stages.** Stage 1 triages every mechanism against both syncs in the one regime that matters.
+  Stage 2 confirms only the winner against the production baseline across all three batch shapes, so
+  the number that gets published is not the one that chose the winner.
+- **Creation cost and a per-mechanism 1-byte sync floor.** The floor is the direct test of the
+  fixed-cost claim; the creation cost is the other side of the zero-write trade-off.
+
+It needs a real filesystem to mean anything. `fsync` and `fdatasync` cost the same on tmpfs, which is
+what every Docker compose in this repo deliberately uses, and on macOS neither reaches stable media
+(`:file.sync` there does not use `F_FULLFSYNC`). It also has to run **serially**: arms measured in
+parallel would contend for the same disk queue and journal, and arms split across runners would be
+compared across machines, which is exactly the bias the A-A control exists to expose. Run it on the
+CI runner, whose `/tmp` is ext4 on a real disk: `Performance Benchmarks` > `Run workflow` >
+`prealloc_ab`.
+
+```bash
+# stage 1, triage
+PREALLOC_AB=1 PREALLOC_AB_REPS=15 PREALLOC_AB_OUT=/tmp/prealloc-ab.json \
+  mix run --no-start benchmark/storage_viability.exs
+
+# stage 2, confirm one mechanism against the production baseline
+PREALLOC_AB=1 PREALLOC_AB_STAGE=2 PREALLOC_AB_MECHANISM=zeros PREALLOC_AB_SYNC=datasync \
+  PREALLOC_AB_REPS=25 PREALLOC_AB_OUT=/tmp/prealloc-ab-stage2.json \
+  mix run --no-start benchmark/storage_viability.exs
+```
+
 ### `dashboard_security_benchmark.exs`
 
 Measures the overhead that authentication, security headers, and audit logging add
