@@ -36,6 +36,8 @@ defmodule Malachi.GroupCommitTest do
     @impl true
     def next_offset(handle), do: ElixirStore.next_offset(handle)
     @impl true
+    def logical_bytes(handle), do: ElixirStore.logical_bytes(handle)
+    @impl true
     def sealed?(handle), do: ElixirStore.sealed?(handle)
     @impl true
     def pending?(handle), do: ElixirStore.pending?(handle)

@@ -17,11 +17,27 @@ defmodule Malachi.Storage.ElixirStore do
   Reads via `:file.pread/3` and writes via `:file.pwrite/3` use explicit positions, so
   the single file descriptor serves both append and random read without position races.
   Recovery scans the segment in bounded chunks, so it never loads the whole file at once.
+
+  ## Preallocation
+
+  With `:prealloc_bytes` set, a new segment is sized to that many bytes at creation
+  (`Malachi.Storage.Preallocation`) so that appends overwrite an already-allocated region instead
+  of extending the file. Measured on an `ubuntu-latest` runner in the regime the pinned ceiling
+  harness runs (batch 10 x 256B, one sync per produce), that takes the per-flush p50 from 316us to
+  96us, a 70% cut, against a measured noise floor of 1us. The reason is that a growing file changes
+  its size on every append, and a size change is metadata the following sync has to journal; a
+  1-byte sync costs 257us on a growing file and 75us on a sized one.
+
+  It costs one full-size write at creation (36ms for 64MB on that runner) and it changes what the
+  unwritten tail looks like, which recovery has to understand: see `classify_tail/2`. The tail is
+  truncated away on `seal/1` and on `close/1`, so a segment this store is not actively writing is
+  byte-exact, and every size the rest of the system reads off disk keeps meaning what it meant.
   """
 
   @behaviour Malachi.Storage.SegmentStore
 
   alias Malachi.Log.{Record, Segment}
+  alias Malachi.Storage.Preallocation
 
   @default_index_interval 4096
   @read_window_bytes 262_144
@@ -30,6 +46,14 @@ defmodule Malachi.Storage.ElixirStore do
   # NorthGuard flushes a batch once it reaches ~10MB or ~20k records.
   @default_flush_bytes 10_485_760
   @default_flush_count 20_000
+  # Off unless asked for. A store is a library and `open/3` writing tens of megabytes by default
+  # would be hostile; `Malachi.Application` is what turns it on for a real deployment.
+  @default_prealloc_bytes 0
+  # How far past the last valid frame recovery looks to tell a torn write from rot. Bounded on
+  # purpose: the alternative is scanning the whole preallocated region on every damaged recovery,
+  # and what a bounded window cannot see (isolated garbage stranded in the middle of the unwritten
+  # tail) is not a shape any crash produces.
+  @tail_window_bytes 65_536
 
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
@@ -51,6 +75,8 @@ defmodule Malachi.Storage.ElixirStore do
           last_indexed_position: integer(),
           flush_bytes: pos_integer(),
           flush_count: pos_integer(),
+          prealloc_bytes: non_neg_integer(),
+          preallocated_to: non_neg_integer() | nil,
           integrity: :ok | integrity_verdict()
         }
 
@@ -79,6 +105,12 @@ defmodule Malachi.Storage.ElixirStore do
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes,
     flush_count: @default_flush_count,
+    prealloc_bytes: @default_prealloc_bytes,
+    # How far this handle preallocated, or `nil` when it did not. It is what authorises trimming
+    # the tail on `seal/1` and `close/1`, and it is deliberately a field rather than a test on
+    # `prealloc_bytes`: a read-only handle from `open_read/3` must never be able to truncate a
+    # sealed segment, whatever options it was passed.
+    preallocated_to: nil,
     integrity: :ok
   ]
 
@@ -94,6 +126,7 @@ defmodule Malachi.Storage.ElixirStore do
       File.touch!(path)
       {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
 
       {:ok,
        %__MODULE__{
@@ -105,7 +138,9 @@ defmodule Malachi.Storage.ElixirStore do
          # Start "behind" by one interval so the segment's first record is always indexed.
          last_indexed_position: -index_interval,
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
-         flush_count: Keyword.get(opts, :flush_count, @default_flush_count)
+         flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
+         prealloc_bytes: prealloc_bytes,
+         preallocated_to: preallocate(file_descriptor, 0, prealloc_bytes)
        }}
     end
   end
@@ -117,6 +152,7 @@ defmodule Malachi.Storage.ElixirStore do
 
     if File.exists?(path) do
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+      prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
       {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
 
       # Scan the file in bounded chunks (never loading it whole), counting records and
@@ -125,12 +161,15 @@ defmodule Malachi.Storage.ElixirStore do
 
       base_offset = segment.base_offset
       sealed? = File.exists?(Segment.seal_marker_path(segment))
-      integrity = integrity_verdict(path, valid_bytes, halt, sealed?)
+      shape = tail_shape(file_descriptor, valid_bytes, File.stat!(path).size)
+      classification = classify_tail(halt, shape)
+      integrity = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, sealed?, prealloc_bytes > 0)
 
-      if truncate?(integrity) do
-        {:ok, _} = :file.position(file_descriptor, valid_bytes)
-        :ok = :file.truncate(file_descriptor)
+      if action_for(classification, sealed?) == :discard_tail do
+        discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
       end
+
+      preallocated_to = if sealed?, do: nil, else: preallocate(file_descriptor, valid_bytes, prealloc_bytes)
 
       segment = %Segment{
         segment
@@ -153,6 +192,8 @@ defmodule Malachi.Storage.ElixirStore do
          last_indexed_position: last_indexed_position(index, index_interval),
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
+         prealloc_bytes: prealloc_bytes,
+         preallocated_to: preallocated_to,
          integrity: integrity
        }}
     else
@@ -160,41 +201,201 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
-  # Whether recovery may drop the bytes past the last valid frame. The rule is about WHAT the damage
-  # is, not only about the segment's state, because a replica's file carries a seal marker only when
-  # its log rolled locally (by size or age): sealing a segment is a control-plane decision, so a
-  # segment the cluster considers immutable usually has no marker on disk, and keying the guard on
-  # the marker alone would leave the destructive path wide open in exactly the deployment that
-  # matters.
+  @typedoc """
+  What the bytes past the last valid frame are.
+
+    * `:clean` - there are none: valid frames consumed the file exactly.
+    * `:blank` - unwritten preallocated space. Not damage, and not a shape a growing segment can
+      produce, since it has no room past its last write.
+    * `:torn` - a write that did not finish. Either the file ended inside a frame (the only shape a
+      growing segment can make) or, in a preallocated segment, a frame whose bytes stop partway and
+      give out into the unwritten zeros behind it. Nothing valid follows it by construction.
+    * `:rot` - a frame that is there and is wrong. Valid frames may well follow it, so these bytes
+      are a peer's problem to fix and never this node's to discard.
+  """
+  @type tail_classification :: :clean | :blank | :torn | :rot
+
+  @doc """
+  Classifies the bytes past the last valid frame from the scan's `halt` and the shape of the tail.
+
+  Pure, and separate from what recovery then DOES about it (`action_for/2`), because the two answer
+  different questions and only one of them depends on whether the segment is sealed.
+
+  Telling `:torn` from `:rot` is the whole difficulty, and preallocation is what makes it hard.
+  While a segment grows, "the file ended inside this frame" is proof the writer died there, because
+  there is nowhere else for bytes to be. A preallocated segment has no such end: a torn write leaves
+  a frame header intact and its payload completed by the zeros that were already there, so it comes
+  back as `:bad_crc`, exactly like rot.
+
+  What still separates them is where the zeros start. A torn write stops partway through the frame
+  and the unwritten region takes over from there, so the zeros begin INSIDE the frame the header
+  describes. Rot flips bytes in a frame that was written whole, so the zeros (if any) begin at or
+  after its end. That is the test, and it is bounded: it looks at one window past the damage rather
+  than scanning the rest of the segment.
+
+  It has one known way to be wrong, and it is deliberate: a record whose value legitimately ends in
+  NUL bytes, sitting in the last frame of a segment, rotted, would be read as torn and dropped
+  rather than reported. It is pinned by a test that names it. The trade is that the alternative,
+  calling every interrupted flush corruption, would have every unclean restart report damage.
+  """
+  @spec classify_tail(:eof | :blank | {:error, atom()}, map()) :: tail_classification()
+  def classify_tail(:eof, %{trailing_bytes: 0}), do: :clean
+  def classify_tail(:eof, _shape), do: :torn
+  def classify_tail(:blank, _shape), do: :blank
+
+  def classify_tail({:error, _reason}, shape) do
+    if shape.zeros_start_inside_frame? and shape.zeros_reach_the_end?, do: :torn, else: :rot
+  end
+
+  @doc """
+  What recovery may do about a classified tail: nothing, discard it, or leave it alone and report.
+
+  The state matters here and not in the classification, because it is about permission rather than
+  about what the bytes are. The rule keys on the DAMAGE and not only on the seal marker, because a
+  replica's file carries a marker only when its log rolled locally (by size or age): sealing a
+  segment is a control-plane decision, so a segment the cluster considers immutable usually has no
+  marker on disk, and keying the guard on the marker alone would leave the destructive path wide
+  open in exactly the deployment that matters.
+  """
+  @spec action_for(tail_classification(), boolean()) :: :none | :discard_tail | :preserve
+  def action_for(:clean, _sealed?), do: :none
+  def action_for(:blank, _sealed?), do: :none
+  def action_for(:torn, false), do: :discard_tail
+  def action_for(:torn, true), do: :preserve
+  def action_for(:rot, _sealed?), do: :preserve
+
+  # What the recovery scan concluded, for the caller to report (this module never logs). A clean or
+  # blank tail is `:ok`; anything else is described so the warning can name the byte position and
+  # how much of the file is unreadable.
   #
-  # An `:incomplete` tail is the crash-mid-write shape: the scan ran out of bytes inside a frame, so
-  # by construction nothing valid follows it, and dropping it keeps the file clean and the next
-  # append contiguous. A checksum or framing failure is different: the frame was written whole and
-  # is wrong (rot, or a bug), and VALID frames may well follow it. Those are recoverable from a peer
-  # and must not be destroyed by the very node that noticed the damage. Reads are bounded by
-  # `write_position` either way, so leaving the bytes costs nothing but disk.
-  defp truncate?(:ok), do: false
-  defp truncate?(%{sealed?: true}), do: false
-  defp truncate?(%{reason: :incomplete}), do: true
-  defp truncate?(_rot), do: false
+  # `unreadable_bytes` counts the bytes past the last valid frame that are not preallocated space.
+  # Without preallocation that is all of them, exactly as before, and it stays all of them even when
+  # some happen to be zeros: a torn frame full of NULs is still a torn frame, and the number is
+  # meant to say what recovery dropped. With preallocation the blank tail comes off, because
+  # reporting a fresh 64MB segment as having 64MB unreadable would make the number meaningless.
+  defp integrity_verdict(:clean, _valid_bytes, _shape, _sealed?, _preallocated?), do: :ok
+  defp integrity_verdict(:blank, _valid_bytes, _shape, _sealed?, _preallocated?), do: :ok
 
-  # What the recovery scan concluded, for the caller to report (this module never logs). A scan that
-  # consumed the file exactly is clean; anything else is described so the warning can name the byte
-  # position and how much of the file is unreadable. Those trailing bytes are dropped only when
-  # `truncate?/1` allows it; otherwise they stay on disk, unreadable but recoverable.
-  defp integrity_verdict(path, valid_bytes, halt, sealed?) do
-    unreadable_bytes = File.stat!(path).size - valid_bytes
+  # `:incomplete` whichever way the scan hit it: the file ending inside a frame and a frame giving
+  # out into unwritten space are the same event, a write that did not finish, and callers that
+  # already handle the first must not have to learn a second name for it.
+  defp integrity_verdict(:torn, valid_bytes, shape, sealed?, preallocated?) do
+    verdict_map(:incomplete, valid_bytes, shape, sealed?, preallocated?)
+  end
 
-    case halt do
-      :eof when unreadable_bytes == 0 ->
-        :ok
+  defp integrity_verdict({:rot, reason}, valid_bytes, shape, sealed?, preallocated?) do
+    verdict_map(reason, valid_bytes, shape, sealed?, preallocated?)
+  end
 
-      :eof ->
-        %{reason: :incomplete, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+  defp verdict_map(reason, valid_bytes, shape, sealed?, preallocated?) do
+    %{
+      reason: reason,
+      position: valid_bytes,
+      unreadable_bytes: unreadable_bytes(shape, preallocated?),
+      sealed?: sealed?
+    }
+  end
 
-      {:error, reason} ->
-        %{reason: reason, position: valid_bytes, unreadable_bytes: unreadable_bytes, sealed?: sealed?}
+  defp unreadable_bytes(shape, true), do: shape.trailing_bytes - shape.blank_tail_bytes
+  defp unreadable_bytes(shape, false), do: shape.trailing_bytes
+
+  # Reads one bounded window past the last valid frame and describes it, which is the only part of
+  # the torn-versus-rot decision that touches the disk.
+  #
+  #   * `trailing_bytes` - how much of the file is past the last valid frame at all.
+  #   * `written_bytes` - the leading run of the tail that is not zeros, so the extent of what a
+  #     torn write actually left behind.
+  #   * `blank_tail_bytes` - the rest, when the tail ends in zeros. The window is bounded, so zeros
+  #     that fill it are taken to continue to the end of the file: garbage stranded past the window
+  #     is not a shape a crash makes, and refusing to look for it is what keeps recovery O(1) in
+  #     the size of the preallocated region.
+  #   * `zeros_start_inside_frame?` - whether the zeros begin before the end of the frame the
+  #     damaged header claims. A frame whose header is itself unreadable has no claimed end, so the
+  #     answer is false and the tail is treated as rot, which is the conservative direction.
+  #   * `zeros_reach_the_end?` - whether the tail ends in zeros at all.
+  defp tail_shape(file_descriptor, valid_bytes, file_size) do
+    trailing_bytes = max(file_size - valid_bytes, 0)
+    window = min(@tail_window_bytes, trailing_bytes)
+
+    bytes =
+      case :file.pread(file_descriptor, valid_bytes, window) do
+        {:ok, chunk} -> chunk
+        _eof_or_error -> <<>>
+      end
+
+    written_bytes = non_zero_prefix(bytes)
+    ends_in_zeros? = written_bytes < byte_size(bytes)
+
+    %{
+      trailing_bytes: trailing_bytes,
+      written_bytes: written_bytes,
+      blank_tail_bytes: if(ends_in_zeros?, do: trailing_bytes - written_bytes, else: 0),
+      zeros_start_inside_frame?: written_bytes < claimed_frame_size(bytes),
+      zeros_reach_the_end?: ends_in_zeros?
+    }
+  end
+
+  # Where the trailing run of zeros starts, as a length from the front. A window that is entirely
+  # zeros answers 0, and one with no zeros at all answers its own size.
+  defp non_zero_prefix(bytes), do: non_zero_prefix(bytes, byte_size(bytes))
+  defp non_zero_prefix(_bytes, 0), do: 0
+
+  defp non_zero_prefix(bytes, length) do
+    case :binary.at(bytes, length - 1) do
+      0 -> non_zero_prefix(bytes, length - 1)
+      _non_zero -> length
     end
+  end
+
+  # How long the damaged frame says it is, from its own header. Zero when the header is not a frame
+  # header at all, which makes `zeros_start_inside_frame?` false: with no claimed extent there is
+  # nothing to say the write stopped short, so the bytes are treated as rot.
+  defp claimed_frame_size(<<0x4D51::16, payload_length::32, _checksum::32, _rest::binary>>),
+    do: 10 + payload_length
+
+  defp claimed_frame_size(_bytes), do: 0
+
+  # Drops the bytes a torn write left behind. Without preallocation that means truncating the file,
+  # which is what has always happened. With it, truncating would throw away the preallocated region
+  # itself, so the damaged run is overwritten with zeros instead: the next append starts at
+  # `valid_bytes` and covers it anyway, and zeroing it now restores the invariant that everything
+  # past the last valid frame is unwritten space, which is what keeps a recovered replica's file
+  # byte-identical to one that never crashed.
+  defp discard_tail(file_descriptor, valid_bytes, _shape, 0) do
+    {:ok, _position} = :file.position(file_descriptor, valid_bytes)
+    :ok = :file.truncate(file_descriptor)
+  end
+
+  defp discard_tail(file_descriptor, valid_bytes, shape, _prealloc_bytes) do
+    :ok = Preallocation.extend(file_descriptor, valid_bytes, valid_bytes + shape.written_bytes, :zeros)
+  end
+
+  # Sizes a segment at creation, or re-sizes a recovered one, and answers how far it reached so the
+  # handle knows whether it may trim the tail later. `nil` for a segment that was not preallocated.
+  #
+  # The sync is not optional, and it was measured. Preallocating leaves the whole region dirty in
+  # the page cache, and without a sync here the first commits inherit that writeback: in the batch
+  # 1024 x 1KB case, where the preallocated region is large relative to the number of flushes that
+  # follow it, the per-flush p99 went from 23.7ms growing to 72.0ms preallocated, three times worse,
+  # while the p50 in the small-batch regimes was already 55% better. Paying it once, here, is what
+  # keeps the cost a property of creating a segment rather than of committing to one.
+  defp preallocate(_file_descriptor, _from_byte, 0), do: nil
+
+  defp preallocate(file_descriptor, from_byte, prealloc_bytes) do
+    :ok = Preallocation.extend(file_descriptor, from_byte, prealloc_bytes, :zeros)
+    :ok = :file.sync(file_descriptor)
+    prealloc_bytes
+  end
+
+  # Gives back the preallocated tail, so a segment this store is no longer writing is byte-exact.
+  # It is what keeps every file size the rest of the system reads meaning what it meant: the sparse
+  # index sidecar, `Malachi.Cluster.Scrubber`, retention's `byte_size`, and the lost-copy probe in
+  # `Malachi.Cluster.SelfHealing` all measure sealed segments off disk.
+  defp trim_tail(%__MODULE__{preallocated_to: nil}), do: :ok
+
+  defp trim_tail(%__MODULE__{} = store) do
+    {:ok, _position} = :file.position(store.file_descriptor, store.write_position)
+    :ok = :file.truncate(store.file_descriptor)
   end
 
   @impl true
@@ -204,13 +405,18 @@ defmodule Malachi.Storage.ElixirStore do
 
     if File.exists?(path) do
       {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+      # A scrub reaches this without the segment's options (it walks a directory, not a handle), so
+      # an unstated preallocation makes the reported `unreadable_bytes` conservative rather than
+      # wrong: a blank tail is already `:ok` by classification, and only the size attached to real
+      # damage is affected.
+      preallocated? = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes) > 0
 
       try do
         {record_count, valid_bytes, halt} = check_scan(file_descriptor)
 
         # Frames first: with the segment itself damaged the sidecar's verdict is moot, and rebuilding
         # an index over damaged frames would only bake the damage in.
-        with {:ok, counts} <- verdict(path, record_count, valid_bytes, halt) do
+        with {:ok, counts} <- verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
           verify_index(segment, file_descriptor, valid_bytes, counts)
         end
       after
@@ -282,21 +488,23 @@ defmodule Malachi.Storage.ElixirStore do
   # checksum mismatch (an active segment's torn tail is normal and is handled by `recover/3`).
   # The damage map carries the same keys `recover/3` reports, so a caller (and the telemetry event)
   # handles findings from either path identically.
-  defp verdict(path, record_count, valid_bytes, halt) do
-    file_size = File.stat!(path).size
-    unreadable = file_size - valid_bytes
+  defp verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
+    shape = tail_shape(file_descriptor, valid_bytes, File.stat!(path).size)
 
-    case halt do
-      :eof when unreadable == 0 ->
+    case classify_tail(halt, shape) do
+      classification when classification in [:clean, :blank] ->
         {:ok, %{records: record_count, bytes: valid_bytes}}
 
-      :eof ->
-        {:error, %{position: valid_bytes, reason: :incomplete, unreadable_bytes: unreadable, file: path}}
-
-      {:error, reason} ->
-        {:error, %{position: valid_bytes, reason: reason, unreadable_bytes: unreadable, file: path}}
+      classification ->
+        damage = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, true, preallocated?)
+        {:error, damage |> Map.delete(:sealed?) |> Map.put(:file, path)}
     end
   end
+
+  # Folds the scan's halt into the classification so the verdict has one thing to match on: only a
+  # `:rot` verdict carries the halt's reason, and only a halt that is an error can produce one.
+  defp verdict_key(:rot, {:error, reason}), do: {:rot, reason}
+  defp verdict_key(classification, _halt), do: classification
 
   # The verification scan: `walk/4` driven by `Malachi.Log.Record.check_one/1`, which verifies the
   # checksum without building a record struct, and an accumulator that is just a count. A scrub
@@ -488,16 +696,22 @@ defmodule Malachi.Storage.ElixirStore do
 
   def seal(%__MODULE__{} = store) do
     {:ok, store} = sync(store)
+    # Before the index and the marker: past this point the segment is immutable, so the tail it
+    # will never write into is given back, and the handle stops claiming it may trim anything.
+    :ok = trim_tail(store)
     :ok = persist_index(store)
     File.touch!(Segment.seal_marker_path(store.segment))
 
     %Segment{} = current_segment = store.segment
     segment = %Segment{current_segment | state: :sealed, sealed_at: System.system_time(:millisecond)}
-    {:ok, %{store | segment: segment}}
+    {:ok, %{store | segment: segment, preallocated_to: nil}}
   end
 
   @impl true
   def next_offset(%__MODULE__{next_offset: next_offset}), do: next_offset
+
+  @impl true
+  def logical_bytes(%__MODULE__{segment: segment}), do: segment.byte_size
 
   @impl true
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
@@ -512,7 +726,14 @@ defmodule Malachi.Storage.ElixirStore do
   def should_seal?(%__MODULE__{segment: segment}, now_ms), do: Segment.should_seal?(segment, now_ms)
 
   @impl true
-  def close(%__MODULE__{file_descriptor: file_descriptor}), do: :file.close(file_descriptor)
+  def close(%__MODULE__{} = store) do
+    # A cleanly closed segment is byte-exact too, so only a file whose process died still carries a
+    # tail, and it carries one for as long as it takes something to reopen it. `preallocated_to` is
+    # `nil` on a sealed handle and on every read-only one from `open_read/3`, which is what keeps
+    # this from ever truncating a segment it did not size itself.
+    :ok = trim_tail(store)
+    :file.close(store.file_descriptor)
+  end
 
   # --- reading ---
 
@@ -678,6 +899,11 @@ defmodule Malachi.Storage.ElixirStore do
           :eof -> {valid_bytes, accumulator, :eof}
           {:error, reason} -> {valid_bytes, accumulator, {:error, reason}}
         end
+
+      # Unwritten preallocated space. It ends the walk exactly like end of file does, because that
+      # is what it is: the segment stops here, there is simply room after it.
+      :blank ->
+        {valid_bytes, accumulator, :blank}
 
       {:error, reason} ->
         {valid_bytes, accumulator, {:error, reason}}

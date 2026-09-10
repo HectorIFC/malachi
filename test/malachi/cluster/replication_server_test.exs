@@ -407,6 +407,8 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     @impl true
     def next_offset(handle), do: ElixirStore.next_offset(handle)
     @impl true
+    def logical_bytes(handle), do: ElixirStore.logical_bytes(handle)
+    @impl true
     def sealed?(handle), do: ElixirStore.sealed?(handle)
     @impl true
     def pending?(handle), do: ElixirStore.pending?(handle)
@@ -671,6 +673,46 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       check.() -> true
       remaining_ms <= 0 -> false
       true -> Process.sleep(20) && eventually(check, remaining_ms - 20)
+    end
+  end
+
+  # A preallocated segment's file is far larger than the records in it, and three things downstream
+  # read a segment's size off disk: the `byte_size` recorded when it is sealed or fenced, size-based
+  # retention, and the lost-copy probe in `Malachi.Cluster.SelfHealing`, which re-backfills any
+  # replica whose bytes fall short of the recorded number. If preallocation leaked into any of them,
+  # one replica would report a segment sixteen times its real size and its healthy peers would be
+  # re-copied as if they had been truncated.
+  describe "preallocation never reaches the byte counts the cluster acts on" do
+    @prealloc 256 * 1024
+
+    test "stored_bytes and the seal report the same numbers with it and without it" do
+      plain = start_broker()
+      preallocated = start_broker(log_opts: [prealloc_bytes: @prealloc])
+
+      for server <- [plain, preallocated] do
+        {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(~w(a b c)))
+      end
+
+      # An ACTIVE preallocated segment: its file is 256KB, and neither number may say so.
+      assert ReplicationServer.durable_stats(preallocated, @segment, 0) ==
+               ReplicationServer.durable_stats(plain, @segment, 0)
+
+      {:ok, _end_offset, active_bytes} = ReplicationServer.durable_stats(preallocated, @segment, 0)
+      assert active_bytes > 0 and active_bytes < @prealloc
+
+      # And a SEALED one, which is the shape retention and the lost-copy probe actually measure.
+      assert ReplicationServer.seal(preallocated, @segment, 0) == ReplicationServer.seal(plain, @segment, 0)
+      assert segment_bytes(preallocated, @segment) == segment_bytes(plain, @segment)
+    end
+
+    test "the records survive the round trip through a preallocated segment" do
+      server = start_broker(log_opts: [prealloc_bytes: @prealloc])
+      # replicate/5, not append/5: it is the path that commits, and reading back committed records
+      # out of a file whose tail is 256KB of zeros is the property under test.
+      assert {:ok, 2} = ReplicationServer.replicate(server, @segment, [server], 0, records(~w(a b c)))
+
+      assert {:ok, records} = ReplicationServer.read(server, @segment, 0, 10)
+      assert Enum.map(records, & &1.value) == ~w(a b c)
     end
   end
 

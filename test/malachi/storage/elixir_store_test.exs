@@ -667,12 +667,288 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert decoded.headers == [{"a", "1"}, {"b", "2"}]
     end
 
-    test "decode_one reports incomplete and bad framing", _ctx do
+    test "decode_one tells incomplete, blank and bad framing apart", _ctx do
       frame = Record.encode(%Record{Record.new("v") | offset: 0})
       <<partial::binary-size(byte_size(frame) - 2), _::binary>> = frame
       assert Record.decode_one(partial) == :incomplete
-      assert Record.decode_one(<<0, 0, 0>>) == :incomplete
       assert Record.decode_one(<<1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11>>) == {:error, :bad_magic}
+
+      # Zeros used to answer :incomplete, on the reasoning that a short buffer is a short buffer.
+      # They are their own answer now, because a preallocated segment reads back as zeros past its
+      # last write and recovery has to know the difference between space nobody wrote and a frame
+      # that was cut off mid-write. Both a bare header's worth and a couple of bytes of it count,
+      # so the very end of a preallocated region is still recognised.
+      assert Record.decode_one(<<0, 0, 0>>) == :blank
+      assert Record.decode_one(:binary.copy(<<0>>, 64)) == :blank
+      assert Record.check_one(:binary.copy(<<0>>, 64)) == :blank
+    end
+
+    # A write cut just after the magic leaves a zero length and a zero checksum, and crc32 of an
+    # empty binary IS zero, so this shape would verify as a valid 10-byte frame without the minimum
+    # payload guard. It is the one way the two scans could disagree about where a segment ends.
+    test "a frame claiming a payload shorter than the fixed fields is bad framing", _ctx do
+      truncated_header = <<0x4D51::16, 0::32, 0::32, 0, 0, 0, 0>>
+
+      assert Record.decode_one(truncated_header) == {:error, :bad_magic}
+      assert Record.check_one(truncated_header) == {:error, :bad_magic}
+    end
+  end
+
+  describe "classify_tail/2 and action_for/2" do
+    test "a scan that consumed the file exactly is clean", _ctx do
+      assert ElixirStore.classify_tail(:eof, shape(trailing_bytes: 0)) == :clean
+    end
+
+    test "a file that ended inside a frame is torn, which is the only shape a growing segment makes",
+         _ctx do
+      assert ElixirStore.classify_tail(:eof, shape(trailing_bytes: 7)) == :torn
+    end
+
+    test "unwritten preallocated space is blank, whatever the tail looks like", _ctx do
+      assert ElixirStore.classify_tail(:blank, shape(trailing_bytes: 64 * 1024 * 1024)) == :blank
+    end
+
+    test "a damaged frame that gives out into the zeros behind it is torn", _ctx do
+      tail = shape(zeros_start_inside_frame?: true, zeros_reach_the_end?: true)
+      assert ElixirStore.classify_tail({:error, :bad_crc}, tail) == :torn
+    end
+
+    test "a damaged frame that was written whole is rot", _ctx do
+      written_whole = shape(zeros_start_inside_frame?: false, zeros_reach_the_end?: true)
+      followed_by_more = shape(zeros_start_inside_frame?: true, zeros_reach_the_end?: false)
+
+      assert ElixirStore.classify_tail({:error, :bad_crc}, written_whole) == :rot
+      assert ElixirStore.classify_tail({:error, :bad_crc}, followed_by_more) == :rot
+    end
+
+    # The two rules that make the destructive path safe, over the whole matrix rather than over the
+    # cases someone thought to write down. Everything else about the classification is a judgement
+    # call; these two are not.
+    property "a sealed segment never loses bytes, and rot is never discarded" do
+      check all(
+              classification <- StreamData.member_of([:clean, :blank, :torn, :rot]),
+              sealed? <- StreamData.boolean()
+            ) do
+        action = ElixirStore.action_for(classification, sealed?)
+
+        assert action in [:none, :discard_tail, :preserve]
+        if sealed?, do: assert(action != :discard_tail)
+        if classification == :rot, do: assert(action != :discard_tail)
+        if action == :discard_tail, do: assert(classification == :torn and not sealed?)
+      end
+    end
+
+    property "every halt and tail shape classifies, and only a blank tail is free of consequence" do
+      check all(
+              halt <-
+                StreamData.one_of([
+                  StreamData.constant(:eof),
+                  StreamData.constant(:blank),
+                  StreamData.map(StreamData.member_of([:bad_crc, :bad_magic, :bad_payload]), &{:error, &1})
+                ]),
+              trailing <- StreamData.integer(0..1_000_000),
+              inside? <- StreamData.boolean(),
+              reaches? <- StreamData.boolean()
+            ) do
+        tail = shape(trailing_bytes: trailing, zeros_start_inside_frame?: inside?, zeros_reach_the_end?: reaches?)
+        classification = ElixirStore.classify_tail(halt, tail)
+
+        assert classification in [:clean, :blank, :torn, :rot]
+        if halt == :blank, do: assert(classification == :blank)
+        if classification in [:clean, :blank], do: assert(ElixirStore.action_for(classification, false) == :none)
+      end
+    end
+
+    defp shape(overrides) do
+      Enum.into(overrides, %{
+        trailing_bytes: 0,
+        written_bytes: 0,
+        blank_tail_bytes: 0,
+        zeros_start_inside_frame?: false,
+        zeros_reach_the_end?: false
+      })
+    end
+  end
+
+  describe "a preallocated segment" do
+    @prealloc 128 * 1024
+
+    defp open_preallocated(directory, opts \\ []) do
+      open(directory, Keyword.merge([prealloc_bytes: @prealloc], opts))
+    end
+
+    test "is sized at creation without counting as content", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      path = Segment.path(store.segment)
+
+      assert File.stat!(path).size == @prealloc
+      # The two numbers the rest of the system reads. If either followed the file size, a brand new
+      # segment would look full: `should_seal?` would roll it immediately and retention would count
+      # 128KB of nothing against the range's budget.
+      assert store.segment.byte_size == 0
+      assert ElixirStore.logical_bytes(store) == 0
+      refute ElixirStore.should_seal?(store, System.system_time(:millisecond))
+
+      :ok = ElixirStore.close(store)
+    end
+
+    test "appends inside the region without changing the file size", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      path = Segment.path(store.segment)
+
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      # The whole point of the change: the commit above made no metadata for the sync to journal.
+      assert File.stat!(path).size == @prealloc
+      assert ElixirStore.logical_bytes(store) > 0
+      assert {:ok, records} = ElixirStore.read(store, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+
+      :ok = ElixirStore.close(store)
+    end
+
+    test "recovers a blank tail as intact, not as damage", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0")])
+      {:ok, store} = ElixirStore.sync(store)
+      # Closing trims, so reopen the file behind the store's back to keep the tail a recovery sees.
+      logical = store.segment.byte_size
+      :ok = :file.close(store.file_descriptor)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      # Without the :blank verdict this reports :bad_magic and every restart of every active segment
+      # logs corruption.
+      assert ElixirStore.integrity(recovered) == :ok
+      assert recovered.segment.byte_size == logical
+      assert {:ok, [record]} = ElixirStore.read(recovered, 0, 10)
+      assert record.value == "v0"
+
+      :ok = ElixirStore.close(recovered)
+    end
+
+    test "recovers a torn frame inside the region as incomplete, and zeroes what it dropped",
+         %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, store} = ElixirStore.sync(store)
+      valid_bytes = store.segment.byte_size
+      path = Segment.path(store.segment)
+
+      # A crash between the pwrite and its sync: the head of a frame reached the disk and the rest
+      # of it did not, so the preallocated zeros complete it. This is what today's recovery reads as
+      # bit rot, because the file no longer ends where the writing stopped.
+      torn = binary_part(Record.encode(%Record{rec("v2") | offset: 2}), 0, 12)
+      {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
+      :ok = :file.pwrite(fd, valid_bytes, torn)
+      :ok = :file.close(fd)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      # 10 and not the 12 bytes written: the count runs to the last NON-ZERO byte, and this frame's
+      # 11th and 12th bytes are the leading zeros of its 64-bit offset. Bytes that are already zero
+      # are indistinguishable from space nobody wrote, which is the whole basis of the rule, so
+      # there is nothing to report about them and nothing to zero out either.
+      assert %{reason: :incomplete, position: ^valid_bytes, unreadable_bytes: 10, sealed?: false} =
+               ElixirStore.integrity(recovered)
+
+      assert recovered.segment.record_count == 2
+      # The region is kept (truncating would throw away the preallocation) and the garbage inside it
+      # is zeroed, so a replica that crashed comes back byte-identical to one that did not.
+      assert File.stat!(path).size == @prealloc
+      assert {:ok, blank} = :file.pread(recovered.file_descriptor, valid_bytes, 32)
+      assert blank == :binary.copy(<<0>>, 32)
+
+      :ok = ElixirStore.close(recovered)
+    end
+
+    test "still refuses to discard rot that has valid frames after it", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+
+      store =
+        Enum.reduce(0..4, store, fn i, acc ->
+          {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      path = Segment.path(store.segment)
+      position = frame_position(path, 2)
+      :ok = :file.close(store.file_descriptor)
+      corrupt_payload_byte(path, 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      assert %{reason: :bad_crc, position: ^position} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+
+      :ok = ElixirStore.close(recovered)
+    end
+
+    # The known way the torn-versus-rot rule is wrong, named rather than avoided. A value that ends
+    # in NULs, in the last frame, rotted, looks exactly like a write that stopped partway: the zeros
+    # begin inside the frame and run to the end of the preallocated region. The alternative rule,
+    # calling every interrupted flush corruption, would have every unclean restart report damage.
+    test "misreads rot as torn when a value legitimately ends in NULs at the very end", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec(<<"tail", 0, 0, 0, 0, 0, 0, 0, 0>>)])
+      {:ok, store} = ElixirStore.sync(store)
+      path = Segment.path(store.segment)
+      position = frame_position(path, 1)
+      :ok = :file.close(store.file_descriptor)
+      corrupt_payload_byte(path, 1)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      # It reports :incomplete (torn) where a growing segment would have reported :bad_crc.
+      assert %{reason: :incomplete, position: ^position} = ElixirStore.integrity(recovered)
+
+      :ok = ElixirStore.close(recovered)
+    end
+
+    test "gives the tail back on seal and on close", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, sealed} = ElixirStore.seal(store)
+      path = Segment.path(sealed.segment)
+
+      assert File.stat!(path).size == sealed.segment.byte_size
+      assert sealed.preallocated_to == nil
+      :ok = ElixirStore.close(sealed)
+      assert File.stat!(path).size == sealed.segment.byte_size
+
+      # And a sealed segment reopened read-only reads its own length, not a region of zeros.
+      {:ok, read_only} = ElixirStore.open_read(directory, "segment-0", base_offset: 0, record_count: 2)
+      assert read_only.preallocated_to == nil
+      assert {:ok, records} = ElixirStore.read(read_only, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+      :ok = ElixirStore.close(read_only)
+    end
+
+    test "closing an active segment trims it too, so only a crashed file carries a tail",
+         %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0")])
+      {:ok, store} = ElixirStore.sync(store)
+      path = Segment.path(store.segment)
+
+      assert File.stat!(path).size == @prealloc
+      :ok = ElixirStore.close(store)
+      assert File.stat!(path).size == store.segment.byte_size
+    end
+
+    test "verify reports a blank tail as intact and still finds real damage", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, store} = ElixirStore.sync(store)
+      :ok = :file.close(store.file_descriptor)
+      opts = [prealloc_bytes: @prealloc]
+
+      assert {:ok, %{records: 2}} = ElixirStore.verify(directory, "segment-0", opts)
+
+      corrupt_payload_byte(Segment.path(store.segment), 0)
+      assert {:error, %{reason: :bad_crc, position: 0}} = ElixirStore.verify(directory, "segment-0", opts)
     end
   end
 

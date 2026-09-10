@@ -20,6 +20,21 @@ defmodule Malachi.Log.Record do
   `flags` bit 0 distinguishes a `nil` key (absent) from an empty-binary key.
   The leading `magic`/`payload_length`/`crc32` header lets recovery (a) detect a partial
   trailing write (truncated frame) and stop cleanly, and (b) detect bit-rot via CRC.
+
+  ## Where a scan stops
+
+  A scan hits one of four things, and telling them apart is what recovery is built on:
+
+    * a valid frame, and it continues;
+    * `:incomplete`, meaning the bytes run out inside a frame;
+    * `:blank`, meaning the frame header is all zeros. Zeros are not a frame that went wrong,
+      they are space that was never written, which is what the unwritten region of a
+      preallocated segment reads back as (`Malachi.Storage.Preallocation`). A segment that grows
+      never produces this, because it has no space past its last write;
+    * `{:error, reason}`, meaning a frame is there and is wrong.
+
+  The magic is `0x4D51`, so a zero magic can never be a real frame, and a payload shorter than the
+  fixed fields every record carries can never be one either.
   """
 
   import Bitwise
@@ -98,11 +113,12 @@ defmodule Malachi.Log.Record do
   Decodes a single frame from the front of `binary`.
 
   Returns `{:ok, record, frame_size, rest}` on success, `:incomplete` if `binary` does
-  not yet contain a full frame (partial/trailing write), or `{:error, reason}` if the
-  framing is corrupt.
+  not yet contain a full frame (partial/trailing write), `:blank` if the frame header is
+  all zeros (unwritten space, never a damaged frame), or `{:error, reason}` if the framing
+  is corrupt.
   """
   @spec decode_one(binary()) ::
-          {:ok, t(), pos_integer(), binary()} | :incomplete | {:error, atom()}
+          {:ok, t(), pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
   def decode_one(binary) do
     case split_frame(binary) do
       {:ok, payload, frame_size, rest} ->
@@ -125,7 +141,7 @@ defmodule Malachi.Log.Record do
   confirm that every frame still matches its checksum, and building a `Record` struct per frame
   would dominate that cost for no benefit.
   """
-  @spec check_one(binary()) :: {:ok, pos_integer(), binary()} | :incomplete | {:error, atom()}
+  @spec check_one(binary()) :: {:ok, pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
   def check_one(binary) do
     case split_frame(binary) do
       {:ok, _payload, frame_size, rest} -> {:ok, frame_size, rest}
@@ -139,8 +155,10 @@ defmodule Malachi.Log.Record do
   # Note the CRC covers the PAYLOAD only: corruption inside the 10-byte header surfaces as
   # :bad_magic, or as :incomplete when a mangled length field claims more bytes than exist. Every
   # single-byte corruption is still caught, only the reported reason differs.
-  @spec split_frame(binary()) :: {:ok, binary(), pos_integer(), binary()} | :incomplete | {:error, atom()}
-  defp split_frame(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>) do
+  @spec split_frame(binary()) ::
+          {:ok, binary(), pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
+  defp split_frame(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>)
+       when payload_length >= @fixed_payload_size do
     if :erlang.crc32(payload) == checksum do
       {:ok, payload, @frame_header_size + payload_length, rest}
     else
@@ -152,7 +170,23 @@ defmodule Malachi.Log.Record do
        when byte_size(partial) < payload_length,
        do: :incomplete
 
+  # Unwritten space, not a damaged frame. It comes up because a preallocated segment reads back as
+  # zeros past its last write, and it is checked BEFORE the short-binary clause so that a couple of
+  # zero bytes at the very end of the preallocated region are still recognised for what they are.
+  #
+  # A zero magic cannot collide with a real frame (the magic is a fixed non-zero constant), so this
+  # never hides damage: a frame whose header rotted to zeros is indistinguishable from unwritten
+  # space by construction, and the CRC over the payload is what catches rot inside a frame.
+  defp split_frame(<<0::16, _rest::binary>>), do: :blank
+
   defp split_frame(binary) when byte_size(binary) < @frame_header_size, do: :incomplete
+
+  # Reached with a valid magic when `payload_length` is below the fixed fields every payload
+  # carries, which no encoder can produce. It matters for a torn write into preallocated space: a
+  # write cut just after the magic leaves a length of zero and a checksum of zero, and `crc32(<<>>)`
+  # IS zero, so without this guard that shape would verify as a valid 10-byte frame in `check_one/1`
+  # while `decode_one/1` rejected its empty payload, and the two scans would disagree by 10 bytes
+  # about where the segment ends.
   defp split_frame(_binary), do: {:error, :bad_magic}
 
   @doc """
@@ -171,10 +205,9 @@ defmodule Malachi.Log.Record do
       {:ok, record, frame_size, rest} ->
         decode_all(rest, position + frame_size, [{record, position} | decoded])
 
-      :incomplete ->
-        {Enum.reverse(decoded), position}
-
-      {:error, _reason} ->
+      # Incomplete, blank and corrupt all end the run at the same place: `position` is the last
+      # byte a valid frame reached, which is the only thing this function promises.
+      _incomplete_blank_or_error ->
         {Enum.reverse(decoded), position}
     end
   end
