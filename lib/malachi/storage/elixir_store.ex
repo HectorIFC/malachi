@@ -23,10 +23,14 @@ defmodule Malachi.Storage.ElixirStore do
   With `:prealloc_bytes` set, a new segment is sized to that many bytes at creation
   (`Malachi.Storage.Preallocation`) so that appends overwrite an already-allocated region instead
   of extending the file. Measured on an `ubuntu-latest` runner in the regime the pinned ceiling
-  harness runs (batch 10 x 256B, one sync per produce), that takes the per-flush p50 from 316us to
-  96us, a 70% cut, against a measured noise floor of 1us. The reason is that a growing file changes
+  harness runs (batch 10 x 256B, one sync per produce), that takes the per-flush p50 from 317us to
+  96us, a 70% cut, against a measured noise floor of 2us. The reason is that a growing file changes
   its size on every append, and a size change is metadata the following sync has to journal; a
   1-byte sync costs 257us on a growing file and 75us on a sized one.
+
+  It is a trade rather than a free win: it also gives up the filesystem's delayed allocation, which
+  costs more than the journal saves once a flush is large. The crossover is around 128KB per flush
+  and `Malachi.Storage.Preallocation` carries the measured curve.
 
   It costs one full-size write at creation (36ms for 64MB on that runner) and it changes what the
   unwritten tail looks like, which recovery has to understand: see `classify_tail/2`. The tail is

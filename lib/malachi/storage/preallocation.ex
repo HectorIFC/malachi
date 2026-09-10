@@ -28,6 +28,33 @@ defmodule Malachi.Storage.Preallocation do
   That is a mechanism argument, not a measurement, which is why all three are kept here and
   `benchmark/storage_viability.exs` measures them against both syncs before one is chosen.
 
+  ## It is a trade, and the flush size decides which way it goes
+
+  Preallocation takes metadata out of the commit, which is most of the bill when a flush is a few
+  KB. It also gives up the filesystem's delayed allocation, which is what the bill is made of when a
+  flush is large and the transfer dominates. Measured on an `ubuntu-latest` runner, one sync per
+  flush, 15 interleaved repetitions per arm with an A-A control (`benchmark/storage_viability.exs`
+  stage 3):
+
+  | bytes per flush | p50 | p99 |
+  | --- | --- | --- |
+  | 2.5KB | -69.7% | -47.2% |
+  | 25KB | -68.2% | -33.7% |
+  | 64KB | -41.2% | -11.7% |
+  | 128KB | -2.7% | -6.7% |
+  | 256KB | +5.0% | +10.5% |
+  | 512KB | +13.4% | +81.7% |
+  | 1MB | +16.2% | +258.0% |
+
+  **The median turns over around 128KB per flush, and the tail turns over before it, around 256KB.**
+  So which number to read depends on which one is defended: a service with a p99 objective should
+  stop preallocating well before one that watches the median. Above 512KB the tail cost is not
+  subtle.
+
+  What sets the flush size is what a producer sends per `produce`, or what group commit coalesces,
+  NOT `:flush_bytes`, which is only a ceiling (10MB by default). The pinned ceiling harness runs
+  2.5KB per flush, fifty times below the crossover.
+
   ## What it assumes about the filesystem
 
   Preallocation turns every append from an extend into an **overwrite of already-allocated blocks**.

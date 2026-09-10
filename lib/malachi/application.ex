@@ -779,8 +779,15 @@ defmodule Malachi.Application do
   # `:segment_max_bytes`, 64MB, so that is the size the file actually reaches. Preallocating the roll
   # threshold would reserve and write sixteen times the data that will ever land in it.
   #
-  # Set MALACHI_SEGMENT_PREALLOC_BYTES=0 to turn it off, which is what a copy-on-write filesystem
-  # (btrfs, zfs) wants: there, overwriting allocated blocks costs MORE than appending to a file.
+  # Set MALACHI_SEGMENT_PREALLOC_BYTES=0 to turn it off. Two deployments want that:
+  #
+  #   * a copy-on-write filesystem (btrfs, zfs), where overwriting allocated blocks costs MORE than
+  #     appending to a file;
+  #   * large flushes. Preallocation is a trade, and the flush size decides which way it goes: the
+  #     per-flush p50 improves 70% at 2.5KB per flush, breaks even around 128KB, and is 16% WORSE at
+  #     1MB, where the p99 is 3.5x worse. `Malachi.Storage.Preallocation` carries the full curve.
+  #     What sets the flush size is what a producer sends per produce, or what group commit
+  #     coalesces, not `:flush_bytes`, which is only a ceiling.
   defp segment_prealloc_bytes do
     Application.get_env(:malachi, :segment_prealloc_bytes, @default_segment_prealloc_bytes)
   end

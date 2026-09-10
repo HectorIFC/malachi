@@ -221,8 +221,28 @@ not the one expected:
 Noise floor 2us in every case, so all three are real. **Preallocation is not a free win, it is a
 trade.** It takes metadata out of the commit, which is most of the bill when a flush is a few KB,
 and it gives up the filesystem's delayed allocation, which is what matters when a flush is a
-megabyte and the transfer is the bill. Stage 3 exists to find where those two cross, because that
-boundary, and not either end, is what the knob's documentation has to say.
+megabyte and the transfer is the bill.
+
+Stage 3 swept the range between them, and the crossover is sharp (n=15, one sync per flush, record
+size held at 1KB so the only variable is bytes per flush):
+
+| bytes per flush | growing p50 | preallocated p50 | delta | p99 delta | identical-arm spread |
+| --- | --- | --- | --- | --- | --- |
+| 2.5KB | 317us | 96us | **-69.7%** | -47.2% | 2us |
+| 25KB | 355us | 113us | **-68.2%** | -33.7% | 2us |
+| 64KB | 473us | 278us | **-41.2%** | -11.7% | 7us |
+| 128KB | 626us | 609us | **-2.7%** | -6.7% | 11us |
+| 256KB | 925us | 971us | **+5.0%** | +10.5% | 10us |
+| 512KB | 1512us | 1715us | **+13.4%** | +81.7% | 32us |
+| 1MB | 2612us | 3034us | **+16.2%** | +258.0% | 58us |
+
+**The median turns over around 128KB per flush** (a 17us delta against an 11us noise floor: a tie,
+which is what a crossover should look like). **The tail turns over before it, around 256KB**, and
+past 512KB it is not subtle. Which number to read depends on which one a deployment defends.
+
+The flush size is set by what a producer sends per `produce`, or by what group commit coalesces, not
+by `:flush_bytes`, which is only a ceiling (10MB by default). The pinned ceiling harness runs 2.5KB
+per flush, fifty times below the crossover, which is why the knob ships on.
 
 Keeping a third arm identical to the two controls is what made the ordering bias visible in the
 first place, instead of letting 2897us be read as a result.
