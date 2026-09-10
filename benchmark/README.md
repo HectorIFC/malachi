@@ -183,16 +183,37 @@ zeros, p99 went 381us to 182us, -52%, interval [-263, -130] against an 8us floor
 tail halved, which is what dropping the mtime update would look like. A p99 over n=15 is a noisy
 estimator, so that is a lead for #82 to confirm, not a conclusion.
 
-Stage 2 (n=25) confirmed the main result across batch shapes, and found the one thing stage 1 could
-not: **batch 10 x 256B 445us to 199us (-55%), batch 100 x 256B 562us to 230us (-59%), and batch 1024
-x 1KB 2887us to 3421us (+18%) with p99 going 23.7ms to 72.0ms, three times worse.**
+Stage 2 (n=25) confirmed it across batch shapes, and then caught two things in the harness itself.
 
-That last row was the harness measuring itself. Preallocation leaves its whole region dirty in the
-page cache, and where the region is large relative to the flushes that follow it, the first flushes
-paid for that writeback instead of for their own data. Both the harness and the store now **sync
-right after preallocating**, so the cost stays a property of creating a segment rather than of
-committing to one. Creation costs 36ms for 64MB, which the saving pays back in about 164 flushes out
-of the roughly 26k a 64MB segment sees.
+The first was writeback. Batch 1024 x 1KB came back 18% worse in the median and **three times worse
+in the tail** (p99 23.7ms to 72.0ms). Preallocation leaves its whole region dirty in the page cache,
+and where the region is large relative to the flushes that follow it, the first flushes paid for
+that writeback instead of for their own data. Both the harness and the store now **sync right after
+preallocating**. Re-run, that case's p99 went from +204% to **-5.7%**, so that part is settled.
+
+The second was the arm order, and the harness caught it on itself. Re-run, the two small-batch cases
+came back stronger than ever, with a noise floor of **zero**:
+
+| case | growing | preallocated | delta | noise floor |
+| --- | --- | --- | --- | --- |
+| batch 10 x 256B | 372us | 147us | **-60.5%**, ci95 [-230, -222] | 0us |
+| batch 100 x 256B | 459us | 162us | **-64.7%**, ci95 [-301, -290] | 2us |
+
+But in batch 1024 x 1KB the three arms with IDENTICAL configuration split 2060us, 2047us and
+**2897us**. The two labelled controls agreed to within 13us; the third sat 850us above them. The
+cause was the rotation: **a cyclic rotation changes which arm goes first but preserves the circular
+order**, so every arm keeps following the same neighbour, and whatever that neighbour leaves behind
+lands on the same arm every time. The odd one out was the only arm that always ran straight after
+the growing one. It is now a shuffle.
+
+So the large-batch case is **not answered**: in that regime the ordering bias is larger than any
+effect being measured. The two regimes Malachi actually runs are answered, twice, with the tightest
+intervals this harness has produced. Keeping a third identical arm in the rotation is what made the
+bias visible instead of letting 2897us be read as a result.
+
+Creation costs **249ms for 64MB** once the sync is counted, which the saving pays back in roughly
+1100 of the ~26k flushes a 64MB segment sees. That is 4% of the segment's life, and it is also a
+quarter-second stall inside the first append after a roll.
 
 ```bash
 # stage 1, triage

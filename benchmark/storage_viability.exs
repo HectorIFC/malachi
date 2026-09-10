@@ -327,29 +327,34 @@ defmodule PreallocAB do
     results
   end
 
-  # Interleaved repetitions of every arm, with the ORDER ROTATED per repetition so no arm keeps a
-  # fixed position. Returns each arm's per-rep p50/p99, which are the samples the statistics run
-  # on: one repetition is one independent observation of that arm.
+  # Interleaved repetitions of every arm, SHUFFLED per repetition. Returns each arm's per-rep
+  # p50/p99, which are the samples the statistics run on: one repetition is one independent
+  # observation of that arm.
+  #
+  # It was a cyclic rotation first, and that was not enough, which the harness caught on itself. A
+  # rotation changes which arm goes FIRST but preserves the circular order, so every arm still
+  # follows the same neighbour every time, and whatever the neighbour leaves behind (page cache,
+  # pending writeback) lands on the same arm forever. In the batch 1024 x 1KB case, where each
+  # repetition writes tens of megabytes, three arms with IDENTICAL configuration split 2060us,
+  # 2047us and 2897us: the two that were labelled controls agreed to within 13us while the third,
+  # the only one that always followed the growing arm, sat 850us above them. A shuffle is what
+  # actually breaks that, and keeping a third identical arm in the rotation is what made the bias
+  # visible instead of letting it be read as a result.
   defp paired({_label, rec_size, batch_count, n_batches}, arms, reps) do
     for _ <- 1..@warmup_reps, arm <- arms do
       measure(rec_size, batch_count, n_batches, arm, "warm")
     end
 
     1..reps
-    |> Enum.reduce(Map.new(arms, &{&1.key, []}), fn rep, acc ->
+    |> Enum.reduce(Map.new(arms, &{&1.key, []}), fn _rep, acc ->
       arms
-      |> rotate(rep)
+      |> Enum.shuffle()
       |> Enum.reduce(acc, fn arm, inner ->
         sample = summarize(measure(rec_size, batch_count, n_batches, arm, "run"))
         Map.update!(inner, arm.key, &[sample | &1])
       end)
     end)
     |> Map.new(fn {arm_key, values} -> {arm_key, Enum.reverse(values)} end)
-  end
-
-  defp rotate(list, by) do
-    at = rem(by, length(list))
-    Enum.drop(list, at) ++ Enum.take(list, at)
   end
 
   # One arm, one repetition: a fresh file, preallocated by this arm's mechanism, then `n_batches`
