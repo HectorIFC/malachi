@@ -892,7 +892,19 @@ defmodule Malachi.Storage.ElixirStoreTest do
       # records a peer was meant to repair, invisible to the verdict this test used to assert alone.
       assert binary_part(File.read!(path), position, logical_end - position) == preserved
 
+      # And closing must not undo it either. `preallocated_to` is what authorizes `seal/1` and
+      # `close/1` to trim back to `write_position`, which for a preserved tail is the byte the damage
+      # STARTS at, so a handle that claimed it would delete the same bytes one door further along.
+      # `:preserve` means this handle does not touch the file at all.
+      assert recovered.preallocated_to == nil
       :ok = ElixirStore.close(recovered)
+      assert binary_part(File.read!(path), position, logical_end - position) == preserved
+
+      # Reopening finds the damage still there, which is the point: a peer is what repairs it.
+      {:ok, again} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+      assert %{reason: :bad_crc, position: ^position} = ElixirStore.integrity(again)
+      :ok = ElixirStore.close(again)
+      assert binary_part(File.read!(path), position, logical_end - position) == preserved
     end
 
     # The known way the torn-versus-rot rule is wrong, named rather than avoided. A value that ends

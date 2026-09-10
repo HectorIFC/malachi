@@ -169,11 +169,18 @@ defmodule Malachi.Storage.ElixirStore do
       classification = classify_tail(halt, shape)
       integrity = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, sealed?, prealloc_bytes > 0)
 
-      if action_for(classification, sealed?) == :discard_tail do
-        discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
-      end
+      action = action_for(classification, sealed?)
+      if action == :discard_tail, do: discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
 
-      preallocated_to = if sealed?, do: nil, else: preallocate(file_descriptor, prealloc_bytes)
+      # `:preserve` means this handle does not touch the file, and that has to include preallocating
+      # it. Not because extending is destructive by itself (it starts from the file's size and only
+      # ever adds room), but because `preallocated_to` is what authorizes `seal/1` and `close/1` to
+      # trim back to `write_position`, and `write_position` is `valid_bytes`: the byte the damage
+      # STARTS at. Setting it here would have closing the handle delete the damaged frame and every
+      # valid frame behind it, which is the same loss the extension itself was just fixed for, one
+      # door further along.
+      preallocated_to =
+        if sealed? or action == :preserve, do: nil, else: preallocate(file_descriptor, prealloc_bytes)
 
       segment = %Segment{
         segment
