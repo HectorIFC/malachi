@@ -109,9 +109,50 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert ElixirStore.read(store, 99, 10) == {:error, :out_of_range}
     end
 
-    test "sync with nothing pending is a durable no-op", %{tmp_dir: directory} do
+    test "sync with nothing pending is a no-op that leaves earlier records durable", %{tmp_dir: directory} do
+      # It does not sync, because there is nothing unsynced to catch: the only write to the
+      # descriptor is the flush's own pwrite, which fsyncs in the same breath. What it must not do
+      # is disturb what is already committed.
       {:ok, store} = open(directory)
-      assert {:ok, _store} = ElixirStore.sync(store)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("a"), rec("b")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      assert {:ok, store} = ElixirStore.sync(store)
+      assert {:ok, store} = ElixirStore.sync(store)
+      assert store.pending_count == 0
+
+      :ok = ElixirStore.close(store)
+      {:ok, reopened} = ElixirStore.recover(directory, "segment-0")
+
+      assert {:ok, records} = ElixirStore.read(reopened, 0, 10)
+      assert Enum.map(records, & &1.value) == ["a", "b"]
+    end
+
+    # The direct proof for dropping the fsync from the empty-buffer clause: recovery truncates a
+    # torn tail without syncing, and that truncation used to be made durable by a later empty
+    # `sync/1`. It no longer is, which is safe only because recovering the same bytes twice
+    # computes the same boundary. So: recover, sync with nothing pending, and recover again from
+    # the very same file, and the second pass must agree with the first.
+    test "recovering twice over a torn tail reaches the same boundary, synced or not", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+
+      path = Segment.path(store.segment)
+      truncate_to(path, File.stat!(path).size - 3)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+      assert recovered.segment.record_count == 4
+      first_pass = {recovered.segment.record_count, recovered.segment.byte_size, recovered.next_offset}
+
+      # An empty sync no longer forces the truncation to disk; recovery must not depend on it.
+      {:ok, recovered} = ElixirStore.sync(recovered)
+      :ok = ElixirStore.close(recovered)
+
+      {:ok, again} = ElixirStore.recover(directory, "segment-0")
+
+      assert {again.segment.record_count, again.segment.byte_size, again.next_offset} == first_pass
+      assert {:ok, records} = ElixirStore.read(again, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1", "v2", "v3"]
     end
   end
 
