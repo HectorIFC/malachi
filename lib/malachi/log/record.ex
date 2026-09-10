@@ -171,13 +171,22 @@ defmodule Malachi.Log.Record do
        do: :incomplete
 
   # Unwritten space, not a damaged frame. It comes up because a preallocated segment reads back as
-  # zeros past its last write, and it is checked BEFORE the short-binary clause so that a couple of
-  # zero bytes at the very end of the preallocated region are still recognized for what they are.
+  # zeros past its last write.
   #
-  # A zero magic cannot collide with a real frame (the magic is a fixed non-zero constant), so this
-  # never hides damage: a frame whose header rotted to zeros is indistinguishable from unwritten
-  # space by construction, and the CRC over the payload is what catches rot inside a frame.
-  defp split_frame(<<0::16, _rest::binary>>), do: :blank
+  # The WHOLE header has to be zero, not just the magic. Unwritten space is zero all the way through,
+  # so a zero magic followed by a non-zero header byte is not unwritten space, it is damage that
+  # happened to land on the magic. Answering `:blank` there would stop the scan, report the segment
+  # healthy, and silently drop every valid frame behind the damage: the same silent loss the CRC
+  # exists to prevent, arriving before the CRC is ever consulted.
+  defp split_frame(<<0::80, _rest::binary>>), do: :blank
+
+  # Fewer than a full header left, which is the very end of a preallocated region. Every byte that IS
+  # there still has to be zero, on the same reasoning.
+  defp split_frame(<<0::16, rest::binary>> = binary) when byte_size(binary) < @frame_header_size do
+    if all_zero?(rest), do: :blank, else: {:error, :bad_magic}
+  end
+
+  defp split_frame(<<0::16, _rest::binary>>), do: {:error, :bad_magic}
 
   defp split_frame(binary) when byte_size(binary) < @frame_header_size, do: :incomplete
 
@@ -213,6 +222,8 @@ defmodule Malachi.Log.Record do
   end
 
   # --- private encoding helpers ---
+
+  defp all_zero?(binary), do: binary == :binary.copy(<<0>>, byte_size(binary))
 
   defp encode_headers(headers) do
     for {key, value} <- headers, into: <<>> do

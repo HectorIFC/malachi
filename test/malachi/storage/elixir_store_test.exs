@@ -677,10 +677,16 @@ defmodule Malachi.Storage.ElixirStoreTest do
       # They are their own answer now, because a preallocated segment reads back as zeros past its
       # last write and recovery has to know the difference between space nobody wrote and a frame
       # that was cut off mid-write. Both a bare header's worth and a couple of bytes of it count,
-      # so the very end of a preallocated region is still recognised.
+      # so the very end of a preallocated region is still recognized.
       assert Record.decode_one(<<0, 0, 0>>) == :blank
       assert Record.decode_one(:binary.copy(<<0>>, 64)) == :blank
       assert Record.check_one(:binary.copy(<<0>>, 64)) == :blank
+
+      # But the WHOLE header has to be zero. Unwritten space is zero all the way through, so a zero
+      # magic with a non-zero header byte is damage that landed on the magic, and calling it blank
+      # would stop the scan, report the segment healthy, and drop every valid frame behind it.
+      assert Record.decode_one(<<0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 1, 2, 3>>) == {:error, :bad_magic}
+      assert Record.decode_one(<<0, 0, 7>>) == {:error, :bad_magic}
     end
 
     # A write cut just after the magic leaves a zero length and a zero checksum, and crc32 of an
@@ -859,6 +865,35 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert File.stat!(path).size == @prealloc
       assert {:ok, blank} = :file.pread(recovered.file_descriptor, valid_bytes, 32)
       assert blank == :binary.copy(<<0>>, 32)
+
+      :ok = ElixirStore.close(recovered)
+    end
+
+    # The end-to-end version of the header rule: damage that zeroes a frame's magic must not read as
+    # the end of the segment, because valid frames follow it and a peer is what repairs them.
+    test "rot that lands on a frame's magic is damage, not the end of the data", %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+
+      store =
+        Enum.reduce(0..4, store, fn i, acc ->
+          {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      path = Segment.path(store.segment)
+      position = frame_position(path, 2)
+      :ok = :file.close(store.file_descriptor)
+
+      # Zero just the two magic bytes of frame 2, leaving the rest of its header intact.
+      <<head::binary-size(position), _magic::16, tail::binary>> = File.read!(path)
+      File.write!(path, <<head::binary, 0::16, tail::binary>>)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      assert %{reason: :bad_magic, position: ^position} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+      assert recovered.preallocated_to == nil
 
       :ok = ElixirStore.close(recovered)
     end

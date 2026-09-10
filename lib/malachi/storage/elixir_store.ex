@@ -406,7 +406,7 @@ defmodule Malachi.Storage.ElixirStore do
         prealloc_bytes
 
       # Preallocation is an optimization, and a segment works without it, so a failure here degrades
-      # to the behaviour this store had before it existed rather than failing the open. ENOSPC is the
+      # to the behavior this store had before it existed rather than failing the open. ENOSPC is the
       # realistic trigger, and it is not hidden: claiming the space up front only moves WHEN a full
       # volume is noticed, and the append that follows still reports it. The file is put back to the
       # size it had first, so a partial extension cannot leave a tail behind that `seal/1` would then
@@ -909,7 +909,7 @@ defmodule Malachi.Storage.ElixirStore do
   # the duplication it removes: `valid_bytes` is where the segment logically ends, and recovery and
   # the scrub disagreeing about that would be a silent split brain over what a copy contains.
   #
-  # One behaviour change comes with folding them together: the recovery scan used to have no clause
+  # One behavior change comes with folding them together: the recovery scan used to have no clause
   # for a `:file.pread/3` error and would have crashed the caller with a FunctionClauseError. It now
   # reports the error as the halt, the way the verification scan already did, because a device that
   # cannot be read IS the damage these scans exist to find, and the detector must not die of the
