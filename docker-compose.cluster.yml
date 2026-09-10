@@ -68,6 +68,12 @@ x-malachi-node: &malachi-node
     # remounted EMPTY on container restart, and durability-through-restart is exactly what it tests.
     MALACHI_LOG_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_log"
     MALACHI_RA_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_ra"
+    # Segment preallocation. OFF here, where production has it on at 64MB, because the default data
+    # root below is /tmp, a 1g tmpfs: on tmpfs there is no filesystem journal to avoid and no delayed
+    # allocation to give up, so preallocating buys nothing and costs the RAM it sits in, 64MB per
+    # active segment before a record is written. A harness that runs on the real volume
+    # (MALACHI_DATA_ROOT=/data) overrides this, and scripts/docker-storage-chaos.sh does.
+    MALACHI_SEGMENT_PREALLOC_BYTES: "${MALACHI_SEGMENT_PREALLOC_BYTES:-0}"
     # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
     # a small value so segments seal (and become repairable sealed copies) within its window.
     MALACHI_SEGMENT_MAX_BYTES: "${MALACHI_SEGMENT_MAX_BYTES:-}"
