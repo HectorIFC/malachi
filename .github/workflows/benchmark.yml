@@ -11,9 +11,9 @@ on:
         type: boolean
         default: false
       prealloc_ab_stage:
-        description: 'Stage 1 triages every mechanism; stage 2 confirms one against the baseline.'
+        description: 'Stage 1 triages every mechanism; 2 confirms one against the baseline; 3 sweeps flush sizes for the crossover.'
         type: choice
-        options: ['1', '2']
+        options: ['1', '2', '3']
         default: '1'
       prealloc_ab_reps:
         description: 'Interleaved repetitions per arm'

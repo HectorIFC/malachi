@@ -254,6 +254,21 @@ defmodule PreallocAB do
     {"batch 1024 x 1KB", 1024, 1024, 20}
   ]
 
+  # The crossover sweep. Preallocation wins big where the journal dominates the bill (a few KB per
+  # flush) and loses where the transfer does (a megabyte per flush), so the number an operator needs
+  # is not either end, it is WHERE it turns over. Record size is held at 1KB and the batch count is
+  # what moves, so the only variable is bytes per flush; batches per repetition scale inversely to
+  # keep each repetition writing about 20MB whatever the flush size.
+  @sweep_cases [
+    {"2.5KB per flush (batch 10 x 256B)", 256, 10, 500},
+    {"25KB per flush (batch 100 x 256B)", 256, 100, 300},
+    {"64KB per flush (batch 64 x 1KB)", 1024, 64, 320},
+    {"128KB per flush (batch 128 x 1KB)", 1024, 128, 160},
+    {"256KB per flush (batch 256 x 1KB)", 1024, 256, 80},
+    {"512KB per flush (batch 512 x 1KB)", 1024, 512, 40},
+    {"1MB per flush (batch 1024 x 1KB)", 1024, 1024, 20}
+  ]
+
   @mechanisms [:grow, :sparse, :allocate, :zeros]
 
   @doc "Stage 1: every mechanism against both syncs, in the one regime that matters."
@@ -270,6 +285,20 @@ defmodule PreallocAB do
     arms = [arm(:grow, :sync), arm(mechanism, sync)] ++ control_arms()
     comparisons = [{"#{mechanism}+#{sync} vs the production baseline", key(mechanism, sync), key(:grow, :sync)}]
     run(@confirm_cases, arms, comparisons ++ [control_comparison()], reps)
+  end
+
+  @doc """
+  Stage 3: the winning mechanism against the production baseline across flush sizes, to find where
+  the win turns into a loss.
+
+  Same arms as stage 2 and the same A-A control, so each case is read the same way; only the ladder
+  of flush sizes is new. It answers the one question the operator-facing knob actually needs: below
+  what flush size is preallocation worth turning on.
+  """
+  def sweep(reps, mechanism, sync) do
+    arms = [arm(:grow, :sync), arm(mechanism, sync)] ++ control_arms()
+    comparisons = [{"#{mechanism}+#{sync} vs the production baseline", key(mechanism, sync), key(:grow, :sync)}]
+    run(@sweep_cases, arms, comparisons ++ [control_comparison()], reps)
   end
 
   defp arm(mechanism, sync), do: %{key: key(mechanism, sync), mechanism: mechanism, sync: sync}
@@ -586,6 +615,11 @@ if System.get_env("PREALLOC_AB") == "1" do
   reps = String.to_integer(System.get_env("PREALLOC_AB_REPS") || "15")
   stage = System.get_env("PREALLOC_AB_STAGE") || "1"
 
+  chosen_arm = fn ->
+    {String.to_existing_atom(System.get_env("PREALLOC_AB_MECHANISM") || "zeros"),
+     String.to_existing_atom(System.get_env("PREALLOC_AB_SYNC") || "datasync")}
+  end
+
   IO.puts("\n========== PREALLOCATION A/B (issue #83, blocking #82) ==========")
   IO.puts("  #{reps} interleaved repetitions per arm, arm order rotated per repetition,")
   IO.puts("  plus an A-A control (two identical arms) for the measured noise floor.")
@@ -601,10 +635,14 @@ if System.get_env("PREALLOC_AB") == "1" do
   cases =
     case stage do
       "2" ->
-        mechanism = String.to_existing_atom(System.get_env("PREALLOC_AB_MECHANISM") || "zeros")
-        sync = String.to_existing_atom(System.get_env("PREALLOC_AB_SYNC") || "datasync")
+        {mechanism, sync} = chosen_arm.()
         IO.puts("\n  stage 2: confirming #{mechanism}+#{sync} against the production baseline.")
         PreallocAB.confirm(reps, mechanism, sync)
+
+      "3" ->
+        {mechanism, sync} = chosen_arm.()
+        IO.puts("\n  stage 3: sweeping flush sizes to find where #{mechanism}+#{sync} stops winning.")
+        PreallocAB.sweep(reps, mechanism, sync)
 
       _stage_one ->
         IO.puts("\n  stage 1: triaging every mechanism against both syncs.")

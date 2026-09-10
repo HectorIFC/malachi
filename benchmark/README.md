@@ -139,9 +139,11 @@ the file already sized, does `fdatasync` finally win?
 
   They run through `Malachi.Storage.Preallocation`, the module the store itself uses, so the
   benchmark measures the code that would ship.
-- **Two stages.** Stage 1 triages every mechanism against both syncs in the one regime that matters.
-  Stage 2 confirms only the winner against the production baseline across all three batch shapes, so
-  the number that gets published is not the one that chose the winner.
+- **Three stages.** Stage 1 triages every mechanism against both syncs in the one regime that
+  matters. Stage 2 confirms only the winner against the production baseline across three batch
+  shapes, so the number that gets published is not the one that chose the winner. Stage 3 sweeps
+  flush sizes from 2.5KB to 1MB, because the answer turned out to depend on that and an operator
+  needs to know where.
 - **Creation cost and a per-mechanism 1-byte sync floor.** The floor is the direct test of the
   fixed-cost claim; the creation cost is the other side of the zero-write trade-off.
 
@@ -206,10 +208,24 @@ order**, so every arm keeps following the same neighbour, and whatever that neig
 lands on the same arm every time. The odd one out was the only arm that always ran straight after
 the growing one. It is now a shuffle.
 
-So the large-batch case is **not answered**: in that regime the ordering bias is larger than any
-effect being measured. The two regimes Malachi actually runs are answered, twice, with the tightest
-intervals this harness has produced. Keeping a third identical arm in the rotation is what made the
-bias visible instead of letting 2897us be read as a result.
+Shuffled, the three identical arms came back at 1997us, 2004us and 2006us, agreeing to within 9us
+where they had split by 850us. The bias was the ordering, and with it gone the picture is clean and
+not the one expected:
+
+| flush size | growing | preallocated | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| 2.5KB (batch 10 x 256B) | 231us | 62us | **-73.2%**, ci95 [-176, -162] | -40.4% |
+| 25KB (batch 100 x 256B) | 259us | 83us | **-68.0%**, ci95 [-183, -173] | -41.5% |
+| 1MB (batch 1024 x 1KB) | 1523us | 1997us | **+31.1%**, ci95 [448, 515] | **+115.8%** |
+
+Noise floor 2us in every case, so all three are real. **Preallocation is not a free win, it is a
+trade.** It takes metadata out of the commit, which is most of the bill when a flush is a few KB,
+and it gives up the filesystem's delayed allocation, which is what matters when a flush is a
+megabyte and the transfer is the bill. Stage 3 exists to find where those two cross, because that
+boundary, and not either end, is what the knob's documentation has to say.
+
+Keeping a third arm identical to the two controls is what made the ordering bias visible in the
+first place, instead of letting 2897us be read as a result.
 
 Creation costs **249ms for 64MB** once the sync is counted, which the saving pays back in roughly
 1100 of the ~26k flushes a 64MB segment sees. That is 4% of the segment's life, and it is also a
@@ -223,6 +239,11 @@ PREALLOC_AB=1 PREALLOC_AB_REPS=15 PREALLOC_AB_OUT=/tmp/prealloc-ab.json \
 # stage 2, confirm one mechanism against the production baseline
 PREALLOC_AB=1 PREALLOC_AB_STAGE=2 PREALLOC_AB_MECHANISM=zeros PREALLOC_AB_SYNC=datasync \
   PREALLOC_AB_REPS=25 PREALLOC_AB_OUT=/tmp/prealloc-ab-stage2.json \
+  mix run --no-start benchmark/storage_viability.exs
+
+# stage 3, sweep flush sizes to find where the win turns into a loss
+PREALLOC_AB=1 PREALLOC_AB_STAGE=3 PREALLOC_AB_MECHANISM=zeros PREALLOC_AB_SYNC=sync \
+  PREALLOC_AB_REPS=15 PREALLOC_AB_OUT=/tmp/prealloc-ab-stage3.json \
   mix run --no-start benchmark/storage_viability.exs
 ```
 
