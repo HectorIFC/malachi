@@ -51,6 +51,17 @@ defmodule Malachi.Cluster.LeaseHolder do
   @spec leader?(GenServer.server()) :: boolean()
   def leader?(server), do: GenServer.call(server, :leader?)
 
+  @doc """
+  The lease **with its fencing token**: `{:ok, fence}` while this node leads, `:error` otherwise. A
+  plain read, like `leader?/1`, and the same answer plus the token.
+
+  Work that writes through a fenced store needs the token, not just the boolean: a holder that has lost
+  the lease and not yet noticed still answers `leader?/1` truthfully from its own point of view, and it
+  is the token carried into the write that lets the store refuse it. See `Malachi.Cluster.Ring`.
+  """
+  @spec lease(GenServer.server()) :: {:ok, non_neg_integer()} | :error
+  def lease(server), do: GenServer.call(server, :lease)
+
   @impl true
   def init(opts) do
     state = %{
@@ -74,6 +85,11 @@ defmodule Malachi.Cluster.LeaseHolder do
   def handle_call(:tick_now, _from, state) do
     state = tick(state)
     {:reply, {state.role, state.fence}, state}
+  end
+
+  def handle_call(:lease, _from, state) do
+    reply = if state.role == :leader and state.fence, do: {:ok, state.fence}, else: :error
+    {:reply, reply, state}
   end
 
   def handle_call(:leader?, _from, state) do

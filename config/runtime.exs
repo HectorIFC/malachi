@@ -227,6 +227,12 @@ config :malachi,
   # Replicas per control-plane vnode: each vnode's ra cluster is placed on this many nodes (rendezvous,
   # clamped to the node count) for HA per vnode. Default 3.
   log_vnode_replication_factor: String.to_integer(System.get_env("MALACHI_LOG_VNODE_REPLICATION_FACTOR") || "3"),
+  # How long a clustered node waits at boot for the durable ring to become readable before refusing to
+  # start. The ring outranks :log_vnodes, so a node that cannot read it does not know which vnode owns
+  # which arc, and booting on the environment instead is exactly the corruption this store prevents.
+  # The wait exists for the ordinary full-cluster restart, where the first node up has no quorum until a
+  # second joins; raise it for clusters that stagger their boots more than a minute apart.
+  log_ring_boot_timeout_ms: parse_int.(System.get_env("MALACHI_LOG_RING_BOOT_TIMEOUT_MS"), 60_000),
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),
@@ -280,9 +286,12 @@ if config_env() != :test do
     # Rate limiting configuration
     auth_rate_limit: parse_int.(System.get_env("MALACHI_AUTH_RATE_LIMIT"), 10),
     auth_rate_window_ms: parse_int.(System.get_env("MALACHI_AUTH_RATE_WINDOW_MS"), 60_000),
-    publish_rate_limit: parse_int.(System.get_env("MALACHI_PUBLISH_RATE_LIMIT"), 1_000),
+    # Publish/subscribe limits are enforced but OPT-IN: 0 means no limit, so a deployment that does not
+    # ask for a quota keeps the throughput it had. A shipped default of 1000/s would have capped every
+    # broker far below what it can do.
+    publish_rate_limit: parse_int.(System.get_env("MALACHI_PUBLISH_RATE_LIMIT"), 0),
     publish_rate_window_ms: parse_int.(System.get_env("MALACHI_PUBLISH_RATE_WINDOW_MS"), 1_000),
-    subscribe_rate_limit: parse_int.(System.get_env("MALACHI_SUBSCRIBE_RATE_LIMIT"), 100),
+    subscribe_rate_limit: parse_int.(System.get_env("MALACHI_SUBSCRIBE_RATE_LIMIT"), 0),
     subscribe_rate_window_ms: parse_int.(System.get_env("MALACHI_SUBSCRIBE_RATE_WINDOW_MS"), 60_000),
     rate_limit_cleanup_interval_ms: parse_int.(System.get_env("MALACHI_RATE_LIMIT_CLEANUP_INTERVAL"), 300_000),
     # Connection limits

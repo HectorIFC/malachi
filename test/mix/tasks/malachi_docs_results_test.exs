@@ -139,7 +139,13 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
 
     test "the backpressure section appears only for a run that counted it", context do
       publish(context, "loadtest-node.json", loadtest_result())
-      publish(context, "loadtest-elixir.json", loadtest_result(%{"dropped" => 0, "overloaded" => 3, "reconnects" => 1}))
+
+      publish(
+        context,
+        "loadtest-elixir.json",
+        loadtest_result(%{"dropped" => 0, "overloaded" => 3, "rate_limited" => 2, "reconnects" => 1})
+      )
+
       run(context)
 
       refute page(context, "loadtest-node-results.md") =~ "## Backpressure"
@@ -147,6 +153,8 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       elixir = page(context, "loadtest-elixir-results.md")
       assert elixir =~ "## Backpressure"
       assert elixir =~ "| Server-shed produces | 3 |"
+      # the two refusals are reported apart: saturation and quota mean different things to an operator
+      assert elixir =~ "| Quota-refused produces | 2 |"
       assert elixir =~ "| Reconnects | 1 |"
     end
 

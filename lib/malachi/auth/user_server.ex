@@ -1,6 +1,6 @@
 defmodule Malachi.Auth.UserServer do
   @moduledoc """
-  A thin wrapper around `ra` for the cluster's user store (`Malachi.Auth.UserMachine`): start the dedicated
+  A thin named facade over `Malachi.Cluster.RaCluster` for the cluster's user store (`Malachi.Auth.UserMachine`): start the dedicated
   Raft cluster, submit user commands through the log, and read the replicated user set. Mirrors
   `Malachi.Cluster.LeaseServer`; `ra` must already be running (`:ra.start_in/1`). This module owns only the
   user cluster, not ra's lifecycle.
@@ -18,9 +18,7 @@ defmodule Malachi.Auth.UserServer do
 
   alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserRegistry
-  alias Malachi.Cluster.RaResume
-
-  @system :default
+  alias Malachi.Cluster.RaCluster
 
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
@@ -32,27 +30,7 @@ defmodule Malachi.Auth.UserServer do
   """
   @spec start(cluster_name(), [node()]) :: {:ok, server_id()} | {:error, term()}
   def start(cluster_name, nodes \\ [node()]) do
-    # Resume-first (see Malachi.Cluster.RaResume): forming over a member this node has ever started
-    # would register a fresh empty uid and resurrect an amnesiac member, losing the replicated
-    # auth state the same way the storage-chaos harness caught the metadata control plane wiped.
-    case RaResume.resume_or(@system, {cluster_name, node()}, fn -> form(cluster_name, nodes) end) do
-      :ok -> {:ok, {cluster_name, member_node(nodes)}}
-      other -> other
-    end
-  end
-
-  defp form(cluster_name, nodes) do
-    server_ids = Enum.map(nodes, &{cluster_name, &1})
-    machine = {:module, UserMachine, %{}}
-
-    case :ra.start_cluster(@system, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} -> {:ok, {cluster_name, member_node(nodes)}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp member_node(nodes) do
-    if node() in nodes, do: node(), else: hd(nodes)
+    RaCluster.start(UserMachine, cluster_name, nodes)
   end
 
   @doc """
@@ -62,33 +40,7 @@ defmodule Malachi.Auth.UserServer do
   periodically until the node has joined. Mirrors `LeaseServer.reconcile/2`.
   """
   @spec reconcile(cluster_name(), [node()]) :: :ok
-  def reconcile(cluster_name, nodes) do
-    # Skip if the local server is already running (the common case), avoids re-issuing start_cluster on a
-    # formed cluster, which ra logs as an error. Only a node that has not yet joined tries to form/join.
-    case :ra.members({cluster_name, node()}) do
-      {:ok, _members, _leader} ->
-        :ok
-
-      _not_running ->
-        _ = start(cluster_name, nodes)
-        ensure_local_server(cluster_name, nodes)
-    end
-  end
-
-  # Best-effort: starts the local user server so it (re)joins the cluster. Any error (already started, or the
-  # cluster not yet formed) is ignored: reconcile is idempotent and the caller retries.
-  defp ensure_local_server(cluster_name, nodes) do
-    # Resume-first here too: :ra.start_server registers a fresh empty uid just like start_cluster,
-    # so a self-join over a member this node once hosted must restart it, never re-create it.
-    _ =
-      RaResume.resume_or(@system, {cluster_name, node()}, fn ->
-        server_ids = Enum.map(nodes, &{cluster_name, &1})
-        machine = {:module, UserMachine, %{}}
-        :ra.start_server(@system, cluster_name, {cluster_name, node()}, machine, server_ids)
-      end)
-
-    :ok
-  end
+  def reconcile(cluster_name, nodes), do: RaCluster.reconcile(UserMachine, cluster_name, nodes)
 
   @doc "Inserts a user. Machine reply is `:ok` or `{:error, :user_exists}`."
   @spec put_user(server_id(), UserRegistry.username(), UserRegistry.password_hash(), UserRegistry.permissions()) ::
@@ -135,24 +87,12 @@ defmodule Malachi.Auth.UserServer do
   @doc "Stops and deletes the user store's Raft cluster (removing its on-disk state)."
   @spec delete(cluster_name()) :: :ok
   def delete(cluster_name) do
-    :ra.delete_cluster([{cluster_name, node()}])
+    _ = RaCluster.delete(cluster_name)
     :ok
   end
 
-  defp command(server_id, command) do
-    case :ra.process_command(server_id, command) do
-      {:ok, reply, _leader} -> {:ok, reply}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
-  end
+  defp command(server_id, command), do: RaCluster.command(server_id, command)
 
   # Reads the local replica's state (no consensus round-trip). Eventually consistent; fine for auth.
-  defp local_query(server_id, query_fun) do
-    case :ra.local_query(server_id, query_fun) do
-      {:ok, {_idx_term, result}, _leader} -> {:ok, result}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
-  end
+  defp local_query(server_id, query_fun), do: RaCluster.local_query(server_id, query_fun)
 end
