@@ -20,12 +20,14 @@ on:
         type: string
         default: '15'
       prealloc_ab_mechanism:
-        description: 'Stage 2 only: which mechanism to confirm (grow, sparse, allocate, zeros)'
-        type: string
+        description: 'Stages 2 and 3: which mechanism to measure'
+        type: choice
+        options: ['zeros', 'allocate', 'sparse', 'grow']
         default: 'zeros'
       prealloc_ab_sync:
-        description: 'Stage 2 only: which sync to confirm it with (sync, datasync)'
-        type: string
+        description: 'Stages 2 and 3: which sync to measure it with'
+        type: choice
+        options: ['datasync', 'sync']
         default: 'datasync'
 
 permissions:

@@ -624,10 +624,23 @@ if System.get_env("PREALLOC_AB") == "1" do
     raise ArgumentError, "PREALLOC_AB_STAGE must be 1, 2 or 3, got: #{inspect(stage)}"
   end
 
-  chosen_arm = fn ->
-    {String.to_existing_atom(System.get_env("PREALLOC_AB_MECHANISM") || "zeros"),
-     String.to_existing_atom(System.get_env("PREALLOC_AB_SYNC") || "datasync")}
+  # Validated up front for the same reason the stage is: `chosen_arm` runs only after the sync floor
+  # and four 64MB creation measurements, so a bad value costs all of that before it is noticed, and
+  # some of them are not even noticed there. `Zeros` has no existing atom and raises in
+  # `String.to_existing_atom/1`; `PREALLOC_AB_SYNC=zeros` parses cleanly and then raises a
+  # FunctionClauseError inside the first warmup repetition instead.
+  mechanism = System.get_env("PREALLOC_AB_MECHANISM") || "zeros"
+  sync = System.get_env("PREALLOC_AB_SYNC") || "datasync"
+
+  if mechanism not in ["grow", "sparse", "allocate", "zeros"] do
+    raise ArgumentError, "PREALLOC_AB_MECHANISM must be grow, sparse, allocate or zeros, got: #{inspect(mechanism)}"
   end
+
+  if sync not in ["sync", "datasync"] do
+    raise ArgumentError, "PREALLOC_AB_SYNC must be sync or datasync, got: #{inspect(sync)}"
+  end
+
+  chosen_arm = fn -> {String.to_existing_atom(mechanism), String.to_existing_atom(sync)} end
 
   IO.puts("\n========== PREALLOCATION A/B (issue #83, blocking #82) ==========")
   IO.puts("  #{reps} interleaved repetitions per arm, arm order rotated per repetition,")
