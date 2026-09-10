@@ -46,10 +46,12 @@ defmodule Malachi.Storage.Preallocation do
   | 512KB | +13.4% | +81.7% |
   | 1MB | +16.2% | +258.0% |
 
-  **The median turns over around 128KB per flush, and the tail turns over before it, around 256KB.**
-  So which number to read depends on which one is defended: a service with a p99 objective should
-  stop preallocating well before one that watches the median. Above 512KB the tail cost is not
-  subtle.
+  **Both turn over around 170KB per flush**, interpolating between the measured points: the p50
+  crosses zero near 173KB and the p99 near 178KB. What separates them is not where they cross but how
+  steeply they fall afterwards. Past the crossover the median drifts (+5.0%, +13.4%, +16.2%) while
+  the tail runs away (+10.5%, +81.7%, +258.0%), so a deployment defending a p99 has far more to lose
+  from being on the wrong side of it than one watching the median, even though both sit on the same
+  side.
 
   What sets the flush size is what a producer sends per `produce`, or what group commit coalesces,
   NOT `:flush_bytes`, which is only a ceiling (10MB by default). The pinned ceiling harness runs

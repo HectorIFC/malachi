@@ -236,9 +236,19 @@ size held at 1KB so the only variable is bytes per flush):
 | 512KB | 1512us | 1715us | **+13.4%** | +81.7% | 32us |
 | 1MB | 2612us | 3034us | **+16.2%** | +258.0% | 58us |
 
-**The median turns over around 128KB per flush** (a 17us delta against an 11us noise floor: a tie,
-which is what a crossover should look like). **The tail turns over before it, around 256KB**, and
-past 512KB it is not subtle. Which number to read depends on which one a deployment defends.
+**Both turn over around 170KB per flush.** Interpolating between the measured points, the p50
+crosses zero near 173KB and the p99 near 178KB, and at 128KB the p50 delta is 17us against an 11us
+noise floor: a tie, which is what a crossover should look like.
+
+What separates the two percentiles is not where they cross but how steeply they fall afterwards.
+Past the crossover the median drifts (+5.0%, +13.4%, +16.2%) while the tail runs away (+10.5%,
++81.7%, +258.0%). A deployment defending a p99 therefore has far more to lose from being on the
+wrong side, even though both percentiles turn over at the same place.
+
+An earlier version of this section claimed the tail turned over first, around 256KB. It does not,
+and the measurements above never said so: being more positive at one point is a steeper slope, not
+an earlier crossing. The claim inverted the operator guidance for exactly the deployments that care
+most, which is worth recording rather than quietly editing.
 
 The flush size is set by what a producer sends per `produce`, or by what group commit coalesces, not
 by `:flush_bytes`, which is only a ceiling (10MB by default). The pinned ceiling harness runs 2.5KB
