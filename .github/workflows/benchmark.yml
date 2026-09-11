@@ -29,6 +29,10 @@ on:
         type: choice
         options: ['datasync', 'sync']
         default: 'datasync'
+      blank_tail_scan:
+        description: 'Measure what proving a preallocated tail is unwritten costs (issue #149). Seconds, not minutes.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -109,4 +113,22 @@ jobs:
         with:
           name: prealloc-ab-measurement-stage-${{ inputs.prealloc_ab_stage }}
           path: ${{ runner.temp }}/prealloc-ab.json
+          if-no-files-found: error
+
+      # The measurement behind issue #149. The 1MB probe bound was chosen against 344ms measured for
+      # 64MB on macOS, and the target is Linux, where a recovery reads a file written moments earlier
+      # that is likely page-cache warm. If the real number here is tens of milliseconds, the bound is
+      # not worth its exposure and the tail should simply be verified whole.
+      - name: Measure the blank tail verification cost
+        if: ${{ inputs.blank_tail_scan }}
+        env:
+          BLANK_SCAN_OUT: ${{ runner.temp }}/blank-tail-scan.json
+        run: mix run --no-start benchmark/blank_tail_scan.exs
+
+      - name: Upload the blank tail measurement
+        if: ${{ inputs.blank_tail_scan }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: blank-tail-scan
+          path: ${{ runner.temp }}/blank-tail-scan.json
           if-no-files-found: error
