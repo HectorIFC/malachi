@@ -57,6 +57,17 @@ defmodule Malachi.Storage.Preallocation do
   NOT `:flush_bytes`, which is only a ceiling (10MB by default). The pinned ceiling harness runs
   2.5KB per flush, fifty times below the crossover.
 
+  ## Why written zeros cost more to verify later
+
+  Worth knowing before anyone proposes the obvious optimization. A filesystem can answer "where does
+  the data start" in constant time for SPARSE regions, through `SEEK_DATA`, which would make checking
+  that a preallocated tail is really unwritten free instead of proportional to its size
+  (`Malachi.Storage.ElixirStore`, the blank-tail probe). It does not help here: written zeros are
+  allocated, written blocks, and `SEEK_DATA` cannot tell them from data. The mechanism that makes the
+  append cheap is the same one that makes the later verification expensive, and `:sparse` would trade
+  that back at the cost of the win this module exists for. Erlang does not expose `SEEK_HOLE` without
+  a NIF in any case.
+
   ## What it assumes about the filesystem
 
   Preallocation turns every append from an extend into an **overwrite of already-allocated blocks**.
