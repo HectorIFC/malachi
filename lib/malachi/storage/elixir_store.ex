@@ -58,6 +58,18 @@ defmodule Malachi.Storage.ElixirStore do
   # and what a bounded window cannot see (isolated garbage stranded in the middle of the unwritten
   # tail) is not a shape any crash produces.
   @tail_window_bytes 65_536
+  # How far a zero frame header has to stay zero before the scan believes it is unwritten space
+  # rather than damage. A zeroed region with valid frames behind it is a real disk failure (a
+  # remapped sector, a firmware bug, a power loss with a lying cache), and taking the header at face
+  # value would have recovery report the segment healthy while dropping every frame past the hole.
+  #
+  # 1MB is the trade, and it is a trade. Proving a tail really is unwritten means reading all of it,
+  # measured at 344ms for a 64MB region, paid on EVERY recovery of a healthy segment, which is the
+  # common case and the one that must stay cheap. A megabyte costs about 5ms and covers the shapes
+  # that occur: a 512-byte sector, a 4KB filesystem block, a small extent. Corruption that zeroes
+  # more than a contiguous megabyte AND leaves valid frames behind it goes unseen here, and is left
+  # to the scrub.
+  @blank_probe_bytes 1_048_576
 
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
@@ -345,6 +357,31 @@ defmodule Malachi.Storage.ElixirStore do
       zeros_reach_the_end?: ends_in_zeros?
     }
   end
+
+  # Whether the next `@blank_probe_bytes` from `position` are all zero, or the file ends first. Reads
+  # in the same bounded windows the scan uses and stops at the first non-zero byte, so the expensive
+  # answer is the reassuring one: a segment with data behind the hole bails almost immediately.
+  defp blank_tail?(file_descriptor, position), do: blank_tail?(file_descriptor, position, @blank_probe_bytes)
+
+  defp blank_tail?(_file_descriptor, _position, remaining) when remaining <= 0, do: true
+
+  defp blank_tail?(file_descriptor, position, remaining) do
+    case :file.pread(file_descriptor, position, min(@read_window_bytes, remaining)) do
+      {:ok, chunk} ->
+        all_zero?(chunk) and
+          blank_tail?(file_descriptor, position + byte_size(chunk), remaining - byte_size(chunk))
+
+      :eof ->
+        true
+
+      # A descriptor that cannot be read is not one that can vouch for unwritten space, and the scan
+      # reports the damage rather than assuming the best about bytes it never saw.
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp all_zero?(binary), do: binary == :binary.copy(<<0>>, byte_size(binary))
 
   # Where the trailing run of zeros starts, as a length from the front. A window that is entirely
   # zeros answers 0, and one with no zeros at all answers its own size.
@@ -931,10 +968,15 @@ defmodule Malachi.Storage.ElixirStore do
           {:error, reason} -> {valid_bytes, accumulator, {:error, reason}}
         end
 
-      # Unwritten preallocated space. It ends the walk exactly like end of file does, because that
-      # is what it is: the segment stops here, there is simply room after it.
+      # Unwritten preallocated space, but only if it stays unwritten. A zero frame header with data
+      # behind it is damage wearing the shape of empty room, and believing it would end the scan
+      # early and report the segment clean while every frame past the hole disappeared.
       :blank ->
-        {valid_bytes, accumulator, :blank}
+        if blank_tail?(file_descriptor, valid_bytes) do
+          {valid_bytes, accumulator, :blank}
+        else
+          {valid_bytes, accumulator, {:error, :bad_magic}}
+        end
 
       {:error, reason} ->
         {valid_bytes, accumulator, {:error, reason}}
