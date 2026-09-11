@@ -1,15 +1,13 @@
 # What does it cost to PROVE a preallocated tail is really unwritten? (issue #149)
 #
-# `Malachi.Storage.ElixirStore` answers `:blank` for a zero frame header only if the next
-# `@blank_probe_bytes` stay zero, currently 1MB. A bounded probe rather than a full verification,
-# because a zeroed region larger than the bound with valid frames behind it then reads as a healthy
-# tail, and closing that means reading the whole tail on every recovery of a HEALTHY segment.
+# `Malachi.Storage.ElixirStore` answers `:blank` for a zero frame header only once every byte after
+# it has been read and found zero, and that is paid on every recovery of a HEALTHY segment, which is
+# the common case. A bounded probe was tried instead and does not work: it looks only for non-zero
+# bytes, and a record whose value is zeros carries almost none.
 #
-# The bound was picked before anyone had measured it on the platform Malachi runs on. Malachi runs on
-# Linux and nowhere else, where recovery reads a file written moments earlier that is likely still in
-# the page cache, and no measurement from a developer laptop says anything about that. If the real
-# figure here is tens of milliseconds, the trade does not hold and the right fix is to verify the
-# whole tail. This measures it, warm and cold, alongside the recovery it would be paid inside.
+# Malachi runs on Linux and nowhere else, where recovery reads a file written moments earlier that is
+# likely still in the page cache, and no measurement from a developer laptop says anything about
+# that. This measures it there, warm and cold, alongside the recovery it is paid inside.
 #
 # It also measures the AGGREGATE, which is the number an operator actually feels: the blank tail
 # exists only on a segment being written, there is one per range, and a restart recovers all of them.
@@ -69,7 +67,11 @@ defmodule BlankTailScan do
     File.write!(path, :binary.copy(<<0>>, size))
 
     warm = Enum.map(1..@reps, fn _ -> time_scan(path) end)
-    cold = Enum.map(1..@reps, fn _ -> drop_caches() && time_scan(path) end)
+
+    cold =
+      1..@reps
+      |> Enum.map(fn _ -> if drop_caches(), do: time_scan(path) end)
+      |> Enum.reject(&is_nil/1)
 
     # And the reassuring case: a non-zero byte early in the region, which is what a damaged tail
     # looks like. The expensive answer is the one that says everything is fine.
@@ -85,7 +87,7 @@ defmodule BlankTailScan do
     %{
       bytes: size,
       warm_us: median(warm),
-      cold_us: median(cold),
+      cold_us: if(cold == [], do: nil, else: median(cold)),
       early_bail_us: median(bail),
       warm_all: warm,
       cold_all: cold
@@ -122,22 +124,23 @@ defmodule BlankTailScan do
         us
       end)
 
+    # Measured apart, NOT added to the recovery above: `recover/3` already verifies the tail, so a
+    # sum would count the same work twice. This is the share of the recovery that the verification
+    # accounts for, which is what a different verification strategy would be replacing.
     verifications = Enum.map(1..@reps, fn _ -> time_scan_from(path, valid_bytes) end)
     File.rm_rf!(directory)
 
     IO.puts(
       "  recover a #{mb(prealloc)} segment holding #{valid_bytes} bytes of records:\n" <>
-        "    today (1MB probe)        #{ms(median(recovers))}\n" <>
-        "    verifying the whole tail #{ms(median(recovers) + median(verifications))}" <>
-        "  (+#{ms(median(verifications))})\n"
+        "    whole recovery           #{ms(median(recovers))}\n" <>
+        "    of which the tail check  #{ms(median(verifications))}\n"
     )
 
     %{
       prealloc_bytes: prealloc,
       valid_bytes: valid_bytes,
-      recover_today_us: median(recovers),
-      tail_verification_us: median(verifications),
-      recover_with_full_verification_us: median(recovers) + median(verifications)
+      recover_us: median(recovers),
+      tail_verification_us: median(verifications)
     }
   end
 
@@ -156,23 +159,22 @@ defmodule BlankTailScan do
         {directory, Malachi.Log.Segment.path(store.segment), valid_bytes}
       end)
 
-    today = median(Enum.map(1..@reps, fn _ -> time_recover_all(directories) end))
+    total = median(Enum.map(1..@reps, fn _ -> time_recover_all(directories) end))
     verification = median(Enum.map(1..@reps, fn _ -> time_verify_all(directories) end))
 
     Enum.each(directories, fn {directory, _path, _valid} -> File.rm_rf!(directory) end)
 
     IO.puts(
       "  restart recovering #{count} active segment(s) of #{mb(@aggregate_prealloc)}:\n" <>
-        "    today (1MB probe)        #{ms(today)}\n" <>
-        "    verifying the whole tail #{ms(today + verification)}  (+#{ms(verification)})\n"
+        "    whole restart            #{ms(total)}\n" <>
+        "    of which the tail checks #{ms(verification)}\n"
     )
 
     %{
       segments: count,
       prealloc_bytes: @aggregate_prealloc,
-      recover_today_us: today,
-      tail_verification_us: verification,
-      recover_with_full_verification_us: today + verification
+      recover_us: total,
+      tail_verification_us: verification
     }
   end
 
@@ -233,22 +235,25 @@ defmodule BlankTailScan do
     end
   end
 
-  # Best effort: the runner allows passwordless sudo, a laptop generally does not.
+  # Best effort: the runner allows passwordless sudo, a laptop generally does not. The EXIT STATUS
+  # decides, not the existence of the file: a sudo that fails would otherwise leave the caches warm
+  # while the report called the samples cold, which is a worse answer than admitting it could not.
   defp can_drop_caches?, do: File.exists?("/proc/sys/vm/drop_caches")
 
   defp drop_caches do
-    if can_drop_caches?() do
-      System.cmd("sudo", ["sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"], stderr_to_stdout: true)
+    case System.cmd("sudo", ["sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
     end
-
-    true
+  rescue
+    ErlangError -> false
   end
 
   defp report(label, warm, cold, bail) do
     IO.puts(
       "  #{label}:\n" <>
         "    warm cache      #{ms(median(warm))}   (#{Enum.map_join(warm, ", ", &ms/1)})\n" <>
-        "    cold cache      #{ms(median(cold))}\n" <>
+        "    cold cache      #{if cold == [], do: "unavailable", else: ms(median(cold))}\n" <>
         "    bails at 4KB    #{ms(median(bail))}\n"
     )
   end
