@@ -920,7 +920,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
     # sector, a firmware bug, a power loss with a lying cache. Taking a zero header at face value had
     # recovery report the segment clean while dropping every frame past the hole, which is worse than
     # the damage it was hiding.
-    test "a zeroed region with valid frames behind it is damage, not unwritten space",
+    test "a zeroed region with valid frames behind it is damage, caught by the contiguous probe",
          %{tmp_dir: directory} do
       {:ok, store} = open_preallocated(directory)
 
@@ -958,6 +958,74 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert {:ok, after_hole} = :file.pread(tail, hole_end, 64)
       assert after_hole != :binary.copy(<<0>>, 64)
       :ok = :file.close(tail)
+    end
+
+    # The other half of the rule. A hole wider than the contiguous probe walks straight past it, so
+    # only the sampling can see the data behind it. Deliberately larger than @blank_probe_bytes,
+    # which is why this test writes megabytes where the rest of the file writes bytes.
+    @tag :tmp_dir
+    test "a zeroed region wider than the contiguous probe is caught by the sampling",
+         %{tmp_dir: directory} do
+      prealloc = 3 * 1024 * 1024
+      {:ok, store} = open(directory, prealloc_bytes: prealloc)
+
+      store =
+        Enum.reduce(0..4, store, fn i, acc ->
+          {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      path = Segment.path(store.segment)
+      hole_start = frame_position(path, 2)
+      # 1.5MB of zeros, half again as wide as the contiguous probe, so only the sampling can see past
+      # it.
+      hole_bytes = 1_572_864
+      :ok = :file.close(store.file_descriptor)
+
+      bytes = File.read!(path)
+      records_behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
+
+      # The data behind the hole has to be at least one sampling interval wide, or it can land
+      # entirely between two samples and go unseen. That is the guarantee this phase actually makes,
+      # and a test that wrote a few bytes there would be asserting luck rather than the rule.
+      behind = records_behind <> :binary.copy(records_behind, div(128 * 1024, byte_size(records_behind)) + 1)
+
+      File.write!(
+        path,
+        binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, hole_bytes) <> behind
+      )
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: prealloc)
+
+      assert %{reason: :bad_magic, position: ^hole_start} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
+    end
+
+    property "sample_offsets/3 covers the range in steps no wider than the interval" do
+      check all(
+              from <- StreamData.integer(0..1_000_000),
+              length <- StreamData.integer(0..5_000_000),
+              interval <- StreamData.integer(1..2_000_000)
+            ) do
+        to = from + length
+        offsets = ElixirStore.sample_offsets(from, to, interval)
+
+        # Every sample lands inside the range it is meant to cover.
+        assert Enum.all?(offsets, &(&1 >= from and &1 < to))
+        # Strictly increasing, so no offset is read twice and none goes backwards.
+        assert offsets == Enum.uniq(offsets) and offsets == Enum.sort(offsets)
+
+        # No gap wider than the interval, which is the invariant that stops a stretch of the tail
+        # from going unsampled: the step between neighbours, and from the last sample to the end.
+        gaps = Enum.zip(offsets, tl(offsets ++ [to])) |> Enum.map(fn {a, b} -> b - a end)
+        assert Enum.all?(gaps, &(&1 <= interval))
+
+        # A non-empty range always samples at least once, however short it is.
+        if to > from, do: assert(offsets != [])
+      end
     end
 
     test "still refuses to discard rot that has valid frames after it", %{tmp_dir: directory} do
