@@ -1005,7 +1005,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
     # samples made the record vanish with the segment reporting itself healthy. Verifying the tail
     # whole reads those thirty bytes like any others.
     test "a record whose value is all zeros is still found behind a hole", %{tmp_dir: directory} do
-      prealloc = 1024 * 1024
+      prealloc = 4 * 1024 * 1024
       {:ok, store} = open(directory, prealloc_bytes: prealloc, flush_bytes: 8 * 1024 * 1024)
       {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
       {:ok, store} = ElixirStore.sync(store)
@@ -1016,11 +1016,15 @@ defmodule Malachi.Storage.ElixirStoreTest do
       path = Segment.path(store.segment)
       :ok = :file.close(store.file_descriptor)
 
-      # Deliberately not a round number: an aligned hole puts the header on a sample by luck, which
-      # is what hid the bug the first time it was looked for.
+      # 1602864 is chosen, not round. The hole has to clear the 1MB contiguous probe the sampling
+      # version began with, or that probe would have caught this and the test would pass against the
+      # very code it exists to regress. Past the probe, the header lands at 1602946, between the
+      # sample windows at 1573554 and 1639090: missed by the old implementation, found by this one.
+      # An aligned 1.5MB hole puts the header on a sample by luck, which is what hid the bug the
+      # first time it was looked for.
       bytes = File.read!(path)
       behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
-      File.write!(path, binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, 30_000) <> behind)
+      File.write!(path, binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, 1_602_864) <> behind)
 
       {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: prealloc)
 
