@@ -63,41 +63,16 @@ defmodule Malachi.Storage.ElixirStore do
   # remapped sector, a firmware bug, a power loss with a lying cache), and taking the header at face
   # value would have recovery report the segment healthy while dropping every frame past the hole.
   #
-  # Two phases, because neither alone is affordable and correct at once.
+  # Nothing is taken on faith here: a zero frame header is believed only once every byte after it has
+  # been read and found zero. That costs 8.2 ms per MB of tail, measured on the runner, and a blank
+  # tail exists only on a segment being written, so a restart pays it once per range.
   #
-  # Reading the whole tail would be the honest answer, and it was measured on the runner rather than
-  # assumed: 8.2 ms per MB of tail, consistent across an 8MB segment, a 64MB one and a 64-segment
-  # restart. A blank tail exists only on a segment being written and there is one per range, so a
-  # node with 64 ranges of 64MB would add 33 seconds to its restart, all of it spent confirming that
-  # healthy segments are healthy.
-  #
-  # Phase one is `@blank_probe_bytes` of CONTIGUOUS zeros from the damage, which catches zero-fill at
-  # the point it happens: a 512-byte sector, a 4KB filesystem block, a small extent.
-  #
-  # Phase two samples `@blank_sample_bytes` every `@blank_sample_interval` across the rest, and its
-  # guarantee is exactly as wide as that interval: a region of data is certain to be caught only if
-  # it is at least one interval long, and a shorter one is caught with probability (size + sample) /
-  # interval. That is the trade, priced with the number above:
-  #
-  #     interval   reads     64MB tail   certain to catch
-  #     1MB        1/256     2ms         a 1MB region
-  #     64KB       1/16      33ms        a 64KB region (a 4KB block: 12%)
-  #     8KB        1/2       262ms       a 4KB block, the smallest data there is
-  #     (none)     1/1       525ms       anything
-  #
-  # 64KB is the chosen point. A restart with 64 ranges of 64MB spends about 2 seconds on it rather
-  # than 33, and 64KB is sixteen filesystem blocks: a loss worth refetching from a peer is larger
-  # than that. Guaranteeing a single block costs half of reading everything, which buys the rarest
-  # case at most of the price.
-  #
-  # Two things about WHERE this cost lands. It is per ACTIVE segment, and there is one per range, so
-  # a restart pays it once for every range the node holds: the per-segment number multiplies. And it
-  # is zero when `:prealloc_bytes` is zero, because a segment that grows has no tail to verify, which
-  # puts it in the same ledger as the rest of the preallocation trade-off.
-  @blank_probe_bytes 1_048_576
-  @blank_sample_bytes 4_096
-  @blank_sample_interval 65_536
-
+  # A bounded check was tried first and does not work, which is worth recording because it looks like
+  # it should. Sampling the tail catches only NON-ZERO bytes that land on a sample, and a frame
+  # carries very few of them: a 3MB record whose value is zeros has about thirty, in its header. Put
+  # a hole in front of it so that header falls between two samples and the record vanishes with the
+  # segment reporting itself healthy. Reproduced at a 4KB sample every 64KB. The blind spot is not in
+  # the interval, it is in what the samples can see, so no interval fixes it.
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
 
@@ -385,22 +360,14 @@ defmodule Malachi.Storage.ElixirStore do
     }
   end
 
-  # Whether everything from `position` on is unwritten space: contiguous zeros for the length of the
-  # probe, then a sample every interval across whatever is left. Both halves stop at the first
-  # non-zero byte, so the expensive answer is the reassuring one: a segment with data behind the hole
-  # bails almost immediately and a healthy one pays in full.
+  # Whether everything from `position` to the end of the file is zero. Reads in the same bounded
+  # windows the scan uses and stops at the first non-zero byte, so the expensive answer is the
+  # reassuring one: a segment with data behind the hole bails almost immediately and a healthy one
+  # pays in full.
   defp blank_tail?(file_descriptor, position) do
-    contiguous_blank?(file_descriptor, position, @blank_probe_bytes) and
-      sampled_blank?(file_descriptor, position + @blank_probe_bytes)
-  end
-
-  defp contiguous_blank?(_file_descriptor, _position, remaining) when remaining <= 0, do: true
-
-  defp contiguous_blank?(file_descriptor, position, remaining) do
-    case :file.pread(file_descriptor, position, min(@read_window_bytes, remaining)) do
+    case :file.pread(file_descriptor, position, @read_window_bytes) do
       {:ok, chunk} ->
-        all_zero?(chunk) and
-          contiguous_blank?(file_descriptor, position + byte_size(chunk), remaining - byte_size(chunk))
+        all_zero?(chunk) and blank_tail?(file_descriptor, position + byte_size(chunk))
 
       :eof ->
         true
@@ -410,37 +377,6 @@ defmodule Malachi.Storage.ElixirStore do
       {:error, _reason} ->
         false
     end
-  end
-
-  defp sampled_blank?(file_descriptor, from) do
-    case Preallocation.file_size(file_descriptor) do
-      {:ok, size} ->
-        # One sample is the contiguous check over a very short run, so it is the same function: the
-        # two phases differ in where they look, not in what counts as unwritten space.
-        from
-        |> sample_offsets(size, @blank_sample_interval)
-        |> Enum.all?(&contiguous_blank?(file_descriptor, &1, @blank_sample_bytes))
-
-      {:error, _reason} ->
-        false
-    end
-  end
-
-  @doc """
-  Where to sample, walking `[from, to)` in steps of `interval`.
-
-  Pure, and separate from the reading for that reason: the arithmetic is the part that can be wrong
-  in a way no example test would notice, and getting it wrong means a stretch of the tail nobody
-  looks at. An empty range samples nothing; a range shorter than one interval still samples once,
-  because a short tail is exactly where a small region of data would hide.
-  """
-  @spec sample_offsets(non_neg_integer(), non_neg_integer(), pos_integer()) :: [non_neg_integer()]
-  def sample_offsets(from, to, _interval) when from >= to, do: []
-
-  def sample_offsets(from, to, interval) when interval > 0 do
-    from
-    |> Stream.iterate(&(&1 + interval))
-    |> Enum.take_while(&(&1 < to))
   end
 
   defp all_zero?(binary), do: binary == :binary.copy(<<0>>, byte_size(binary))

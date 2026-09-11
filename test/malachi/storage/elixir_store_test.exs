@@ -920,7 +920,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
     # sector, a firmware bug, a power loss with a lying cache. Taking a zero header at face value had
     # recovery report the segment clean while dropping every frame past the hole, which is worse than
     # the damage it was hiding.
-    test "a zeroed region with valid frames behind it is damage, caught by the contiguous probe",
+    test "a zeroed region with valid frames behind it is damage, not unwritten space",
          %{tmp_dir: directory} do
       {:ok, store} = open_preallocated(directory)
 
@@ -960,11 +960,11 @@ defmodule Malachi.Storage.ElixirStoreTest do
       :ok = :file.close(tail)
     end
 
-    # The other half of the rule. A hole wider than the contiguous probe walks straight past it, so
-    # only the sampling can see the data behind it. Deliberately larger than @blank_probe_bytes,
-    # which is why this test writes megabytes where the rest of the file writes bytes.
+    # Megabytes where the rest of this file writes bytes, on purpose: a bounded check was tried here
+    # and a hole this wide is what walked past it. The tail is verified whole now, so size is no
+    # longer what decides, and this pins that.
     @tag :tmp_dir
-    test "a zeroed region wider than the contiguous probe is caught by the sampling",
+    test "a zeroed region of megabytes is damage too, however wide",
          %{tmp_dir: directory} do
       prealloc = 3 * 1024 * 1024
       {:ok, store} = open(directory, prealloc_bytes: prealloc)
@@ -978,18 +978,13 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
       path = Segment.path(store.segment)
       hole_start = frame_position(path, 2)
-      # 1.5MB of zeros, half again as wide as the contiguous probe, so only the sampling can see past
-      # it.
       hole_bytes = 1_572_864
       :ok = :file.close(store.file_descriptor)
 
       bytes = File.read!(path)
       records_behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
 
-      # The data behind the hole has to be at least one sampling interval wide, or it can land
-      # entirely between two samples and go unseen. That is the guarantee this phase actually makes,
-      # and a test that wrote a few bytes there would be asserting luck rather than the rule.
-      behind = records_behind <> :binary.copy(records_behind, div(128 * 1024, byte_size(records_behind)) + 1)
+      behind = records_behind
 
       File.write!(
         path,
@@ -1004,28 +999,35 @@ defmodule Malachi.Storage.ElixirStoreTest do
       :ok = ElixirStore.close(recovered)
     end
 
-    property "sample_offsets/3 covers the range in steps no wider than the interval" do
-      check all(
-              from <- StreamData.integer(0..1_000_000),
-              length <- StreamData.integer(0..5_000_000),
-              interval <- StreamData.integer(1..2_000_000)
-            ) do
-        to = from + length
-        offsets = ElixirStore.sample_offsets(from, to, interval)
+    # The case a bounded check cannot see, kept as a regression. A record whose value is zeros carries
+    # almost no non-zero bytes: its header is about thirty of them. Sampling the tail looks only for
+    # non-zero bytes, so putting a hole in front of such a record until its header falls between two
+    # samples made the record vanish with the segment reporting itself healthy. Verifying the tail
+    # whole reads those thirty bytes like any others.
+    test "a record whose value is all zeros is still found behind a hole", %{tmp_dir: directory} do
+      prealloc = 1024 * 1024
+      {:ok, store} = open(directory, prealloc_bytes: prealloc, flush_bytes: 8 * 1024 * 1024)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, store} = ElixirStore.sync(store)
+      hole_start = store.segment.byte_size
 
-        # Every sample lands inside the range it is meant to cover.
-        assert Enum.all?(offsets, &(&1 >= from and &1 < to))
-        # Strictly increasing, so no offset is read twice and none goes backwards.
-        assert offsets == Enum.uniq(offsets) and offsets == Enum.sort(offsets)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec(:binary.copy(<<0>>, 200_000))])
+      {:ok, store} = ElixirStore.sync(store)
+      path = Segment.path(store.segment)
+      :ok = :file.close(store.file_descriptor)
 
-        # No gap wider than the interval, which is the invariant that stops a stretch of the tail
-        # from going unsampled: the step between neighbours, and from the last sample to the end.
-        gaps = Enum.zip(offsets, tl(offsets ++ [to])) |> Enum.map(fn {a, b} -> b - a end)
-        assert Enum.all?(gaps, &(&1 <= interval))
+      # Deliberately not a round number: an aligned hole puts the header on a sample by luck, which
+      # is what hid the bug the first time it was looked for.
+      bytes = File.read!(path)
+      behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
+      File.write!(path, binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, 30_000) <> behind)
 
-        # A non-empty range always samples at least once, however short it is.
-        if to > from, do: assert(offsets != [])
-      end
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: prealloc)
+
+      assert %{reason: :bad_magic, position: ^hole_start} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
     end
 
     test "still refuses to discard rot that has valid frames after it", %{tmp_dir: directory} do
