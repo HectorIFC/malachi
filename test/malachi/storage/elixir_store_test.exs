@@ -42,6 +42,14 @@ defmodule Malachi.Storage.ElixirStoreTest do
     File.write!(path, <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>)
   end
 
+  # Length of `binary` up to and including its last non-zero byte, which is what the store reports as
+  # `unreadable_bytes`: a trailing run of zeros is indistinguishable from space nobody wrote.
+  defp written_prefix_length(binary) do
+    Enum.reduce_while(byte_size(binary)..1//-1, 0, fn position, _none ->
+      if :binary.at(binary, position - 1) != 0, do: {:halt, position}, else: {:cont, 0}
+    end)
+  end
+
   defp truncate_to(path, bytes) do
     File.write!(path, binary_part(File.read!(path), 0, bytes))
   end
@@ -853,12 +861,21 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
       {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
 
-      # 10 and not the 12 bytes written: the count runs to the last NON-ZERO byte, and this frame's
+      # Fewer than the 12 bytes written: the count runs to the last NON-ZERO byte, and this frame's
       # 11th and 12th bytes are the leading zeros of its 64-bit offset. Bytes that are already zero
       # are indistinguishable from space nobody wrote, which is the whole basis of the rule, so
       # there is nothing to report about them and nothing to zero out either.
-      assert %{reason: :incomplete, position: ^valid_bytes, unreadable_bytes: 10, sealed?: false} =
+      #
+      # Derived from the injected bytes instead of hard-coded, because the four CRC bytes just before
+      # those zeros vary with the record's timestamp, and a CRC that happens to end in a zero byte
+      # makes the count 9, or rarely 8. Measured over 20k timestamps that is 0.38% of runs, which is
+      # exactly often enough to fail in CI and be blamed on something else. It was.
+      expected_unreadable = written_prefix_length(torn)
+
+      assert %{reason: :incomplete, position: ^valid_bytes, sealed?: false, unreadable_bytes: ^expected_unreadable} =
                ElixirStore.integrity(recovered)
+
+      assert expected_unreadable > 0 and expected_unreadable <= byte_size(torn)
 
       assert recovered.segment.record_count == 2
       # The region is kept (truncating would throw away the preallocation) and the garbage inside it
@@ -897,6 +914,50 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert recovered.preallocated_to == nil
 
       :ok = ElixirStore.close(recovered)
+    end
+
+    # A zeroed region with valid frames behind it is a real disk failure, not only rot: a remapped
+    # sector, a firmware bug, a power loss with a lying cache. Taking a zero header at face value had
+    # recovery report the segment clean while dropping every frame past the hole, which is worse than
+    # the damage it was hiding.
+    test "a zeroed region with valid frames behind it is damage, not unwritten space",
+         %{tmp_dir: directory} do
+      {:ok, store} = open_preallocated(directory)
+
+      store =
+        Enum.reduce(0..9, store, fn i, acc ->
+          {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      path = Segment.path(store.segment)
+      hole_start = frame_position(path, 3)
+      hole_end = frame_position(path, 5)
+      :ok = :file.close(store.file_descriptor)
+
+      bytes = File.read!(path)
+
+      File.write!(
+        path,
+        binary_part(bytes, 0, hole_start) <>
+          :binary.copy(<<0>>, hole_end - hole_start) <>
+          binary_part(bytes, hole_end, byte_size(bytes) - hole_end)
+      )
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @prealloc)
+
+      assert %{reason: :bad_magic, position: ^hole_start} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 3
+      # Damage means preserve, so the frames behind the hole are still on disk for a peer to use.
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
+      assert byte_size(File.read!(path)) == @prealloc
+
+      {:ok, tail} = :file.open(path, [:read, :raw, :binary])
+      assert {:ok, after_hole} = :file.pread(tail, hole_end, 64)
+      assert after_hole != :binary.copy(<<0>>, 64)
+      :ok = :file.close(tail)
     end
 
     test "still refuses to discard rot that has valid frames after it", %{tmp_dir: directory} do
