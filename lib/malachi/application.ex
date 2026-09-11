@@ -11,6 +11,10 @@ defmodule Malachi.Application do
   """
   use Application
   require Logger
+
+  # See `segment_prealloc_bytes/0`: matches the broker's default `:segment_max_bytes`, which is the
+  # size a segment file actually reaches before the control plane rolls it.
+  @default_segment_prealloc_bytes 64 * 1024 * 1024
   alias Malachi.Auth.AclServer
   alias Malachi.Auth.ConfigValidator
   alias Malachi.Auth.LockoutServer
@@ -758,6 +762,45 @@ defmodule Malachi.Application do
         value -> [{option, value}]
       end
     end)
+    |> Keyword.put(:prealloc_bytes, segment_prealloc_bytes())
+  end
+
+  # How far to size a new segment file at creation, so appends overwrite an already-allocated region
+  # instead of extending the file. On by default HERE rather than in the store, because the store is
+  # a library and an `open/3` that writes tens of megabytes by default would be hostile to anything
+  # that opens a segment without meaning to, the test suite first among them.
+  #
+  # Measured on an ubuntu-latest runner, in the regime the pinned ceiling harness runs: per-flush p50
+  # 316us growing against 96us preallocated, a 70% cut, against a measured noise floor of 1us. It
+  # costs one 64MB write per segment creation, about 36ms on that runner, which the saving pays back
+  # in roughly 164 flushes out of the ~26k a 64MB segment sees.
+  #
+  # 64MB and not `:log_roll_max_bytes` (1GB by default): the broker asks for a roll at
+  # `:segment_max_bytes`, 64MB, so that is the size the file actually reaches. Preallocating the roll
+  # threshold would reserve and write sixteen times the data that will ever land in it.
+  #
+  # Set MALACHI_SEGMENT_PREALLOC_BYTES=0 to turn it off. Two deployments want that:
+  #
+  #   * a copy-on-write filesystem (btrfs, zfs), where overwriting allocated blocks costs MORE than
+  #     appending to a file;
+  #   * large flushes. Preallocation is a trade, and the flush size decides which way it goes: the
+  #     per-flush p50 improves 70% at 2.5KB per flush, breaks even around 128KB, and is 16% WORSE at
+  #     1MB, where the p99 is 3.5x worse. `Malachi.Storage.Preallocation` carries the full curve.
+  #     What sets the flush size is what a producer sends per produce, or what group commit
+  #     coalesces, not `:flush_bytes`, which is only a ceiling.
+  defp segment_prealloc_bytes do
+    configured = Application.get_env(:malachi, :segment_prealloc_bytes, @default_segment_prealloc_bytes)
+
+    # Never more than the segment will be allowed to reach. An operator who rolls at 1MB would
+    # otherwise get a 64MB file created and written for every 1MB segment, which is 64x the disk and
+    # 64x the creation cost for room that can never be used. Both thresholds bound the active file:
+    # `:segment_max_bytes` is where the broker asks for a roll, `:log_roll_max_bytes` where the log
+    # rolls internally, so the smaller of whichever are set is the real ceiling.
+    [:segment_max_bytes, :log_roll_max_bytes]
+    |> Enum.map(&Application.get_env(:malachi, &1))
+    |> Enum.filter(&is_integer/1)
+    |> Enum.min(fn -> configured end)
+    |> min(configured)
   end
 
   defp replication_child do

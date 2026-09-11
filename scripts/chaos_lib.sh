@@ -232,10 +232,16 @@ write_result() {
 # postmortem to the teardown cost a diagnosis round once.
 finish() {
   if [ "$FAILED" != "0" ]; then
-    say "postmortem: node logs (last 40 lines each)"
+    say "postmortem: node logs (matching lines with their following context)"
     for c in malachi-cluster-1 malachi-cluster-2 malachi-cluster-3; do
       echo "--- $c ---"
-      docker logs --tail 40 "$c" 2>&1 | grep -iE "error|warn|crash|terminat" | tail -15
+      # -A 20, and it is the whole point of this line. An Erlang crash report puts the reason and
+      # the stack trace on the lines AFTER the one that matches, and not one of those lines contains
+      # error, warn, crash or terminating. Filtering line by line printed the first two lines of a
+      # MatchError and swallowed the trace that says where it came from, which cost a diagnosis
+      # round on a failure that then did not reproduce. The wider --tail is so a trace near the end
+      # of the window is not cut off before grep ever sees it.
+      docker logs --tail 200 "$c" 2>&1 | grep -iE -A 20 "error|warn|crash|terminat" | tail -80
     done
   fi
 

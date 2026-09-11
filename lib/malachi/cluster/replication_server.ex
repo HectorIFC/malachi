@@ -549,7 +549,11 @@ defmodule Malachi.Cluster.ReplicationServer do
     # serve: the metadata would promise records that read as :eof and the range's reads would stop dead.
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     {:ok, log} = Log.seal(log)
-    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
+    # The sealed log goes back into the state BEFORE the byte count is taken: the count now comes
+    # from the open log rather than from stat, and the copy still in the state is the pre-seal one,
+    # whose committed byte count predates the flush that sealing just did.
+    state = put_log(state, segment_id, log)
+    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
   end
 
   # The batched fence report. Read-only by construction: `fenced?/2` is the same test the write paths
@@ -576,7 +580,8 @@ defmodule Malachi.Cluster.ReplicationServer do
     # answered unflushed would hand a failover pass a seal point its own replicas could not serve.
     {state, log} = fetch_or_open(state, segment_id, base_offset)
     log = if Log.pending?(log), do: elem(Log.sync(log), 1), else: log
-    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, put_log(state, segment_id, log)}
+    state = put_log(state, segment_id, log)
+    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
@@ -1014,7 +1019,26 @@ defmodule Malachi.Cluster.ReplicationServer do
   # at its range-relative first offset.
   # Every `*.log` file this server holds for the segment, sealed ones included, which is what makes it
   # the whole logical segment rather than whichever piece is open right now.
+  #
+  # An OPEN log is asked rather than stat'd, because a store may size the active segment's file
+  # ahead of what it has written (`Malachi.Storage.Preallocation`) and stat would then report the
+  # room instead of the records. It matters well past this function: this number is recorded as the
+  # segment's `byte_size` when it is sealed or fenced, and from there it drives size-based retention
+  # and the lost-copy probe in `Malachi.Cluster.SelfHealing`, which re-backfills any replica whose
+  # bytes fall short of it. A preallocated file counted as content would inflate that number on one
+  # replica and have healthy peers re-copied as if they were truncated.
+  #
+  # A segment with no open log is stat'd as before. Every caller that needs the number to be exact
+  # (`:seal`, `:durable_stats`, `:fenced_segments`) opens the log first; `:stored_bytes` deliberately
+  # does not, and it probes SEALED segments, whose files carry no preallocated tail.
   defp bytes_on_disk(state, segment_id) do
+    case Map.fetch(state.logs, segment_id) do
+      {:ok, log} -> Log.bytes_on_disk(log)
+      :error -> stat_bytes_on_disk(state, segment_id)
+    end
+  end
+
+  defp stat_bytes_on_disk(state, segment_id) do
     state.directory
     |> segment_directory(segment_id)
     |> Path.join("*.log")

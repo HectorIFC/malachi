@@ -46,7 +46,11 @@ defmodule Malachi.Storage.SegmentStore do
               {:ok, handle(), first :: non_neg_integer(), last :: non_neg_integer()}
               | {:error, term()}
 
-  @doc "Flushes buffered records and fsyncs. After this, appended records are committed and readable."
+  @doc """
+  Flushes buffered records and makes them durable. After this, appended records are committed and
+  readable. An implementation may skip the sync when nothing is buffered, so callers must not use
+  this as a barrier for writes made through anything but `append/2`.
+  """
   @callback sync(handle()) :: {:ok, handle()} | {:error, term()}
 
   @doc """
@@ -61,6 +65,17 @@ defmodule Malachi.Storage.SegmentStore do
 
   @doc "The logical offset the next appended record will receive."
   @callback next_offset(handle()) :: non_neg_integer()
+
+  @doc """
+  How many bytes of committed records the segment holds, which is not necessarily how large its
+  file is.
+
+  An implementation may size a segment's file ahead of its contents (`Malachi.Storage.Preallocation`),
+  so an active segment's file can be far larger than the log it carries. Anything that needs the
+  segment's LENGTH must ask here; `File.stat` answers a different question and, for a segment being
+  written, answers it wrongly.
+  """
+  @callback logical_bytes(handle()) :: non_neg_integer()
 
   @doc "Whether the segment is sealed (immutable)."
   @callback sealed?(handle()) :: boolean()

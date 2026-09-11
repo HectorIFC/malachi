@@ -31,6 +31,10 @@ services:
       # Data on tmpfs (RAM) so fsync cost is identical in the separated and co-located runs.
       MALACHI_LOG_DATA_DIR: "/tmp/malachi_log"
       MALACHI_RA_DATA_DIR: "/tmp/malachi_ra"
+      # And therefore no preallocation. On tmpfs there is no filesystem journal to avoid and no
+      # delayed allocation to give up, so sizing a segment ahead buys nothing and costs the RAM it
+      # sits in: 64MB per active segment, out of a 1g tmpfs, before a single record is written.
+      MALACHI_SEGMENT_PREALLOC_BYTES: "0"
     tmpfs:
       - /tmp:rw,size=1g
     mem_limit: 3g

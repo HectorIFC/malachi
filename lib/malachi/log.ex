@@ -205,6 +205,35 @@ defmodule Malachi.Log do
     end
   end
 
+  @doc """
+  How many bytes this log holds on disk, counting committed records and not preallocated space.
+
+  Sealed segment files are measured with `File.stat/1`, because a sealed file is exactly its
+  contents. The ACTIVE segment is asked instead (`c:Malachi.Storage.SegmentStore.logical_bytes/1`),
+  because a store may size its file ahead of what it has written, and stat would then report the
+  room rather than the log.
+
+  This is the number anything downstream wants: it is what gets recorded as a segment's
+  `byte_size` when it is sealed, and from there it drives size-based retention and the lost-copy
+  probe that compares replicas byte for byte.
+  """
+  @spec bytes_on_disk(t()) :: non_neg_integer()
+  def bytes_on_disk(%__MODULE__{} = log) do
+    active_path = if log.active_base_offset, do: segment_path(log, log.active_base_offset)
+    active_bytes = if log.active, do: log.store.logical_bytes(log.active), else: 0
+
+    log.directory
+    |> Path.join("*.log")
+    |> Path.wildcard()
+    |> Enum.reject(&(&1 == active_path))
+    |> Enum.reduce(active_bytes, fn path, sum ->
+      case File.stat(path) do
+        {:ok, %{size: size}} -> sum + size
+        {:error, _reason} -> sum
+      end
+    end)
+  end
+
   @doc "Whether the log has buffered records not yet flushed."
   @spec pending?(t()) :: boolean()
   def pending?(%__MODULE__{active: nil}), do: false
@@ -403,6 +432,10 @@ defmodule Malachi.Log do
       {:error, _reason} = error ->
         error
     end
+  end
+
+  defp segment_path(log, base_offset) do
+    Path.join(log.directory, segment_id_for(base_offset) <> ".log")
   end
 
   defp segment_id_for(base_offset) do

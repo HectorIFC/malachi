@@ -11,6 +11,12 @@
 #                    trailing frame: the classic crash-mid-write shape). Recovery clamps the copy
 #                    at the last CRC-valid frame; the write path's catch-up (still active) or the
 #                    integrity probe (sealed meanwhile) repairs the tail.
+#   e2. torn write inside the PREALLOCATED region - the same crash, in the shape it actually takes
+#                    once segments are preallocated: the file does not shrink, because the space was
+#                    already there. Cut the records short and put the file back to its full size, so
+#                    a half-written frame runs out into the zeros that were behind it all along.
+#                    This is the case that used to be indistinguishable from bit rot, since the
+#                    signal recovery relied on (the file ending inside a frame) no longer exists.
 #   f. truncation  - cut a follower's segment copy to half. Same repair paths.
 #   g. file loss   - delete a follower's SEALED segment directory. The self-healing integrity
 #                    probe must detect the silent under-replication and re-backfill the copy
@@ -27,6 +33,10 @@
 #
 # Invariants certified on top of the fatia-1 set (acked durability, convergence, clean produce):
 #   4. The damaged copies physically reconverge: byte-identical segment files across all 3 nodes.
+#      With preallocation on, this certifies one thing more: recovery ZEROES the bytes a torn write
+#      left behind instead of truncating them away (truncating would give back the preallocated
+#      region). A node that crashed and one that never did therefore hold identical files, dead
+#      zone included, and this check is what proves it.
 #
 # Usage: scripts/docker-storage-chaos.sh
 set -uo pipefail
@@ -39,6 +49,15 @@ export MALACHI_SEGMENT_MAX_BYTES="${MALACHI_SEGMENT_MAX_BYTES:-4096}"
 # And a tiny INTERNAL roll, so each segment's log rolls and writes its sparse-index sidecar. With the
 # library default (1GB / 1h) a run of seconds has no `.idx` at all and event i would be vacuous.
 export MALACHI_LOG_ROLL_MAX_BYTES="${MALACHI_LOG_ROLL_MAX_BYTES:-2048}"
+# Preallocation ON, and small: segments are sized ahead of their contents in production (64MB), and
+# the whole point of this drill is the recovery path that a preallocated tail changes. Small enough
+# that invariant 4 can md5 the files whole.
+#
+# The effective size is clamped to the internal roll above, so the ask here is an upper bound and the
+# file is really preallocated to MALACHI_LOG_ROLL_MAX_BYTES. That is the right size: the segment
+# cannot grow past the roll, so anything more would be room it can never use, and the blank tail this
+# drill needs still exists for everything below the roll point.
+export MALACHI_SEGMENT_PREALLOC_BYTES="${MALACHI_SEGMENT_PREALLOC_BYTES:-8192}"
 # The scrub at production cadence revisits a segment about weekly, which no test window can wait
 # for, so the drill runs it aggressively: the point is to certify that it detects and repairs, not
 # to measure its pace (that is benchmark/docker-scrub.sh).
@@ -120,6 +139,27 @@ sleep 25
 event "e: torn write on a follower's active-segment copy (cut to 3/4 + garbage tail)"
 damage_follower active 'f=$(ls $dir/*.log | head -1); sz=$(wc -c <$f); truncate -s $((sz * 3 / 4)) $f; head -c 50 /dev/urandom >> $f' &&
   echo "torn write injected and node restarted"
+
+event "e2: torn write INSIDE a follower's preallocated region (the file keeps its size)"
+# No garbage appended, on purpose: a crash does not invent bytes, it stops writing them. Cutting the
+# records short and restoring the length leaves exactly what an interrupted flush leaves on a
+# preallocated file, a frame that runs out into the zeros behind it. Recovery must read that as a
+# torn tail (drop it, zero it, keep the room) and NOT as bit rot, which is what event h injects.
+#
+# The cut point is computed from the WRITTEN prefix, never a constant, and it takes three bytes off
+# the END of it rather than a fraction. Both parts were wrong once. A fixed offset lands in the blank
+# tail of a segment that has just rolled, so the cut removes nothing but zeros and the restore puts
+# the same zeros back: the drill reports a torn frame it never injected. A fraction is no better with
+# uniform records, which is what the checker produces: three quarters of four equal frames is exactly
+# a frame boundary, leaving whole frames followed by zeros, which recovery reads as `:blank` and not
+# as torn. One run in four would have certified nothing.
+#
+# Three bytes off the end always lands strictly inside the last frame, because the smallest frame
+# this format can encode is 39 bytes (a 10-byte header plus 29 bytes of fixed payload fields). The
+# guard requires a written prefix bigger than that, so an empty segment fails the event instead of
+# passing it.
+damage_follower active 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); written=$(od -An -v -tx1 $f | awk "{for(i=1;i<=NF;i++){n++; if(\$i!=\"00\") last=n}} END{print last+0}"); [ "$written" -gt 40 ] || { echo "no written records in $f to tear (written=$written)"; exit 1; }; cut=$((written - 3)); truncate -s $cut $f; truncate -s $before $f; [ "$(wc -c <$f)" = "$before" ]' &&
+  echo "torn frame injected inside the preallocated region, size unchanged, node restarted"
 
 event "f: truncate a follower's active-segment copy to half"
 damage_follower active 'f=$(ls $dir/*.log | head -1); sz=$(wc -c <$f); truncate -s $((sz / 2)) $f' &&
