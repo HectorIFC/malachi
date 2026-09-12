@@ -282,7 +282,7 @@ defmodule Malachi.MixProject do
       {:argon2_elixir, "~> 4.1.3"},
       # JWT/JWS validation for the OIDC auth provider. Built on erlang-jose; handles the algorithm
       # pitfalls (alg:none, RS256/HS256 confusion) that hand-rolled JWT verification gets wrong.
-      {:joken, "~> 2.6.2"},
+      {:joken, "~> 2.7.0"},
       {:inet_cidr, "~> 1.0.9"},
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
