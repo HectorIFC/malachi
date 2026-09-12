@@ -795,18 +795,23 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
 
     test "a batch cast before the fence is inside its answer; one cast after is refused" do
+      # The explicit timeouts below are not decoration. What this asserts is ORDER, not latency, and
+      # the cast it waits on appends and fsyncs before it notifies, so the default 100ms is a bet on
+      # disk speed that has nothing to do with the property. It lost that bet twice on one commit in
+      # CI. Two other waits in this file already carry their own timeout for the same reason.
+      #
       # This is what proves the produce path's ordering. Both the cast and the fence call travel from
       # THIS process to the SAME server, and Erlang orders signals between a fixed pair of processes, so
       # the server appends the batch before it takes the seal point. Reversing the two reverses the
       # outcome, which is why `Malachi.BrokerServer` settles rolls AFTER it fires its dispatches.
       server = start_broker()
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["a", "b"]), self(), :tag)
-      assert_receive {:replicate_result, :tag, {:ok, 1}}
+      assert_receive {:replicate_result, :tag, {:ok, 1}}, 1_000
 
       assert {:ok, 2, _bytes} = ReplicationServer.seal(server, @segment, 0)
 
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["c"]), self(), :late)
-      assert_receive {:replicate_result, :late, {:error, {:sealed, 2}}}
+      assert_receive {:replicate_result, :late, {:error, {:sealed, 2}}}, 1_000
       assert read_values(server, @segment) == ["a", "b"]
     end
 
@@ -829,7 +834,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert Process.alive?(pid)
 
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["b"]), self(), :async)
-      assert_receive {:replicate_result, :async, {:error, {:sealed, 1}}}
+      assert_receive {:replicate_result, :async, {:error, {:sealed, 1}}}, 1_000
       assert Process.alive?(pid)
 
       # The primary's fan-out: it must ACK an error rather than stay silent, so the source simply does

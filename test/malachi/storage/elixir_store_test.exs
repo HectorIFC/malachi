@@ -1,5 +1,10 @@
 defmodule Malachi.Storage.ElixirStoreTest do
-  use ExUnit.Case, async: true
+  # async: false, and it costs about a second of wall clock to say so. The preallocation cases here
+  # write and fsync megabytes, and run concurrently with every other async module when they are not
+  # pinned: a fsync-bound test elsewhere then waits on this file's disk traffic rather than on its own
+  # work. That is how a 100ms assert_receive in the replication tests came to fail twice on one commit
+  # while passing everywhere else.
+  use ExUnit.Case, async: false
   use ExUnitProperties
 
   alias Malachi.Log.{Record, Segment}
