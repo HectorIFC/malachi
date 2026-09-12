@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # This job runs repository code (deps and the generators). Nothing here does authenticated
         # git, so the token has no business staying in the local git config.
         with:
@@ -127,7 +127,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -180,7 +180,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 📥 Download results
         uses: actions/download-artifact@v4
