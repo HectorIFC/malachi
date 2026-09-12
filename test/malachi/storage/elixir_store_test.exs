@@ -1,5 +1,10 @@
 defmodule Malachi.Storage.ElixirStoreTest do
-  use ExUnit.Case, async: true
+  # async: false, and it costs about a second of wall clock to say so. The preallocation cases here
+  # write and fsync megabytes, and run concurrently with every other async module when they are not
+  # pinned: a fsync-bound test elsewhere then waits on this file's disk traffic rather than on its own
+  # work. That is how a 100ms assert_receive in the replication tests came to fail twice on one commit
+  # while passing everywhere else.
+  use ExUnit.Case, async: false
   use ExUnitProperties
 
   alias Malachi.Log.{Record, Segment}
@@ -958,6 +963,80 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert {:ok, after_hole} = :file.pread(tail, hole_end, 64)
       assert after_hole != :binary.copy(<<0>>, 64)
       :ok = :file.close(tail)
+    end
+
+    # Megabytes where the rest of this file writes bytes, on purpose: a bounded check was tried here
+    # and a hole this wide is what walked past it. The tail is verified whole now, so size is no
+    # longer what decides, and this pins that.
+    @tag :tmp_dir
+    test "a zeroed region of megabytes is damage too, however wide",
+         %{tmp_dir: directory} do
+      prealloc = 3 * 1024 * 1024
+      {:ok, store} = open(directory, prealloc_bytes: prealloc)
+
+      store =
+        Enum.reduce(0..4, store, fn i, acc ->
+          {:ok, acc, _first, _last} = ElixirStore.append(acc, [rec("v#{i}")])
+          {:ok, acc} = ElixirStore.sync(acc)
+          acc
+        end)
+
+      path = Segment.path(store.segment)
+      hole_start = frame_position(path, 2)
+      hole_bytes = 1_572_864
+      :ok = :file.close(store.file_descriptor)
+
+      bytes = File.read!(path)
+      records_behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
+
+      behind = records_behind
+
+      File.write!(
+        path,
+        binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, hole_bytes) <> behind
+      )
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: prealloc)
+
+      assert %{reason: :bad_magic, position: ^hole_start} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
+    end
+
+    # The case a bounded check cannot see, kept as a regression. A record whose value is zeros carries
+    # almost no non-zero bytes: its header is about thirty of them. Sampling the tail looks only for
+    # non-zero bytes, so putting a hole in front of such a record until its header falls between two
+    # samples made the record vanish with the segment reporting itself healthy. Verifying the tail
+    # whole reads those thirty bytes like any others.
+    test "a record whose value is all zeros is still found behind a hole", %{tmp_dir: directory} do
+      prealloc = 4 * 1024 * 1024
+      {:ok, store} = open(directory, prealloc_bytes: prealloc, flush_bytes: 8 * 1024 * 1024)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0"), rec("v1")])
+      {:ok, store} = ElixirStore.sync(store)
+      hole_start = store.segment.byte_size
+
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec(:binary.copy(<<0>>, 200_000))])
+      {:ok, store} = ElixirStore.sync(store)
+      path = Segment.path(store.segment)
+      :ok = :file.close(store.file_descriptor)
+
+      # 1602864 is chosen, not round. The hole has to clear the 1MB contiguous probe the sampling
+      # version began with, or that probe would have caught this and the test would pass against the
+      # very code it exists to regress. Past the probe, the header lands at 1602946, between the
+      # sample windows at 1573554 and 1639090: missed by the old implementation, found by this one.
+      # An aligned 1.5MB hole puts the header on a sample by luck, which is what hid the bug the
+      # first time it was looked for.
+      bytes = File.read!(path)
+      behind = binary_part(bytes, hole_start, byte_size(bytes) - hole_start)
+      File.write!(path, binary_part(bytes, 0, hole_start) <> :binary.copy(<<0>>, 1_602_864) <> behind)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: prealloc)
+
+      assert %{reason: :bad_magic, position: ^hole_start} = ElixirStore.integrity(recovered)
+      assert recovered.segment.record_count == 2
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
     end
 
     test "still refuses to discard rot that has valid frames after it", %{tmp_dir: directory} do

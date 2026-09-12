@@ -63,14 +63,16 @@ defmodule Malachi.Storage.ElixirStore do
   # remapped sector, a firmware bug, a power loss with a lying cache), and taking the header at face
   # value would have recovery report the segment healthy while dropping every frame past the hole.
   #
-  # 1MB is the trade, and it is a trade. Proving a tail really is unwritten means reading all of it,
-  # measured at 344ms for a 64MB region, paid on EVERY recovery of a healthy segment, which is the
-  # common case and the one that must stay cheap. A megabyte costs about 5ms and covers the shapes
-  # that occur: a 512-byte sector, a 4KB filesystem block, a small extent. Corruption that zeroes
-  # more than a contiguous megabyte AND leaves valid frames behind it goes unseen here, and is left
-  # to the scrub.
-  @blank_probe_bytes 1_048_576
-
+  # Nothing is taken on faith here: a zero frame header is believed only once every byte after it has
+  # been read and found zero. That costs 8.2 ms per MB of tail, measured on the runner, and a blank
+  # tail exists only on a segment being written, so a restart pays it once per range.
+  #
+  # A bounded check was tried first and does not work, which is worth recording because it looks like
+  # it should. Sampling the tail catches only NON-ZERO bytes that land on a sample, and a frame
+  # carries very few of them: a 3MB record whose value is zeros has about thirty, in its header. Put
+  # a hole in front of it so that header falls between two samples and the record vanishes with the
+  # segment reporting itself healthy. Reproduced at a 4KB sample every 64KB. The blind spot is not in
+  # the interval, it is in what the samples can see, so no interval fixes it.
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
 
@@ -358,18 +360,14 @@ defmodule Malachi.Storage.ElixirStore do
     }
   end
 
-  # Whether the next `@blank_probe_bytes` from `position` are all zero, or the file ends first. Reads
-  # in the same bounded windows the scan uses and stops at the first non-zero byte, so the expensive
-  # answer is the reassuring one: a segment with data behind the hole bails almost immediately.
-  defp blank_tail?(file_descriptor, position), do: blank_tail?(file_descriptor, position, @blank_probe_bytes)
-
-  defp blank_tail?(_file_descriptor, _position, remaining) when remaining <= 0, do: true
-
-  defp blank_tail?(file_descriptor, position, remaining) do
-    case :file.pread(file_descriptor, position, min(@read_window_bytes, remaining)) do
+  # Whether everything from `position` to the end of the file is zero. Reads in the same bounded
+  # windows the scan uses and stops at the first non-zero byte, so the expensive answer is the
+  # reassuring one: a segment with data behind the hole bails almost immediately and a healthy one
+  # pays in full.
+  defp blank_tail?(file_descriptor, position) do
+    case :file.pread(file_descriptor, position, @read_window_bytes) do
       {:ok, chunk} ->
-        all_zero?(chunk) and
-          blank_tail?(file_descriptor, position + byte_size(chunk), remaining - byte_size(chunk))
+        all_zero?(chunk) and blank_tail?(file_descriptor, position + byte_size(chunk))
 
       :eof ->
         true

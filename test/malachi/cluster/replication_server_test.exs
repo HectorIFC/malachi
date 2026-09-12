@@ -1,6 +1,7 @@
 defmodule Malachi.Cluster.ReplicationServerTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Storage.Layout
@@ -301,6 +302,47 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     unknown = {{"cold_none", 0}, 0}
     assert ReplicationServer.read(name, unknown, 0, 10) == :eof
     assert ReplicationServer.stored_bytes(name, unknown) == 0
+  end
+
+  test "an active copy zeroed at its end comes back short and is refilled by catch-up" do
+    # The second net under the blank-tail check, tested rather than assumed. A zeroed run at the end
+    # of an ACTIVE segment is indistinguishable from unwritten space by looking at the bytes, and
+    # correctly so: that is what a preallocated tail IS. #149 argued that replication covers this,
+    # because recovery resumes at the durable end it could prove and a push past it nacks. That was
+    # derived from reading the code and had never been exercised.
+    directory = Path.join(System.tmp_dir!(), "malachi_repl_zerotail_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    name = :"repl_zerotail_#{System.unique_integer([:positive])}"
+    {peer, _peer_directory} = {start_broker(), nil}
+
+    {:ok, first} = ReplicationServer.start_link(name: name, directory: directory)
+    values = ~w(a b c d)
+    assert {:ok, 3} = ReplicationServer.replicate(name, @segment, [name], 0, records(values))
+    assert {:ok, 3} = ReplicationServer.replicate(peer, @segment, [peer], 0, records(values))
+    GenServer.stop(first)
+
+    # Zero from the third frame to the end of the file, leaving the frames before it intact. Not
+    # sealed: this is the segment still being written to.
+    [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    {pairs, _valid} = Record.decode_all(File.read!(log_file))
+    {_record, position} = Enum.at(pairs, 2)
+    bytes = File.read!(log_file)
+    File.write!(log_file, binary_part(bytes, 0, position) <> :binary.copy(<<0>>, byte_size(bytes) - position))
+
+    {:ok, _second} = ReplicationServer.start_link(name: name, directory: directory)
+
+    # Recovery resumes where it could prove the data ends, which is short of what was acked.
+    assert ReplicationServer.durable_end(name, @segment, 0) == 2
+
+    # And that is what makes the loss visible to the cluster: a push at the offset the peer thinks
+    # this copy reached is refused, rather than being written past a gap.
+    assert {:error, :out_of_sync} = ReplicationServer.follow(name, @segment, 3, records(["e"]))
+
+    # The repair itself, from the intact peer, resuming at the truncation point.
+    assert {:ok, 4} = Catchup.run(name, peer, @segment, 2, 4)
+    assert ReplicationServer.durable_end(name, @segment, 0) == 4
+    assert {:ok, recovered} = ReplicationServer.read(name, @segment, 0, 10)
+    assert Enum.map(recovered, & &1.value) == values
   end
 
   test "opening a corrupt sealed copy warns and emits an integrity event naming the segment" do
@@ -753,18 +795,23 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
 
     test "a batch cast before the fence is inside its answer; one cast after is refused" do
+      # The explicit timeouts below are not decoration. What this asserts is ORDER, not latency, and
+      # the cast it waits on appends and fsyncs before it notifies, so the default 100ms is a bet on
+      # disk speed that has nothing to do with the property. It lost that bet twice on one commit in
+      # CI. Two other waits in this file already carry their own timeout for the same reason.
+      #
       # This is what proves the produce path's ordering. Both the cast and the fence call travel from
       # THIS process to the SAME server, and Erlang orders signals between a fixed pair of processes, so
       # the server appends the batch before it takes the seal point. Reversing the two reverses the
       # outcome, which is why `Malachi.BrokerServer` settles rolls AFTER it fires its dispatches.
       server = start_broker()
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["a", "b"]), self(), :tag)
-      assert_receive {:replicate_result, :tag, {:ok, 1}}
+      assert_receive {:replicate_result, :tag, {:ok, 1}}, 1_000
 
       assert {:ok, 2, _bytes} = ReplicationServer.seal(server, @segment, 0)
 
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["c"]), self(), :late)
-      assert_receive {:replicate_result, :late, {:error, {:sealed, 2}}}
+      assert_receive {:replicate_result, :late, {:error, {:sealed, 2}}}, 1_000
       assert read_values(server, @segment) == ["a", "b"]
     end
 
@@ -787,7 +834,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert Process.alive?(pid)
 
       ReplicationServer.replicate_async(server, @segment, [server], 0, records(["b"]), self(), :async)
-      assert_receive {:replicate_result, :async, {:error, {:sealed, 1}}}
+      assert_receive {:replicate_result, :async, {:error, {:sealed, 1}}}, 1_000
       assert Process.alive?(pid)
 
       # The primary's fan-out: it must ACK an error rather than stay silent, so the source simply does
