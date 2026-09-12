@@ -58,6 +58,20 @@ defmodule Malachi.Cluster.ScrubberTest do
     position
   end
 
+  # Zeros everything from frame `index` to the end of the file, keeping the file's size. This is what
+  # a zero-fill failure leaves when it lands on the LAST frames of a sealed copy, and it is the one
+  # shape the segment cannot report on its own: the blank-tail check in `Malachi.Storage.ElixirStore`
+  # sees zeros all the way to the end and correctly calls that unwritten space, so the scan comes back
+  # clean and short. Only the control plane's record of what the seal held can catch it.
+  defp zero_tail_from(directory, index) do
+    [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    {pairs, _valid} = Record.decode_all(File.read!(log_file))
+    {_record, position} = Enum.at(pairs, index)
+    bytes = File.read!(log_file)
+    File.write!(log_file, binary_part(bytes, 0, position) <> :binary.copy(<<0>>, byte_size(bytes) - position))
+    position
+  end
+
   # Tests assert on the returned result, so the default seams here stay quiet; pass `:default` for a
   # seam to drop it and get the module's own behaviour (used by the test that checks the log line).
   defp start_scrubber(opts) do
@@ -170,6 +184,67 @@ defmodule Malachi.Cluster.ScrubberTest do
     # the whole point: the copy reads back completely again
     assert read_values(damaged_replica) == values
     assert Scrubber.verify_segment(scrubber, @segment) |> elem(0) == :ok
+  end
+
+  test "a sealed copy zeroed at its end scans clean and is caught by the control plane" do
+    # The net under the blank-tail check, tested rather than assumed. A zeroed run at the end of a
+    # sealed segment is indistinguishable from unwritten space by looking at the bytes, and #149
+    # argued that the cross-check against the seal is what covers it. That argument was derived from
+    # reading the code and had never been exercised.
+    {damaged_replica, damaged_directory} = start_replica()
+    {peer_replica, peer_directory} = start_replica()
+    values = ["a", "b", "c", "d"]
+    metadata = sealed_everywhere([damaged_replica, peer_replica], values)
+
+    peer_scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: peer_replica,
+        directory: peer_directory
+      )
+
+    zero_tail_from(damaged_directory, 2)
+
+    # The copy now serves only what precedes the zeros, silently: this is the loss being caught.
+    assert read_values(damaged_replica) == ["a", "b"]
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: damaged_replica,
+        directory: damaged_directory,
+        peer_scrubber: fn _node -> peer_scrubber end
+      )
+
+    result = Scrubber.scrub_now(scrubber)
+
+    # Not a checksum failure: the frames that remain are all valid, and the scan ends where the zeros
+    # begin. What makes it damage is that the seal recorded four records and this copy holds two.
+    assert [{@segment, %{reason: :short_copy}}] = result.damaged
+    assert result.repaired == [@segment]
+    assert read_values(damaged_replica) == values
+  end
+
+  test "a sealed copy zeroed at its end, with no peer, is reported rather than quietly accepted" do
+    # The same shape without anywhere to repair from. The point is that it is still REPORTED: a node
+    # that cannot fix a short copy must not answer that the copy is fine.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a", "b", "c", "d"])
+    zero_tail_from(directory, 2)
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> metadata end,
+        local_ref: replica,
+        directory: directory
+      )
+
+    result = Scrubber.scrub_now(scrubber)
+
+    assert [{@segment, %{reason: :short_copy}}] = result.damaged
+    assert result.verified == []
+    assert [{@segment, :no_intact_copy}] = result.unrepairable
+    assert Scrubber.damaged(scrubber) == [@segment]
   end
 
   test "rebuilds a rotted index locally: no peer, no demote, no delete" do
