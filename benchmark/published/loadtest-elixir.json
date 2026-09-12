@@ -1,40 +1,40 @@
 {
   "meta": {
-    "command": "mix malachi.loadtest --scenario=produce --connections=64 --duration=15 --warmup=3 --batch=10 --record-size=256 --keys=1000 --pipeline=1 --max=100 --window=100 --prepopulate=0 --topics=1 --topic=loadtest_1789096815465 --host=127.0.0.1 --port=4040 --connect-strategy=bounded --connect-concurrency=32 --user=admin --json",
-    "timestamp": "2026-09-11T03:20:37.667910Z",
-    "git_ref": "b324cb2",
+    "command": "mix malachi.loadtest --scenario=produce --connections=64 --duration=15 --warmup=3 --batch=10 --record-size=256 --keys=1000 --pipeline=1 --max=100 --window=100 --prepopulate=0 --topics=1 --topic=loadtest_1789239784856 --host=127.0.0.1 --port=4040 --connect-strategy=bounded --connect-concurrency=32 --user=admin --json",
+    "timestamp": "2026-09-12T19:03:26.905982Z",
+    "git_ref": "148e82c",
     "hardware": {
       "cpu": "x86_64-pc-linux-gnu",
       "os": "linux 6.17.0",
       "schedulers": 1,
       "cores": 1
     },
-    "git_ref_date": "2026-09-11T00:19:19-03:00",
-    "malachi_version": "0.9.0"
+    "git_ref_date": "2026-09-12T16:02:09-03:00",
+    "malachi_version": "0.9.1"
   },
   "dropped": 0,
   "overloaded": 0,
-  "ops": 34629,
+  "ops": 4205,
   "errors": 0,
   "pipeline": 1,
   "scenario": "produce",
   "connections": 64,
   "duration_s": 15,
   "latency_ms": {
-    "p50": 21.25,
-    "p99": 149.26,
-    "p99_9": 370.73,
-    "p99_99": 370.73
+    "p50": 131.07,
+    "p99": 1095.0,
+    "p99_9": 1548.56,
+    "p99_99": 1617.13
   },
-  "mb_per_s": 5.64,
-  "ops_per_s": 2309,
+  "mb_per_s": 0.68,
+  "ops_per_s": 280,
   "rate_limited": 0,
   "reconnects": 0,
-  "records": 346290,
-  "records_per_s": 23086,
-  "server_cpu_cores": 0.81,
+  "records": 42050,
+  "records_per_s": 2803,
+  "server_cpu_cores": 0.25,
   "server_cpu_budget": 3,
-  "generator_cpu_cores": 0.13,
+  "generator_cpu_cores": 0.01,
   "generator_cpu_budget": 1,
   "peak_at_ladder_limit": false
 }
