@@ -134,6 +134,33 @@ defmodule Malachi.Storage.Preallocation do
   end
 
   @doc """
+  Extends like `extend/4` and makes the extension durable with a sync, or, if either fails, puts the file
+  back to `from_byte`.
+
+  Answers `:extended`, or `:restored` when the extension or its sync failed and the file is `from_byte`
+  long again, or `{:error, reason}` when putting it back failed too. That last one is not a degraded
+  success: the file may keep part of an extension that nothing will trim, so a caller must not go on using
+  the descriptor as though it had never been extended.
+  """
+  @spec extend_or_restore(:file.fd(), non_neg_integer(), non_neg_integer(), strategy()) ::
+          :extended | :restored | {:error, term()}
+  def extend_or_restore(file_descriptor, from_byte, to_byte, strategy) do
+    with :ok <- extend(file_descriptor, from_byte, to_byte, strategy),
+         :ok <- :file.sync(file_descriptor) do
+      :extended
+    else
+      {:error, _reason} -> restore(file_descriptor, from_byte)
+    end
+  end
+
+  defp restore(file_descriptor, size) do
+    with {:ok, _position} <- :file.position(file_descriptor, size),
+         :ok <- :file.truncate(file_descriptor) do
+      :restored
+    end
+  end
+
+  @doc """
   The size of the file behind `file_descriptor`, in bytes.
 
   Reads it from the descriptor rather than from the path, so it describes the file this handle is

@@ -159,6 +159,46 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "a read the device refuses (EIO)" do
+    # A real EIO, not a simulated one: the segment file is a link to /proc/self/mem, whose offset 0 is never
+    # mapped, so every read of it fails with EIO and every open of it succeeds. Only Linux has it.
+    @describetag skip: if(File.exists?("/proc/self/mem"), do: false, else: "needs Linux /proc/self/mem for a real EIO")
+
+    defp eio_segment!(directory) do
+      File.mkdir_p!(directory)
+      path = Segment.path(Segment.new("segment-0", directory, []))
+      File.ln_s!("/proc/self/mem", path)
+
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+      assert {:error, :eio} = :file.pread(file_descriptor, 0, 16), "#{path} did not fail reads with EIO"
+      :ok = :file.close(file_descriptor)
+
+      path
+    end
+
+    test "recover/3 answers it instead of recovering a writable handle around it", %{tmp_dir: directory} do
+      # THE FINDING, reproduced on Linux before the fix: recovery took the failed read for a rotten tail, answered
+      # {:ok, store} positioned at byte 0 with an :eio integrity verdict, and the next append would have written
+      # over every byte nobody could read.
+      eio_segment!(directory)
+
+      assert ElixirStore.recover(directory, "segment-0") == {:error, :eio}
+    end
+
+    test "rebuild_index/3 answers it instead of writing a partial index", %{tmp_dir: directory} do
+      eio_segment!(directory)
+
+      assert ElixirStore.rebuild_index(directory, "segment-0") == {:error, :eio}
+      refute File.exists?(Segment.index_path(Segment.new("segment-0", directory, [])))
+    end
+
+    test "verify/3 still reports it as damage carrying the reason", %{tmp_dir: directory} do
+      eio_segment!(directory)
+
+      assert {:error, %{reason: :eio, position: 0}} = ElixirStore.verify(directory, "segment-0")
+    end
+  end
+
   describe "append / sync / read round-trip" do
     test "reads back appended records in order with sequential offsets", %{tmp_dir: directory} do
       {:ok, store} = open(directory)
