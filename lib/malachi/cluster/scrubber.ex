@@ -43,6 +43,11 @@ defmodule Malachi.Cluster.Scrubber do
   For the same reason a peer asked about a latched copy answers `{:error, :failed_copy}`, so it is never
   chosen as a repair source: this node would delete its own copy and then be refused by the peer.
 
+  A latch that cannot be read (the replication server is slow, restarting or gone) is UNKNOWN, never
+  absent, because the repair is the one step here that destroys something. The pass still verifies the
+  copies and reports their damage, but repairs nothing from a peer (`:latch_unknown` under
+  `:unrepairable`), and a peer in that state answers `{:error, :latch_unknown}` and is not a source.
+
   When the damaged copy is the segment's primary, the repair first submits a
   `:set_segment_replicas` that moves this node to the end of the replica set. Reads follow the head
   of that set, so they move to an intact replica immediately instead of hitting the hole (or the
@@ -154,7 +159,9 @@ defmodule Malachi.Cluster.Scrubber do
       pending: [],
       damaged: MapSet.new(),
       # The reference resolved for the pass currently running (see `:local_ref`).
-      resolved_ref: nil
+      resolved_ref: nil,
+      # Whether the pass currently running could not learn which of its copies are latched (see `repair/4`).
+      latches_unknown?: false
     }
 
     schedule(state)
@@ -168,10 +175,16 @@ defmodule Malachi.Cluster.Scrubber do
   end
 
   def handle_call({:verify_segment, segment_id}, _from, state) do
-    if segment_id in latched(resolve_ref(state.local_ref), [segment_id]) do
-      {:reply, {:error, :failed_copy}, state}
-    else
-      {:reply, verify(state, segment_id), state}
+    case latched(resolve_ref(state.local_ref), [segment_id]) do
+      {:ok, failed} ->
+        if segment_id in failed,
+          do: {:reply, {:error, :failed_copy}, state},
+          else: {:reply, verify(state, segment_id), state}
+
+      # The asker deletes its own copy once this answers `{:ok, _}`, so an answer about a copy whose latch
+      # nobody could read must not be one.
+      :unknown ->
+        {:reply, {:error, :latch_unknown}, state}
     end
   end
 
@@ -226,7 +239,12 @@ defmodule Malachi.Cluster.Scrubber do
   defp run(state) do
     state = %{state | resolved_ref: resolve_ref(state.local_ref)}
     {segments, state} = take_segments(state)
-    failed = latched(state.resolved_ref, Enum.map(segments, & &1.id))
+
+    {failed, state} =
+      case latched(state.resolved_ref, Enum.map(segments, & &1.id)) do
+        {:ok, failed} -> {failed, %{state | latches_unknown?: false}}
+        :unknown -> {MapSet.new(), %{state | latches_unknown?: true}}
+      end
 
     {result, state} =
       Enum.reduce(segments, {empty_result(), state}, fn segment, {acc, acc_state} ->
@@ -317,6 +335,15 @@ defmodule Malachi.Cluster.Scrubber do
   # this node does not already hold. That makes it the one damage shape with no peer, no demotion and
   # no deletion, which is also why it must never be confused with damage to the segment itself.
   defp repair(segment, %{reason: :bad_index}, acc, state), do: rebuild_index(segment, acc, state)
+
+  # A repair from a peer deletes this copy before refetching it, which is only safe on a copy known not to
+  # be latched: a latched one is SelfHealing's to replace, and refetching it onto the disk that failed is the
+  # loop the latch check exists to stop. Unknown is not "not latched", so the damage stays reported and the
+  # copy stays on disk until a pass that can read the latches.
+  defp repair(segment, _segment_damage, acc, %{latches_unknown?: true} = state) do
+    {%{acc | unrepairable: [{segment.id, :latch_unknown} | acc.unrepairable]}, state}
+  end
+
   defp repair(segment, _segment_damage, acc, state), do: repair_from_peer(segment, acc, state)
 
   defp rebuild_index(segment, acc, state) do
@@ -422,15 +449,15 @@ defmodule Malachi.Cluster.Scrubber do
 
   defp forget_damage(state, segment_id), do: %{state | damaged: MapSet.delete(state.damaged, segment_id)}
 
-  # Which of `segment_ids` this node's replication server has latched as failed. A server that cannot say
-  # latches nothing here: the scrub then runs as it did before latches existed, and a repair that needs the
-  # server fails on its own.
-  defp latched(_ref, []), do: MapSet.new()
+  # Which of `segment_ids` this node's replication server has latched as failed, or `:unknown` when it cannot
+  # say. Never an empty set on an error: an empty set reads as "none latched", which is what lets a latched
+  # copy be deleted by a repair or serve as another node's repair source (see the moduledoc).
+  defp latched(_ref, []), do: {:ok, MapSet.new()}
 
   defp latched(ref, segment_ids) do
     case ReplicationServer.failed_segments(ref, segment_ids, @latch_timeout) do
-      {:ok, failed} -> failed
-      {:error, _reason} -> MapSet.new()
+      {:ok, failed} -> {:ok, failed}
+      {:error, _reason} -> :unknown
     end
   end
 
