@@ -11,7 +11,15 @@
 # read by a human still leaves a record.
 
 COMPOSE="docker compose -f docker-compose.cluster.yml"
-WORK="$(mktemp -d)"
+# The scratch dir is bind-mounted into the checker container (`-v "$WORK:/chaos"`), so it must live where the
+# Docker host can see it. A bare `mktemp -d` does not guarantee that: on macOS it ignores TMPDIR and picks
+# /var/folders, which Docker Desktop need not share with its VM. The checker then wrote acked.log inside the
+# VM, `close_window` read nothing, and the drill failed with "checker acked nothing" while every write had
+# been acknowledged. Every caller cds to the repo root before sourcing this file, and the repo sits on a path
+# the host shares; CHAOS_WORK_ROOT overrides it.
+CHAOS_WORK_ROOT="${CHAOS_WORK_ROOT:-$PWD/tmp/chaos}"
+mkdir -p "$CHAOS_WORK_ROOT" || { echo "cannot create $CHAOS_WORK_ROOT"; exit 1; }
+WORK="$(mktemp -d "$CHAOS_WORK_ROOT/work.XXXXXX")" || { echo "cannot create a scratch dir under $CHAOS_WORK_ROOT"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
 FAILED=0
 CHAOS_HOSTS="malachi1,malachi2,malachi3"

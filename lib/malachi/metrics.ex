@@ -80,6 +80,22 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records a storage operation that failed on a segment's copy (`Malachi.Cluster.ReplicationServer` took
+  the copy out of service), bucketed by `reason`: `:enospc` (a full volume), `:eio` (a failing device),
+  `:eacces` (a permission problem), and `:other` for anything else. Buckets rather than the raw reason
+  because a Prometheus label must come from a closed set, and these three are the ones that call for
+  different operator actions.
+  """
+  def record_storage_failure(reason) do
+    key = {:storage_failure, storage_failure_bucket(reason)}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
+  defp storage_failure_bucket(reason) when reason in [:enospc, :eio, :eacces], do: reason
+  defp storage_failure_bucket(_reason), do: :other
+
+  @doc """
   Records one integrity scrub pass: how many segments it verified, repaired, and could not repair. A
   verified total that stops advancing is how an operator sees that the scrub itself has stopped,
   which the failure counters alone cannot show (they stay at zero both when all is well and when
@@ -292,6 +308,10 @@ defmodule Malachi.Metrics do
         integrity_incomplete: get_counter({:integrity_failure, :incomplete}),
         integrity_short_copy: get_counter({:integrity_failure, :short_copy}),
         integrity_bad_index: get_counter({:integrity_failure, :bad_index}),
+        storage_failure_enospc: get_counter({:storage_failure, :enospc}),
+        storage_failure_eio: get_counter({:storage_failure, :eio}),
+        storage_failure_eacces: get_counter({:storage_failure, :eacces}),
+        storage_failure_other: get_counter({:storage_failure, :other}),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
         scrub_segments_repaired: get_counter(:scrub_segments_repaired),
         scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),

@@ -13,6 +13,10 @@ end
 # Individual tests handle their own state isolation via setup/on_exit blocks
 {:ok, _} = Application.ensure_all_started(:malachi)
 
+# The rules table the storage-failure tests inject faults through. Scoped by directory, so async tests
+# never see each other's rules.
+:ok = Malachi.Test.FaultySegmentStore.start()
+
 # Remove this run's isolated log-broker and ra data dirs (config/test.exs) once the suite finishes.
 ExUnit.after_suite(fn _result ->
   for key <- [:log_data_dir, :ra_data_dir] do

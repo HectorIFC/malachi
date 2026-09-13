@@ -3,6 +3,7 @@ defmodule Malachi.LogTest do
 
   alias Malachi.Log
   alias Malachi.Log.{Record, Segment}
+  alias Malachi.Test.FaultySegmentStore
 
   @moduletag :tmp_dir
 
@@ -314,6 +315,102 @@ defmodule Malachi.LogTest do
     test "an empty or missing directory is :enoent, not a failure", %{tmp_dir: directory} do
       assert Log.verify(directory) == {:error, :enoent}
       assert Log.verify(Path.join(directory, "nope")) == {:error, :enoent}
+    end
+  end
+
+  # A log over the fault-injecting store, with its rules removed when the test ends.
+  defp faulty_log(directory, opts \\ []) do
+    on_exit(fn -> FaultySegmentStore.clear(directory) end)
+    Log.open(directory, [store: FaultySegmentStore] ++ opts)
+  end
+
+  defp first_segment_path(directory), do: Path.join(directory, "00000000000000000000.log")
+
+  describe "storage failures (passed through exactly as the store reported them)" do
+    test "open/2 answers the error when the directory cannot be created", %{tmp_dir: directory} do
+      blocker = Path.join(directory, "a_file")
+      File.write!(blocker, "")
+
+      assert Log.open(Path.join(blocker, "log")) == {:error, :enotdir}
+      # recover/2 of a directory with no segments goes through open/2, and says the same
+      assert Log.recover(Path.join(blocker, "log")) == {:error, :enotdir}
+    end
+
+    test "an append whose segment fails to open answers the store's error", %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory)
+      FaultySegmentStore.fail(directory, :open, {:error, :eacces})
+
+      assert Log.append(log, [rec("a")]) == {:error, :eacces}
+    end
+
+    test "an append that fails on a segment it just opened closes that segment", %{tmp_dir: directory} do
+      # Preallocated, so closing is visible from outside: `close/1` gives the tail back, and a file that was
+      # never closed would still be the full 64KB.
+      {:ok, log} = faulty_log(directory, prealloc_bytes: 65_536)
+      FaultySegmentStore.fail(directory, :append, {:error, :enospc})
+
+      assert Log.append(log, [rec("a")]) == {:error, :enospc}
+      assert File.stat!(first_segment_path(directory)).size == 0
+    end
+
+    test "an append that fails on a segment already open leaves that segment to its owner", %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory)
+      log = append_sync(log, rec("a"))
+      FaultySegmentStore.fail(directory, :append, {:error, :enospc})
+
+      assert Log.append(log, [rec("b")]) == {:error, :enospc}
+
+      # Still open: the caller's log can be synced and read, so it can be closed by whoever holds it.
+      FaultySegmentStore.clear(directory)
+      assert {:ok, log} = Log.sync(log)
+      assert read_all(log) |> Enum.map(& &1.value) == ["a"]
+      :ok = Log.close(log)
+    end
+
+    test "a failed sync answers the store's error", %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory)
+      {:ok, log, 0, 0} = Log.append(log, [rec("a")])
+      FaultySegmentStore.fail(directory, :sync, {:error, :enospc})
+
+      assert Log.sync(log) == {:error, :enospc}
+    end
+
+    test "a sync whose roll fails to seal the segment answers that error", %{tmp_dir: directory} do
+      # max_bytes: 1, so the very first sync hits the seal threshold and rolls.
+      {:ok, log} = faulty_log(directory, max_bytes: 1)
+      {:ok, log, 0, 0} = Log.append(log, [rec("a")])
+      FaultySegmentStore.fail(directory, :seal, {:error, :eio})
+
+      assert Log.sync(log) == {:error, :eio}
+      assert Log.roll(log) == {:error, :eio}
+    end
+
+    test "seal/1 answers the error from sealing the segment file", %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory)
+      log = append_sync(log, rec("a"))
+      FaultySegmentStore.fail(directory, :seal, {:error, :eio})
+
+      assert Log.seal(log) == {:error, :eio}
+      refute File.exists?(Log.seal_marker_path(directory))
+    end
+
+    test "seal/1 answers the error from writing the log's own marker", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = append_sync(log, rec("a"))
+      # A directory where the marker file has to go: the only write here that belongs to the log itself.
+      File.mkdir_p!(Log.seal_marker_path(directory))
+
+      assert Log.seal(log) == {:error, :eisdir}
+    end
+
+    test "recover/2 answers the error when the store cannot recover the last segment", %{tmp_dir: directory} do
+      {:ok, log} = open(directory)
+      log = append_sync(log, rec("a"))
+      :ok = Log.close(log)
+      on_exit(fn -> FaultySegmentStore.clear(directory) end)
+      FaultySegmentStore.fail(directory, :recover, {:error, :eio})
+
+      assert Log.recover(directory, store: FaultySegmentStore) == {:error, :eio}
     end
   end
 

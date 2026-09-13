@@ -57,8 +57,24 @@ defmodule Malachi.Cluster.Failover do
   blocked, which is the CP choice, and recovering it is a deliberate operator decision rather than
   something this policy takes on the operator's behalf.
 
-  The probing itself lives in the caller: `candidates/2` names the segments to probe, and `plan/4`
+  The probing itself lives in the caller: `candidates/3` names the segments to probe, and `plan/5`
   turns the probe results into commands, so the policy stays pure and testable without processes.
+
+  ## A copy that failed
+
+  A replica does not have to die for its copy to be lost to a segment. When a storage operation fails,
+  `Malachi.Cluster.ReplicationServer` takes that copy out of service for good (it never writes it again,
+  and answers every request for it with an error), and the segment can no longer count on it. NorthGuard
+  treats that exactly like a failed broker, "we just seal it, make a new one, move the producers over",
+  and so does this policy: a segment with a FAILED copy is a candidate too, whether the copy is the
+  primary's or a follower's, with the caller learning which copies failed from
+  `Malachi.Cluster.ReplicationServer.failed_segments/3` (`failure_probes/2` says whom to ask).
+
+  The argument above carries over unchanged, because a failed copy is removed from the answers just as a
+  dead primary is: it is never probed, never fenced, and never becomes the head. The consequence carries
+  over too: without the failed copy there must still be a majority, so at `replication_factor: 3` one
+  failed copy seals the segment on the other two, while at 2 and 1 the range stays blocked until the
+  failed server restarts.
   """
 
   alias Malachi.Metadata
@@ -69,18 +85,22 @@ defmodule Malachi.Cluster.Failover do
   @typedoc "Probe results per segment: `%{segment_id => %{replica_ref => probe}}`."
   @type probes :: %{optional(term()) => %{optional(term()) => probe()}}
 
+  @typedoc "Copies that failed in storage, as `{segment_id, replica}` pairs."
+  @type failed :: MapSet.t()
+
   @doc """
-  The active segments whose primary is dead, each with the live replicas worth probing. The caller
-  probes these and feeds the results to `plan/4`. Sorted, so a pass is deterministic.
+  The active segments whose primary is dead or that have a failed copy, each with the live, non-failed
+  replicas worth probing. The caller probes these and feeds the results to `plan/5`. Sorted, so a pass is
+  deterministic.
   """
-  @spec candidates(Metadata.t(), [Metadata.broker()]) :: [{term(), [Metadata.broker()]}]
-  def candidates(%Metadata{} = metadata, live_brokers) do
+  @spec candidates(Metadata.t(), [Metadata.broker()], failed()) :: [{term(), [Metadata.broker()]}]
+  def candidates(%Metadata{} = metadata, live_brokers, failed \\ MapSet.new()) do
     live = MapSet.new(live_brokers)
 
     metadata.segments
     |> Map.values()
-    |> Enum.filter(&active_primary_dead?(&1, live))
-    |> Enum.map(&{&1.id, Enum.filter(&1.replica_set, fn replica -> MapSet.member?(live, replica) end)})
+    |> Enum.filter(&(active_primary_dead?(&1, live) or active_copy_failed?(&1, failed)))
+    |> Enum.map(&{&1.id, probeable_replicas(&1, live, failed)})
     |> Enum.reject(fn {_id, replicas} -> replicas == [] end)
     |> Enum.sort()
   end
@@ -91,13 +111,35 @@ defmodule Malachi.Cluster.Failover do
   majority of its replica set is skipped: see the moduledoc on why that leaves the range blocked rather
   than risking acknowledged data. Returns a sorted (deterministic) list.
   """
-  @spec plan(Metadata.t(), [Metadata.broker()], probes(), integer()) :: [Metadata.command()]
-  def plan(%Metadata{} = metadata, live_brokers, probes, now_ms) do
-    # `candidates/2` is already sorted, and the per-segment pair must stay in the order it is built
+  @spec plan(Metadata.t(), [Metadata.broker()], probes(), integer(), failed()) :: [Metadata.command()]
+  def plan(%Metadata{} = metadata, live_brokers, probes, now_ms, failed \\ MapSet.new()) do
+    # `candidates/3` is already sorted, and the per-segment pair must stay in the order it is built
     # (seal, then head), so the list is not re-sorted here.
     metadata
-    |> candidates(live_brokers)
-    |> Enum.flat_map(&seal(&1, metadata, probes, now_ms))
+    |> candidates(live_brokers, failed)
+    |> Enum.flat_map(&seal(&1, metadata, probes, now_ms, failed))
+  end
+
+  @doc """
+  Whom to ask which copies failed: every live replica of a segment, active or sealed, with the segments it
+  holds, as `[{replica, [segment_id]}]`, sorted. One entry per replica so the caller makes one batched call
+  per broker, whatever the number of segments.
+
+  Sealed segments are asked about too, though they are never a failover candidate: a sealed copy that
+  failed takes no seal, but it is a lost replica the metadata still lists, which
+  `Malachi.Cluster.SelfHealing` replaces on another broker.
+  """
+  @spec failure_probes(Metadata.t(), [Metadata.broker()]) :: [{Metadata.broker(), [term()]}]
+  def failure_probes(%Metadata{} = metadata, live_brokers) do
+    live = MapSet.new(live_brokers)
+
+    metadata.segments
+    |> Map.values()
+    |> Enum.filter(&(&1.state in [:active, :sealed]))
+    |> Enum.flat_map(fn segment -> for replica <- segment.replica_set, replica in live, do: {replica, segment.id} end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.map(fn {replica, segment_ids} -> {replica, Enum.sort(segment_ids)} end)
+    |> Enum.sort()
   end
 
   @doc """
@@ -113,9 +155,25 @@ defmodule Malachi.Cluster.Failover do
 
   defp active_primary_dead?(_segment, _live), do: false
 
-  defp seal({segment_id, _live_replicas}, metadata, probes, now_ms) do
+  defp active_copy_failed?(%{state: :active, id: id, replica_set: replica_set}, failed) do
+    Enum.any?(replica_set, &MapSet.member?(failed, {id, &1}))
+  end
+
+  defp active_copy_failed?(_segment, _failed), do: false
+
+  defp probeable_replicas(segment, live, failed) do
+    Enum.filter(segment.replica_set, &(MapSet.member?(live, &1) and not MapSet.member?(failed, {segment.id, &1})))
+  end
+
+  defp seal({segment_id, _live_replicas}, metadata, probes, now_ms, failed) do
     segment = Map.fetch!(metadata.segments, segment_id)
-    answers = Map.get(probes, segment_id, %{})
+
+    # Filtered here as well as in `candidates/3`, because the probes come from the caller: an answer that
+    # arrived from a copy known to have failed must neither count toward the majority nor become the head.
+    answers =
+      probes
+      |> Map.get(segment_id, %{})
+      |> Map.reject(fn {replica, _probe} -> MapSet.member?(failed, {segment_id, replica}) end)
 
     if majority?(map_size(answers), segment.replica_set) do
       # The furthest end reported, not the one a majority of the ANSWERS agree on. Taking the

@@ -5,6 +5,8 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Storage.Layout
+  alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.StorageFaults
 
   @segment {{"events", 0}, 0}
 
@@ -14,7 +16,12 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   defp start_broker_at(opts) do
     name = :"repl_#{System.unique_integer([:positive])}"
     directory = Path.join(System.tmp_dir!(), "malachi_repl_#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(directory) end)
+
+    on_exit(fn ->
+      FaultySegmentStore.clear(directory)
+      File.rm_rf!(directory)
+    end)
+
     start_supervised!({ReplicationServer, [name: name, directory: directory] ++ opts}, id: name)
     {name, directory}
   end
@@ -423,59 +430,316 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert ReplicationServer.durable_end(name, @segment, 0) == 2
   end
 
-  # Counts the fsyncs that actually happen (a sync with nothing buffered is a no-op and does not
-  # count), so a test can prove that group commit coalesces them. Kept local to this file with its own
-  # table: sharing a global counter with other test modules would couple async tests through mutable
-  # global state.
-  defmodule CountingStore do
-    @behaviour Malachi.Storage.SegmentStore
-    alias Malachi.Storage.ElixirStore
+  # A second segment on the same server, to prove a failure stays with the segment that failed.
+  @other_segment {{"events", 1}, 0}
 
-    @impl true
-    def sync(handle) do
-      if ElixirStore.pending?(handle), do: :ets.update_counter(:repl_gc_syncs, :n, 1)
-      ElixirStore.sync(handle)
+  # Where a segment's files live under a server's directory, which is what a FaultySegmentStore rule names.
+  defp storage_dir(directory, segment), do: Layout.segment_directory(directory, segment)
+
+  # Fails `segment` on `ref` for good through a sync that answers `reason`, and returns the storage error
+  # every later request for it must answer. The server logs the failure, which is captured here.
+  defp fail_segment!(ref, directory, segment, reason) do
+    FaultySegmentStore.fail(storage_dir(directory, segment), :sync, {:error, reason})
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert ReplicationServer.replicate(ref, segment, [ref], 0, records(["doomed"])) == {:error, {:storage, reason}}
+    end)
+
+    {:error, {:storage, reason}}
+  end
+
+  describe "seal_async/5 (the fence answered as a message)" do
+    test "answers what the sealed log holds, idempotently, and the segment refuses writes afterwards" do
+      name = start_broker()
+      assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
+
+      :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :first)
+      assert_receive {:seal_result, :first, {:ok, 2, bytes}}
+      assert bytes > 0
+
+      # The same numbers again: the resend a caller makes after an unanswered fence is harmless.
+      :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :again)
+      assert_receive {:seal_result, :again, {:ok, 2, ^bytes}}
+
+      assert {:error, {:sealed, 2}} = ReplicationServer.replicate(name, @segment, [name], 0, records(["late"]))
     end
 
-    @impl true
-    def open(dir, id, opts), do: ElixirStore.open(dir, id, opts)
-    @impl true
-    def recover(dir, id, opts), do: ElixirStore.recover(dir, id, opts)
-    @impl true
-    def open_read(dir, id, opts), do: ElixirStore.open_read(dir, id, opts)
-    @impl true
-    def append(handle, records), do: ElixirStore.append(handle, records)
-    @impl true
-    def read(handle, offset, max), do: ElixirStore.read(handle, offset, max)
-    @impl true
-    def seal(handle), do: ElixirStore.seal(handle)
-    @impl true
-    def next_offset(handle), do: ElixirStore.next_offset(handle)
-    @impl true
-    def logical_bytes(handle), do: ElixirStore.logical_bytes(handle)
-    @impl true
-    def sealed?(handle), do: ElixirStore.sealed?(handle)
-    @impl true
-    def pending?(handle), do: ElixirStore.pending?(handle)
-    @impl true
-    def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
-    @impl true
-    def close(handle), do: ElixirStore.close(handle)
-    @impl true
-    def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
-    @impl true
-    def integrity(handle), do: ElixirStore.integrity(handle)
-    @impl true
-    def rebuild_index(dir, id, opts), do: ElixirStore.rebuild_index(dir, id, opts)
+    test "answers a failed copy's storage error instead of a seal" do
+      {name, directory} = start_broker_at(store: FaultySegmentStore)
+      error = fail_segment!(name, directory, @segment, :eio)
+
+      :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :tag)
+      assert_receive {:seal_result, :tag, ^error}
+    end
+
+    test "is never answered by a server that is not there, and does not raise for it" do
+      assert ReplicationServer.seal_async(:"nobody_#{System.unique_integer([:positive])}", @segment, 0, self(), :t) ==
+               :ok
+
+      refute_receive {:seal_result, :t, _reply}, 100
+    end
+  end
+
+  describe "storage failures (one failing segment never takes the server down)" do
+    test "ENOSPC on a sync answers the caller, and the server and its other segments keep serving" do
+      {primary, directory} = start_broker_at(store: FaultySegmentStore)
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :enospc})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert ReplicationServer.replicate(primary, @segment, [primary], 0, records(["a"])) ==
+                   {:error, {:storage, :enospc}}
+        end)
+
+      assert log =~ "failed in storage"
+      assert log =~ "enospc"
+      assert Process.alive?(Process.whereis(primary))
+
+      assert {:ok, 1} = ReplicationServer.replicate(primary, @other_segment, [primary], 0, records(["x", "y"]))
+      assert read_values(primary, @other_segment) == ["x", "y"]
+    end
+
+    test "a failed segment is refused on every entry point without touching the disk again" do
+      {primary, directory} = start_broker_at(store: FaultySegmentStore)
+      segment_dir = storage_dir(directory, @segment)
+      error = fail_segment!(primary, directory, @segment, :enospc)
+      operations = [:open, :recover, :open_read, :append, :sync, :seal, :read]
+      touched = for operation <- operations, do: FaultySegmentStore.count(segment_dir, operation)
+
+      assert ReplicationServer.replicate(primary, @segment, [primary], 0, records(["b"])) == error
+      assert ReplicationServer.append(primary, @segment, [primary], 0, records(["b"])) == error
+      assert ReplicationServer.follow(primary, @segment, 0, records(["b"])) == error
+      assert ReplicationServer.read(primary, @segment, 0, 10) == error
+      assert ReplicationServer.durable_end(primary, @segment, 0) == error
+      assert ReplicationServer.durable_stats(primary, @segment, 0) == error
+      assert ReplicationServer.seal(primary, @segment, 0) == error
+
+      :ok = ReplicationServer.replicate_async(primary, @segment, [primary], 0, records(["b"]), self(), :tag)
+      assert_receive {:replicate_result, :tag, ^error}
+
+      assert touched == for(operation <- operations, do: FaultySegmentStore.count(segment_dir, operation))
+      assert ReplicationServer.failed_segments(primary, [@segment, @other_segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    test "deleting a failed segment clears the latch, so the id can be stored again" do
+      {primary, directory} = start_broker_at(store: FaultySegmentStore)
+      _error = fail_segment!(primary, directory, @segment, :eio)
+      FaultySegmentStore.clear(storage_dir(directory, @segment))
+
+      assert ReplicationServer.delete(primary, @segment) == :ok
+      assert ReplicationServer.failed_segments(primary, [@segment]) == {:ok, MapSet.new()}
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["fresh"]))
+      assert read_values(primary, @segment) == ["fresh"]
+    end
+
+    test "batches parked on a segment are answered with its storage error, not left to time out as no_quorum" do
+      {primary, directory} = start_broker_at(store: FaultySegmentStore)
+      # Followers nobody registered: pushes to them go nowhere, so the first batch parks for a quorum.
+      replica_set = [
+        primary,
+        :"silent_a_#{System.unique_integer([:positive])}",
+        :"silent_b_#{System.unique_integer([:positive])}"
+      ]
+
+      parked = Task.async(fn -> ReplicationServer.replicate(primary, @segment, replica_set, 0, records(["a"])) end)
+      assert eventually(fn -> Map.get(:sys.get_state(primary).inflight, @segment, []) != [] end)
+
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.replicate(primary, @segment, replica_set, 1, records(["b"])) ==
+                 {:error, {:storage, :eio}}
+
+        # Well inside the 5s follow timeout that would otherwise answer it, and with the real reason.
+        assert Task.await(parked, 2_000) == {:error, {:storage, :eio}}
+      end)
+    end
+
+    test "a follower whose append fails acks the error, and keeps acking it without touching the disk" do
+      {follower, directory} = start_broker_at(store: FaultySegmentStore)
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        GenServer.cast(follower, {:replica_append, @segment, 0, 0, records(["a"]), -1, self()})
+        assert_receive {:"$gen_cast", {:replica_ack, @segment, _ref, {:error, {:storage, :eio}}}}, 2_000
+      end)
+
+      GenServer.cast(follower, {:replica_append, @segment, 0, 0, records(["a"]), -1, self()})
+      assert_receive {:"$gen_cast", {:replica_ack, @segment, _ref, {:error, {:storage, :eio}}}}, 2_000
+    end
+
+    test "under group commit a follower withholds a failed segment's deferred ack and releases the others" do
+      {follower, directory} =
+        start_broker_at(store: FaultySegmentStore, group_commit: true, group_commit_interval_ms: 20)
+
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :enospc})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for segment <- [@segment, @other_segment] do
+          GenServer.cast(follower, {:replica_append, segment, 0, 0, records(["a"]), -1, self()})
+        end
+
+        assert_receive {:"$gen_cast", {:replica_ack, @other_segment, _ref, {:ok, 0}}}, 2_000
+        refute_receive {:"$gen_cast", {:replica_ack, @segment, _ref, {:ok, _last}}}, 200
+      end)
+
+      assert ReplicationServer.failed_segments(follower, [@segment, @other_segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    test "flush/1 names the segment whose buffered records were lost, once" do
+      {name, directory} = start_broker_at(store: FaultySegmentStore)
+      assert {:ok, 0} = ReplicationServer.append(name, @segment, [name], 0, records(["a"]))
+      assert {:ok, 0} = ReplicationServer.append(name, @other_segment, [name], 0, records(["x"]))
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :enospc})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.flush(name) == {:error, [{@segment, :enospc}]}
+      end)
+
+      assert ReplicationServer.flush(name) == :ok
+      assert read_values(name, @other_segment) == ["x"]
+    end
+
+    test "flush/1 reports a loss that happened BETWEEN the append it would ack and the flush itself" do
+      # The append was already answered {:ok, last}, so a flush that only looked at its own syncs would hand
+      # the broker an :ok for records that are gone.
+      {name, directory} = start_broker_at(store: FaultySegmentStore)
+      assert {:ok, 0} = ReplicationServer.append(name, @segment, [name], 0, records(["a"]))
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :enospc})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.durable_stats(name, @segment, 0) == {:error, {:storage, :enospc}}
+      end)
+
+      assert ReplicationServer.flush(name) == {:error, [{@segment, :enospc}]}
+    end
+
+    test "a cold read of a segment this server cannot open answers the error and the server stays up" do
+      {name, directory} = start_broker_at([])
+      assert {:ok, 0} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a"]))
+      :ok = stop_supervised(name)
+
+      StorageFaults.make_unreadable!(Path.join(storage_dir(directory, @segment), "00000000000000000000.log"))
+      start_supervised!({ReplicationServer, [name: name, directory: directory]}, id: name)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.read(name, @segment, 0, 10) == {:error, {:storage, :eacces}}
+      end)
+
+      assert Process.alive?(Process.whereis(name))
+      assert ReplicationServer.failed_segments(name, [@segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    test "a read below a segment's start is still :out_of_range, not a storage failure" do
+      {name, _directory} = start_broker_at([])
+      assert {:ok, 5} = ReplicationServer.replicate(name, @segment, [name], 5, records(["a"]))
+
+      assert ReplicationServer.read(name, @segment, 0, 10) == {:error, :out_of_range}
+      assert ReplicationServer.failed_segments(name, [@segment]) == {:ok, MapSet.new()}
+    end
+
+    test "fenced_segments/3 leaves out a failed copy even when it carries a fence marker" do
+      {name, directory} = start_broker_at(store: FaultySegmentStore)
+      assert {:ok, 0} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a"]))
+      assert {:ok, 1, _bytes} = ReplicationServer.seal(name, @segment, 0)
+      assert {:ok, %{@segment => {1, _}}} = ReplicationServer.fenced_segments(name, [{@segment, 0}])
+
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :open_read, {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.read(name, @segment, 0, 10) == {:error, {:storage, :eio}}
+      end)
+
+      assert ReplicationServer.fenced_segments(name, [{@segment, 0}]) == {:ok, %{}}
+    end
+
+    test "a storage failure is reported once through telemetry, and a refused request reports nothing" do
+      {primary, directory} = start_broker_at(store: FaultySegmentStore)
+      # A segment id of this test's own. The handler is global and this module runs async, so the shared
+      # @segment, which other tests here also fail with :enospc, would put their events in this mailbox.
+      segment = {{"telemetry_#{System.unique_integer([:positive])}", 0}, 0}
+      parent = self()
+      handler_id = "storage-failure-test-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:malachi, :storage, :failure],
+        fn name, measurements, metadata, _config -> send(parent, {:telemetry, name, measurements, metadata}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      error = fail_segment!(primary, directory, segment, :enospc)
+      assert_receive {:telemetry, [:malachi, :storage, :failure], %{count: 1}, %{segment: ^segment, reason: :enospc}}
+
+      assert ReplicationServer.replicate(primary, segment, [primary], 0, records(["b"])) == error
+      refute_receive {:telemetry, [:malachi, :storage, :failure], _measurements, %{segment: ^segment}}, 100
+    end
+
+    test "an append the store refuses answers the storage error on every write path" do
+      error = {:error, {:storage, :eio}}
+
+      # Each path on a server of its own: a failed segment is latched, and a path tried after the latch
+      # would be refused by the latch instead of reaching the write it is meant to exercise.
+      fail_append = fn opts ->
+        {name, directory} = start_broker_at([store: FaultySegmentStore] ++ opts)
+        FaultySegmentStore.fail(storage_dir(directory, @segment), :append, {:error, :eio})
+        name
+      end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        buffered = fail_append.([])
+        assert ReplicationServer.append(buffered, @segment, [buffered], 0, records(["a"])) == error
+
+        durable = fail_append.([])
+        assert ReplicationServer.replicate(durable, @segment, [durable], 0, records(["a"])) == error
+
+        grouped = fail_append.(group_commit: true, group_commit_interval_ms: 20)
+        assert ReplicationServer.replicate(grouped, @segment, [grouped], 0, records(["a"])) == error
+
+        grouped_follower = fail_append.(group_commit: true, group_commit_interval_ms: 20)
+        GenServer.cast(grouped_follower, {:replica_append, @segment, 0, 0, records(["a"]), -1, self()})
+        assert_receive {:"$gen_cast", {:replica_ack, @segment, _ref, ^error}}, 2_000
+      end)
+    end
+
+    test "a fenced segment whose recovery fails after a restart is a storage failure, never reported as fenced" do
+      {name, directory} = start_broker_at(store: FaultySegmentStore)
+
+      for segment <- [@segment, @other_segment] do
+        assert {:ok, 0} = ReplicationServer.replicate(name, segment, [name], 0, records(["a"]))
+        assert {:ok, 1, _bytes} = ReplicationServer.seal(name, segment, 0)
+      end
+
+      # Back up over the fence markers with a store whose recovery fails: the fence is visible without
+      # opening anything, and where it ENDED can only be learned by opening, which now fails.
+      :ok = stop_supervised(name)
+      FaultySegmentStore.fail(directory, :recover, {:error, :eio})
+      start_supervised!({ReplicationServer, [name: name, directory: directory, store: FaultySegmentStore]}, id: name)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        # Two segments, because the first request fails its segment and every later one is then refused by
+        # the latch: each of these has to be the FIRST to reach its segment.
+        assert ReplicationServer.fenced_segments(name, [{@other_segment, 0}]) == {:ok, %{}}
+        assert ReplicationServer.replicate(name, @segment, [name], 0, records(["b"])) == {:error, {:storage, :eio}}
+      end)
+
+      assert ReplicationServer.failed_segments(name, [@segment, @other_segment]) ==
+               {:ok, MapSet.new([@segment, @other_segment])}
+    end
+
+    test "failed_segments/3 answers :unreachable for a server that is not there" do
+      assert ReplicationServer.failed_segments(:"nobody_#{System.unique_integer([:positive])}", [@segment]) ==
+               {:error, :unreachable}
+    end
   end
 
   describe "group commit under replication" do
     test "grouped replicate commits durably on every replica and coalesces fsyncs" do
-      :ets.new(:repl_gc_syncs, [:named_table, :public, :set])
-      :ets.insert(:repl_gc_syncs, {:n, 0})
-
-      gc = [group_commit: true, group_commit_interval_ms: 40, store: CountingStore]
-      [primary, f1, f2] = replica_set = [start_broker(gc), start_broker(gc), start_broker(gc)]
+      gc = [group_commit: true, group_commit_interval_ms: 40, store: FaultySegmentStore]
+      brokers = for _ <- 1..3, do: start_broker_at(gc)
+      [primary, f1, f2] = replica_set = Enum.map(brokers, &elem(&1, 0))
 
       results =
         1..30
@@ -503,7 +767,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
       # The point: 30 batches across 3 replicas is 90 per-batch fsyncs without coalescing; with the
       # burst landing in a couple of flush ticks it must be far fewer. Allow slack for tick straddling.
-      [{:n, fsyncs}] = :ets.lookup(:repl_gc_syncs, :n)
+      fsyncs = brokers |> Enum.map(fn {_ref, dir} -> FaultySegmentStore.count(dir, :flushing_sync) end) |> Enum.sum()
       assert fsyncs > 0
       assert fsyncs <= 18, "expected coalesced fsyncs, saw #{fsyncs} for 30 batches x 3 replicas"
     end

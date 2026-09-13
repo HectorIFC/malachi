@@ -8,6 +8,7 @@ defmodule Malachi.Cluster.ScrubberTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
+  alias Malachi.Test.FaultySegmentStore
 
   @segment {{"events", 0}, 0}
 
@@ -83,6 +84,65 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     opts = defaults |> Keyword.merge(opts) |> Enum.reject(fn {_key, value} -> value == :default end)
     start_supervised!({Scrubber, opts}, id: {:scrubber, System.unique_integer([:positive])})
+  end
+
+  describe "a copy that failed in storage" do
+    # A replica whose store fails on demand, with this segment's copy already latched as failed.
+    defp start_latched_replica(values) do
+      name = :"scrub_faulty_#{System.unique_integer([:positive])}"
+      directory = Path.join(System.tmp_dir!(), "malachi_scrub_#{System.unique_integer([:positive])}")
+
+      on_exit(fn ->
+        FaultySegmentStore.clear(directory)
+        File.rm_rf!(directory)
+      end)
+
+      start_supervised!({ReplicationServer, [name: name, directory: directory, store: FaultySegmentStore]}, id: name)
+      replica = {name, node()}
+      metadata = sealed_everywhere([replica], values)
+
+      FaultySegmentStore.fail(Layout.segment_directory(directory, @segment), :sync, {:error, :enospc})
+
+      capture_log(fn ->
+        next = length(values)
+        assert {:error, {:storage, :enospc}} = ReplicationServer.follow(replica, @segment, next, records(["late"]))
+      end)
+
+      {replica, directory, metadata}
+    end
+
+    test "is skipped, never deleted and refetched onto the disk that failed" do
+      {replica, directory, metadata} = start_latched_replica(["a", "b", "c"])
+      rot_copy(directory)
+
+      scrubber = start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+      assert %{skipped: [@segment], verified: [], damaged: [], repaired: [], unrepairable: []} =
+               Scrubber.scrub_now(scrubber)
+
+      # Still latched, so nothing deleted it (a delete clears the latch).
+      assert ReplicationServer.failed_segments(replica, [@segment]) == {:ok, MapSet.new([@segment])}
+      assert Scrubber.damaged(scrubber) == []
+    end
+
+    test "is refused as a repair source when a peer asks" do
+      {replica, directory, metadata} = start_latched_replica(["a"])
+      scrubber = start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+      assert Scrubber.verify_segment(scrubber, @segment) == {:error, :failed_copy}
+    end
+
+    test "a replication server that cannot say latches nothing, and the scrub runs as before" do
+      # The copy is on disk and clean, but the reference this scrub asks about latches names no server.
+      {replica, directory} = start_replica()
+      written = sealed_everywhere([replica], ["a", "b"])
+      {metadata, :ok} = Metadata.apply(written, {:set_segment_replicas, @segment, [:no_such_server]})
+
+      scrubber = start_scrubber(metadata_source: fn -> metadata end, local_ref: :no_such_server, directory: directory)
+
+      assert %{verified: [@segment], skipped: []} = Scrubber.scrub_now(scrubber)
+      assert {:ok, _counts} = Scrubber.verify_segment(scrubber, @segment)
+    end
   end
 
   test "verifies the node's sealed copies and reports them clean" do

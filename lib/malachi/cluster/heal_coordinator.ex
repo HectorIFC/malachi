@@ -22,8 +22,8 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
   (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
-  `Malachi.Cluster.Failover.plan/4` (sealing active segments whose primary died, so writing rolls to a
-  fresh segment), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
+  `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died or that have a copy that
+  failed in storage, so writing rolls to a fresh segment), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
   returns the combined result, for tests and manual triggers.
 
   Failover needs to know what each surviving replica holds, which no pure function can answer, so this
@@ -49,7 +49,17 @@ defmodule Malachi.Cluster.HealCoordinator do
       which of a replica's segments are ALREADY fenced (default
       `Malachi.Cluster.ReplicationServer.fenced_segments/3`, answering `%{}` on any error). See the
       orphaned-fence pass below;
-    * `:probe_timeout` - ms for all three defaults (default 1000).
+    * `:failed_state` - `((replica, [segment_id]) -> MapSet.t(segment_id))`, which of a replica's
+      segments have a copy that FAILED there in storage (default
+      `Malachi.Cluster.ReplicationServer.failed_segments/3`, answering an empty set on any error). An
+      active one becomes a failover candidate (see "A copy that failed" in `Malachi.Cluster.Failover`); a
+      sealed one is a lost replica `Malachi.Cluster.SelfHealing` replaces on another broker;
+    * `:discard_copy` - `((replica, segment_id) -> any)`, how a failed copy that was replaced is removed
+      from the broker it failed on (default `Malachi.Cluster.ReplicationServer.delete/2`, which also clears
+      the latch there). Called only once the control plane shows the copy gone from the replica set: a
+      copy deleted while still listed would answer a read with nothing rather than an error, and a read
+      that finds nothing takes the range as drained;
+    * `:probe_timeout` - ms for the four probing defaults (default 1000).
 
   ## The orphaned-fence pass
 
@@ -112,7 +122,11 @@ defmodule Malachi.Cluster.HealCoordinator do
       fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000))),
       # The third seam. Read-only like `:probe`, batched per primary unlike either, and asked about
       # every active segment rather than a failover candidate. See the moduledoc.
-      seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000)))
+      seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000))),
+      # The fourth seam, as cheap as `:seal_state` (a lookup, no disk) and batched per replica, because it is
+      # asked of every live replica of every active segment.
+      failed_state: Keyword.get(opts, :failed_state, default_failed_state(Keyword.get(opts, :probe_timeout, 1_000))),
+      discard_copy: Keyword.get(opts, :discard_copy, &ReplicationServer.delete/2)
     }
 
     schedule(state)
@@ -137,14 +151,18 @@ defmodule Malachi.Cluster.HealCoordinator do
 
     now_ms = System.system_time(:millisecond)
 
-    heal_opts = put_spread(state.heal_opts, state.spread.())
+    # Asked first, because both halves below act on it: a failed copy of an active segment is a failover
+    # candidate, and one of a sealed segment is a lost replica to replace.
+    failed = probe_failures(state, metadata, live)
+    heal_opts = state.heal_opts |> put_spread(state.spread.()) |> Keyword.put(:failed, failed)
     healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
-    seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live), now_ms)
+    seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live, failed), now_ms, failed)
     orphans = OrphanedFence.plan(metadata, probe_fences(state, metadata, live), now_ms)
 
     applied = healed.applied ++ seals ++ orphans
     Enum.each(applied, state.apply_command)
 
+    discard_replaced_copies(state, replaced_copies(healed.applied, failed))
     report_orphans(orphans, state)
 
     # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
@@ -213,11 +231,55 @@ defmodule Malachi.Cluster.HealCoordinator do
     match?(%{state: :sealed}, Map.get(metadata.segments, segment_id))
   end
 
-  # Asks every live replica of every failover candidate what it holds. The impure half of the
-  # failover decision: `Failover` stays a pure function of these answers.
-  defp probe_candidates(state, metadata, live) do
+  # The failed copies a heal command left out of its segment's new replica set: `SelfHealing` never places
+  # a segment on a broker whose copy of it failed, so every one of them was replaced.
+  defp replaced_copies(heal_commands, failed) do
+    for {:set_segment_replicas, segment_id, new_set} <- heal_commands,
+        {^segment_id, replica} <- failed,
+        replica not in new_set,
+        do: {segment_id, replica}
+  end
+
+  defp discard_replaced_copies(_state, []), do: :ok
+
+  # Re-read like `report_orphans/2`, and for a sharper reason: a copy deleted while the control plane still
+  # lists it answers reads with nothing, where the latched copy answered with an error.
+  defp discard_replaced_copies(state, replaced) do
+    metadata = state.metadata_source.()
+    discarded = Enum.filter(replaced, fn {segment_id, replica} -> left_the_set?(metadata, segment_id, replica) end)
+
+    Enum.each(discarded, fn {segment_id, replica} -> state.discard_copy.(replica, segment_id) end)
+
+    if discarded != [] do
+      Logger.warning(I18n.t(:heal_failed_copy_replaced, count: length(discarded), copies: inspect(discarded)))
+    end
+  end
+
+  defp left_the_set?(metadata, segment_id, replica) do
+    case Map.get(metadata.segments, segment_id) do
+      %{replica_set: replica_set} -> replica not in replica_set
+      nil -> false
+    end
+  end
+
+  # Asks every live replica which of its segments have a copy that failed there, as the
+  # `{segment_id, replica}` pairs `Failover` and `SelfHealing` take. Read-only and batched per replica, like
+  # `probe_fences/3`.
+  defp probe_failures(state, metadata, live) do
     metadata
-    |> Failover.candidates(live)
+    |> Failover.failure_probes(live)
+    |> Enum.reduce(MapSet.new(), fn {replica, segment_ids}, acc ->
+      state.failed_state.(replica, segment_ids)
+      |> Enum.reduce(acc, &MapSet.put(&2, {&1, replica}))
+    end)
+  end
+
+  # Asks every live replica of every failover candidate what it holds. The impure half of the
+  # failover decision: `Failover` stays a pure function of these answers. A failed copy is not asked,
+  # since `Failover.candidates/3` already leaves it out.
+  defp probe_candidates(state, metadata, live, failed) do
+    metadata
+    |> Failover.candidates(live, failed)
     |> Map.new(fn {segment_id, replicas} ->
       segment = Map.fetch!(metadata.segments, segment_id)
       answers = for r <- replicas, stats = probe(state, r, segment_id, segment.start_offset), into: %{}, do: {r, stats}
@@ -294,6 +356,17 @@ defmodule Malachi.Cluster.HealCoordinator do
       case ReplicationServer.fenced_segments(replica, segments, timeout) do
         {:ok, fenced} -> fenced
         {:error, _reason} -> %{}
+      end
+    end
+  end
+
+  # Same rule as `default_seal_state/1`: no answer means nothing learned, so an unreachable replica reports
+  # no failed copy rather than stalling or crashing the pass.
+  defp default_failed_state(timeout) do
+    fn replica, segment_ids ->
+      case ReplicationServer.failed_segments(replica, segment_ids, timeout) do
+        {:ok, failed} -> failed
+        {:error, _reason} -> MapSet.new()
       end
     end
   end
