@@ -147,15 +147,30 @@ defmodule StoreErrorPathAB do
     if files == [] do
       :missing
     else
-      samples =
-        Enum.group_by(files, &arm_of/1, fn path -> path |> File.read!() |> parse.() end)
+      by_arm = Enum.group_by(files, &arm_of/1)
 
-      for arm <- @arms, not Map.has_key?(samples, arm) do
+      for arm <- @arms, not Map.has_key?(by_arm, arm) do
         raise "case #{name} has no samples for arm #{arm} under #{results}"
       end
 
-      samples
+      # The bootstrap pairs observations by POSITION (`Malachi.Bench.PairedStats`), so position n must be the
+      # same repetition in every arm. Sorted by the repetition's number, not by file name, where rep 10 sorts
+      # before rep 2; and an arm missing a repetition another arm has is an error, not a shorter list.
+      reps = Map.new(by_arm, fn {arm, paths} -> {arm, paths |> Enum.map(&rep_of/1) |> Enum.sort()} end)
+
+      if reps |> Map.values() |> Enum.uniq() |> length() > 1 do
+        raise "case #{name} has arms that ran different repetitions under #{results}: #{inspect(reps)}"
+      end
+
+      Map.new(by_arm, fn {arm, paths} ->
+        {arm, paths |> Enum.sort_by(&rep_of/1) |> Enum.map(&(&1 |> File.read!() |> parse.()))}
+      end)
     end
+  end
+
+  defp rep_of(path) do
+    [rep, _arm] = path |> Path.basename(".out") |> String.split("-", parts: 2)
+    String.to_integer(rep)
   end
 
   defp warmup?(path), do: path |> Path.basename() |> String.starts_with?("warm")

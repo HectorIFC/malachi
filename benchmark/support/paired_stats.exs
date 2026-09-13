@@ -91,17 +91,30 @@ defmodule Malachi.Bench.PairedStats do
     abs(median(b) - median(a))
   end
 
-  # Percentile bootstrap of the difference of medians: resample each arm's per-rep observations
-  # with replacement, recompute the difference, and take the 2.5th/97.5th percentiles.
-  defp bootstrap_ci(a, b) do
+  # Percentile bootstrap of the difference of medians, resampling REPETITIONS: each draw takes a whole
+  # repetition, both arms' observations of it together, because the design is paired. Every arm runs in
+  # every repetition, under that repetition's conditions (page cache, writeback, neighbours), so the two
+  # observations of one repetition are not independent. Resampling each arm on its own mixed repetitions
+  # up, which throws the pairing away: the interval came out wider than the data supports, and a wider
+  # interval is one that includes zero more often, which reads as "no difference" when there is one.
+  # Positions must therefore line up across arms (see the callers), and arms of different lengths are
+  # refused rather than silently truncated by the zip.
+  defp bootstrap_ci(a, b) when length(a) == length(b) do
+    pairs = Enum.zip(a, b)
+
     diffs =
       for _ <- 1..@bootstrap_iterations do
-        median(resample(a)) - median(resample(b))
+        {sample_a, sample_b} = pairs |> resample() |> Enum.unzip()
+        median(sample_b) - median(sample_a)
       end
       |> Enum.sort()
 
-    # Negated because the statistic above is (a - b) while the reported delta is (b - a).
-    {-pctl(diffs, 97.5), -pctl(diffs, 2.5)}
+    {pctl(diffs, 2.5), pctl(diffs, 97.5)}
+  end
+
+  defp bootstrap_ci(a, b) do
+    raise ArgumentError,
+          "a paired bootstrap needs one observation per repetition in each arm, got #{length(a)} and #{length(b)}"
   end
 
   defp resample(samples) do
