@@ -6,9 +6,12 @@ on:
   pull_request:
     branches: ['**']
 
+# Read-only token for every job: nothing here writes to the repository, and these jobs run the code under test.
+permissions:
+  contents: read
+
 env:
   MIX_ENV: test
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   test:
@@ -27,6 +30,8 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       
       - name: 🔧 Setup Elixir
         uses: erlef/setup-beam@v1
@@ -96,6 +101,8 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -237,6 +244,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       
       - name: 🔧 Setup Elixir
         uses: erlef/setup-beam@v1
@@ -293,6 +301,8 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: 🔧 Setup Elixir
         uses: erlef/setup-beam@v1
@@ -335,6 +345,8 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: 🔧 Setup Elixir
         id: beam
