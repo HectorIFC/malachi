@@ -282,24 +282,122 @@ jobs:
           grep -r "TODO\|FIXME" lib/ || echo "✅ No TODO/FIXME found"
         continue-on-error: true
 
+  # The tests tagged :multinode start peer BEAM nodes, which is why `mix test` excludes them by default. They
+  # are the only proof of the cross-node paths (replication, failover, sealing on another node's failure),
+  # so they run here, in a job of their own: a flaky peer boot must not hide behind the unit suite's result,
+  # nor the other way round.
+  multinode:
+    name: Multinode Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      - name: 📦 Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-multinode-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-multinode-
+
+      - name: 🔨 Install dependencies
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch. Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
+
+      - name: 🌐 Run multinode tests
+        run: mix test --only multinode
+
+  # Specs are part of the contract (a storage failure is `{:error, reason}`, not a raise, and dialyzer is what
+  # checks callers still match what a function can return), so they are checked on every push rather than
+  # left to whoever remembers to run it locally.
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Elixir
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      # The PLTs take minutes to build and change only with the toolchain and the dependencies, so they are
+      # cached on exactly those. dialyxir keeps the core PLTs under the mix home and the project PLT in _build.
+      - name: 📦 Cache dependencies and PLTs
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+            ~/.mix
+          key: ${{ runner.os }}-dialyzer-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-dialyzer-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - name: 🔨 Install dependencies
+        run: |
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
+
+      - name: 🧪 Run dialyzer
+        run: mix dialyzer --format github
+
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [test, docker, quality]
+    needs: [test, docker, quality, multinode, dialyzer]
     if: always()
-    
+
     steps:
       - name: 📊 Check results
         run: |
           echo "Test Status: ${{ needs.test.result }}"
           echo "Docker Status: ${{ needs.docker.result }}"
           echo "Quality Status: ${{ needs.quality.result }}"
-          
+          echo "Multinode Status: ${{ needs.multinode.result }}"
+          echo "Dialyzer Status: ${{ needs.dialyzer.result }}"
+
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "❌ Tests failed!"
             exit 1
           fi
-          
+
+          if [ "${{ needs.multinode.result }}" != "success" ]; then
+            echo "❌ Multinode tests failed!"
+            exit 1
+          fi
+
+          if [ "${{ needs.dialyzer.result }}" != "success" ]; then
+            echo "❌ Dialyzer failed!"
+            exit 1
+          fi
+
           if [ "${{ needs.docker.result }}" != "success" ]; then
             echo "❌ Docker build failed!"
             exit 1
