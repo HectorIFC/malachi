@@ -11,6 +11,11 @@ defmodule Malachi.Test.UnfenceablePrimary do
   Everything else is forwarded to a real replication server started underneath, with the replica set
   rewritten from this proxy's reference to the inner server's, so the inner server still recognizes
   itself as the primary.
+
+  `fence: :hold` makes the asynchronous fence (`seal_async/5`) take effect on the inner server while its
+  answer is held back: the store refuses writes past the fence and the caller does not hear so until
+  `release_fences/1`, after which held and later answers pass straight through. Never released, it is a
+  fence applied and never answered. The default, `:swallow`, never applies the fence at all.
   """
 
   use GenServer
@@ -24,6 +29,10 @@ defmodule Malachi.Test.UnfenceablePrimary do
     GenServer.start_link(__MODULE__, opts, gen_server_opts)
   end
 
+  @doc "Delivers every fence answer held under `fence: :hold`, and lets later ones through unheld."
+  @spec release_fences(GenServer.server()) :: :ok
+  def release_fences(proxy), do: GenServer.call(proxy, :release_fences)
+
   @impl true
   def init(opts) do
     directory =
@@ -32,7 +41,7 @@ defmodule Malachi.Test.UnfenceablePrimary do
       end)
 
     {:ok, inner} = ReplicationServer.start_link(directory: directory)
-    {:ok, %{inner: inner, directory: directory}}
+    {:ok, %{inner: inner, directory: directory, fence: Keyword.get(opts, :fence, :swallow), held: []}}
   end
 
   @impl true
@@ -41,15 +50,45 @@ defmodule Malachi.Test.UnfenceablePrimary do
     {:noreply, state}
   end
 
+  def handle_call(:release_fences, _from, state) do
+    state.held |> Enum.reverse() |> Enum.each(&deliver/1)
+    {:reply, :ok, %{state | fence: :released, held: []}}
+  end
+
   def handle_call(request, _from, state) do
     {:reply, GenServer.call(state.inner, rewrite(request, state)), state}
   end
 
   @impl true
+  def handle_cast({:seal_async, segment_id, base_offset, notify}, %{fence: mode} = state)
+      when mode in [:hold, :released] do
+    # Applied on the inner server, with the answer routed through this proxy (`handle_info/2`).
+    GenServer.cast(state.inner, {:seal_async, segment_id, base_offset, {self(), {:proxied, notify}}})
+    {:noreply, state}
+  end
+
+  def handle_cast({:seal_async, _segment_id, _base_offset, _notify}, state) do
+    # The asynchronous fence is swallowed too: forwarding it would fence the inner server, and the double
+    # would stop being a primary that never answers a fence.
+    {:noreply, state}
+  end
+
   def handle_cast(request, state) do
     GenServer.cast(state.inner, rewrite(request, state))
     {:noreply, state}
   end
+
+  @impl true
+  def handle_info({:seal_result, {:proxied, notify}, reply}, %{fence: :released} = state) do
+    deliver({notify, reply})
+    {:noreply, state}
+  end
+
+  def handle_info({:seal_result, {:proxied, notify}, reply}, state) do
+    {:noreply, %{state | held: [{notify, reply} | state.held]}}
+  end
+
+  defp deliver({{pid, tag}, reply}), do: send(pid, {:seal_result, tag, reply})
 
   # The broker builds replica sets out of THIS process's reference, and the inner server accepts a
   # write only when it is the set's head, so the head is swapped for the inner server on the way in.

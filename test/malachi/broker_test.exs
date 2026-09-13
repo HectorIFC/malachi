@@ -42,7 +42,7 @@ defmodule Malachi.BrokerTest do
     do: Broker.produce(broker, topic, records, replicate_fun(store))
 
   # Fences every owed roll through the fake store and records what it answered, which is exactly what
-  # `Malachi.BrokerServer.settle_rolls/1` does with the real replication server.
+  # `Malachi.BrokerServer.send_roll_fences/1` and its fence's answer do with the real replication server.
   defp settle(broker, store) do
     Enum.reduce(Broker.due_rolls(broker), broker, fn roll, acc -> fence_and_record(acc, store, roll) end)
   end
@@ -614,6 +614,98 @@ defmodule Malachi.BrokerTest do
       assert {broker, :ok} = Broker.record_seal(unchanged, roll, 1, 0, 1_000)
       assert Broker.due_rolls(broker) == []
       assert [%{state: :sealed, length: 1}] = segments(broker, root_id)
+    end
+
+    test "fences_to_send/3 hands each owed roll out once, and again only after the retry window", %{store: store} do
+      {broker, _root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+
+      assert {broker, [%{fence_sent_at: 1_000} = roll]} = Broker.fences_to_send(broker, 1_000, 500)
+      assert Broker.due_rolls(broker) == [roll]
+
+      # In flight: the next produce that asks must not fan out a second fence for the same roll.
+      assert Broker.fences_to_send(broker, 1_499, 500) == {broker, []}
+
+      # A fence that went unanswered (a slow, mute or gone primary) is sent again once the window passes.
+      assert {_broker, [%{fence_sent_at: 1_500}]} = Broker.fences_to_send(broker, 1_500, 500)
+    end
+
+    test "fences_to_send/3 has nothing to send when no roll is owed", %{store: store} do
+      {broker, _root_id, _store} = one_record_topic(store)
+      assert Broker.fences_to_send(broker, 0, 500) == {broker, []}
+    end
+
+    test "record_fence/5 seals at the answer even after this frontend's own refusal cleared the roll", %{store: store} do
+      # The fence closed the store, a produce this frontend sent afterwards was refused, and the refusal
+      # cleared the roll before the fence's answer arrived. Dropping that answer would leave the store fenced
+      # under a segment the metadata still calls active, refusing every write to the range.
+      {broker, root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      {broker, [roll]} = Broker.fences_to_send(broker, 0, 1_000)
+
+      broker = Broker.forget_sealed(broker, root_id, roll.segment_id, 1)
+      assert Broker.due_rolls(broker) == []
+
+      assert {broker, :ok} = Broker.record_fence(broker, roll, 1, 42, 1_000)
+      assert [%{state: :sealed, length: 1, byte_size: 42}] = segments(broker, root_id)
+      assert broker.offsets[root_id] == 1
+    end
+
+    test "record_fence/5 leaves a segment someone else sealed alone and only clears the roll", %{store: store} do
+      {broker, root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      {broker, [roll]} = Broker.fences_to_send(broker, 0, 1_000)
+
+      broker = Broker.apply_heal(broker, [{:seal_segment, {root_id, 0}, 1, 3, 500}])
+      broker = %{broker | rolling: %{root_id => roll}}
+
+      assert {broker, :ok} = Broker.record_fence(broker, roll, 4, 99, 1_000)
+      assert Broker.due_rolls(broker) == []
+      assert [%{state: :sealed, length: 1, byte_size: 3, sealed_at: 500}] = segments(broker, root_id)
+    end
+
+    test "awaiting_fence?/5 is true for a sent fence until its answer is recorded or its window passes", %{store: store} do
+      {broker, root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      segment_id = {root_id, 0}
+
+      refute Broker.awaiting_fence?(broker, root_id, segment_id, 0, 1_000)
+
+      {broker, [roll]} = Broker.fences_to_send(broker, 0, 1_000)
+      assert Broker.awaiting_fence?(broker, root_id, segment_id, 999, 1_000)
+      refute Broker.awaiting_fence?(broker, root_id, segment_id, 1_000, 1_000)
+      refute Broker.awaiting_fence?(broker, root_id, {root_id, 7}, 0, 1_000)
+
+      # A refusal clears the roll but not the wait: that is the whole reason the two are kept apart.
+      broker = Broker.forget_sealed(broker, root_id, segment_id, 1)
+      assert Broker.awaiting_fence?(broker, root_id, segment_id, 10, 1_000)
+
+      {recorded, :ok} = Broker.record_fence(broker, roll, 1, 0, 1_000)
+      refute Broker.awaiting_fence?(recorded, root_id, segment_id, 10, 1_000)
+
+      # A failed fence ends the wait too, and leaves the roll owed so the fence is sent again.
+      forgotten = Broker.forget_fence(broker, roll)
+      refute Broker.awaiting_fence?(forgotten, root_id, segment_id, 10, 1_000)
+
+      # Forgetting names the segment: a failure for an older fence leaves a newer one awaited.
+      assert Broker.forget_fence(broker, %{roll | segment_id: {root_id, 7}}) == broker
+    end
+
+    test "range_awaiting_fence/4 names a waiting range of the topic, or nil", %{store: store} do
+      {broker, root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+
+      assert Broker.range_awaiting_fence(broker, "events", 0, 1_000) == nil
+
+      {broker, [roll]} = Broker.fences_to_send(broker, 0, 1_000)
+      assert Broker.range_awaiting_fence(broker, "events", 500, 1_000) == root_id
+      assert Broker.range_awaiting_fence(broker, "other", 500, 1_000) == nil
+      assert Broker.range_awaiting_fence(broker, "events", 1_000, 1_000) == nil
+
+      # An answer for a segment someone else already sealed clears the wait as well.
+      broker = Broker.apply_heal(broker, [{:seal_segment, roll.segment_id, 1, 3, 500}])
+      {broker, :ok} = Broker.record_fence(broker, roll, 1, 3, 1_000)
+      assert Broker.range_awaiting_fence(broker, "events", 500, 1_000) == nil
     end
 
     test "forget_sealed/4 seats the frontend, and ignores a refusal naming an older segment", %{store: store} do

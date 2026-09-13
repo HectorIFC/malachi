@@ -59,13 +59,15 @@ defmodule Malachi.Broker do
 
   A map of rolls rather than a set of range ids, because `record_seal/5` can fail (an ra timeout) after
   the cached segment is already gone, and the retry needs the segment id, its primary and its start
-  offset. A set would lose them.
+  offset. A set would lose them. `fence_sent_at` is when its fence was last sent (`fences_to_send/3`), in
+  monotonic milliseconds, or `nil` before the first send.
   """
   @type roll :: %{
           range_id: Metadata.range_id(),
           segment_id: Metadata.segment_id(),
           primary: Metadata.broker(),
-          start_offset: non_neg_integer()
+          start_offset: non_neg_integer(),
+          fence_sent_at: integer() | nil
         }
 
   @typedoc "Appends/replicates a batch to a segment, returning the last offset stored."
@@ -95,7 +97,8 @@ defmodule Malachi.Broker do
           segments: %{Metadata.range_id() => active_segment()},
           segment_seq: %{Metadata.range_id() => non_neg_integer()},
           offsets: %{Metadata.range_id() => non_neg_integer()},
-          rolling: %{Metadata.range_id() => roll()}
+          rolling: %{Metadata.range_id() => roll()},
+          fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}}
         }
 
   defstruct dsrsm: nil,
@@ -119,7 +122,11 @@ defmodule Malachi.Broker do
             # Ranges whose active segment crossed `:segment_max_bytes` and still owes a fence. A REQUEST,
             # not a barrier: the range keeps taking writes, and whatever lands meanwhile is inside the end
             # the fence eventually reports. See `due_rolls/1` and `record_seal/5`.
-            rolling: %{}
+            rolling: %{},
+            # Fences this frontend has SENT and not yet seen answered, by range. Apart from `rolling` on
+            # purpose: a refusal clears the roll (`forget_sealed/4`), and it is exactly then that a produce
+            # must still be recognized as racing this frontend's own fence. See `awaiting_fence?/5`.
+            fencing: %{}
 
   @doc """
   Opens an empty broker.
@@ -507,39 +514,99 @@ defmodule Malachi.Broker do
   def due_rolls(%__MODULE__{rolling: rolling}), do: Map.values(rolling)
 
   @doc """
-  Seals every segment whose roll was requested and whose range's write head is still that segment.
+  The owed rolls whose fence the caller should send now, marked as sent at `now_ms`: each roll whose fence
+  has not been sent yet, and each whose last send is at least `retry_after_ms` old (a fence that went
+  unanswered, from a primary that is slow, mute or gone). Pure; the caller sends the fences and hands each
+  answer to `record_fence/5`.
 
-  Pure: no replica is contacted. The length is `next_offset - start_offset`, so the CALLER must have
-  seated the counter on the primary's answer first (`adopt_offsets/4`), which is the whole reason the
-  seal is deferred rather than taken where the byte threshold trips. At that moment the frontend holds
-  only a reservation, and recording it would seal a length the primary never agreed to: short when
-  another frontend interleaved, long when the batch then failed.
+  The mark is what keeps a busy range from fanning out a fence per produce while one is in flight, and
+  the window is what keeps a lost fence from leaving the roll owed forever.
 
-  Call it only after a produce that SUCCEEDED. On a failure the reservation stands above what the
-  primary actually stored, and sealing there would promise records that do not exist, which reads worse
-  than a short seal: `read/5` would answer fewer records than the length claims and a consume cursor
-  would stall at the sealed edge with nothing to advance it.
-
-  A roll whose segment is no longer the range's head is dropped rather than applied: something else
-  (a failover seal, another frontend) already closed it, and its length is not this frontend's to say.
+  A roll is never sealed without its fence. It used to be, from this frontend's counter, and a frontend
+  that had not yet seen that seal kept appending to the segment through a primary that knew nothing of it:
+  acknowledged records landed above the recorded edge, stored and unreachable.
   """
-  @spec settle_rolls(t()) :: t()
-  def settle_rolls(%__MODULE__{rolling: rolling} = broker) when map_size(rolling) == 0, do: broker
+  @spec fences_to_send(t(), integer(), non_neg_integer()) :: {t(), [roll()]}
+  def fences_to_send(%__MODULE__{} = broker, now_ms, retry_after_ms) do
+    {broker, due} =
+      Enum.reduce(broker.rolling, {broker, []}, fn {range_id, roll}, {acc, due} ->
+        if roll.fence_sent_at == nil or now_ms - roll.fence_sent_at >= retry_after_ms do
+          sent = %{roll | fence_sent_at: now_ms}
+          fencing = Map.put(acc.fencing, range_id, %{segment_id: roll.segment_id, sent_at: now_ms})
+          {%{acc | rolling: Map.put(acc.rolling, range_id, sent), fencing: fencing}, [sent | due]}
+        else
+          {acc, due}
+        end
+      end)
 
-  def settle_rolls(%__MODULE__{} = broker) do
-    Enum.reduce(Map.values(broker.rolling), broker, &settle_requested_roll(&2, &1))
+    {broker, Enum.reverse(due)}
   end
 
-  defp settle_requested_roll(broker, roll) do
-    case Map.get(broker.segments, roll.range_id) do
-      %{id: id, bytes: bytes} when id == roll.segment_id ->
-        end_offset = next_offset(broker, roll.range_id)
-        {broker, _reply} = record_seal(broker, roll, end_offset, bytes, System.system_time(:millisecond))
-        broker
+  @doc """
+  Records the answer to a produce roll's fence: `end_offset` and `byte_size` are what closing the segment
+  answered, so they become its sealed length (`record_seal/5`).
 
-      _head_moved_on ->
-        clear_roll(broker, roll.range_id, roll.segment_id)
+  Applied while the control plane still calls the segment ACTIVE, and applied then even if this frontend
+  no longer owes the roll. That second half matters: a produce this frontend sent after the fence is
+  refused with `{:sealed, end_offset}`, which clears the roll (`forget_sealed/4`) before the fence's own
+  answer arrives, and dropping the answer then would leave the store fenced under a segment the metadata
+  still calls active, refusing every write to the range until a heal pass reconciled it. It is safe for the
+  same reason it is needed: while the segment is active its range has no successor, so nothing can have
+  been written above the end this seats the counter at.
+
+  Once the segment is sealed (a failover, or another frontend's roll, closed it first), its length is not
+  this answer's to say, and the roll is only cleared.
+  """
+  @spec record_fence(t(), roll(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+          {t(), :ok | {:error, term()}}
+  def record_fence(%__MODULE__{} = broker, roll, end_offset, byte_size, sealed_at) do
+    case DSRSM.get_segment(broker.dsrsm, topic_of_segment(roll.segment_id), roll.segment_id) do
+      %{state: :active} ->
+        record_seal(broker, roll, end_offset, byte_size, sealed_at)
+
+      _sealed_or_gone ->
+        {broker |> clear_roll(roll.range_id, roll.segment_id) |> clear_fencing(roll.range_id, roll.segment_id), :ok}
     end
+  end
+
+  @doc """
+  Stops awaiting the fence of `roll` after it FAILED. The roll stays owed (`fences_to_send/3` resends it),
+  but a produce refused meanwhile is no longer taken for this frontend's own roll overtaking it.
+  """
+  @spec forget_fence(t(), roll()) :: t()
+  def forget_fence(%__MODULE__{} = broker, roll), do: clear_fencing(broker, roll.range_id, roll.segment_id)
+
+  @doc """
+  Whether this frontend sent the fence of `segment_id`, the write head of `range_id`, less than `window_ms`
+  ago and has not recorded its answer yet.
+
+  A `{:sealed, _}` refusal for that segment is then this frontend's own roll overtaking one of its
+  produces: the primary applied the fence (the refusal proves it) and the answer is on its way. The caller
+  can hold the produce until that answer opens the successor instead of failing it. The window bounds the
+  wait for an answer that was lost.
+  """
+  @spec awaiting_fence?(t(), Metadata.range_id(), Metadata.segment_id(), integer(), non_neg_integer()) :: boolean()
+  def awaiting_fence?(%__MODULE__{fencing: fencing}, range_id, segment_id, now_ms, window_ms) do
+    case Map.get(fencing, range_id) do
+      %{segment_id: ^segment_id, sent_at: sent_at} -> now_ms - sent_at < window_ms
+      _other -> false
+    end
+  end
+
+  @doc """
+  A range of `topic` whose fence this frontend is still waiting on (see `awaiting_fence?/5`), or `nil`: for a
+  caller that learns only that a produce to `topic` was refused, not which of its segments refused it. The
+  lowest such range, so the answer is deterministic.
+  """
+  @spec range_awaiting_fence(t(), Metadata.topic_name(), integer(), non_neg_integer()) ::
+          Metadata.range_id() | nil
+  def range_awaiting_fence(%__MODULE__{fencing: fencing}, topic, now_ms, window_ms) do
+    fencing
+    |> Enum.filter(fn {range_id, %{sent_at: sent_at}} ->
+      topic_of_range(range_id) == topic and now_ms - sent_at < window_ms
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.min(fn -> nil end)
   end
 
   @doc """
@@ -632,6 +699,7 @@ defmodule Malachi.Broker do
     broker
     |> forget_active_segment(roll.segment_id)
     |> clear_roll(roll.range_id, roll.segment_id)
+    |> clear_fencing(roll.range_id, roll.segment_id)
     |> put_offset(roll.range_id, end_offset)
   end
 
@@ -709,6 +777,14 @@ defmodule Malachi.Broker do
   defp clear_roll(broker, range_id, segment_id) do
     case Map.get(broker.rolling, range_id) do
       %{segment_id: ^segment_id} -> %{broker | rolling: Map.delete(broker.rolling, range_id)}
+      _other -> broker
+    end
+  end
+
+  # Guarded on the id like `clear_roll/3`: an answer for an older segment must not forget a newer fence.
+  defp clear_fencing(broker, range_id, segment_id) do
+    case Map.get(broker.fencing, range_id) do
+      %{segment_id: ^segment_id} -> %{broker | fencing: Map.delete(broker.fencing, range_id)}
       _other -> broker
     end
   end
@@ -1119,7 +1195,13 @@ defmodule Malachi.Broker do
   end
 
   defp roll_of(range_id, active) do
-    %{range_id: range_id, segment_id: active.id, primary: primary(active), start_offset: active.start_offset}
+    %{
+      range_id: range_id,
+      segment_id: active.id,
+      primary: primary(active),
+      start_offset: active.start_offset,
+      fence_sent_at: nil
+    }
   end
 
   # Applies a metadata mutation via the configured command function (in-memory by default, or

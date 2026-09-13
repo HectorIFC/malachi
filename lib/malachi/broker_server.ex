@@ -50,8 +50,8 @@ defmodule Malachi.BrokerServer do
 
   @default_brokers_refresh_interval 1_000
 
-  # Bounds the split/merge fence. Deliberately not reachable from the produce path: see
-  # `fence_and_seal/2` for why a network call belongs on one and not the other.
+  # Bounds the split/merge fence, a call that is waited on. The produce roll's fence is sent as a cast
+  # instead: see `fence_and_seal/2` for why a waited-on network call belongs on one and not the other.
   @default_fence_timeout 1_000
   # Produce call timeout: must exceed every server-side completion path (replication no_quorum ~5s,
   # the async-produce safety timer at 6s), so callers get a real error reply, never a call exit.
@@ -59,8 +59,10 @@ defmodule Malachi.BrokerServer do
   # Safety net for an async produce whose replication result never arrives (e.g. the cast to a dead
   # primary was silently dropped): reply an error instead of leaving the caller to time out.
   @async_produce_timeout 6_000
-  # How long a roll's fence may take, matching the heal coordinator's probe timeout. A spurious timeout
-  # is safe: the roll stays owed and a re-fence is idempotent, answering the same numbers.
+  # How long a roll's fence may go unanswered before it is sent again, matching the heal coordinator's probe
+  # timeout. A spurious resend is safe: the roll stays owed and a fence is idempotent, answering the same
+  # numbers.
+  @roll_fence_retry_ms 1_000
 
   # --- client API ---
 
@@ -76,7 +78,8 @@ defmodule Malachi.BrokerServer do
       currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
     * `:fence_timeout` - ms a split's or a merge's store fence may take before the operation is
-      refused (default 1000). Not on the produce path: see `fence_and_seal/2`.
+      refused (default 1000). The produce roll's fence is asynchronous and not bounded by this: see
+      `fence_and_seal/2`.
     * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
       authoritative via that `ra` cluster (mutations go through the log; reads come from a local
       cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
@@ -385,8 +388,13 @@ defmodule Malachi.BrokerServer do
       max_inflight_records: max_inflight_records,
       gc_timer: nil,
       # In-flight async produces (the non-group-commit path): ref => the parked caller, its computed
-      # placements, how many replication dispatches are still owed, and the safety timer.
-      async_produces: %{}
+      # placements, how many replication dispatches are still owed, the records of the dispatches that went
+      # out behind this frontend's own fence (`parts`, so they can be planned again), and the safety timer.
+      async_produces: %{},
+      # Produces held behind a fence this frontend sent and has not seen answered, by range: each a refused
+      # async dispatch or a whole group-commit call. Released when the answer lands, or when the retry
+      # window runs out. See `park_on_fence/3`.
+      fence_parked: %{}
     }
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
@@ -627,12 +635,10 @@ defmodule Malachi.BrokerServer do
             {state, pending} = adopt_result(state, pending, dispatch, actual)
 
             if pending.remaining == 1 do
-              # Every dispatch of this produce has answered, so the counter now carries the primary's
-              # truth for each range it touched and a requested roll can be recorded at a length that
-              # is no longer a guess. Only on the success path: a failed dispatch leaves the plan's
-              # reservation standing above what was actually stored, and sealing there would promise
-              # records that do not exist, which reads worse than a short seal (`Broker.settle_rolls/1`).
-              state = %{state | broker: Broker.settle_rolls(state.broker)}
+              # Every dispatch of this produce has answered, so a roll it tripped is sent its fence now.
+              # The cast leaves this loop after the batch's own, so it reaches the primary behind them and
+              # the end the fence answers includes the batch that crossed the threshold.
+              state = send_roll_fences(state)
               {:noreply, finish_async_produce(state, ref, pending, {:ok, pending.placements})}
             else
               pending = %{pending | remaining: pending.remaining - 1}
@@ -643,12 +649,28 @@ defmodule Malachi.BrokerServer do
           # the client's retry opens or adopts the successor instead of racing :segment_overlap.
           {:error, {:sealed, end_offset}} ->
             broker = Broker.forget_sealed(state.broker, dispatch.range_id, dispatch.segment_id, end_offset)
-            state = %{state | broker: broker}
-            {:noreply, finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})}
+            {:noreply, sealed_dispatch(%{state | broker: broker}, ref, pending, dispatch, end_offset)}
 
           {:error, reason} ->
             {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
         end
+    end
+  end
+
+  # The answer to a produce roll's fence (`send_roll_fences/1`). Whatever it says, the produces held behind
+  # that fence go again: on success the successor is now open to them, and on failure they learn so from
+  # the primary rather than from a wait.
+  def handle_info({:seal_result, {:roll_fence, roll}, reply}, state) do
+    state = record_roll_fence(state, roll, reply)
+    {:noreply, release_fence_parked(state, roll.range_id, :replan)}
+  end
+
+  # The fence's answer never came within the retry window (`park_on_fence/3`). A later park on the same range
+  # carries a new token, so a timer that lost the race to an answer releases nothing.
+  def handle_info({:fence_park_timeout, range_id, token}, state) do
+    case Map.get(state.fence_parked, range_id) do
+      %{token: ^token} -> {:noreply, release_fence_parked(state, range_id, :refuse)}
+      _released_or_newer -> {:noreply, state}
     end
   end
 
@@ -699,8 +721,10 @@ defmodule Malachi.BrokerServer do
     {:noreply, %{state | broker: broker}}
   end
 
+  # Also where a roll whose fence went unanswered is sent again: a range that stops producing would
+  # otherwise keep its roll owed, and its segment unsealed, for as long as nothing wrote to it.
   def handle_info(:reconcile, state) do
-    {:noreply, reconcile_metadata(state)}
+    {:noreply, state |> reconcile_metadata() |> send_roll_fences()}
   end
 
   # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
@@ -875,13 +899,15 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  # The fence belongs on THIS path and not on the produce path, and what separates them is the caller's
-  # rhythm rather than the correctness of the fence. A split or a merge retires the range: it happens
-  # once, it is already a control-plane round trip, and nothing may write to the parent afterwards, so
-  # paying a network call to make that true is exactly the trade. The produce path is the opposite on
-  # every count, and a fence there put a synchronous call to a possibly mute primary inside the loop
-  # that serializes every client of this node, retried on every produce with no backoff. It seals from
-  # the counter the primary has already corrected instead (`Broker.settle_rolls/1`).
+  # This fence is WAITED ON, and the produce roll's is not, and what separates them is the caller's rhythm
+  # rather than the correctness of the fence. A split or a merge retires the range: it happens once, it is
+  # already a control-plane round trip, and nothing may write to the parent afterwards, so waiting on a
+  # network call to make that true is exactly the trade. A produce roll is the opposite on every count, and
+  # a waited-on fence there put a synchronous call to a possibly mute primary inside the loop that
+  # serializes every client of this node. So the roll sends its fence as a cast and records the answer
+  # when it arrives (`send_roll_fences/1`). What it must not do is skip the fence, which it used to: sealing
+  # from its own counter let a frontend that had not yet seen the seal keep appending to the segment, and
+  # the primary acknowledged records above the recorded edge that no read could reach.
   defp fence_and_seal(state, roll) do
     case ReplicationServer.seal(roll.primary, roll.segment_id, roll.start_offset, state.fence_timeout) do
       {:ok, end_offset, byte_size} ->
@@ -910,6 +936,146 @@ defmodule Malachi.BrokerServer do
         {:error, reason, state}
     end
   end
+
+  # Sends the fence of every owed roll that is due (`Broker.fences_to_send/3`): the first send, or a resend
+  # once one has gone unanswered for `@roll_fence_retry_ms`. Never waits: the answer comes back as a
+  # `{:seal_result, ...}` message, and until it does the segment stays active and keeps taking writes, each
+  # of which the fence's answer then covers.
+  defp send_roll_fences(state) do
+    {broker, rolls} = Broker.fences_to_send(state.broker, now_ms(), @roll_fence_retry_ms)
+
+    for roll <- rolls do
+      ReplicationServer.seal_async(roll.primary, roll.segment_id, roll.start_offset, self(), {:roll_fence, roll})
+    end
+
+    %{state | broker: broker}
+  end
+
+  defp record_roll_fence(state, roll, {:ok, end_offset, byte_size}) do
+    case Broker.record_fence(state.broker, roll, end_offset, byte_size, System.system_time(:millisecond)) do
+      {broker, :ok} ->
+        %{state | broker: broker}
+
+      # The store is fenced and the metadata is not, as in `fence_and_seal/2`, and just as loud. Unlike a
+      # split, the roll stays owed: its fence is resent once the retry window passes, and answers the same
+      # numbers, so the seal is recorded again rather than left to a heal pass. The answer did arrive, so the
+      # fence is no longer awaited: a produce refused by it fails at once instead of being held for nothing.
+      {broker, {:error, reason}} ->
+        Logger.error(I18n.t(:seal_record_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
+        Telemetry.orphaned_fence(roll.segment_id, reason)
+        %{state | broker: Broker.forget_fence(broker, roll)}
+    end
+  end
+
+  # A failed fence changes nothing: the segment stays open for writes and the roll stays owed, so the fence
+  # is resent after the retry window. A primary whose copy failed in storage answers here too, and the
+  # failover pass seals that segment, which clears the roll. The fence is no longer awaited, though, so no
+  # produce is held behind it.
+  defp record_roll_fence(state, roll, {:error, reason}) do
+    Logger.warning(I18n.t(:roll_fence_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
+    %{state | broker: Broker.forget_fence(state.broker, roll)}
+  end
+
+  # A dispatch refused by a sealed segment. One that went out behind this frontend's own fence is this
+  # frontend's roll overtaking its own produce, not a writer racing a seal it has not seen, so it is not
+  # failed back to the client: it waits for the fence's answer if that is still on its way, and is planned
+  # again at once if the answer already landed (the primary sends the answer before the refusal, so that
+  # is the common order). Only once: a dispatch that is itself a second attempt fails as before.
+  defp sealed_dispatch(state, ref, pending, %{behind_fence: true} = dispatch, end_offset) do
+    %{range_id: range_id, segment_id: segment_id} = dispatch
+
+    if Broker.awaiting_fence?(state.broker, range_id, segment_id, now_ms(), @roll_fence_retry_ms) do
+      park_on_fence(state, range_id, {:async, ref, dispatch, end_offset})
+    else
+      replan_dispatch(state, ref, pending, dispatch)
+    end
+  end
+
+  defp sealed_dispatch(state, ref, pending, _dispatch, end_offset) do
+    finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
+  end
+
+  # Holds `entry` until the fence of `range_id` answers (`handle_info/2` for `:seal_result`) or the retry
+  # window runs out, whichever comes first. The window is the one after which the fence itself is resent, so
+  # a produce never waits longer for an answer than the frontend does. Entries keep their arrival order.
+  defp park_on_fence(state, range_id, entry) do
+    parked =
+      case Map.get(state.fence_parked, range_id) do
+        nil ->
+          token = make_ref()
+          timer = Process.send_after(self(), {:fence_park_timeout, range_id, token}, @roll_fence_retry_ms)
+          %{token: token, timer: timer, entries: [entry]}
+
+        parked ->
+          %{parked | entries: [entry | parked.entries]}
+      end
+
+    %{state | fence_parked: Map.put(state.fence_parked, range_id, parked)}
+  end
+
+  # `:replan` sends every held produce again, `:refuse` fails the refused dispatches with the refusal they
+  # got. A held group-commit call was never refused (it was held before it was tried), so both modes simply
+  # try it now, with no second hold.
+  defp release_fence_parked(state, range_id, mode) do
+    case Map.pop(state.fence_parked, range_id) do
+      {nil, _fence_parked} ->
+        state
+
+      {parked, fence_parked} ->
+        Process.cancel_timer(parked.timer)
+
+        parked.entries
+        |> Enum.reverse()
+        |> Enum.reduce(%{state | fence_parked: fence_parked}, &release_parked_entry(&2, &1, mode))
+    end
+  end
+
+  defp release_parked_entry(state, {:async, ref, dispatch, end_offset}, mode) do
+    case {Map.get(state.async_produces, ref), mode} do
+      # Already finished: another of its dispatches failed, or its safety timer fired.
+      {nil, _mode} -> state
+      {pending, :replan} -> replan_dispatch(state, ref, pending, dispatch)
+      {pending, :refuse} -> finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
+    end
+  end
+
+  defp release_parked_entry(state, {:grouped, from, topic, records}, _mode) do
+    case grouped_append(from, topic, records, state) do
+      {:reply, reply, state} ->
+        GenServer.reply(from, reply)
+        state
+
+      {:noreply, state} ->
+        state
+    end
+  end
+
+  # Plans one refused dispatch's records again, as a produce of their own folded into the one they belong to:
+  # the refused dispatch is replaced by whatever the new plan owes (one dispatch into the successor, or more
+  # if the range split meanwhile), and its placement by the new ones.
+  defp replan_dispatch(state, ref, pending, dispatch) do
+    {records, parts} = Map.pop!(pending.parts, dispatch)
+    pending = %{pending | parts: parts}
+
+    case Broker.produce_plan(state.broker, pending.topic, records) do
+      {broker, {:ok, placements, dispatches}} ->
+        state = %{state | broker: broker}
+        dispatch_async(state, ref, dispatches, false)
+
+        pending = %{
+          pending
+          | placements: pending.placements |> Map.delete(dispatch.range_id) |> Map.merge(placements),
+            remaining: pending.remaining - 1 + length(dispatches)
+        }
+
+        %{state | async_produces: Map.put(state.async_produces, ref, pending)}
+
+      {broker, {:error, _reason} = error} ->
+        finish_async_produce(%{state | broker: broker}, ref, pending, error)
+    end
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   defp reconcile_metadata(state) do
     schedule_reconcile(state)
@@ -1117,29 +1283,52 @@ defmodule Malachi.BrokerServer do
         # folded in by `adopt_result/4` as each dispatch lands, say where the segment really ends.
         state = %{state | broker: broker}
         ref = make_ref()
-
-        Enum.each(dispatches, fn d ->
-          tag = {ref, %{range_id: d.range_id, segment_id: d.segment_id, last: d.last, count: d.count}}
-
-          ReplicationServer.replicate_async(
-            d.primary,
-            d.segment_id,
-            d.replica_set,
-            d.base_offset,
-            d.records,
-            self(),
-            tag
-          )
-        end)
+        parts = dispatch_async(state, ref, dispatches, true)
 
         timer = Process.send_after(self(), {:produce_timeout, ref}, @async_produce_timeout)
 
-        pending = %{from: from, topic: topic, placements: placements, remaining: length(dispatches), timer: timer}
+        pending = %{
+          from: from,
+          topic: topic,
+          placements: placements,
+          remaining: length(dispatches),
+          parts: parts,
+          timer: timer
+        }
+
         {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
 
       {broker, {:error, _reason} = error} ->
         {:reply, error, %{state | broker: broker}}
     end
+  end
+
+  # Casts each dispatch to its primary, tagged with what its answer needs. A dispatch into a segment whose
+  # roll fence this frontend already sent is marked `behind_fence`: the primary takes the fence first, so it
+  # will refuse the dispatch, and `sealed_dispatch/5` plans it again instead of failing it. Only those keep
+  # their records (the returned `parts`), so the common produce holds nothing extra. `first_attempt?` false
+  # marks none, which is what bounds a produce to one replan.
+  defp dispatch_async(state, ref, dispatches, first_attempt?) do
+    now = now_ms()
+
+    Enum.reduce(dispatches, %{}, fn d, parts ->
+      behind_fence? =
+        first_attempt? and Broker.awaiting_fence?(state.broker, d.range_id, d.segment_id, now, @roll_fence_retry_ms)
+
+      tag = %{range_id: d.range_id, segment_id: d.segment_id, last: d.last, count: d.count, behind_fence: behind_fence?}
+
+      ReplicationServer.replicate_async(
+        d.primary,
+        d.segment_id,
+        d.replica_set,
+        d.base_offset,
+        d.records,
+        self(),
+        {ref, tag}
+      )
+
+      if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
+    end)
   end
 
   # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
@@ -1173,7 +1362,19 @@ defmodule Malachi.BrokerServer do
   # path does, so the routing/offset code is shared; the client reply is parked until the next
   # `:group_flush` makes it durable. A routing/append error (bad topic, unroutable key) is returned now,
   # not parked, since nothing was buffered.
+  #
+  # A call for a topic with a roll fence still awaited is held until that fence answers (`park_on_fence/3`)
+  # rather than tried and refused. Unlike an async dispatch it cannot be replanned after a refusal: the
+  # executing produce may already have appended the batch's other ranges, and trying it again would store
+  # those twice. Held BEFORE it is tried, nothing has been stored yet.
   defp produce_grouped(from, topic, records, state) do
+    case Broker.range_awaiting_fence(state.broker, topic, now_ms(), @roll_fence_retry_ms) do
+      nil -> grouped_append(from, topic, records, state)
+      range_id -> {:noreply, park_on_fence(state, range_id, {:grouped, from, topic, records})}
+    end
+  end
+
+  defp grouped_append(from, topic, records, state) do
     if state.pending_records >= state.max_inflight_records do
       # Backpressure: shed load gracefully. Replying now (fast) keeps the caller's produce call from timing
       # out and crashing its connection; the client sees an `:overloaded` error and backs off.
@@ -1184,15 +1385,15 @@ defmodule Malachi.BrokerServer do
           waiter = %{from: from, reply: reply, topic: topic}
           pending_records = state.pending_records + length(records)
 
-          # Settled here rather than where the threshold tripped: `Broker.produce/4` has already seated
-          # the counter on the primary's answer for this batch, so the length is exact. On the produce
-          # path a seal is a metadata command and nothing more, never a call to a replica.
-          state = %{
-            state
-            | broker: Broker.settle_rolls(broker),
-              pending_produce: [waiter | state.pending_produce],
-              pending_records: pending_records
-          }
+          # A roll this batch tripped is sent its fence here, after the append it follows, so the end the
+          # fence answers includes this batch.
+          state =
+            send_roll_fences(%{
+              state
+              | broker: broker,
+                pending_produce: [waiter | state.pending_produce],
+                pending_records: pending_records
+            })
 
           # Flush eagerly once enough is parked so each fsync (and so each reply) stays bounded; otherwise
           # let the interval timer fire.

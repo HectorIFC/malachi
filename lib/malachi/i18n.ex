@@ -238,6 +238,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Cerca do segmento %{segment_id} falhou: %{reason}; o segmento pai segue aberto",
       "en_US" => "⚠️ Fence for segment %{segment_id} failed: %{reason}; the parent stays open"
     },
+    roll_fence_failed: %{
+      "pt_BR" =>
+        "cerca do roll do segmento %{segment_id} falhou: %{reason}; o segmento segue aberto para escrita " <>
+          "e a cerca é reenviada",
+      "en_US" =>
+        "roll fence for segment %{segment_id} failed: %{reason}; the segment stays open for writes and the " <>
+          "fence is sent again"
+    },
     seal_record_failed: %{
       "pt_BR" =>
         "❌ Segmento %{segment_id} foi cercado mas o selo no control plane falhou: %{reason}; o range " <>
