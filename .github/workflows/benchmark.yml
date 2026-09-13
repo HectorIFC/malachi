@@ -33,6 +33,14 @@ on:
         description: 'Measure what proving a preallocated tail is unwritten costs (issue #149). Seconds, not minutes.'
         type: boolean
         default: false
+      store_error_path_ab:
+        description: 'Paired A/B of the storage error path against main (issue #147). Tens of minutes.'
+        type: boolean
+        default: false
+      store_error_path_ab_reps:
+        description: 'Store-case repetitions per arm (a verdict needs at least 5)'
+        type: string
+        default: '15'
 
 permissions:
   contents: read
@@ -131,4 +139,33 @@ jobs:
         with:
           name: blank-tail-scan
           path: ${{ runner.temp }}/blank-tail-scan.json
+          if-no-files-found: error
+
+      # The measurement behind issue #147: does handing storage errors back cost the produce hot path
+      # anything? It compares this checkout against main, so main is checked out beside it, outside the
+      # workspace, and both are built from their own sources. The runner's temp dir is ext4 on a real disk,
+      # the platform the answer is about; the script refuses to call a run too short to judge a pass.
+      - name: Check out main as the A/B baseline
+        if: ${{ inputs.store_error_path_ab }}
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: store-error-path-baseline
+          persist-credentials: false
+
+      - name: Run the storage error path A/B
+        if: ${{ inputs.store_error_path_ab }}
+        env:
+          AB_REPS: ${{ inputs.store_error_path_ab_reps }}
+          AB_DIR: ${{ runner.temp }}/store_error_path_ab
+        run: |
+          mv store-error-path-baseline "$RUNNER_TEMP/baseline"
+          benchmark/store_error_path_ab.sh "$RUNNER_TEMP/baseline" . "$RUNNER_TEMP/store-error-path-ab"
+
+      - name: Upload the storage error path A/B
+        if: ${{ always() && inputs.store_error_path_ab }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-error-path-ab
+          path: ${{ runner.temp }}/store-error-path-ab/report.json
           if-no-files-found: error
