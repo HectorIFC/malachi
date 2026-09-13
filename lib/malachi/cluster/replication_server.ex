@@ -44,6 +44,26 @@ defmodule Malachi.Cluster.ReplicationServer do
   `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
   without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
   landed and finish it.
+
+  ## Storage failures
+
+  This one process holds every log on the node, so a storage failure in one segment must never take
+  the process down: that would take every OTHER segment with it, and a condition like a full volume does
+  not clear between supervisor restarts. A failed storage operation is instead answered to its caller as
+  `{:error, {:storage, reason}}` (the POSIX reason, `{:storage, :enospc}`), and the segment is FAILED on
+  this server:
+
+    * its log is closed and dropped, its parked batches are answered with the same error, and deferred
+      follower acks for it are discarded, so nothing acknowledges records that never became durable;
+    * every later request for it, writes and reads alike, is refused with that error WITHOUT touching
+      the disk, until the segment is deleted here or the server restarts;
+    * it is reported by `failed_segments/3`, which is how `Malachi.Cluster.HealCoordinator` finds it and
+      seals the segment on its surviving replicas so producers move to a new one, as NorthGuard does
+      when a replica fails.
+
+  The copy is never retried. This store writes through the page cache (no Direct I/O), and after a
+  failed fsync the cache can claim bytes are written that never reached the device, so a retry could
+  report success over lost data.
   """
 
   use GenServer
@@ -92,7 +112,9 @@ defmodule Malachi.Cluster.ReplicationServer do
            group_commit: boolean(),
            gc_interval: pos_integer(),
            gc_timer: reference() | nil,
-           pending_acks: %{{term(), term()} => non_neg_integer()}
+           pending_acks: %{{term(), term()} => non_neg_integer()},
+           failed: %{term() => term()},
+           lost_unflushed: %{term() => term()}
          }
 
   @doc """
@@ -127,12 +149,20 @@ defmodule Malachi.Cluster.ReplicationServer do
   (`start_offset, start_offset + 1, ...`) rather than restarting at zero.
 
   Returns `{:ok, last_offset}` once a quorum has the batch durably, `{:error, :no_quorum}` if too
-  few replicas acked, `{:error, :not_primary}` if this server is not the set's primary, or
-  `{:error, :empty}` for an empty batch.
+  few replicas acked, `{:error, :not_primary}` if this server is not the set's primary,
+  `{:error, :empty}` for an empty batch, `{:error, {:sealed, end_offset}}` for a fenced segment, or
+  `{:error, {:storage, reason}}` when this server's copy failed (see "Storage failures").
   """
   @spec replicate(term(), term(), [term()], non_neg_integer(), [Malachi.Log.Record.t()]) ::
           {:ok, non_neg_integer()}
-          | {:error, :no_quorum | :not_primary | :empty | :empty_replica_set}
+          | {:error,
+             :no_quorum
+             | :not_primary
+             | :empty
+             | :empty_replica_set
+             | :unreachable
+             | {:sealed, non_neg_integer()}
+             | {:storage, term()}}
   def replicate(primary, segment_id, replica_set, base_offset, records) do
     # Carry the caller's trace context (the broker produce span, possibly on another node) so the quorum
     # replication becomes a child span: distributed tracing across the produce -> replication hop.
@@ -177,9 +207,15 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   @doc """
   Fsyncs every segment on this server that has buffered (un-synced) records, making all prior
-  `append/5`s durable in one pass. Returns `:ok`. This is the flush half of group commit.
+  `append/5`s durable in one pass. This is the flush half of group commit.
+
+  Returns `:ok` only when every record appended since the previous flush is durable. Otherwise it
+  returns `{:error, [{segment_id, reason}]}` naming each segment whose buffered records were lost to a
+  storage failure, whether that failure happened in this flush or earlier, between the append and it:
+  either way the append was already answered `{:ok, last}`, and a caller that acks on this reply must
+  not ack those records.
   """
-  @spec flush(term()) :: :ok
+  @spec flush(term()) :: :ok | {:error, [{term(), term()}]}
   def flush(ref) do
     GenServer.call(ref, :flush)
   end
@@ -225,7 +261,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   triggers a catch-up, since the caller is already driving one.
   """
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
-          {:ok, non_neg_integer()} | {:error, :out_of_sync}
+          {:ok, non_neg_integer()} | {:error, :out_of_sync | {:storage, term()}}
   def follow(ref, segment_id, expected_first, records) do
     GenServer.call(ref, {:follow, segment_id, expected_first, records})
   end
@@ -258,9 +294,9 @@ defmodule Malachi.Cluster.ReplicationServer do
   is not open yet. Unlike `end_offset/3` (which answers `:empty` for a segment that exists on disk
   but has not been touched since this server booted), this gives the true resume point after a
   restart, which is what a repair needs as its copy start. `base_offset` seats a missing or empty
-  log at the segment's base.
+  log at the segment's base. A copy that failed here answers `{:error, {:storage, reason}}`.
   """
-  @spec durable_end(term(), term(), non_neg_integer(), timeout()) :: non_neg_integer()
+  @spec durable_end(term(), term(), non_neg_integer(), timeout()) :: non_neg_integer() | {:error, term()}
   def durable_end(ref, segment_id, base_offset, timeout \\ 5_000) do
     GenServer.call(ref, {:durable_end, segment_id, base_offset}, timeout)
   end
@@ -314,6 +350,19 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @doc """
+  The same fence as `seal/4`, without waiting for it: the answer is DELIVERED to `notify_pid` as
+  `{:seal_result, tag, {:ok, end_offset, byte_size} | {:error, reason}}`.
+
+  For a caller that must not block its loop on a network call, which is the produce roll in
+  `Malachi.BrokerServer`. A cast to a dead or unreachable server is simply never answered, so the caller
+  owns the retry: sending the fence again is safe, since it is idempotent and answers the same numbers.
+  """
+  @spec seal_async(term(), term(), non_neg_integer(), pid(), term()) :: :ok
+  def seal_async(ref, segment_id, base_offset, notify_pid, tag) do
+    GenServer.cast(ref, {:seal_async, segment_id, base_offset, {notify_pid, tag}})
+  end
+
+  @doc """
   Which of `segments` this server has already FENCED, as `%{segment_id => {end_offset, byte_size}}`.
   Never fences anything: it reports a latch somebody else already closed.
 
@@ -335,6 +384,22 @@ defmodule Malachi.Cluster.ReplicationServer do
           {:ok, %{optional(term()) => {non_neg_integer(), non_neg_integer()}}} | {:error, term()}
   def fenced_segments(ref, segments, timeout \\ 5_000) do
     GenServer.call(ref, {:fenced_segments, segments}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Which of `segment_ids` have FAILED on this server (see "Storage failures"), as a `MapSet`.
+
+  Read-only and free of disk access: it is a lookup in the failure latch, so a heal pass can ask every
+  replica about every active segment it holds on each pass. A failed copy is one this server will never
+  write again, which is what `Malachi.Cluster.Failover` needs to know to seal the segment elsewhere.
+
+  A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller.
+  """
+  @spec failed_segments(term(), [term()], timeout()) :: {:ok, MapSet.t()} | {:error, term()}
+  def failed_segments(ref, segment_ids, timeout \\ 5_000) do
+    GenServer.call(ref, {:failed_segments, segment_ids}, timeout)
   catch
     :exit, _reason -> {:error, :unreachable}
   end
@@ -387,7 +452,12 @@ defmodule Malachi.Cluster.ReplicationServer do
       group_commit: Keyword.get(opts, :group_commit, false),
       gc_interval: Keyword.get(opts, :group_commit_interval_ms, @default_gc_interval_ms),
       gc_timer: nil,
-      pending_acks: %{}
+      pending_acks: %{},
+      # The failure latch (see "Storage failures"): segment => the reason its copy failed here.
+      failed: %{},
+      # Segments that failed while holding buffered records, which `:flush` has to report because those
+      # appends were already answered `{:ok, last}`. One entry per segment, cleared by the flush.
+      lost_unflushed: %{}
     }
 
     {:ok, state}
@@ -410,18 +480,17 @@ defmodule Malachi.Cluster.ReplicationServer do
       # The span covers the primary's local durable append; the follower fan-out completes
       # asynchronously (see the :replica_ack handler), so it is not inside this span.
       Tracer.with_span "malachi.replication.commit" do
-        cond do
-          fenced?(state, segment_id) ->
-            {state, end_offset} = fenced_end(state, segment_id, base_offset)
-            {:reply, {:error, {:sealed, end_offset}}, state}
+        case write_refusal(state, segment_id, base_offset) do
+          {:refuse, reply, state} ->
+            {:reply, reply, state}
 
-          hd(replica_set) == state.ref ->
+          :proceed when hd(replica_set) == state.ref ->
             case do_replicate(state, {:call, from}, segment_id, replica_set, base_offset, records) do
               {:done, result, state} -> {:reply, result, state}
               {:parked, state} -> {:noreply, state}
             end
 
-          true ->
+          :proceed ->
             {:reply, {:error, :not_primary}, state}
         end
       end
@@ -443,79 +512,93 @@ defmodule Malachi.Cluster.ReplicationServer do
     # is no follower fan-out here; the broker routes multi-replica sets through `:replicate` instead.
     replica_set = Enum.map(replica_set, &canonical_ref/1)
 
-    cond do
-      fenced?(state, segment_id) ->
-        {state, end_offset} = fenced_end(state, segment_id, base_offset)
-        {:reply, {:error, {:sealed, end_offset}}, state}
+    case write_refusal(state, segment_id, base_offset) do
+      {:refuse, reply, state} ->
+        {:reply, reply, state}
 
-      hd(replica_set) == state.ref ->
-        {state, log} = fetch_or_open(state, segment_id, base_offset)
-
-        case Log.append(log, records) do
-          {:ok, log, _first, last} -> {:reply, {:ok, last}, put_log(state, segment_id, log)}
-          {:error, reason} -> {:reply, {:error, reason}, state}
+      :proceed when hd(replica_set) == state.ref ->
+        with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+             {:ok, state, _first, last} <- write_records(state, segment_id, log, records, :buffered) do
+          {:reply, {:ok, last}, state}
+        else
+          {:error, reason, state} -> {:reply, {:error, reason}, state}
         end
 
-      true ->
+      :proceed ->
         {:reply, {:error, :not_primary}, state}
     end
   end
 
   def handle_call(:flush, _from, state) do
-    logs =
-      Map.new(state.logs, fn {segment_id, log} ->
-        if Log.pending?(log), do: {segment_id, elem(Log.sync(log), 1)}, else: {segment_id, log}
-      end)
+    # `sync_pending/1` fails every segment whose sync fails, and failing a segment that held buffered
+    # records records the loss, so after it the losses are exactly what this flush must not call durable.
+    state = sync_pending(state)
 
-    {:reply, :ok, %{state | logs: logs}}
+    reply = if state.lost_unflushed == %{}, do: :ok, else: {:error, Enum.sort(state.lost_unflushed)}
+    {:reply, reply, %{state | lost_unflushed: %{}}}
   end
 
   def handle_call({:follow, segment_id, expected_first, records}, _from, state) do
     # A fresh log opens exactly where this batch starts: the caller (Catchup) copies a span it chose,
     # so there is no earlier gap for this replica to backfill. The primary's fan-out, which does have
     # to seat a new replica at the segment's base, comes in through :replica_append instead.
-    {state, log} = fetch_or_open(state, segment_id, expected_first)
+    case open_segment(state, segment_id, expected_first) do
+      {:ok, state, %Log{next_offset: ^expected_first} = log} ->
+        case write_records(state, segment_id, log, records, :durable) do
+          {:ok, state, _first, last} -> {:reply, {:ok, last}, state}
+          {:error, reason, state} -> {:reply, {:error, reason}, state}
+        end
 
-    if log.next_offset == expected_first do
-      {log, _first, last} = append_durably(log, records)
-      {:reply, {:ok, last}, put_log(state, segment_id, log)}
-    else
-      {:reply, {:error, :out_of_sync}, state}
+      {:ok, state, _log_at_another_offset} ->
+        {:reply, {:error, :out_of_sync}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:read, segment_id, offset, max_records}, _from, state) do
-    case Map.fetch(state.logs, segment_id) do
-      {:ok, log} ->
-        {:reply, Log.read(log, offset, max_records), state}
+    cond do
+      Map.has_key?(state.failed, segment_id) ->
+        {:reply, storage_error(state, segment_id), state}
 
-      :error ->
-        # Cold read: a restarted server holds durable segments nothing has opened yet, and only the
-        # append path used to open them, so every pre-restart record answered :eof until some write
-        # happened to touch its segment (the storage-chaos harness read 0 of 4592 acked records off
-        # a fully healthy cluster this way). Recover from disk when files exist; reading a segment
-        # this server never stored stays :eof and must not create an empty log as a side effect.
-        directory = segment_directory(state.directory, segment_id)
+      Map.has_key?(state.logs, segment_id) ->
+        read_open(state, segment_id, offset, max_records)
 
-        if Path.wildcard(Path.join(directory, "*.log")) == [] do
-          {:reply, :eof, state}
-        else
-          # The base offset opt only seats an EMPTY log; with files present recover derives the
-          # true offsets from them, so 0 here is inert.
-          {state, log} = fetch_or_open(state, segment_id, 0)
-          {:reply, Log.read(log, offset, max_records), state}
+      # Cold read: a restarted server holds durable segments nothing has opened yet, and only the
+      # append path used to open them, so every pre-restart record answered :eof until some write
+      # happened to touch its segment (the storage-chaos harness read 0 of 4592 acked records off
+      # a fully healthy cluster this way). Recover from disk when files exist; reading a segment
+      # this server never stored stays :eof and must not create an empty log as a side effect.
+      Path.wildcard(Path.join(segment_directory(state.directory, segment_id), "*.log")) == [] ->
+        {:reply, :eof, state}
+
+      true ->
+        # The base offset opt only seats an EMPTY log; with files present recover derives the
+        # true offsets from them, so 0 here is inert.
+        case open_segment(state, segment_id, 0) do
+          {:ok, state, _log} -> read_open(state, segment_id, offset, max_records)
+          {:error, reason, state} -> {:reply, {:error, reason}, state}
         end
     end
   end
 
   def handle_call({:delete, segment_id}, _from, state) do
+    # Deleting clears the failure latch too: the copy is gone, and a segment that comes back under this
+    # id later is a new copy with nothing wrong with it.
+    state = %{
+      state
+      | failed: Map.delete(state.failed, segment_id),
+        lost_unflushed: Map.delete(state.lost_unflushed, segment_id)
+    }
+
     case Map.pop(state.logs, segment_id) do
       # Open here: close and drop its whole directory.
       {%Log{} = log, logs} ->
         :ok = Log.delete(log)
         {:reply, :ok, %{state | logs: logs}}
 
-      # Not open (never replicated here, or not reopened after a restart): clear any files on disk.
+      # Not open (never replicated here, or not reopened after a restart, or failed): clear any files.
       {nil, logs} ->
         _ = File.rm_rf(segment_directory(state.directory, segment_id))
         {:reply, :ok, %{state | logs: logs}}
@@ -537,8 +620,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
-    {:reply, log.next_offset, state}
+    case open_segment(state, segment_id, base_offset) do
+      {:ok, state, log} -> {:reply, log.next_offset, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
@@ -547,13 +632,12 @@ defmodule Malachi.Cluster.ReplicationServer do
     # actually be READ back. A log's next offset counts buffered records too, and the store serves only
     # committed ones, so answering unflushed would seal a segment at a length its own replicas cannot
     # serve: the metadata would promise records that read as :eof and the range's reads would stop dead.
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
-    {:ok, log} = Log.seal(log)
-    # The sealed log goes back into the state BEFORE the byte count is taken: the count now comes
-    # from the open log rather than from stat, and the copy still in the state is the pre-seal one,
-    # whose committed byte count predates the flush that sealing just did.
-    state = put_log(state, segment_id, log)
-    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
+    #
+    # The sealed log goes back into the state (inside `run_log/4`) BEFORE the byte count is taken: the
+    # count comes from the open log rather than from stat, and the copy that was in the state is the
+    # pre-seal one, whose committed byte count predates the flush that sealing just did.
+    {reply, state} = seal_segment(state, segment_id, base_offset)
+    {:reply, reply, state}
   end
 
   # The batched fence report. Read-only by construction: `fenced?/2` is the same test the write paths
@@ -561,11 +645,18 @@ defmodule Malachi.Cluster.ReplicationServer do
   # merely active is never touched, which is the property that keeps this safe to run over every active
   # segment: a pass that fenced while probing is what wedged a range at `replication_factor: 2` before.
   def handle_call({:fenced_segments, segments}, _from, state) do
+    # A FAILED copy is left out even when it carries a fence marker: its end cannot be trusted, and a
+    # failed segment is `failed_segments/3`'s to report, where the heal pass seals it on a majority.
     {state, fenced} =
       Enum.reduce(segments, {state, %{}}, fn {segment_id, base_offset}, {acc_state, acc} ->
-        if fenced?(acc_state, segment_id) do
-          {acc_state, end_offset} = fenced_end(acc_state, segment_id, base_offset)
-          {acc_state, Map.put(acc, segment_id, {end_offset, bytes_on_disk(acc_state, segment_id)})}
+        if not Map.has_key?(acc_state.failed, segment_id) and fenced?(acc_state, segment_id) do
+          case fenced_end(acc_state, segment_id, base_offset) do
+            {:ok, acc_state, end_offset} ->
+              {acc_state, Map.put(acc, segment_id, {end_offset, bytes_on_disk(acc_state, segment_id)})}
+
+            {:error, _reason, acc_state} ->
+              {acc_state, acc}
+          end
         else
           {acc_state, acc}
         end
@@ -574,19 +665,33 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, {:ok, fenced}, state}
   end
 
+  def handle_call({:failed_segments, segment_ids}, _from, state) do
+    failed = for segment_id <- segment_ids, Map.has_key?(state.failed, segment_id), into: MapSet.new(), do: segment_id
+    {:reply, {:ok, failed}, state}
+  end
+
   def handle_call({:durable_stats, segment_id, base_offset}, _from, state) do
     # The same measurement as the seal above, without the latch: flush so the answer describes readable
     # records, then report. Sharing the flush matters more than sharing the code, since a probe that
     # answered unflushed would hand a failover pass a seal point its own replicas could not serve.
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
-    log = if Log.pending?(log), do: elem(Log.sync(log), 1), else: log
-    state = put_log(state, segment_id, log)
-    {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
+    with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+         {:ok, state, log} <- flush_log(state, segment_id, log) do
+      {:reply, {:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
+    else
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # The asynchronous fence (`seal_async/5`): the same seal as the call, answered as a message.
+  @impl true
+  def handle_cast({:seal_async, segment_id, base_offset, notify}, state) do
+    {reply, state} = seal_segment(state, segment_id, base_offset)
+    notify_seal(notify, reply)
+    {:noreply, state}
   end
 
   # The fire-and-forget produce path (a frontend that must not block its loop): same flow as the
   # :replicate call, but completions are DELIVERED as messages to the notify target.
-  @impl true
   def handle_cast({:replicate_async, _segment_id, _replica_set, _base_offset, records, notify, _ctx}, state)
       when records == [] do
     notify_result(notify, {:error, :empty})
@@ -606,13 +711,12 @@ defmodule Malachi.Cluster.ReplicationServer do
       # As in the call path, the span covers the primary's local durable append; the fan-out completes
       # asynchronously.
       Tracer.with_span "malachi.replication.commit" do
-        cond do
-          fenced?(state, segment_id) ->
-            {state, end_offset} = fenced_end(state, segment_id, base_offset)
-            notify_result(notify, {:error, {:sealed, end_offset}})
+        case write_refusal(state, segment_id, base_offset) do
+          {:refuse, reply, state} ->
+            notify_result(notify, reply)
             {:noreply, state}
 
-          hd(replica_set) == state.ref ->
+          :proceed when hd(replica_set) == state.ref ->
             case do_replicate(state, {:notify, pid, tag}, segment_id, replica_set, base_offset, records) do
               {:done, result, state} ->
                 notify_result(notify, result)
@@ -622,7 +726,7 @@ defmodule Malachi.Cluster.ReplicationServer do
                 {:noreply, state}
             end
 
-          true ->
+          :proceed ->
             notify_result(notify, {:error, :not_primary})
             {:noreply, state}
         end
@@ -636,8 +740,38 @@ defmodule Malachi.Cluster.ReplicationServer do
   # offset (the NorthGuard replica ack). Pushes from one primary arrive in offset order (per-pair
   # FIFO), so a mismatch means this replica is genuinely behind (or ahead via catch-up), not reordered.
   def handle_cast({:replica_append, segment_id, base, expected_first, records, _committed, source}, state) do
-    {state, log} = fetch_or_open(state, segment_id, base)
+    case open_segment(state, segment_id, base) do
+      # A failed copy acks the error like a fenced one does below: silence would have the primary wait out
+      # its follow timeout for an ack that can never come, while an error just drops this replica from
+      # the quorum count.
+      {:error, reason, state} ->
+        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, reason}})
+        {:noreply, state}
 
+      {:ok, state, log} ->
+        follow_push(state, log, {segment_id, base, expected_first, records, source})
+    end
+  end
+
+  # Primary side: fold a follower's durable-offset ack into the tracker and complete every parked
+  # batch the quorum now covers. Errors (out_of_sync, and stale acks from a replica no longer in the
+  # set) do not count toward the quorum, mirroring the old synchronous gather.
+  def handle_cast({:replica_ack, segment_id, follower, {:ok, offset}}, state) do
+    with tracker when tracker != nil <- Map.get(state.trackers, segment_id),
+         {:ok, tracker} <- ReplicaTracker.ack(tracker, follower, offset) do
+      state = put_in(state.trackers[segment_id], tracker)
+      {:noreply, resolve_batches(state, segment_id)}
+    else
+      _stale -> {:noreply, state}
+    end
+  end
+
+  def handle_cast({:replica_ack, _segment_id, _follower, {:error, _reason}}, state) do
+    {:noreply, state}
+  end
+
+  # The follower side of one pipelined push, once its log is open.
+  defp follow_push(state, log, {segment_id, base, expected_first, records, source}) do
     cond do
       # Fenced here: ack an ERROR rather than stay silent, so the primary simply does not count this
       # replica toward the quorum instead of waiting out the follow timeout for an ack that can never come.
@@ -648,15 +782,26 @@ defmodule Malachi.Cluster.ReplicationServer do
       log.next_offset == expected_first and state.group_commit ->
         # Group commit on the follower: buffer the append and defer the durable ack to the next flush
         # tick, so one fsync (and one cumulative ack per primary) covers every batch since the last.
-        {:ok, log, _first, last} = Log.append(log, records)
-        state = put_log(state, segment_id, log)
-        state = %{state | pending_acks: Map.put(state.pending_acks, {segment_id, source}, last)}
-        {:noreply, ensure_gc_timer(state)}
+        case write_records(state, segment_id, log, records, :buffered) do
+          {:ok, state, _first, last} ->
+            state = %{state | pending_acks: Map.put(state.pending_acks, {segment_id, source}, last)}
+            {:noreply, ensure_gc_timer(state)}
+
+          {:error, reason, state} ->
+            GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, reason}})
+            {:noreply, state}
+        end
 
       log.next_offset == expected_first ->
-        {log, _first, last} = append_durably(log, records)
-        GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, last}})
-        {:noreply, put_log(state, segment_id, log)}
+        case write_records(state, segment_id, log, records, :durable) do
+          {:ok, state, _first, last} ->
+            GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:ok, last}})
+            {:noreply, state}
+
+          {:error, reason, state} ->
+            GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, reason}})
+            {:noreply, state}
+        end
 
       log.next_offset > expected_first ->
         # Already have this batch (a background catch-up overtook the push stream). Under group commit
@@ -678,37 +823,16 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  # Primary side: fold a follower's durable-offset ack into the tracker and complete every parked
-  # batch the quorum now covers. Errors (out_of_sync, and stale acks from a replica no longer in the
-  # set) do not count toward the quorum, mirroring the old synchronous gather.
-  def handle_cast({:replica_ack, segment_id, follower, {:ok, offset}}, state) do
-    with tracker when tracker != nil <- Map.get(state.trackers, segment_id),
-         {:ok, tracker} <- ReplicaTracker.ack(tracker, follower, offset) do
-      state = put_in(state.trackers[segment_id], tracker)
-      {:noreply, resolve_batches(state, segment_id)}
-    else
-      _stale -> {:noreply, state}
-    end
-  end
-
-  def handle_cast({:replica_ack, _segment_id, _follower, {:error, _reason}}, state) do
-    {:noreply, state}
-  end
-
   # The group-commit flush tick: one fsync per replica covers every batch buffered since the last tick.
   # As the PRIMARY, self-ack the now-durable end of every segment with parked batches and resolve them;
   # as a FOLLOWER, send one cumulative durable ack per (segment, primary). Both roles run here because a
   # server is usually primary for some segments and follower for others at once.
   @impl true
   def handle_info(:gc_flush, state) do
-    state = %{state | gc_timer: nil}
-
-    logs =
-      Map.new(state.logs, fn {segment_id, log} ->
-        if Log.pending?(log), do: {segment_id, elem(Log.sync(log), 1)}, else: {segment_id, log}
-      end)
-
-    state = %{state | logs: logs}
+    # A segment whose sync fails is failed on the spot (`fail_segment/3`): its parked batches get the
+    # error and its deferred acks are dropped, so nothing below can release an ack, or self-ack a durable
+    # end, for records that did not become durable.
+    state = sync_pending(%{state | gc_timer: nil})
 
     # Follower role: everything appended is durable now, so release the deferred cumulative acks.
     Enum.each(state.pending_acks, fn {{segment_id, source}, last} ->
@@ -796,10 +920,17 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   # Per-batch durability: append + fsync locally, self-ack, push. The original semantics.
   defp do_replicate_durable(state, reply_target, segment_id, replica_set, followers, base_offset, records) do
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
-    {log, first, last} = append_durably(log, records)
-    state = put_log(state, segment_id, log)
+    with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+         {:ok, state, first, last} <- write_records(state, segment_id, log, records, :durable) do
+      commit_local(state, reply_target, {segment_id, replica_set, followers, base_offset, records}, first, last)
+    else
+      {:error, reason, state} -> {:done, {:error, reason}, state}
+    end
+  end
 
+  # The primary's own copy of the batch is durable: self-ack it and either reply (no followers) or park
+  # the caller and push to the followers.
+  defp commit_local(state, reply_target, {segment_id, replica_set, followers, base_offset, records}, first, last) do
     tracker = tracker_for(state, segment_id, replica_set)
     {:ok, tracker} = ReplicaTracker.ack(tracker, state.ref, last)
     state = put_in(state.trackers[segment_id], tracker)
@@ -819,21 +950,17 @@ defmodule Malachi.Cluster.ReplicationServer do
   # buffered since the last. The caller parks even with no followers: a reply must never precede local
   # durability.
   defp do_replicate_grouped(state, reply_target, segment_id, replica_set, followers, base_offset, records) do
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
+    with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+         {:ok, state, first, last} <- write_records(state, segment_id, log, records, :buffered) do
+      # Ensure the tracker exists now, so a follower ack arriving before our first flush still lands.
+      state = put_in(state.trackers[segment_id], tracker_for(state, segment_id, replica_set))
 
-    case Log.append(log, records) do
-      {:ok, log, first, last} ->
-        state = put_log(state, segment_id, log)
-        # Ensure the tracker exists now, so a follower ack arriving before our first flush still lands.
-        state = put_in(state.trackers[segment_id], tracker_for(state, segment_id, replica_set))
-
-        state
-        |> park_and_push(reply_target, segment_id, base_offset, first, last, followers, records)
-        |> ensure_gc_timer()
-        |> then(&{:parked, &1})
-
-      {:error, reason} ->
-        {:done, {:error, reason}, state}
+      state
+      |> park_and_push(reply_target, segment_id, base_offset, first, last, followers, records)
+      |> ensure_gc_timer()
+      |> then(&{:parked, &1})
+    else
+      {:error, reason, state} -> {:done, {:error, reason}, state}
     end
   end
 
@@ -1051,10 +1178,11 @@ defmodule Malachi.Cluster.ReplicationServer do
     end)
   end
 
+  # Only `open_segment/3` calls this: it is what applies the failure latch before and after.
   defp fetch_or_open(state, segment_id, base_offset) do
     case Map.fetch(state.logs, segment_id) do
       {:ok, log} ->
-        {state, log}
+        {:ok, state, log}
 
       :error ->
         # recover, not open: after a restart the segment's files may already exist on disk (a durable
@@ -1062,9 +1190,11 @@ defmodule Malachi.Cluster.ReplicationServer do
         # at the true durable end (a push past it nacks out_of_sync and catch-up backfills the gap) and
         # falls back to a fresh open when the directory is empty.
         opts = [base_offset: base_offset] ++ state.log_opts
-        {:ok, log} = Log.recover(segment_directory(state.directory, segment_id), opts)
-        report_integrity(log.integrity, segment_id)
-        {put_log(state, segment_id, log), log}
+
+        with {:ok, log} <- Log.recover(segment_directory(state.directory, segment_id), opts) do
+          report_integrity(log.integrity, segment_id)
+          {:ok, put_log(state, segment_id, log), log}
+        end
     end
   end
 
@@ -1114,9 +1244,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   # server that has not touched this segment yet) and is what makes the fence survive a restart. The
   # guard sits here, not in `Log.append/2`, because repair must still be able to write into a fenced
   # segment: `follow/4` appends records that already carry their offsets, bounded above by the source's
-  # end, and a fenced source's end IS the sealed edge, so a repair cannot overshoot it. Keeping
-  # `Log.append/2` permissive also keeps `append_durably/2`'s hard match honest: a fenced append here
-  # would raise inside the loop and take down every segment this server hosts.
+  # end, and a fenced source's end IS the sealed edge, so a repair cannot overshoot it.
   defp fenced?(state, segment_id) do
     case Map.fetch(state.logs, segment_id) do
       {:ok, log} -> Log.sealed?(log)
@@ -1124,17 +1252,176 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  # The write fence behind both `seal/4` and `seal_async/5`, answering what the sealed log holds.
+  defp seal_segment(state, segment_id, base_offset) do
+    with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+         {:ok, state, log} <- run_log(state, segment_id, log, &Log.seal/1) do
+      {{:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
+    else
+      {:error, reason, state} -> {{:error, reason}, state}
+    end
+  end
+
+  defp notify_seal({pid, tag}, reply), do: send(pid, {:seal_result, tag, reply})
+
   # The end a refused writer should seat itself at, so its retry opens the successor where this segment
   # closed instead of racing the control plane's tiling rule.
   defp fenced_end(state, segment_id, base_offset) do
-    {state, log} = fetch_or_open(state, segment_id, base_offset)
-    {state, log.next_offset}
+    with {:ok, state, log} <- open_segment(state, segment_id, base_offset) do
+      {:ok, state, log.next_offset}
+    end
   end
 
-  defp append_durably(log, records) do
-    {:ok, log, first, last} = Log.append(log, records)
-    {:ok, log} = Log.sync(log)
-    {log, first, last}
+  # Why a write to `segment_id` must not proceed here, asked the same way by every write entry point
+  # (`replicate/5`, `replicate_async/7`, `append/5`). The failure latch comes first because it answers
+  # without touching the disk, which the fence check may not.
+  defp write_refusal(state, segment_id, base_offset) do
+    cond do
+      Map.has_key?(state.failed, segment_id) ->
+        {:refuse, storage_error(state, segment_id), state}
+
+      fenced?(state, segment_id) ->
+        case fenced_end(state, segment_id, base_offset) do
+          {:ok, state, end_offset} -> {:refuse, {:error, {:sealed, end_offset}}, state}
+          {:error, reason, state} -> {:refuse, {:error, reason}, state}
+        end
+
+      true ->
+        :proceed
+    end
+  end
+
+  # --- storage failures (see the moduledoc) ---
+
+  # The one way a handler reaches a segment's log. A segment that already failed here is refused without
+  # touching the disk; one whose log fails to open now is failed on the spot.
+  @spec open_segment(state(), term(), non_neg_integer()) :: {:ok, state(), Log.t()} | {:error, term(), state()}
+  defp open_segment(state, segment_id, base_offset) do
+    if Map.has_key?(state.failed, segment_id) do
+      {:error, {:storage, Map.fetch!(state.failed, segment_id)}, state}
+    else
+      case fetch_or_open(state, segment_id, base_offset) do
+        {:ok, state, log} -> {:ok, state, log}
+        {:error, reason} -> {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+      end
+    end
+  end
+
+  defp storage_error(state, segment_id), do: {:error, {:storage, Map.fetch!(state.failed, segment_id)}}
+
+  # Appends `records` to `segment_id`'s open `log`, either `:durable` (appended and fsynced) or `:buffered`
+  # (appended only, for group commit to make durable later), and records the result in the state.
+  @spec write_records(state(), term(), Log.t(), [Malachi.Log.Record.t()], :durable | :buffered) ::
+          {:ok, state(), non_neg_integer(), non_neg_integer()} | {:error, term(), state()}
+  defp write_records(state, segment_id, log, records, durability) do
+    case write(log, records, durability) do
+      {:ok, log, first, last} ->
+        {:ok, put_log(state, segment_id, log), first, last}
+
+      {:error, reason, latest_log} ->
+        {:error, {:storage, reason}, fail_segment(put_log(state, segment_id, latest_log), segment_id, reason)}
+    end
+  end
+
+  # A failure answers the NEWEST log along with the reason, because that is the one `fail_segment/3` has
+  # to close: an append that reaches a segment's next file opens it, and only the appended log holds that
+  # descriptor. `Log.append/2` closes a file it opened and then failed to write, so after a failed append
+  # the newest log is the one we started with.
+  defp write(log, records, :buffered) do
+    case Log.append(log, records) do
+      {:ok, _log, _first, _last} = appended -> appended
+      {:error, reason} -> {:error, reason, log}
+    end
+  end
+
+  defp write(log, records, :durable) do
+    case Log.append(log, records) do
+      {:ok, appended, first, last} ->
+        case Log.sync(appended) do
+          {:ok, synced} -> {:ok, synced, first, last}
+          {:error, reason} -> {:error, reason, appended}
+        end
+
+      {:error, reason} ->
+        {:error, reason, log}
+    end
+  end
+
+  # Runs one whole-log `operation` (`Log.sync/1`, `Log.seal/1`) on `segment_id`'s open log and records the
+  # result, failing the segment when it fails.
+  defp run_log(state, segment_id, log, operation) do
+    case operation.(log) do
+      {:ok, log} -> {:ok, put_log(state, segment_id, log), log}
+      {:error, reason} -> {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+    end
+  end
+
+  defp flush_log(state, segment_id, log) do
+    if Log.pending?(log), do: run_log(state, segment_id, log, &Log.sync/1), else: {:ok, state, log}
+  end
+
+  # Syncs every log holding buffered records, failing each one whose sync fails.
+  defp sync_pending(state) do
+    Enum.reduce(state.logs, state, fn {segment_id, log}, acc ->
+      case flush_log(acc, segment_id, log) do
+        {:ok, acc, _log} -> acc
+        {:error, _reason, acc} -> acc
+      end
+    end)
+  end
+
+  # Latches `segment_id` as failed on this server. It decides nothing about the segment beyond this copy:
+  # sealing it where it can still be served is the heal pass's job, which finds it via
+  # `failed_segments/3`.
+  @spec fail_segment(state(), term(), term()) :: state()
+  defp fail_segment(state, segment_id, reason) do
+    {log, logs} = Map.pop(state.logs, segment_id)
+    lost_buffer? = log != nil and Log.pending?(log)
+    if log, do: :ok = Log.close(log)
+
+    # Every caller parked on this segment is answered now. Their records either never became durable
+    # here or cannot be vouched for, and leaving them parked would only turn this failure into a
+    # misleading `:no_quorum` when their timers fire.
+    {inflight, inflight_by_segment} = Map.pop(state.inflight, segment_id, [])
+    {queued, pending_by_segment} = Map.pop(state.pending, segment_id, :queue.new())
+    reply = {:error, {:storage, reason}}
+
+    for batch <- inflight ++ Enum.map(:queue.to_list(queued), &elem(&1, 0)) do
+      Process.cancel_timer(batch.timer)
+      reply_batch(batch, reply)
+    end
+
+    Logger.error(I18n.t(:replication_segment_storage_failed, segment_id: inspect(segment_id), reason: inspect(reason)))
+    Telemetry.storage_failure(segment_id, reason)
+
+    %{
+      state
+      | logs: logs,
+        trackers: Map.delete(state.trackers, segment_id),
+        committed: Map.delete(state.committed, segment_id),
+        inflight: inflight_by_segment,
+        pending: pending_by_segment,
+        # Deferred follower acks for records that will now never be synced here.
+        pending_acks: Map.reject(state.pending_acks, fn {{acked, _source}, _last} -> acked == segment_id end),
+        failed: Map.put(state.failed, segment_id, reason),
+        lost_unflushed:
+          if(lost_buffer?, do: Map.put(state.lost_unflushed, segment_id, reason), else: state.lost_unflushed)
+    }
+  end
+
+  # Reads from a segment whose log is open. `:out_of_range` is the log's own answer for an offset below
+  # its start (`Malachi.Log.read/3`), not a failure; any other error is the copy failing to be read.
+  defp read_open(state, segment_id, offset, max_records) do
+    case Log.read(Map.fetch!(state.logs, segment_id), offset, max_records) do
+      {:error, :out_of_range} = out_of_range ->
+        {:reply, out_of_range, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:storage, reason}}, fail_segment(state, segment_id, reason)}
+
+      records_or_eof ->
+        {:reply, records_or_eof, state}
+    end
   end
 
   defp put_log(state, segment_id, log), do: put_in(state.logs[segment_id], log)

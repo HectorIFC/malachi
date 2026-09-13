@@ -33,6 +33,16 @@ defmodule Malachi.Cluster.Scrubber do
   this node's own copy. Peers are asked through their own `Scrubber` (never the replication server),
   so the verification scan stays off the replication hot loop.
 
+  ## A copy that failed in storage
+
+  A copy this node's replication server has latched as failed (see "Storage failures" in
+  `Malachi.Cluster.ReplicationServer`) is skipped, reported under `:skipped`, and never repaired here. The
+  repair deletes the copy and refetches it onto the disk that just failed: the delete clears the latch, a
+  disk still failing latches it again during the refetch, and the next pass does it all over, reporting
+  the same damage every time. `Malachi.Cluster.SelfHealing` replaces such a copy on another broker instead.
+  For the same reason a peer asked about a latched copy answers `{:error, :failed_copy}`, so it is never
+  chosen as a repair source: this node would delete its own copy and then be refused by the peer.
+
   When the damaged copy is the segment's primary, the repair first submits a
   `:set_segment_replicas` that moves this node to the end of the replica set. Reads follow the head
   of that set, so they move to an intact replica immediately instead of hitting the hole (or the
@@ -80,13 +90,16 @@ defmodule Malachi.Cluster.Scrubber do
   # is reading a whole segment from disk (24 to 86ms for 64MB warm, more from cold storage), but
   # still bounded so one stuck peer cannot hold up the pass.
   @peer_timeout 30_000
+  # Bounds asking this node's own replication server which copies are latched: a lookup, no disk.
+  @latch_timeout 5_000
 
   @type verdict :: :ok | map()
   @type result :: %{
           verified: [Metadata.segment_id()],
           damaged: [{Metadata.segment_id(), verdict()}],
           repaired: [Metadata.segment_id()],
-          unrepairable: [{Metadata.segment_id(), term()}]
+          unrepairable: [{Metadata.segment_id(), term()}],
+          skipped: [Metadata.segment_id()]
         }
 
   @doc "Starts the scrubber. See the module doc for options."
@@ -155,7 +168,11 @@ defmodule Malachi.Cluster.Scrubber do
   end
 
   def handle_call({:verify_segment, segment_id}, _from, state) do
-    {:reply, verify(state, segment_id), state}
+    if segment_id in latched(resolve_ref(state.local_ref), [segment_id]) do
+      {:reply, {:error, :failed_copy}, state}
+    else
+      {:reply, verify(state, segment_id), state}
+    end
   end
 
   def handle_call(:damaged, _from, state), do: {:reply, MapSet.to_list(state.damaged), state}
@@ -209,10 +226,15 @@ defmodule Malachi.Cluster.Scrubber do
   defp run(state) do
     state = %{state | resolved_ref: resolve_ref(state.local_ref)}
     {segments, state} = take_segments(state)
+    failed = latched(state.resolved_ref, Enum.map(segments, & &1.id))
 
     {result, state} =
       Enum.reduce(segments, {empty_result(), state}, fn segment, {acc, acc_state} ->
-        scrub_segment(segment, acc, acc_state)
+        if segment.id in failed do
+          {%{acc | skipped: [segment.id | acc.skipped]}, acc_state}
+        else
+          scrub_segment(segment, acc, acc_state)
+        end
       end)
 
     result = finalize(result)
@@ -400,14 +422,27 @@ defmodule Malachi.Cluster.Scrubber do
 
   defp forget_damage(state, segment_id), do: %{state | damaged: MapSet.delete(state.damaged, segment_id)}
 
-  defp empty_result, do: %{verified: [], damaged: [], repaired: [], unrepairable: []}
+  # Which of `segment_ids` this node's replication server has latched as failed. A server that cannot say
+  # latches nothing here: the scrub then runs as it did before latches existed, and a repair that needs the
+  # server fails on its own.
+  defp latched(_ref, []), do: MapSet.new()
+
+  defp latched(ref, segment_ids) do
+    case ReplicationServer.failed_segments(ref, segment_ids, @latch_timeout) do
+      {:ok, failed} -> failed
+      {:error, _reason} -> MapSet.new()
+    end
+  end
+
+  defp empty_result, do: %{verified: [], damaged: [], repaired: [], unrepairable: [], skipped: []}
 
   defp finalize(result) do
     %{
       verified: Enum.reverse(result.verified),
       damaged: Enum.reverse(result.damaged),
       repaired: Enum.reverse(result.repaired),
-      unrepairable: Enum.reverse(result.unrepairable)
+      unrepairable: Enum.reverse(result.unrepairable),
+      skipped: Enum.reverse(result.skipped)
     }
   end
 

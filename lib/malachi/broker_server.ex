@@ -721,11 +721,21 @@ defmodule Malachi.BrokerServer do
     # Every pipeline is still attempted (the healthy ones make their buffers durable), but waiters are
     # only acked when ALL of them flushed: an ack must never precede a confirmed fsync. On any failure
     # the whole parked cycle is replied an error and the clients retry.
+    #
+    # A pipeline that is alive can fail too: `flush/1` answers `{:error, failures}` when a segment's
+    # storage failed, including a failure between an append it already answered and this flush. That
+    # has to fail the cycle exactly like a dead pipeline does, or those appends would be acked unsynced.
     flushed_ok? =
       Enum.reduce(state.broker.brokers, true, fn pipeline, ok? ->
         try do
-          ReplicationServer.flush(pipeline)
-          ok?
+          case ReplicationServer.flush(pipeline) do
+            :ok ->
+              ok?
+
+            {:error, failures} ->
+              Logger.warning(I18n.t(:group_flush_failed, pipeline: inspect(pipeline), reason: inspect(failures)))
+              false
+          end
         catch
           :exit, reason ->
             Logger.warning(I18n.t(:group_flush_failed, pipeline: inspect(pipeline), reason: inspect(reason)))
@@ -834,8 +844,14 @@ defmodule Malachi.BrokerServer do
   # unreachable primary must cost milliseconds, not the default five seconds per range. A legitimate
   # open that overruns it is retried on the next tick, by which point the server has finished opening
   # and answers from memory.
+  #
+  # A primary whose copy failed answers `{:error, _}`, and it is treated like one that does not answer:
+  # it has no trustworthy end to seat a horizon at, and the heal pass is what seals that segment.
   defp safe_durable_end(primary, segment_id, base_offset) do
-    ReplicationServer.durable_end(primary, segment_id, base_offset, 250)
+    case ReplicationServer.durable_end(primary, segment_id, base_offset, 250) do
+      {:error, _reason} -> :unreachable
+      end_offset -> end_offset
+    end
   catch
     :exit, _reason -> :unreachable
   end

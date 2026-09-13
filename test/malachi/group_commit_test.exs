@@ -1,5 +1,5 @@
 defmodule Malachi.GroupCommitTest do
-  # async: false because the coalescing test uses a named ETS counter and leans on the flush timer.
+  # async: false because the coalescing and flush-failure tests lean on the flush timer.
   use ExUnit.Case, async: false
 
   import Malachi.Test.TeardownHelper
@@ -7,66 +7,24 @@ defmodule Malachi.GroupCommitTest do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Test.FaultySegmentStore
 
-  # A SegmentStore that delegates everything to ElixirStore but counts the fsyncs that actually happen
-  # (a sync of a store with no buffered records is a no-op and does not count). Lets a test prove that
-  # many concurrent produces coalesce into few fsyncs.
-  defmodule CountingStore do
-    @behaviour Malachi.Storage.SegmentStore
-    alias Malachi.Storage.ElixirStore
-
-    @impl true
-    def sync(handle) do
-      if ElixirStore.pending?(handle), do: :ets.update_counter(:gc_sync_count, :n, 1)
-      ElixirStore.sync(handle)
-    end
-
-    @impl true
-    def open(dir, id, opts), do: ElixirStore.open(dir, id, opts)
-    @impl true
-    def recover(dir, id, opts), do: ElixirStore.recover(dir, id, opts)
-    @impl true
-    def open_read(dir, id, opts), do: ElixirStore.open_read(dir, id, opts)
-    @impl true
-    def append(handle, records), do: ElixirStore.append(handle, records)
-    @impl true
-    def read(handle, offset, max), do: ElixirStore.read(handle, offset, max)
-    @impl true
-    def seal(handle), do: ElixirStore.seal(handle)
-    @impl true
-    def next_offset(handle), do: ElixirStore.next_offset(handle)
-    @impl true
-    def logical_bytes(handle), do: ElixirStore.logical_bytes(handle)
-    @impl true
-    def sealed?(handle), do: ElixirStore.sealed?(handle)
-    @impl true
-    def pending?(handle), do: ElixirStore.pending?(handle)
-    @impl true
-    def should_seal?(handle, now_ms), do: ElixirStore.should_seal?(handle, now_ms)
-    @impl true
-    def close(handle), do: ElixirStore.close(handle)
-    @impl true
-    def verify(dir, id, opts), do: ElixirStore.verify(dir, id, opts)
-    @impl true
-    def integrity(handle), do: ElixirStore.integrity(handle)
-    @impl true
-    def rebuild_index(dir, id, opts), do: ElixirStore.rebuild_index(dir, id, opts)
-  end
+  defp start_broker(opts \\ []), do: elem(start_broker_at(opts), 0)
 
   # Boots an independent group-commit broker (its own ReplicationServer, dir, and topic) and registers
   # cleanup. `opts`: :interval (flush ms, default 10), :group_commit (default true), :repl_opts (e.g. a
   # custom :store), :flush_max_records (eager-flush threshold, default 8000), :max_inflight (overload
-  # valve, default 200000). Returns the broker pid.
-  defp start_broker(opts \\ []) do
+  # valve, default 200000). Returns the broker pid and the replication server's data directory, which is
+  # what a `FaultySegmentStore` rule or count is scoped by.
+  defp start_broker_at(opts) do
     tag = System.unique_integer([:positive])
     base = Path.join(System.tmp_dir!(), "gc_test_#{tag}")
     File.rm_rf!(base)
     repl = :"gc_repl_#{tag}"
+    repl_dir = Path.join(base, "repl")
 
     {:ok, repl_pid} =
-      ReplicationServer.start_link(
-        [name: repl, directory: Path.join(base, "repl")] ++ Keyword.get(opts, :repl_opts, [])
-      )
+      ReplicationServer.start_link([name: repl, directory: repl_dir] ++ Keyword.get(opts, :repl_opts, []))
 
     {:ok, broker} =
       BrokerServer.start_link(Path.join(base, "broker"),
@@ -80,10 +38,11 @@ defmodule Malachi.GroupCommitTest do
     on_exit(fn ->
       stop_quietly(broker)
       stop_quietly(repl_pid)
+      FaultySegmentStore.clear(repl_dir)
       File.rm_rf!(base)
     end)
 
-    broker
+    {broker, repl_dir}
   end
 
   defp batch(n, value \\ "v"), do: for(i <- 1..n, do: Record.new(value, key: "k#{i}"))
@@ -121,13 +80,8 @@ defmodule Malachi.GroupCommitTest do
   end
 
   test "concurrent producers all commit durably, and their fsyncs coalesce" do
-    # Owned by (and auto-deleted with) this test process, so no explicit cleanup; public + named so the
-    # CountingStore, which runs in the ReplicationServer process, can bump it.
-    :ets.new(:gc_sync_count, [:named_table, :public, :set])
-    :ets.insert(:gc_sync_count, {:n, 0})
-
-    # A long window so the concurrent burst lands in one or two flushes; a custom store to count fsyncs.
-    broker = start_broker(interval: 60, repl_opts: [store: CountingStore])
+    # A long window so the concurrent burst lands in one or two flushes; a counting store to see fsyncs.
+    {broker, repl_dir} = start_broker_at(interval: 60, repl_opts: [store: FaultySegmentStore])
     {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
 
     producers = 50
@@ -145,7 +99,7 @@ defmodule Malachi.GroupCommitTest do
 
     # The point of group commit: 50 concurrent produces do NOT cost 50 fsyncs. A single-range topic is
     # one segment, so a flush of the whole burst is one fsync; allow a little slack for burst timing.
-    [{:n, fsyncs}] = :ets.lookup(:gc_sync_count, :n)
+    fsyncs = FaultySegmentStore.count(repl_dir, :flushing_sync)
     assert fsyncs > 0
     assert fsyncs <= 5, "expected concurrent produces to coalesce, but saw #{fsyncs} fsyncs for #{producers} produces"
   end
@@ -155,6 +109,27 @@ defmodule Malachi.GroupCommitTest do
     # No such topic: nothing is buffered, so the error must come back now (well under the flush interval),
     # not wait for a group flush.
     assert {:error, :no_such_topic} = BrokerServer.produce(broker, "missing", batch(1))
+  end
+
+  test "a storage failure in a live pipeline's flush fails the parked cycle too, and the broker stays up" do
+    # The pipeline is alive and answers the flush, but a segment's sync failed: `flush/1` says so, and the
+    # parked producers must get the same error a dead pipeline gives them, never an ack.
+    {broker, repl_dir} = start_broker_at(interval: 60_000, repl_opts: [store: FaultySegmentStore])
+    {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+    FaultySegmentStore.fail(repl_dir, :sync, {:error, :enospc})
+
+    tasks = for _ <- 1..3, do: Task.async(fn -> BrokerServer.produce(broker, "t", batch(2)) end)
+    wait_until(fn -> length(:sys.get_state(broker).pending_produce) == 3 end)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      send(broker, :group_flush)
+
+      for task <- tasks do
+        assert {:error, :flush_failed} = Task.await(task, 5_000)
+      end
+    end)
+
+    assert Process.alive?(broker)
   end
 
   test "a dead pipeline fails the flush cycle with an error, without killing the broker" do

@@ -5,11 +5,26 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Storage.Layout
+  alias Malachi.Test.FaultySegmentStore
 
-  defp start_broker do
+  defp start_broker, do: elem(start_broker_at([]), 0)
+
+  # Same, with extra server options (a `:store`), and handing back the data directory a store rule names.
+  defp start_broker_at(opts) do
     directory = Path.join(System.tmp_dir!(), "malachi_healco_#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(directory) end)
-    start_supervised!({ReplicationServer, directory: directory}, id: {:repl, System.unique_integer([:positive])})
+
+    on_exit(fn ->
+      FaultySegmentStore.clear(directory)
+      File.rm_rf!(directory)
+    end)
+
+    ref =
+      start_supervised!({ReplicationServer, [directory: directory] ++ opts},
+        id: {:repl, System.unique_integer([:positive])}
+      )
+
+    {ref, directory}
   end
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
@@ -215,6 +230,224 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
 
     # And nothing above the sealed edge became readable on the replicas that hold the truth.
     for replica <- [b, c], do: assert(read_values(replica, segment_id) == ["x", "y"])
+  end
+
+  # Fails `ref`'s copy of `segment_id` for good, through a directed append whose sync answers ENOSPC.
+  defp fail_copy!(ref, directory, segment_id, next_offset) do
+    FaultySegmentStore.fail(Layout.segment_directory(directory, segment_id), :sync, {:error, :enospc})
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert ReplicationServer.follow(ref, segment_id, next_offset, records(["z"])) == {:error, {:storage, :enospc}}
+    end)
+
+    :ok
+  end
+
+  describe "a copy that failed in storage (seal-on-failure)" do
+    test "a LIVE primary whose copy failed is sealed on its followers, which are fenced, and loses the head" do
+      {primary, primary_dir} = start_broker_at(store: FaultySegmentStore)
+      b = start_broker()
+      c = start_broker()
+      {metadata, segment_id} = active_segment([primary, b, c], [primary, b, c], ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+      fail_copy!(primary, primary_dir, segment_id, 2)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(coordinator)
+
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 2
+      # Reads must not keep routing at a copy that refuses every request.
+      assert hd(sealed.replica_set) in [b, c]
+
+      for replica <- [b, c] do
+        assert {:error, {:sealed, 2}} =
+                 ReplicationServer.replicate(replica, segment_id, [replica], 0, records(["late"]))
+      end
+    end
+
+    test "a FOLLOWER whose copy failed gets the segment sealed on the primary and the healthy follower" do
+      a = start_broker()
+      b = start_broker()
+      {c, c_dir} = start_broker_at(store: FaultySegmentStore)
+      replica_set = [a, b, c]
+      {metadata, segment_id} = active_segment(replica_set, replica_set, ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+      FaultySegmentStore.fail(Layout.segment_directory(c_dir, segment_id), :sync, {:error, :eio})
+
+      # The produce still commits, on the quorum of a and b, because c acks its failure instead of staying
+      # silent, and c's copy is now latched as failed.
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, 2} = ReplicationServer.replicate(a, segment_id, replica_set, 0, records(["z"]))
+
+        assert eventually(fn ->
+                 ReplicationServer.failed_segments(c, [segment_id]) == {:ok, MapSet.new([segment_id])}
+               end)
+      end)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> replica_set end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(coordinator)
+
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 3
+      assert hd(sealed.replica_set) in [a, b]
+    end
+
+    test "at rf=2 a failed copy leaves no majority: nothing is sealed and the healthy replica is not fenced" do
+      {primary, primary_dir} = start_broker_at(store: FaultySegmentStore)
+      b = start_broker()
+      {metadata, segment_id} = active_segment([primary, b], [primary, b], ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+      fail_copy!(primary, primary_dir, segment_id, 2)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary, b] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert log =~ "no majority"
+      assert Metadata.get_segment(source.(), segment_id).state == :active
+      assert ReplicationServer.fenced_segments(b, [{segment_id, 0}]) == {:ok, %{}}
+      assert {:ok, 2} = ReplicationServer.follow(b, segment_id, 2, records(["z"]))
+    end
+
+    test "the failed-state seam is what makes a copy a candidate, and an empty answer makes none" do
+      a = start_broker()
+      b = start_broker()
+      c = start_broker()
+      {metadata, segment_id} = active_segment([a, b, c], [a, b, c], ["x"])
+      {source, apply} = metadata_store(metadata)
+
+      quiet =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          failed_state: fn _replica, _segments -> MapSet.new() end,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(quiet)
+      assert Metadata.get_segment(source.(), segment_id).state == :active
+
+      reporting =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          failed_state: fn replica, segments -> if replica == a, do: MapSet.new(segments), else: MapSet.new() end,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(reporting)
+      assert Metadata.get_segment(source.(), segment_id).state == :sealed
+    end
+
+    test "a SEALED copy that failed is replaced on a spare broker, then deleted where it failed" do
+      # The other half of seal-on-failure. The seal stops writes to the broken copy, but the segment is still
+      # one replica short on a node that is alive, so nothing keyed on membership would ever notice.
+      {b, b_dir} = start_broker_at(store: FaultySegmentStore)
+      [a, c, d] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_on([b, a, c], ["x", "y", "z"])
+      {source, apply} = metadata_store(metadata)
+      fail_copy!(b, b_dir, segment_id, 3)
+
+      coordinator =
+        start_coordinator(live_brokers: fn -> [a, b, c, d] end, metadata_source: source, apply_command: apply)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      healed = Metadata.get_segment(source.(), segment_id)
+      assert Enum.sort(healed.replica_set) == Enum.sort([a, c, d])
+      assert read_values(d, segment_id) == ["x", "y", "z"]
+      assert log =~ "replaced 1"
+
+      # Deleted on b, which is also what clears the latch there.
+      assert ReplicationServer.failed_segments(b, [segment_id]) == {:ok, MapSet.new()}
+      assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
+    end
+
+    test "a replaced copy is not deleted while the control plane still lists it" do
+      {b, b_dir} = start_broker_at(store: FaultySegmentStore)
+      [a, c, d] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_on([b, a, c], ["x", "y", "z"])
+      fail_copy!(b, b_dir, segment_id, 3)
+      test_pid = self()
+
+      # The heal command is lost: the replica set the coordinator reads back is the one it started from.
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c, d] end,
+          metadata_source: fn -> metadata end,
+          apply_command: fn _command -> :ok end,
+          discard_copy: fn replica, id -> send(test_pid, {:discarded, replica, id}) end
+        )
+
+      assert [{:set_segment_replicas, ^segment_id, _new_set}] = HealCoordinator.heal_now(coordinator).applied
+
+      refute_received {:discarded, _replica, _segment_id}
+      assert ReplicationServer.failed_segments(b, [segment_id]) == {:ok, MapSet.new([segment_id])}
+    end
+
+    test "a replaced copy of a segment gone from the control plane is left to retention" do
+      {b, b_dir} = start_broker_at(store: FaultySegmentStore)
+      [a, c, d] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_on([b, a, c], ["x", "y", "z"])
+      {source, apply} = metadata_store(metadata)
+      fail_copy!(b, b_dir, segment_id, 3)
+      test_pid = self()
+
+      # Retention expires the segment right behind the heal command, before the coordinator reads back.
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c, d] end,
+          metadata_source: source,
+          apply_command: fn command ->
+            apply.(command)
+            apply.({:delete_segment, segment_id})
+          end,
+          discard_copy: fn replica, id -> send(test_pid, {:discarded, replica, id}) end
+        )
+
+      assert [{:set_segment_replicas, ^segment_id, _new_set}] = HealCoordinator.heal_now(coordinator).applied
+      assert Metadata.get_segment(source.(), segment_id) == nil
+      refute_received {:discarded, _replica, _segment_id}
+    end
+  end
+
+  # Metadata with one sealed segment over `replica_set`, every replica holding the records.
+  defp sealed_on(replica_set, values) do
+    {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    segment_id = {root, 0}
+    {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, length(values), 0, 0})
+
+    for replica <- replica_set do
+      {:ok, _last} = ReplicationServer.follow(replica, segment_id, 0, records(values))
+    end
+
+    {metadata, segment_id}
   end
 
   describe "the orphaned-fence pass (issue #121)" do

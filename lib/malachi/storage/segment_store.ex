@@ -14,6 +14,22 @@ defmodule Malachi.Storage.SegmentStore do
   `append/2` only buffers; records become durable and readable after `sync/1`, which
   must fsync before returning. `read/3` serves only committed (synced) records, never
   buffered-but-unsynced data, matching NorthGuard's "ack only committed records".
+
+  ## Failure contract
+
+  Every callback whose type includes `{:error, term()}` returns it when a storage operation fails (a
+  full volume, a failing device, a missing permission), carrying the POSIX reason the file layer
+  reported (`{:error, :enospc}`), and never raises for one. `verify/3` is the one that reports such a
+  failure inside its damage map instead, with the POSIX reason as `:reason`, because to a scrub a copy
+  that cannot be read is a copy that is damaged here.
+
+  A store reports a failure and decides nothing about what it means. Whether the segment is fenced,
+  retried or sealed belongs to the caller (`Malachi.Cluster.ReplicationServer`), for the same reason
+  `c:integrity/1` exists: the caller owns the segment id and the deployment context.
+
+  A handle that answered an error is unusable. An operation can fail after changing the file (a write
+  that landed before its sync failed), and the handle does not describe that state, so it must not be
+  retried. `close/1` stays safe to call on it.
   """
 
   alias Malachi.Log.Record
@@ -97,7 +113,10 @@ defmodule Malachi.Storage.SegmentStore do
   @doc "Whether an active segment has hit a seal threshold (size or age) at time `now_ms`."
   @callback should_seal?(handle(), now_ms :: non_neg_integer()) :: boolean()
 
-  @doc "Closes the segment's file handle."
+  @doc """
+  Closes the segment's file handle. Best-effort: it always answers `:ok`, including on a handle that
+  answered an error, because a close that fails has nothing left for its caller to do.
+  """
   @callback close(handle()) :: :ok
 
   @doc """
