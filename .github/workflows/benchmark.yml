@@ -41,6 +41,10 @@ on:
         description: 'Store-case repetitions per arm (a verdict needs at least 5)'
         type: string
         default: '15'
+      store_error_path_ab_e2e_reps:
+        description: 'End-to-end (throughput_1m) repetitions per arm, about 16s each (a verdict needs at least 5; 0 skips the case)'
+        type: string
+        default: '5'
 
 permissions:
   contents: read
@@ -157,6 +161,7 @@ jobs:
         if: ${{ inputs.store_error_path_ab }}
         env:
           AB_REPS: ${{ inputs.store_error_path_ab_reps }}
+          AB_E2E_REPS: ${{ inputs.store_error_path_ab_e2e_reps }}
           AB_DIR: ${{ runner.temp }}/store_error_path_ab
         run: |
           mv store-error-path-baseline "$RUNNER_TEMP/baseline"
