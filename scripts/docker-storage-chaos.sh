@@ -245,7 +245,6 @@ sleep 25
 
 event "j: fill $FULL_NODE's log volume until its writes fail with ENOSPC"
 restarts_before=$(docker inspect "$FULL_NODE" --format '{{.RestartCount}}')
-active_before=$(topology | grep 'state=active')
 
 # dd stops at ENOSPC and exits non-zero, which is the point; df shows the volume really is full.
 docker exec "$FULL_NODE" sh -c 'dd if=/dev/zero of=/data/malachi_log/filler bs=1M 2>/dev/null; df -h /data/malachi_log | tail -1'
@@ -282,28 +281,37 @@ else
   fail "$FULL_NODE went down with a full volume (restarts $restarts_before -> $restarts_after, health $health, replication server crashes $crashes)"
 fi
 
-# A segment that was active when the volume filled must be sealed by now: its copy on the full node failed,
-# and the heal pass seals it on the other two so producers move to a new segment.
-sealed_since=0
-for _ in $(seq 1 12); do
-  topology_now=$(topology)
-  sealed_since=0
+# Every segment whose copy failed on the full node must be sealed by now: the heal pass seals it on the other
+# two so producers move to a new segment. Keyed on the failed copies themselves, not on whatever was active
+# when the volume filled: under the checker's traffic a segment rolls every few seconds, so an assertion
+# that any pre-fill segment got sealed holds with or without seal-on-failure and certifies nothing.
+#
+# The node names each copy it takes out of service, as in
+#   segment {{"chaos_acked", 0}, 14}'s copy on this node failed in storage (:enospc)
+# which is range 0, seq 14 in the topology's terms.
+failed_segments=$(docker logs "$FULL_NODE" 2>&1 |
+  sed -n "s/.*segment {{\"$CHAOS_TOPIC\", \([0-9]*\)}, \([0-9]*\)}'s copy on this node failed in storage.*/range=\1 seq=\2/p" |
+  sort -u)
 
-  while read -r line; do
-    [ -n "$line" ] || continue
-    range=$(seg_field "$line" range)
-    seq_no=$(seg_field "$line" seq)
-    grep -q "range=$range seq=$seq_no state=sealed" <<<"$topology_now" && sealed_since=$((sealed_since + 1))
-  done <<<"$active_before"
-
-  [ "$sealed_since" -gt 0 ] && break
-  sleep 5
-done
-
-if [ "$sealed_since" -gt 0 ]; then
-  echo "$sealed_since segment(s) active when the volume filled are sealed now: producers moved on"
+if [ -z "$failed_segments" ]; then
+  fail "$FULL_NODE logged storage failures, but none named a $CHAOS_TOPIC segment this drill can check"
 else
-  fail "no segment active when $FULL_NODE's volume filled was sealed: seal-on-failure did not happen"
+  unsealed="$failed_segments"
+  for _ in $(seq 1 12); do
+    topology_now=$(topology)
+    unsealed=$(while read -r key; do
+      grep -q "$key state=sealed" <<<"$topology_now" || echo "$key"
+    done <<<"$failed_segments")
+
+    [ -z "$unsealed" ] && break
+    sleep 5
+  done
+
+  if [ -z "$unsealed" ]; then
+    echo "all $(wc -l <<<"$failed_segments" | tr -d ' ') segment(s) whose copy failed on $FULL_NODE are sealed: producers moved on"
+  else
+    fail "segment(s) whose copy failed on $FULL_NODE were never sealed: $(tr '\n' ';' <<<"$unsealed")"
+  fi
 fi
 
 docker exec "$FULL_NODE" rm -f /data/malachi_log/filler && echo "space freed on $FULL_NODE"
