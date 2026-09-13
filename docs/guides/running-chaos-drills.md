@@ -68,6 +68,19 @@ meant to find.
 On top of the node-fault invariants, this one certifies that the damaged copies physically
 reconverge: byte-identical segment files across all three nodes.
 
+Then a second phase, on a fresh cluster of its own:
+
+- **full volume**: one node's log directory is a small volume (a size-limited tmpfs, from
+  `docker-compose.storage-full.yml`), filled to ENOSPC while the checker keeps producing. The node must
+  stay up: no restart, no crash of the replication server, still healthy. The failures must actually
+  happen (the node logs them, so the event cannot pass without injecting anything), and the segments
+  whose copy failed must be sealed on the other two replicas so producers move to new ones. Space is
+  freed at the end and the acked-durability and clean-produce invariants close the run.
+
+It needs a cluster of its own because a tmpfs comes back empty whenever its container restarts, and
+the corruption events restart followers: sharing one cluster would turn each of those restarts into
+the loss of every copy on that node.
+
 ## Config deployment
 
 ```bash

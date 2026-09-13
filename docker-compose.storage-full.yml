@@ -1,0 +1,17 @@
+# Override for event j of scripts/docker-storage-chaos.sh (issue #147): gives ONE node a small log volume,
+# so the drill can fill it and certify that a full volume does not take the node down.
+#
+# The volume is a size-limited tmpfs mounted over that node's log directory, on top of the named /data
+# volume the chaos drill already uses (the Raft data under /data/malachi_ra stays on the real volume). It
+# is simulated rather than a real small filesystem because a loop-mounted one needs a privileged container,
+# and it counts against the container's memory limit, which is why the default is far below the 2g the
+# cluster compose gives each node.
+#
+# tmpfs is remounted EMPTY when the container restarts, so nothing that uses this override may restart
+# the node it applies to: the drill runs event j on a cluster of its own for exactly that reason.
+#
+#   docker compose -f docker-compose.cluster.yml -f docker-compose.storage-full.yml up
+services:
+  malachi3:
+    tmpfs:
+      - /data/malachi_log:rw,size=${STORAGE_FULL_VOLUME_SIZE:-64m}
