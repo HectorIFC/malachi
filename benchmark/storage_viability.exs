@@ -14,15 +14,14 @@
 #
 #   PREALLOC_AB=1 PREALLOC_AB_OUT=/tmp/prealloc-ab.json mix run --no-start benchmark/storage_viability.exs
 
+Code.require_file("support/paired_stats.exs", __DIR__)
+
 defmodule Bench do
   @dir "/tmp/ng_bench_data"
 
   def now_us, do: System.monotonic_time(:microsecond)
 
-  def pctl(sorted, p) do
-    idx = max(0, round(p / 100 * (length(sorted) - 1)))
-    Enum.at(sorted, idx)
-  end
+  defdelegate pctl(sorted, p), to: Malachi.Bench.PairedStats
 
   def stats(label, lat_us, total_bytes, total_recs, wall_us) do
     sorted = Enum.sort(lat_us)
@@ -234,13 +233,13 @@ File.rm_rf!("/tmp/ng_bench_data")
 #      fixed-cost claim and the other side of the zero-write trade-off.
 # ---------------------------------------------------------------------------------------------
 defmodule PreallocAB do
+  alias Malachi.Bench.PairedStats
   alias Malachi.Storage.Preallocation
 
   @dir "/tmp/ng_prealloc_ab"
   # Discarded before the measured repetitions: the first pass on a fresh directory pays for cold
   # page cache and first-touch allocation, which is a property of the harness, not of the syscall.
   @warmup_reps 1
-  @bootstrap_iterations 10_000
   @floor_reps 200
 
   # {label, record_size, records_per_batch, batches_per_rep}. The first is the regime that matters:
@@ -493,120 +492,14 @@ defmodule PreallocAB do
     {key(mechanism, sync), p50}
   end
 
-  defp summarize(latencies) do
-    sorted = Enum.sort(latencies)
-    %{p50: Bench.pctl(sorted, 50), p99: Bench.pctl(sorted, 99)}
-  end
-
-  defp summary(values) do
-    Map.new([:p50, :p99], fn stat ->
-      of_stat = Enum.map(values, & &1[stat])
-      {stat, %{median_us: median(of_stat), min_us: Enum.min(of_stat), max_us: Enum.max(of_stat)}}
-    end)
-  end
-
-  defp verdict({label, b_key, a_key}, samples) do
-    stats =
-      Map.new([:p50, :p99], fn stat ->
-        a = Enum.map(samples[a_key], & &1[stat])
-        b = Enum.map(samples[b_key], & &1[stat])
-        control_delta = control_delta(samples, stat)
-
-        delta = median(b) - median(a)
-        {low, high} = bootstrap_ci(a, b)
-
-        # Both conditions must hold. The control gate alone would call a tiny but consistent shift
-        # signal on a very quiet machine; the interval alone would call a large but erratic one
-        # signal on a noisy one. Requiring both is what keeps the answer honest either way.
-        beats_control = abs(delta) > control_delta
-        excludes_zero = (low > 0 and high > 0) or (low < 0 and high < 0)
-
-        {stat,
-         %{
-           baseline_median_us: median(a),
-           treatment_median_us: median(b),
-           delta_us: delta,
-           delta_pct: percent(delta, median(a)),
-           control_delta_us: control_delta,
-           ci95_low_us: low,
-           ci95_high_us: high,
-           beats_control: beats_control,
-           excludes_zero: excludes_zero,
-           signal: beats_control and excludes_zero
-         }}
-      end)
-
-    %{comparison: label, baseline: a_key, treatment: b_key, stats: stats}
-  end
-
-  defp control_delta(samples, stat) do
-    a = Enum.map(samples[:control_a1], & &1[stat])
-    b = Enum.map(samples[:control_a2], & &1[stat])
-    abs(median(b) - median(a))
-  end
-
-  # Percentile bootstrap of the difference of medians: resample each arm's per-rep observations
-  # with replacement, recompute the difference, and take the 2.5th/97.5th percentiles.
-  defp bootstrap_ci(a, b) do
-    diffs =
-      for _ <- 1..@bootstrap_iterations do
-        median(resample(a)) - median(resample(b))
-      end
-      |> Enum.sort()
-
-    # Negated because the statistic above is (a - b) while the reported delta is (b - a).
-    {-Bench.pctl(diffs, 97.5), -Bench.pctl(diffs, 2.5)}
-  end
-
-  defp resample(samples) do
-    count = length(samples)
-    for _ <- 1..count, do: Enum.at(samples, :rand.uniform(count) - 1)
-  end
-
-  defp median([]), do: 0.0
-
-  defp median(values) do
-    sorted = Enum.sort(values)
-    count = length(sorted)
-    middle = div(count, 2)
-
-    if rem(count, 2) == 1 do
-      Enum.at(sorted, middle) * 1.0
-    else
-      (Enum.at(sorted, middle - 1) + Enum.at(sorted, middle)) / 2
-    end
-  end
-
-  defp percent(_delta, +0.0), do: 0.0
-  defp percent(delta, base), do: Float.round(delta / base * 100, 2)
-
-  defp report(samples, verdicts) do
-    IO.puts("    -- per-arm medians --")
-
-    for {arm_key, values} <- Enum.sort_by(samples, fn {_key, values} -> median(Enum.map(values, & &1.p50)) end) do
-      of_p50 = Enum.map(values, & &1.p50)
-
-      IO.puts(
-        "    #{pad(arm_key)} p50 #{us(median(of_p50))}  (spread #{us(Enum.min(of_p50))} to #{us(Enum.max(of_p50))})"
-      )
-    end
-
-    IO.puts("    -- comparisons --")
-
-    for %{comparison: label, stats: stats} <- verdicts, stat <- [:p50, :p99] do
-      v = stats[stat]
-
-      IO.puts(
-        "    #{stat} #{label}: #{us(v.baseline_median_us)} -> #{us(v.treatment_median_us)}  " <>
-          "delta #{us(v.delta_us)} (#{v.delta_pct}%)  ci95 [#{us(v.ci95_low_us)}, #{us(v.ci95_high_us)}]  " <>
-          "noise floor #{us(v.control_delta_us)}  => #{if v.signal, do: "SIGNAL", else: "noise"}"
-      )
-    end
-  end
-
-  defp pad(value), do: String.pad_trailing("#{value}", 22)
-
-  defp us(value), do: "#{Float.round(value / 1000, 3)}ms"
+  # The statistics and the verdict rule live in support/paired_stats.exs, shared with the storage
+  # error-path experiment (issue #147), so two experiments cannot disagree about what a result is.
+  defp summarize(latencies), do: PairedStats.summarize(latencies)
+  defp summary(values), do: PairedStats.summary(values)
+  defp verdict(comparison, samples), do: PairedStats.verdict(comparison, samples)
+  defp median(values), do: PairedStats.median(values)
+  defp report(samples, verdicts), do: PairedStats.report(samples, verdicts)
+  defp pad(value), do: PairedStats.pad(value)
 end
 
 # The paired preallocation experiment. Opt-in: it is minutes rather than seconds, and the CI
