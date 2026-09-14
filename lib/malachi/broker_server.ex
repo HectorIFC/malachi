@@ -368,7 +368,7 @@ defmodule Malachi.BrokerServer do
       waiters: [],
       # Streaming subscribers: `%{topic => [subscriber]}`. A subscriber is pushed records as they
       # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
-      # commit the group's position. See `wake_subscribers/2` / `push_subscriber/2`.
+      # commit the group's position. See `wake_subscribers/3` / `push_subscriber/2`.
       subscribers: %{},
       # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
       # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
