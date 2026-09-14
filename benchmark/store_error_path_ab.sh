@@ -78,6 +78,13 @@ build "$BRANCH"
 run_case store "$REPS"
 run_case e2e "$E2E_REPS"
 
+# The analyzer is told which cases this run asked for, so a case that was asked for and left no samples
+# is a run with no verdict rather than one that passes on whatever else it measured. The store case is
+# always asked for: it is the path this experiment exists to measure, and AB_REPS=0 judges nothing about it.
+EXPECTED=store
+[ "$E2E_REPS" -gt 0 ] && EXPECTED="$EXPECTED e2e"
+
 say "analyzing"
 cd "$BRANCH"
-AB_MODE=analyze AB_RESULTS="$OUT" AB_OUT="$OUT/report.json" mix run --no-start benchmark/store_error_path_ab.exs
+AB_MODE=analyze AB_RESULTS="$OUT" AB_OUT="$OUT/report.json" AB_EXPECTED="$EXPECTED" \
+  mix run --no-start benchmark/store_error_path_ab.exs

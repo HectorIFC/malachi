@@ -85,6 +85,37 @@ defmodule Malachi.Bench.PairedStats do
     %{comparison: label, baseline: a_key, treatment: b_key, stats: stats}
   end
 
+  @doc """
+  The verdict of a whole run, from the cases it evaluated (`%{case: name, sufficient: boolean, comparisons:
+  [treatment_verdict | _]}`) and the case names the run was expected to evaluate.
+
+  A regression is a sufficient case whose treatment comparison is SIGNAL with the treatment slower, and it
+  is reported whatever else is wrong with the run. Otherwise the run has NO verdict when an expected case
+  produced no samples or too few repetitions: an experiment that did not measure the path it exists for
+  must not read as "no regression", which an empty list of findings otherwise would.
+  """
+  def outcome(cases, expected) do
+    present = Enum.map(cases, & &1.case)
+
+    regressions =
+      for %{case: name, sufficient: true, comparisons: [treatment | _control]} <- cases,
+          {stat, v} <- Enum.sort(treatment.stats),
+          v.signal and v.delta_us > 0,
+          do: "#{name} #{stat}"
+
+    missing = Enum.reject(expected, &(&1 in present))
+    insufficient = for %{case: name, sufficient: false} <- cases, do: name
+
+    verdict =
+      cond do
+        regressions != [] -> :regression
+        missing != [] or insufficient != [] -> :no_verdict
+        true -> :pass
+      end
+
+    %{verdict: verdict, regressions: regressions, missing: missing, insufficient: insufficient}
+  end
+
   defp control_delta(samples, stat, control_a1, control_a2) do
     a = Enum.map(samples[control_a1], & &1[stat])
     b = Enum.map(samples[control_a2], & &1[stat])

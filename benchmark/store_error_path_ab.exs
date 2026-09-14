@@ -22,7 +22,10 @@
 #
 # Modes (normally driven by store_error_path_ab.sh, not by hand):
 #   AB_MODE=sample  AB_DIR=/scratch            mix run --no-start benchmark/store_error_path_ab.exs
-#   AB_MODE=analyze AB_RESULTS=dir AB_OUT=file mix run --no-start benchmark/store_error_path_ab.exs
+#   AB_MODE=analyze AB_RESULTS=dir AB_OUT=file AB_EXPECTED="store e2e" mix run --no-start benchmark/store_error_path_ab.exs
+#
+# AB_EXPECTED names the cases the run must have evaluated (default: store). One with no samples is a run
+# with no verdict, never a pass.
 
 Code.require_file("support/paired_stats.exs", __DIR__)
 
@@ -70,9 +73,10 @@ defmodule StoreErrorPathAB do
 
   @doc """
   Reads every sample under `results` (`<case>/<rep>-<arm>.out`, warmups excluded), prints the verdicts
-  and writes them to `out`. Halts with status 1 when the branch regressed, so a CI step fails on it.
+  and writes them to `out`. Halts with status 1 when the branch regressed, and with status 2 when there is
+  no verdict: a case in `expected` produced no samples, or too few repetitions. Either way a CI step fails.
   """
-  def analyze(results, out) do
+  def analyze(results, out, expected) do
     cases =
       for {name, parse} <- [{"store", &parse_store/1}, {"e2e", &parse_e2e/1}],
           samples = load(results, name, parse),
@@ -100,13 +104,8 @@ defmodule StoreErrorPathAB do
         }
       end
 
-    regressions =
-      for %{case: name, sufficient: true, comparisons: [branch | _control]} <- cases,
-          {stat, v} <- branch.stats,
-          v.signal and v.delta_us > 0,
-          do: "#{name} #{stat}"
-
-    insufficient = for %{case: name, sufficient: false} <- cases, do: name
+    %{verdict: verdict, regressions: regressions, missing: missing, insufficient: insufficient} =
+      PairedStats.outcome(cases, expected)
 
     report = %{
       schema: 1,
@@ -117,23 +116,27 @@ defmodule StoreErrorPathAB do
       interleaving: "by run, arm order shuffled per repetition",
       min_reps: @min_reps,
       cases: cases,
+      expected: expected,
+      missing: missing,
       insufficient: insufficient,
       regressions: regressions
     }
 
     if out, do: File.write!(out, Jason.encode_to_iodata!(report, pretty: true))
 
-    cond do
-      regressions != [] ->
+    case verdict do
+      :regression ->
         IO.puts("\n  REGRESSION: #{Enum.join(regressions, ", ")}")
         System.halt(1)
 
-      # Not a pass: a run too short to judge must not read as "no regression" in a CI log.
-      insufficient != [] ->
-        IO.puts("\n  NO VERDICT for #{Enum.join(insufficient, ", ")}: too few repetitions")
+      # Not a pass: a run that did not measure a case it was asked to, or measured it too few times, must
+      # not read as "no regression" in a CI log.
+      :no_verdict ->
+        if missing != [], do: IO.puts("\n  NO VERDICT for #{Enum.join(missing, ", ")}: no samples")
+        if insufficient != [], do: IO.puts("\n  NO VERDICT for #{Enum.join(insufficient, ", ")}: too few repetitions")
         System.halt(2)
 
-      true ->
+      :pass ->
         IO.puts("\n  no regression by the fixed rule")
     end
   end
@@ -201,7 +204,10 @@ case System.get_env("AB_MODE") do
     StoreErrorPathAB.sample(System.get_env("AB_DIR") || Path.join(System.tmp_dir!(), "store_error_path_ab"))
 
   "analyze" ->
-    StoreErrorPathAB.analyze(System.fetch_env!("AB_RESULTS"), System.get_env("AB_OUT"))
+    # The cases the run was asked for, space separated. The store case is the one this experiment exists to
+    # measure, so it is expected unless the caller says otherwise; store_error_path_ab.sh passes what it ran.
+    expected = System.get_env("AB_EXPECTED", "store") |> String.split()
+    StoreErrorPathAB.analyze(System.fetch_env!("AB_RESULTS"), System.get_env("AB_OUT"), expected)
 
   other ->
     raise ArgumentError, "AB_MODE must be sample or analyze, got: #{inspect(other)}"
