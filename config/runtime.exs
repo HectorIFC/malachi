@@ -182,6 +182,13 @@ config :malachi,
   # The replicated path's flush period, decoupled from the rf=1 knob above so tuning a single node
   # never silently retunes every replica's fsync cadence. Default 10ms (the NorthGuard time trigger).
   replication_group_commit_interval_ms: parse_int.(System.get_env("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS"), 10),
+  # The replication server's minimum heap, in words. Each produce hands it a whole batch to encode and write,
+  # and at the VM's default heap it collects garbage several times per batch; 256K words (2MB, once per node)
+  # halves that, measured on Linux, and larger floors collected no less. 0 keeps the VM default, which the
+  # test suite uses so the many servers it starts do not each reserve the floor. See
+  # Malachi.Cluster.ReplicationServer.start_link/1.
+  replication_min_heap_size:
+    parse_int.(System.get_env("MALACHI_REPLICATION_MIN_HEAP_WORDS"), if(config_env() == :test, do: 0, else: 256_000)),
   # Background integrity verification of data at rest (the CRC scrub). Each node walks its own sealed
   # segments, re-checking every record's checksum, and repairs a damaged copy from an intact replica.
   # Corruption at rest is otherwise silent: a damaged copy serves short reads with no error at all.

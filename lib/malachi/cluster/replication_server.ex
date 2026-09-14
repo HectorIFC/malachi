@@ -129,6 +129,8 @@ defmodule Malachi.Cluster.ReplicationServer do
     * `:group_commit` - coalesce fsyncs under replication (NorthGuard: fsync on every replica by
       time/count/size triggers, before the produce ack). Default false (fsync per batch).
     * `:group_commit_interval_ms` - the time trigger for that coalescing (default 10).
+    * `:min_heap_size` - the server process's minimum heap, in words. Defaults to the `:malachi`
+      application's `:replication_min_heap_size`, and to 0 (the VM's own default) when that is unset.
     * any remaining options are forwarded to each segment's `Malachi.Log`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -139,8 +141,25 @@ defmodule Malachi.Cluster.ReplicationServer do
         :error -> []
       end
 
-    GenServer.start_link(__MODULE__, opts, gen_server_opts)
+    min_heap_size =
+      Keyword.get_lazy(opts, :min_heap_size, fn -> Application.get_env(:malachi, :replication_min_heap_size) || 0 end)
+
+    GenServer.start_link(__MODULE__, opts, with_min_heap_size(gen_server_opts, min_heap_size))
   end
+
+  # Every produce hands this process a whole batch to encode, index and write, so at the VM's default heap
+  # size its young generation fills and is collected several times per batch. Measured on Linux with
+  # benchmark/throughput_1m.exs (batches of 1000 x 100B): 3.6 minor collections per batch at the default, 1.7
+  # with a floor of 256K words (2MB), and no fewer at 512K, 1M or 2M words.
+  #
+  # The heap used to get most of that floor by accident. A produce roll that sealed only the metadata left
+  # every rolled segment's store open here, index and all, and that live data kept the heap large; once the
+  # roll fenced and sealed the segment for real, the store was released, the heap shrank back, and the
+  # collections came back with it, which the end-to-end A/B for #153 measured as a slower produce p50.
+  defp with_min_heap_size(gen_server_opts, 0), do: gen_server_opts
+
+  defp with_min_heap_size(gen_server_opts, words) when is_integer(words) and words > 0,
+    do: Keyword.put(gen_server_opts, :spawn_opt, min_heap_size: words)
 
   @doc """
   Replicates `records` for `segment_id` across `replica_set`, called on the primary (the first
@@ -431,7 +450,8 @@ defmodule Malachi.Cluster.ReplicationServer do
           :follow_timeout,
           :replication_window,
           :group_commit,
-          :group_commit_interval_ms
+          :group_commit_interval_ms,
+          :min_heap_size
         ]),
       logs: %{},
       trackers: %{},

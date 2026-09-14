@@ -77,6 +77,12 @@ MALACHI_PUBLISH_RATE_WINDOW_MS=1000
 MALACHI_REPLICATION_GROUP_COMMIT=false
 MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
 
+# The replication server's minimum heap (words). Every produce batch is encoded and written in that one
+# process, and at the VM's default heap it garbage-collects several times per batch; 256K words (2MB per
+# node) halves that. Raise it only if a profile shows the server collecting per batch again, e.g. with much
+# larger batches; 0 restores the VM default.
+MALACHI_REPLICATION_MIN_HEAP_WORDS=256000
+
 # Active-segment roll size (bytes); unset keeps the 64MB default. Smaller segments seal (and become
 # independently replicable/repairable units) sooner, at the cost of more metadata churn.
 MALACHI_SEGMENT_MAX_BYTES=67108864

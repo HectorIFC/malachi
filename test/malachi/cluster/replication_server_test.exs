@@ -448,6 +448,28 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     {:error, {:storage, reason}}
   end
 
+  describe "min_heap_size (the server's garbage-collection floor)" do
+    test "sets the server process's minimum heap, and is not passed on to the segment logs" do
+      {name, _directory} = start_broker_at(min_heap_size: 300_000)
+      pid = Process.whereis(name)
+
+      # The VM rounds a requested size up to one of its heap sizes, so the floor is at least what was asked.
+      assert {:min_heap_size, words} = Process.info(pid, :min_heap_size)
+      assert words >= 300_000
+      refute Keyword.has_key?(:sys.get_state(pid).log_opts, :min_heap_size)
+    end
+
+    test "0, and the test configuration when the option is left out, keep the VM default" do
+      {:min_heap_size, vm_default} = :erlang.system_info(:min_heap_size)
+      {zero, _directory} = start_broker_at(min_heap_size: 0)
+      {unset, _directory} = start_broker_at([])
+
+      for name <- [zero, unset] do
+        assert Process.info(Process.whereis(name), :min_heap_size) == {:min_heap_size, vm_default}
+      end
+    end
+  end
+
   describe "seal_async/5 (the fence answered as a message)" do
     test "answers what the sealed log holds, idempotently, and the segment refuses writes afterwards" do
       name = start_broker()
