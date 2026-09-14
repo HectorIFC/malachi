@@ -10,7 +10,9 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Storage.Layout
   alias Malachi.Test.AliveMembersStub
+  alias Malachi.Test.FaultySegmentStore
 
   setup_all do
     :ok
@@ -116,6 +118,42 @@ defmodule Malachi.BrokerServerRaTest do
 
     :ok = BrokerServer.stop(second)
     :ok = GenServer.stop(cold_repl)
+  end
+
+  test "a restarted broker whose active segment's primary copy failed in storage still starts" do
+    # Recovery asks the primary for the active segment's durable end. A copy latched as failed answers an
+    # error, which must count as no answer (seated at zero, retried next tick), not crash the broker's init.
+    cluster = :"bs_failed_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    directory = Path.join(System.tmp_dir!(), "malachi_failed_#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      FaultySegmentStore.clear(directory)
+      File.rm_rf!(directory)
+    end)
+
+    name = :"failed_repl_#{System.unique_integer([:positive])}"
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name, store: FaultySegmentStore)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: [{name, node()}], metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    :ok = BrokerServer.stop(first)
+
+    segment_id = {root, 0}
+    FaultySegmentStore.fail(Layout.segment_directory(directory, segment_id), :sync, {:error, :eio})
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      late = [Record.new("late", key: "late")]
+      assert {:error, {:storage, :eio}} = ReplicationServer.follow({name, node()}, segment_id, 5, late)
+      assert {:error, {:storage, :eio}} = ReplicationServer.durable_end({name, node()}, segment_id, 0)
+
+      {:ok, second} = BrokerServer.start_link("unused", brokers: [{name, node()}], metadata_cluster: cluster)
+      assert Process.alive?(second)
+      assert BrokerServer.active_range_ids(second, "events") == [root]
+      :ok = BrokerServer.stop(second)
+    end)
   end
 
   test "a subscriber is pushed records produced through a different frontend" do

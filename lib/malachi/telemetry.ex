@@ -21,6 +21,11 @@ defmodule Malachi.Telemetry do
       read. `position` is the byte where the damage starts, `sealed` whether the segment was
       immutable (damage there is corruption at rest, not a crash mid-write), and `source` where the
       verdict came from (`:recover` when a segment was opened, `:scrub` from the background pass).
+    * `[:malachi, :storage, :failure]`. `%{count: 1}` / `%{segment, reason}` - a storage operation on a
+      segment's copy failed on this node (`reason` is the POSIX reason, `:enospc` for a full volume),
+      so `Malachi.Cluster.ReplicationServer` stopped using that copy and the heal pass will seal the
+      segment on its other replicas. A failed WRITE, unlike `:integrity`, which is damage found by
+      reading. Alert on any: a volume that fills or a device that fails shows up here first.
     * `[:malachi, :cluster, :orphaned_fence]`. `%{count: 1}` / `%{segment, reason}` - a segment's store
       was fenced but the control-plane seal that had to follow it FAILED, so the segment is closed to
       writes while the metadata still calls it active and its range accepts nothing until a heal pass
@@ -72,6 +77,15 @@ defmodule Malachi.Telemetry do
       %{position: verdict.position, unreadable_bytes: verdict.unreadable_bytes},
       %{result: verdict.reason, sealed: verdict.sealed?, source: source, segment: segment_id}
     )
+  end
+
+  @doc """
+  A storage operation on `segment_id`'s copy failed on this node with `reason` (the POSIX reason), and
+  the copy was taken out of service.
+  """
+  @spec storage_failure(term(), term()) :: :ok
+  def storage_failure(segment_id, reason) do
+    :telemetry.execute([:malachi, :storage, :failure], %{count: 1}, %{segment: segment_id, reason: reason})
   end
 
   @doc """

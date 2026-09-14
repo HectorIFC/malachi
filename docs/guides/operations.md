@@ -77,6 +77,12 @@ MALACHI_PUBLISH_RATE_WINDOW_MS=1000
 MALACHI_REPLICATION_GROUP_COMMIT=false
 MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS=10  # its own flush period, decoupled from the rf=1 one
 
+# The replication server's minimum heap (words). Every produce batch is encoded and written in that one
+# process, and at the VM's default heap it garbage-collects several times per batch; 256K words (2MB per
+# node) halves that. Raise it only if a profile shows the server collecting per batch again, e.g. with much
+# larger batches; 0 restores the VM default.
+MALACHI_REPLICATION_MIN_HEAP_WORDS=256000
+
 # Active-segment roll size (bytes); unset keeps the 64MB default. Smaller segments seal (and become
 # independently replicable/repairable units) sooner, at the cost of more metadata churn.
 MALACHI_SEGMENT_MAX_BYTES=67108864
@@ -175,8 +181,16 @@ The deletion exercises the self-healing **integrity probe**: metadata still says
 all its replicas, so only a physical check (on-disk bytes vs the sealed byte size, run each healing
 pass) can spot the silent under-replication and re-backfill the copy. On top of the three
 invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
-file must end byte-identical across the three nodes. Damage always targets follower copies;
-primary damage is seal-on-failure territory (roadmap). In-place corruption that keeps the byte size
+file must end byte-identical across the three nodes. Corruption always targets follower copies;
+corruption of a primary copy is seal-on-failure territory (roadmap). A storage FAILURE is not: when a
+write or read fails on a node (a full volume, a failing device), that node stops using the segment's
+copy, answers `{:error, {:storage, reason}}` for it, counts it in `malachi_storage_failures_total`, and
+the healing pass seals the segment on its other replicas so producers move to a new one. From then on
+the failed copy counts as a lost replica: the healing pass backfills a replacement on another broker and
+deletes the broken copy (which lets that node use the segment id again), and the scrub skips it meanwhile
+instead of refetching it onto the disk that failed. With no spare broker the copy stays, behind the
+healthy replicas, and the pass reports the segment as `{:no_spare_broker, copies}`. The drill's
+last event fills a node's volume to certify it. In-place corruption that keeps the byte size
 (bit rot) and a rotted sparse index are covered too, by the integrity scrub described above. The run
 sets `MALACHI_SEGMENT_MAX_BYTES` and `MALACHI_LOG_ROLL_MAX_BYTES` low so segments seal and roll
 within the window; both knobs are available to any deployment that wants smaller roll sizes.

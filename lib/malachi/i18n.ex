@@ -238,6 +238,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Cerca do segmento %{segment_id} falhou: %{reason}; o segmento pai segue aberto",
       "en_US" => "⚠️ Fence for segment %{segment_id} failed: %{reason}; the parent stays open"
     },
+    roll_fence_failed: %{
+      "pt_BR" =>
+        "cerca do roll do segmento %{segment_id} falhou: %{reason}; o segmento segue aberto para escrita " <>
+          "e a cerca é reenviada",
+      "en_US" =>
+        "roll fence for segment %{segment_id} failed: %{reason}; the segment stays open for writes and the " <>
+          "fence is sent again"
+    },
     seal_record_failed: %{
       "pt_BR" =>
         "❌ Segmento %{segment_id} foi cercado mas o selo no control plane falhou: %{reason}; o range " <>
@@ -356,9 +364,27 @@ defmodule Malachi.I18n do
       "pt_BR" => "segmento %{segment_id} descartou %{bytes} bytes de uma escrita parcial",
       "en_US" => "segment %{segment_id} dropped %{bytes} bytes of a partial write"
     },
+    replication_segment_storage_failed: %{
+      "pt_BR" =>
+        "a cópia do segmento %{segment_id} neste nó falhou no armazenamento (%{reason}): ela não será " <>
+          "reescrita, as requisições para ela são recusadas até um restart ou delete, e a passagem de cura " <>
+          "sela o segmento nas réplicas restantes e repõe esta cópia em outro broker",
+      "en_US" =>
+        "segment %{segment_id}'s copy on this node failed in storage (%{reason}): it will not be written " <>
+          "again, requests for it are refused until a restart or delete, and the healing pass seals the " <>
+          "segment on the remaining replicas and replaces this copy on another broker"
+    },
     heal_repair_failed: %{
       "pt_BR" => "passagem de cura não conseguiu reparar %{count}: %{failures}",
       "en_US" => "healing pass could not repair %{count}: %{failures}"
+    },
+    heal_failed_copy_replaced: %{
+      "pt_BR" =>
+        "%{count} cópia(s) que falharam no armazenamento foram repostas em outro broker e apagadas de onde " <>
+          "falharam: %{copies}",
+      "en_US" =>
+        "replaced %{count} copy(ies) that failed in storage on another broker and deleted them where they " <>
+          "failed: %{copies}"
     },
     heal_orphaned_fence_reconciled: %{
       "pt_BR" =>

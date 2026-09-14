@@ -76,6 +76,25 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.scrub_segments_unrepairable == before.scrub_segments_unrepairable + 1
   end
 
+  test "a storage failure is counted by reason, with an unfamiliar reason under other" do
+    # Buckets rather than the raw reason, because a Prometheus label has to come from a closed set: a new
+    # POSIX reason must land somewhere an alert already watches, not in a series nobody created.
+    before = Metrics.get_system_metrics().operations
+    segment = {{"events", 0}, 0}
+
+    Telemetry.storage_failure(segment, :enospc)
+    Telemetry.storage_failure(segment, :enospc)
+    Telemetry.storage_failure(segment, :eio)
+    Telemetry.storage_failure(segment, :eacces)
+    Telemetry.storage_failure(segment, :einval)
+
+    ops = Metrics.get_system_metrics().operations
+    assert ops.storage_failure_enospc == before.storage_failure_enospc + 2
+    assert ops.storage_failure_eio == before.storage_failure_eio + 1
+    assert ops.storage_failure_eacces == before.storage_failure_eacces + 1
+    assert ops.storage_failure_other == before.storage_failure_other + 1
+  end
+
   test "an orphaned fence and its reconciliation are counted as a pair" do
     # A fence whose control-plane seal failed closes a range to writes until something reconciles it.
     # The detection alone says a split hit an `ra` error, which is survivable; it is detections that

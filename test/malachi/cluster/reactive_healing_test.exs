@@ -4,6 +4,9 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
   # and the membership -> broker-ref bridge that feeds it.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.PollingHelper
+
+  alias Malachi.Broker
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MembershipServer
@@ -42,6 +45,10 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     for index <- 0..7 do
       {:ok, _placements} = BrokerServer.produce(control, "events", [Record.new("v#{index}", key: "k#{index}")])
     end
+
+    # A roll's seal lands when its fence answers, after the produce that tripped it. A pass that ran before
+    # the last answer would find that store fenced and its metadata active, and seal it itself.
+    wait_until!(fn -> Broker.due_rolls(:sys.get_state(control).broker) == [] end)
 
     {:ok, live_agent} = start_supervised({Agent, fn -> brokers end}, id: :live)
 

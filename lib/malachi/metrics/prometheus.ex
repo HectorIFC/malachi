@@ -93,6 +93,18 @@ defmodule Malachi.Metrics.Prometheus do
         ]
       ),
       metric(
+        "malachi_storage_failures_total",
+        :counter,
+        "Storage operations that failed on a segment copy, which was then taken out of service, by reason " <>
+          "(enospc is a full volume, eio a failing device)",
+        [
+          {[reason: "enospc"], ops.storage_failure_enospc},
+          {[reason: "eio"], ops.storage_failure_eio},
+          {[reason: "eacces"], ops.storage_failure_eacces},
+          {[reason: "other"], ops.storage_failure_other}
+        ]
+      ),
+      metric(
         "malachi_storage_scrub_segments_total",
         :counter,
         "Segments the integrity scrub has processed (a total that stops advancing means it stopped)",

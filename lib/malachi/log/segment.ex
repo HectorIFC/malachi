@@ -5,7 +5,8 @@ defmodule Malachi.Log.Segment do
   A segment is a sequence of `Malachi.Log.Record`s persisted to a single file
   (file-per-segment). It is either `:active` (records may be appended) or `:sealed`
   (immutable). A segment is sealed when it reaches a size limit, exceeds a maximum
-  active age, or (in a replicated deployment) on replica failure.
+  active age, or (in a replicated deployment) on replica failure: its primary dying
+  (`Malachi.Cluster.Failover`), or any replica's copy failing in storage.
 
   This struct is pure data; durable I/O lives in `Malachi.Storage.SegmentStore`
   implementations. The counters here (`byte_size`, `record_count`) reflect *flushed*

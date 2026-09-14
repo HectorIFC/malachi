@@ -13,6 +13,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.UnfenceablePrimary
 
   @moduletag :tmp_dir
 
@@ -20,10 +21,10 @@ defmodule Malachi.BrokerServerTest do
 
   # A primary that serves everything but the fence, so a FAILED fence can be told apart from a dead
   # primary (which would fail the produce too and make the two outcomes indistinguishable).
-  defp start_unfenceable(id) do
+  defp start_unfenceable(id, opts \\ []) do
     directory = Path.join(System.tmp_dir!(), "malachi_unfenceable_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    start_supervised!({Malachi.Test.UnfenceablePrimary, directory: directory}, id: id)
+    start_supervised!({UnfenceablePrimary, [directory: directory] ++ opts}, id: id)
   end
 
   defp start(directory, opts \\ []) do
@@ -118,8 +119,13 @@ defmodule Malachi.BrokerServerTest do
       {:ok, _} = BrokerServer.produce(server, "events", [record("value", "k0")])
       {:ok, _} = BrokerServer.produce(server, "events", [record("value", "k1")])
 
-      sealed = Metadata.segments_of_range(BrokerServer.metadata(server), root_id) |> Enum.find(&(&1.state == :sealed))
-      assert sealed != nil
+      first_sealed = fn ->
+        Metadata.segments_of_range(BrokerServer.metadata(server), root_id) |> Enum.find(&(&1.state == :sealed))
+      end
+
+      # A roll's seal lands when its fence answers, which is asynchronous to the produce that tripped it.
+      wait_until!(fn -> first_sealed.() != nil end)
+      sealed = first_sealed.()
 
       assert BrokerServer.delete_segment(server, sealed.id) == :ok
       refute Enum.any?(Metadata.segments_of_range(BrokerServer.metadata(server), root_id), &(&1.id == sealed.id))
@@ -321,12 +327,13 @@ defmodule Malachi.BrokerServerTest do
 
         replication = BrokerServer.replication_ref(server)
 
-        sealed =
-          BrokerServer.metadata(server)
-          |> Metadata.segments_of_range(root_id)
-          |> Enum.filter(&(&1.state == :sealed))
+        sealed_segments = fn ->
+          BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id) |> Enum.filter(&(&1.state == :sealed))
+        end
 
-        assert sealed != []
+        # A roll's fence answers asynchronously, so its seal lands shortly after the produce that tripped it.
+        wait_until!(fn -> sealed_segments.() != [] end)
+        sealed = sealed_segments.()
 
         for segment <- sealed do
           durable = ReplicationServer.durable_end(replication, segment.id, segment.start_offset)
@@ -374,10 +381,12 @@ defmodule Malachi.BrokerServerTest do
         assert Map.fetch!(first, root_id) == {0, 1}
         assert Map.fetch!(third, root_id) == {5, 7}
 
-        [sealed] =
-          BrokerServer.metadata(front_a)
-          |> Metadata.segments_of_range(root_id)
-          |> Enum.filter(&(&1.state == :sealed))
+        front_a_sealed = fn ->
+          BrokerServer.metadata(front_a) |> Metadata.segments_of_range(root_id) |> Enum.filter(&(&1.state == :sealed))
+        end
+
+        wait_until!(fn -> front_a_sealed.() != [] end)
+        [sealed] = front_a_sealed.()
 
         # 8, the store's end, not 5, A's tally. This is the assertion a baseline tree fails.
         assert sealed.length == 8
@@ -388,32 +397,273 @@ defmodule Malachi.BrokerServerTest do
         assert {:ok, [%{offset: 5, value: "v5"} | _rest]} = BrokerServer.read(front_a, root_id, 5, 100)
         assert front_a |> read_all(root_id) |> Enum.map(& &1.value) == Enum.map(0..7, &"v#{&1}")
       end
+
+      test "a frontend that has not seen a roll gets no write acknowledged above the sealed edge",
+           %{tmp_dir: directory} do
+        # THE REGRESSION the storage chaos drill found (#147). A roll used to be a metadata command taken from
+        # the rolling frontend's counter, with nothing telling the store. A frontend still caching the segment
+        # as its write head kept appending to it, the primary kept acknowledging, and those records sat above
+        # the edge the control plane recorded: stored, acknowledged, and unreachable by any read. Now the roll
+        # fences the store first, so the stale frontend is refused instead of acknowledged.
+        #
+        # Two frontends with separate metadata over one primary, as in the test above: segment ids are
+        # deterministic, so both address the same segment, and B never learns A's seal from the metadata.
+        one_record = Record.encoded_size(record("v0", "k0"))
+        repl = start_repl(directory, 1)
+
+        opts = [
+          brokers: [repl],
+          segment_max_bytes: 2 * one_record,
+          group_commit: unquote(group_commit),
+          group_commit_interval_ms: 5
+        ]
+
+        front_a = start(Path.join(directory, "a"), opts)
+        front_b = start(Path.join(directory, "b"), opts)
+        {:ok, root_id} = BrokerServer.create_topic(front_a, "events", 4)
+        {:ok, ^root_id} = BrokerServer.create_topic(front_b, "events", 4)
+
+        # B opens the range's first segment and caches it as its write head, below its own threshold.
+        {:ok, _} = BrokerServer.produce(front_b, "events", [record("v0", "k0")])
+
+        # A appends to the same segment and crosses ITS threshold: the roll, sealed at the primary's end, 3.
+        {:ok, _} = BrokerServer.produce(front_a, "events", [record("v1", "k1"), record("v2", "k2")])
+
+        wait_until!(fn ->
+          match?([%{state: :sealed, length: 3}], BrokerServer.metadata(front_a) |> Metadata.segments_of_range(root_id))
+        end)
+
+        # B still treats segment 0 as its write head. Before the fence this append was acknowledged, at offset
+        # 3, above the edge A had recorded.
+        assert {:error, {:sealed, 3}} = BrokerServer.produce(front_b, "events", [record("v3", "k3")])
+
+        # A's next write opens the successor at the sealed edge, and every acknowledged record is readable.
+        {:ok, _} = BrokerServer.produce(front_a, "events", [record("v4", "k4")])
+        assert front_a |> read_all(root_id) |> Enum.map(& &1.value) == ["v0", "v1", "v2", "v4"]
+      end
+
+      test "a produce behind this frontend's own fence waits for the answer and lands in the successor",
+           %{tmp_dir: directory} do
+        # THE REGRESSION the async fence introduced (#147). The rolling frontend's next produce reaches the
+        # primary after the fence it sent, so the primary refuses it; that is this frontend overtaking itself,
+        # not a stale writer, and failing it back made every roll cost a client error. The double holds the
+        # fence's answer, so the produce is provably held while the answer is out.
+        {directory, opts} = seal_opts(unquote(group_commit), directory)
+        # Records the size of the one `seal_opts/2` measures, so each one crosses the threshold.
+        primary = start_unfenceable(:"hold_fence_#{unquote(group_commit)}", fence: :hold)
+        {server, root_id} = with_topic(directory, Keyword.put(opts, :brokers, [primary]))
+
+        assert {:ok, %{^root_id => {0, 0}}} = BrokerServer.produce(server, "events", [record("val_0", "ke0")])
+
+        second = Task.async(fn -> BrokerServer.produce(server, "events", [record("val_1", "ke1")]) end)
+        wait_until!(fn -> Map.has_key?(:sys.get_state(server).fence_parked, root_id) end)
+        assert Task.yield(second, 50) == nil
+
+        :ok = UnfenceablePrimary.release_fences(primary)
+
+        assert {:ok, %{^root_id => {1, 1}}} = Task.await(second)
+        assert [%{state: :sealed, length: 1}, %{start_offset: 1} | _] = segments_of(server, root_id)
+        assert server |> read_all(root_id) |> Enum.map(& &1.value) == ["val_0", "val_1"]
+        assert :sys.get_state(server).fence_parked == %{}
+      end
+
+      test "a produce behind a fence that never answers fails with the refusal once the retry window passes",
+           %{tmp_dir: directory} do
+        # The bound on the hold: an answer that was lost must not park a client forever. The window is the
+        # one after which the frontend resends the fence, so no produce waits on an answer longer than that.
+        {directory, opts} = seal_opts(unquote(group_commit), directory)
+        primary = start_unfenceable(:"mute_fence_#{unquote(group_commit)}", fence: :hold)
+        {server, root_id} = with_topic(directory, Keyword.put(opts, :brokers, [primary]))
+
+        assert {:ok, _} = BrokerServer.produce(server, "events", [record("val_0", "ke0")])
+
+        {elapsed_us, reply} = :timer.tc(fn -> BrokerServer.produce(server, "events", [record("val_1", "ke1")]) end)
+
+        assert reply == {:error, {:sealed, 1}}
+        assert elapsed_us >= 900_000, "failed after #{div(elapsed_us, 1000)}ms, before the retry window"
+        assert :sys.get_state(server).fence_parked == %{}
+        assert server |> read_all(root_id) |> Enum.map(& &1.value) == ["val_0"]
+      end
+    end
+  end
+
+  defp segments_of(server, range_id) do
+    server |> BrokerServer.metadata() |> Metadata.segments_of_range(range_id) |> Enum.sort_by(& &1.start_offset)
+  end
+
+  describe "a produce behind its own roll fence (group_commit: false)" do
+    test "is planned again only once: a second refusal fails it", %{tmp_dir: directory} do
+      # The fence answers, but its seal cannot be recorded, so the control plane still calls the segment
+      # active. The held produce is planned again, adopts that same segment, and is refused a second time;
+      # holding it again would loop for as long as the metadata stays behind.
+      one_record = Record.encoded_size(record("v0", "k0"))
+      primary = start_unfenceable(:hold_fence_record_fails, fence: :hold)
+      {server, root_id} = with_topic(directory, brokers: [primary], segment_max_bytes: one_record)
+
+      failing = fn dsrsm, topic, command ->
+        case command do
+          {:seal_segment, _id, _length, _bytes, _at} -> {dsrsm, {:error, :ra_timeout}}
+          _other -> DSRSM.command(dsrsm, topic, command)
+        end
+      end
+
+      :sys.replace_state(server, fn state -> put_in(state.broker.command_fun, failing) end)
+
+      assert {:ok, _} = BrokerServer.produce(server, "events", [record("v0", "k0")])
+
+      second = Task.async(fn -> BrokerServer.produce(server, "events", [record("v1", "k1")]) end)
+      wait_until!(fn -> Map.has_key?(:sys.get_state(server).fence_parked, root_id) end)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = UnfenceablePrimary.release_fences(primary)
+        assert Task.await(second) == {:error, {:sealed, 1}}
+      end)
+
+      assert :sys.get_state(server).fence_parked == %{}
+      assert [%{state: :active}] = segments_of(server, root_id)
+
+      # And the answer ended the wait: the next refusal fails at once rather than being held for a window.
+      {elapsed_us, reply} = :timer.tc(fn -> BrokerServer.produce(server, "events", [record("v2", "k2")]) end)
+      assert reply == {:error, {:sealed, 1}}
+      assert elapsed_us < 500_000
+    end
+
+    test "a failed fence holds nothing", %{tmp_dir: directory} do
+      # A fence that answers with an error leaves the segment open, so a produce refused meanwhile was not
+      # refused by it: nothing is held, and the roll stays owed.
+      one_record = Record.encoded_size(record("v0", "k0"))
+      primary = start_unfenceable(:hold_fence_fails, fence: :hold)
+      {server, root_id} = with_topic(directory, brokers: [primary], segment_max_bytes: one_record)
+
+      assert {:ok, _} = BrokerServer.produce(server, "events", [record("v0", "k0")])
+      [roll] = Broker.due_rolls(:sys.get_state(server).broker)
+      assert Broker.awaiting_fence?(:sys.get_state(server).broker, root_id, roll.segment_id, now(), 1_000)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(server, {:seal_result, {:roll_fence, roll}, {:error, :unreachable}})
+
+        wait_until!(fn ->
+          not Broker.awaiting_fence?(:sys.get_state(server).broker, root_id, roll.segment_id, now(), 1_000)
+        end)
+      end)
+
+      assert [%{segment_id: segment_id}] = Broker.due_rolls(:sys.get_state(server).broker)
+      assert segment_id == roll.segment_id
+      assert :sys.get_state(server).fence_parked == %{}
+    end
+
+    test "several produces held behind one fence go again in the order they arrived", %{tmp_dir: directory} do
+      one_record = Record.encoded_size(record("val_0", "ke0"))
+      primary = start_unfenceable(:hold_fence_many, fence: :hold)
+      {server, root_id} = with_topic(directory, brokers: [primary], segment_max_bytes: one_record)
+
+      assert {:ok, %{^root_id => {0, 0}}} = BrokerServer.produce(server, "events", [record("val_0", "ke0")])
+
+      second = Task.async(fn -> BrokerServer.produce(server, "events", [record("val_1", "ke1")]) end)
+      wait_until!(fn -> parked_count(server, root_id) == 1 end)
+      third = Task.async(fn -> BrokerServer.produce(server, "events", [record("val_2", "ke2")]) end)
+      wait_until!(fn -> parked_count(server, root_id) == 2 end)
+
+      :ok = UnfenceablePrimary.release_fences(primary)
+
+      assert {:ok, %{^root_id => {1, 1}}} = Task.await(second)
+      assert {:ok, %{^root_id => {2, 2}}} = Task.await(third)
+      assert server |> read_all(root_id) |> Enum.map(& &1.value) == ["val_0", "val_1", "val_2"]
+    end
+
+    test "a held produce that already finished is dropped when its fence answers", %{tmp_dir: directory} do
+      # Its safety timer fired while it was held: the client has its answer, and replanning it now would
+      # store records nobody is waiting for.
+      one_record = Record.encoded_size(record("val_0", "ke0"))
+      primary = start_unfenceable(:hold_fence_finished, fence: :hold)
+      {server, root_id} = with_topic(directory, brokers: [primary], segment_max_bytes: one_record)
+
+      assert {:ok, _} = BrokerServer.produce(server, "events", [record("val_0", "ke0")])
+
+      second = Task.async(fn -> BrokerServer.produce(server, "events", [record("val_1", "ke1")]) end)
+      wait_until!(fn -> parked_count(server, root_id) == 1 end)
+
+      [ref] = Map.keys(:sys.get_state(server).async_produces)
+      send(server, {:produce_timeout, ref})
+      assert Task.await(second) == {:error, :replication_timeout}
+
+      :ok = UnfenceablePrimary.release_fences(primary)
+      wait_until!(fn -> :sys.get_state(server).fence_parked == %{} end)
+
+      assert server |> read_all(root_id) |> Enum.map(& &1.value) == ["val_0"]
+      assert {:ok, %{^root_id => {1, 1}}} = BrokerServer.produce(server, "events", [record("val_2", "ke2")])
+    end
+
+    test "a held produce whose new plan fails gets that failure", %{tmp_dir: directory} do
+      one_record = Record.encoded_size(record("val_0", "ke0"))
+      primary = start_unfenceable(:hold_fence_replan_fails, fence: :hold)
+      {server, root_id} = with_topic(directory, brokers: [primary], segment_max_bytes: one_record)
+
+      assert {:ok, _} = BrokerServer.produce(server, "events", [record("val_0", "ke0")])
+
+      second = Task.async(fn -> BrokerServer.produce(server, "events", [record("val_1", "ke1")]) end)
+      wait_until!(fn -> parked_count(server, root_id) == 1 end)
+
+      # The seal records, but the successor cannot be registered.
+      failing = fn dsrsm, topic, command ->
+        case command do
+          {:register_segment, _range, _id, _set, _offset} -> {dsrsm, {:error, :ra_timeout}}
+          _other -> DSRSM.command(dsrsm, topic, command)
+        end
+      end
+
+      :sys.replace_state(server, fn state -> put_in(state.broker.command_fun, failing) end)
+      :ok = UnfenceablePrimary.release_fences(primary)
+
+      assert Task.await(second) == {:error, :ra_timeout}
+      assert :sys.get_state(server).async_produces == %{}
+      assert [%{state: :sealed, length: 1}] = segments_of(server, root_id)
+    end
+
+    test "a stale park timeout releases nothing", %{tmp_dir: directory} do
+      {server, root_id} = with_topic(directory)
+      send(server, {:fence_park_timeout, root_id, make_ref()})
+      assert :sys.get_state(server).fence_parked == %{}
+    end
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
+
+  defp parked_count(server, range_id) do
+    case Map.get(:sys.get_state(server).fence_parked, range_id) do
+      nil -> 0
+      parked -> length(parked.entries)
     end
   end
 
   describe "fenced seals (failure paths)" do
-    test "a primary that never answers a fence does not delay or block the produce roll", %{tmp_dir: directory} do
-      # The regression guard for putting a network call on the produce path. This double answers every
-      # request except the fence, which it swallows forever, so if the roll seal depended on a fence the
-      # segment below could never close: it would stay active, every produce would pay the fence timeout
-      # first, and the frontend would degrade to roughly one produce per timeout for every owed roll,
-      # stalling clients of unrelated topics behind the same loop. The roll seal is a metadata command
-      # derived from the counter the primary has already corrected, so a mute fence costs it nothing.
+    test "a primary that never answers a fence delays no produce and seals nothing on a guess", %{tmp_dir: directory} do
+      # Two guards in one. This double answers every request except the fence, which it swallows forever.
+      #
+      # The fence is sent as a cast, so a mute primary puts no wait on the loop that serializes every client
+      # of this node: a waited-on fence would have each produce below pay the fence timeout, and the
+      # frontend would degrade to about one produce per timeout for every owed roll.
+      #
+      # And the seal waits for the fence's answer, so a primary that never gives one leaves the segment
+      # ACTIVE and taking writes past its soft threshold, rather than sealed at a length nobody measured.
+      # Sealing from the frontend's own counter is what let a writer that had not yet seen the seal land
+      # acknowledged records above the recorded edge.
       one_record = Record.encoded_size(Record.new("value", key: "key"))
       unfenceable = start_unfenceable(:unfenceable_roll)
 
       {server, root_id} = with_topic(directory, brokers: [unfenceable], segment_max_bytes: one_record)
 
-      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("value", "key0")])
-      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("value", "key1")])
+      {elapsed_us, results} =
+        :timer.tc(fn -> for i <- 0..1, do: BrokerServer.produce(server, "events", [record("value", "key#{i}")]) end)
 
-      # Both sealed, despite the fence never answering: with the threshold at one record each produce
-      # closes its own segment. The lengths are the primary's, and they tile the range without a gap.
-      assert [%{state: :sealed, start_offset: 0, length: 1}, %{state: :sealed, start_offset: 1, length: 1}] =
-               BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert elapsed_us < 500_000, "two produces took #{div(elapsed_us, 1000)}ms: something waited on the fence"
 
-      # And nothing is left owed, so no later produce inherits a retry against the mute primary.
-      assert :sys.get_state(server).broker |> Broker.due_rolls() == []
+      assert [%{state: :active, start_offset: 0}] = BrokerServer.metadata(server) |> Metadata.segments_of_range(root_id)
+      assert server |> read_all(root_id) |> length() == 2
+
+      # The roll stays owed, to be sent again, instead of being settled without an answer.
+      assert [%{segment_id: {^root_id, 0}}] = :sys.get_state(server).broker |> Broker.due_rolls()
     end
 
     test "split_range/2 fences the parent before the split, and reports a fence failure", %{tmp_dir: directory} do

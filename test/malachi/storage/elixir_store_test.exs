@@ -9,6 +9,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
   alias Malachi.Log.{Record, Segment}
   alias Malachi.Storage.ElixirStore
+  alias Malachi.Test.StorageFaults
 
   @moduletag :tmp_dir
 
@@ -57,6 +58,145 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
   defp truncate_to(path, bytes) do
     File.write!(path, binary_part(File.read!(path), 0, bytes))
+  end
+
+  describe "storage failures (returned, never raised: the store's failure contract)" do
+    test "open/3 answers the error when the segment's directory cannot be created", %{tmp_dir: directory} do
+      blocker = Path.join(directory, "a_file")
+      File.write!(blocker, "")
+
+      assert ElixirStore.open(Path.join(blocker, "segments"), "segment-0", []) == {:error, :enotdir}
+    end
+
+    test "the empty .log an open leaves behind when it fails after creating it recovers as a clean segment",
+         %{tmp_dir: directory} do
+      File.touch!(Path.join(directory, "segment-0.log"))
+
+      # What a second open answers for it, and why recovery is the way back.
+      assert open(directory) == {:error, :already_exists}
+
+      assert {:ok, store} = ElixirStore.recover(directory, "segment-0", [])
+      assert ElixirStore.next_offset(store) == 0
+      assert ElixirStore.integrity(store) == :ok
+      assert ElixirStore.close(store) == :ok
+    end
+
+    test "recover/3 answers the error for a segment it cannot open", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      :ok = ElixirStore.close(store)
+      StorageFaults.make_unreadable!(Path.join(directory, "segment-0.log"))
+
+      assert ElixirStore.recover(directory, "segment-0", []) == {:error, :eacces}
+    end
+
+    test "open_read/3 answers the error for a sealed segment it cannot open", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+      StorageFaults.make_unreadable!(Path.join(directory, "segment-0.log"))
+
+      assert ElixirStore.open_read(directory, "segment-0", record_count: 3) == {:error, :eacces}
+    end
+
+    test "verify/3 reports a segment it cannot open as damage at byte 0 carrying the POSIX reason",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      :ok = ElixirStore.close(store)
+      path = Path.join(directory, "segment-0.log")
+      StorageFaults.make_unreadable!(path)
+
+      assert ElixirStore.verify(directory, "segment-0", []) ==
+               {:error, %{reason: :eacces, position: 0, unreadable_bytes: 0, file: path}}
+    end
+
+    test "rebuild_index/3 answers the error for a segment it cannot open", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      :ok = ElixirStore.close(store)
+      StorageFaults.make_unreadable!(Path.join(directory, "segment-0.log"))
+
+      assert ElixirStore.rebuild_index(directory, "segment-0", []) == {:error, :eacces}
+    end
+
+    test "sync/1 answers the error when the write fails", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      {:ok, store, 0, 0} = ElixirStore.append(store, [rec("a")])
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.sync(store) == {:error, :einval}
+    end
+
+    test "append/2 answers the error when the flush its size trigger starts fails", %{tmp_dir: directory} do
+      {:ok, store} = open(directory, flush_count: 1)
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.append(store, [rec("a")]) == {:error, :einval}
+    end
+
+    test "seal/1 answers the error when its flush fails", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      {:ok, store, 0, 0} = ElixirStore.append(store, [rec("a")])
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.seal(store) == {:error, :einval}
+    end
+
+    test "read/3 answers the error, from a scan from the start and from one the sparse index seats",
+         %{tmp_dir: directory} do
+      # A tiny index interval indexes every frame, so reading offset 15 starts from an index hint rather
+      # than from byte 0: the error has to come back through that path too, not be rescanned from 0.
+      {:ok, store} = seed_frames(directory, 0..19, index_interval: 16)
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.read(store, 0, 5) == {:error, :einval}
+      assert ElixirStore.read(store, 15, 5) == {:error, :einval}
+    end
+
+    test "close/1 answers :ok even when giving back the preallocated tail fails", %{tmp_dir: directory} do
+      {:ok, store} = open(directory, prealloc_bytes: 65_536)
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.close(store) == :ok
+    end
+  end
+
+  describe "a read the device refuses (EIO)" do
+    # A real EIO, not a simulated one: the segment file is a link to /proc/self/mem, whose offset 0 is never
+    # mapped, so every read of it fails with EIO and every open of it succeeds. Only Linux has it.
+    @describetag skip: if(File.exists?("/proc/self/mem"), do: false, else: "needs Linux /proc/self/mem for a real EIO")
+
+    defp eio_segment!(directory) do
+      File.mkdir_p!(directory)
+      path = Segment.path(Segment.new("segment-0", directory, []))
+      File.ln_s!("/proc/self/mem", path)
+
+      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
+      assert {:error, :eio} = :file.pread(file_descriptor, 0, 16), "#{path} did not fail reads with EIO"
+      :ok = :file.close(file_descriptor)
+
+      path
+    end
+
+    test "recover/3 answers it instead of recovering a writable handle around it", %{tmp_dir: directory} do
+      # THE FINDING, reproduced on Linux before the fix: recovery took the failed read for a rotten tail, answered
+      # {:ok, store} positioned at byte 0 with an :eio integrity verdict, and the next append would have written
+      # over every byte nobody could read.
+      eio_segment!(directory)
+
+      assert ElixirStore.recover(directory, "segment-0") == {:error, :eio}
+    end
+
+    test "rebuild_index/3 answers it instead of writing a partial index", %{tmp_dir: directory} do
+      eio_segment!(directory)
+
+      assert ElixirStore.rebuild_index(directory, "segment-0") == {:error, :eio}
+      refute File.exists?(Segment.index_path(Segment.new("segment-0", directory, [])))
+    end
+
+    test "verify/3 still reports it as damage carrying the reason", %{tmp_dir: directory} do
+      eio_segment!(directory)
+
+      assert {:error, %{reason: :eio, position: 0}} = ElixirStore.verify(directory, "segment-0")
+    end
   end
 
   describe "append / sync / read round-trip" do

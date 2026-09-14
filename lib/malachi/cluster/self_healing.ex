@@ -30,6 +30,19 @@ defmodule Malachi.Cluster.SelfHealing do
   `Malachi.Cluster.Catchup`, resuming at the truncation point rather than recopying the segment.
   In-place corruption that keeps the byte size is out of this probe's reach by construction, since it
   compares sizes: that is what `Malachi.Cluster.Scrubber` verifies checksums for.
+
+  ## A copy that failed in storage
+
+  A sealed copy its replication server has latched as failed (see "Storage failures" in
+  `Malachi.Cluster.ReplicationServer`, and the `:failed` option) is a lost replica on a live broker: it
+  refuses every request, so it is neither a backfill source nor a placement target for that segment, and
+  the segment is healed as if that broker had left it. The healed set leaves the copy out, and the caller
+  deletes it once the new set is recorded (`Malachi.Cluster.HealCoordinator`).
+
+  A failed copy is REPLACED, never merely dropped. With no spare broker to take its place it stays in the
+  set, moved behind the healthy replicas so reads avoid it, and the segment is reported as failed with
+  `{:no_spare_broker, copies}` on every pass. Dropping it would give up the one chance it has left: the
+  latch lives in memory, and after a restart a copy whose sealed bytes were intact serves again.
   """
 
   alias Malachi.Cluster.Catchup
@@ -57,20 +70,24 @@ defmodule Malachi.Cluster.SelfHealing do
     * `:spread` - `{attribute_key, attributes}` forwarded to `Placement.place/4` so re-replication stays
       rack/DC-aware. Best-effort only: any `:min_domains`/`:policy` is intentionally *not* forwarded:
       healing prioritises durability and never fails a re-replication for domain diversity.
+    * `:failed` - a `MapSet` of `{segment_id, replica}` whose copy failed in storage there (default
+      empty). See "A copy that failed in storage" above.
   """
   @spec heal_sealed(Metadata.t(), [Metadata.broker()], pos_integer(), keyword()) :: result()
   def heal_sealed(%Metadata{} = metadata, live_brokers, replication_factor, opts \\ []) do
+    failed = Keyword.get(opts, :failed, MapSet.new())
     under_replicated = Placement.under_replicated(metadata, live_brokers, replication_factor)
+    to_heal = Enum.sort(Enum.uniq(under_replicated ++ with_failed_copy(metadata, failed)))
 
     healed =
-      under_replicated
+      to_heal
       |> Enum.map(&Metadata.get_segment(metadata, &1))
       |> Enum.filter(&(&1.state == :sealed))
       |> Enum.reduce(%{applied: [], failed: []}, fn segment, acc ->
-        heal_segment(segment, live_brokers, replication_factor, opts, acc)
+        heal_segment(segment, live_brokers, replication_factor, opts, failed_copies(failed, segment), acc)
       end)
 
-    integrity = repair_lost_copies(metadata, MapSet.new(under_replicated), live_brokers, opts)
+    integrity = repair_lost_copies(metadata, MapSet.new(to_heal), live_brokers, opts)
 
     finalize(%{
       applied: healed.applied,
@@ -79,19 +96,51 @@ defmodule Malachi.Cluster.SelfHealing do
     })
   end
 
-  defp heal_segment(segment, live_brokers, replication_factor, opts, acc) do
+  # Sealed segments with a copy that failed on a broker still in their replica set.
+  defp with_failed_copy(metadata, failed) do
+    for {segment_id, replica} <- failed,
+        segment = Map.get(metadata.segments, segment_id),
+        segment != nil and segment.state == :sealed and replica in segment.replica_set,
+        uniq: true,
+        do: segment_id
+  end
+
+  defp failed_copies(failed, segment) do
+    for {segment_id, replica} <- failed, segment_id == segment.id, replica in segment.replica_set, do: replica
+  end
+
+  # `lost` are this segment's failed copies: a broker holding one is live, but not for this segment.
+  defp heal_segment(segment, live_brokers, replication_factor, opts, lost, acc) do
+    available = live_brokers -- lost
+    sources = Enum.filter(segment.replica_set, &(&1 in available))
+
     # Only :spread is forwarded: heal is durability-first and must never fail on a domain guarantee, so
-    # :min_domains/:policy are deliberately stripped (place then always returns {:ok, _}).
-    {:ok, new_set} = Placement.place(segment.id, live_brokers, replication_factor, Keyword.take(opts, [:spread]))
+    # :min_domains/:policy are deliberately stripped, which leaves an empty broker list as the only error.
+    case Placement.place(segment.id, available, replication_factor, Keyword.take(opts, [:spread])) do
+      {:ok, new_set} -> heal_to(acc, segment, new_set, sources, lost, opts)
+      # Every live broker holds a failed copy of it, so there is no broker left to hold it.
+      {:error, :no_brokers} -> record_failed(acc, segment.id, :no_live_source)
+    end
+  end
+
+  defp heal_to(acc, segment, new_set, sources, lost, opts) do
     to_add = new_set -- segment.replica_set
-    sources = Enum.filter(segment.replica_set, &(&1 in live_brokers))
 
     cond do
+      # Nothing to put in a failed copy's place: it stays, behind the healthy replicas (see the moduledoc).
+      to_add == [] and lost != [] -> keep_failed_copies(acc, segment, new_set, lost)
       # The healed set drops/reorders replicas but adds none, so no data has to move.
       to_add == [] -> record_applied(acc, segment.id, new_set)
       sources == [] -> record_failed(acc, segment.id, :no_live_source)
       true -> backfill_and_record(acc, segment, new_set, to_add, hd(sources), opts)
     end
+  end
+
+  defp keep_failed_copies(acc, segment, new_set, lost) do
+    kept = new_set ++ lost
+    acc = record_failed(acc, segment.id, {:no_spare_broker, lost})
+
+    if kept == segment.replica_set, do: acc, else: record_applied(acc, segment.id, kept)
   end
 
   defp backfill_and_record(acc, segment, new_set, to_add, source, opts) do
@@ -168,8 +217,13 @@ defmodule Malachi.Cluster.SelfHealing do
     :exit, _reason -> :unreachable
   end
 
+  # A copy that failed in storage answers an error, and it is skipped like a silent replica: it will not
+  # take a repair (it refuses every write), and the failover pass is what deals with it.
   defp probe_durable_end(replica, segment_id, base_offset) do
-    {:ok, ReplicationServer.durable_end(replica, segment_id, base_offset, @probe_timeout)}
+    case ReplicationServer.durable_end(replica, segment_id, base_offset, @probe_timeout) do
+      {:error, _reason} -> :unreachable
+      end_offset -> {:ok, end_offset}
+    end
   catch
     :exit, _reason -> :unreachable
   end

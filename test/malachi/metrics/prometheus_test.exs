@@ -37,6 +37,10 @@ defmodule Malachi.Metrics.PrometheusTest do
         integrity_incomplete: 1,
         integrity_short_copy: 0,
         integrity_bad_index: 4,
+        storage_failure_enospc: 6,
+        storage_failure_eio: 1,
+        storage_failure_eacces: 0,
+        storage_failure_other: 2,
         scrub_segments_verified: 4200,
         scrub_segments_repaired: 3,
         scrub_segments_unrepairable: 2,
@@ -82,6 +86,11 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_crc"} 2)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="incomplete"} 1)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_index"} 4)
+    assert out =~ "# TYPE malachi_storage_failures_total counter\n"
+    assert out =~ ~s(malachi_storage_failures_total{reason="enospc"} 6)
+    assert out =~ ~s(malachi_storage_failures_total{reason="eio"} 1)
+    assert out =~ ~s(malachi_storage_failures_total{reason="eacces"} 0)
+    assert out =~ ~s(malachi_storage_failures_total{reason="other"} 2)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="verified"} 4200)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="repaired"} 3)
     assert out =~ ~s(malachi_storage_scrub_segments_total{result="unrepairable"} 2)

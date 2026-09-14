@@ -36,6 +36,16 @@ defmodule Malachi.Storage.ElixirStore do
   unwritten tail looks like, which recovery has to understand: see `classify_tail/2`. The tail is
   truncated away on `seal/1` and on `close/1`, so a segment this store is not actively writing is
   byte-exact, and every size the rest of the system reads off disk keeps meaning what it meant.
+
+  ## Failures
+
+  Every file operation's error comes back as `{:error, posix}`, per the failure contract in
+  `Malachi.Storage.SegmentStore`. That includes a read that fails while recovery scans the segment:
+  it is answered as the storage failure it is, never classified as damage to the bytes and recovered
+  around. The one deliberate exception is preallocation: it is an optimization, so an extension that
+  fails degrades to an unpreallocated segment rather than failing the open or recovery, and the next
+  commit reports the condition if it persists. It degrades only if the file can be put back to its
+  previous size; when it cannot, the handle is refused (see `Malachi.Storage.Preallocation.extend_or_restore/4`).
   """
 
   @behaviour Malachi.Storage.SegmentStore
@@ -134,18 +144,21 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def open(directory, segment_id, opts \\ []) do
-    File.mkdir_p!(directory)
     segment = Segment.new(segment_id, directory, opts)
     path = Segment.path(segment)
 
-    if File.exists?(path) do
-      {:error, :already_exists}
-    else
-      File.touch!(path)
-      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
-      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-      prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
+    # A failure between creating the file and opening it leaves an empty `.log` behind, on purpose:
+    # removing a file from a volume that just failed can fail too, and the leftover is harmless. `open/3`
+    # answers `:already_exists` for it, and `recover/3`, which is what reopens a segment after a restart,
+    # reads an empty file as a clean one.
+    index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+    prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
 
+    with :ok <- File.mkdir_p(directory),
+         :ok <- absent(path),
+         :ok <- File.touch(path),
+         {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]),
+         {:ok, preallocated_to} <- preallocate_or_close(file_descriptor, prealloc_bytes) do
       {:ok,
        %__MODULE__{
          segment: segment,
@@ -158,8 +171,23 @@ defmodule Malachi.Storage.ElixirStore do
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
          prealloc_bytes: prealloc_bytes,
-         preallocated_to: preallocate(file_descriptor, prealloc_bytes)
+         preallocated_to: preallocated_to
        }}
+    end
+  end
+
+  defp absent(path), do: if(File.exists?(path), do: {:error, :already_exists}, else: :ok)
+
+  # A handle whose preallocation could not be undone is not handed out, so nothing else would ever close its
+  # descriptor.
+  defp preallocate_or_close(file_descriptor, prealloc_bytes) do
+    case preallocate(file_descriptor, prealloc_bytes) do
+      {:ok, _preallocated_to} = preallocated ->
+        preallocated
+
+      {:error, _reason} = error ->
+        _ = :file.close(file_descriptor)
+        error
     end
   end
 
@@ -169,32 +197,43 @@ defmodule Malachi.Storage.ElixirStore do
     path = Segment.path(segment)
 
     if File.exists?(path) do
-      index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-      prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
-      {:ok, file_descriptor} = :file.open(path, [:read, :write, :raw, :binary])
+      with {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]) do
+        # A recovery that fails hands back no handle, so nothing else could ever close this descriptor.
+        case recover_from(segment, path, file_descriptor, opts) do
+          {:ok, _store} = recovered ->
+            recovered
 
-      # Scan the file in bounded chunks (never loading it whole), counting records and
-      # building the sparse index. `valid_bytes` is where valid frames end.
-      {record_count, valid_bytes, index_entries, halt} = scan_segment(file_descriptor, index_interval)
+          {:error, _reason} = error ->
+            _ = :file.close(file_descriptor)
+            error
+        end
+      end
+    else
+      {:error, :enoent}
+    end
+  end
 
-      base_offset = segment.base_offset
-      sealed? = File.exists?(Segment.seal_marker_path(segment))
-      shape = tail_shape(file_descriptor, valid_bytes, File.stat!(path).size)
-      classification = classify_tail(halt, shape)
+  defp recover_from(%Segment{} = segment, path, file_descriptor, opts) do
+    index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
+    prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
+
+    # Scan the file in bounded chunks (never loading it whole), counting records and
+    # building the sparse index. `valid_bytes` is where valid frames end.
+    {record_count, valid_bytes, index_entries, halt} = scan_segment(file_descriptor, index_interval)
+    sealed? = File.exists?(Segment.seal_marker_path(segment))
+
+    # A scan stopped by a read error is not a finding about the bytes, it is the device failing, and it is
+    # answered as one, before anything classifies or repairs the tail. Recovering around it used to hand
+    # back a writable handle positioned where the read gave out, so the next append overwrote bytes nobody
+    # had been able to read, and the failure never reached the replication server as a storage failure.
+    with :ok <- readable(halt),
+         {:ok, %{size: file_size}} <- File.stat(path),
+         {:ok, shape} <- tail_shape(file_descriptor, valid_bytes, file_size),
+         classification = classify_tail(halt, shape),
+         action = action_for(classification, sealed?),
+         :ok <- apply_tail_action(action, file_descriptor, valid_bytes, shape, prealloc_bytes),
+         {:ok, preallocated_to} <- recovered_preallocation(action, sealed?, file_descriptor, prealloc_bytes) do
       integrity = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, sealed?, prealloc_bytes > 0)
-
-      action = action_for(classification, sealed?)
-      if action == :discard_tail, do: discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
-
-      # `:preserve` means this handle does not touch the file, and that has to include preallocating
-      # it. Not because extending is destructive by itself (it starts from the file's size and only
-      # ever adds room), but because `preallocated_to` is what authorizes `seal/1` and `close/1` to
-      # trim back to `write_position`, and `write_position` is `valid_bytes`: the byte the damage
-      # STARTS at. Setting it here would have closing the handle delete the damaged frame and every
-      # valid frame behind it, which is the same loss the extension itself was just fixed for, one
-      # door further along.
-      preallocated_to =
-        if sealed? or action == :preserve, do: nil, else: preallocate(file_descriptor, prealloc_bytes)
 
       segment = %Segment{
         segment
@@ -211,7 +250,7 @@ defmodule Malachi.Storage.ElixirStore do
          segment: segment,
          file_descriptor: file_descriptor,
          write_position: valid_bytes,
-         next_offset: base_offset + record_count,
+         next_offset: segment.base_offset + record_count,
          index: index,
          index_interval: index_interval,
          last_indexed_position: last_indexed_position(index, index_interval),
@@ -221,10 +260,28 @@ defmodule Malachi.Storage.ElixirStore do
          preallocated_to: preallocated_to,
          integrity: integrity
        }}
-    else
-      {:error, :enoent}
     end
   end
+
+  defp readable({:read_error, reason}), do: {:error, reason}
+  defp readable(_halt), do: :ok
+
+  # `:preserve` means this handle does not touch the file, and that has to include preallocating it. Not
+  # because extending is destructive by itself (it starts from the file's size and only ever adds room), but
+  # because `preallocated_to` is what authorizes `seal/1` and `close/1` to trim back to `write_position`,
+  # and `write_position` is `valid_bytes`: the byte the damage STARTS at. Setting it here would have closing
+  # the handle delete the damaged frame and every valid frame behind it, which is the same loss the
+  # extension itself was just fixed for, one door further along.
+  defp recovered_preallocation(:preserve, _sealed?, _file_descriptor, _prealloc_bytes), do: {:ok, nil}
+  defp recovered_preallocation(_action, true, _file_descriptor, _prealloc_bytes), do: {:ok, nil}
+
+  defp recovered_preallocation(_action, false, file_descriptor, prealloc_bytes),
+    do: preallocate(file_descriptor, prealloc_bytes)
+
+  defp apply_tail_action(:discard_tail, file_descriptor, valid_bytes, shape, prealloc_bytes),
+    do: discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
+
+  defp apply_tail_action(_none_or_preserve, _file_descriptor, _valid_bytes, _shape, _prealloc_bytes), do: :ok
 
   @typedoc """
   What the bytes past the last valid frame are.
@@ -338,16 +395,20 @@ defmodule Malachi.Storage.ElixirStore do
   #     damaged header claims. A frame whose header is itself unreadable has no claimed end, so the
   #     answer is false and the tail is treated as rot, which is the conservative direction.
   #   * `zeros_reach_the_end?` - whether the tail ends in zeros at all.
+  # A tail that cannot be read is an error, not an empty tail: read as empty, it classified as whatever an
+  # empty tail would have been, and recovery went on to act on bytes it never saw.
   defp tail_shape(file_descriptor, valid_bytes, file_size) do
     trailing_bytes = max(file_size - valid_bytes, 0)
     window = min(@tail_window_bytes, trailing_bytes)
 
-    bytes =
-      case :file.pread(file_descriptor, valid_bytes, window) do
-        {:ok, chunk} -> chunk
-        _eof_or_error -> <<>>
-      end
+    case :file.pread(file_descriptor, valid_bytes, window) do
+      {:ok, chunk} -> {:ok, shape_of(chunk, trailing_bytes)}
+      :eof -> {:ok, shape_of(<<>>, trailing_bytes)}
+      {:error, _reason} = error -> error
+    end
+  end
 
+  defp shape_of(bytes, trailing_bytes) do
     written_bytes = non_zero_prefix(bytes)
     ends_in_zeros? = written_bytes < byte_size(bytes)
 
@@ -364,18 +425,18 @@ defmodule Malachi.Storage.ElixirStore do
   # windows the scan uses and stops at the first non-zero byte, so the expensive answer is the
   # reassuring one: a segment with data behind the hole bails almost immediately and a healthy one
   # pays in full.
-  defp blank_tail?(file_descriptor, position) do
+  defp blank_from(file_descriptor, position) do
     case :file.pread(file_descriptor, position, @read_window_bytes) do
       {:ok, chunk} ->
-        all_zero?(chunk) and blank_tail?(file_descriptor, position + byte_size(chunk))
+        if all_zero?(chunk), do: blank_from(file_descriptor, position + byte_size(chunk)), else: :written
 
       :eof ->
-        true
+        :blank
 
-      # A descriptor that cannot be read is not one that can vouch for unwritten space, and the scan
-      # reports the damage rather than assuming the best about bytes it never saw.
-      {:error, _reason} ->
-        false
+      # A descriptor that cannot be read vouches for nothing, neither unwritten space nor data behind a
+      # hole, so the scan hands the read error on rather than guessing either way.
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -408,12 +469,13 @@ defmodule Malachi.Storage.ElixirStore do
   # past the last valid frame is unwritten space, which is what keeps a recovered replica's file
   # byte-identical to one that never crashed.
   defp discard_tail(file_descriptor, valid_bytes, _shape, 0) do
-    {:ok, _position} = :file.position(file_descriptor, valid_bytes)
-    :ok = :file.truncate(file_descriptor)
+    with {:ok, _position} <- :file.position(file_descriptor, valid_bytes) do
+      :file.truncate(file_descriptor)
+    end
   end
 
   defp discard_tail(file_descriptor, valid_bytes, shape, _prealloc_bytes) do
-    :ok = Preallocation.extend(file_descriptor, valid_bytes, valid_bytes + shape.written_bytes, :zeros)
+    Preallocation.extend(file_descriptor, valid_bytes, valid_bytes + shape.written_bytes, :zeros)
   end
 
   # Sizes a segment at creation, or re-sizes a recovered one, and answers how far it reached so the
@@ -425,7 +487,7 @@ defmodule Malachi.Storage.ElixirStore do
   # follow it, the per-flush p99 went from 23.7ms growing to 72.0ms preallocated, three times worse,
   # while the p50 in the small-batch regimes was already 55% better. Paying it once, here, is what
   # keeps the cost a property of creating a segment rather than of committing to one.
-  defp preallocate(_file_descriptor, 0), do: nil
+  defp preallocate(_file_descriptor, 0), do: {:ok, nil}
 
   defp preallocate(file_descriptor, prealloc_bytes) do
     # From the file's CURRENT size, never from `valid_bytes`. The bytes between the two belong to
@@ -433,23 +495,34 @@ defmodule Malachi.Storage.ElixirStore do
     # extending from `valid_bytes` would zero the damaged frame AND every valid frame after it, so
     # the next recovery would read unwritten space, report `:ok`, and the node would call itself
     # healthy having silently lost the records a peer was supposed to repair.
-    {:ok, size} = Preallocation.file_size(file_descriptor)
+    #
+    # A size that cannot even be read degrades the same way an extension that fails does, and with
+    # nothing to put back: no byte has been written yet.
+    #
+    # Preallocation is an optimization, and a segment works without it, so an extension that fails degrades
+    # to the behavior this store had before it existed rather than failing the open. ENOSPC is the realistic
+    # trigger, and it is not hidden: claiming the space up front only moves WHEN a full volume is noticed,
+    # and the append that follows still reports it. The file is put back to the size it had first, so a
+    # partial extension cannot leave a tail behind that `seal/1` would then not trim (`preallocated_to`
+    # stays nil, which is what authorizes trimming). A sync that fails after a whole extension is the same
+    # device failing, and it degrades the same way.
+    #
+    # Putting the file back can fail too, and that one does NOT degrade: the file may keep zeros past its
+    # last record that nothing is authorized to trim, and a sealed segment is measured off its file size,
+    # so those zeros would enter the sealed `byte_size` and make every intact copy on the other replicas
+    # look short. The handle is refused instead, which the replication server treats as the storage failure
+    # it is.
+    case Preallocation.file_size(file_descriptor) do
+      {:ok, size} -> preallocated_or_error(file_descriptor, size, prealloc_bytes)
+      {:error, _reason} -> {:ok, nil}
+    end
+  end
 
-    case Preallocation.extend(file_descriptor, size, prealloc_bytes, :zeros) do
-      :ok ->
-        :ok = :file.sync(file_descriptor)
-        prealloc_bytes
-
-      # Preallocation is an optimization, and a segment works without it, so a failure here degrades
-      # to the behavior this store had before it existed rather than failing the open. ENOSPC is the
-      # realistic trigger, and it is not hidden: claiming the space up front only moves WHEN a full
-      # volume is noticed, and the append that follows still reports it. The file is put back to the
-      # size it had first, so a partial extension cannot leave a tail behind that `seal/1` would then
-      # not trim (`preallocated_to` stays nil, which is what authorizes trimming).
-      {:error, _reason} ->
-        _ = :file.position(file_descriptor, size)
-        _ = :file.truncate(file_descriptor)
-        nil
+  defp preallocated_or_error(file_descriptor, size, prealloc_bytes) do
+    case Preallocation.extend_or_restore(file_descriptor, size, prealloc_bytes, :zeros) do
+      :extended -> {:ok, prealloc_bytes}
+      :restored -> {:ok, nil}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -460,8 +533,9 @@ defmodule Malachi.Storage.ElixirStore do
   defp trim_tail(%__MODULE__{preallocated_to: nil}), do: :ok
 
   defp trim_tail(%__MODULE__{} = store) do
-    {:ok, _position} = :file.position(store.file_descriptor, store.write_position)
-    :ok = :file.truncate(store.file_descriptor)
+    with {:ok, _position} <- :file.position(store.file_descriptor, store.write_position) do
+      :file.truncate(store.file_descriptor)
+    end
   end
 
   @impl true
@@ -470,28 +544,42 @@ defmodule Malachi.Storage.ElixirStore do
     path = Segment.path(segment)
 
     if File.exists?(path) do
-      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
-      # A scrub reaches this without the segment's options (it walks a directory, not a handle), so
-      # an unstated preallocation makes the reported `unreadable_bytes` conservative rather than
-      # wrong: a blank tail is already `:ok` by classification, and only the size attached to real
-      # damage is affected.
-      preallocated? = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes) > 0
+      case :file.open(path, [:read, :raw, :binary]) do
+        {:ok, file_descriptor} ->
+          # A scrub reaches this without the segment's options (it walks a directory, not a handle),
+          # so an unstated preallocation makes the reported `unreadable_bytes` conservative rather
+          # than wrong: a blank tail is already `:ok` by classification, and only the size attached to
+          # real damage is affected.
+          preallocated? = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes) > 0
 
-      try do
-        {record_count, valid_bytes, halt} = check_scan(file_descriptor)
+          try do
+            {record_count, valid_bytes, halt} = check_scan(file_descriptor)
 
-        # Frames first: with the segment itself damaged the sidecar's verdict is moot, and rebuilding
-        # an index over damaged frames would only bake the damage in.
-        with {:ok, counts} <- verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
-          verify_index(segment, file_descriptor, valid_bytes, counts)
-        end
-      after
-        :file.close(file_descriptor)
+            # Frames first: with the segment itself damaged the sidecar's verdict is moot, and
+            # rebuilding an index over damaged frames would only bake the damage in.
+            with {:ok, counts} <- verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
+              verify_index(segment, file_descriptor, valid_bytes, counts)
+            end
+          after
+            :file.close(file_descriptor)
+          end
+
+        {:error, reason} ->
+          unreadable(path, reason)
       end
     else
       {:error, :enoent}
     end
   end
+
+  # A segment that cannot be opened or measured is reported the way a frame that cannot be read already
+  # is: damage at byte 0 carrying the POSIX reason, because to a scrub a copy nobody can read is damaged.
+  # Except `:enoent`, which keeps its own meaning: the segment was removed between the existence check
+  # and the open (retention, mid-scan), and a deleted segment is not a damaged one.
+  defp unreadable(_path, :enoent), do: {:error, :enoent}
+
+  defp unreadable(path, reason),
+    do: {:error, %{position: 0, reason: reason, unreadable_bytes: 0, file: path}}
 
   # The sparse index sidecar has no checksum of its own and is trusted by every sealed read, so the
   # scrub checks it too: each entry must point at the start of a real frame whose record carries the
@@ -555,16 +643,22 @@ defmodule Malachi.Storage.ElixirStore do
   # The damage map carries the same keys `recover/3` reports, so a caller (and the telemetry event)
   # handles findings from either path identically.
   defp verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
-    shape = tail_shape(file_descriptor, valid_bytes, File.stat!(path).size)
-
-    case classify_tail(halt, shape) do
-      classification when classification in [:clean, :blank] ->
-        {:ok, %{records: record_count, bytes: valid_bytes}}
-
-      classification ->
-        damage = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, true, preallocated?)
-        {:error, damage |> Map.delete(:sealed?) |> Map.put(:file, path)}
+    with {:ok, %{size: file_size}} <- File.stat(path),
+         {:ok, shape} <- tail_shape(file_descriptor, valid_bytes, file_size) do
+      classified_verdict(classify_tail(halt, shape), path, record_count, valid_bytes, halt, shape, preallocated?)
+    else
+      {:error, reason} -> unreadable(path, reason)
     end
+  end
+
+  defp classified_verdict(classification, _path, record_count, valid_bytes, _halt, _shape, _preallocated?)
+       when classification in [:clean, :blank] do
+    {:ok, %{records: record_count, bytes: valid_bytes}}
+  end
+
+  defp classified_verdict(classification, path, _record_count, valid_bytes, halt, shape, preallocated?) do
+    damage = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, true, preallocated?)
+    {:error, damage |> Map.delete(:sealed?) |> Map.put(:file, path)}
   end
 
   # Folds the scan's halt into the classification so the verdict has one thing to match on: only a
@@ -580,8 +674,13 @@ defmodule Malachi.Storage.ElixirStore do
     {valid_bytes, record_count, halt} =
       walk(file_descriptor, &check_frame/1, fn _frame, _position, count -> count + 1 end, 0)
 
-    {record_count, valid_bytes, halt}
+    # Unlike recovery, a scrub reports a copy it cannot read as damage, carrying the POSIX reason: to the
+    # scrub a copy nobody can read IS damaged, and the replication server is not the one asking.
+    {record_count, valid_bytes, as_damage(halt)}
   end
+
+  defp as_damage({:read_error, reason}), do: {:error, reason}
+  defp as_damage(halt), do: halt
 
   # `check_one/1` answers without a decoded frame, so it is padded to the walker's shape. One
   # four-element tuple per frame is nothing next to the `Record` struct (with its key, value and
@@ -600,13 +699,17 @@ defmodule Malachi.Storage.ElixirStore do
 
     if File.exists?(path) do
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
 
-      try do
-        {_record_count, _valid_bytes, entries, _halt} = scan_segment(file_descriptor, index_interval)
-        write_index(Segment.index_path(segment), entries)
-      after
-        :file.close(file_descriptor)
+      with {:ok, file_descriptor} <- :file.open(path, [:read, :raw, :binary]) do
+        try do
+          {_record_count, _valid_bytes, entries, halt} = scan_segment(file_descriptor, index_interval)
+
+          # A scan cut short by a read error only indexed what it reached, and writing that would replace
+          # the sidecar with a partial one while reporting success.
+          with :ok <- readable(halt), do: write_index(Segment.index_path(segment), entries)
+        after
+          :file.close(file_descriptor)
+        end
       end
     else
       {:error, :enoent}
@@ -621,22 +724,26 @@ defmodule Malachi.Storage.ElixirStore do
     if File.exists?(path) do
       record_count = Keyword.fetch!(opts, :record_count)
       index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
-      {:ok, file_descriptor} = :file.open(path, [:read, :raw, :binary])
-      file_size = File.stat!(path).size
-      index = load_index_file(Segment.index_path(segment))
 
-      segment = %Segment{segment | state: :sealed, byte_size: file_size, record_count: record_count}
+      # Measured before opening, so a failure to measure cannot strand a descriptor. A sealed segment
+      # is immutable, so the size cannot change between the two.
+      with {:ok, %{size: file_size}} <- File.stat(path),
+           {:ok, file_descriptor} <- :file.open(path, [:read, :raw, :binary]) do
+        index = load_index_file(Segment.index_path(segment))
 
-      {:ok,
-       %__MODULE__{
-         segment: segment,
-         file_descriptor: file_descriptor,
-         write_position: file_size,
-         next_offset: segment.base_offset + record_count,
-         index: index,
-         index_interval: index_interval,
-         last_indexed_position: last_indexed_position(index, index_interval)
-       }}
+        segment = %Segment{segment | state: :sealed, byte_size: file_size, record_count: record_count}
+
+        {:ok,
+         %__MODULE__{
+           segment: segment,
+           file_descriptor: file_descriptor,
+           write_position: file_size,
+           next_offset: segment.base_offset + record_count,
+           index: index,
+           index_interval: index_interval,
+           last_indexed_position: last_indexed_position(index, index_interval)
+         }}
+      end
     else
       {:error, :enoent}
     end
@@ -683,8 +790,9 @@ defmodule Malachi.Storage.ElixirStore do
          last_offset
        )
        when pending_bytes >= flush_bytes or pending_count >= flush_count do
-    {:ok, flushed_store} = sync(store)
-    {:ok, flushed_store, first_offset, last_offset}
+    with {:ok, flushed_store} <- sync(store) do
+      {:ok, flushed_store, first_offset, last_offset}
+    end
   end
 
   defp flush_if_full(%__MODULE__{} = store, first_offset, last_offset),
@@ -721,28 +829,31 @@ defmodule Malachi.Storage.ElixirStore do
           {[frame | iodata], index_entries, position + frame_size, last_indexed_position}
       end)
 
-    :ok = :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata))
-    :ok = :file.sync(store.file_descriptor)
+    # On either failure the handle is returned untouched, still describing the file as it was before
+    # this sync, which may no longer be true: the write can have landed and only its sync failed. That
+    # is why a handle that answered an error must not be retried (see the failure contract).
+    with :ok <- :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata)),
+         :ok <- :file.sync(store.file_descriptor) do
+      %Segment{} = current_segment = store.segment
 
-    %Segment{} = current_segment = store.segment
+      segment = %Segment{
+        current_segment
+        | byte_size: end_position,
+          record_count: current_segment.record_count + store.pending_count
+      }
 
-    segment = %Segment{
-      current_segment
-      | byte_size: end_position,
-        record_count: current_segment.record_count + store.pending_count
-    }
-
-    {:ok,
-     %{
-       store
-       | segment: segment,
-         write_position: end_position,
-         pending: [],
-         pending_bytes: 0,
-         pending_count: 0,
-         index: append_index_entries(store.index, Enum.reverse(new_index_entries)),
-         last_indexed_position: last_indexed_position
-     }}
+      {:ok,
+       %{
+         store
+         | segment: segment,
+           write_position: end_position,
+           pending: [],
+           pending_bytes: 0,
+           pending_count: 0,
+           index: append_index_entries(store.index, Enum.reverse(new_index_entries)),
+           last_indexed_position: last_indexed_position
+       }}
+    end
   end
 
   @impl true
@@ -751,9 +862,17 @@ defmodule Malachi.Storage.ElixirStore do
     committed_end_offset = Segment.end_offset(segment)
 
     cond do
-      offset < segment.base_offset -> {:error, :out_of_range}
-      offset >= committed_end_offset -> :eof
-      true -> {:ok, do_read(store, offset, max_records)}
+      offset < segment.base_offset ->
+        {:error, :out_of_range}
+
+      offset >= committed_end_offset ->
+        :eof
+
+      true ->
+        case do_read(store, offset, max_records) do
+          {:error, _reason} = error -> error
+          records -> {:ok, records}
+        end
     end
   end
 
@@ -761,16 +880,16 @@ defmodule Malachi.Storage.ElixirStore do
   def seal(%__MODULE__{segment: %Segment{state: :sealed}} = store), do: {:ok, store}
 
   def seal(%__MODULE__{} = store) do
-    {:ok, store} = sync(store)
-    # Before the index and the marker: past this point the segment is immutable, so the tail it
-    # will never write into is given back, and the handle stops claiming it may trim anything.
-    :ok = trim_tail(store)
-    :ok = persist_index(store)
-    File.touch!(Segment.seal_marker_path(store.segment))
-
-    %Segment{} = current_segment = store.segment
-    segment = %Segment{current_segment | state: :sealed, sealed_at: System.system_time(:millisecond)}
-    {:ok, %{store | segment: segment, preallocated_to: nil}}
+    # The trim comes before the index and the marker: past this point the segment is immutable, so the
+    # tail it will never write into is given back, and the handle stops claiming it may trim anything.
+    with {:ok, store} <- sync(store),
+         :ok <- trim_tail(store),
+         :ok <- persist_index(store),
+         :ok <- File.touch(Segment.seal_marker_path(store.segment)) do
+      %Segment{} = current_segment = store.segment
+      segment = %Segment{current_segment | state: :sealed, sealed_at: System.system_time(:millisecond)}
+      {:ok, %{store | segment: segment, preallocated_to: nil}}
+    end
   end
 
   @impl true
@@ -797,8 +916,13 @@ defmodule Malachi.Storage.ElixirStore do
     # tail, and it carries one for as long as it takes something to reopen it. `preallocated_to` is
     # `nil` on a sealed handle and on every read-only one from `open_read/3`, which is what keeps
     # this from ever truncating a segment it did not size itself.
-    :ok = trim_tail(store)
-    :file.close(store.file_descriptor)
+    #
+    # Best-effort on both, and safely so. A trim that fails leaves the preallocated tail in place, which
+    # is exactly what a process that died mid-write leaves, and recovery already reads a blank tail as
+    # unwritten space. A close that fails has nothing left to do.
+    _ = trim_tail(store)
+    _ = :file.close(store.file_descriptor)
+    :ok
   end
 
   # --- reading ---
@@ -827,6 +951,11 @@ defmodule Malachi.Storage.ElixirStore do
       [%Record{offset: offset} | _rest] = records when offset <= target_offset ->
         records
 
+      # A device that cannot be read is not a lying index, and a rescan from byte 0 would only read the
+      # same failing region again, and report success if the failure happened not to repeat.
+      {:error, _reason} = error ->
+        error
+
       _empty_or_past_the_target ->
         collect(store, target_offset, max_records, 0, <<>>, [])
     end
@@ -848,6 +977,9 @@ defmodule Malachi.Storage.ElixirStore do
         case read_chunk(store.file_descriptor, position, bytes_to_read) do
           :eof ->
             Enum.reverse(collected)
+
+          {:error, _reason} = error ->
+            error
 
           {:ok, chunk} ->
             buffer = leftover_bytes <> chunk
@@ -882,6 +1014,7 @@ defmodule Malachi.Storage.ElixirStore do
     case :file.pread(file_descriptor, position, length) do
       {:ok, chunk} -> {:ok, chunk}
       :eof -> :eof
+      {:error, _reason} = error -> error
     end
   end
 
@@ -919,9 +1052,11 @@ defmodule Malachi.Storage.ElixirStore do
   # Scans a segment file in bounded chunks, returning {record_count, valid_bytes, entries, halt}
   # where `entries` is the ascending sparse index, `valid_bytes` is the end of the last valid frame
   # (the safe truncation point after a crash), and `halt` says WHY the scan stopped: `:eof` (clean
-  # end of file) or `{:error, reason}` from `Malachi.Log.Record`. Recovery ignores `halt` and simply
-  # truncates; verification needs it to tell a torn tail from bit rot, and to report the offending
-  # byte position. Never loads the whole file.
+  # end of file), `:blank` (unwritten preallocated space), `{:error, reason}` from `Malachi.Log.Record`
+  # (a frame that is not one), or `{:read_error, posix}` (the device would not give the bytes up). The
+  # last two are kept apart because they mean different things: a bad frame is a finding about the bytes,
+  # which recovery classifies, while a failed read says nothing about them and recovery answers it as a
+  # storage failure. Never loads the whole file.
   defp scan_segment(file_descriptor, index_interval) do
     on_frame = fn record, position, {count, entries, last_indexed_position} ->
       if position - last_indexed_position >= index_interval do
@@ -944,11 +1079,10 @@ defmodule Malachi.Storage.ElixirStore do
   # the duplication it removes: `valid_bytes` is where the segment logically ends, and recovery and
   # the scrub disagreeing about that would be a silent split brain over what a copy contains.
   #
-  # One behavior change comes with folding them together: the recovery scan used to have no clause
-  # for a `:file.pread/3` error and would have crashed the caller with a FunctionClauseError. It now
-  # reports the error as the halt, the way the verification scan already did, because a device that
-  # cannot be read IS the damage these scans exist to find, and the detector must not die of the
-  # condition it was built to report.
+  # A `:file.pread/3` error stops the walk with `{:read_error, reason}`, never with the `{:error, reason}`
+  # a decoder answers. The detector must not die of the condition it was built to report, and it must not
+  # mistake it for another one either: recovery refuses a copy it cannot read (`readable/1`), and the
+  # verification scan reports it as damage (`as_damage/1`).
   defp walk(file_descriptor, decode, on_frame, accumulator) do
     do_walk(file_descriptor, decode, on_frame, 0, <<>>, accumulator)
   end
@@ -963,17 +1097,17 @@ defmodule Malachi.Storage.ElixirStore do
         case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
           {:ok, chunk} -> do_walk(file_descriptor, decode, on_frame, valid_bytes, carry <> chunk, accumulator)
           :eof -> {valid_bytes, accumulator, :eof}
-          {:error, reason} -> {valid_bytes, accumulator, {:error, reason}}
+          {:error, reason} -> {valid_bytes, accumulator, {:read_error, reason}}
         end
 
       # Unwritten preallocated space, but only if it stays unwritten. A zero frame header with data
       # behind it is damage wearing the shape of empty room, and believing it would end the scan
       # early and report the segment clean while every frame past the hole disappeared.
       :blank ->
-        if blank_tail?(file_descriptor, valid_bytes) do
-          {valid_bytes, accumulator, :blank}
-        else
-          {valid_bytes, accumulator, {:error, :bad_magic}}
+        case blank_from(file_descriptor, valid_bytes) do
+          :blank -> {valid_bytes, accumulator, :blank}
+          :written -> {valid_bytes, accumulator, {:error, :bad_magic}}
+          {:error, reason} -> {valid_bytes, accumulator, {:read_error, reason}}
         end
 
       {:error, reason} ->

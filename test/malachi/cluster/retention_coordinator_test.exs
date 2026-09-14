@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.RetentionCoordinatorTest do
   use ExUnit.Case, async: true
 
+  import Malachi.Test.PollingHelper
+
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
@@ -91,8 +93,10 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("value", key: "k0")])
     {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("value", key: "k1")])
 
-    sealed = BrokerServer.metadata(broker) |> Metadata.get_segment({{"events", 0}, 0})
-    assert sealed.state == :sealed
+    # A roll's seal lands when its fence answers, which is asynchronous to the produce that tripped it.
+    first_segment = fn -> BrokerServer.metadata(broker) |> Metadata.get_segment({{"events", 0}, 0}) end
+    wait_until!(fn -> first_segment.().state == :sealed end)
+    sealed = first_segment.()
     assert {:ok, [_ | _]} = ReplicationServer.read(repl_name, sealed.id, sealed.start_offset, 10)
 
     # the real expire_segment: drop from the control plane, then delete on each replica

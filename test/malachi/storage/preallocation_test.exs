@@ -94,6 +94,38 @@ defmodule Malachi.Storage.PreallocationTest do
     end
   end
 
+  describe "extend_or_restore/4" do
+    test "answers :extended once the extension is in place", %{tmp_dir: directory} do
+      {path, file_descriptor} = open_file(directory)
+
+      assert Preallocation.extend_or_restore(file_descriptor, 0, 4096, :zeros) == :extended
+      assert File.stat!(path).size == 4096
+
+      :ok = :file.close(file_descriptor)
+    end
+
+    test "answers :restored and puts the file back when the extension fails", %{tmp_dir: directory} do
+      {path, file_descriptor} = open_file(directory)
+      :ok = :file.pwrite(file_descriptor, 0, "record")
+
+      # A position no file can reach makes the extension fail on any filesystem, while the descriptor stays
+      # good for the restore.
+      assert Preallocation.extend_or_restore(file_descriptor, 6, Bitwise.bsl(1, 64), :sparse) == :restored
+      assert File.read!(path) == "record"
+
+      :ok = :file.close(file_descriptor)
+    end
+
+    test "answers the error when the file cannot be put back either", %{tmp_dir: directory} do
+      # The case that must not pass for a degraded success (`Malachi.Storage.ElixirStore` refuses the handle):
+      # a closed descriptor fails the extension and the restore alike.
+      {_path, file_descriptor} = open_file(directory)
+      :ok = :file.close(file_descriptor)
+
+      assert {:error, _reason} = Preallocation.extend_or_restore(file_descriptor, 0, 4096, :zeros)
+    end
+  end
+
   describe "file_size/1" do
     test "reports the descriptor's own size", %{tmp_dir: directory} do
       {_path, file_descriptor} = open_file(directory)

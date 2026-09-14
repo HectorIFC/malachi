@@ -30,6 +30,13 @@ defmodule Malachi.Log do
   fence is built on: `Malachi.Cluster.ReplicationServer` refuses writes to a sealed log and answers
   where it ended, which is how a control-plane segment gets a sealed length it cannot outgrow.
 
+  ## Failures
+
+  A storage failure comes back as the store reported it (`{:error, :enospc}`), unchanged and
+  uninterpreted, per the failure contract in `Malachi.Storage.SegmentStore`. A log that answered an
+  error is unusable, for the same reason the store's handle is: the operation may have changed the files
+  before it failed. The caller closes it and recovers from disk if it wants the segment back.
+
   Like `Malachi.Storage.ElixirStore`, this is a functional module over an immutable
   handle (no GenServer). Time-based flushing and concurrency belong in a layer on top.
   """
@@ -77,24 +84,24 @@ defmodule Malachi.Log do
     * any remaining options (`:max_bytes`, `:max_age_ms`, `:index_interval`,
       `:flush_bytes`) are passed through to each segment.
   """
-  @spec open(Path.t(), keyword()) :: {:ok, t()}
+  @spec open(Path.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(directory, opts \\ []) do
-    File.mkdir_p!(directory)
-
-    {:ok,
-     %__MODULE__{
-       directory: directory,
-       store: Keyword.get(opts, :store, @default_store),
-       next_offset: Keyword.get(opts, :base_offset, 0),
-       segment_opts: Keyword.drop(opts, [:base_offset, :store])
-     }}
+    with :ok <- File.mkdir_p(directory) do
+      {:ok,
+       %__MODULE__{
+         directory: directory,
+         store: Keyword.get(opts, :store, @default_store),
+         next_offset: Keyword.get(opts, :base_offset, 0),
+         segment_opts: Keyword.drop(opts, [:base_offset, :store])
+       }}
+    end
   end
 
   @doc """
   Reopens an existing log, recovering all segments. Only the last (active) segment is
   scanned; sealed segments are trusted via their file names.
   """
-  @spec recover(Path.t(), keyword()) :: {:ok, t()}
+  @spec recover(Path.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def recover(directory, opts \\ []) do
     store = Keyword.get(opts, :store, @default_store)
     segment_opts = Keyword.drop(opts, [:base_offset, :store])
@@ -103,8 +110,9 @@ defmodule Malachi.Log do
     sealed? = File.exists?(seal_marker_path(directory))
 
     if base_offsets == [] do
-      {:ok, log} = open(directory, opts)
-      {:ok, %{log | sealed?: sealed?}}
+      with {:ok, log} <- open(directory, opts) do
+        {:ok, %{log | sealed?: sealed?}}
+      end
     else
       recover_with_segments(directory, store, segment_opts, base_offsets, sealed?)
     end
@@ -119,28 +127,33 @@ defmodule Malachi.Log do
   def append(%__MODULE__{} = log, []), do: {:ok, log, log.next_offset, log.next_offset - 1}
 
   def append(%__MODULE__{} = log, records) when is_list(records) and records != [] do
-    log = ensure_active(log)
+    with {:ok, opened} <- ensure_active(log) do
+      case opened.store.append(opened.active, records) do
+        {:ok, active, first_offset, last_offset} ->
+          {:ok, %{opened | active: active, next_offset: last_offset + 1}, first_offset, last_offset}
 
-    case log.store.append(log.active, records) do
-      {:ok, active, first_offset, last_offset} ->
-        {:ok, %{log | active: active, next_offset: last_offset + 1}, first_offset, last_offset}
-
-      {:error, _reason} = error ->
-        error
+        {:error, _reason} = error ->
+          # A segment this very call opened is known to nobody else: the caller still holds the log from
+          # before it existed, so closing that log would never reach this descriptor. A segment that was
+          # already active is the caller's to close, and closing it here would pull it out from under them.
+          if log.active == nil, do: _ = opened.store.close(opened.active)
+          error
+      end
     end
   end
 
   @doc "Flushes and fsyncs the active segment, then rolls it if a seal threshold is hit."
-  @spec sync(t()) :: {:ok, t()}
+  @spec sync(t()) :: {:ok, t()} | {:error, term()}
   def sync(%__MODULE__{active: nil} = log), do: {:ok, log}
 
   def sync(%__MODULE__{} = log) do
-    {:ok, active} = log.store.sync(log.active)
-    maybe_roll(%{log | active: active})
+    with {:ok, active} <- log.store.sync(log.active) do
+      maybe_roll(%{log | active: active})
+    end
   end
 
   @doc "Forces the active segment to seal (no-op if there is no active segment)."
-  @spec roll(t()) :: {:ok, t()}
+  @spec roll(t()) :: {:ok, t()} | {:error, term()}
   def roll(%__MODULE__{active: nil} = log), do: {:ok, log}
   def roll(%__MODULE__{} = log), do: do_roll(log)
 
@@ -153,12 +166,18 @@ defmodule Malachi.Log do
   its `follow/4` copies records that already carry their assigned offsets, bounded by the sealed end,
   so it can never hand out a new offset, which is the only thing a fence has to prevent.
   """
-  @spec seal(t()) :: {:ok, t()}
+  @spec seal(t()) :: {:ok, t()} | {:error, term()}
   def seal(%__MODULE__{sealed?: true} = log), do: {:ok, log}
 
   def seal(%__MODULE__{} = log) do
-    {:ok, log} = sync(log)
-    {:ok, log} = roll(log)
+    with {:ok, log} <- sync(log),
+         {:ok, log} <- roll(log),
+         :ok <- write_seal_marker(log.directory) do
+      {:ok, %{log | sealed?: true}}
+    end
+  end
+
+  defp write_seal_marker(directory) do
     # Written after the fsync above, so a marker on disk always means the records it closes over are
     # durable. Empty on purpose: `recover/2` derives `next_offset` from the files, so a marker
     # carrying an end offset would be redundant state that can disagree with them.
@@ -169,8 +188,7 @@ defmodule Malachi.Log do
     # sealed. What this still does not cover is the parent directory's own entry, which Erlang cannot
     # fsync without leaving pure Elixir; so the guarantee is that the marker's CONTENT is durable, not
     # that its creation is, which matches the per-file marker the segment store already writes.
-    File.write!(seal_marker_path(log.directory), <<>>, [:sync])
-    {:ok, %{log | sealed?: true}}
+    File.write(seal_marker_path(directory), <<>>, [:sync])
   end
 
   @doc "Whether the log as a whole is sealed (no further append will ever be accepted for it)."
@@ -336,10 +354,15 @@ defmodule Malachi.Log do
 
   defp recover_with_segments(directory, store, segment_opts, base_offsets, sealed?) do
     last_base_offset = List.last(base_offsets)
+    opts = [base_offset: last_base_offset] ++ segment_opts
 
-    {:ok, handle} =
-      store.recover(directory, segment_id_for(last_base_offset), [base_offset: last_base_offset] ++ segment_opts)
+    with {:ok, handle} <- store.recover(directory, segment_id_for(last_base_offset), opts) do
+      recovered_log(directory, store, segment_opts, base_offsets, sealed?, handle)
+    end
+  end
 
+  defp recovered_log(directory, store, segment_opts, base_offsets, sealed?, handle) do
+    last_base_offset = List.last(base_offsets)
     next_offset = store.next_offset(handle)
 
     log = %__MODULE__{
@@ -352,7 +375,7 @@ defmodule Malachi.Log do
     }
 
     if store.sealed?(handle) do
-      :ok = store.close(handle)
+      _ = store.close(handle)
       {:ok, %{log | sealed_base_offsets: base_offsets, active: nil, active_base_offset: nil}}
     else
       {:ok,
@@ -368,13 +391,13 @@ defmodule Malachi.Log do
   defp ensure_active(%__MODULE__{active: nil} = log) do
     base_offset = log.next_offset
 
-    {:ok, active} =
-      log.store.open(log.directory, segment_id_for(base_offset), [base_offset: base_offset] ++ log.segment_opts)
-
-    %{log | active: active, active_base_offset: base_offset}
+    with {:ok, active} <-
+           log.store.open(log.directory, segment_id_for(base_offset), [base_offset: base_offset] ++ log.segment_opts) do
+      {:ok, %{log | active: active, active_base_offset: base_offset}}
+    end
   end
 
-  defp ensure_active(%__MODULE__{} = log), do: log
+  defp ensure_active(%__MODULE__{} = log), do: {:ok, log}
 
   defp maybe_roll(%__MODULE__{} = log) do
     now_ms = System.system_time(:millisecond)
@@ -387,16 +410,17 @@ defmodule Malachi.Log do
   end
 
   defp do_roll(%__MODULE__{} = log) do
-    {:ok, sealed} = log.store.seal(log.active)
-    :ok = log.store.close(sealed)
+    with {:ok, sealed} <- log.store.seal(log.active) do
+      _ = log.store.close(sealed)
 
-    {:ok,
-     %{
-       log
-       | sealed_base_offsets: log.sealed_base_offsets ++ [log.active_base_offset],
-         active: nil,
-         active_base_offset: nil
-     }}
+      {:ok,
+       %{
+         log
+         | sealed_base_offsets: log.sealed_base_offsets ++ [log.active_base_offset],
+           active: nil,
+           active_base_offset: nil
+       }}
+    end
   end
 
   # Returns [{base_offset, end_offset}] for every segment, in ascending order.
@@ -426,7 +450,7 @@ defmodule Malachi.Log do
     case log.store.open_read(log.directory, segment_id_for(base_offset), opts) do
       {:ok, handle} ->
         result = log.store.read(handle, offset, max_records)
-        :ok = log.store.close(handle)
+        _ = log.store.close(handle)
         result
 
       {:error, _reason} = error ->

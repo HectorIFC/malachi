@@ -252,9 +252,15 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   (byte-identical copies across the nodes), exercising CRC-clamped recovery, write-path catch-up,
   and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. **In-place corruption that
   keeps the byte size** is now caught by the integrity scrub (see the storage layer above); the
-  harness gains that event with the scrub's certification. One deliberate limit remains, tracked as
-  a roadmap item: **damage to a primary copy** needs seal-on-failure (NorthGuard seals the segment
-  and moves producers to a new one when a replica fails), so the harness always damages followers.
+  harness gains that event with the scrub's certification. A **storage failure** on any copy, primary
+  or follower (a full volume, a failing device), is sealed on failure the way NorthGuard does it: the
+  node takes that copy out of service, `Malachi.Cluster.Failover` seals the segment on the remaining
+  majority, and producers move to a new segment. Once sealed, the failed copy is a lost replica on a live
+  node: `Malachi.Cluster.SelfHealing` backfills a replacement on another broker and the healing pass then
+  deletes the broken copy, while the integrity scrub leaves it alone rather than refetching it onto the
+  disk that failed. The drill's filled-volume event certifies that the node survives it. One deliberate limit remains, tracked as a roadmap item: **damage found by reading a
+  primary copy** (corruption rather than a failed operation) does not take the copy out of service, so
+  it still needs seal-on-failure of its own, and the corruption events always damage followers.
 - **Config-deployment certification** (the "deployments... and even config deployments" scenarios):
   delivered as `scripts/docker-config-chaos.sh`. A harmless config change is rolled node by node
   under traffic (availability must hold between steps and the new value must take effect), and a

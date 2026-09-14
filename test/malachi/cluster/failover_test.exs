@@ -44,6 +44,95 @@ defmodule Malachi.Cluster.FailoverTest do
     end
   end
 
+  describe "a copy that failed in storage (candidates/3, plan/5, failure_probes/2)" do
+    test "a LIVE primary whose copy failed makes the segment a candidate, and that copy is not probed" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+      failed = MapSet.new([{segment_id, :a}])
+
+      assert Failover.candidates(metadata, [:a, :b, :c], failed) == [{segment_id, [:b, :c]}]
+    end
+
+    test "a follower whose copy failed makes the segment a candidate too, as any failed replica does in NorthGuard" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+      failed = MapSet.new([{segment_id, :c}])
+
+      assert Failover.candidates(metadata, [:a, :b, :c], failed) == [{segment_id, [:a, :b]}]
+    end
+
+    test "a failed copy of another segment, or of a sealed one, makes nothing a candidate" do
+      {metadata, _segment_id} = segment([:a, :b, :c], false)
+      assert Failover.candidates(metadata, [:a, :b, :c], MapSet.new([{{:another, 0}, :a}])) == []
+
+      {sealed, sealed_id} = segment([:a, :b, :c], true)
+      assert Failover.candidates(sealed, [:a, :b, :c], MapSet.new([{sealed_id, :a}])) == []
+    end
+
+    test "rf=3, primary's copy failed: seals on the other two at the furthest end and moves the holder to the head" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+      failed = MapSet.new([{segment_id, :a}])
+
+      assert Failover.plan(metadata, [:a, :b, :c], probes(segment_id, %{b: {2, 200}, c: {5, 500}}), @now, failed) ==
+               [
+                 {:seal_segment, segment_id, 5, 500, @now},
+                 {:set_segment_replicas, segment_id, [:c, :a, :b]}
+               ]
+    end
+
+    test "rf=3, a follower's copy failed: seals on the primary and the healthy follower" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+      failed = MapSet.new([{segment_id, :c}])
+
+      assert [{:seal_segment, ^segment_id, 4, 400, @now}, {:set_segment_replicas, ^segment_id, [head | _]}] =
+               Failover.plan(metadata, [:a, :b, :c], probes(segment_id, %{a: {4, 400}, b: {4, 400}}), @now, failed)
+
+      assert head in [:a, :b]
+    end
+
+    test "an answer that came from a failed copy neither counts toward the majority nor becomes the head" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+
+      # :a failed yet its stale answer claims the furthest end. It must not be the seal point or the head.
+      ends = %{a: {9, 900}, b: {2, 200}, c: {5, 500}}
+
+      assert Failover.plan(metadata, [:a, :b, :c], probes(segment_id, ends), @now, MapSet.new([{segment_id, :a}])) ==
+               [
+                 {:seal_segment, segment_id, 5, 500, @now},
+                 {:set_segment_replicas, segment_id, [:c, :a, :b]}
+               ]
+
+      # With two copies failed only one answer is left, which is no majority, however far it reaches.
+      two_failed = MapSet.new([{segment_id, :a}, {segment_id, :b}])
+      assert Failover.plan(metadata, [:a, :b, :c], probes(segment_id, ends), @now, two_failed) == []
+    end
+
+    test "rf=2 and rf=1 with a failed copy stay blocked: without it there is no majority" do
+      {rf2, rf2_id} = segment([:a, :b], false)
+      assert Failover.plan(rf2, [:a, :b], probes(rf2_id, %{b: {3, 300}}), @now, MapSet.new([{rf2_id, :a}])) == []
+
+      {rf1, rf1_id} = segment([:a], false)
+      assert Failover.candidates(rf1, [:a], MapSet.new([{rf1_id, :a}])) == []
+      assert Failover.plan(rf1, [:a], %{}, @now, MapSet.new([{rf1_id, :a}])) == []
+    end
+
+    test "failure_probes/2 asks each live replica once, about every segment it holds" do
+      {metadata, events} = segment([:a, :b, :c], false)
+      {metadata, {:ok, orders_root}} = Metadata.apply(metadata, {:create_topic, "orders", 8})
+      orders = {orders_root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, orders_root, orders, [:b, :d], 0})
+
+      # :d is not live, so it is not asked; :b holds both segments and is asked about both in one entry.
+      assert Failover.failure_probes(metadata, [:a, :b, :c]) ==
+               [{:a, [events]}, {:b, Enum.sort([events, orders])}, {:c, [events]}]
+    end
+
+    test "failure_probes/2 asks about sealed segments too: a failed sealed copy is a lost replica to replace" do
+      # Never a failover candidate (see the candidates/3 test above), but SelfHealing needs to know.
+      {sealed, segment_id} = segment([:a, :b, :c], true)
+
+      assert Failover.failure_probes(sealed, [:a, :b]) == [{:a, [segment_id]}, {:b, [segment_id]}]
+    end
+  end
+
   describe "plan/4 (seal-and-roll)" do
     test "seals at the highest durable end reported, not at the first live replica's" do
       # :a (primary) is dead. :b is first in replica-set order but holds only 2 records; :c holds 5.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Storage chaos certification: the "different types of corruption" scenarios of the NorthGuard
-# certification pipeline, run against the real 3-node RF=3 Docker cluster. Damage always targets a
+# certification pipeline, run against the real 3-node RF=3 Docker cluster. Corruption always targets a
 # FOLLOWER copy (the topology mode of scripts/chaos_checker.exs names each segment's primary):
-# primary damage needs seal-on-failure, a separate roadmap item.
+# corruption of a primary copy needs seal-on-failure of its own, a separate roadmap item. A storage
+# FAILURE (event j below) does not, since #147: the node takes the copy out of service and the
+# segment is sealed on the other replicas.
 #
 # Events, each injected with the node STOPPED (damage races the live server otherwise: an early
 # run's truncation was refilled to full size by in-flight pushes before the restart, hiding a
@@ -30,6 +32,14 @@
 #                    DERIVED data, so the repair must be local: rebuilt from the segment, without
 #                    consulting a peer and without touching the .log. Reads stay whole throughout,
 #                    because a read that does not find what the index promised rescans the segment.
+#   j. full volume - a SECOND phase, on a fresh cluster whose third node has a small log volume
+#                    (docker-compose.storage-full.yml). The volume is filled while the checker keeps
+#                    producing. Before #147 the first ENOSPC crashed the one process holding every log
+#                    on the node, and crashed it again on every restart until the application gave up.
+#                    Certified here: the node stays up (no restart, no replication server crash,
+#                    healthy), the failures really happened (the node logged them), a segment whose
+#                    copy failed is sealed on the other replicas, and after freeing the space the
+#                    closing invariants hold.
 #
 # Invariants certified on top of the fatia-1 set (acked durability, convergence, clean produce):
 #   4. The damaged copies physically reconverge: byte-identical segment files across all 3 nodes.
@@ -213,6 +223,100 @@ for _ in $(seq 1 12); do
 done
 [ "$converged" = "1" ] || fail "segment copies did not physically reconverge across the nodes"
 
+verify_acked
+check_convergence
+check_clean_produce
+
+# --- phase 2, event j: a node's log volume fills up (issue #147) ------------------------------------------
+#
+# A cluster of its own, on purpose. The small volume is a tmpfs, and a tmpfs comes back EMPTY when its
+# container restarts, which is what every event above does to a follower: sharing the cluster would turn
+# each of those restarts into the loss of every copy on that node, a different drill. For the same reason
+# nothing below restarts the full node.
+FULL_NODE=malachi-cluster-3
+FULL_WINDOW_S="${FULL_WINDOW_S:-180}"
+COMPOSE="$COMPOSE -f docker-compose.storage-full.yml"
+
+say "phase 2: a fresh cluster whose $FULL_NODE has a small log volume"
+rm -f "$WORK/acked.log"
+start_cluster
+start_checker "$FULL_WINDOW_S"
+sleep 25
+
+event "j: fill $FULL_NODE's log volume until its writes fail with ENOSPC"
+restarts_before=$(docker inspect "$FULL_NODE" --format '{{.RestartCount}}')
+
+# dd stops at ENOSPC and exits non-zero, which is the point; df shows the volume really is full.
+docker exec "$FULL_NODE" sh -c 'dd if=/dev/zero of=/data/malachi_log/filler bs=1M 2>/dev/null; df -h /data/malachi_log | tail -1'
+
+# The failures have to actually happen, or this event certifies nothing: the node logs each copy it takes
+# out of service (Malachi.Cluster.ReplicationServer, "failed in storage").
+failed_copies=0
+for _ in $(seq 1 12); do
+  failed_copies=$(docker logs "$FULL_NODE" 2>&1 | grep -c "failed in storage")
+  [ "$failed_copies" -gt 0 ] && break
+  sleep 5
+done
+
+if [ "$failed_copies" -gt 0 ]; then
+  echo "$FULL_NODE took $failed_copies segment copies out of service"
+else
+  fail "filling $FULL_NODE's volume produced no storage failure: the event injected nothing"
+fi
+
+# Keep producing against the full volume for a while: a crash that takes a few failures to build up (the
+# supervisor's 3 restarts in 5s) must have time to show.
+sleep 20
+
+# Up means all three, because each alone can lie: `mix run --no-halt` keeps the container running after the
+# application stops, a replication server crash is restarted fast enough to look healthy, and a restart
+# count only sees the container.
+restarts_after=$(docker inspect "$FULL_NODE" --format '{{.RestartCount}}')
+health=$(docker inspect "$FULL_NODE" --format '{{.State.Health.Status}}')
+crashes=$(docker logs "$FULL_NODE" 2>&1 | grep -c "Malachi.LogReplication terminating")
+
+if [ "$restarts_after" = "$restarts_before" ] && [ "$health" = "healthy" ] && [ "$crashes" = "0" ]; then
+  echo "$FULL_NODE stayed up through the full volume: no restart, no replication server crash, healthy"
+else
+  fail "$FULL_NODE went down with a full volume (restarts $restarts_before -> $restarts_after, health $health, replication server crashes $crashes)"
+fi
+
+# Every segment whose copy failed on the full node must be sealed by now: the heal pass seals it on the other
+# two so producers move to a new segment. Keyed on the failed copies themselves, not on whatever was active
+# when the volume filled: under the checker's traffic a segment rolls every few seconds, so an assertion
+# that any pre-fill segment got sealed holds with or without seal-on-failure and certifies nothing.
+#
+# The node names each copy it takes out of service, as in
+#   segment {{"chaos_acked", 0}, 14}'s copy on this node failed in storage (:enospc)
+# which is range 0, seq 14 in the topology's terms.
+failed_segments=$(docker logs "$FULL_NODE" 2>&1 |
+  sed -n "s/.*segment {{\"$CHAOS_TOPIC\", \([0-9]*\)}, \([0-9]*\)}'s copy on this node failed in storage.*/range=\1 seq=\2/p" |
+  sort -u)
+
+if [ -z "$failed_segments" ]; then
+  fail "$FULL_NODE logged storage failures, but none named a $CHAOS_TOPIC segment this drill can check"
+else
+  unsealed="$failed_segments"
+  for _ in $(seq 1 12); do
+    topology_now=$(topology)
+    unsealed=$(while read -r key; do
+      grep -q "$key state=sealed" <<<"$topology_now" || echo "$key"
+    done <<<"$failed_segments")
+
+    [ -z "$unsealed" ] && break
+    sleep 5
+  done
+
+  if [ -z "$unsealed" ]; then
+    echo "all $(wc -l <<<"$failed_segments" | tr -d ' ') segment(s) whose copy failed on $FULL_NODE are sealed: producers moved on"
+  else
+    fail "segment(s) whose copy failed on $FULL_NODE were never sealed: $(tr '\n' ';' <<<"$unsealed")"
+  fi
+fi
+
+docker exec "$FULL_NODE" rm -f /data/malachi_log/filler && echo "space freed on $FULL_NODE"
+
+close_window
 verify_acked
 check_convergence
 check_clean_produce

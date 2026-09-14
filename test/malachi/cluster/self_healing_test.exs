@@ -6,6 +6,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
+  alias Malachi.Test.FaultySegmentStore
 
   defp start_broker do
     {ref, _directory, _id} = start_broker_with_directory()
@@ -254,6 +255,98 @@ defmodule Malachi.Cluster.SelfHealingTest do
   defp rewrite_replicas(metadata, segment_id, replica_set) do
     {metadata, :ok} = Metadata.apply(metadata, {:set_segment_replicas, segment_id, replica_set})
     metadata
+  end
+
+  test "a replica whose copy failed in storage is skipped by the integrity probe, like one that does not answer" do
+    {a, _dir_a, _id_a} = start_broker_with_directory()
+    {b, _dir_b, _id_b} = start_broker_with_directory()
+    {c, dir_c, id_c} = start_broker_with_directory()
+    {metadata, segment_id, _byte_size} = sealed_segment_everywhere([a, b, c], ["x", "y", "z"])
+    [log_file] = Path.wildcard(Path.join(dir_c, "events-r0-s0/*.log"))
+
+    # c comes back over a copy cut short, on a store whose recovery fails: short, so the probe wants to
+    # repair it; unable to say where it ends, so a repair has nothing to start from. It must be skipped,
+    # never "repaired" on a state nobody could read.
+    :ok = stop_supervised(id_c)
+    File.write!(log_file, binary_part(File.read!(log_file), 0, 3))
+    on_exit(fn -> FaultySegmentStore.clear(dir_c) end)
+    FaultySegmentStore.fail(dir_c, :recover, {:error, :eio})
+
+    c =
+      start_supervised!({ReplicationServer, directory: dir_c, store: FaultySegmentStore},
+        id: {:repl, System.unique_integer([:positive])}
+      )
+
+    metadata = rewrite_replicas(metadata, segment_id, [a, b, c])
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) == %{applied: [], failed: [], repaired: []}
+    end)
+  end
+
+  describe "a sealed copy that failed in storage (:failed)" do
+    test "is replaced on a spare broker, backfilled from a healthy copy, and left out of the new set" do
+      [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_segment([b, a, c], a, ["x", "y", "z"])
+
+      # Every broker is live: b is not gone, its copy of this one segment is.
+      result = SelfHealing.heal_sealed(metadata, [a, b, c, d], 3, failed: MapSet.new([{segment_id, b}]))
+
+      assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+      assert result.failed == []
+      assert Enum.sort(new_set) == Enum.sort([a, c, d])
+      assert read_values(d, segment_id) == ["x", "y", "z"]
+    end
+
+    test "with no spare broker it stays, behind the healthy replicas, and the segment is reported" do
+      # Pure: nothing is backfilled when there is nowhere to put a copy, so atoms stand in for brokers.
+      {metadata, segment_id} = sealed_metadata([:b, :a, :c])
+
+      result = SelfHealing.heal_sealed(metadata, [:a, :b, :c], 3, failed: MapSet.new([{segment_id, :b}]))
+
+      assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+      assert Enum.sort(Enum.take(new_set, 2)) == [:a, :c]
+      assert List.last(new_set) == :b
+      assert result.failed == [{segment_id, {:no_spare_broker, [:b]}}]
+
+      # Already at the tail, the next pass changes nothing and still reports it.
+      {moved, :ok} = Metadata.apply(metadata, {:set_segment_replicas, segment_id, new_set})
+      again = SelfHealing.heal_sealed(moved, [:a, :b, :c], 3, failed: MapSet.new([{segment_id, :b}]))
+      assert again.applied == []
+      assert again.failed == [{segment_id, {:no_spare_broker, [:b]}}]
+    end
+
+    test "a segment whose only live broker holds the failed copy has no source" do
+      {metadata, segment_id} = sealed_metadata([:a])
+
+      result = SelfHealing.heal_sealed(metadata, [:a], 1, failed: MapSet.new([{segment_id, :a}]))
+
+      assert result == %{applied: [], failed: [{segment_id, :no_live_source}], repaired: []}
+    end
+
+    test "a failed copy of a broker outside the set, of an active segment or of an unknown one changes nothing" do
+      {metadata, segment_id} = sealed_metadata([:a, :b, :c])
+      {active, active_id} = active_metadata([:a, :b, :c])
+
+      failed = MapSet.new([{segment_id, :d}, {{:unknown, 0}, :a}])
+      assert SelfHealing.heal_sealed(metadata, [:a, :b, :c, :d], 3, failed: failed).applied == []
+
+      failed_active = MapSet.new([{active_id, :a}])
+      assert SelfHealing.heal_sealed(active, [:a, :b, :c, :d], 3, failed: failed_active).applied == []
+    end
+  end
+
+  defp sealed_metadata(replica_set) do
+    {metadata, segment_id} = active_metadata(replica_set)
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 3, 0, 0})
+    {metadata, segment_id}
+  end
+
+  defp active_metadata(replica_set) do
+    {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    segment_id = {root, 0}
+    {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
+    {metadata, segment_id}
   end
 
   test "ignores active (unsealed) segments: those heal on the write path" do
