@@ -22,7 +22,8 @@
 #
 # Modes (normally driven by store_error_path_ab.sh, not by hand):
 #   AB_MODE=sample  AB_DIR=/scratch            mix run --no-start benchmark/store_error_path_ab.exs
-#   AB_MODE=analyze AB_RESULTS=dir AB_OUT=file AB_EXPECTED="store e2e" mix run --no-start benchmark/store_error_path_ab.exs
+#   AB_MODE=analyze AB_RESULTS=dir AB_OUT=file AB_EXPECTED="store e2e" \
+#     mix run --no-start benchmark/store_error_path_ab.exs
 #
 # AB_EXPECTED names the cases the run must have evaluated (default: store). One with no samples is a run
 # with no verdict, never a pass.

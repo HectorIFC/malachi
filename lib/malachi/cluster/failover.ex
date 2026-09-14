@@ -17,7 +17,7 @@ defmodule Malachi.Cluster.Failover do
   applies it in two steps, in this order. It first MEASURES every live replica with
   `Malachi.Cluster.ReplicationServer.durable_stats/4`, which reports what a replica holds and leaves it
   writable. Only if those answers reach a majority does it FENCE them with
-  `Malachi.Cluster.ReplicationServer.seal/4`, and the fence answers are what `plan/4` then seals on, so
+  `Malachi.Cluster.ReplicationServer.seal/4`, and the fence answers are what `plan/5` then seals on, so
   the point is recorded after every replica behind it has stopped accepting writes. A returning old
   primary is refused an append by each fenced replica it reaches, including by its own store after a
   restart, and so cannot close a quorum.

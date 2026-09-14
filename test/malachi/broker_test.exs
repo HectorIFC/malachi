@@ -635,7 +635,7 @@ defmodule Malachi.BrokerTest do
       assert Broker.fences_to_send(broker, 0, 500) == {broker, []}
     end
 
-    test "record_fence/5 seals at the answer even after this frontend's own refusal cleared the roll", %{store: store} do
+    test "record_fence/5 seals at the fence's answer even after a refusal cleared the roll", %{store: store} do
       # The fence closed the store, a produce this frontend sent afterwards was refused, and the refusal
       # cleared the roll before the fence's answer arrived. Dropping that answer would leave the store fenced
       # under a segment the metadata still calls active, refusing every write to the range.
@@ -664,7 +664,7 @@ defmodule Malachi.BrokerTest do
       assert [%{state: :sealed, length: 1, byte_size: 3, sealed_at: 500}] = segments(broker, root_id)
     end
 
-    test "awaiting_fence?/5 is true for a sent fence until its answer is recorded or its window passes", %{store: store} do
+    test "awaiting_fence?/5 holds from the send until the answer is recorded or the window passes", %{store: store} do
       {broker, root_id, store} = one_record_topic(store)
       {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
       segment_id = {root_id, 0}

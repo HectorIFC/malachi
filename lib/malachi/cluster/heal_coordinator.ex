@@ -23,14 +23,14 @@ defmodule Malachi.Cluster.HealCoordinator do
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
   (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
   `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died or that have a copy that
-  failed in storage, so writing rolls to a fresh segment), and applies all resulting commands. `heal_now/1` runs one pass synchronously and
-  returns the combined result, for tests and manual triggers.
+  failed in storage, so writing rolls to a fresh segment), and applies all resulting commands. `heal_now/1` runs
+  one pass synchronously and returns the combined result, for tests and manual triggers.
 
   Failover needs to know what each surviving replica holds, which no pure function can answer, so this
-  pass does the probing, in two steps whose order carries the safety. `Failover.candidates/2` names the
+  pass does the probing, in two steps whose order carries the safety. `Failover.candidates/3` names the
   segments; each live replica is MEASURED (`:probe`), which leaves it writable; and only once those
   answers reach a majority is each answering replica FENCED (`:fence`), which is what makes its answer
-  final. The fence answers go to `Failover.plan/4`, which applies the majority rule again to them, so a
+  final. The fence answers go to `Failover.plan/5`, which applies the majority rule again to them, so a
   fence that fails on enough replicas still declines rather than sealing on a minority.
 
   Fencing before knowing whether a majority answered would close replicas of a segment the pass then
@@ -179,7 +179,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp put_spread(opts, spread), do: Keyword.put(opts, :spread, spread)
 
   # Asks each live primary which of its active segments are already fenced. The impure half of the
-  # orphaned-fence decision, and the mirror of `probe_candidates/3` for failover: one batched call per
+  # orphaned-fence decision, and the mirror of `probe_candidates/4` for failover: one batched call per
   # primary, and `state.fence` is deliberately not reachable from here.
   defp probe_fences(state, metadata, live) do
     metadata
@@ -300,7 +300,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   #
   # Below a majority the pass leaves the replicas untouched and the range simply stays blocked until one
   # returns, which is the CP choice `Malachi.Cluster.Failover` already documents. At or above it, the
-  # fence answers are what `Failover.plan/4` seals on, and it applies the majority rule again to them, so
+  # fence answers are what `Failover.plan/5` seals on, and it applies the majority rule again to them, so
   # a fence that fails on enough replicas still declines rather than sealing on a minority.
   defp fence_answered(state, segment, answers) do
     if Failover.majority?(map_size(answers), segment.replica_set) do
