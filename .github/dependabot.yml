@@ -9,6 +9,10 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    # Every dependency PR lands on the maintainer, so an update cannot sit unowned: these arrive on a
+    # schedule rather than from a person, which is exactly how a PR ends up with nobody looking at it.
+    assignees:
+      - "HectorIFC"
     commit-message:
       prefix: "chore(deps):"
 
@@ -22,5 +26,7 @@ updates:
     labels:
       - "ci/cd"
       - "dependencies"
+    assignees:
+      - "HectorIFC"
     commit-message:
       prefix: "chore(ci):"

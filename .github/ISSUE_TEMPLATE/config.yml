@@ -1,0 +1,11 @@
+# Blank issues stay ENABLED on purpose. The template is the shape worth reaching for, not a gate: an
+# observation worth recording should never be lost because the person holding it could not yet fill in
+# a Plan section. Triage moves it into the standard shape afterwards.
+blank_issues_enabled: true
+contact_links:
+  - name: Start here before filing a throughput issue
+    url: https://github.com/HectorIFC/malachi/issues/85
+    about: The field triage of 29 throughput techniques, including the 14 evaluated and not adopted and why. Read it first so a rejected lever is not re-proposed.
+  - name: Start here before filing a diskless topics issue
+    url: https://github.com/HectorIFC/malachi/issues/109
+    about: The umbrella for serving segments from object storage, and the sub-issues already scoped under it.
