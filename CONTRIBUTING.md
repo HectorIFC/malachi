@@ -87,10 +87,11 @@ measure, on which harness, with how many repetitions, and what noise floor makes
 [#82](https://github.com/HectorIFC/malachi/issues/82) is the worked example, and it cuts both ways.
 Switching `fsync` to `fdatasync` was implemented and measured against an A-A control: the median
 per-flush latency moved by less than the control's own variance, the change was not merged, and that
-measurement is what later reordered two issues correctly. Re-measured on preallocated segments, the
-median still tied while the p99 halved (381us to 182us), so the issue stayed open with a sharper
-question instead of being closed on its first answer. "No difference" held for the statistic that was
-measured, and said nothing about the one that was not.
+measurement is what showed that [#83](https://github.com/HectorIFC/malachi/issues/83) had to land
+before #82 could be answered. Re-measured on preallocated segments, the median still tied while the
+p99 halved (381us to 182us), so the issue stayed open with a sharper question instead of being closed
+on its first answer. "No difference" held for the statistic that was measured, and said nothing about
+the one that was not.
 
 **Documentation that promises more than the code delivers is a defect, not a rough edge.** A moduledoc
 here once claimed the segment store fenced a returning old primary. It did not, and the gap between the
