@@ -732,6 +732,10 @@ defmodule Malachi.Loadtest do
       meta: meta(cfg),
       scenario: cfg.scenario,
       connections: cfg.connections,
+      # The flush regime the throughput describes, as fields of their own rather than only inside
+      # meta.command, whose syntax differs between the two generators. Mirrored by scripts/loadtest.js.
+      batch: cfg.batch,
+      record_size: cfg.record_size,
       pipeline: cfg.pipeline,
       duration_s: secs,
       ops: op_count,

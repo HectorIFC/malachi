@@ -14,7 +14,11 @@ That is the whole reason it works this way. The page used to render a single sam
 advertising 0.7.8 numbers while the project shipped 0.8.x. Reading the same files the generated documentation
 pages read means one pipeline keeps both current, and there is no second copy to forget.
 
-The headline number at the top is the Node.js produce rate, which is what the page has always led with. The
+The headline number at the top is the Node.js produce rate, which is what the page has always led with. Its
+subtitle names the flush regime the number describes (for example `batch 10 x 256B (2.5KB of values per request,
+group commit off)`), printed verbatim from the `regime_label` the ceiling sweep records, because a throughput quoted
+without its batch size gets applied to flush sizes it never described. The full curve over batch sizes is on the
+generated results pages. The
 Elixir generator records different fields (backpressure counters, four latency percentiles rather than a full
 histogram), so its section shows what that run recorded and omits the rest: a percentile that was not
 measured is left out of the chart rather than plotted as zero, because a curve that dives to the floor reads

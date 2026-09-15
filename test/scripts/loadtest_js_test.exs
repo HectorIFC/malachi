@@ -85,6 +85,55 @@ defmodule LoadtestJsTest do
     end
   end
 
+  describe "the flush regime" do
+    test "the report records the batch size and record size it ran with, as fields of their own", ctx do
+      args = ~w(--scenario produce --json --connections 1 --duration 1 --batch 7 --record-size 100 --topic) ++ [topic()]
+
+      assert {output, 0} = run_js(ctx, args)
+      assert {:ok, %{"batch" => 7, "record_size" => 100}} = Jason.decode(output)
+
+      # This generator's own defaults, which differ from the Elixir one's; recorded, not assumed.
+      assert {defaults, 0} =
+               run_js(ctx, ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()])
+
+      assert {:ok, %{"batch" => 1, "record_size" => 128}} = Jason.decode(defaults)
+    end
+
+    test "both generators record the same regime fields for the same flags", ctx do
+      # The two generators mirror their flags explicitly; the ceiling sweep reads these fields from either
+      # one through a single path, so a name or a value drifting in one of them would break it quietly.
+      flags = %{"connections" => 2, "batch" => 3, "record_size" => 64}
+
+      {node_output, 0} =
+        run_js(
+          ctx,
+          ~w(--scenario produce --json --connections 2 --batch 3 --record-size 64 --duration 1 --topic) ++ [topic()]
+        )
+
+      elixir_report =
+        ExUnit.CaptureIO.capture_io(fn ->
+          Malachi.Loadtest.run(
+            port: @port,
+            user: "admin",
+            pass: "admin123",
+            scenario: :produce,
+            connections: 2,
+            batch: 3,
+            record_size: 64,
+            duration: 1,
+            warmup: 0,
+            topic: topic(),
+            json: true
+          )
+        end)
+
+      regime = fn json -> json |> Jason.decode!() |> Map.take(Map.keys(flags)) end
+
+      assert regime.(node_output) == flags
+      assert regime.(elixir_report) == flags
+    end
+  end
+
   describe "connections across the warmup" do
     test "a produce run authenticates each connection once and keeps it through the warmup", ctx do
       # Every connection used to be closed and reopened after the warmup, which only the stream scenario

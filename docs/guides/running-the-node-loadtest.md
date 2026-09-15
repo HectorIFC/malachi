@@ -88,21 +88,41 @@ You do not update that file by hand, and a hand-edit would not survive: the Publ
 measures it on a CI runner on every push to main and commits what it measured, so the site always
 shows the merged code rather than whichever laptop last captured a sample. It does not run the bare
 command above. It runs `scripts/loadtest-ceiling.sh` with `GENERATOR=node`, which boots a dedicated
-server pinned to three cores, pins this generator to the fourth, then sweeps `--connections` and keeps
-the peak as the ceiling:
+server pinned to three cores for every point, pins this generator to the fourth, and sweeps two axes:
+the batch size, then for each batch size the connection count. Each batch size's peak is its ceiling:
 
 ```bash
 GENERATOR=node SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-node.json scripts/loadtest-ceiling.sh
 ```
 
+The batch size is swept because the cost of a flush is a curve over its size, and it changes sign:
+segment preallocation makes a 2.5KB flush 69.7% faster and a 1MB flush 16.2% slower, crossing near
+170KB. A ceiling at one batch size describes one slice of that. The default `BATCH_LADDER` is
+`10 100 512 1024 4096` at 256B records, which is 2.5KB, 25KB, 128KB, 256KB and 1MB of values per
+request, and the script forces group commit off so every request is its own flush. Larger requests
+saturate at fewer connections, so each batch size has its own connection ladder: `CONNS_LADDER_<batch>`
+when set, else a default in the script (32 to 512 for batch 10, down to 4 to 64 for batch 4096). The
+published result keeps the flat fields readers already use for `HEADLINE_BATCH` (10, the regime every
+earlier number describes), puts that regime into every headline, and carries the whole curve beside it.
+
+Each point runs once (`REPS=1`, stated in the result), in an order that interleaves the batch sizes so
+a slow stretch on the runner does not read as the effect of one of them, and the headline peak is run
+a second time at the end. How far that A-A repeat moves is the noise floor the page prints next to the
+curve: compare batch sizes within one run, since the published ceiling has moved by more than 30%
+between CI runs of unchanged code. The sweep is budgeted at about 15 minutes per generator. An invalid
+knob exits with status 2 before anything boots; a headline batch size with no clean point still writes
+the result and exits with status 1, which keeps it from being published.
+
 The pinning is the whole point: on one runner an unpinned generator steals server CPU and flatters the
 number. Because the generator gets a single core, a low ceiling can be this client capping rather than
-the server, so the run samples both sides' CPU across the peak window and the published page reports
-them: a server near three of three cores saturated (its ceiling was found), a generator near one of one
-capped first (the number is a lower bound). The load drives a **single topic**, which in Malachi means
-a single range and a serialized append on its primary, so the published figure is the one-topic
-ceiling. If the peak lands at the top of the sweep the script warns to widen `CONNS_LADDER`, since the
-knee may lie beyond it.
+the server, so every point samples both sides' CPU across its measured window and the published page
+reports them: a server near three of three cores saturated (its ceiling was found), a generator near
+one of one capped first (the point is a lower bound, and says so). The window starts when the
+generator creates the file named by `--measure-marker`, after every connection authenticated and the
+warmup ended; sampling from the spawn instead measured the server verifying credentials. The load
+drives a **single topic**, which in Malachi means a single range and a serialized append on its
+primary, so the published figure is the one-topic ceiling. If a batch size peaks at the top of its
+connection ladder the script warns to widen `CONNS_LADDER_<batch>`, since the knee may lie beyond it.
 
 How connections are opened is part of the methodology. Every connection pays a server-side credential
 verification (Argon2, expensive by design), so opening hundreds simultaneously is an auth storm: on the

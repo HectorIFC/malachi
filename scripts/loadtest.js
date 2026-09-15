@@ -490,6 +490,10 @@ function report(scenario, opts, elapsedMs, stats) {
           scenario,
           mode: openLoopMode ? 'open-loop' : streaming ? 'stream' : 'closed-loop',
           connections: opts.connections,
+          // The flush regime the throughput describes, as fields of their own rather than only inside
+          // meta.command, whose syntax differs between the two generators. Mirrored by mix malachi.loadtest.
+          batch: opts.batch,
+          record_size: opts.recordSize,
           duration_s: Number(secs.toFixed(3)),
           topic: opts.topic,
           target_rate_per_s: openLoopMode ? opts.rate : null,

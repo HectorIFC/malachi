@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 # Ceiling load test: drive ONE generator (node|elixir) against a freshly booted Malachi server, pinning
 # the server to SRV_CPUSET and the generator to LT_CPUSET so the client can never steal server CPU, and
-# ramp --connections across CONNS_LADDER until throughput stops rising. The peak run is the ceiling and
-# becomes the canonical $OUT json; the whole ladder is kept beside it under $RUN_DIR. A sampler reads the
+# sweep two axes: the batch size (records per produce, so bytes per flush with group commit off) across
+# BATCH_LADDER, and for each batch size the connection count across its own ladder. Each batch size's
+# peak is its ceiling; the headline batch size's peak is what readers of the flat result see, and the
+# whole curve is published beside it in $OUT. Every run is kept under $RUN_DIR. A sampler reads the
 # /proc CPU of BOTH the server beam and the generator over each measured window, so the report can say
 # which side saturated: the server (its ceiling was found) or the generator (the number is a lower bound).
 #
+# Why a curve: the per-flush cost of the commit path changes sign with the flush size (segment
+# preallocation is 69.7% faster at 2.5KB per flush and 16.2% slower at 1MB, crossing near 170KB, see
+# Malachi.Storage.Preallocation), so a ceiling at one batch size describes one slice of the surface.
+#
 # The methodology is identical for both generators (closed-loop, same flags); each is meant to run on its
 # OWN runner so one load test never influences the other. The server is always the Malachi broker (BEAM);
-# only the generator differs.
+# only the generator differs. What gets published (validation, run order, peak election, lower bounds,
+# the JSON shape) is decided by `mix malachi.loadtest.ceiling`, which is tested; this script runs things.
 #
 # Usage: GENERATOR=node|elixir OUT=/path/loadtest-node.json scripts/loadtest-ceiling.sh
-# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  CONNS_LADDER="32 64 128 256 512"  DUR=15  WARM=3  BATCH=10
-#   RSIZE=256  MALACHI_USER=admin  MALACHI_PASS=admin123  MALACHI_PORT=4040
+# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  DUR=15  WARM=3  RSIZE=256  REPS=1
+#   BATCH_LADDER="10 100 512 1024 4096"  HEADLINE_BATCH=10
+#   CONNS_LADDER="32 64 128 256 512" (for any batch size without its own)
+#   CONNS_LADDER_<batch>="..." (that batch size's ladder; defaults below for 100, 512, 1024 and 4096)
+#   MARKER_TIMEOUT=300  MALACHI_USER=admin  MALACHI_PASS=admin123  MALACHI_PORT=4040
+# Exit: 0 with a headline peak, 1 without one ($OUT is still written) or on a failed step, 2 on invalid
+# knobs.
 #
-# Not -e: a single failed sweep point must not abort the whole ladder; failures are handled per point.
+# Not -e: a single failed sweep point must not abort the whole sweep; failures are handled per point.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,11 +35,25 @@ cd "$ROOT" || exit 1
 GENERATOR="${GENERATOR:?set GENERATOR=node|elixir}"
 case "$GENERATOR" in
   node | elixir) ;;
-  *) echo "GENERATOR must be node or elixir, got '$GENERATOR'"; exit 2 ;;
+  *) echo "GENERATOR must be node or elixir, got '$GENERATOR'" >&2; exit 2 ;;
 esac
+
+# BATCH was a single batch size. Ignoring it silently would publish a sweep its caller did not ask for.
+if [ -n "${BATCH+set}" ]; then
+  echo "BATCH was replaced by BATCH_LADDER (a list of batch sizes) and HEADLINE_BATCH; unset BATCH" >&2
+  exit 2
+fi
 
 SRV_CPUSET="${SRV_CPUSET:-1,2,3}"
 LT_CPUSET="${LT_CPUSET:-0}"
+# Chosen on the byte sizes #83 measured the preallocation curve at: with 256B records these are 2.5KB,
+# 25KB, 128KB, 256KB and 1MB of values per request, bracketing the ~170KB crossover and both extremes.
+BATCH_LADDER="${BATCH_LADDER:-10 100 512 1024 4096}"
+# The batch size readers of the flat result see, and the one every earlier published number describes.
+HEADLINE_BATCH="${HEADLINE_BATCH:-10}"
+# One run per point by default: the published sweep states it, and the A-A repeat of the headline peak
+# measures how much a single run moves. Raise it for a question that needs more than one.
+REPS="${REPS:-1}"
 # 512 included because the first CI runs peaked at 256, the then-top rung, with the server short of its
 # core budget: the knee lies above.
 CONNS_LADDER="${CONNS_LADDER:-32 64 128 256 512}"
@@ -41,7 +67,6 @@ MARKER_TIMEOUT="${MARKER_TIMEOUT:-300}"
 # ends when the generator stops measuring, and a generator that has already exited by the closing read
 # leaves its side unsampled.
 if [ "$DUR" -ge 3 ]; then SAMPLE_S=$((DUR - 1)); else SAMPLE_S="$DUR"; fi
-BATCH="${BATCH:-10}"
 RSIZE="${RSIZE:-256}"
 export MALACHI_USER="${MALACHI_USER:-admin}"
 export MALACHI_PASS="${MALACHI_PASS:-admin123}"
@@ -54,6 +79,12 @@ export MALACHI_HOST="127.0.0.1"
 # inherited =true cannot leave a cap in place and get published as the ceiling.
 export MALACHI_RATE_LIMIT_ENABLED=false
 export MALACHI_CONNECTION_LIMIT_ENABLED=false
+# The regime the published curve claims, forced for the same reason. With group commit off every produce
+# is its own flush, which is what makes a batch size a flush size; an inherited =true would coalesce
+# requests and publish flush sizes that never happened. Preallocation is forced to the application's
+# default so the curve describes the configuration production runs, whatever the caller exported.
+export MALACHI_GROUP_COMMIT=false
+export MALACHI_SEGMENT_PREALLOC_BYTES=67108864
 
 OUT="${OUT:-$ROOT/loadtest-$GENERATOR.json}"
 # Create OUT's directory up front, and fail if that cannot be done: without -e a failed final write
@@ -61,9 +92,27 @@ OUT="${OUT:-$ROOT/loadtest-$GENERATOR.json}"
 mkdir -p "$(dirname "$OUT")" || { echo "cannot create output directory for $OUT" >&2; exit 1; }
 RUN_DIR="${RUN_DIR:-${RUNNER_TEMP:-/tmp}/ceiling-$GENERATOR}"
 mkdir -p "$RUN_DIR"
+# A reused RUN_DIR (the default is a fixed path) still holds the previous sweep's runs, and a point this
+# sweep failed to measure would otherwise be read back from that one.
+rm -f "$RUN_DIR"/run-*.json "$RUN_DIR"/aa-*.json "$RUN_DIR"/*.marker "$RUN_DIR"/*.cpu-*.txt "$RUN_DIR"/sweep.json
+SWEEP="$RUN_DIR/sweep.json"
 SERVER_LOG="$RUN_DIR/server.log"
 : > "$RUN_DIR/loadtest.err"
 TMP="${TMPDIR:-/tmp}"
+
+# The connection ladder a batch size gets when CONNS_LADDER_<batch> is not set. A larger request
+# saturates the server at fewer connections, so the ladders shift down as the batch grows, keeping at
+# most 64MB of values in flight and the runner time on points that carry information.
+default_conns_ladder() { # default_conns_ladder <batch>
+  case "$1" in
+    100) echo "16 32 64 128 256" ;;
+    512 | 1024) echo "8 16 32 64 128" ;;
+    4096) echo "4 8 16 32 64" ;;
+    *) echo "$CONNS_LADDER" ;;
+  esac
+}
+
+ceiling() { MIX_ENV=dev mix malachi.loadtest.ceiling "$@"; }
 
 # How many cores a taskset cpu-list names, for the "X of N cores" attribution and the scheduler counts.
 # Handles every form taskset accepts: single ids (0), ranges (1-3), and strides (0-10:2); counting
@@ -149,10 +198,10 @@ boot_server() {
   SERVER_PID=$!
   for _ in $(seq 1 60); do
     if port_open; then sleep 1.5; break; fi # extra settle so the auth/topic path is ready
-    if ! kill -0 "$SERVER_PID" 2> /dev/null; then echo "server died on boot; see $SERVER_LOG"; return 1; fi
+    if ! kill -0 "$SERVER_PID" 2> /dev/null; then echo "server died on boot; see $SERVER_LOG" >&2; return 1; fi
     sleep 1
   done
-  port_open || { echo "server did not open :$MALACHI_PORT; see $SERVER_LOG"; return 1; }
+  port_open || { echo "server did not open :$MALACHI_PORT; see $SERVER_LOG" >&2; return 1; }
   # taskset/mix exec straight into the beam, so $! IS the server beam: sample and kill it directly.
   BEAM_PID="$SERVER_PID"
   return 0
@@ -165,15 +214,17 @@ kill_server() {
 }
 trap kill_server EXIT
 
-run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical fields + attribution)
-  local n="$1"
-  local out="$RUN_DIR/run-$n.json"
-  local srv_cpu_file="$RUN_DIR/cpu-srv-$n.txt"
-  local gen_cpu_file="$RUN_DIR/cpu-gen-$n.txt"
-  local marker="$RUN_DIR/measure-$n.marker"
-  rm -f "$srv_cpu_file" "$gen_cpu_file" "$marker"
+# run_point <batch> <conns> <out.json>: one generator run against a fresh server, written to <out.json>
+# with the CPU attribution stamped on. Nothing is written for a run whose generator failed.
+run_point() {
+  local batch="$1" n="$2" out="$3"
+  local base="${out%.json}"
+  local srv_cpu_file="$base.cpu-srv.txt"
+  local gen_cpu_file="$base.cpu-gen.txt"
+  local marker="$base.marker"
+  rm -f "$out" "$srv_cpu_file" "$gen_cpu_file" "$marker"
 
-  # Fresh server per ladder point: a later N must never measure a server bloated by an earlier one.
+  # Fresh server per point: a later point must never measure a server bloated by an earlier one.
   boot_server || return 1
 
   # The generator runs in the background so its pid can be sampled alongside the server's; its exit
@@ -185,18 +236,18 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   if [ "$GENERATOR" = node ]; then
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     $lt_pin node scripts/loadtest.js --scenario produce --json \
-      --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
+      --connections "$n" --batch "$batch" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" \
       --connect-strategy bounded --connect-concurrency 32 \
-      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" &
+      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" < /dev/null &
   else
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     ERL_AFLAGS="$GEN_ERL_AFLAGS" $lt_pin mix malachi.loadtest --scenario produce --json \
-      --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
+      --connections "$n" --batch "$batch" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
       --connect-strategy bounded --connect-concurrency 32 \
       --user "$MALACHI_USER" --pass "$MALACHI_PASS" \
-      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" &
+      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" < /dev/null &
   fi
   local gen_pid=$!
 
@@ -220,7 +271,7 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   local sampler=$!
 
   if ! wait "$gen_pid"; then
-    echo "run failed: connections=$n (see loadtest.err)" >&2
+    echo "run failed: batch=$batch connections=$n (see loadtest.err)" >&2
     rm -f "$out"
   fi
   wait "$sampler" 2> /dev/null
@@ -244,51 +295,62 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   fi
 }
 
-echo "== ceiling sweep: generator=$GENERATOR ladder=[$CONNS_LADDER] srv=$SRV_CPUSET lt=$LT_CPUSET ==" >&2
-for n in $CONNS_LADDER; do
-  echo ">> connections=$n" >&2
-  run_point "$n"
+# Validate the knobs and plan the run order before booting anything. Each batch size's connection ladder
+# comes from CONNS_LADDER_<batch> when that is SET (an empty value is passed on and refused, not replaced
+# by the default), else from the table above. A token that is not a plain number has no such variable;
+# it is passed on as it is for the planner to name.
+conns_args=()
+for batch in $BATCH_LADDER; do
+  ladder=""
+  if [[ "$batch" =~ ^[0-9]+$ ]]; then
+    var="CONNS_LADDER_$batch"
+    ladder="${!var-$(default_conns_ladder "$batch")}"
+  fi
+  conns_args+=(--conns-ladder "$batch=$ladder")
 done
 
-# The ceiling is the peak throughput across the ladder, taken only from clean rungs: a throughput
-# recorded alongside errors measures the failure rather than the server (a rung past the knee timing
-# requests out is the usual case), so an errorful rung may show where the knee is but never be the
-# published peak.
-best="$(jq -s 'map(select(.records_per_s != null and .errors == 0)) | sort_by(.records_per_s) | last // empty' \
-  "$RUN_DIR"/run-*.json 2> /dev/null)"
+plan_output="$(ceiling plan --batch-ladder "$BATCH_LADDER" "${conns_args[@]}" \
+  --headline-batch "$HEADLINE_BATCH" --reps "$REPS" --record-size "$RSIZE" \
+  --group-commit "$MALACHI_GROUP_COMMIT" --segment-prealloc-bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
+  --out "$SWEEP")"
+plan_status=$?
+if [ "$plan_status" -ne 0 ]; then
+  exit "$plan_status"
+fi
+# Only the point lines: mix may print compilation output on the same stream.
+points="$(printf '%s\n' "$plan_output" | grep -E '^[0-9]+ [0-9]+ [0-9]+$')"
+planned="$(printf '%s\n' "$points" | grep -c .)"
+headline="$(jq -r '.headline_batch' "$SWEEP")"
 
-# No silent caps: every rung kept out of the election is named. The filters are complements (== 0
-# above, != 0 here), so a rung that somehow failed to record its error count shows up here too instead
-# of vanishing between them.
-errorful="$(jq -rs 'map(select(.records_per_s != null and .errors != 0) | "\(.connections) conns (\(.errors // "unrecorded") errors)") | join(", ")' \
-  "$RUN_DIR"/run-*.json 2> /dev/null)"
-if [ -n "$errorful" ]; then
-  echo "NOTE: rungs excluded from the peak election for recording errors: $errorful" >&2
+echo "== ceiling sweep: generator=$GENERATOR batches=[$BATCH_LADDER] headline=$headline reps=$REPS points=$planned srv=$SRV_CPUSET lt=$LT_CPUSET ==" >&2
+started=$SECONDS
+index=0
+while read -r batch n rep; do
+  index=$((index + 1))
+  echo ">> [$index/$planned] batch=$batch connections=$n repetition=$rep ($((SECONDS - started))s elapsed)" >&2
+  # stdin from /dev/null: nothing a point starts may read the list this loop is reading.
+  run_point "$batch" "$n" "$RUN_DIR/run-b$batch-c$n-r$rep.json" < /dev/null
+done <<< "$points"
+
+# The A-A control: the headline peak once more, on a fresh server, after everything else. How far it
+# moves is the noise floor the published curve is read against.
+peak_connections="$(ceiling peak --run-dir "$RUN_DIR" --sweep "$SWEEP" | grep -E '^[0-9]+$' | tail -n 1)"
+if [ -n "$peak_connections" ]; then
+  echo ">> A-A control: batch=$headline connections=$peak_connections ($((SECONDS - started))s elapsed)" >&2
+  run_point "$headline" "$peak_connections" "$RUN_DIR/aa-b$headline-c$peak_connections.json" < /dev/null
 fi
 
-if [ -z "$best" ]; then
-  if [ -n "$errorful" ]; then
-    echo "every completed rung recorded errors; refusing to publish an errorful throughput as the ceiling" >&2
-  else
-    echo "no successful runs in the sweep; see $RUN_DIR/loadtest.err" >&2
-  fi
-  exit 1
-fi
-peak_n="$(echo "$best" | jq -r '.connections')"
-peak_rps="$(echo "$best" | jq -r '.records_per_s')"
-peak_srv="$(echo "$best" | jq -r '.server_cpu_cores // "n/a"')"
-peak_gen="$(echo "$best" | jq -r '.generator_cpu_cores // "n/a"')"
-top="$(echo "$CONNS_LADDER" | awk '{print $NF}')"
+ceiling summarize --run-dir "$RUN_DIR" --sweep "$SWEEP" --out "$OUT"
+status=$?
 
-# No silent cap: a peak at the top of the ladder means the knee may lie beyond it, so the number is only
-# a lower bound on the ceiling. Stamp that onto the result so the caveat travels with the number into the
-# comment and the pages, not just this CI log.
-limited=false
-[ "$peak_n" = "$top" ] && limited=true
-best="$(echo "$best" | jq --argjson limited "$limited" '. + {peak_at_ladder_limit: $limited}')"
-echo "$best" > "$OUT"
-
-echo "== peak: $peak_rps rec/s @ $peak_n connections, server $peak_srv of $SRV_BUDGET cores, generator $peak_gen of $LT_BUDGET ==" >&2
-if [ "$limited" = true ]; then
-  echo "WARN: peak at the top of the ladder ($top); widen CONNS_LADDER to confirm the ceiling." >&2
+if [ "$status" -eq 0 ]; then
+  jq -r '"== headline: \(.records_per_s) rec/s @ \(.connections) connections, \(.regime_label), server \(.server_cpu_cores // "n/a") of \(.server_cpu_budget) cores, generator \(.generator_cpu_cores // "n/a") of \(.generator_cpu_budget) =="' "$OUT" >&2
 fi
+if [ -f "$OUT" ]; then
+  # No silent caps: every batch size that is only a lower bound, or has no peak at all, is named here as
+  # well as in the result.
+  jq -r '.curve[]? | select(.peak_at_ladder_limit == true) | "WARN: batch \(.batch) peaked at the top of its connection ladder; widen CONNS_LADDER_\(.batch) to confirm the ceiling."' "$OUT" >&2
+  jq -r '.curve[]? | select(.status != "peak") | "WARN: batch \(.batch) has no peak (\(.status))."' "$OUT" >&2
+fi
+echo "== sweep took $((SECONDS - started))s ==" >&2
+exit "$status"

@@ -68,6 +68,18 @@ defmodule Malachi.LoadtestTest do
       assert r.records_per_s > 0
     end
 
+    test "the report records the batch size and record size it ran with, as fields of their own" do
+      # The flush regime the throughput describes. Inside meta.command it is free text in a syntax the
+      # Node generator does not share, which is why the ceiling sweep and the published pages read these.
+      r = run(scenario: :produce, connections: 2, batch: 7, record_size: 100, topic: topic("regime"))
+      assert r.batch == 7
+      assert r.record_size == 100
+
+      defaults = run(scenario: :produce, connections: 1, topic: topic("regime_defaults"))
+      assert defaults.batch == 10
+      assert defaults.record_size == 256
+    end
+
     test "a produce refused by the publish quota is counted apart from a genuine error" do
       # The generator's whole reason for telling `rate_limited` from `errors` is that an operator reading
       # a run must be able to see a quota biting rather than a broker misbehaving. Without a case that
