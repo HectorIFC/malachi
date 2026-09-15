@@ -38,7 +38,15 @@ jobs:
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
-      
+
+      # The load generator tests drive scripts/loadtest.js against the test server, so the suite needs
+      # Node. Set up explicitly rather than trusting whatever the runner image happens to ship: those
+      # tests fail rather than skip when node is missing.
+      - name: 🟢 Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: 📦 Cache dependencies
         uses: actions/cache@v6
         with:

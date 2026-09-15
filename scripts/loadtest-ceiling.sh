@@ -33,6 +33,14 @@ LT_CPUSET="${LT_CPUSET:-0}"
 CONNS_LADDER="${CONNS_LADDER:-32 64 128 256 512}"
 DUR="${DUR:-15}"
 WARM="${WARM:-3}"
+# How long a generator may take to reach its measured window. Every connection authenticates first,
+# which took 25s at 512 connections on the CI runner, so this bounds a stuck connect phase rather than
+# a slow one.
+MARKER_TIMEOUT="${MARKER_TIMEOUT:-300}"
+# The span sampled inside the measured window: one second short of DUR when DUR allows it. The window
+# ends when the generator stops measuring, and a generator that has already exited by the closing read
+# leaves its side unsampled.
+if [ "$DUR" -ge 3 ]; then SAMPLE_S=$((DUR - 1)); else SAMPLE_S="$DUR"; fi
 BATCH="${BATCH:-10}"
 RSIZE="${RSIZE:-256}"
 export MALACHI_USER="${MALACHI_USER:-admin}"
@@ -102,6 +110,29 @@ cpu_ticks() { # cpu_ticks <pid>
   awk '{print $14 + $15}' "/proc/$pid/stat"
 }
 
+# Waits until the generator creates its measure marker, the signal that its measured window began. The
+# harness cannot infer that instant from the spawn: both generators authenticate every connection and
+# warm up first, and a sampler started WARM seconds after the spawn measured the server verifying
+# credentials and the generator waiting on it (server 2.88 of 3 cores, generator 0.01, at 512
+# connections). Gives up when the generator exits first (the caller reports that failure) or after
+# MARKER_TIMEOUT, leaving the attribution unset rather than sampled over the wrong window.
+wait_for_marker() { # wait_for_marker <marker> <gen_pid>
+  local marker="$1" gen_pid="$2" ticks=$((MARKER_TIMEOUT * 10))
+  while [ ! -e "$marker" ]; do
+    if ! kill -0 "$gen_pid" 2> /dev/null; then
+      # It may have written the marker between the two checks and finished already.
+      [ -e "$marker" ] && return 0
+      return 1
+    fi
+    if [ "$ticks" -le 0 ]; then
+      echo "NOTE: no measured window within ${MARKER_TIMEOUT}s; CPU attribution left unset for this point" >&2
+      return 1
+    fi
+    ticks=$((ticks - 1))
+    sleep 0.1
+  done
+}
+
 SERVER_PID=""
 BEAM_PID=""
 boot_server() {
@@ -139,7 +170,8 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
   local out="$RUN_DIR/run-$n.json"
   local srv_cpu_file="$RUN_DIR/cpu-srv-$n.txt"
   local gen_cpu_file="$RUN_DIR/cpu-gen-$n.txt"
-  rm -f "$srv_cpu_file" "$gen_cpu_file"
+  local marker="$RUN_DIR/measure-$n.marker"
+  rm -f "$srv_cpu_file" "$gen_cpu_file" "$marker"
 
   # Fresh server per ladder point: a later N must never measure a server bloated by an earlier one.
   boot_server || return 1
@@ -155,30 +187,33 @@ run_point() { # run_point <conns> ; writes $RUN_DIR/run-<conns>.json (canonical 
     $lt_pin node scripts/loadtest.js --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" \
-      --connect-strategy bounded --connect-concurrency 32 > "$out" 2>> "$RUN_DIR/loadtest.err" &
+      --connect-strategy bounded --connect-concurrency 32 \
+      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" &
   else
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
     ERL_AFLAGS="$GEN_ERL_AFLAGS" $lt_pin mix malachi.loadtest --scenario produce --json \
       --connections "$n" --batch "$BATCH" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
       --connect-strategy bounded --connect-concurrency 32 \
-      --user "$MALACHI_USER" --pass "$MALACHI_PASS" > "$out" 2>> "$RUN_DIR/loadtest.err" &
+      --user "$MALACHI_USER" --pass "$MALACHI_PASS" \
+      --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" &
   fi
   local gen_pid=$!
 
-  # Sample both sides' CPU across the MEASURED window only (skip warmup, then delta over DUR). One
-  # background subshell; each side writes its cores file, or nothing where /proc is unavailable.
+  # Sample both sides' CPU across the MEASURED window only: from the generator's marker, for SAMPLE_S.
+  # One background subshell; each side writes its cores file, or nothing where /proc is unavailable or
+  # no measured window was signalled.
   (
-    sleep "$WARM"
+    wait_for_marker "$marker" "$gen_pid" || exit 0
     srv_t0="$(cpu_ticks "$BEAM_PID")" || srv_t0=""
     gen_t0="$(cpu_ticks "$gen_pid")" || gen_t0=""
-    sleep "$DUR"
+    sleep "$SAMPLE_S"
     if [ -n "$srv_t0" ] && srv_t1="$(cpu_ticks "$BEAM_PID")"; then
-      awk -v a="$srv_t0" -v b="$srv_t1" -v hz="$CLK_TCK" -v s="$DUR" \
+      awk -v a="$srv_t0" -v b="$srv_t1" -v hz="$CLK_TCK" -v s="$SAMPLE_S" \
         'BEGIN { printf "%.2f", ((b - a) / hz) / s }' > "$srv_cpu_file"
     fi
     if [ -n "$gen_t0" ] && gen_t1="$(cpu_ticks "$gen_pid")"; then
-      awk -v a="$gen_t0" -v b="$gen_t1" -v hz="$CLK_TCK" -v s="$DUR" \
+      awk -v a="$gen_t0" -v b="$gen_t1" -v hz="$CLK_TCK" -v s="$SAMPLE_S" \
         'BEGIN { printf "%.2f", ((b - a) / hz) / s }' > "$gen_cpu_file"
     fi
   ) &

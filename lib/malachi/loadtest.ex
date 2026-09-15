@@ -120,6 +120,7 @@ defmodule Malachi.Loadtest do
     warmup_end = now + cfg.warmup * 1000
     measure_end = warmup_end + cfg.duration * 1000
     Enum.each(workers, fn w -> send(w, {:go, warmup_end, measure_end}) end)
+    mark_measure_start(cfg.measure_marker, warmup_end)
 
     Enum.each(workers, fn _ -> receive(do: ({:done, _} -> :ok)) end)
 
@@ -164,6 +165,7 @@ defmodule Malachi.Loadtest do
       # shard) actually spreads load across shards. Connection `i` uses topic `rem(i, topics)`.
       topics: max(1, Keyword.get(opts, :topics, 1)),
       json: Keyword.get(opts, :json, false),
+      measure_marker: measure_marker!(opts),
       # `--host` accepts a comma-separated list (a cluster): connection `i` targets `hosts[rem(i, n)]`,
       # spreading the load across every node's broker mailbox. A single host keeps today's behavior.
       hosts: opts |> Keyword.get(:host, "127.0.0.1") |> String.split(",", trim: true) |> Enum.map(&String.trim/1),
@@ -204,6 +206,30 @@ defmodule Malachi.Loadtest do
     case Keyword.get(opts, key, default) do
       value when is_integer(value) and value > 0 -> value
       value -> raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
+    end
+  end
+
+  # The file a harness waits for before sampling CPU. Checked before any connection opens: finding out
+  # after hundreds of authentications that the marker cannot be written would lose the whole run, and
+  # creating the file early to prove it would fire the signal before the window it marks.
+  defp measure_marker!(opts) do
+    case Keyword.get(opts, :measure_marker) do
+      nil ->
+        nil
+
+      path when is_binary(path) and path != "" ->
+        dir = Path.dirname(path)
+
+        case File.stat(dir) do
+          {:ok, %File.Stat{type: :directory, access: access}} when access in [:write, :read_write] ->
+            path
+
+          _missing_or_unwritable ->
+            raise ArgumentError, "measure_marker directory #{inspect(dir)} does not exist or is not writable"
+        end
+
+      other ->
+        raise ArgumentError, "measure_marker must be a non-empty path, got: #{inspect(other)}"
     end
   end
 
@@ -311,6 +337,18 @@ defmodule Malachi.Loadtest do
       {conn, corr + 1}
     end)
     |> elem(0)
+  end
+
+  # Signals that the measured window has begun, for a harness that samples CPU over it. The harness
+  # cannot know this on its own: every connection authenticates first, which took 25s at 512
+  # connections on the CI runner, so a sampler started from the spawn measured the server verifying
+  # credentials and the generator waiting on it. The workers already hold the deadlines, so the run
+  # process has nothing else to do until warmup ends.
+  defp mark_measure_start(nil, _warmup_end), do: :ok
+
+  defp mark_measure_start(path, warmup_end) do
+    Process.sleep(max(0, warmup_end - mono_ms()))
+    File.write!(path, "")
   end
 
   # --- worker ---

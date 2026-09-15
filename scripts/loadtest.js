@@ -405,7 +405,7 @@ function buildMeta() {
   const cpus = os.cpus();
   return {
     timestamp: new Date().toISOString(),
-    command: [path.relative(REPO_ROOT, process.argv[1]), ...process.argv.slice(2)].join(' '),
+    command: [path.relative(REPO_ROOT, process.argv[1]), ...recordedArgs(process.argv.slice(2))].join(' '),
     git_ref: ref ? (dirty ? `${ref}-dirty` : ref) : null,
     git_ref_date: git(['show', '-s', '--format=%cI', 'HEAD']),
     malachi_version: malachiVersion(),
@@ -416,6 +416,22 @@ function buildMeta() {
       os: `${os.platform()} ${os.release()}`,
     },
   };
+}
+
+// The arguments a reproduction needs: everything typed except --measure-marker and its value. The marker
+// is plumbing for the harness that launched the run, and its path names a directory on that machine, so
+// a published command carrying it would refuse to start anywhere else. Mirrors the Elixir generator,
+// which leaves it out of its rebuilt command for the same reason.
+function recordedArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--measure-marker') {
+      i += 1;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
 }
 
 // Offline check that the histogram's percentiles (including the deep tail) match a brute-force sorted
@@ -579,6 +595,9 @@ ${colors.yellow('Options')}
   --warmup <s>       Warmup seconds excluded from stats (default 0)
   --samples <n>      Deprecated, ignored (percentiles now use an exact histogram, not a sample)
   --json             Emit the report as JSON (with a reproduce-metadata block)
+  --measure-marker <path>  Create this (empty) file when the measured window begins, after every
+                     connection authenticated and the warmup ended, so a harness can sample CPU over
+                     that window alone. Its directory must exist. Not recorded in the JSON command.
   --self-test        Validate the latency histogram offline (no server) and exit
   -h, --help         Show this help
 
@@ -593,7 +612,7 @@ async function main() {
   const valueFlags = [
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
-    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms',
+    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker',
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
@@ -622,6 +641,26 @@ async function main() {
     process.exit(1);
   }
 
+  // Checked before any connection opens, as the Elixir generator does: discovering after hundreds of
+  // authentications that the marker cannot be written would lose the run, and creating it early to
+  // prove it would fire the signal before the window it marks. hasOwnProperty, not truthiness, because
+  // a trailing `--measure-marker` with no value parses as a present key holding undefined.
+  const measureMarker = flags['measure-marker'];
+  if (Object.prototype.hasOwnProperty.call(flags, 'measure-marker')) {
+    if (typeof measureMarker !== 'string' || measureMarker === '') {
+      console.error(colors.red('--measure-marker needs a file path'));
+      process.exit(1);
+    }
+    const dir = path.dirname(measureMarker);
+    try {
+      if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch {
+      console.error(colors.red(`--measure-marker directory "${dir}" does not exist or is not writable`));
+      process.exit(1);
+    }
+  }
+
   const needsBacklog = scenario === 'fetch' || scenario === 'stream' || scenario === 'mixed';
   const opts = {
     connections: int(flags.connections, 10),
@@ -641,6 +680,7 @@ async function main() {
     connectConcurrency: int(flags['connect-concurrency'], 32),
     connectStaggerMs: int(flags['connect-stagger-ms'], 100),
     json: !!flags.json,
+    measureMarker: measureMarker || null,
   };
 
   if (scenario === 'stream' && opts.rate > 0) {
@@ -677,6 +717,9 @@ async function main() {
     }
 
     const stats = new Stats();
+    // The measured window begins here, after every connection authenticated and the warmup ended, which
+    // no caller can infer from the spawn time (see --measure-marker in help()).
+    if (opts.measureMarker) fs.writeFileSync(opts.measureMarker, '');
     const start = performance.now();
     await runScenario(scenario, clients, opts, opts.duration * 1000, stats);
     const elapsed = performance.now() - start;

@@ -8,6 +8,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Histogram
+  alias Malachi.Test.LoadtestProbes
   alias Malachi.Wire
 
   @port Application.compile_env(:malachi, :tcp_port, 4040)
@@ -375,6 +376,72 @@ defmodule Malachi.LoadtestTest do
       assert decoded["latency_ms"]["p50"] == report.latency_ms.p50
       assert decoded["meta"]["command"] == report.meta.command
       assert decoded["meta"]["hardware"]["cpu"] == report.meta.hardware.cpu
+    end
+  end
+
+  describe "measured window marker" do
+    @describetag :tmp_dir
+
+    test "appears only after every connection authenticated and the warmup ended", %{tmp_dir: dir} do
+      # The harness samples CPU from this instant. It used to start WARM seconds after the spawn instead,
+      # which at 512 connections fell entirely inside authentication, so the published attribution
+      # measured Argon2 rather than produce.
+      marker = Path.join(dir, "measure.marker")
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+      LoadtestProbes.watch_file(marker)
+
+      r = run(scenario: :produce, connections: 3, batch: 2, warmup: 1, measure_marker: marker, topic: topic("marker"))
+
+      assert_receive {:file_appeared, ^marker, appeared_at}, 1_000
+      auths = LoadtestProbes.successful_auths()
+
+      # The setup connection plus one per worker.
+      assert length(auths) == 4
+      assert appeared_at >= List.last(auths) + 1_000 - LoadtestProbes.poll_ms()
+      assert r.errors == 0
+    end
+
+    test "is never recorded in the reproduce command", %{tmp_dir: dir} do
+      # It names a directory on the machine that ran the load, so a published command carrying it would
+      # refuse to start anywhere else.
+      command = Loadtest.reproduce_command(measure_marker: Path.join(dir, "m"))
+
+      refute command =~ "measure"
+    end
+
+    test "a directory that does not exist is a named error before any connection opens", %{tmp_dir: dir} do
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+
+      assert_raise ArgumentError, ~r/measure_marker directory .* does not exist or is not writable/, fn ->
+        run(scenario: :produce, connections: 2, measure_marker: Path.join([dir, "missing", "m"]))
+      end
+
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "an empty path is a named error", _context do
+      assert_raise ArgumentError, ~r/measure_marker must be a non-empty path/, fn ->
+        Loadtest.run(measure_marker: "")
+      end
+    end
+
+    test "a read-only directory is a named error", %{tmp_dir: dir} do
+      read_only = Path.join(dir, "ro")
+      File.mkdir_p!(read_only)
+      File.chmod!(read_only, 0o555)
+      on_exit(fn -> File.chmod(read_only, 0o755) end)
+
+      assert_raise ArgumentError, ~r/does not exist or is not writable/, fn ->
+        Loadtest.run(measure_marker: Path.join(read_only, "m"))
+      end
+    end
+
+    test "the mix task accepts --measure-marker and turns a bad one into a Mix error", %{tmp_dir: dir} do
+      assert_raise Mix.Error, ~r/measure_marker directory/, fn ->
+        Mix.Tasks.Malachi.Loadtest.run(["--measure-marker", Path.join([dir, "missing", "m"])])
+      end
     end
   end
 
