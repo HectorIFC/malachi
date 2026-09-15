@@ -84,11 +84,18 @@ upstream; the first push then has to say `-u` explicitly.
 
 ## 4. Move the issue to Ready on the board
 
-Project `PVT_kwHOAKYOJs4BP0nB`. Find the item, adding it to the board if it is not there:
+Project `PVT_kwHOAKYOJs4BP0nB`. Find the item, adding it to the board if it is not there. Ask for each
+item's project id and select on it, rather than taking the first item and trusting it is the right one:
+every issue here belongs to exactly one project today, so the first item happens to be correct, and a
+query that is right by coincidence stops being right the day a second project is added.
 
 ```
-gh api graphql -f query='{repository(owner:"HectorIFC",name:"malachi"){issue(number:<N>){projectItems(first:3){nodes{id}}}}}'
+gh api graphql -f query='{repository(owner:"HectorIFC",name:"malachi"){issue(number:<N>){projectItems(first:10){nodes{id project{id}}}}}}' \
+  --jq '.data.repository.issue.projectItems.nodes[] | select(.project.id=="PVT_kwHOAKYOJs4BP0nB") | .id'
 ```
+
+An empty result means the issue is not on the board and has to be added with `addProjectV2ItemById`
+before any field can be set.
 
 Then set Status (`PVTSSF_lAHOAKYOJs4BP0nBzg-Hr40`) to Ready (`61e4505c`) with
 `updateProjectV2ItemFieldValue`. The other Status options, for when the user asks to move an issue
