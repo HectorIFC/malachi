@@ -1,6 +1,6 @@
 ---
 name: start-issue-work
-description: Set up and start planning work on a Malachi issue. Use when the user asks to begin, plan, or pick up an issue by number, in any wording ("vamos para a issue #147", "crie a worktree para a #83 e inicie o planejamento", "siga para a proxima issue", "start work on #42"). Creates or updates the branch from origin/main, adds a git worktree, moves the issue to Ready on the board, launches a background planning session in plan mode, and hands back the attach command.
+description: Set up and start planning work on a Malachi issue. Use when the user asks to begin, plan, pick up, or move on to an issue by number, in any wording and in any language, including a bare request to create its worktree or move it to Ready. Creates or updates the branch from origin/main, adds a git worktree, moves the issue to Ready on the board, launches a background planning session in plan mode, and hands back the attach command.
 ---
 
 # Starting work on a Malachi issue

@@ -1,5 +1,5 @@
 ---
-description: Start work on a Malachi issue: branch, worktree, board, and a background planning session
+description: 'Start work on a Malachi issue: branch, worktree, board, and a background planning session'
 argument-hint: <issue-number>
 ---
 
