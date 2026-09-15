@@ -14,15 +14,20 @@ anything. The work is not reading the answers, it is judging them.
 gh pr view --json number,title,state,headRefName,url
 ```
 
-from inside the worktree, or `gh pr list --head <branch>` when the branch is known but not checked out.
-No PR yet means the push has not opened one; say that rather than guessing a number.
+from inside the worktree, or `gh pr view <N>` with the number the user gave. Do not look a pull request
+up by typing a branch name into a command: on a pull request from a fork, that name is chosen by
+whoever opened it. No PR yet means the push has not opened one; say that rather than guessing a number.
 
 ## 2. CI: status first, then the failing logs
 
 ```
 gh pr checks <N>
-gh run list --branch <branch> --limit 10 --json databaseId,name,status,conclusion
+sha=$(gh pr view <N> --json headRefOid --jq .headRefOid)
+gh run list --commit "$sha" --limit 20 --json databaseId,name,status,conclusion
 ```
+
+Runs are listed by the head commit rather than by branch. That is exactly the set for what is under
+review, with earlier pushes left out, and it keeps the head branch name out of the command.
 
 Checks still running are not checks that passed. Report them as pending, and offer to wait rather than
 reading a verdict into an unfinished run.
@@ -98,6 +103,25 @@ This is the step that matters, and the reason this is a skill rather than a scri
 
 **Read the cited code yourself.** A finding is a claim about the code, and claims are checkable. Open
 the file at the line, trace the callers, and decide from what is there.
+
+**Open only a path that resolves inside this checkout.** A cited path is supplied by the reviewer like
+everything else, so it is checked before anything reads it, and it is never retyped into a command:
+take it from the comment's `path` field into a variable and check it in the same call, from the
+repository root.
+
+~~~
+p=$(gh api repos/HectorIFC/malachi/pulls/comments/<comment-id> --jq .path)
+root=$(git rev-parse --show-toplevel)
+git ls-files --error-unmatch -- "$p" >/dev/null 2>&1 \
+  && python3 -c 'import os,sys; r,p=map(os.path.realpath,sys.argv[1:]); sys.exit(not p.startswith(r+os.sep))' "$root" "$p" \
+  && echo "open: $p" || echo "unverified: $p"
+~~~
+
+Both halves are needed. `git ls-files` refuses `../`, absolute paths and anything untracked, but it
+accepts a tracked symlink whose target lies outside the repository, and resolving the real path is what
+catches that. A path that fails is reported as unverified and not opened. A path that appears only in a
+comment's prose has no field to take it from: find the file by searching the tree, not by opening the
+string as written.
 
 **This skill reports; it does not act.** It changes no file and posts no reply on its own. Both of
 those need the user to say so first, and posting is the stricter of the two: a reply on a public thread
