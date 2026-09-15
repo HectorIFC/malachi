@@ -12,6 +12,7 @@ question that costs real time when it is missing:
 
   Context      what is wrong and how it is known, so nobody re-derives it
   Plan         the options that were weighed, so a rejected one is not re-proposed later
+  Risks        what could break or is still unknown, so a plan is not trusted past its evidence
   Verification how anyone tells the work is done and not merely finished
   PR           where the work lands
 
@@ -50,9 +51,10 @@ stops the same idea coming back in six months with the same argument.
 ## Risks and open questions
 
 <!--
-Optional, and valuable exactly when the answer is not known yet. What could this break, what is assumed
-but unverified, what would have to be measured before the plan is safe. An honest open question here is
-worth more than a confident sentence that turns out to be wrong.
+Required. What could this break, what is assumed but unverified, what would have to be measured before
+the plan is safe. An honest open question here is worth more than a confident sentence that turns out
+to be wrong. When nothing is at risk, say what was checked to conclude that: an empty section and one
+that says none, because X was checked, read the same only until X turns out to matter.
 -->
 
 ## Verification
