@@ -81,8 +81,23 @@ when its text is read truncated, which is exactly how one was once missed here f
 
 Do not filter by author. This is an OSS project: today the comments come from `coderabbitai[bot]` and
 `github-actions[bot]`, tomorrow from anyone, and a filter written for today's reviewers silently drops
-tomorrow's. Sort by `created_at`, and use `in_reply_to_id` to tell a fresh comment from a reply in a
-thread already handled.
+tomorrow's. Use `in_reply_to_id` to tell a fresh comment from a reply in a thread already handled.
+
+**New means changed since the last check, not created since it.** Bots edit in place. A review round
+with nothing to report can land as an edit of the summary comment posted when the pull request opened,
+hours earlier, and a finding gets marked as addressed by editing its original comment. Filtering by
+`created_at` reports no review at all in both cases. Compare `updated_at` against the time of the last
+check for comments, and `submitted_at` for review bodies, which have no edit timestamp:
+
+```
+since=2026-01-01T00:00:00Z   # the time of the last check, in UTC
+gh api repos/HectorIFC/malachi/pulls/<N>/comments --paginate --jq ".[] | select(.updated_at > \"$since\")"
+gh api repos/HectorIFC/malachi/issues/<N>/comments --paginate --jq ".[] | select(.updated_at > \"$since\")"
+gh api repos/HectorIFC/malachi/pulls/<N>/reviews --paginate --jq ".[] | select(.submitted_at > \"$since\")"
+```
+
+A review check that reports completed while none of the three endpoints shows anything new is the sign
+that the result went into an edit; do not report no review until the edited comments have been read.
 
 Bot bodies carry collapsed `<details>` blocks and HTML comment markers that bury the finding; strip
 them before reading. A finding usually states a severity of its own. Treat that as the reviewer's
