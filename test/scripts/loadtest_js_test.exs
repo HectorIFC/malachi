@@ -52,7 +52,9 @@ defmodule LoadtestJsTest do
       assert_receive {:file_appeared, ^marker, appeared_at}, 1_000
       auths = LoadtestProbes.successful_auths()
 
-      assert appeared_at >= List.last(auths) - LoadtestProbes.poll_ms()
+      # After the last authentication AND the whole warmup: the connections are kept through it, so the
+      # last authentication happens before the warmup starts.
+      assert appeared_at >= List.last(auths) + 1_000 - LoadtestProbes.poll_ms()
       assert {:ok, %{"errors" => 0}} = Jason.decode(output)
     end
 
@@ -80,6 +82,44 @@ defmodule LoadtestJsTest do
     test "a trailing flag with no path is refused, not ignored", ctx do
       assert {_output, 1} = run_js(ctx, ~w(--scenario produce --connections 1 --duration 1 --measure-marker))
       assert LoadtestProbes.successful_auths() == []
+    end
+  end
+
+  describe "connections across the warmup" do
+    test "a produce run authenticates each connection once and keeps it through the warmup", ctx do
+      # Every connection used to be closed and reopened after the warmup, which only the stream scenario
+      # needs: 1989 authentications against the Elixir generator's 997 on the same CI ladder, a second
+      # auth storm inside every point, and a methodology the two generators no longer shared.
+      args = ~w(--scenario produce --json --connections 4 --duration 1 --warmup 1 --topic) ++ [topic()]
+
+      assert {_output, 0} = run_js(ctx, args)
+      # The topic-creating admin connection, then one per worker.
+      assert length(LoadtestProbes.successful_auths()) == 5
+    end
+
+    test "a mixed run keeps its connections too, since it subscribes to nothing", ctx do
+      args =
+        ~w(--scenario mixed --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
+
+      assert {_output, 0} = run_js(ctx, args)
+      # Admin, the prepopulating connection, then one per worker.
+      assert length(LoadtestProbes.successful_auths()) == 4
+    end
+
+    test "a stream run still reconnects after the warmup, since a subscription ends only with its socket", ctx do
+      args =
+        ~w(--scenario stream --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
+
+      assert {_output, 0} = run_js(ctx, args)
+      # Admin, the prepopulating connection, then every worker twice.
+      assert length(LoadtestProbes.successful_auths()) == 6
+    end
+
+    test "without a warmup nothing reconnects in any scenario", ctx do
+      args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 50 --topic) ++ [topic()]
+
+      assert {_output, 0} = run_js(ctx, args)
+      assert length(LoadtestProbes.successful_auths()) == 4
     end
   end
 end

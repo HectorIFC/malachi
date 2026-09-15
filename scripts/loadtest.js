@@ -709,11 +709,16 @@ async function main() {
       const warmStats = new Stats();
       await runScenario(scenario, clients, opts, opts.warmup * 1000, warmStats);
       if (!opts.json) console.log(colors.gray(`   warmup done (${warmStats.count} ops discarded)`));
-      // Reconnect: the streaming subscription can only be ended by closing the socket (there is no
-      // unsubscribe frame), so reuse across warmup+measure would double-subscribe. Fresh connections also
-      // reset any TCP/GC warmup state for the measured run.
-      clients.forEach((c) => c.close());
-      clients = await makeClients(opts.connections, opts);
+      // Only the stream scenario reconnects here: a subscription can only be ended by closing its socket
+      // (there is no unsubscribe frame), so reusing it across warmup and measure would double-subscribe.
+      // Every other scenario keeps its warmed connections, as the Elixir generator always has.
+      // Reconnecting them all ran a second authentication storm inside every ceiling point (93s at 512
+      // connections on the CI runner) and measured a colder client than the Elixir generator did, so
+      // published Node numbers move with this change.
+      if (scenario === 'stream') {
+        clients.forEach((c) => c.close());
+        clients = await makeClients(opts.connections, opts);
+      }
     }
 
     const stats = new Stats();
