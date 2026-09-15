@@ -27,9 +27,18 @@ gh run list --branch <branch> --limit 10 --json databaseId,name,status,conclusio
 Checks still running are not checks that passed. Report them as pending, and offer to wait rather than
 reading a verdict into an unfinished run.
 
-For each failure, read the log rather than the name:
+For each failure, read the log rather than the name. `--log-failed` takes a run directly, which is the
+shorter path when a run has one failing job:
 
 ```
+gh run view <run-id> --log-failed
+```
+
+When a run has several jobs and only one is red, get its id from the run first, since neither
+`gh pr checks` nor `gh run list` reports job ids:
+
+```
+gh run view <run-id> --json jobs --jq '.jobs[] | select(.conclusion=="failure") | "\(.databaseId) \(.name)"'
 gh run view --job <job-id> --log-failed
 ```
 
@@ -37,11 +46,15 @@ Then answer the question the user actually has, which is never "which job is red
 mine". Three outcomes, and they need different words:
 
 - **Caused by this change.** Say what broke and where.
-- **A known flake.** Say so, and say how you know, with the evidence: a rerun of the same commit that
-  passed, or a failure that predates the branch. A flake asserted without evidence is a guess that
-  happens to be convenient.
-- **Failing on main too.** Check before blaming the branch: `gh run list --branch main --limit 5`. A
-  drill that fails the same way on an untouched main is not this PR's defect.
+- **A known flake.** Intermittent, and the only evidence that shows it is a rerun of the SAME commit
+  that passes. A failure predating the branch does not establish this: it establishes that the failure
+  is pre-existing, which is the next case and a different thing. A pre-existing failure is often
+  perfectly deterministic. Calling it a flake without the rerun is a guess that happens to be
+  convenient, and it is how a real defect gets waved through twice.
+- **Pre-existing, failing on main too.** Check before blaming the branch: `gh run list --branch main
+  --limit 5`, or rerun the drill on an unchanged main. Not this PR's defect, and not automatically a
+  flake either: report it as its own problem and, if there is no issue for it, say that there should
+  be. A storage drill failing identically on an untouched main is what became issue #152.
 
 ## 3. Comments: both endpoints, every author
 
@@ -69,18 +82,23 @@ This is the step that matters, and the reason this is a skill rather than a scri
 **Read the cited code yourself.** A finding is a claim about the code, and claims are checkable. Open
 the file at the line, trace the callers, and decide from what is there.
 
-Findings fall into four outcomes, and each needs a different action:
+**This skill reports; it does not act.** It changes no file and posts no reply on its own. Both of
+those need the user to say so first, and posting is the stricter of the two: a reply on a public thread
+is visible to everyone, cannot be taken back, and on an OSS project it is read by people deciding
+whether reviewing here is worth their time. Propose the wording and let the user send it.
 
-- **Right, and as described.** Fix it.
+Findings fall into four outcomes. Each needs a different proposal, not a different action:
+
+- **Right, and as described.** Say what the fix is.
 - **Right, and worse than described.** Happens often, and it is the most valuable outcome. A comment
-  labelled minor about two documentation lines once turned out to describe a moduledoc asserting a
+  labeled minor about two documentation lines once turned out to describe a moduledoc asserting a
   guarantee the code did not implement, which is the same class of defect that had already cost 519
-  acknowledged records. Fix it, and say why the severity moved.
-- **Right, but already handled.** The working tree may already contain the fix. Confirm it, and say so
-  rather than changing it twice.
-- **Wrong, or not applicable.** Say so with the evidence, and reply on the thread. A finding declined
-  with reasoning is a better outcome than one silently ignored, and on an OSS project the reply is read
-  by people deciding whether it is worth reviewing here again.
+  acknowledged records. Say why the severity moved, because that is the part the user needs in order
+  to decide.
+- **Right, but already handled.** The working tree may already contain the fix. Confirm it and say so,
+  rather than proposing a change that would be made twice.
+- **Wrong, or not applicable.** Say so with the evidence, and draft the reply for the thread. A finding
+  declined with reasoning is a better outcome than one silently ignored.
 
 Never accept a finding because a bot is usually right, and never dismiss one because a bot is
 sometimes wrong. Both are ways of not checking.

@@ -3,7 +3,7 @@ description: After a push, report which CI jobs failed and what reviewers said, 
 argument-hint: "[pr-number]"
 ---
 
-Check the pull request${1:+ #$1} for this branch.
+Check the pull request for this branch. If $ARGUMENTS names a PR number, check that one instead.
 
 Follow the `review-pr-feedback` skill: read the CI status and the logs of anything that failed, gather
 comments from both the review and the conversation endpoints for every author, and verify each finding

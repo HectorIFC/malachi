@@ -3,12 +3,12 @@ description: 'Start work on a Malachi issue: branch, worktree, board, and a back
 argument-hint: <issue-number>
 ---
 
-Start work on issue #$1.
+Start work on the Malachi issue named by $ARGUMENTS.
 
 Follow the `start-issue-work` skill exactly: read the issue and the work related to it, create or
-fast-forward its branch from `origin/main`, add the worktree at `~/malachi-$1`, clear the upstream on a
-new branch, move the issue to Ready on the board, and launch the background planning session in plan
-mode, with the session named exactly after the branch.
+fast-forward its branch from `origin/main`, add the worktree at `~/malachi-<issue number>`, clear the
+upstream on a new branch, move the issue to Ready on the board, and launch the background planning
+session in plan mode, with the session named exactly after the branch.
 
 Finish by printing the `claude attach <id>` command on its own line, so it can be copied without
 reading past it.

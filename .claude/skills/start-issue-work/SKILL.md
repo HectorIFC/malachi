@@ -20,7 +20,8 @@ Two things come out of the body:
 
 - **The branch name**, from the `## PR` section's `**Branch**` block. It is authoritative: never invent
   one, and never reuse a name the issue does not give. If the section is missing or the issue lacks the
-  repo's standard sections (Context, Plan, Verification, PR), stop and say so. An incomplete issue is
+  repo's standard sections (Context, Plan, Risks and open questions, Verification, PR, the five that
+  `CONTRIBUTING.md` defines), stop and say so. An incomplete issue is
   triage work, not planning work, and planning against one produces a plan nobody can verify.
 - **What the issue does not know.** Issues are written at a point in time and the tree moves. Check for
   related work before launching, because this is the part that changes a plan:
@@ -32,7 +33,7 @@ Two things come out of the body:
 
 ## 2. Set up the branch
 
-The branch may already exist, and the three cases differ:
+The branch may already exist, locally, remotely, or both, and the cases differ:
 
 ```
 git fetch --prune
@@ -40,11 +41,24 @@ git rev-parse --verify --quiet refs/heads/<branch>          # local?
 git rev-parse --verify --quiet refs/remotes/origin/<branch> # remote?
 ```
 
-- **Neither exists**: create from `origin/main`.
-- **Remote exists, no commits of its own** (`git rev-list --count origin/main..origin/<branch>` is 0):
-  create the local branch tracking it, then `git merge --ff-only origin/main`. Fast-forward, so no merge
-  commit and no rewriting of published history.
-- **Remote exists with commits**: do not touch it. Report what is on it and let the user decide.
+Check both refs for commits of their own before deciding, not just the remote: a local-only branch can
+hold unpushed work, and reusing its tip would carry that work into the worktree unnoticed.
+
+```
+git rev-list --count origin/main..<branch>          # local, when it exists
+git rev-list --count origin/main..origin/<branch>   # remote, when it exists
+```
+
+- **Neither ref exists**: create from `origin/main`.
+- **Either ref has commits of its own** (count above 0): stop. Report what is on it and let the user
+  decide. Never fast-forward, reset, or reuse a branch carrying work nobody has looked at.
+- **Remote only, no commits of its own**: create the local branch tracking it, then
+  `git merge --ff-only origin/main`. Fast-forward, so no merge commit and no rewriting of published
+  history.
+- **Local only, no commits of its own**: `git merge --ff-only origin/main` on it, then add the worktree
+  without `-b`, since the ref already exists and `-b` would fail.
+- **Both refs exist, neither with commits**: same as the local-only case, and check they point at the
+  same commit before proceeding.
 
 Always base on `origin/main`, never on the local `main`, which is often behind. Check with
 `git rev-list --count main..origin/main` and say so if it is.
