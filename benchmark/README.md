@@ -27,8 +27,21 @@ disk via `ReplicationServer` -> consume), measuring throughput, per-batch latenc
 memory, on-disk bytes, and CPU (reductions). This is the system baseline the streaming
 alternatives are judged against.
 
+**Regime:** batch 1000 x 100B (97.7KB of values per request), one producer, one produce at a
+time. It writes under `BENCH_DIR` (default: the system temp dir) on a real filesystem, so it runs
+on the durable path, with segment preallocation off and group commit off: every produce is one
+sync, and segments grow as they fill. Production runs with preallocation on, so this measures the
+growing-segment path. The script pins both settings rather than inheriting them, and prints the
+same label, filesystem type included, next to its result, so an alternative measured in another
+regime is visibly not on equal ground. Measurements count on Linux only.
+
+It refuses to run on tmpfs or ramfs, which many Linux distributions mount at `/tmp` and which
+have no durable path to measure, unless `BENCH_ALLOW_TMPFS=1`. `benchmark/store_error_path_ab.exs`
+reads its produce latency line, so that line keeps its shape.
+
 ```bash
 mix run benchmark/throughput_1m.exs
+BENCH_DIR=/var/tmp mix run benchmark/throughput_1m.exs
 ```
 
 ### `streaming_bench.exs`

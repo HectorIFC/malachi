@@ -3,14 +3,26 @@
 # Produces and consumes 1_000_000 records through the actual produce -> disk (ReplicationServer) ->
 # consume path of the BrokerServer, measuring throughput, per-batch latency, BEAM memory, on-disk bytes,
 # and CPU (reductions). This is the SYSTEM baseline the streaming alternatives are judged against; it is
-# a standalone script and does not touch lib/.
+# a standalone script and does not modify lib/.
+#
+# The regime is pinned, and printed next to the result (support/flush_regime.exs): one producer sending
+# fixed batches, one sync per produce because group commit is off, segments growing because
+# preallocation is off, on the filesystem under BENCH_DIR, which must not be memory-backed. A number
+# from another regime is not comparable with this one. Measurements count on Linux only.
 #
 # Run: mix run benchmark/throughput_1m.exs
+#   BENCH_DIR          directory to write under (default: the system temp dir); must exist
+#   BENCH_ALLOW_TMPFS  1 runs on tmpfs or ramfs anyway, with a warning
+#
+# benchmark/store_error_path_ab.exs reads the produce latency line (support/e2e_sample.exs): keep it as
+# the only line of its shape.
 
 Code.require_file("support/measure.exs", __DIR__)
 Code.require_file("support/paired_stats.exs", __DIR__)
+Code.require_file("support/flush_regime.exs", __DIR__)
 
 defmodule Bench1M do
+  alias Malachi.Bench.FlushRegime
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
@@ -27,14 +39,20 @@ defmodule Bench1M do
   defp mem(key), do: mb(:erlang.memory(key))
 
   def run do
-    base = Path.join(System.tmp_dir!(), "malachi_bench_1m_#{System.unique_integer([:positive])}")
+    target = FlushRegime.prepare!()
+    regime = FlushRegime.label(@batch, @value_bytes, target.filesystem)
+    base = Path.join(target.dir, "malachi_bench_1m_#{System.unique_integer([:positive])}")
     File.rm_rf!(base)
     repl_dir = Path.join(base, "repl")
 
-    {:ok, _repl} = ReplicationServer.start_link(name: :bench_repl, directory: repl_dir)
+    {:ok, _repl} =
+      ReplicationServer.start_link([name: :bench_repl, directory: repl_dir] ++ FlushRegime.replication_opts())
 
     {:ok, broker} =
-      BrokerServer.start_link(Path.join(base, "broker"), brokers: [:bench_repl], segment_max_bytes: 64 * 1024 * 1024)
+      BrokerServer.start_link(
+        Path.join(base, "broker"),
+        [brokers: [:bench_repl], segment_max_bytes: 64 * 1024 * 1024] ++ FlushRegime.broker_opts()
+      )
 
     {:ok, _root} = BrokerServer.create_topic(broker, @topic, 8)
 
@@ -48,7 +66,7 @@ defmodule Bench1M do
     {red0, _} = :erlang.statistics(:reductions)
 
     # ---- PRODUCE ----
-    IO.puts("Producing #{@total} records (#{@value_bytes}B value each, batches of #{@batch})...")
+    IO.puts("Producing #{@total} records, #{regime}...")
     t0 = System.monotonic_time(:microsecond)
 
     produce_lat =
@@ -74,6 +92,7 @@ defmodule Bench1M do
     mem_final = %{total: mem(:total), binary: mem(:binary), processes: mem(:processes), ets: mem(:ets)}
 
     report(%{
+      regime: regime,
       produce_wall: produce_wall,
       produce_lat: Enum.sort(produce_lat),
       consume_wall: consume_wall,
@@ -110,6 +129,7 @@ defmodule Bench1M do
     IO.puts("""
 
     ============ 1M-message end-to-end (BrokerServer + ReplicationServer, single node) ============
+    REGIME    #{m.regime}
     PRODUCE   #{@total} recs in #{Float.round(prod_s, 2)}s  =>  #{round(@total / prod_s)} rec/s, #{Float.round(mb(m.disk) / prod_s, 1)} MB/s
       batch latency (#{@batch}/batch) us:  p50=#{pctl(m.produce_lat, 50)}  p99=#{pctl(m.produce_lat, 99)}  max=#{List.last(m.produce_lat)}
     CONSUME   #{m.consumed} recs in #{Float.round(cons_s, 2)}s  =>  #{round(m.consumed / cons_s)} rec/s
