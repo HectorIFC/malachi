@@ -8,6 +8,9 @@
 #
 # Run: mix run benchmark/single_node_scale.exs
 
+Code.require_file("support/measure.exs", __DIR__)
+Code.require_file("support/paired_stats.exs", __DIR__)
+
 defmodule ScaleBench do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
@@ -18,14 +21,9 @@ defmodule ScaleBench do
   @value_bytes 100
   @ns [1, 2, 4, 8]
 
-  defp mb(bytes), do: Float.round(bytes / 1_048_576, 1)
-
-  defp dir_bytes(dir) do
-    dir |> Path.join("**/*") |> Path.wildcard() |> Enum.map(&File.stat!(&1).size) |> Enum.sum()
-  end
-
-  defp pctl(sorted, p),
-    do: Enum.at(sorted, max(0, min(length(sorted) - 1, round(p / 100 * (length(sorted) - 1)))))
+  defdelegate mb(bytes), to: Malachi.Bench.Measure
+  defdelegate dir_bytes(dir), to: Malachi.Bench.Measure
+  defdelegate pctl(sorted, p), to: Malachi.Bench.PairedStats
 
   # One independent pipeline: its own ReplicationServer (named, own dir), its own BrokerServer (by pid, so
   # no name collision), and its own topic. Each broker keeps in-memory metadata, so the shards share

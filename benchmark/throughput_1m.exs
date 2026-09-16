@@ -7,6 +7,9 @@
 #
 # Run: mix run benchmark/throughput_1m.exs
 
+Code.require_file("support/measure.exs", __DIR__)
+Code.require_file("support/paired_stats.exs", __DIR__)
+
 defmodule Bench1M do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
@@ -17,14 +20,11 @@ defmodule Bench1M do
   @value_bytes 100
   @topic "bench"
 
-  defp mb(bytes), do: Float.round(bytes / 1_048_576, 1)
+  defdelegate mb(bytes), to: Malachi.Bench.Measure
+  defdelegate dir_bytes(dir), to: Malachi.Bench.Measure
+  defdelegate pctl(sorted, p), to: Malachi.Bench.PairedStats
+
   defp mem(key), do: mb(:erlang.memory(key))
-
-  defp dir_bytes(dir) do
-    dir |> Path.join("**/*") |> Path.wildcard() |> Enum.map(&File.stat!(&1).size) |> Enum.sum()
-  end
-
-  defp pctl(sorted, p), do: Enum.at(sorted, max(0, min(length(sorted) - 1, round(p / 100 * (length(sorted) - 1)))))
 
   def run do
     base = Path.join(System.tmp_dir!(), "malachi_bench_1m_#{System.unique_integer([:positive])}")
