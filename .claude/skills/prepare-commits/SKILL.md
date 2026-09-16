@@ -14,8 +14,13 @@ blocks it.
 
 ## 0. Look for an earlier set before writing a new one
 
+The files this skill writes have exact names: `commit_message.txt` for a single commit or
+`commit_message_1.txt` upward for several, `commit_1.patch` upward, and `commit_message.sh`. Look for
+those by name. **Anything else matching `commit_*` at the root belongs to someone else**: never read it,
+replay it or delete it.
+
 ```
-ls commit_message* commit_*.patch 2>/dev/null
+ls commit_message.sh commit_message.txt commit_message_1.txt commit_1.patch 2>/dev/null
 /usr/bin/git log --format=%s -10
 ```
 
@@ -80,11 +85,17 @@ whole working tree** rather than from a list, so no change can fall between the 
 
 ```
 GIT_INDEX_FILE="$scratch/idxN" $GIT read-tree "<previous tree>"
-GIT_INDEX_FILE="$scratch/idxN" $GIT add -A -- . ':!commit_message*' ':!commit_*.patch' <exclusions the user agreed to>
+GIT_INDEX_FILE="$scratch/idxN" $GIT add -A -- . ':!commit_message.txt' ':!commit_1.patch' <the other generated names, and the exclusions the user agreed to>
 ```
 
-Two pathspec rules, both learned by breaking them:
+Three pathspec rules, all learned by breaking them:
 
+- Exclude the generated files **by exact name**, never as `':!commit_message*'`. A wildcard also
+  excludes a tracked file that happens to match, such as a `commit_message.ex` in the project, and it
+  would be dropped from the commit without a word.
+- Name only the generated files git would otherwise stage, which is the script and the patches. The
+  message files are ignored here (`*.txt` in `.gitignore`), and naming an ignored path is the mistake
+  in the next rule.
 - Never name an ignored path in a pathspec, not even as an exclusion (`':!tmp'` when `tmp/` is
   ignored). `git add` aborts on it and stages nothing. Ignored paths are left out already.
 - A deleted file is a change like any other: `add -A` stages the deletion. Exclude it by name only if
@@ -103,12 +114,14 @@ $GIT diff --binary <previous tree> "$tree_k" > commit_$k.patch
 
 ```
 GIT_INDEX_FILE="$scratch/check" $GIT read-tree HEAD
-for p in commit_*.patch; do GIT_INDEX_FILE="$scratch/check" $GIT apply --cached "$p"; done   # in order
+for p in commit_1.patch commit_2.patch; do GIT_INDEX_FILE="$scratch/check" $GIT apply --cached "$p"; done
 [ "$(GIT_INDEX_FILE="$scratch/check" $GIT write-tree)" = "<last tree>" ] && echo replay ok
 ```
 
-Do not hand over without `replay ok`. With more than nine commits, list the patches explicitly rather
-than trusting the glob's order.
+The patches are listed by name and in order, never as `commit_*.patch`: a glob picks up a stray patch
+left at the root by something else, and past nine commits it orders them wrongly anyway.
+
+Do not hand over without `replay ok`.
 
 ## 5. Write the messages
 
@@ -130,8 +143,8 @@ edit tool is not executable, and the user's first run then fails with permission
 
 ```bash
 #!/usr/bin/env bash
-# Creates the commits for <what>, in order, from the patches beside this script, then deletes the
-# patches, the messages and itself. Each patch is applied to the INDEX only, so a file split across
+# Creates the commits for <what>, in order, from the patches beside this script, then deletes exactly
+# the files named below and itself. Each patch is applied to the INDEX only, so a file split across
 # commits lands in each with exactly its own hunks; nothing in the working tree changes.
 set -euo pipefail
 
@@ -139,10 +152,10 @@ cd "$(dirname "$0")"
 GIT=/usr/bin/git
 BASE=<sha of HEAD when the patches were built>
 
-commits=(
-  "commit_1.patch commit_message_1.txt"
-  "commit_2.patch commit_message_2.txt"
-)
+# Every file this script reads or deletes, by exact name and in commit order. Never a glob: a wildcard
+# picks up an unrelated commit_1.patch someone else left at the root, and deletes it at the end.
+patches=(commit_1.patch commit_2.patch)
+messages=(commit_message_1.txt commit_message_2.txt)
 
 # The patches were cut against BASE; on any other HEAD they would apply to the wrong tree or not at all.
 if [ "$("$GIT" rev-parse HEAD)" != "$BASE" ]; then
@@ -156,22 +169,30 @@ if ! "$GIT" diff --cached --quiet; then
   exit 1
 fi
 
-for entry in "${commits[@]}"; do
-  read -r patch message <<< "$entry"
-  [ -f "$patch" ] && [ -f "$message" ] || { echo "missing $patch or $message; nothing was committed" >&2; exit 1; }
+for i in "${!patches[@]}"; do
+  [ -f "${patches[$i]}" ] && [ -f "${messages[$i]}" ] \
+    || { echo "missing ${patches[$i]} or ${messages[$i]}; nothing was committed" >&2; exit 1; }
 done
 
-for entry in "${commits[@]}"; do
-  read -r patch message <<< "$entry"
-  "$GIT" apply --cached --check "$patch"
-  "$GIT" apply --cached "$patch"
-  "$GIT" commit -q -F "$message"
+for i in "${!patches[@]}"; do
+  "$GIT" apply --cached --check "${patches[$i]}"
+  "$GIT" apply --cached "${patches[$i]}"
+  # --no-verify, and this is the reason: the repository's pre-commit hook formats the whole WORKING
+  # TREE and re-stages every file it reformats that is already staged. For a file split across commits
+  # that stages its later hunks into this one, which is exactly what the patches exist to prevent. The
+  # formatting the hook would enforce is checked when the patches are built instead.
+  "$GIT" commit -q --no-verify -F "${messages[$i]}"
   echo "committed: $("$GIT" log -1 --format=%s)"
 done
 
-rm -f -- commit_*.patch commit_message*.txt "$0"
+rm -f -- "${patches[@]}" "${messages[@]}" "$0"
 "$GIT" status --short
 ```
+
+Because the script commits with `--no-verify`, whatever the hook would have done is the agent's job
+before handing over: run the repository's formatter and its checks (here `mix format --check-formatted`,
+`mix credo --strict`, `mix test`) over the working tree the patches were cut from, and say in the report
+that they passed.
 
 ```
 chmod +x commit_message.sh && bash -n commit_message.sh
@@ -200,5 +221,7 @@ After handing over, do not touch the script, the patches or the messages again w
 - Do not use the user's index, `git stash` or `git reset` to build commits.
 - Do not leave a change out, or fold an unrelated one in, without asking.
 - Do not stage whole paths per commit when a file spans commits.
-- Do not name an ignored path in a pathspec.
+- Do not name an ignored path in a pathspec, and do not name the generated files with a wildcard
+  anywhere: not in the exclusions, not in the replay, not in the cleanup.
+- Do not let the pre-commit hook stage anything for you.
 - Do not hand over without `replay ok` and an executable script.
