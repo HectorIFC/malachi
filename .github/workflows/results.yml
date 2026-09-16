@@ -184,8 +184,12 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      # The full history, because publishing decides between two results by which commit is newer
+      # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 📥 Download results
         uses: actions/download-artifact@v4
@@ -353,39 +357,20 @@ jobs:
       # start another workflow run, which is what keeps this from committing to itself forever; the
       # cost of that same rule is that it does not start the Pages build either, so pages.yml listens
       # for this workflow to finish instead.
+      #
+      # Main has usually moved by the time this runs, sometimes with results of its own: a rerun of
+      # this run after its first attempt already published, or a newer run that finished first. The
+      # script decides per file which result main should hold (a newer commit's result is never
+      # overwritten, a rerun replaces its own) and ends green when there is nothing left to write. A
+      # rebase used to stop on those files as a conflict and fail the run with main already correct
+      # (run 35147990781). The concurrency group above serializes runs of THIS workflow and cannot
+      # serialize a human, so the script also retries a push that loses a race, a bounded number of
+      # times.
       - name: 📌 Commit the refreshed results
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PUBLISH_SHA: ${{ github.sha }}
         run: |
-          set -euo pipefail
-          if git diff --quiet -- benchmark/published; then
-            echo "results are unchanged; nothing to commit"
-            exit 0
-          fi
-
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add benchmark/published
-          git commit -m "chore(results): refresh published benchmark and chaos results from CI"
-
-          # Rebase before pushing, and try again if the push still loses. This job checks out the SHA
-          # that triggered it, then spends several minutes running load tests and a chaos drill, so
-          # anything pushed to main in the meantime leaves it behind: a bare push is rejected with
-          # `fetch first`, which is exactly how it failed when a version bump landed during a run.
-          # The concurrency group above serializes runs of THIS workflow and cannot serialize a human,
-          # so it was never the protection this needed.
-          #
-          # Retried rather than rebased once, because the same race can happen again between the
-          # rebase and the push. Bounded, because a push that keeps losing is a busy main rather than
-          # a transient, and failing then is the honest outcome. The commit touches only
-          # benchmark/published, so a rebase conflict means something else wrote the same results,
-          # which is a case that should stop rather than resolve itself.
-          for attempt in 1 2 3; do
-            if git push; then
-              exit 0
-            fi
-            echo "push rejected (attempt ${attempt}); rebasing onto the current main"
-            git pull --rebase origin main
-          done
-
-          echo "still could not push after 3 attempts"
-          exit 1
+          scripts/publish-results.sh
