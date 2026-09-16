@@ -16,21 +16,21 @@ defmodule Malachi.Benchmark.Throughput1mTest do
 
   alias Malachi.Bench.E2ESample
   alias Malachi.Bench.FlushRegime
+  alias Malachi.Test.BenchScript
 
   @moduletag :tmp_dir
   @moduletag timeout: 300_000
 
   @script "benchmark/throughput_1m.exs"
-  @project Path.expand("../..", __DIR__)
   @shm "/dev/shm"
   @shm_tmpfs? File.dir?(@shm) and FlushRegime.filesystem(@shm) == "tmpfs"
 
   setup_all do
-    %{mix: System.find_executable("mix") || flunk("mix is required to run #{@script}")}
+    %{tools: BenchScript.executables!()}
   end
 
-  test "prints its regime next to a sample the A/B harness can read", %{mix: mix, tmp_dir: dir} do
-    {output, status} = run(mix, [{"BENCH_DIR", dir}])
+  test "prints its regime next to a sample the A/B harness can read", %{tools: tools, tmp_dir: dir} do
+    {output, status} = BenchScript.run(tools, @script, [{"BENCH_DIR", dir}])
 
     assert status == 0, output
     {:ok, %{dir: resolved, filesystem: filesystem}} = FlushRegime.prepare(%{"BENCH_DIR" => dir}, "/proc/self/mountinfo")
@@ -47,17 +47,17 @@ defmodule Malachi.Benchmark.Throughput1mTest do
     assert File.ls!(resolved) == []
   end
 
-  test "a BENCH_DIR that does not exist stops the run before anything starts", %{mix: mix, tmp_dir: dir} do
+  test "a BENCH_DIR that does not exist stops the run before anything starts", %{tools: tools, tmp_dir: dir} do
     missing = Path.join(dir, "missing")
-    {output, status} = run(mix, [{"BENCH_DIR", missing}])
+    {output, status} = BenchScript.run(tools, @script, [{"BENCH_DIR", missing}])
 
     assert status == 2
     assert output =~ "ERROR: BENCH_DIR #{missing} is not an existing directory"
     refute output =~ "Producing"
   end
 
-  test "an invalid BENCH_ALLOW_TMPFS stops the run before anything starts", %{mix: mix, tmp_dir: dir} do
-    {output, status} = run(mix, [{"BENCH_DIR", dir}, {"BENCH_ALLOW_TMPFS", "yes"}])
+  test "an invalid BENCH_ALLOW_TMPFS stops the run before anything starts", %{tools: tools, tmp_dir: dir} do
+    {output, status} = BenchScript.run(tools, @script, [{"BENCH_DIR", dir}, {"BENCH_ALLOW_TMPFS", "yes"}])
 
     assert status == 2
     assert output =~ ~s(ERROR: BENCH_ALLOW_TMPFS must be 1 or unset, got "yes")
@@ -74,8 +74,8 @@ defmodule Malachi.Benchmark.Throughput1mTest do
       %{shm_dir: dir}
     end
 
-    test "the run is refused", %{mix: mix, shm_dir: dir} do
-      {output, status} = run(mix, [{"BENCH_DIR", dir}])
+    test "the run is refused", %{tools: tools, shm_dir: dir} do
+      {output, status} = BenchScript.run(tools, @script, [{"BENCH_DIR", dir}])
 
       assert status == 2
       assert output =~ "ERROR: #{dir} is on tmpfs, which is not the durable path"
@@ -83,19 +83,12 @@ defmodule Malachi.Benchmark.Throughput1mTest do
       assert File.ls!(dir) == []
     end
 
-    test "BENCH_ALLOW_TMPFS=1 runs it with a warning and says so in the regime", %{mix: mix, shm_dir: dir} do
-      {output, status} = run(mix, [{"BENCH_DIR", dir}, {"BENCH_ALLOW_TMPFS", "1"}])
+    test "BENCH_ALLOW_TMPFS=1 runs it with a warning and says so in the regime", %{tools: tools, shm_dir: dir} do
+      {output, status} = BenchScript.run(tools, @script, [{"BENCH_DIR", dir}, {"BENCH_ALLOW_TMPFS", "1"}])
 
       assert status == 0, output
       assert output =~ "WARNING: the log is on tmpfs, which is not the durable path"
       assert output =~ "\nREGIME    #{FlushRegime.label(1000, 100, "tmpfs")}\n"
     end
-  end
-
-  defp run(mix, env) do
-    # The variables this test does not set are cleared, so a value in the developer's shell cannot
-    # change what is being checked.
-    env = Enum.uniq_by(env ++ [{"BENCH_DIR", nil}, {"BENCH_ALLOW_TMPFS", nil}, {"MIX_ENV", "test"}], &elem(&1, 0))
-    System.cmd(mix, ["run", "--no-start", @script], cd: @project, env: env, stderr_to_stdout: true)
   end
 end
