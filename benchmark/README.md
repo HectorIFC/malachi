@@ -16,6 +16,66 @@ not touch `lib/`). Results, where written, go to `results/` (gitignored except `
 > unaffected (zero-copy only applies to reads); consume/fetch/stream numbers have headroom once it
 > lands.
 
+## Which harnesses measure the durable path
+
+Every acknowledged produce waits on a write and an fsync, and the options that make that cheaper
+(group commit, segment preallocation) exist because the fsync is not free. On tmpfs it is: there is no
+journal to commit and no allocation to give up, so a harness whose data lives on tmpfs measures the
+produce path with the durable part costing nothing. That is deliberate where it appears (fsync cost is
+then identical from run to run), but its numbers say nothing about durability. Group commit below is
+what the broker runs, which is off above RF 1 whatever the setting says.
+
+| Harness | Where the data lives | Durable path (a real fsync) | Preallocation | Group commit |
+|---|---|---|---|---|
+| `docker-cluster.sh` | each node's 1g tmpfs | no | off | on at RF 1, off at RF 3 |
+| `docker-cluster.sh` with `REAL_DISK=1` | each node's named volume | yes | 64MB | on at RF 1, off at RF 3 |
+| `docker-compare.sh`, `docker-pipeline.sh`, `docker-shards.sh` (`docker-compose.bench.yml`) | the node's 1g tmpfs | no | off | on |
+| `docker-ratelimit.sh` | each node's 1g tmpfs | no | off | on (RF 1 by default) |
+| `docker-scrub.sh` | each node's named volume | yes | off | on (RF 1 by default) |
+| ceiling harness (`scripts/loadtest-ceiling.sh`) | host filesystem (ext4 on the CI runner) | yes | 64MB | off |
+| `storage_viability.exs` | host filesystem (ext4 on the CI runner) | yes | per arm | not involved (the store alone) |
+| `throughput_1m.exs`, `single_node_scale.exs` | host filesystem | yes | off | off: one sync per produce |
+
+Numbers from the host filesystem or a named volume are only comparable when the filesystem and the disk
+under it are the same, so the harnesses that report them say which they ran on. Only Linux counts: on
+Docker Desktop a named volume sits inside the VM's disk image, and on macOS `:file.sync` does not reach
+stable media.
+
+### docker-cluster.sh
+
+The 3-node cluster produce benchmark, at RF 1 and RF 3, on a fresh cluster with its volumes removed for
+every case. It runs in one of two data modes per invocation:
+
+```bash
+benchmark/docker-cluster.sh                                          # tmpfs, the run-to-run comparable mode
+REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the durable path
+```
+
+- **Real disk.** `REAL_DISK=1` puts each node's data on its named volume, with preallocation at the
+  production 64MB. A case fails unless the volume is a real filesystem (not tmpfs) and the preallocated
+  bytes are on it afterwards, because the store quietly falls back to an unpreallocated segment when
+  preallocation fails. A case whose host disk cannot hold TOPICS x RF x 64MB (plus a 1GB margin) is
+  refused before it runs.
+- **Segment creation stays out of the window.** Every topic's segment is created during setup
+  (`--prepopulate`, one batch per topic), in both modes, so the 64MB preallocation (about 249ms, see
+  below) is not paid inside the warmup or the measured window.
+- **RF 3 is the case most likely to struggle.** Group commit is off there and every batch waits on a
+  quorum fsync, which is free on tmpfs and paid in full on a disk. Generator errors are reported as a
+  lower number (`err=N`), not as a failure. A generator that runs past `CASE_TIMEOUT` (300s) is killed
+  and reported as a timeout, and the next case still runs.
+- **Where the numbers came from.** The output (and each `OUT` line) records the host, the Docker
+  engine, what backs the Docker root (filesystem, mount options, disk), and each node's view of its own
+  data mount.
+- **Linux only.** The script refuses any other host unless `ALLOW_NON_LINUX=1`, which runs it as a smoke
+  test and says so.
+
+**Protocol.** A mode comparison is a manual dispatch of the `Performance Benchmarks` workflow with
+`docker_cluster_durability` checked. It runs both modes `docker_cluster_reps` times (3 by default),
+alternating tmpfs and disk within each repetition, on a 4-core runner (servers on cores 1-3, the
+generator on core 0). The spread between repetitions of one mode is the noise floor, and a difference
+between the modes is claimed only when their min to max ranges do not overlap, and never from a single
+run of either mode; the job summary states which. Per-flush latency is not part of the comparison yet: the flush telemetry is not on `main`.
+
 ## Mechanism investigations
 
 Design-exploration benchmarks that compare mechanisms on the current log model.
