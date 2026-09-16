@@ -121,6 +121,10 @@ defmodule ScaleBench do
     }
   end
 
+  @doc """
+  Runs the sweep: validates the ladders and the target directory, then measures every N at every batch
+  size and prints one block per batch size under its regime, followed by the verdicts.
+  """
   def run do
     ns = ladder!("SCALE_NS", @ns)
     batches = ladder!("SCALE_BATCHES", @batches)

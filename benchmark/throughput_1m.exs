@@ -38,6 +38,10 @@ defmodule Bench1M do
 
   defp mem(key), do: mb(:erlang.memory(key))
 
+  @doc """
+  Runs the benchmark once: checks the target directory, produces and consumes 1M records under the pinned
+  regime, prints the report, and removes everything it wrote.
+  """
   def run do
     target = FlushRegime.prepare!()
     regime = FlushRegime.label(@batch, @value_bytes, target.filesystem)
