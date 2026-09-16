@@ -433,6 +433,42 @@ defmodule Malachi.LoadtestTest do
       assert LoadtestProbes.successful_auths() == []
     end
 
+    test "a marker that already exists is overwritten rather than refused", %{tmp_dir: dir} do
+      marker = Path.join(dir, "stale.marker")
+      File.write!(marker, "from an earlier run")
+
+      r = run(scenario: :produce, connections: 1, batch: 1, measure_marker: marker, topic: topic("marker_exists"))
+
+      assert File.read!(marker) == ""
+      assert r.errors == 0
+    end
+
+    test "a marker path that is a directory is a named error before any connection opens", %{tmp_dir: dir} do
+      # Checking only the parent directory let this through, and it then failed inside File.write!, after
+      # every connection had authenticated and the warmup had run.
+      marker = Path.join(dir, "marker.d")
+      File.mkdir_p!(marker)
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+
+      assert_raise ArgumentError, ~r/exists and is not a writable regular file \(type directory/, fn ->
+        run(scenario: :produce, connections: 2, measure_marker: marker)
+      end
+
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "a marker that exists and cannot be written is a named error", %{tmp_dir: dir} do
+      marker = Path.join(dir, "read-only.marker")
+      File.write!(marker, "")
+      File.chmod!(marker, 0o444)
+      on_exit(fn -> File.chmod(marker, 0o644) end)
+
+      assert_raise ArgumentError, ~r/exists and is not a writable regular file \(type regular, access read\)/, fn ->
+        Loadtest.run(measure_marker: marker)
+      end
+    end
+
     test "an empty path is a named error", _context do
       assert_raise ArgumentError, ~r/measure_marker must be a non-empty path/, fn ->
         Loadtest.run(measure_marker: "")

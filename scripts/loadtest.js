@@ -418,6 +418,38 @@ function buildMeta() {
   };
 }
 
+// Why the marker path cannot be used, or null when it can. A marker that already exists is overwritten
+// when the measured window opens, so it has to be a writable regular file; a directory or a file owned
+// by someone else passes a check of the parent alone and then fails inside writeFileSync, after every
+// connection has authenticated. Mirrors `check_marker!` in lib/malachi/loadtest.ex.
+function markerProblem(marker) {
+  let stat = null;
+  try {
+    stat = fs.statSync(marker);
+  } catch {
+    stat = null;
+  }
+
+  if (stat) {
+    if (!stat.isFile()) return `"${marker}" exists and is not a regular file`;
+    try {
+      fs.accessSync(marker, fs.constants.W_OK);
+    } catch {
+      return `"${marker}" exists and is not writable`;
+    }
+    return null;
+  }
+
+  const dir = path.dirname(marker);
+  try {
+    if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch {
+    return `directory "${dir}" does not exist or is not writable`;
+  }
+  return null;
+}
+
 // The arguments a reproduction needs: everything typed except --measure-marker and its value. The marker
 // is plumbing for the harness that launched the run, and its path names a directory on that machine, so
 // a published command carrying it would refuse to start anywhere else. Mirrors the Elixir generator,
@@ -655,12 +687,9 @@ async function main() {
       console.error(colors.red('--measure-marker needs a file path'));
       process.exit(1);
     }
-    const dir = path.dirname(measureMarker);
-    try {
-      if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
-      fs.accessSync(dir, fs.constants.W_OK);
-    } catch {
-      console.error(colors.red(`--measure-marker directory "${dir}" does not exist or is not writable`));
+    const problem = markerProblem(measureMarker);
+    if (problem) {
+      console.error(colors.red(`--measure-marker ${problem}`));
       process.exit(1);
     }
   }

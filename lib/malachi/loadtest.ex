@@ -218,18 +218,44 @@ defmodule Malachi.Loadtest do
         nil
 
       path when is_binary(path) and path != "" ->
-        dir = Path.dirname(path)
-
-        case File.stat(dir) do
-          {:ok, %File.Stat{type: :directory, access: access}} when access in [:write, :read_write] ->
-            path
-
-          _missing_or_unwritable ->
-            raise ArgumentError, "measure_marker directory #{inspect(dir)} does not exist or is not writable"
-        end
+        check_marker!(path)
 
       other ->
         raise ArgumentError, "measure_marker must be a non-empty path, got: #{inspect(other)}"
+    end
+  end
+
+  # A marker that already exists is overwritten when the window opens, so it has to be a writable
+  # regular file; a directory or a file owned by someone else passes a check of the parent alone and
+  # then fails inside `File.write!/2`, after every connection has authenticated. Mirrored by
+  # `markerProblem` in scripts/loadtest.js.
+  defp check_marker!(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, access: access}} when access in [:write, :read_write] ->
+        path
+
+      {:ok, %File.Stat{type: type, access: access}} ->
+        raise ArgumentError,
+              "measure_marker #{inspect(path)} exists and is not a writable regular file " <>
+                "(type #{type}, access #{access})"
+
+      {:error, :enoent} ->
+        check_marker_directory!(path)
+
+      {:error, reason} ->
+        raise ArgumentError, "measure_marker #{inspect(path)} cannot be used: #{inspect(reason)}"
+    end
+  end
+
+  defp check_marker_directory!(path) do
+    dir = Path.dirname(path)
+
+    case File.stat(dir) do
+      {:ok, %File.Stat{type: :directory, access: access}} when access in [:write, :read_write] ->
+        path
+
+      _missing_or_unwritable ->
+        raise ArgumentError, "measure_marker directory #{inspect(dir)} does not exist or is not writable"
     end
   end
 

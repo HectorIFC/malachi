@@ -31,8 +31,13 @@ defmodule Malachi.Test.LoadtestProbes do
   end
 
   @doc """
-  Drains the `{:auth, :ok, ms}` messages already in the mailbox, oldest first. Failed authentications are
-  drained too but not returned: the tests count connections that were admitted.
+  Drains the `{:auth, :ok, ms}` messages already in the mailbox and returns them oldest first. Failed
+  authentications are drained too but not returned: the tests count connections that were admitted.
+
+  Sorted rather than taken in mailbox order: each authentication is forwarded from the connection
+  process that performed it, and ordering is only guaranteed between one sender and one receiver, so the
+  arrival order across connections is not chronological. The tests read the last element as the last
+  authentication, which mailbox order would sometimes get wrong.
   """
   @spec successful_auths() :: [integer()]
   def successful_auths, do: drain_auths([])
@@ -42,7 +47,7 @@ defmodule Malachi.Test.LoadtestProbes do
       {:auth, :ok, ms} -> drain_auths([ms | acc])
       {:auth, _failed, _ms} -> drain_auths(acc)
     after
-      0 -> Enum.reverse(acc)
+      0 -> Enum.sort(acc)
     end
   end
 

@@ -16,6 +16,18 @@ defmodule Malachi.Test.LoadtestProbesTest do
     refute_received {:auth, _result, _ms}
   end
 
+  test "orders by timestamp, since the mailbox order across connections is not chronological" do
+    # Each authentication is forwarded from the connection process that performed it, and ordering holds
+    # only between one sender and one receiver. The generator tests read the last element as the last
+    # authentication, which mailbox order would sometimes get wrong.
+    send(self(), {:auth, :ok, 30})
+    send(self(), {:auth, :ok, 10})
+    send(self(), {:auth, :error, 99})
+    send(self(), {:auth, :ok, 20})
+
+    assert LoadtestProbes.successful_auths() == [10, 20, 30]
+  end
+
   test "forwards the server's authentication telemetry to the watching process" do
     probe = LoadtestProbes.watch_auth()
 

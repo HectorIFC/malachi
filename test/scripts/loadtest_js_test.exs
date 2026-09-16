@@ -26,7 +26,9 @@ defmodule LoadtestJsTest do
     :ok
   end
 
-  defp run_js(ctx, args) do
+  # `stderr: true` folds the generator's error output into the returned string, for the cases that are
+  # about what it refuses. The default keeps stderr out, so a run's JSON is the whole of stdout.
+  defp run_js(ctx, args, opts \\ []) do
     env = [
       {"MALACHI_HOST", "127.0.0.1"},
       {"MALACHI_PORT", Integer.to_string(@port)},
@@ -34,7 +36,7 @@ defmodule LoadtestJsTest do
       {"MALACHI_PASS", "admin123"}
     ]
 
-    System.cmd(ctx.node, [@script | args], env: env, stderr_to_stdout: false)
+    System.cmd(ctx.node, [@script | args], env: env, stderr_to_stdout: Keyword.get(opts, :stderr, false))
   end
 
   defp topic, do: "ltjs_#{System.unique_integer([:positive])}"
@@ -73,9 +75,51 @@ defmodule LoadtestJsTest do
     test "a directory that does not exist fails before any connection opens", ctx do
       marker = Path.join([ctx.tmp_dir, "missing", "m"])
 
-      assert {_output, 1} =
-               run_js(ctx, ~w(--scenario produce --connections 2 --duration 1 --measure-marker) ++ [marker])
+      assert {output, 1} =
+               run_js(ctx, ~w(--scenario produce --connections 2 --duration 1 --measure-marker) ++ [marker],
+                 stderr: true
+               )
 
+      assert output =~ "does not exist or is not writable"
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "a marker that already exists is overwritten rather than refused", ctx do
+      marker = Path.join(ctx.tmp_dir, "stale.marker")
+      File.write!(marker, "from an earlier run")
+      args = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic(), "--measure-marker", marker]
+
+      assert {_output, 0} = run_js(ctx, args)
+      assert File.read!(marker) == ""
+    end
+
+    test "a marker path that is a directory fails before any connection opens", ctx do
+      # Checking only the parent directory let this through, and it then failed inside writeFileSync,
+      # after every connection had authenticated and the warmup had run.
+      marker = Path.join(ctx.tmp_dir, "marker.d")
+      File.mkdir_p!(marker)
+
+      assert {output, 1} =
+               run_js(ctx, ~w(--scenario produce --connections 2 --duration 1 --measure-marker) ++ [marker],
+                 stderr: true
+               )
+
+      assert output =~ "exists and is not a regular file"
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "a marker that exists and cannot be written fails before any connection opens", ctx do
+      marker = Path.join(ctx.tmp_dir, "read-only.marker")
+      File.write!(marker, "")
+      File.chmod!(marker, 0o444)
+      on_exit(fn -> File.chmod(marker, 0o644) end)
+
+      assert {output, 1} =
+               run_js(ctx, ~w(--scenario produce --connections 2 --duration 1 --measure-marker) ++ [marker],
+                 stderr: true
+               )
+
+      assert output =~ "exists and is not writable"
       assert LoadtestProbes.successful_auths() == []
     end
 
