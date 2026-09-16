@@ -85,7 +85,7 @@ whole working tree** rather than from a list, so no change can fall between the 
 
 ```
 GIT_INDEX_FILE="$scratch/idxN" $GIT read-tree "<previous tree>"
-GIT_INDEX_FILE="$scratch/idxN" $GIT add -A -- . ':!commit_message.txt' ':!commit_1.patch' <the other generated names, and the exclusions the user agreed to>
+GIT_INDEX_FILE="$scratch/idxN" $GIT add -A -- . ':!commit_message.sh' ':!commit_1.patch' <the other generated names, and the exclusions the user agreed to>
 ```
 
 Three pathspec rules, all learned by breaking them:
@@ -94,10 +94,13 @@ Three pathspec rules, all learned by breaking them:
   excludes a tracked file that happens to match, such as a `commit_message.ex` in the project, and it
   would be dropped from the commit without a word.
 - Name only the generated files git would otherwise stage, which is the script and the patches. The
-  message files are ignored here (`*.txt` in `.gitignore`), and naming an ignored path is the mistake
-  in the next rule.
-- Never name an ignored path in a pathspec, not even as an exclusion (`':!tmp'` when `tmp/` is
-  ignored). `git add` aborts on it and stages nothing. Ignored paths are left out already.
+  message files are ignored here (`*.txt` in `.gitignore`), so they are out already, and naming one is
+  the mistake in the next rule.
+- Never name an ignored path in a pathspec, not even as an exclusion (`':!tmp'` when `tmp/` is ignored,
+  or `':!commit_message.txt'` when `*.txt` is). Measured: `git add` prints the path as ignored and exits
+  1, **having staged every other path anyway**. Under `set -e` that stops the preparation with a
+  half-built index, which is the worst of both outcomes, and the exit status is easy to miss when the
+  add is the last command of a step.
 - A deleted file is a change like any other: `add -A` stages the deletion. Exclude it by name only if
   the user agreed to leave it out.
 
