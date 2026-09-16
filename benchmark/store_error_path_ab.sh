@@ -19,11 +19,13 @@ export AB_DIR=${AB_DIR:-${TMPDIR:-/tmp}/store_error_path_ab}
 
 say() { printf '[ab] %s\n' "$*"; }
 
-# The harness is new with #147, so the baseline tree gets the branch's copy. It only calls APIs both
-# trees have (`ElixirStore.open/append/sync/close`), so the baseline measures its own store code.
+# The harness is new with #147, so the baseline tree gets the branch's copy, with the support files it
+# loads. It only calls APIs both trees have (`ElixirStore.open/append/sync/close`), so the baseline
+# measures its own store code.
 mkdir -p "$BASELINE/benchmark/support"
 cp "$BRANCH/benchmark/store_error_path_ab.exs" "$BASELINE/benchmark/store_error_path_ab.exs"
 cp "$BRANCH/benchmark/support/paired_stats.exs" "$BASELINE/benchmark/support/paired_stats.exs"
+cp "$BRANCH/benchmark/support/e2e_sample.exs" "$BASELINE/benchmark/support/e2e_sample.exs"
 
 build() {
   say "building $1"

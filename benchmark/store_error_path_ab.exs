@@ -29,8 +29,10 @@
 # with no verdict, never a pass.
 
 Code.require_file("support/paired_stats.exs", __DIR__)
+Code.require_file("support/e2e_sample.exs", __DIR__)
 
 defmodule StoreErrorPathAB do
+  alias Malachi.Bench.E2ESample
   alias Malachi.Bench.PairedStats
   alias Malachi.Log.Record
   alias Malachi.Storage.ElixirStore
@@ -192,12 +194,7 @@ defmodule StoreErrorPathAB do
   end
 
   # The produce line of throughput_1m.exs, which is the half #147 touches.
-  defp parse_e2e(output) do
-    case Regex.run(~r/batch latency .*?p50=(\d+)\s+p99=(\d+)/, output) do
-      [_line, p50, p99] -> %{p50: String.to_integer(p50), p99: String.to_integer(p99)}
-      nil -> raise "e2e sample without a produce latency line:\n#{output}"
-    end
-  end
+  defp parse_e2e(output), do: E2ESample.parse(output)
 end
 
 case System.get_env("AB_MODE") do

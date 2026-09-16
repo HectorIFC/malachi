@@ -404,16 +404,25 @@ defmodule Malachi.Loadtest.Ceiling do
 
   @doc """
   The regime a batch size describes, as a sentence fragment every surface prints verbatim:
-  `batch 10 x 256B (2.5KB of values per request, group commit off)`. Formatted once here so the
-  generated pages, the dashboard and the workflow cannot disagree about rounding or wording.
+  `batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)`.
+  Formatted once here so the generated pages, the dashboard, the workflow and the benchmark scripts
+  cannot disagree about rounding or wording. Both settings in the parentheses move the per-flush cost:
+  group commit decides how many produces one sync carries, and preallocation changes sign across the
+  flush sizes the ladder spans (`Malachi.Storage.Preallocation`), so a label naming one and not the
+  other would still let two numbers from different regimes read alike.
   """
-  @spec regime_label(pos_integer(), pos_integer(), boolean()) :: String.t()
-  def regime_label(batch, record_size, group_commit) do
+  @spec regime_label(pos_integer(), pos_integer(), boolean(), non_neg_integer()) :: String.t()
+  def regime_label(batch, record_size, group_commit, segment_prealloc_bytes)
+      when is_integer(batch) and batch > 0 and is_integer(record_size) and record_size > 0 and
+             is_boolean(group_commit) and is_integer(segment_prealloc_bytes) and segment_prealloc_bytes >= 0 do
     commit = if group_commit, do: "on", else: "off"
 
     "batch #{batch} x #{format_bytes(record_size)} (#{format_bytes(batch * record_size)} of values per request, " <>
-      "group commit #{commit})"
+      "group commit #{commit}, segment preallocation #{preallocation(segment_prealloc_bytes)})"
   end
+
+  defp preallocation(0), do: "off"
+  defp preallocation(bytes), do: format_bytes(bytes)
 
   @doc """
   `regime_label/3` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
@@ -452,7 +461,8 @@ defmodule Malachi.Loadtest.Ceiling do
       "record_size" => sweep.record_size,
       "bytes_per_request" => batch * sweep.record_size,
       "group_commit" => sweep.group_commit,
-      "regime_label" => regime_label(batch, sweep.record_size, sweep.group_commit)
+      "segment_prealloc_bytes" => sweep.segment_prealloc_bytes,
+      "regime_label" => regime_label(batch, sweep.record_size, sweep.group_commit, sweep.segment_prealloc_bytes)
     }
   end
 

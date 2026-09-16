@@ -16,7 +16,7 @@ pages read means one pipeline keeps both current, and there is no second copy to
 
 The headline number at the top is the Node.js produce rate, which is what the page has always led with. Its
 subtitle names the flush regime the number describes (for example `batch 10 x 256B (2.5KB of values per request,
-group commit off)`), printed verbatim from the `regime_label` the ceiling sweep records, because a throughput quoted
+group commit off, segment preallocation 64MB)`), printed verbatim from the `regime_label` the ceiling sweep records, because a throughput quoted
 without its batch size gets applied to flush sizes it never described. The full curve over batch sizes is on the
 generated results pages. The
 Elixir generator records different fields (backpressure counters, four latency percentiles rather than a full

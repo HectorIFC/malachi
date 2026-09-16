@@ -88,8 +88,54 @@ disk via `ReplicationServer` -> consume), measuring throughput, per-batch latenc
 memory, on-disk bytes, and CPU (reductions). This is the system baseline the streaming
 alternatives are judged against.
 
+**Regime:** batch 1000 x 100B (97.7KB of values per request), one producer, one produce at a
+time. It writes under `BENCH_DIR` (default: the system temp dir) on a real filesystem, so it runs
+on the durable path, with segment preallocation off and group commit off: every produce is one
+sync, and segments grow as they fill. Production runs with preallocation on, so this measures the
+growing-segment path. The script pins both settings rather than inheriting them, and prints the
+same label, filesystem type included, next to its result, so an alternative measured in another
+regime is visibly not on equal ground. Measurements count on Linux only.
+
+It refuses to run on tmpfs or ramfs, which many Linux distributions mount at `/tmp` and which
+have no durable path to measure, unless `BENCH_ALLOW_TMPFS=1`. `benchmark/store_error_path_ab.exs`
+reads its produce latency line, so that line keeps its shape.
+
 ```bash
 mix run benchmark/throughput_1m.exs
+BENCH_DIR=/var/tmp mix run benchmark/throughput_1m.exs
+```
+
+### `single_node_scale.exs`
+
+N independent produce pipelines (each its own `BrokerServer`, `ReplicationServer` and topic) on
+one node, run concurrently, to see how far a sharded data plane lifts the aggregate produce rate.
+It sweeps two dimensions, because the answer depends on both: the pipeline count N, and the batch
+size. With small batches the per-produce cost dominates and each pipeline's serial broker is the
+limit; with large ones the disk is. The table reports, per batch size, the aggregate and
+per-pipeline rate, the efficiency against the smallest N, the aggregate p50 and p99 of every
+produce, and the disk rate, then whether 1M rec/s aggregate was reached.
+
+**Regime:** 100B values, and every pipeline sends 1000 produces per cell, so every cell has as
+many latency samples and batch 1000 is 1M records per pipeline: N=1 at batch 1000 runs the
+`throughput_1m.exs` regime. The other settings are the same as there: it writes under `BENCH_DIR`
+on a real filesystem, on the durable path, with segment preallocation off and group commit off,
+so every produce is one sync; it refuses tmpfs and ramfs unless `BENCH_ALLOW_TMPFS=1`; and each
+block of the table is headed by its full regime label, filesystem type included. Measurements
+count on Linux only, and a single sweep is one sample, so its numbers are not published here.
+
+| knob | default | meaning |
+| --- | --- | --- |
+| `SCALE_NS` | `1 2 4 8` | pipeline counts to sweep |
+| `SCALE_BATCHES` | `10 100 1000` | records per produce to sweep |
+| `BENCH_DIR` | system temp dir | directory to write under; must exist |
+| `BENCH_ALLOW_TMPFS` | unset | `1` runs on tmpfs or ramfs anyway, with a warning |
+
+`SCALE_NS` and `SCALE_BATCHES` take distinct positive integers separated by spaces; anything else
+stops the run before it starts.
+
+```bash
+mix run benchmark/single_node_scale.exs
+SCALE_NS="1 2" SCALE_BATCHES="100 1000" mix run benchmark/single_node_scale.exs
 ```
 
 ### `streaming_bench.exs`

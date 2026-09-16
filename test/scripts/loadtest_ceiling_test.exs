@@ -103,7 +103,10 @@ defmodule LoadtestCeilingTest do
       result = read_json!(ctx.out)
       assert result["records_per_s"] == 80
       assert result["connections"] == 8
-      assert result["regime_label"] == "batch 10 x 256B (2.5KB of values per request, group commit off)"
+
+      assert result["regime_label"] ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)"
+
       assert result["peak_at_ladder_limit"] == true
       assert [%{"batch" => 10, "status" => "peak"}, %{"batch" => 100, "status" => "no_clean_rung"}] = result["curve"]
       assert %{"connections" => 8, "repeat_records_per_s" => 80, "delta_pct" => +0.0} = result["sweep"]["aa_control"]

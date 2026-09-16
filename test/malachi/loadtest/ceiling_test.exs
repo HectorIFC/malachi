@@ -174,7 +174,7 @@ defmodule Malachi.Loadtest.CeilingTest do
     end
   end
 
-  describe "format_bytes/1 and regime_label/3" do
+  describe "format_bytes/1 and regime_label/4" do
     for {bytes, text} <- [
           {100, "100B"},
           {1023, "1023B"},
@@ -191,9 +191,27 @@ defmodule Malachi.Loadtest.CeilingTest do
       end
     end
 
-    test "the label names the batch, the record size, the bytes per request and group commit" do
-      assert Ceiling.regime_label(10, 256, false) == "batch 10 x 256B (2.5KB of values per request, group commit off)"
-      assert Ceiling.regime_label(4096, 256, true) == "batch 4096 x 256B (1MB of values per request, group commit on)"
+    test "the label names the batch, the record size, the bytes per request, group commit and preallocation" do
+      assert Ceiling.regime_label(10, 256, false, 67_108_864) ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)"
+
+      assert Ceiling.regime_label(4096, 256, true, 0) ==
+               "batch 4096 x 256B (1MB of values per request, group commit on, segment preallocation off)"
+
+      assert Ceiling.regime_label(1000, 100, false, 8192) ==
+               "batch 1000 x 100B (97.7KB of values per request, group commit off, segment preallocation 8KB)"
+    end
+
+    test "the label refuses values that describe no regime" do
+      for {batch, record_size, group_commit, prealloc} <- [
+            {0, 256, false, 0},
+            {10, 0, false, 0},
+            {10, 256, "false", 0},
+            {10, 256, false, -1},
+            {10, 256, false, nil}
+          ] do
+        assert_raise FunctionClauseError, fn -> Ceiling.regime_label(batch, record_size, group_commit, prealloc) end
+      end
     end
   end
 
@@ -266,7 +284,11 @@ defmodule Malachi.Loadtest.CeilingTest do
       assert result["record_size"] == 256
       assert result["bytes_per_request"] == 2_560
       assert result["group_commit"] == false
-      assert result["regime_label"] == "batch 10 x 256B (2.5KB of values per request, group commit off)"
+      assert result["segment_prealloc_bytes"] == 67_108_864
+
+      assert result["regime_label"] ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)"
+
       assert result["headline_status"] == "peak"
       assert result["peak_at_ladder_limit"] == true
       assert result["lower_bound_reasons"] == ["ladder_limit"]
@@ -281,7 +303,26 @@ defmodule Malachi.Loadtest.CeilingTest do
       assert large["status"] == "peak"
       assert large["peak"]["connections"] == 16
       assert large["peak_at_ladder_limit"] == false
-      assert large["regime_label"] == "batch 100 x 256B (25KB of values per request, group commit off)"
+
+      assert large["regime_label"] ==
+               "batch 100 x 256B (25KB of values per request, group commit off, segment preallocation 64MB)"
+    end
+
+    test "the regime of every batch size comes from the settings the sweep recorded" do
+      sweep = sweep(%{group_commit: "true", segment_prealloc_bytes: "0"})
+      rates = %{{10, 32} => 1_000, {10, 64} => 2_000, {100, 16} => 5_000, {100, 32} => 4_000}
+
+      assert {:ok, result} = Ceiling.summarize(sweep, clean_runs(sweep, rates), nil)
+
+      assert result["group_commit"] == true
+      assert result["segment_prealloc_bytes"] == 0
+
+      assert result["regime_label"] ==
+               "batch 10 x 256B (2.5KB of values per request, group commit on, segment preallocation off)"
+
+      assert [small, large] = result["curve"]
+      assert small["segment_prealloc_bytes"] == 0
+      assert large["regime_label"] =~ "(25KB of values per request, group commit on, segment preallocation off)"
     end
 
     test "a tie goes to the fewer connections" do
@@ -374,7 +415,7 @@ defmodule Malachi.Loadtest.CeilingTest do
       assert large["peak_at_ladder_limit"] == nil
       assert large["lower_bound_reasons"] == []
 
-      assert ("batch 100 x 256B (25KB of values per request, group commit off): no clean rung; " <>
+      assert ("batch 100 x 256B (25KB of values per request, group commit off, segment preallocation 64MB): no clean rung; " <>
                 "16 conns (4 errors), 32 conns (unrecorded errors)") in Ceiling.summary_lines(result)
     end
 
@@ -391,7 +432,7 @@ defmodule Malachi.Loadtest.CeilingTest do
       assert item(result, 100)["status"] == "no_completed_rung"
       assert Enum.all?(item(result, 100)["rungs"], &(&1["status"] == "failed" and &1["repetitions_completed"] == 0))
 
-      assert "batch 100 x 256B (25KB of values per request, group commit off): no rung completed" in Ceiling.summary_lines(
+      assert "batch 100 x 256B (25KB of values per request, group commit off, segment preallocation 64MB): no rung completed" in Ceiling.summary_lines(
                result
              )
     end
@@ -477,7 +518,7 @@ defmodule Malachi.Loadtest.CeilingTest do
       assert {:ok, %{"lower_bound_reasons" => ["ladder_limit", "generator_saturated"]} = result} =
                Ceiling.summarize(sweep, runs, nil)
 
-      assert ("batch 10 x 256B (2.5KB of values per request, group commit off): 1000 rec/s at 32 connections, " <>
+      assert ("batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB): 1000 rec/s at 32 connections, " <>
                 "lower bound (ladder_limit, generator_saturated)") in Ceiling.summary_lines(result)
     end
 
