@@ -22,9 +22,11 @@
 Code.require_file("support/measure.exs", __DIR__)
 Code.require_file("support/paired_stats.exs", __DIR__)
 Code.require_file("support/flush_regime.exs", __DIR__)
+Code.require_file("support/scale_sweep.exs", __DIR__)
 
 defmodule ScaleBench do
   alias Malachi.Bench.FlushRegime
+  alias Malachi.Bench.ScaleSweep
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
@@ -134,7 +136,7 @@ defmodule ScaleBench do
     #{@produces_per_pipeline} produces of #{@value_bytes}B values.
     """)
 
-    blocks = for batch <- batches, do: {batch, run_block(target, batch, ns, base_n)}
+    blocks = for batch <- batches, do: {batch, run_block(target, batch, ns)}
 
     IO.puts("\n============ single-node scaling: N parallel produce pipelines, per batch size ============")
     IO.puts("eff % is the per-pipeline rate against N=#{base_n} at the same batch size.")
@@ -149,10 +151,8 @@ defmodule ScaleBench do
     IO.puts(String.duplicate("=", 91))
   end
 
-  defp run_block(target, batch, ns, base_n) do
-    results = Enum.map(ns, &run_cell(target.dir, batch, &1))
-    base = Enum.find(results, &(&1.n == base_n)).per
-    Enum.map(results, fn r -> %{r | eff: Float.round(r.per / base * 100, 0)} end)
+  defp run_block(target, batch, ns) do
+    ns |> Enum.map(&run_cell(target.dir, batch, &1)) |> ScaleSweep.with_efficiency()
   end
 
   defp print_block(target, batch, results) do
@@ -186,7 +186,7 @@ defmodule ScaleBench do
   end
 
   defp print_verdict(batch, results) do
-    case Enum.find(results, fn r -> r.agg >= @target_rate end) do
+    case ScaleSweep.crossing(results, @target_rate) do
       nil ->
         max_n = results |> Enum.map(& &1.n) |> Enum.max()
         IO.puts("batch #{batch}: did NOT reach 1M rec/s aggregate within the swept range (N up to #{max_n})")
@@ -199,39 +199,16 @@ defmodule ScaleBench do
     end
   end
 
-  # A space-separated list of distinct positive integers from `name`, or `default` when it is unset.
-  # Anything else stops the run before it starts: a sweep over values nobody asked for is worse than none.
+  # The ladder `name` asks for, or `default` when it is unset. Anything else stops the run before it starts.
   defp ladder!(name, default) do
-    case System.get_env(name) do
-      nil -> default
-      value -> value |> parse_ladder() |> ladder_or_halt(name, value)
+    case ScaleSweep.ladder(name, System.get_env(name), default) do
+      {:ok, ladder} ->
+        ladder
+
+      {:error, message} ->
+        IO.puts(:stderr, "ERROR: " <> message)
+        System.halt(2)
     end
-  end
-
-  defp parse_ladder(value) do
-    with {:ok, items} <- non_empty(String.split(value)),
-         {:ok, ints} <- positive_integers(items) do
-      if Enum.uniq(ints) == ints, do: {:ok, ints}, else: {:error, "repeats a value"}
-    end
-  end
-
-  defp non_empty([]), do: {:error, "is empty"}
-  defp non_empty(items), do: {:ok, items}
-
-  defp positive_integers(items) do
-    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
-      case Integer.parse(item) do
-        {int, ""} when int > 0 -> {:cont, {:ok, acc ++ [int]}}
-        _ -> {:halt, {:error, "has #{inspect(item)}, not a positive integer"}}
-      end
-    end)
-  end
-
-  defp ladder_or_halt({:ok, ladder}, _name, _value), do: ladder
-
-  defp ladder_or_halt({:error, reason}, name, value) do
-    IO.puts(:stderr, "ERROR: #{name}=#{inspect(value)} #{reason}; expected distinct positive integers")
-    System.halt(2)
   end
 end
 
