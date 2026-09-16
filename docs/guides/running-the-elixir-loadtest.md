@@ -110,8 +110,11 @@ request runs it too without committing, and posts the numbers as a comment when 
 this repository; from a fork the comment is skipped and the artifacts carry them.
 
 CI does not run the bare command above. It runs `scripts/loadtest-ceiling.sh` with `GENERATOR=elixir`,
-which boots a dedicated server pinned to three cores and pins this generator to the fourth, then sweeps
-`--connections` and publishes the peak as the ceiling:
+which boots a dedicated server pinned to three cores for every point and pins this generator to the
+fourth, then sweeps the batch size and, for each batch size, the connection count, publishing every
+batch size's peak with the headline batch size's in the flat fields. Why the batch size is swept, the
+default ladders, the A-A repeat and how to read the noise are the same for both generators and are
+described in [Running the Node.js load test](running-the-node-loadtest.md):
 
 ```bash
 GENERATOR=elixir SRV_CPUSET=1,2,3 LT_CPUSET=0 OUT=/tmp/loadtest-elixir.json scripts/loadtest-ceiling.sh
@@ -132,10 +135,12 @@ multi-core scalability, which a one-core pin removes by construction, so a singl
 client may still edge it out here. The attribution below says who capped, which is what the comparison
 needs.
 
-The run samples both sides' CPU across the peak window and the page reports them: a server near three
-of three cores saturated (its ceiling was found), a generator near one of one capped first (the number
-is a lower bound). Both generators drive a **single topic**, which in Malachi means a single range and
-a serialized append on its primary, so the published figure is the one-topic ceiling; `--topics` spreads
+Every point samples both sides' CPU across its measured window, which starts when this generator
+creates the file named by `--measure-marker` (after every connection authenticated and the warmup
+ended), and the page reports them: a server near three of three cores saturated (its ceiling was
+found), a generator near one of one capped first (the point is a lower bound, and says so). Both
+generators drive a **single topic**, which in Malachi means a single range and a serialized append on
+its primary, so the published figure is the one-topic ceiling; `--topics` spreads
 load across ranges when you want the multi-shard picture locally. Run the script the same way locally
 when you want the published ceiling; the bare command above is a single point at whatever concurrency
 you pass.

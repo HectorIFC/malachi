@@ -105,6 +105,12 @@ Keep unrelated fixes in their own commits. Pre-existing debt found along the way
 stale doc, an inconsistent helper) is welcome, in a separate commit from the feature, so a revert of one
 does not drag the other.
 
+If you work with Claude Code, the repository's `prepare-commits` skill (`/commits`) does that split for
+you without committing anything: it assigns every change to a commit, splitting a file by hunk when it
+belongs to more than one, writes each message and one patch per commit, checks that the patches replay
+to the intended tree, and hands back a script that creates the commits in order and then removes its own
+files. You read the messages and run the script.
+
 Write the commit message for the person who will read it in a year with no memory of the discussion:
 what changed, why the alternative was not taken, and what it does not cover. Prose over bullet lists.
 

@@ -8,6 +8,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Histogram
+  alias Malachi.Test.LoadtestProbes
   alias Malachi.Wire
 
   @port Application.compile_env(:malachi, :tcp_port, 4040)
@@ -65,6 +66,18 @@ defmodule Malachi.LoadtestTest do
       assert r.ops > 0
       assert r.records == r.ops * 5
       assert r.records_per_s > 0
+    end
+
+    test "the report records the batch size and record size it ran with, as fields of their own" do
+      # The flush regime the throughput describes. Inside meta.command it is free text in a syntax the
+      # Node generator does not share, which is why the ceiling sweep and the published pages read these.
+      r = run(scenario: :produce, connections: 2, batch: 7, record_size: 100, topic: topic("regime"))
+      assert r.batch == 7
+      assert r.record_size == 100
+
+      defaults = run(scenario: :produce, connections: 1, topic: topic("regime_defaults"))
+      assert defaults.batch == 10
+      assert defaults.record_size == 256
     end
 
     test "a produce refused by the publish quota is counted apart from a genuine error" do
@@ -375,6 +388,134 @@ defmodule Malachi.LoadtestTest do
       assert decoded["latency_ms"]["p50"] == report.latency_ms.p50
       assert decoded["meta"]["command"] == report.meta.command
       assert decoded["meta"]["hardware"]["cpu"] == report.meta.hardware.cpu
+    end
+  end
+
+  describe "measured window marker" do
+    @describetag :tmp_dir
+
+    test "appears only after every connection authenticated and the warmup ended", %{tmp_dir: dir} do
+      # The harness samples CPU from this instant. It used to start WARM seconds after the spawn instead,
+      # which at 512 connections fell entirely inside authentication, so the published attribution
+      # measured Argon2 rather than produce.
+      marker = Path.join(dir, "measure.marker")
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+      LoadtestProbes.watch_file(marker)
+
+      r = run(scenario: :produce, connections: 3, batch: 2, warmup: 1, measure_marker: marker, topic: topic("marker"))
+
+      assert_receive {:file_appeared, ^marker, appeared_at}, 1_000
+      auths = LoadtestProbes.successful_auths()
+
+      # The setup connection plus one per worker.
+      assert length(auths) == 4
+      assert appeared_at >= List.last(auths) + 1_000 - LoadtestProbes.poll_ms()
+      assert r.errors == 0
+    end
+
+    test "marks the boundary itself, appearing neither before the warmup ends nor after the run", %{tmp_dir: dir} do
+      # The marker is the measured window's left edge for the harness that samples CPU over it, so it
+      # has to land ON warmup_end: early would hand the sampler part of the warmup, late would hand it
+      # part of the measured work under another phase's attribution.
+      marker = Path.join(dir, "boundary.marker")
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+      LoadtestProbes.watch_file(marker)
+
+      run(
+        scenario: :produce,
+        connections: 2,
+        batch: 1,
+        warmup: 1,
+        duration: 2,
+        measure_marker: marker,
+        topic: topic("bound")
+      )
+
+      assert_receive {:file_appeared, ^marker, appeared_at}, 1_000
+      ready = List.last(LoadtestProbes.successful_auths())
+
+      assert appeared_at >= ready + 1_000 - LoadtestProbes.poll_ms(), "the marker appeared before the warmup ended"
+      assert appeared_at <= ready + 1_500, "the marker appeared after the measured window had started"
+    end
+
+    test "is never recorded in the reproduce command", %{tmp_dir: dir} do
+      # It names a directory on the machine that ran the load, so a published command carrying it would
+      # refuse to start anywhere else.
+      command = Loadtest.reproduce_command(measure_marker: Path.join(dir, "m"))
+
+      refute command =~ "measure"
+    end
+
+    test "a directory that does not exist is a named error before any connection opens", %{tmp_dir: dir} do
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+
+      assert_raise ArgumentError, ~r/measure_marker directory .* does not exist or is not writable/, fn ->
+        run(scenario: :produce, connections: 2, measure_marker: Path.join([dir, "missing", "m"]))
+      end
+
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "a marker that already exists is overwritten rather than refused", %{tmp_dir: dir} do
+      marker = Path.join(dir, "stale.marker")
+      File.write!(marker, "from an earlier run")
+
+      r = run(scenario: :produce, connections: 1, batch: 1, measure_marker: marker, topic: topic("marker_exists"))
+
+      assert File.read!(marker) == ""
+      assert r.errors == 0
+    end
+
+    test "a marker path that is a directory is a named error before any connection opens", %{tmp_dir: dir} do
+      # Checking only the parent directory let this through, and it then failed inside File.write!, after
+      # every connection had authenticated and the warmup had run.
+      marker = Path.join(dir, "marker.d")
+      File.mkdir_p!(marker)
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+
+      assert_raise ArgumentError, ~r/exists and is not a writable regular file \(type directory/, fn ->
+        run(scenario: :produce, connections: 2, measure_marker: marker)
+      end
+
+      assert LoadtestProbes.successful_auths() == []
+    end
+
+    test "a marker that exists and cannot be written is a named error", %{tmp_dir: dir} do
+      marker = Path.join(dir, "read-only.marker")
+      File.write!(marker, "")
+      File.chmod!(marker, 0o444)
+      on_exit(fn -> File.chmod(marker, 0o644) end)
+
+      assert_raise ArgumentError, ~r/exists and is not a writable regular file \(type regular, access read\)/, fn ->
+        Loadtest.run(measure_marker: marker)
+      end
+    end
+
+    test "an empty path is a named error", _context do
+      assert_raise ArgumentError, ~r/measure_marker must be a non-empty path/, fn ->
+        Loadtest.run(measure_marker: "")
+      end
+    end
+
+    test "a read-only directory is a named error", %{tmp_dir: dir} do
+      read_only = Path.join(dir, "ro")
+      File.mkdir_p!(read_only)
+      File.chmod!(read_only, 0o555)
+      on_exit(fn -> File.chmod(read_only, 0o755) end)
+
+      assert_raise ArgumentError, ~r/does not exist or is not writable/, fn ->
+        Loadtest.run(measure_marker: Path.join(read_only, "m"))
+      end
+    end
+
+    test "the mix task accepts --measure-marker and turns a bad one into a Mix error", %{tmp_dir: dir} do
+      assert_raise Mix.Error, ~r/measure_marker directory/, fn ->
+        Mix.Tasks.Malachi.Loadtest.run(["--measure-marker", Path.join([dir, "missing", "m"])])
+      end
     end
   end
 

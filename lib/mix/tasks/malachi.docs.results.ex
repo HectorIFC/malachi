@@ -25,6 +25,8 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
   use Mix.Task
 
+  alias Malachi.Loadtest.Ceiling
+
   @published_dir "benchmark/published"
   @output_dir "docs/generated"
 
@@ -135,29 +137,158 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
         "[#{how_to_title}](#{how_to_path}) for the other ways to drive it.",
       "## Throughput",
       table(throughput_rows(result)),
+      curve_section(result),
       "## Latency",
       table(latency_rows(result)),
       backpressure_section(result),
       "## Reproduce",
-      table(meta_rows(result["meta"]))
+      table(meta_rows(result["meta"]) ++ sweep_rows(result["sweep"]))
     ])
   end
 
-  defp loadtest_headline(result) do
-    "**#{number(result["records_per_s"])} records per second** at saturation over " <>
+  # The regime sits INSIDE the sentence, not beside it: the headline is what gets quoted, and a
+  # throughput quoted without its batch size gets applied to flush sizes it never described (#145).
+  defp loadtest_headline(%{"records_per_s" => rate} = result) when is_number(rate) do
+    "**#{number(rate)} records per second** at saturation#{regime_clause(result)} over " <>
       "#{result["duration_s"]}s with #{result["errors"]} errors, scenario `#{result["scenario"]}`, " <>
       "peaking at #{result["connections"]} connections#{cpu_phrase(result)}." <>
-      ladder_limit_note(result)
+      lower_bound_note(result)
   end
 
-  # When the sweep peaked at its top rung the knee may lie beyond it, so the figure is a lower bound on
-  # the ceiling rather than the ceiling. Only added when the run recorded that it hit the limit.
-  defp ladder_limit_note(%{"peak_at_ladder_limit" => true}),
-    do:
-      " This is a lower bound: the connection sweep peaked at its top rung, so the true ceiling may be " <>
-        "higher."
+  # A sweep whose headline batch size had no clean rung still writes its result, which is how a local
+  # run reaches this page; CI never publishes one. Saying so beats a headline with a blank number.
+  defp loadtest_headline(result) do
+    regime =
+      case result["regime_label"] do
+        label when is_binary(label) -> ", #{label}"
+        _unrecorded -> ""
+      end
 
-  defp ladder_limit_note(_), do: ""
+    "**No clean peak was measured at the headline batch size**#{regime}. " <>
+      "The batch-size table below shows what each batch size recorded."
+  end
+
+  # Absent on results recorded before the sweep carried its regime, and then left out rather than parsed
+  # from meta.command, whose syntax differs between the two generators.
+  defp regime_clause(%{"regime_label" => label}) when is_binary(label), do: ", #{label},"
+  defp regime_clause(_result), do: ""
+
+  # A peak is a lower bound on the ceiling when the sweep says why: it sat at the top of its connection
+  # ladder, or its generator core was saturated. Results from before the reasons were recorded carry only
+  # the ladder-limit flag, which still earns the note.
+  defp lower_bound_note(%{"lower_bound_reasons" => [_ | _] = reasons}),
+    do:
+      " This is a lower bound: " <>
+        Enum.map_join(reasons, " and ", &reason_text/1) <> ", so the true ceiling may be higher."
+
+  defp lower_bound_note(%{"lower_bound_reasons" => _none}), do: ""
+
+  defp lower_bound_note(%{"peak_at_ladder_limit" => true}),
+    do: lower_bound_note(%{"lower_bound_reasons" => ["ladder_limit"]})
+
+  defp lower_bound_note(_result), do: ""
+
+  defp reason_text("ladder_limit"), do: "the connection sweep peaked at its top rung"
+  defp reason_text("generator_saturated"), do: "the single generator core was saturated"
+  defp reason_text(other), do: to_string(other)
+
+  # --- the curve over batch sizes ---
+
+  @curve_headers ["Batch", "Values per request", "Peak records/s", "At connections", "Status", "Lower bound because"]
+
+  defp curve_section(%{"curve" => [_ | _] = curve} = result) do
+    "## Throughput by batch size\n\n" <>
+      noise_paragraph(result["sweep"]) <>
+      table(Enum.map(curve, &curve_row/1), @curve_headers)
+  end
+
+  defp curve_section(_result), do: ""
+
+  # Every cell is rendered in words rather than left nil: a batch size with no peak is a finding, and a
+  # dropped row would hide it.
+  defp curve_row(item) do
+    peak = item["peak"] || %{}
+
+    {
+      number(item["batch"]),
+      bytes(item["bytes_per_request"]),
+      number(peak["records_per_s"]) || "none",
+      number(peak["connections"]) || "none",
+      status_text(item),
+      reasons_cell(item)
+    }
+  end
+
+  defp bytes(value) when is_integer(value) and value >= 0, do: Ceiling.format_bytes(value)
+  defp bytes(_value), do: "not recorded"
+
+  defp status_text(%{"status" => "peak"}), do: "peak"
+
+  defp status_text(%{"status" => "no_clean_rung", "rungs" => rungs}) do
+    errorful =
+      for %{"status" => "errorful"} = rung <- rungs || [] do
+        "#{rung["connections"]} connections, #{rung["errors"] || "unrecorded"} errors"
+      end
+
+    "no clean rung (#{Enum.join(errorful, "; ")})"
+  end
+
+  defp status_text(%{"status" => "no_completed_rung"}), do: "no rung completed"
+  defp status_text(item), do: to_string(item["status"] || "not recorded")
+
+  defp reasons_cell(%{"peak" => nil}), do: "n/a"
+  defp reasons_cell(%{"lower_bound_reasons" => [_ | _] = reasons}), do: Enum.map_join(reasons, "; ", &reason_text/1)
+  defp reasons_cell(_item), do: "no"
+
+  # How far to trust a difference between rows, stated next to the rows.
+  defp noise_paragraph(%{} = sweep) do
+    repetitions = sweep["repetitions"]
+
+    "Each batch size ran over its own connection ladder, #{repetitions} #{plural(repetitions, "repetition")} " <>
+      "per point, with the points interleaved across batch sizes. #{aa_sentence(sweep)} Compare batch sizes " <>
+      "within this run rather than across runs: on a shared CI runner the published ceiling has moved by more " <>
+      "than 30% between runs of unchanged code.\n\n"
+  end
+
+  defp noise_paragraph(_sweep), do: ""
+
+  defp aa_sentence(%{"aa_control" => %{"delta_pct" => delta} = aa}) when is_number(delta) do
+    "Repeating the headline peak moved it #{delta}% (#{number(aa["first_records_per_s"])} then " <>
+      "#{number(aa["repeat_records_per_s"])} records per second), so a difference between batch sizes smaller " <>
+      "than that is noise."
+  end
+
+  defp aa_sentence(%{"aa_control_reason" => reason}) when is_binary(reason),
+    do: "No A-A repeat of the headline peak was recorded (#{reason}), so this run carries no noise estimate."
+
+  defp aa_sentence(_sweep),
+    do: "No A-A repeat of the headline peak was recorded, so this run carries no noise estimate."
+
+  defp sweep_rows(%{} = sweep) do
+    [
+      {"Batch sizes", join(sweep["batch_ladder"])},
+      {"Connection ladders", conns_ladders(sweep)},
+      {"Repetitions per point", sweep["repetitions"]},
+      {"Record size", bytes(sweep["record_size"])},
+      {"Group commit", on_off(sweep["group_commit"])},
+      {"Segment preallocation", bytes(sweep["segment_prealloc_bytes"])}
+    ]
+  end
+
+  defp sweep_rows(_sweep), do: []
+
+  defp conns_ladders(%{"batch_ladder" => [_ | _] = batches, "conns_ladders" => %{} = ladders}) do
+    Enum.map_join(batches, "; ", fn batch -> "batch #{batch}: #{join(ladders[to_string(batch)])}" end)
+  end
+
+  defp conns_ladders(_sweep), do: nil
+
+  defp join(values) when is_list(values), do: Enum.join(values, " ")
+  defp join(_values), do: nil
+
+  defp on_off(true), do: "on"
+  defp on_off(false), do: "off"
+  defp on_off(_value), do: nil
 
   # One side's CPU attribution ("2.47 of 3"), or nil when the run did not sample that side, so it is
   # dropped rather than rendered as a measured zero. `side` is "server" or "generator".
@@ -318,15 +449,26 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     end
   end
 
-  # A row whose value is nil is dropped rather than rendered blank, so a table never claims to have
+  # A row with a nil cell is dropped rather than rendered blank, so a table never claims to have
   # measured something the run did not record.
   # A header with no rows under it renders as an empty table, which reads as a measurement that came
   # back with nothing rather than a section that had nothing to render. `bullets/1` already answers
   # that case in words; this matches it.
-  defp table(rows) do
-    case for {label, value} <- rows, value != nil, do: "| #{cell(label)} | #{cell(value)} |" do
-      [] -> "None recorded."
-      body -> Enum.join(["| Measure | Value |", "| --- | --- |" | body], "\n")
+  # Rows are tuples with one element per header; the two-column measure/value table is the default.
+  defp table(rows, headers \\ ["Measure", "Value"]) do
+    body =
+      for row <- rows, cells = Tuple.to_list(row), nil not in cells do
+        "| " <> Enum.map_join(cells, " | ", &cell/1) <> " |"
+      end
+
+    case body do
+      [] ->
+        "None recorded."
+
+      body ->
+        header = "| " <> Enum.join(headers, " | ") <> " |"
+        separator = "|" <> String.duplicate(" --- |", length(headers))
+        Enum.join([header, separator | body], "\n")
     end
   end
 

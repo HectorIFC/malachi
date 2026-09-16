@@ -32,6 +32,10 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       trust store when none is given. `--insecure` skips that verification: development only, since it
       makes the connection encrypted but unauthenticated and therefore open to interception.
     * `--json` emit the report as JSON
+    * `--measure-marker` a path created (empty) the moment the measured window begins, after every
+      connection has authenticated and the warmup has ended, so a harness can sample CPU over that
+      window alone. Its directory must exist. Left out of the recorded command, since it is plumbing for
+      the caller rather than part of the run.
   """
 
   use Mix.Task
@@ -68,7 +72,8 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     cacert: :string,
     cert: :string,
     key: :string,
-    json: :boolean
+    json: :boolean,
+    measure_marker: :string
   ]
 
   @impl Mix.Task

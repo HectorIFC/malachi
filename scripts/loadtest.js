@@ -405,7 +405,7 @@ function buildMeta() {
   const cpus = os.cpus();
   return {
     timestamp: new Date().toISOString(),
-    command: [path.relative(REPO_ROOT, process.argv[1]), ...process.argv.slice(2)].join(' '),
+    command: [path.relative(REPO_ROOT, process.argv[1]), ...recordedArgs(process.argv.slice(2))].join(' '),
     git_ref: ref ? (dirty ? `${ref}-dirty` : ref) : null,
     git_ref_date: git(['show', '-s', '--format=%cI', 'HEAD']),
     malachi_version: malachiVersion(),
@@ -416,6 +416,54 @@ function buildMeta() {
       os: `${os.platform()} ${os.release()}`,
     },
   };
+}
+
+// Why the marker path cannot be used, or null when it can. A marker that already exists is overwritten
+// when the measured window opens, so it has to be a writable regular file; a directory or a file owned
+// by someone else passes a check of the parent alone and then fails inside writeFileSync, after every
+// connection has authenticated. Mirrors `check_marker!` in lib/malachi/loadtest.ex.
+function markerProblem(marker) {
+  let stat = null;
+  try {
+    stat = fs.statSync(marker);
+  } catch {
+    stat = null;
+  }
+
+  if (stat) {
+    if (!stat.isFile()) return `"${marker}" exists and is not a regular file`;
+    try {
+      fs.accessSync(marker, fs.constants.W_OK);
+    } catch {
+      return `"${marker}" exists and is not writable`;
+    }
+    return null;
+  }
+
+  const dir = path.dirname(marker);
+  try {
+    if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch {
+    return `directory "${dir}" does not exist or is not writable`;
+  }
+  return null;
+}
+
+// The arguments a reproduction needs: everything typed except --measure-marker and its value. The marker
+// is plumbing for the harness that launched the run, and its path names a directory on that machine, so
+// a published command carrying it would refuse to start anywhere else. Mirrors the Elixir generator,
+// which leaves it out of its rebuilt command for the same reason.
+function recordedArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--measure-marker') {
+      i += 1;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
 }
 
 // Offline check that the histogram's percentiles (including the deep tail) match a brute-force sorted
@@ -474,6 +522,10 @@ function report(scenario, opts, elapsedMs, stats) {
           scenario,
           mode: openLoopMode ? 'open-loop' : streaming ? 'stream' : 'closed-loop',
           connections: opts.connections,
+          // The flush regime the throughput describes, as fields of their own rather than only inside
+          // meta.command, whose syntax differs between the two generators. Mirrored by mix malachi.loadtest.
+          batch: opts.batch,
+          record_size: opts.recordSize,
           duration_s: Number(secs.toFixed(3)),
           topic: opts.topic,
           target_rate_per_s: openLoopMode ? opts.rate : null,
@@ -579,6 +631,9 @@ ${colors.yellow('Options')}
   --warmup <s>       Warmup seconds excluded from stats (default 0)
   --samples <n>      Deprecated, ignored (percentiles now use an exact histogram, not a sample)
   --json             Emit the report as JSON (with a reproduce-metadata block)
+  --measure-marker <path>  Create this (empty) file when the measured window begins, after every
+                     connection authenticated and the warmup ended, so a harness can sample CPU over
+                     that window alone. Its directory must exist. Not recorded in the JSON command.
   --self-test        Validate the latency histogram offline (no server) and exit
   -h, --help         Show this help
 
@@ -593,7 +648,7 @@ async function main() {
   const valueFlags = [
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
-    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms',
+    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker',
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
@@ -622,6 +677,23 @@ async function main() {
     process.exit(1);
   }
 
+  // Checked before any connection opens, as the Elixir generator does: discovering after hundreds of
+  // authentications that the marker cannot be written would lose the run, and creating it early to
+  // prove it would fire the signal before the window it marks. hasOwnProperty, not truthiness, because
+  // a trailing `--measure-marker` with no value parses as a present key holding undefined.
+  const measureMarker = flags['measure-marker'];
+  if (Object.prototype.hasOwnProperty.call(flags, 'measure-marker')) {
+    if (typeof measureMarker !== 'string' || measureMarker === '') {
+      console.error(colors.red('--measure-marker needs a file path'));
+      process.exit(1);
+    }
+    const problem = markerProblem(measureMarker);
+    if (problem) {
+      console.error(colors.red(`--measure-marker ${problem}`));
+      process.exit(1);
+    }
+  }
+
   const needsBacklog = scenario === 'fetch' || scenario === 'stream' || scenario === 'mixed';
   const opts = {
     connections: int(flags.connections, 10),
@@ -641,6 +713,7 @@ async function main() {
     connectConcurrency: int(flags['connect-concurrency'], 32),
     connectStaggerMs: int(flags['connect-stagger-ms'], 100),
     json: !!flags.json,
+    measureMarker: measureMarker || null,
   };
 
   if (scenario === 'stream' && opts.rate > 0) {
@@ -669,14 +742,22 @@ async function main() {
       const warmStats = new Stats();
       await runScenario(scenario, clients, opts, opts.warmup * 1000, warmStats);
       if (!opts.json) console.log(colors.gray(`   warmup done (${warmStats.count} ops discarded)`));
-      // Reconnect: the streaming subscription can only be ended by closing the socket (there is no
-      // unsubscribe frame), so reuse across warmup+measure would double-subscribe. Fresh connections also
-      // reset any TCP/GC warmup state for the measured run.
-      clients.forEach((c) => c.close());
-      clients = await makeClients(opts.connections, opts);
+      // Only the stream scenario reconnects here: a subscription can only be ended by closing its socket
+      // (there is no unsubscribe frame), so reusing it across warmup and measure would double-subscribe.
+      // Every other scenario keeps its warmed connections, as the Elixir generator always has.
+      // Reconnecting them all ran a second authentication storm inside every ceiling point (93s at 512
+      // connections on the CI runner) and measured a colder client than the Elixir generator did, so
+      // published Node numbers move with this change.
+      if (scenario === 'stream') {
+        clients.forEach((c) => c.close());
+        clients = await makeClients(opts.connections, opts);
+      }
     }
 
     const stats = new Stats();
+    // The measured window begins here, after every connection authenticated and the warmup ended, which
+    // no caller can infer from the spawn time (see --measure-marker in help()).
+    if (opts.measureMarker) fs.writeFileSync(opts.measureMarker, '');
     const start = performance.now();
     await runScenario(scenario, clients, opts, opts.duration * 1000, stats);
     const elapsed = performance.now() - start;

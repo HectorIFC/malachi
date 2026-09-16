@@ -219,7 +219,7 @@
 
         if (isHeadline) {
           document.getElementById("subtitle").textContent =
-            `${d.scenario ?? "?"}${d.mode ? " (" + d.mode + ")" : ""} - ${d.connections ?? "?"} connections - ${d.meta?.hardware?.cpu ?? "unknown CPU"}`;
+            `${d.scenario ?? "?"}${d.mode ? " (" + d.mode + ")" : ""}${typeof d.regime_label === "string" ? " - " + d.regime_label : ""} - ${d.connections ?? "?"} connections - ${d.meta?.hardware?.cpu ?? "unknown CPU"}`;
           document.getElementById("hl-num").textContent = fmt(d.records_per_s);
           document.getElementById("hl-unit").textContent = "records/s";
           document.getElementById("hl-cap").textContent =
