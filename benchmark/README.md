@@ -74,7 +74,8 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
 alternating tmpfs and disk within each repetition, on a 4-core runner (servers on cores 1-3, the
 generator on core 0). The spread between repetitions of one mode is the noise floor, and a difference
 between the modes is claimed only when their min to max ranges do not overlap, and never from a single
-run of either mode; the job summary states which. Per-flush latency is not part of the comparison yet: the flush telemetry is not on `main`.
+run of either mode; the job summary states which. Per-flush latency is not part of the comparison yet,
+because the flush telemetry is not on `main`; porting it and adding it to this output is #164.
 
 ## Mechanism investigations
 

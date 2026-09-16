@@ -26,6 +26,9 @@
 # stalls land there and not in the warmup or the window. Both modes pass it, so the modes differ only in
 # where the data lives.
 #
+# Per-flush latency, the most direct cost of the durable path, is not reported: the flush telemetry is
+# not on main yet. Porting it and scraping it here is #164.
+#
 # A `docker stats` snapshot is taken mid-window so a CPU-saturated node set is visible evidence (the
 # three servers share the cores of SRV_CPUSET).
 #
