@@ -45,6 +45,14 @@ on:
         description: 'End-to-end (throughput_1m) repetitions per arm, about 16s each (a verdict needs at least 5; 0 skips the case)'
         type: string
         default: '5'
+      docker_cluster_durability:
+        description: 'Run the Docker cluster benchmark on tmpfs and on a real disk, interleaved (issue #144). About half an hour.'
+        type: boolean
+        default: false
+      docker_cluster_reps:
+        description: 'Repetitions of each data mode (the spread between them is the noise floor)'
+        type: string
+        default: '3'
 
 permissions:
   contents: read
@@ -174,3 +182,75 @@ jobs:
           name: store-error-path-ab
           path: ${{ runner.temp }}/store-error-path-ab/report.json
           if-no-files-found: error
+
+  # The measurement behind issue #144: the cluster produce path with its data on tmpfs, where fsync is
+  # free, against the same cluster on a real disk with production preallocation, where the durable path
+  # is paid in full. Opt-in and dispatch-only because it takes about half an hour, and its own job so it
+  # runs on a runner nothing else is using. Only this Linux run counts; see benchmark/README.md for the
+  # protocol (interleaved repetitions, a difference claimed only for disjoint ranges).
+  docker-cluster-durability:
+    name: Docker cluster, tmpfs against real disk
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_cluster_durability }}
+    runs-on: ubuntu-latest
+    # About 12 cases of two minutes plus the image build. Twice that is stuck, not slow.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # This job runs repository code (the images and the harness) and does no authenticated git.
+        with:
+          persist-credentials: false
+
+      # At RF=3 the disk mode preallocates 64MB for every topic on every replica, about 12GB with the
+      # default 64 topics, and the runner's free space is not much more than that. The harness refuses a
+      # case that does not fit; this makes room for it by removing toolchains nothing here uses.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      # The harness defaults assume a workstation with eight cores; a GitHub runner has four, so the
+      # cpusets are re-split here, as the chaos job does. Modes alternate within every repetition so a slow
+      # stretch of the runner lands on both instead of reading as the effect of one.
+      - name: Run both data modes, interleaved
+        env:
+          DOCKER_CLUSTER_REPS: ${{ inputs.docker_cluster_reps }}
+          SRV_CPUSET: '1,2,3'
+          LT_CPUSET: '0'
+          OUT: ${{ runner.temp }}/docker-cluster/cases.jsonl
+        run: |
+          set -uo pipefail
+          case "$DOCKER_CLUSTER_REPS" in
+            '' | *[!0-9]* | 0*) echo "docker_cluster_reps must be a positive integer, got '$DOCKER_CLUSTER_REPS'"; exit 2 ;;
+          esac
+          failed=0
+          for rep in $(seq 1 "$DOCKER_CLUSTER_REPS"); do
+            for mode in 0 1; do
+              echo "::group::repetition $rep, REAL_DISK=$mode"
+              REAL_DISK="$mode" benchmark/docker-cluster.sh || { echo "::error::repetition $rep with REAL_DISK=$mode failed"; failed=1; }
+              echo "::endgroup::"
+            done
+          done
+          exit "$failed"
+
+      # always(): a run with failed cases still recorded the ones that finished, and the summary lists
+      # the failures by name.
+      - name: Summarize
+        if: always()
+        run: |
+          cases="$RUNNER_TEMP/docker-cluster/cases.jsonl"
+          if [ -s "$cases" ]; then
+            jq -rs -f benchmark/docker-cluster-summary.jq "$cases" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No case was recorded." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the cases
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-cluster-durability
+          path: ${{ runner.temp }}/docker-cluster/cases.jsonl
+          if-no-files-found: warn
