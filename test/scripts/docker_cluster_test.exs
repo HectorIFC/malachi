@@ -37,7 +37,7 @@ defmodule DockerClusterTest do
     stubs = Path.join(dir, "stubs")
     File.mkdir_p!(stubs)
     write_stub!(stubs, "docker", docker_stub())
-    write_stub!(stubs, "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    write_stub!(stubs, "sleep", sleep_stub())
     write_stub!(stubs, "findmnt", findmnt_stub())
     write_stub!(stubs, "lsblk", lsblk_stub())
 
@@ -236,6 +236,50 @@ defmodule DockerClusterTest do
       write_stub!(ctx.stubs, "lsblk", ~s(#!/usr/bin/env bash\necho '{"blockdevices": []}'\n))
       assert {output, 0} = run_script(ctx, [{"RFS", "1"}])
       assert output =~ "on ext4 rw,relatime on /dev/sda1 (disk unknown)"
+    end
+  end
+
+  describe "the CPU snapshot" do
+    test "waits for the generator's measure marker, then reads every container", ctx do
+      assert {output, 0} = run_script(ctx, [{"RFS", "1"}, {"REAL_DISK", "1"}, {"OUT", ctx.out}])
+      [run] = loadtest_runs(ctx)
+      assert run.args =~ "--measure-marker /tmp/malachi-measure-window --json"
+
+      verbs = ctx |> docker_calls() |> Enum.map(& &1.args)
+
+      marker =
+        Enum.find_index(
+          verbs,
+          &(&1 =~ ~r/^exec malachi-cluster-loadtest-\d+ sh -c test -e \/tmp\/malachi-measure-window/)
+        )
+
+      stats = Enum.find_index(verbs, &String.starts_with?(&1, "stats --no-stream"))
+      assert marker && stats && marker < stats
+
+      assert output =~ "mid-window CPU: malachi-cluster-1 150.00%"
+      assert [%{"mid_window_cpu" => "malachi-cluster-1 150.00%"}] = cases(ctx)
+    end
+
+    test "is left out when the window never opens, and does not hold the run", ctx do
+      assert {output, 0} = run_script(ctx, [{"RFS", "1"}, {"STUB_MARKER", "no"}, {"OUT", ctx.out}])
+      refute output =~ "mid-window CPU"
+      refute Enum.any?(docker_calls(ctx), &(&1.verb == "stats"))
+      assert [%{"outcome" => "ok", "mid_window_cpu" => nil}] = cases(ctx)
+    end
+
+    test "stops with a generator that hangs before its window", ctx do
+      assert {output, 1} =
+               run_script(ctx, [
+                 {"RFS", "1"},
+                 {"STUB_MARKER", "no"},
+                 {"STUB_LOADTEST", "hang"},
+                 {"CASE_TIMEOUT", "1"},
+                 {"OUT", ctx.out}
+               ])
+
+      assert output =~ "(timeout after 1s)"
+      refute Enum.any?(docker_calls(ctx), &(&1.verb == "stats"))
+      assert [%{"outcome" => "timeout after 1s", "mid_window_cpu" => nil}] = cases(ctx)
     end
   end
 
@@ -466,7 +510,8 @@ defmodule DockerClusterTest do
 
   # Answers from STUB_FSTYPE (a filesystem, or `none` for an unreadable mount), STUB_DF_KB and STUB_DU_KB
   # (kilobytes, or `none` for no output), STUB_HEALTHY (healthy node count), STUB_LOADTEST (json, errors,
-  # garbage, none, hang), STUB_LABEL (fail) and STUB_REAL_MIX (1 sends the label to the real task).
+  # garbage, none, hang), STUB_MARKER (yes, or no for a window that never opens), STUB_LABEL (fail) and
+  # STUB_REAL_MIX (1 sends the label to the real task).
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -486,7 +531,11 @@ defmodule DockerClusterTest do
       stats) echo "malachi-cluster-1 150.00%" ;;
       build | up | down | logs | rm) : ;;
       exec)
-        case "$4" in
+        # `compose exec -T <service> <cmd>` puts the command fourth; the sampler's plain
+        # `exec <container> sh -c ...` puts it third.
+        command="$4"
+        [ "$3" = sh ] && command=sh
+        case "$command" in
           awk)
             [ "${STUB_FSTYPE:-ext4}" = none ] && exit 1
             echo "${STUB_FSTYPE:-ext4} rw,relatime" ;;
@@ -497,6 +546,9 @@ defmodule DockerClusterTest do
           du)
             [ "${STUB_DU_KB:-}" = none ] && exit 0
             echo "${STUB_DU_KB:-1000000} /data/malachi_log" ;;
+          sh)
+            [ "${STUB_MARKER:-yes}" = yes ] && echo yes
+            exit 0 ;;
           *) echo "stub docker: unexpected exec $*" >&2; exit 97 ;;
         esac ;;
       run)
@@ -532,6 +584,18 @@ defmodule DockerClusterTest do
         esac ;;
       *) echo "stub docker: unexpected $*" >&2; exit 97 ;;
     esac
+    """
+  end
+
+  # The health poll and the snapshot's half-window wait return at once; the marker poll's fractional
+  # pause is kept short but real, so the poll does not spin.
+  defp sleep_stub do
+    ~S"""
+    #!/usr/bin/env bash
+    case "$1" in
+      *.*) exec "$REAL_SLEEP" 0.05 ;;
+    esac
+    exit 0
     """
   end
 

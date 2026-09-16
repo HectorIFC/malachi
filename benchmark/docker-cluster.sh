@@ -30,7 +30,8 @@
 # not on main yet. Porting it and scraping it here is #164.
 #
 # A `docker stats` snapshot is taken mid-window so a CPU-saturated node set is visible evidence (the
-# three servers share the cores of SRV_CPUSET).
+# three servers share the cores of SRV_CPUSET). The window is the one the generator marks with
+# `--measure-marker`, never a guess from its start time: setup length varies with the data mode.
 #
 # Linux only, like Malachi: the measurement counts only there. On any other host the script refuses to
 # run unless ALLOW_NON_LINUX=1, which runs it as a smoke test whose numbers are not comparable.
@@ -131,6 +132,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 NODES="malachi1 malachi2 malachi3"
 LOADTEST_CONTAINER="malachi-cluster-loadtest-$$"
+# Created by the generator, inside its own container, the moment the measured window opens.
+MEASURE_MARKER=/tmp/malachi-measure-window
 FAILED=0
 
 # --- where the numbers come from ---
@@ -227,6 +230,27 @@ node_mount() {
 # The three volumes share that disk, so the total is what matters.
 needed_bytes() { echo $((TOPICS * $1 * MALACHI_SEGMENT_PREALLOC_BYTES)); }
 
+# Snapshots CPU% of every container around the middle of the measured window, into $WORK/stats.txt. The
+# window opens when the generator creates MEASURE_MARKER in its container, which is polled until then,
+# and the sampler gives up once the run is over ($WORK/run.done) without having seen it. Timing the
+# snapshot from the generator's start instead put it inside setup whenever setup was long: in the disk
+# mode, where setup writes the whole preallocation first, it read 6 to 16% per node against about 100%
+# on tmpfs (dispatch run 35125794435), which said nothing about the window.
+#
+# `docker stats --no-stream` samples for about two seconds before it prints (2.4s measured on Docker
+# Desktop), so it starts that much before the middle: started at the middle of a 4s window it ended
+# after the window, and the generator, already gone, was missing from the reading.
+sample_cpu() {
+  until [ -e "$WORK/run.done" ]; do
+    if [ "$(docker exec "$LOADTEST_CONTAINER" sh -c "test -e $MEASURE_MARKER && echo yes" 2> /dev/null)" = yes ]; then
+      sleep "$((DUR > 2 ? (DUR - 2) / 2 : 0))"
+      docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > "$WORK/stats.txt" 2> /dev/null
+      return
+    fi
+    sleep 0.5
+  done
+}
+
 # Appends the case to OUT; a no-op without it.
 record_case() {
   local rf="$1" outcome="$2" loadtest="${3:-null}" du_bytes="${4:-null}" cpu="${5:-}"
@@ -300,10 +324,9 @@ for rf in $RFS; do
     fi
   fi
 
-  # Snapshot CPU% of every container mid-window (background; the run below takes setup+warmup+duration
-  # secs, so this lands in the window only when setup is short; it is evidence, not a measurement).
-  rm -f "$WORK/stats.txt"
-  ( sleep $((WARM + DUR / 2)); docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > "$WORK/stats.txt" 2> /dev/null ) &
+  # The CPU snapshot runs beside the generator; it is evidence of who saturated, not a measurement.
+  rm -f "$WORK/stats.txt" "$WORK/run.done"
+  sample_cpu &
   stats_pid=$!
 
   # stderr goes to a file rather than /dev/null. It used to be discarded, and the cost of that showed
@@ -313,9 +336,10 @@ for rf in $RFS; do
   RF="$rf" timeout --kill-after=10 "$CASE_TIMEOUT" $COMPOSE run --rm --name "$LOADTEST_CONTAINER" loadtest \
     --host malachi1,malachi2,malachi3 --scenario produce \
     --connections "$CONNS" --batch "$BATCH" --topics "$TOPICS" --prepopulate "$BATCH" \
-    --duration "$DUR" --warmup "$WARM" --record-size "$RSIZE" --json \
+    --duration "$DUR" --warmup "$WARM" --record-size "$RSIZE" --measure-marker "$MEASURE_MARKER" --json \
     > "$WORK/loadtest.out" 2> "$WORK/loadtest-rf$rf.err"
   status=$?
+  touch "$WORK/run.done"
   wait "$stats_pid" 2> /dev/null
   cpu=""
   [ -s "$WORK/stats.txt" ] && cpu="$(tr '\n' ' ' < "$WORK/stats.txt" | sed 's/ $//')"
