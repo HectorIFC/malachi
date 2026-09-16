@@ -286,11 +286,11 @@ defmodule Malachi.Loadtest.Ceiling do
 
   defp parse_integer(nil, name), do: {:error, "#{name} is not set"}
 
-  defp parse_positive(value, name) do
-    case parse_integer(value, name) do
-      {:ok, integer} when integer >= 1 -> {:ok, integer}
-      {:ok, integer} -> {:error, "#{name} must be a positive integer, got #{integer}"}
-      {:error, _message} = error -> error
+  # An integer from a string, then held to the same check `validate/1` applies to a sweep.
+  defp parse_checked(value, name, check) do
+    with {:ok, integer} <- parse_integer(value, name),
+         :ok <- check.(integer, name) do
+      {:ok, integer}
     end
   end
 
@@ -425,18 +425,20 @@ defmodule Malachi.Loadtest.Ceiling do
   defp preallocation(bytes), do: format_bytes(bytes)
 
   @doc """
-  `regime_label/3` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
+  `regime_label/4` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
 
-  `params` has `:batch` and `:record_size` (positive integers) and `:group_commit` (\"true\" or
-  \"false\"), as the command line gives them. Every problem is returned as a message naming the flag to
-  fix.
+  `params` has `:batch` and `:record_size` (positive integers), `:group_commit` (\"true\" or \"false\")
+  and `:segment_prealloc_bytes` (a non-negative integer, 0 for off), as the command line gives them.
+  Every problem is returned as a message naming the flag to fix.
   """
   @spec label(map()) :: {:ok, String.t()} | {:error, String.t()}
   def label(params) do
-    with {:ok, batch} <- parse_positive(params[:batch], "--batch"),
-         {:ok, record_size} <- parse_positive(params[:record_size], "--record-size"),
-         {:ok, group_commit} <- parse_boolean(params[:group_commit], "--group-commit") do
-      {:ok, regime_label(batch, record_size, group_commit)}
+    with {:ok, batch} <- parse_checked(params[:batch], "--batch", &check_positive/2),
+         {:ok, record_size} <- parse_checked(params[:record_size], "--record-size", &check_positive/2),
+         {:ok, group_commit} <- parse_boolean(params[:group_commit], "--group-commit"),
+         {:ok, prealloc} <-
+           parse_checked(params[:segment_prealloc_bytes], "--segment-prealloc-bytes", &check_non_negative/2) do
+      {:ok, regime_label(batch, record_size, group_commit, prealloc)}
     end
   end
 

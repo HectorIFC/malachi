@@ -217,22 +217,50 @@ defmodule Malachi.Loadtest.CeilingTest do
 
   describe "label/1" do
     defp label_params(overrides \\ %{}),
-      do: Map.merge(%{batch: "100", record_size: "256", group_commit: "true"}, overrides)
+      do:
+        Map.merge(
+          %{batch: "100", record_size: "256", group_commit: "true", segment_prealloc_bytes: "0"},
+          overrides
+        )
 
-    test "formats the regime exactly as regime_label/3 does" do
-      assert Ceiling.label(label_params()) == {:ok, Ceiling.regime_label(100, 256, true)}
-      assert Ceiling.label(label_params(%{group_commit: "false"})) == {:ok, Ceiling.regime_label(100, 256, false)}
-      assert Ceiling.label(label_params(%{batch: "4096"})) == {:ok, Ceiling.regime_label(4096, 256, true)}
+    test "formats the regime exactly as regime_label/4 does" do
+      assert Ceiling.label(label_params()) == {:ok, Ceiling.regime_label(100, 256, true, 0)}
+      assert Ceiling.label(label_params(%{group_commit: "false"})) == {:ok, Ceiling.regime_label(100, 256, false, 0)}
+      assert Ceiling.label(label_params(%{batch: "4096"})) == {:ok, Ceiling.regime_label(4096, 256, true, 0)}
+
+      assert Ceiling.label(label_params(%{segment_prealloc_bytes: "67108864"})) ==
+               {:ok, Ceiling.regime_label(100, 256, true, 67_108_864)}
+    end
+
+    test "names the preallocation, off at zero" do
+      assert {:ok, "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation off)"} =
+               Ceiling.label(label_params())
+
+      assert {:ok, "batch 100 x 256B (25KB of values per request, group commit off, segment preallocation 64MB)"} =
+               Ceiling.label(label_params(%{group_commit: "false", segment_prealloc_bytes: "67108864"}))
     end
 
     test "trims the integers the way plan/1 does" do
-      assert Ceiling.label(label_params(%{batch: " 100 "})) == {:ok, Ceiling.regime_label(100, 256, true)}
+      assert Ceiling.label(label_params(%{batch: " 100 ", segment_prealloc_bytes: " 8192 "})) ==
+               {:ok, Ceiling.regime_label(100, 256, true, 8192)}
     end
 
-    test "each missing flag is named" do
-      assert Ceiling.label(%{record_size: "256", group_commit: "true"}) == {:error, "--batch is not set"}
-      assert Ceiling.label(%{batch: "100", group_commit: "true"}) == {:error, "--record-size is not set"}
-      assert Ceiling.label(%{batch: "100", record_size: "256"}) == {:error, "--group-commit is not set"}
+    for {flag, key} <- [
+          {"--batch", :batch},
+          {"--record-size", :record_size},
+          {"--group-commit", :group_commit},
+          {"--segment-prealloc-bytes", :segment_prealloc_bytes}
+        ] do
+      test "a missing #{flag} is named" do
+        assert Ceiling.label(Map.delete(label_params(), unquote(key))) == {:error, "#{unquote(flag)} is not set"}
+      end
+    end
+
+    for value <- ["-1", "-67108864"] do
+      test "--segment-prealloc-bytes #{value} is negative" do
+        assert Ceiling.label(label_params(%{segment_prealloc_bytes: unquote(value)})) ==
+                 {:error, "--segment-prealloc-bytes must be a non-negative integer, got #{unquote(value)}"}
+      end
     end
 
     for {flag, key, value} <- [
@@ -251,7 +279,9 @@ defmodule Malachi.Loadtest.CeilingTest do
           {"--batch", :batch, "ten"},
           {"--batch", :batch, "10.5"},
           {"--record-size", :record_size, "256B"},
-          {"--record-size", :record_size, ""}
+          {"--record-size", :record_size, ""},
+          {"--segment-prealloc-bytes", :segment_prealloc_bytes, "64MB"},
+          {"--segment-prealloc-bytes", :segment_prealloc_bytes, ""}
         ] do
       test "#{flag} #{inspect(value)} is not an integer" do
         assert Ceiling.label(label_params(%{unquote(key) => unquote(value)})) ==

@@ -177,10 +177,12 @@ $COMPOSE build || { echo "build failed"; exit 1; }
 group_commit_for_rf() { if [ "$1" = 1 ]; then echo true; else echo false; fi; }
 
 # Regime names come from the same formatter the ceiling results use, run in the load generator image.
+# They name the preallocation too, so a tmpfs case and a disk case never carry the same label.
 declare -A LABELS
 for rf in $RFS; do
   label="$($COMPOSE run --rm --no-deps --entrypoint mix loadtest malachi.loadtest.ceiling label \
              --batch "$BATCH" --record-size "$RSIZE" --group-commit "$(group_commit_for_rf "$rf")" \
+             --segment-prealloc-bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
              2> "$WORK/label.err" | tail -1)"
   if [ -z "$label" ]; then
     echo "could not name the regime for RF=$rf; its stderr:"

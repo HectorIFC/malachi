@@ -199,15 +199,23 @@ defmodule DockerClusterTest do
       assert run.args =~ "--name malachi-cluster-loadtest-"
     end
 
-    test "names its regime with the ceiling task's words, group commit off above RF 1", ctx do
-      assert {output, 0} = run_script(ctx, [{"STUB_REAL_MIX", "1"}, {"OUT", ctx.out}])
-      assert output =~ "regime: batch 100 x 256B (25KB of values per request, group commit on)"
-      assert output =~ "regime: batch 100 x 256B (25KB of values per request, group commit off)"
+    for {real_disk, prealloc} <- [{"0", "off"}, {"1", "64MB"}] do
+      test "names its regime with the ceiling task's words, group commit off above RF 1, " <>
+             "preallocation #{prealloc} with REAL_DISK=#{real_disk}",
+           ctx do
+        assert {output, 0} =
+                 run_script(ctx, [{"STUB_REAL_MIX", "1"}, {"REAL_DISK", unquote(real_disk)}, {"OUT", ctx.out}])
 
-      assert Enum.map(cases(ctx), &{&1["rf"], &1["regime_label"]}) == [
-               {1, "batch 100 x 256B (25KB of values per request, group commit on)"},
-               {3, "batch 100 x 256B (25KB of values per request, group commit off)"}
-             ]
+        on =
+          "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation #{unquote(prealloc)})"
+
+        off =
+          "batch 100 x 256B (25KB of values per request, group commit off, segment preallocation #{unquote(prealloc)})"
+
+        assert output =~ "regime: " <> on
+        assert output =~ "regime: " <> off
+        assert Enum.map(cases(ctx), &{&1["rf"], &1["regime_label"]}) == [{1, on}, {3, off}]
+      end
     end
 
     test "a regime that cannot be named stops the run before any case", ctx do
@@ -392,7 +400,7 @@ defmodule DockerClusterTest do
       assert %{
                "data_mode" => "disk",
                "rf" => 1,
-               "regime_label" => "LABEL batch=100 rsize=256 group_commit=true",
+               "regime_label" => "LABEL batch=100 rsize=256 group_commit=true prealloc=67108864",
                "outcome" => "ok",
                "prealloc_bytes" => @prealloc,
                "du_bytes" => 3_072_000_000,
@@ -410,7 +418,7 @@ defmodule DockerClusterTest do
                "malachi3" => %{"fstype" => "ext4", "mount_options" => "rw,relatime"}
              }
 
-      assert %{"rf" => 3, "regime_label" => "LABEL batch=100 rsize=256 group_commit=false"} = rf3
+      assert %{"rf" => 3, "regime_label" => "LABEL batch=100 rsize=256 group_commit=false prealloc=67108864"} = rf3
     end
 
     test "creates its directory", ctx do
@@ -552,13 +560,14 @@ defmodule DockerClusterTest do
           *) echo "stub docker: unexpected exec $*" >&2; exit 97 ;;
         esac ;;
       run)
-        batch="" rsize="" gc="" entrypoint=""
+        batch="" rsize="" gc="" prealloc="" entrypoint=""
         while [ $# -gt 0 ]; do
           case "$1" in
             --entrypoint) entrypoint="$2"; shift ;;
             --batch) batch="$2"; shift ;;
             --record-size) rsize="$2"; shift ;;
             --group-commit) gc="$2"; shift ;;
+            --segment-prealloc-bytes) prealloc="$2"; shift ;;
           esac
           shift
         done
@@ -567,10 +576,10 @@ defmodule DockerClusterTest do
           if [ "${STUB_LABEL:-}" = fail ]; then echo "label exploded" >&2; exit 1; fi
           if [ "${STUB_REAL_MIX:-}" = 1 ]; then
             cd "$REAL_PROJECT" && MIX_ENV=test exec "$REAL_MIX" malachi.loadtest.ceiling label \
-              --batch "$batch" --record-size "$rsize" --group-commit "$gc"
+              --batch "$batch" --record-size "$rsize" --group-commit "$gc" --segment-prealloc-bytes "$prealloc"
           fi
           echo "Compiling nothing"
-          echo "LABEL batch=$batch rsize=$rsize group_commit=$gc"
+          echo "LABEL batch=$batch rsize=$rsize group_commit=$gc prealloc=$prealloc"
           exit 0
         fi
 

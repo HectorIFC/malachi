@@ -30,9 +30,10 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
   a repetition that produced nothing; a file that does not parse fails the task, since something wrote
   garbage where a result belongs.
 
-      mix malachi.loadtest.ceiling label --batch 100 --record-size 256 --group-commit true
+      mix malachi.loadtest.ceiling label --batch 100 --record-size 256 --group-commit true \\
+        --segment-prealloc-bytes 0
 
-  Prints `Malachi.Loadtest.Ceiling.regime_label/3` for one regime, so a harness that is not this sweep
+  Prints `Malachi.Loadtest.Ceiling.regime_label/4` for one regime, so a harness that is not this sweep
   (`benchmark/docker-cluster.sh`) names its regime in the same words instead of formatting its own.
   An invalid flag fails the task with a message naming it.
   """
@@ -54,7 +55,7 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
 
   @peak_switches [run_dir: :string, sweep: :string]
   @summarize_switches [run_dir: :string, sweep: :string, out: :string]
-  @label_switches [batch: :string, record_size: :string, group_commit: :string]
+  @label_switches [batch: :string, record_size: :string, group_commit: :string, segment_prealloc_bytes: :string]
 
   @impl Mix.Task
   def run(["plan" | argv]), do: plan(argv)
