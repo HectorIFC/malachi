@@ -32,7 +32,10 @@ defmodule Bench1M do
     repl_dir = Path.join(base, "repl")
 
     {:ok, _repl} = ReplicationServer.start_link(name: :bench_repl, directory: repl_dir)
-    {:ok, broker} = BrokerServer.start_link(Path.join(base, "broker"), brokers: [:bench_repl], segment_max_bytes: 64 * 1024 * 1024)
+
+    {:ok, broker} =
+      BrokerServer.start_link(Path.join(base, "broker"), brokers: [:bench_repl], segment_max_bytes: 64 * 1024 * 1024)
+
     {:ok, _root} = BrokerServer.create_topic(broker, @topic, 8)
 
     value = :binary.copy("x", @value_bytes)
@@ -71,10 +74,16 @@ defmodule Bench1M do
     mem_final = %{total: mem(:total), binary: mem(:binary), processes: mem(:processes), ets: mem(:ets)}
 
     report(%{
-      produce_wall: produce_wall, produce_lat: Enum.sort(produce_lat),
-      consume_wall: consume_wall, consume_lat: Enum.sort(consume_lat), consumed: consumed,
-      disk: disk, reductions: red1 - red0,
-      mem_base: mem_base, mem_after_produce: mem_after_produce, mem_final: mem_final
+      produce_wall: produce_wall,
+      produce_lat: Enum.sort(produce_lat),
+      consume_wall: consume_wall,
+      consume_lat: Enum.sort(consume_lat),
+      consumed: consumed,
+      disk: disk,
+      reductions: red1 - red0,
+      mem_base: mem_base,
+      mem_after_produce: mem_after_produce,
+      mem_final: mem_final
     })
 
     GenServer.stop(broker)
@@ -107,7 +116,7 @@ defmodule Bench1M do
       page latency (#{@batch}/page) us:    p50=#{pctl(m.consume_lat, 50)}  p99=#{pctl(m.consume_lat, 99)}  max=#{List.last(m.consume_lat)}
 
     DISK      #{mb(m.disk)} MB on disk  =>  #{Float.round(m.disk / @total, 1)} bytes/record (payload #{@value_bytes}B)
-    CPU       #{m.reductions} reductions total (#{round((m.reductions) / (@total * 2))} per record round-trip)
+    CPU       #{m.reductions} reductions total (#{round(m.reductions / (@total * 2))} per record round-trip)
     MEMORY    (MB)          total   binary  processes  ets
       baseline             #{fmt(m.mem_base)}
       after 1M produce      total=#{m.mem_after_produce}
