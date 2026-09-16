@@ -29,7 +29,7 @@ defmodule Malachi.Storage.ElixirStore do
   1-byte sync costs 257us on a growing file and 75us on a sized one.
 
   It is a trade rather than a free win: it also gives up the filesystem's delayed allocation, which
-  costs more than the journal saves once a flush is large. The crossover is around 128KB per flush
+  costs more than the journal saves once a flush is large. The crossover is around 170KB per flush
   and `Malachi.Storage.Preallocation` carries the measured curve.
 
   It costs one full-size write at creation (36ms for 64MB on that runner) and it changes what the

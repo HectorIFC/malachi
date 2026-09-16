@@ -215,7 +215,7 @@ config :malachi,
   segment_max_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_MAX_BYTES"), nil),
   # How far a new segment file is sized at creation so appends stop extending it. 64MB by default,
   # matching the size a segment reaches before the broker rolls it. 0 turns it off, which is what a
-  # copy-on-write filesystem wants and what a deployment whose flushes exceed ~128KB wants, since
+  # copy-on-write filesystem wants and what a deployment whose flushes exceed ~170KB wants, since
   # above that the trade reverses. See Malachi.Application.segment_prealloc_bytes/0 and the measured
   # curve in Malachi.Storage.Preallocation.
   segment_prealloc_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_PREALLOC_BYTES"), 64 * 1024 * 1024),
