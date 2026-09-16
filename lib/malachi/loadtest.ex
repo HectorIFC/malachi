@@ -370,6 +370,14 @@ defmodule Malachi.Loadtest do
   # connections on the CI runner, so a sampler started from the spawn measured the server verifying
   # credentials and the generator waiting on it. The workers already hold the deadlines, so the run
   # process has nothing else to do until warmup ends.
+  #
+  # The instant this marks is `warmup_end`, which is also the instant every worker starts recording
+  # (`measuring = now >= m.warmup_end`), and that is why it is written here rather than before the
+  # `:go` messages: sending first costs 810us to 512 workers and the write itself 363us, while writing
+  # before them would put the marker at the START of the warmup and hand the sampler a window that
+  # includes it, which is the error this whole mechanism exists to remove. With `warmup: 0` the two
+  # coincide and a worker can record about a millisecond before the file appears, against a harness
+  # that polls for it every 100ms.
   defp mark_measure_start(nil, _warmup_end), do: :ok
 
   defp mark_measure_start(path, warmup_end) do

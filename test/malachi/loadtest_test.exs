@@ -414,6 +414,32 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
     end
 
+    test "marks the boundary itself, appearing neither before the warmup ends nor after the run", %{tmp_dir: dir} do
+      # The marker is the measured window's left edge for the harness that samples CPU over it, so it
+      # has to land ON warmup_end: early would hand the sampler part of the warmup, late would hand it
+      # part of the measured work under another phase's attribution.
+      marker = Path.join(dir, "boundary.marker")
+      probe = LoadtestProbes.watch_auth()
+      on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
+      LoadtestProbes.watch_file(marker)
+
+      run(
+        scenario: :produce,
+        connections: 2,
+        batch: 1,
+        warmup: 1,
+        duration: 2,
+        measure_marker: marker,
+        topic: topic("bound")
+      )
+
+      assert_receive {:file_appeared, ^marker, appeared_at}, 1_000
+      ready = List.last(LoadtestProbes.successful_auths())
+
+      assert appeared_at >= ready + 1_000 - LoadtestProbes.poll_ms(), "the marker appeared before the warmup ended"
+      assert appeared_at <= ready + 1_500, "the marker appeared after the measured window had started"
+    end
+
     test "is never recorded in the reproduce command", %{tmp_dir: dir} do
       # It names a directory on the machine that ran the load, so a published command carrying it would
       # refuse to start anywhere else.
