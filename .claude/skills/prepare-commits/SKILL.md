@@ -21,9 +21,20 @@ replay it or delete it.
 
 ```
 ls commit_message.sh commit_message.txt commit_message_1.txt commit_1.patch 2>/dev/null
-base=$(grep -m1 '^BASE=' commit_message.sh | cut -d= -f2)
-/usr/bin/git log --format=%s --reverse "$base..HEAD"
+base=$([ -f commit_message.sh ] && grep -m1 '^BASE=' commit_message.sh | cut -d= -f2)
+if [ -n "$base" ] && /usr/bin/git rev-parse --verify --quiet "$base^{commit}" > /dev/null; then
+  /usr/bin/git log --format=%s --reverse "$base..HEAD"
+else
+  echo "no usable base recorded"
+fi
 ```
+
+The base is checked before the log rather than after, because an unusable one does not announce
+itself. Measured: with no `commit_message.sh`, or one with no `BASE=` line, `base` is empty, and
+`git log "..HEAD"` reads the empty side as HEAD, prints nothing and exits 0. That is
+indistinguishable from a set whose commits are not there, which is a different case with a different
+answer. A `BASE` that names no commit in this repository is the one shape that does fail, with exit
+128.
 
 A script from an earlier request may already have run. What decides whether it did is the set of
 commits made **since the base it recorded**, in order, against the first line of each prepared message.
@@ -34,9 +45,10 @@ carries the same subject, and the cleanup would then delete a set that never ran
   Delete them, and never rewrite them. Rewriting a script after the user ran it recreates exactly the
   files its cleanup removed.
 - **None matched:** the user may still mean to run it. Ask before replacing anything.
-- **Some matched, or they matched out of order, or `commit_message.sh` is gone or records no base:**
-  the run stopped partway or the files describe something else. Say which messages matched and ask.
-  Deleting here costs the split and the written messages, which the working tree cannot give back.
+- **Some matched, or they matched out of order, or there is no usable base:** the run stopped partway,
+  or the files describe something else, or nothing says what they were cut against. Say which messages
+  matched, or that the base is missing, and ask. Deleting here costs the split and the written
+  messages, which the working tree cannot give back.
 
 ## 1. Inventory every change
 
