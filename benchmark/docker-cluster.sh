@@ -3,7 +3,7 @@
 # aggregate? The client (pinned to its own cores) drives all three nodes at once via multi-host
 # round-robin, over enough topics that segment placement spreads primaries across the nodes.
 #
-# Two regimes are measured, each on a FRESH cluster (recreated, empty tmpfs):
+# Two regimes are measured, each on a FRESH cluster (recreated, volumes removed before and after):
 # - RF=1: segments striped across the three primaries, group commit ACTIVE on each node. The
 #   throughput regime, the one with a real shot at 1M.
 # - RF=3: every batch quorum-fsynced across the nodes and group commit gated off (rf > 1). The
@@ -49,13 +49,18 @@ wait_healthy() {
   return 1
 }
 
+# Removes the containers AND the volumes, so no case ever starts on another case's data. The data root
+# can be the per-node named volume (MALACHI_DATA_ROOT=/data), which a plain `down` keeps.
+teardown() { RF="$1" $COMPOSE down -v > /dev/null 2>&1; }
+
 for rf in $RFS; do
+  teardown "$rf"
   RF="$rf" $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >"$WORK/up.log" 2>&1
 
   if ! wait_healthy; then
     echo "  cluster did not converge to healthy (RF=$rf); node 1 log tail:"
     RF="$rf" $COMPOSE logs --tail 25 malachi1 2>&1 | tail -25
-    RF="$rf" $COMPOSE down >/dev/null 2>&1
+    teardown "$rf"
     FAILED=1
     continue
   fi
@@ -75,7 +80,7 @@ for rf in $RFS; do
          | grep -E '^\{' | tail -1)
 
   wait "$stats_pid" 2>/dev/null
-  RF="$rf" $COMPOSE down >/dev/null 2>&1
+  teardown "$rf"
 
   if [ -z "$json" ]; then
     # A caseless client must fail the run, not blend in as a blank row.
