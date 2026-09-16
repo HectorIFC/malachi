@@ -25,7 +25,7 @@ defmodule Malachi.Bench.FlushRegimeTest do
   describe "label/4" do
     test "states the values per request, the commit and the preallocation" do
       assert FlushRegime.label(1000, 100, false, 0) ==
-               "batch 1000 x 100B (97.7KB of values per request, group commit off), segment preallocation off"
+               "batch 1000 x 100B (97.7KB of values per request, group commit off, segment preallocation off)"
     end
 
     test "uses the ceiling's byte formatting at every batch the scale sweep runs" do
@@ -35,7 +35,7 @@ defmodule Malachi.Bench.FlushRegimeTest do
 
     test "names group commit on and a preallocation size" do
       assert FlushRegime.label(1000, 100, true, 64 * 1024 * 1024) ==
-               "batch 1000 x 100B (97.7KB of values per request, group commit on), segment preallocation 64MB"
+               "batch 1000 x 100B (97.7KB of values per request, group commit on, segment preallocation 64MB)"
     end
 
     test "refuses values that describe no regime" do
@@ -55,12 +55,12 @@ defmodule Malachi.Bench.FlushRegimeTest do
   describe "label/3 and label/5" do
     test "the pinned regime ends with the filesystem" do
       assert FlushRegime.label(1000, 100, "ext4") ==
-               "batch 1000 x 100B (97.7KB of values per request, group commit off), " <>
-                 "segment preallocation off, on ext4"
+               "batch 1000 x 100B (97.7KB of values per request, group commit off, " <>
+                 "segment preallocation off), on ext4"
     end
 
     test "an unreadable mount table is said, not hidden" do
-      assert FlushRegime.label(1000, 100, :unknown) =~ ~r/segment preallocation off, on an unknown filesystem$/
+      assert FlushRegime.label(1000, 100, :unknown) =~ ~r/segment preallocation off\), on an unknown filesystem$/
     end
 
     test "label/5 appends the filesystem to label/4" do

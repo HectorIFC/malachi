@@ -23,8 +23,8 @@ defmodule Malachi.Bench.E2ESampleTest do
   ==============================================================================================
   """
 
-  @regime "REGIME    batch 1000 x 100B (97.7KB of values per request, group commit off), " <>
-            "segment preallocation off, on ext4"
+  @regime "REGIME    batch 1000 x 100B (97.7KB of values per request, group commit off, " <>
+            "segment preallocation off), on ext4"
 
   test "reads the produce p50 and p99 from a real report" do
     assert E2ESample.parse(@report) == %{p50: 1734, p99: 3932}

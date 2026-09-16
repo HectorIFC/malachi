@@ -5,7 +5,7 @@
 #
 # The group commit and preallocation settings are PASSED to the servers from here, not inherited: left
 # to the defaults, `MALACHI_GROUP_COMMIT=true` in the shell would change the regime while the label kept
-# saying off. The label reuses `Malachi.Loadtest.Ceiling.regime_label/3`, so these scripts and the
+# saying off. The label is `Malachi.Loadtest.Ceiling.regime_label/4`, so these scripts and the
 # published ceiling pages count bytes the same way: bytes of values per request, not encoded frames.
 #
 # Malachi runs on Linux only, and so do these harnesses: the filesystem comes from
@@ -33,23 +33,16 @@ defmodule Malachi.Bench.FlushRegime do
   def label(batch, value_bytes, filesystem), do: label(batch, value_bytes, @group_commit, @prealloc_bytes, filesystem)
 
   @doc """
-  A regime as one sentence fragment, for example
-  `batch 1000 x 100B (97.7KB of values per request, group commit off), segment preallocation off`.
+  A regime as one sentence fragment, exactly as `Malachi.Loadtest.Ceiling.regime_label/4` writes it for
+  the published ceiling, for example
+  `batch 1000 x 100B (97.7KB of values per request, group commit off, segment preallocation off)`.
   """
-  def label(batch, value_bytes, group_commit, prealloc_bytes)
-      when is_integer(batch) and batch > 0 and is_integer(value_bytes) and value_bytes > 0 and
-             is_boolean(group_commit) and is_integer(prealloc_bytes) and prealloc_bytes >= 0 do
-    Ceiling.regime_label(batch, value_bytes, group_commit) <>
-      ", segment preallocation " <> preallocation(prealloc_bytes)
-  end
+  defdelegate label(batch, value_bytes, group_commit, prealloc_bytes), to: Ceiling, as: :regime_label
 
   @doc "`label/4` followed by the filesystem the log is on, or `:unknown` when it could not be read."
   def label(batch, value_bytes, group_commit, prealloc_bytes, filesystem) do
     label(batch, value_bytes, group_commit, prealloc_bytes) <> ", " <> on(filesystem)
   end
-
-  defp preallocation(0), do: "off"
-  defp preallocation(bytes), do: Ceiling.format_bytes(bytes)
 
   defp on(:unknown), do: "on an unknown filesystem"
   defp on(fstype) when is_binary(fstype) and fstype != "", do: "on " <> fstype
