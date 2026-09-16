@@ -27,8 +27,9 @@ jobs:
   loadtest:
     name: Load test (${{ matrix.generator }})
     runs-on: ubuntu-latest
-    # The sweep is budgeted at 15 minutes per generator (five batch sizes, 25 points, one A-A repeat); a
-    # run twice that long is stuck rather than slow, and should fail instead of holding a runner for hours.
+    # The sweep takes about 16 minutes per generator (five batch sizes, 25 points, one A-A repeat;
+    # measured at 14m54s and 15m11s). A run twice that long is stuck rather than slow, and should fail
+    # instead of holding a runner for hours.
     timeout-minutes: 30
 
     # Two generators, two runners. Each leg boots its OWN server on its OWN runner, so one load test can

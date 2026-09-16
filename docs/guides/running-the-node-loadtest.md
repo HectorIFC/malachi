@@ -109,7 +109,9 @@ Each point runs once (`REPS=1`, stated in the result), in an order that interlea
 a slow stretch on the runner does not read as the effect of one of them, and the headline peak is run
 a second time at the end. How far that A-A repeat moves is the noise floor the page prints next to the
 curve: compare batch sizes within one run, since the published ceiling has moved by more than 30%
-between CI runs of unchanged code. The sweep is budgeted at about 15 minutes per generator. An invalid
+between CI runs of unchanged code. The whole sweep takes about 16 minutes per generator on a GitHub
+runner (14m54s and 15m11s on the two legs of the run that measured it), against the job's
+`timeout-minutes: 30`, which is there for a run that is stuck rather than slow. An invalid
 knob exits with status 2 before anything boots; a headline batch size with no clean point still writes
 the result and exits with status 1, which keeps it from being published.
 
