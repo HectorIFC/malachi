@@ -29,4 +29,9 @@ end)
 
 # Multi-node tests spin up peer BEAM nodes (need epmd/distribution); opt in with
 # `mix test --include multinode`.
-ExUnit.start(exclude: [:multinode])
+#
+# Malachi and its harnesses target Linux only, and `:linux` tests drive them with Linux tools (coreutils
+# `timeout`, util-linux). They run wherever the suite runs on Linux, CI included; on any other host they
+# are excluded rather than rewritten for it.
+linux_only = if :os.type() == {:unix, :linux}, do: [], else: [:linux]
+ExUnit.start(exclude: [:multinode | linux_only])
