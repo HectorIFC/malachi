@@ -11,8 +11,10 @@
 
 defmodule Malachi.Bench.E2ESample do
   # Anchored to a whole line, so only the produce line throughput_1m.exs prints can match. The consume
-  # line says `page latency`, and a line that merely mentions a batch and a p50 does not qualify.
-  @produce_latency ~r/^\s*batch latency \(\d+\/batch\) us:\s+p50=(\d+)\s+p99=(\d+)\s+max=\d+\s*$/m
+  # line says `page latency`, and a line that merely mentions a batch and a p50 does not qualify. The
+  # separators are spaces and tabs, never `\s`, which would let a match run across a line break and read
+  # a record split over two lines as one sample; a `\r` is allowed only before the line ends.
+  @produce_latency ~r/^[ \t]*batch latency \(\d+\/batch\) us:[ \t]+p50=(\d+)[ \t]+p99=(\d+)[ \t]+max=\d+[ \t]*\r?$/m
 
   @doc """
   The produce p50 and p99, in microseconds, from one throughput_1m.exs output.

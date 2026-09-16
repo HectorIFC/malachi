@@ -48,6 +48,19 @@ defmodule Malachi.Bench.E2ESampleTest do
     assert_raise RuntimeError, ~r/without a produce latency line/, fn -> E2ESample.parse(output) end
   end
 
+  test "a produce line split across two lines is not read as one sample" do
+    output =
+      drop_produce_line(@report) <> "  batch latency (1000/batch) us:\n  p50=1734  p99=3932  max=21442\n"
+
+    assert_raise RuntimeError, ~r/without a produce latency line/, fn -> E2ESample.parse(output) end
+  end
+
+  test "a line ending in CRLF is still read" do
+    output = drop_produce_line(@report) <> "  batch latency (1000/batch) us:  p50=5  p99=6  max=7\r\n"
+
+    assert E2ESample.parse(output) == %{p50: 5, p99: 6}
+  end
+
   test "the consume page latency alone is not a produce sample" do
     assert_raise RuntimeError, ~r/without a produce latency line/, fn ->
       E2ESample.parse(drop_produce_line(@report))
