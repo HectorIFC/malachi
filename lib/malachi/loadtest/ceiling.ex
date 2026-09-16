@@ -286,8 +286,17 @@ defmodule Malachi.Loadtest.Ceiling do
 
   defp parse_integer(nil, name), do: {:error, "#{name} is not set"}
 
+  defp parse_positive(value, name) do
+    case parse_integer(value, name) do
+      {:ok, integer} when integer >= 1 -> {:ok, integer}
+      {:ok, integer} -> {:error, "#{name} must be a positive integer, got #{integer}"}
+      {:error, _message} = error -> error
+    end
+  end
+
   defp parse_boolean("true", _name), do: {:ok, true}
   defp parse_boolean("false", _name), do: {:ok, false}
+  defp parse_boolean(nil, name), do: {:error, "#{name} is not set"}
   defp parse_boolean(value, name), do: {:error, "#{name} must be true or false, got #{inspect(value)}"}
 
   defp show(list) when is_list(list), do: Enum.map_join(list, " ", &show_term/1)
@@ -404,6 +413,22 @@ defmodule Malachi.Loadtest.Ceiling do
 
     "batch #{batch} x #{format_bytes(record_size)} (#{format_bytes(batch * record_size)} of values per request, " <>
       "group commit #{commit})"
+  end
+
+  @doc """
+  `regime_label/3` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
+
+  `params` has `:batch` and `:record_size` (positive integers) and `:group_commit` (\"true\" or
+  \"false\"), as the command line gives them. Every problem is returned as a message naming the flag to
+  fix.
+  """
+  @spec label(map()) :: {:ok, String.t()} | {:error, String.t()}
+  def label(params) do
+    with {:ok, batch} <- parse_positive(params[:batch], "--batch"),
+         {:ok, record_size} <- parse_positive(params[:record_size], "--record-size"),
+         {:ok, group_commit} <- parse_boolean(params[:group_commit], "--group-commit") do
+      {:ok, regime_label(batch, record_size, group_commit)}
+    end
   end
 
   @doc """

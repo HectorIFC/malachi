@@ -197,6 +197,58 @@ defmodule Malachi.Loadtest.CeilingTest do
     end
   end
 
+  describe "label/1" do
+    defp label_params(overrides \\ %{}),
+      do: Map.merge(%{batch: "100", record_size: "256", group_commit: "true"}, overrides)
+
+    test "formats the regime exactly as regime_label/3 does" do
+      assert Ceiling.label(label_params()) == {:ok, Ceiling.regime_label(100, 256, true)}
+      assert Ceiling.label(label_params(%{group_commit: "false"})) == {:ok, Ceiling.regime_label(100, 256, false)}
+      assert Ceiling.label(label_params(%{batch: "4096"})) == {:ok, Ceiling.regime_label(4096, 256, true)}
+    end
+
+    test "trims the integers the way plan/1 does" do
+      assert Ceiling.label(label_params(%{batch: " 100 "})) == {:ok, Ceiling.regime_label(100, 256, true)}
+    end
+
+    test "each missing flag is named" do
+      assert Ceiling.label(%{record_size: "256", group_commit: "true"}) == {:error, "--batch is not set"}
+      assert Ceiling.label(%{batch: "100", group_commit: "true"}) == {:error, "--record-size is not set"}
+      assert Ceiling.label(%{batch: "100", record_size: "256"}) == {:error, "--group-commit is not set"}
+    end
+
+    for {flag, key, value} <- [
+          {"--batch", :batch, "0"},
+          {"--batch", :batch, "-1"},
+          {"--record-size", :record_size, "0"},
+          {"--record-size", :record_size, "-256"}
+        ] do
+      test "#{flag} #{value} is not positive" do
+        assert Ceiling.label(label_params(%{unquote(key) => unquote(value)})) ==
+                 {:error, "#{unquote(flag)} must be a positive integer, got #{unquote(value)}"}
+      end
+    end
+
+    for {flag, key, value} <- [
+          {"--batch", :batch, "ten"},
+          {"--batch", :batch, "10.5"},
+          {"--record-size", :record_size, "256B"},
+          {"--record-size", :record_size, ""}
+        ] do
+      test "#{flag} #{inspect(value)} is not an integer" do
+        assert Ceiling.label(label_params(%{unquote(key) => unquote(value)})) ==
+                 {:error, "#{unquote(flag)} must be an integer, got #{inspect(unquote(value))}"}
+      end
+    end
+
+    for value <- ["maybe", "TRUE", "1", ""] do
+      test "--group-commit #{inspect(value)} is not a boolean" do
+        assert Ceiling.label(label_params(%{group_commit: unquote(value)})) ==
+                 {:error, "--group-commit must be true or false, got #{inspect(unquote(value))}"}
+      end
+    end
+  end
+
   describe "summarize/3, the headline" do
     test "the top level is the headline peak's run, with the regime, the sweep and the curve beside it" do
       sweep = sweep()

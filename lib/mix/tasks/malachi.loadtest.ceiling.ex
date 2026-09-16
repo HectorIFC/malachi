@@ -29,6 +29,12 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
   Run files are named by `Malachi.Loadtest.Ceiling.run_file/3` and `aa_file/2`. A file that is absent is
   a repetition that produced nothing; a file that does not parse fails the task, since something wrote
   garbage where a result belongs.
+
+      mix malachi.loadtest.ceiling label --batch 100 --record-size 256 --group-commit true
+
+  Prints `Malachi.Loadtest.Ceiling.regime_label/3` for one regime, so a harness that is not this sweep
+  (`benchmark/docker-cluster.sh`) names its regime in the same words instead of formatting its own.
+  An invalid flag fails the task with a message naming it.
   """
 
   use Mix.Task
@@ -48,12 +54,14 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
 
   @peak_switches [run_dir: :string, sweep: :string]
   @summarize_switches [run_dir: :string, sweep: :string, out: :string]
+  @label_switches [batch: :string, record_size: :string, group_commit: :string]
 
   @impl Mix.Task
   def run(["plan" | argv]), do: plan(argv)
   def run(["peak" | argv]), do: peak(argv)
   def run(["summarize" | argv]), do: summarize(argv)
-  def run(_argv), do: Mix.raise("usage: mix malachi.loadtest.ceiling plan|peak|summarize [options]")
+  def run(["label" | argv]), do: label(argv)
+  def run(_argv), do: Mix.raise("usage: mix malachi.loadtest.ceiling plan|peak|summarize|label [options]")
 
   defp plan(argv) do
     {opts, _rest} = OptionParser.parse!(argv, strict: @plan_switches)
@@ -127,6 +135,19 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
 
           exit({:shutdown, 1})
         end
+    end
+  end
+
+  defp label(argv) do
+    case OptionParser.parse!(argv, strict: @label_switches) do
+      {opts, []} ->
+        case Ceiling.label(Map.new(opts)) do
+          {:ok, label} -> Mix.shell().info(label)
+          {:error, message} -> Mix.raise(message)
+        end
+
+      {_opts, extra} ->
+        Mix.raise("label takes no positional arguments, got: #{Enum.join(extra, " ")}")
     end
   end
 

@@ -202,6 +202,55 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     end
   end
 
+  describe "label" do
+    defp label!(argv) do
+      Task.run(["label" | argv])
+      assert_received {:mix_shell, :info, [line]}
+      line
+    end
+
+    test "prints the regime in the words regime_label/3 uses" do
+      assert label!(["--batch", "100", "--record-size", "256", "--group-commit", "true"]) ==
+               "batch 100 x 256B (25KB of values per request, group commit on)"
+
+      assert label!(["--batch", "10", "--record-size", "256", "--group-commit", "false"]) ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off)"
+
+      assert label!(["--batch", "4096", "--record-size", "512", "--group-commit", "false"]) ==
+               "batch 4096 x 512B (2MB of values per request, group commit off)"
+    end
+
+    test "prints nothing else" do
+      Task.run(["label", "--batch", "1", "--record-size", "1", "--group-commit", "true"])
+      assert_received {:mix_shell, :info, ["batch 1 x 1B (1B of values per request, group commit on)"]}
+      refute_received {:mix_shell, _, _}
+    end
+
+    for {argv, message} <- [
+          {["--record-size", "256", "--group-commit", "true"], "--batch is not set"},
+          {["--batch", "100", "--group-commit", "true"], "--record-size is not set"},
+          {["--batch", "100", "--record-size", "256"], "--group-commit is not set"},
+          {["--batch", "0", "--record-size", "256", "--group-commit", "true"],
+           "--batch must be a positive integer, got 0"},
+          {["--batch", "100", "--record-size", "-1", "--group-commit", "true"],
+           "--record-size must be a positive integer, got -1"},
+          {["--batch", "100", "--record-size", "256", "--group-commit", "maybe"],
+           ~s(--group-commit must be true or false, got "maybe")},
+          {["--batch", "100", "--record-size", "256", "--group-commit", "true", "extra"],
+           "label takes no positional arguments, got: extra"}
+        ] do
+      test "rejects #{Enum.join(argv, " ")}" do
+        assert_raise Mix.Error, unquote(message), fn -> Task.run(["label" | unquote(argv)]) end
+      end
+    end
+
+    test "an unknown flag is rejected by name" do
+      assert_raise OptionParser.ParseError, ~r/--connections/, fn ->
+        Task.run(["label", "--batch", "100", "--connections", "32"])
+      end
+    end
+  end
+
   describe "inputs" do
     test "a run directory that does not exist", ctx do
       plan!(ctx)
@@ -226,7 +275,7 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     end
 
     test "an unknown subcommand prints the usage" do
-      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize/, fn ->
+      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize\|label/, fn ->
         Task.run(["elect"])
       end
     end
