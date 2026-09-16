@@ -784,7 +784,7 @@ defmodule Malachi.Application do
   #   * a copy-on-write filesystem (btrfs, zfs), where overwriting allocated blocks costs MORE than
   #     appending to a file;
   #   * large flushes. Preallocation is a trade, and the flush size decides which way it goes: the
-  #     per-flush p50 improves 70% at 2.5KB per flush, breaks even around 128KB, and is 16% WORSE at
+  #     per-flush p50 improves 70% at 2.5KB per flush, breaks even around 170KB, and is 16% WORSE at
   #     1MB, where the p99 is 3.5x worse. `Malachi.Storage.Preallocation` carries the full curve.
   #     What sets the flush size is what a producer sends per produce, or what group commit
   #     coalesces, not `:flush_bytes`, which is only a ceiling.
