@@ -34,7 +34,7 @@ what the broker runs, which is off above RF 1 whatever the setting says.
 | `docker-scrub.sh` | each node's named volume | yes | off | on (RF 1 by default) |
 | ceiling harness (`scripts/loadtest-ceiling.sh`) | host filesystem (ext4 on the CI runner) | yes | 64MB | off |
 | `storage_viability.exs` | host filesystem (ext4 on the CI runner) | yes | per arm | not involved (the store alone) |
-| `throughput_1m.exs`, `single_node_scale.exs` | host filesystem | yes | off | off: one sync per produce |
+| `throughput_1m.exs`, `single_node_scale.exs` | `BENCH_DIR` on the host (the system temp dir by default; tmpfs and ramfs refused) | yes | off | off: one sync per produce |
 
 Numbers from the host filesystem or a named volume are only comparable when the filesystem and the disk
 under it are the same, so the harnesses that report them say which they ran on. Only Linux counts: on
