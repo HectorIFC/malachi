@@ -201,7 +201,7 @@ defmodule Malachi.RateLimiter do
         ]
   def window_counters(identifier, action) do
     @table
-    |> :ets.match_object({{identifier, action, :_, :_}, :_, :_})
+    |> :ets.select(sharded_counters_spec(identifier, action, :"$_"))
     |> Enum.map(fn {{_identifier, _action, window_start, shard}, used, window_ms} ->
       %{window_start: window_start, shard: shard, used: used, window_ms: window_ms}
     end)
@@ -209,7 +209,10 @@ defmodule Malachi.RateLimiter do
   end
 
   @doc """
-  Reset bucket for specific identifier and action.
+  Gives `identifier` its whole allowance for `action` back and forgets its blocked count.
+
+  Clears both doors: the token bucket of `check_limit/3` and every window counter of
+  `check_limit_in_caller/3`, whatever window and shard it was counted under.
 
   Used for testing or manual intervention.
   """
@@ -268,8 +271,9 @@ defmodule Malachi.RateLimiter do
 
   @impl true
   def handle_call({:reset_bucket, identifier, action}, _from, state) do
-    key = {identifier, action}
-    :ets.delete(@table, key)
+    :ets.delete(@table, {identifier, action})
+    # The sharded counters live under one key per window per shard, so they are selected, not looked up.
+    :ets.select_delete(@table, sharded_counters_spec(identifier, action, true))
     :ets.delete(@table, {:blocked, identifier, action})
     {:reply, :ok, state}
   end
@@ -346,6 +350,17 @@ defmodule Malachi.RateLimiter do
   end
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  # A match spec for every sharded window counter of `identifier` and `action`, returning `result`. The two
+  # are compared as constants in a guard rather than written into the pattern: an identifier may be an
+  # atom, and the atoms `:_` and `:"$1"` in a pattern are wildcards, so a user named that way would
+  # otherwise match, and a reset would delete, every user's counters.
+  defp sharded_counters_spec(identifier, action, result) do
+    [
+      {{{:"$1", :"$2", :_, :_}, :_, :_}, [{:"=:=", :"$1", {:const, identifier}}, {:"=:=", :"$2", {:const, action}}],
+       [result]}
+    ]
+  end
 
   # A fixed window sharded per scheduler. The window is identified by its START in monotonic ms (see
   # `window_clock_ms/0`), derived from the clock rather than from stored state, so a new window needs no

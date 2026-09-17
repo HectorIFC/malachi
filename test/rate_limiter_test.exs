@@ -170,6 +170,75 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "reset_bucket/2 on the sharded window (check_limit_in_caller/3)" do
+    # The reset predates the sharded door and once cleared only the token bucket, so a spent publish or
+    # subscribe quota stayed spent after a reset that answered :ok.
+    @window %{limit: 1, window_ms: 60_000}
+
+    test "gives a spent quota back" do
+      {identifier, before_reset, after_reset} =
+        within_one_window(@window.window_ms, fn ->
+          identifier = "reset_sharded_#{System.unique_integer([:positive])}"
+          :ok = RateLimiter.check_limit_in_caller(identifier, :publish, @window)
+          before_reset = RateLimiter.check_limit_in_caller(identifier, :publish, @window)
+          :ok = RateLimiter.reset_bucket(identifier, :publish)
+          {identifier, before_reset, RateLimiter.check_limit_in_caller(identifier, :publish, @window)}
+        end)
+
+      assert {:error, :rate_limit_exceeded, _} = before_reset
+      assert :ok = after_reset, "the quota was still spent after reset_bucket/2 answered :ok"
+      refute RateLimiter.get_top_blocked(:publish, 1_000) |> Enum.any?(&(elem(&1, 0) == identifier))
+    end
+
+    test "clears every window and shard of that identifier and action, and nothing else" do
+      identifier = "reset_scope_#{System.unique_integer([:positive])}"
+      other = "reset_scope_other_#{System.unique_integer([:positive])}"
+      table = :malachi_rate_limits
+
+      entries = [
+        {{identifier, :publish, 1_000, 0}, 1, 1_000},
+        {{identifier, :publish, 2_000, 3}, 1, 1_000},
+        {{identifier, :subscribe, 1_000, 0}, 1, 1_000},
+        {{other, :publish, 1_000, 0}, 1, 1_000}
+      ]
+
+      :ets.insert(table, entries)
+      on_exit(fn -> for {key, _, _} <- entries, do: :ets.delete(table, key) end)
+
+      :ok = RateLimiter.reset_bucket(identifier, :publish)
+
+      assert RateLimiter.window_counters(identifier, :publish) == []
+      assert [_] = RateLimiter.window_counters(identifier, :subscribe)
+      assert [_] = RateLimiter.window_counters(other, :publish)
+    end
+
+    test "an identifier that is a match-spec wildcard atom resets only itself" do
+      table = :malachi_rate_limits
+      bystander = {"reset_bystander_#{System.unique_integer([:positive])}", :publish, 1_000, 0}
+      wildcard = {:_, :publish, 1_000, 0}
+      :ets.insert(table, [{bystander, 1, 1_000}, {wildcard, 1, 1_000}])
+      on_exit(fn -> for key <- [bystander, wildcard], do: :ets.delete(table, key) end)
+
+      assert [%{window_start: 1_000}] = RateLimiter.window_counters(:_, :publish)
+
+      :ok = RateLimiter.reset_bucket(:_, :publish)
+
+      assert :ets.lookup(table, wildcard) == []
+      assert [_] = :ets.lookup(table, bystander), "a reset of the user :_ deleted another user's counter"
+    end
+
+    test "also clears the token bucket of the same identifier and action" do
+      identifier = "reset_both_#{System.unique_integer([:positive])}"
+      config = %{limit: 1, window_ms: 60_000}
+
+      :ok = RateLimiter.check_limit(identifier, :publish, config)
+      {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit(identifier, :publish, config)
+      :ok = RateLimiter.reset_bucket(identifier, :publish)
+
+      assert :ok = RateLimiter.check_limit(identifier, :publish, config)
+    end
+  end
+
   describe "get_top_blocked/2" do
     test "returns empty list when no blocks" do
       action = :"test_action_#{:rand.uniform(1_000_000)}"
