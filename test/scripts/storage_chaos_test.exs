@@ -151,6 +151,62 @@ defmodule StorageChaosTest do
     end
   end
 
+  describe "the negative control" do
+    test "passes when invariant 4 names the node whose copy was damaged, and it is repaired", ctx do
+      assert {output, 0} = run_drill(ctx, [{"STORAGE_CHAOS_NEGATIVE_CONTROL", "1"}, {"STUB_NEGATIVE", "caught"}])
+
+      assert output =~ "event negative control"
+      assert output =~ "invariant 4 caught the diverged copy on malachi2"
+      assert output =~ "copy repaired: follower holds the primary's records"
+
+      calls = docker_calls(ctx)
+      damage = Enum.find_index(calls, &(&1 =~ "dd of=$f"))
+      negative = Enum.find_index(calls, &(&1 =~ "copies malachi1,malachi2,malachi3 chaos_acked 1 0 segment="))
+      stop = calls |> Enum.take(damage) |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) == "stop malachi-cluster-2"))
+
+      # Stopped, damaged, and compared before the node comes back: the scrub cannot repair what nobody looked at.
+      assert [_ | _] = stop
+      assert damage < negative
+      refute Enum.any?(Enum.slice(calls, elem(List.last(stop), 1)..negative), &(&1 == "start malachi-cluster-2"))
+      assert Enum.at(calls, negative + 1) == "start malachi-cluster-2"
+
+      # And then the scrub must repair it, judged like any other repair.
+      assert calls
+             |> Enum.drop(negative + 1)
+             |> Enum.any?(
+               &(&1 =~
+                   "chaos_acked 12 5000 segment=chaos_acked-r0-s1 malachi1=/copies/malachi1/malachi_log " <>
+                     "malachi2=/copies/malachi2/malachi_log")
+             )
+    end
+
+    test "fails when invariant 4 passes a damaged copy", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STORAGE_CHAOS_NEGATIVE_CONTROL", "1"}, {"STUB_NEGATIVE", "missed"}])
+      assert output =~ "FAIL: invariant 4 did not catch a byte flipped inside malachi2's sealed records"
+    end
+
+    test "fails when invariant 4 fails on a different node than the damaged one", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STORAGE_CHAOS_NEGATIVE_CONTROL", "1"}, {"STUB_NEGATIVE", "other"}])
+      assert output =~ "FAIL: invariant 4 did not catch a byte flipped inside malachi2's sealed records"
+    end
+
+    test "fails when the damaged copy is never repaired", ctx do
+      assert {output, 1} =
+               run_drill(ctx, [
+                 {"STORAGE_CHAOS_NEGATIVE_CONTROL", "1"},
+                 {"STUB_NEGATIVE", "caught"},
+                 {"STUB_REPAIR", "never"}
+               ])
+
+      assert output =~ "FAIL: the negative control's damaged copy was never repaired"
+    end
+
+    test "does not run unless asked for", ctx do
+      assert {output, 0} = run_drill(ctx, [])
+      refute output =~ "negative control"
+    end
+  end
+
   defp run_drill(ctx, env) do
     base = [
       {"PATH", "#{ctx.stubs}:#{System.get_env("PATH")}"},
@@ -158,6 +214,7 @@ defmodule StorageChaosTest do
       {"CHAOS_WORK_ROOT", ctx.work_root},
       {"CHAOS_RESULT_FILE", ctx.result},
       # Nothing from the environment running the tests may leak into the drill.
+      {"STORAGE_CHAOS_NEGATIVE_CONTROL", nil},
       {"CHECKER_WINDOW_S", nil},
       {"FULL_WINDOW_S", nil},
       {"MALACHI_SEGMENT_PREALLOC_BYTES", nil}
@@ -182,8 +239,9 @@ defmodule StorageChaosTest do
     File.chmod!(path, 0o755)
   end
 
-  # Answers from STUB_MD5_DIFFER (1: each node's index files hash differently) and STUB_COPIES (identical, benign or
-  # content: the phase-1 comparison).
+  # Answers from STUB_MD5_DIFFER (1: each node's index files hash differently), STUB_COPIES (identical, benign
+  # or content: the phase-1 comparison), STUB_NEGATIVE (caught, missed or other: the negative control's
+  # comparison) and STUB_REPAIR (never: the repair never converges).
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -242,7 +300,18 @@ defmodule StorageChaosTest do
           *"chaos_checker.exs copies"*" 12 5000 segment="*)
             copy_line malachi1
             copy_line malachi2
+            if [ "${STUB_REPAIR:-}" = never ]; then
+              echo "COPIES verdict=lagging segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi2"
+              exit 1
+            fi
             echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=sealed:6 nodes=-" ;;
+          *"chaos_checker.exs copies"*" 1 0 segment="*)
+            for n in malachi1 malachi2 malachi3; do copy_line "$n"; done
+            case "${STUB_NEGATIVE:-}" in
+              caught) echo "COPIES verdict=damaged segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi2"; exit 1 ;;
+              other) echo "COPIES verdict=damaged segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi3"; exit 1 ;;
+              *) echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=sealed:6 nodes=-" ;;
+            esac ;;
           *"chaos_checker.exs copies"*)
             verdict="${STUB_COPIES:-identical}"
             for n in malachi1 malachi2 malachi3; do copy_line "$n"; done

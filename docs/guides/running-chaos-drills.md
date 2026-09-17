@@ -89,6 +89,11 @@ second phase, whose fresh cluster deletes the volumes. The result JSON names tha
 `evidence_dir`. The repairs of the file-loss and bit-rot events are judged by the same rule, and the
 rotted index by byte equality of the index files.
 
+Set `STORAGE_CHAOS_NEGATIVE_CONTROL=1` to prove the comparison is not vacuous. After the check, the
+drill stops a follower, inverts one byte inside the records of one of its sealed copies, and requires
+the comparison to fail naming that node before the node comes back. Then it requires the integrity
+scrub to repair the copy. Run it by hand whenever the comparison changes.
+
 Then a second phase, on a fresh cluster of its own:
 
 - **full volume**: one node's log directory is a small volume (a size-limited tmpfs, from

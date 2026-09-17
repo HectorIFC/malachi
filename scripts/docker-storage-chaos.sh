@@ -49,7 +49,8 @@
 #      promise (issue #152): only a fenced copy has its preallocated tail trimmed, and each node rolls
 #      its internal files at its own sync points, so healthy copies differ as files on every run.
 #      That recovery zeroes a torn write inside the preallocated region instead of truncating it is
-#      pinned where it is decided, in test/malachi/storage/elixir_store_test.exs.
+#      pinned where it is decided, in test/malachi/storage/elixir_store_test.exs. Run with
+#      STORAGE_CHAOS_NEGATIVE_CONTROL=1 to prove this invariant still fails on a diverged copy.
 #
 # Usage: scripts/docker-storage-chaos.sh
 set -uo pipefail
@@ -104,7 +105,8 @@ seg_dir() { echo "$DATA_DIR/${CHAOS_TOPIC}-r$(seg_field "$1" range)-s$(seg_field
 # Damages a follower copy per $2 (a shell fragment run with $dir set), with the follower node
 # STOPPED: damage is injected through a one-off container on the node's data volume, so no live
 # server can race the injection (append past a truncation, reopen a deleted file's descriptor).
-# Then restarts the node and waits for reconvergence. Prints what it picked.
+# Then restarts the node and waits for reconvergence, unless LEAVE_STOPPED=1 (the caller restarts it).
+# Prints what it picked.
 damage_follower() {
   line=$(topology | grep "state=$1" | head -1)
   if [ -z "$line" ]; then
@@ -124,6 +126,7 @@ damage_follower() {
   docker stop "$container" >/dev/null 2>&1
   docker run --rm -v "$volume:/data" --entrypoint sh "$image" -c "dir=$dir; $2" ||
     { fail "damage command failed for $container"; docker start "$container" >/dev/null 2>&1; return 1; }
+  [ "${LEAVE_STOPPED:-0}" = "1" ] && return 0
   docker start "$container" >/dev/null 2>&1
   wait_healthy || fail "cluster did not reconverge after restarting $follower"
 }
@@ -288,6 +291,37 @@ else
   disagreeing_copies "$WORK/copies.txt"
   keep_copies_evidence "$WORK/copies.txt"
   fail "segment copies did not reconverge to the same records across the nodes (see the per-copy report above)"
+fi
+
+# Opt-in, and run by hand: proof that invariant 4 still fails on a copy that really diverged, so a change to how
+# copies are compared cannot turn it into a check that passes on anything. It damages a follower's sealed copy
+# INSIDE its valid records with the node stopped, requires the comparison to fail naming that node, then
+# restarts the node and requires the integrity scrub to repair the copy.
+if [ "${STORAGE_CHAOS_NEGATIVE_CONTROL:-0}" = "1" ]; then
+  event "negative control: flip a byte inside a follower's sealed records; invariant 4 must name that node"
+  # The byte is inverted rather than overwritten, so it always changes, and it sits five bytes before the end
+  # of the written records, inside the last frame: the written prefix is measured the way event e2 measures
+  # it, and the guard requires more than one smallest frame (39 bytes) of it. The node stays stopped until
+  # the comparison has run, since the scrub would otherwise repair the copy before anyone looked.
+  flip='f=$(ls $dir/*.log | head -1); written=$(od -An -v -tx1 $f | awk "{for(i=1;i<=NF;i++){n++; if(\$i!=\"00\") last=n}} END{print last+0}"); [ "$written" -gt 40 ] || { echo "no written records in $f to damage (written=$written)"; exit 1; }; at=$((written - 5)); b=$(od -An -tu1 -j$at -N1 $f | tr -d " "); printf "$(printf "\\\\%03o" $((b ^ 255)))" | dd of=$f bs=1 seek=$at count=1 conv=notrunc 2>/dev/null'
+
+  if LEAVE_STOPPED=1 damage_follower sealed "$flip"; then
+    damaged_node="malachi${DAMAGED_FOLLOWER##*-}"
+    segment="segment=$(basename "$DAMAGED_DIR")"
+
+    copies 1 0 "$segment" malachi-cluster-1 malachi-cluster-2 malachi-cluster-3 >"$WORK/negative.txt" 2>&1
+    negative_status=$?
+    grep -E '^(COPY|COPIES)' "$WORK/negative.txt"
+    if [ "$negative_status" != "0" ] && grep -q "^COPIES verdict=.* nodes=.*$damaged_node" "$WORK/negative.txt"; then
+      echo "invariant 4 caught the diverged copy on $damaged_node"
+    else
+      fail "invariant 4 did not catch a byte flipped inside $damaged_node's sealed records"
+    fi
+
+    docker start "$DAMAGED_FOLLOWER" >/dev/null 2>&1
+    wait_healthy || fail "cluster did not reconverge after the negative control"
+    wait_segment_repaired "the negative control's damaged copy was never repaired"
+  fi
 fi
 
 verify_acked
