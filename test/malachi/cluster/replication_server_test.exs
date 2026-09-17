@@ -471,17 +471,25 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   end
 
   describe "seal_async/5 (the fence answered as a message)" do
+    # The answer arrives after two fsyncs, a truncate, the index write and a synced marker, all on the
+    # server's own loop. Idle that takes about a millisecond; with the suite saturating the CPUs it was
+    # measured at a p50 of 49ms and a maximum of 109ms on a 4-core Linux box, past the 100ms
+    # `assert_receive` waits by default, which failed the first test here once in 192 CI runs. The
+    # fence is not a latency promise (the broker waits a second and resends), so the wait is the same
+    # bound `seal/4` gives its own call.
+    @fence_answer_ms 5_000
+
     test "answers what the sealed log holds, idempotently, and the segment refuses writes afterwards" do
       name = start_broker()
       assert {:ok, 1} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a", "b"]))
 
       :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :first)
-      assert_receive {:seal_result, :first, {:ok, 2, bytes}}
+      assert_receive {:seal_result, :first, {:ok, 2, bytes}}, @fence_answer_ms
       assert bytes > 0
 
       # The same numbers again: the resend a caller makes after an unanswered fence is harmless.
       :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :again)
-      assert_receive {:seal_result, :again, {:ok, 2, ^bytes}}
+      assert_receive {:seal_result, :again, {:ok, 2, ^bytes}}, @fence_answer_ms
 
       assert {:error, {:sealed, 2}} = ReplicationServer.replicate(name, @segment, [name], 0, records(["late"]))
     end
@@ -491,7 +499,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       error = fail_segment!(name, directory, @segment, :eio)
 
       :ok = ReplicationServer.seal_async(name, @segment, 0, self(), :tag)
-      assert_receive {:seal_result, :tag, ^error}
+      assert_receive {:seal_result, :tag, ^error}, @fence_answer_ms
     end
 
     test "is never answered by a server that is not there, and does not raise for it" do
