@@ -11,7 +11,7 @@ defmodule Malachi.RateLimiter do
     (`check_limit/3`); as with the sharded counters, the entry carries the window it was written under so
     that ageing it never depends on configuration read somewhere else
   - `{{identifier, action, window_start_ms, shard}, used, window_ms}` - Sharded window counters
-    (`check_limit_in_caller/3`); the entry carries the window it was counted under so the cleanup can
+    (`check_limit_in_caller/3`), the window start being in Erlang monotonic ms; the entry carries the window it was counted under so the cleanup can
     age it without having to re-read config that may since have changed
   - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
@@ -58,7 +58,9 @@ defmodule Malachi.RateLimiter do
 
   What this door gives up is the *shape* of the limit, not its arithmetic. A fixed window does not refill
   gradually, so a client can spend the tail of one window and the head of the next back to back and burst
-  to 2x the limit across a boundary; the token bucket smooths that. Bursting is acceptable for a
+  to 2x the limit across a boundary; the token bucket smooths that. The windows are named by the
+  monotonic clock, so that burst is the only way to reach a new window: a step of the system clock cannot
+  hand out a fresh quota mid-window. Bursting is acceptable for a
   throughput quota and not for an auth control, which is why the two doors exist rather than one.
 
   ## Configuration
@@ -166,7 +168,9 @@ defmodule Malachi.RateLimiter do
   # arithmetic lives, so the hot path, `current_window_start/1` and the tests cannot disagree about it.
   @spec window_bounds(integer(), pos_integer()) :: {integer(), non_neg_integer()}
   def window_bounds(now_ms, window_ms) do
-    elapsed_in_window = rem(now_ms, window_ms)
+    # `Integer.mod/2`, not `rem/2`: the monotonic clock is often negative, and `rem/2` truncates toward
+    # zero, which would put a negative timestamp's window start after the timestamp itself.
+    elapsed_in_window = Integer.mod(now_ms, window_ms)
     {now_ms - elapsed_in_window, elapsed_in_window}
   end
 
@@ -339,9 +343,9 @@ defmodule Malachi.RateLimiter do
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
 
-  # A fixed window sharded per scheduler. The window is identified by its START in wall-clock ms, derived
-  # from the clock rather than from stored state, so a new window needs no reset: its counters simply live
-  # under a new key, and the periodic cleanup reaps the old ones by age.
+  # A fixed window sharded per scheduler. The window is identified by its START in monotonic ms (see
+  # `window_clock_ms/0`), derived from the clock rather than from stored state, so a new window needs no
+  # reset: its counters simply live under a new key, and the periodic cleanup reaps the old ones by age.
   #
   # The fast path is a single atomic `update_counter` on this scheduler's own shard, which is why this
   # scales with cores.
@@ -403,8 +407,12 @@ defmodule Malachi.RateLimiter do
   # id is the cheapest identifier that already tracks how much concurrency there actually is.
   defp shard_count, do: :erlang.system_info(:schedulers_online)
 
-  # The clock the sharded windows are named by.
-  defp window_clock_ms, do: System.system_time(:millisecond)
+  # The clock the sharded windows are named by: monotonic, so a step of the OS clock can never move a
+  # request into a window with a fresh quota. Erlang system time is not safe for this. Under
+  # multi_time_warp (the default from OTP 29) it follows an OS clock step at once, and a forward step
+  # across a boundary would refund the whole quota mid-window. Its origin is arbitrary, and windows only
+  # need to agree within one node, which is the scope the quota is enforced in anyway.
+  defp window_clock_ms, do: System.monotonic_time(:millisecond)
 
   defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) do
     now = System.monotonic_time(:millisecond)
@@ -467,7 +475,7 @@ defmodule Malachi.RateLimiter do
   # the quota mid-window).
   defp cleanup_expired_buckets do
     now = System.monotonic_time(:millisecond)
-    now_ms = window_clock_ms()
+    window_now = window_clock_ms()
 
     expired_count =
       :ets.foldl(
@@ -483,7 +491,7 @@ defmodule Malachi.RateLimiter do
           # Sharded window counters: the entry carries both the start and the width of the window it
           # counted, so each one is aged against that window and nothing else.
           {{_identifier, _action, window_start, _shard} = key, _used, window_ms}, acc ->
-            if window_start < now_ms - 2 * window_ms do
+            if window_start < window_now - 2 * window_ms do
               :ets.delete(@table, key)
               acc + 1
             else

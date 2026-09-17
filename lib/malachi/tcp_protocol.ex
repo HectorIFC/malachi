@@ -334,7 +334,8 @@ defmodule Malachi.TCPProtocol do
   # The check runs in this connection's own process (`check_limit_in_caller/3`) rather than through the
   # limiter GenServer, which would put every connection in the system behind one process on the hottest
   # path. The count stays exact; what that door gives up is the token bucket's smoothing, so a client can
-  # burst to 2x the limit across a window boundary. See the limiter's own docs for the measurements.
+  # burst to 2x the limit across a window boundary. Windows follow the monotonic clock, so a system clock
+  # step does not open a new one. See the limiter's own docs for the measurements.
   #
   # `retry_after_ms` is computed by the limiter but deliberately not carried on the wire: the error frame's
   # payload is a bare reason string, and `Malachi.Wire` freezes that encoding, so carrying it would take a

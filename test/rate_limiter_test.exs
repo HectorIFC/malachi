@@ -1,5 +1,7 @@
 defmodule Malachi.RateLimiterTest do
   use ExUnit.Case, async: false
+  use ExUnitProperties
+
   import Malachi.Test.QuotaForensics, only: [within_one_window: 2]
 
   alias Malachi.RateLimiter
@@ -571,6 +573,49 @@ defmodule Malachi.RateLimiterTest do
       assert RateLimiter.window_bounds(123_456, 60_000) == {120_000, 3_456}
     end
 
+    property "window_bounds/2 aligns every timestamp to the floor of its window, negative ones included" do
+      # The window is named by the monotonic clock, whose origin is arbitrary and often far below zero
+      # (-576460751119 ms was seen on a workstation). `rem/2` truncates toward zero, so on a negative
+      # timestamp it put the start AFTER the timestamp; this is the property that caught it.
+      check all(
+              now <- StreamData.integer(-1_000_000_000_000_000..1_000_000_000_000_000),
+              window_ms <- StreamData.integer(1..86_400_000)
+            ) do
+        {start, elapsed} = RateLimiter.window_bounds(now, window_ms)
+
+        assert start <= now and now < start + window_ms
+        assert Integer.mod(start, window_ms) == 0
+        assert elapsed == now - start
+        # every timestamp of the window names the same window
+        assert RateLimiter.window_bounds(start + window_ms - 1, window_ms) == {start, window_ms - 1}
+      end
+    end
+
+    test "the window is named by the monotonic clock, not by wall-clock time" do
+      # A clock step moves Erlang system time outright under multi_time_warp (the OTP 29 default), and a
+      # window named by it would then hand out a fresh quota mid-window. The monotonic clock never steps.
+      # No test can step the real clock, so this pins the property that makes the step harmless: the
+      # counter's window comes from the monotonic clock. The guarantee itself is the ERTS contract for
+      # `erlang:monotonic_time/1`.
+      window_ms = 60_000
+      floor_of = fn now -> Integer.floor_div(now, window_ms) * window_ms end
+
+      {earliest, counters, latest} =
+        within_one_window(window_ms, fn ->
+          identifier = "monotonic_#{System.unique_integer([:positive])}"
+          earliest = floor_of.(System.monotonic_time(:millisecond))
+          :ok = RateLimiter.check_limit_in_caller(identifier, :publish, %{limit: 1, window_ms: window_ms})
+          {earliest, RateLimiter.window_counters(identifier, :publish), floor_of.(System.monotonic_time(:millisecond))}
+        end)
+
+      assert counters != []
+
+      for %{window_start: window_start} <- counters do
+        assert window_start in earliest..latest//window_ms,
+               "window #{window_start} is not the monotonic window #{earliest}; system time names #{floor_of.(System.system_time(:millisecond))}"
+      end
+    end
+
     test "current_window_start/1 names the window a check made now is counted in" do
       window_ms = 60_000
 
@@ -586,7 +631,7 @@ defmodule Malachi.RateLimiterTest do
       # a shard holding none of the quota still records the attempt, so there may be more than one entry
       assert counters != []
       assert Enum.all?(counters, &(&1.window_start == before))
-      assert rem(before, window_ms) == 0
+      assert Integer.mod(before, window_ms) == 0
     end
 
     test "shard_caps/1 splits the limit over one shard per scheduler and sums to it" do
@@ -664,6 +709,10 @@ defmodule Malachi.RateLimiterTest do
       :ok
     end
 
+    # Now, by the clock the sharded windows are named with: a 1ms window starts at the current instant.
+    # Stale and live counters are built from it, as the limiter would have written them.
+    defp window_now, do: RateLimiter.current_window_start(1)
+
     defp run_cleanup do
       send(Process.whereis(RateLimiter), :cleanup)
       # the cleanup is a cast-like info message; a sync call flushes it
@@ -689,7 +738,7 @@ defmodule Malachi.RateLimiterTest do
       pid = Process.whereis(RateLimiter)
       %{cleanup_timer: old_timer} = :sys.get_state(pid)
 
-      stale = {"scheduled_stale_#{:rand.uniform(1_000_000)}", :publish, System.system_time(:millisecond) - 3_600_000, 0}
+      stale = {"scheduled_stale_#{:rand.uniform(1_000_000)}", :publish, window_now() - 3_600_000, 0}
       :ets.insert(@table, {stale, 1, 1_000})
 
       send(pid, :scheduled_cleanup)
@@ -707,7 +756,7 @@ defmodule Malachi.RateLimiterTest do
     test "reaps stale sharded window counters and keeps live ones" do
       tag = :rand.uniform(1_000_000)
       hour_ms = 3_600_000
-      now = System.system_time(:millisecond)
+      now = window_now()
 
       stale = {"stale_#{tag}", :publish, now - hour_ms - 60_000, 0}
       live = {"live_#{tag}", :publish, now, 0}
@@ -747,7 +796,7 @@ defmodule Malachi.RateLimiterTest do
 
       identifier = "live_wide_#{tag}"
       # 90 minutes into a 2-hour window: past the hour, but the window is still the current one.
-      live_window_start = System.system_time(:millisecond) - 90 * 60_000
+      live_window_start = window_now() - 90 * 60_000
       key = {identifier, :subscribe, live_window_start, 0}
       :ets.insert(@table, {key, 9_999, window_ms})
 
@@ -766,7 +815,7 @@ defmodule Malachi.RateLimiterTest do
 
       identifier = "rolled_#{tag}"
       # Ten seconds back: ten windows ago, long dead, but nowhere near an hour old.
-      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
+      key = {identifier, :publish, window_now() - 10_000, 0}
       :ets.insert(@table, {key, 100, 1_000})
 
       run_cleanup()
@@ -788,7 +837,7 @@ defmodule Malachi.RateLimiterTest do
       Application.put_env(:malachi, :publish_rate_window_ms, 86_400_000)
 
       identifier = "stored_window_#{tag}"
-      key = {identifier, :publish, System.system_time(:millisecond) - 10_000, 0}
+      key = {identifier, :publish, window_now() - 10_000, 0}
       :ets.insert(@table, {key, 5, 1_000})
 
       run_cleanup()
