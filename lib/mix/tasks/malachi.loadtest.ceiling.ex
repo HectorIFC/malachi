@@ -36,11 +36,28 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
   Prints `Malachi.Loadtest.Ceiling.regime_label/4` for one regime, so a harness that is not this sweep
   (`benchmark/docker-cluster.sh`) names its regime in the same words instead of formatting its own.
   An invalid flag fails the task with a message naming it.
+
+      mix malachi.loadtest.ceiling flush-window --before before.prom --after after.prom
+
+  Prints the server's flush latency over the window between two scrapes of its `/metrics`
+  (`Malachi.Loadtest.FlushWindow`) as one JSON object: `p50`, `p99`, `p999` and `mean` in seconds, plus
+  `flushes`, `bytes` and `records`. When the two scrapes cannot give a window (a missing series, a node
+  that restarted in between) it prints `{"error": "<why>"}` instead and still exits 0: the harness
+  records the reason next to a throughput that is still valid.
+
+      mix malachi.loadtest.ceiling flush-window --stdin
+
+  The same for several nodes at once, read from standard input as
+  `{"nodes": {"<name>": {"before": "<exposition>", "after": "<exposition>"} | {"error": "<why>"}}}`.
+  Prints `{"nodes": {"<name>": <window or error>}, "all": <window or null>, "error": <why or null>}`,
+  where `all` adds every node's flushes into one distribution and exists only when every node has a
+  window. A node given as an error (a scrape the harness could not take) passes its reason through.
   """
 
   use Mix.Task
 
   alias Malachi.Loadtest.Ceiling
+  alias Malachi.Loadtest.FlushWindow
 
   @plan_switches [
     batch_ladder: :string,
@@ -56,13 +73,17 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
   @peak_switches [run_dir: :string, sweep: :string]
   @summarize_switches [run_dir: :string, sweep: :string, out: :string]
   @label_switches [batch: :string, record_size: :string, group_commit: :string, segment_prealloc_bytes: :string]
+  @flush_window_switches [before: :string, after: :string, stdin: :boolean]
 
   @impl Mix.Task
   def run(["plan" | argv]), do: plan(argv)
   def run(["peak" | argv]), do: peak(argv)
   def run(["summarize" | argv]), do: summarize(argv)
   def run(["label" | argv]), do: label(argv)
-  def run(_argv), do: Mix.raise("usage: mix malachi.loadtest.ceiling plan|peak|summarize|label [options]")
+  def run(["flush-window" | argv]), do: flush_window(argv)
+
+  def run(_argv),
+    do: Mix.raise("usage: mix malachi.loadtest.ceiling plan|peak|summarize|label|flush-window [options]")
 
   defp plan(argv) do
     {opts, _rest} = OptionParser.parse!(argv, strict: @plan_switches)
@@ -151,6 +172,102 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
         Mix.raise("label takes no positional arguments, got: #{Enum.join(extra, " ")}")
     end
   end
+
+  defp flush_window(argv) do
+    case OptionParser.parse!(argv, strict: @flush_window_switches) do
+      {[stdin: true], []} ->
+        read_stdin() |> decode_nodes!() |> nodes_window() |> print_json()
+
+      {opts, []} ->
+        if opts[:stdin], do: Mix.raise("--stdin takes no --before or --after")
+        {before, later} = {required!(opts, :before), required!(opts, :after)}
+        read_scrape!(before) |> window(read_scrape!(later)) |> print_json()
+
+      {_opts, extra} ->
+        Mix.raise("flush-window takes no positional arguments, got: #{Enum.join(extra, " ")}")
+    end
+  end
+
+  defp read_scrape!(path) do
+    case File.read(path) do
+      {:ok, text} -> text
+      {:error, reason} -> Mix.raise("cannot read #{path}: #{inspect(reason)}")
+    end
+  end
+
+  # Empty input reads as :eof, which is the same malformed request as any other non-JSON.
+  defp read_stdin do
+    case IO.read(:stdio, :eof) do
+      data when is_binary(data) -> data
+      _eof_or_error -> ""
+    end
+  end
+
+  defp decode_nodes!(input) do
+    with {:ok, %{"nodes" => %{} = nodes}} when map_size(nodes) > 0 <- Jason.decode(input),
+         true <- Enum.all?(nodes, fn {_name, node} -> node_input?(node) end) do
+      nodes
+    else
+      _invalid ->
+        Mix.raise(~s(--stdin expects {"nodes": {"<name>": {"before": ..., "after": ...} or {"error": ...}}}))
+    end
+  end
+
+  defp node_input?(%{"before" => before, "after" => later}) when is_binary(before) and is_binary(later), do: true
+  defp node_input?(%{"error" => error}) when is_binary(error), do: true
+  defp node_input?(_other), do: false
+
+  defp nodes_window(nodes) do
+    windows =
+      Map.new(nodes, fn
+        {name, %{"error" => error}} -> {name, {:error, error}}
+        {name, %{"before" => before, "after" => later}} -> {name, diff(before, later)}
+      end)
+
+    failed = for {name, {:error, reason}} <- Enum.sort(windows), do: "#{name}: #{describe(reason)}"
+
+    all =
+      if failed == [] do
+        windows |> Map.values() |> Enum.map(fn {:ok, window} -> window end) |> FlushWindow.merge()
+      end
+
+    {all_json, error} =
+      case {failed, all} do
+        {[], {:ok, merged}} -> {FlushWindow.summarize(merged), nil}
+        {[], {:error, reason}} -> {nil, "the nodes cannot be added up: #{describe(reason)}"}
+        {failed, nil} -> {nil, Enum.join(failed, "; ")}
+      end
+
+    %{
+      "nodes" =>
+        Map.new(windows, fn
+          {name, {:ok, window}} -> {name, FlushWindow.summarize(window)}
+          {name, {:error, reason}} -> {name, %{"error" => describe(reason)}}
+        end),
+      "all" => all_json,
+      "error" => error
+    }
+  end
+
+  defp window(before, later) do
+    case diff(before, later) do
+      {:ok, window} -> FlushWindow.summarize(window)
+      {:error, reason} -> %{"error" => describe(reason)}
+    end
+  end
+
+  defp diff(before, later) do
+    with {:ok, before} <- FlushWindow.parse(before),
+         {:ok, later} <- FlushWindow.parse(later) do
+      FlushWindow.diff(before, later)
+    end
+  end
+
+  # A reason from the harness is already words; one from FlushWindow is an atom to translate.
+  defp describe(reason) when is_binary(reason), do: reason
+  defp describe(reason), do: FlushWindow.describe(reason)
+
+  defp print_json(value), do: Mix.shell().info(Jason.encode!(value))
 
   defp required!(opts, key) do
     case opts[key] do
