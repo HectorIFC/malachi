@@ -174,7 +174,10 @@ the same run beside the two load tests.
 
 CI keeps that file current: the Publish results workflow runs the node-fault drill on every push to
 main and commits its record, failures included. Only that drill is published. The storage-corruption
-and config-deployment drills above are run by hand, so a record from either stays wherever you point
+drill also runs in CI (the Storage chaos certification workflow: on demand, weekly, and on pull requests
+that touch storage, replication, repair or the drill). It is not a required check, and it publishes
+nothing: its JSON and any evidence are uploaded as the `chaos-storage` artifact. The config-deployment
+and reshard drills are run by hand, so a record from either stays wherever you point
 `CHAOS_RESULT_FILE`.
 
 ## Reading a failure
