@@ -125,6 +125,27 @@ defmodule StorageChaosTest do
       refute output =~ "every segment's copies hold the same records"
     end
 
+    test "fails when the topology could not be read, even with agreeing copies, and keeps every copy", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_COPIES", "unavailable"}])
+      assert output =~ "COPIES segments=2 whole_file=ok content=ok control=unavailable"
+      assert output =~ "FAIL: invariant 4 could not read the topology: sealed lengths went unchecked"
+      refute output =~ "did not reconverge"
+
+      # The report names no disagreeing segment, so the evidence is the whole topic.
+      assert %{"evidence_dir" => evidence} = result(ctx)
+      assert File.exists?(Path.join(evidence, "copies.txt"))
+      assert Enum.count(docker_calls(ctx), &(&1 =~ ":/out" and &1 =~ "for d in chaos_acked-r\*; do")) == 3
+    end
+
+    test "fails when the checker produced no report, and keeps every copy", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_COPIES", "crash"}])
+      assert output =~ "per-copy report unavailable:\n** (RuntimeError) boom"
+      assert output =~ "FAIL: invariant 4 could not compare the copies: the checker produced no report"
+      assert %{"evidence_dir" => evidence} = result(ctx)
+      assert File.read!(Path.join(evidence, "copies.txt")) =~ "boom"
+      assert Enum.count(docker_calls(ctx), &(&1 =~ ":/out" and &1 =~ "for d in chaos_acked-r\*; do")) == 3
+    end
+
     test "the index repair is still judged byte for byte", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_MD5_DIFFER", "1"}])
       assert output =~ "FAIL: rotted sparse index was not rebuilt by the integrity scrub"
@@ -294,7 +315,7 @@ defmodule StorageChaosTest do
   # Answers from these variables:
   #   STUB_RUNNING       names `docker ps` lists as running
   #   STUB_MD5_DIFFER    1: each node's index files hash differently
-  #   STUB_COPIES        identical, benign, content or none: the phase-1 comparison
+  #   STUB_COPIES        identical, benign, content, none, unavailable or crash: the phase-1 comparison
   #   STUB_NEGATIVE      caught, missed or other: the negative control's comparison
   #   STUB_REPAIR        never: the repair never converges
   #   STUB_ACTIVE_AFTER  how many topology calls list no active segment before one appears
@@ -366,6 +387,7 @@ defmodule StorageChaosTest do
             copy_line malachi2
             if [ "${STUB_REPAIR:-}" = never ]; then
               echo "COPIES verdict=lagging segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi2"
+              echo "COPIES segments=1 whole_file=differs content=differs control=ok"
               exit 1
             fi
             echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=sealed:6 nodes=-" ;;
@@ -377,10 +399,17 @@ defmodule StorageChaosTest do
               *) echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=sealed:6 nodes=-" ;;
             esac ;;
           *"chaos_checker.exs copies"*)
-            if [ "${STUB_COPIES:-}" = none ]; then
-              echo "COPIES segments=0 whole_file=none content=none"
-              exit 1
-            fi
+            case "${STUB_COPIES:-}" in
+              none) echo "COPIES segments=0 whole_file=none content=none control=none"; exit 1 ;;
+              crash) echo "** (RuntimeError) boom"; exit 1 ;;
+              unavailable)
+                echo "topology unavailable: comparing the copies with each other only, which cannot pass: :nope"
+                for n in malachi1 malachi2 malachi3; do copy_line "$n"; done
+                echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=unavailable nodes=-"
+                echo "COPIES verdict=identical segment=chaos_acked-r0-s2 control=unavailable nodes=-"
+                echo "COPIES segments=2 whole_file=ok content=ok control=unavailable"
+                exit 1 ;;
+            esac
             verdict="${STUB_COPIES:-identical}"
             for n in malachi1 malachi2 malachi3; do copy_line "$n"; done
             echo "COPY segment=chaos_acked-r0-s2 node=malachi1 status=ok marker=no records=1 bytes=40 digest=bbbbbbbbbbbb trailing=0 files=6:2048:bbbbbbbbbbbb"
@@ -392,7 +421,7 @@ defmodule StorageChaosTest do
             [ "$verdict" = content ] && content=differs
             whole=ok
             [ "$verdict" = identical ] || whole=differs
-            echo "COPIES segments=2 whole_file=$whole content=$content"
+            echo "COPIES segments=2 whole_file=$whole content=$content control=ok"
             [ "$content" = ok ] ;;
           *--scenario*) echo '{"errors":0,"dropped":0,"records_per_s":100}' ;;
           *) : ;;

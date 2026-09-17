@@ -221,6 +221,10 @@ keep_copies_evidence() {
   } >"$EVIDENCE_DIR/substrate.txt" 2>&1
 
   dirs=$(disagreeing_copies "$1" | sed -n 's/^COPIES .* segment=\([^ ]*\) .*/\1/p' | tr '\n' ' ')
+  # A report that names no segment is a report that itself failed (a checker that crashed, a topology it could
+  # not read, no copy found at all): keep every copy of the topic rather than none. The glob expands in the
+  # node's shell, on the volume.
+  [ -n "$dirs" ] || dirs="${CHAOS_TOPIC}-r*"
   for c in malachi-cluster-1 malachi-cluster-2 malachi-cluster-3; do
     mkdir -p "$EVIDENCE_DIR/$c"
     docker run --rm -v "$(data_volume_of "$c"):/data:ro" -v "$EVIDENCE_DIR/$c:/out" --entrypoint sh "$(image_of "$c")" \
@@ -301,20 +305,38 @@ close_window
 
 say "invariant 4: physical convergence of every chaos-topic segment copy"
 # Retried for a minute, like every repair wait: a copy still being caught up converges inside the window.
+# Three ways to fail, named apart: a checker that produced no report, a check that could not check (no copy
+# found, or a topology it could not read, which leaves sealed lengths unverified), and copies that really
+# hold different records. Only the last one is about the broker. Evidence is kept in every case, before
+# phase 2's fresh cluster removes the volumes.
 if copies 12 5000 malachi-cluster-1 malachi-cluster-2 malachi-cluster-3 >"$WORK/copies.txt" 2>&1; then
   grep '^COPIES segments=' "$WORK/copies.txt"
   echo "every segment's copies hold the same records on the 3 nodes"
-elif grep -q '^COPIES segments=0 ' "$WORK/copies.txt"; then
-  # Nothing compared is not nothing wrong: the check read no segment at all, which is what a log directory
-  # mounted or named differently from DATA_DIR looks like, and passing it would certify nothing.
-  grep '^COPIES segments=' "$WORK/copies.txt"
-  fail "invariant 4 found no $CHAOS_TOPIC segment copy to compare under $DATA_DIR on any node"
 else
-  grep '^COPIES segments=' "$WORK/copies.txt" || { echo "per-copy report unavailable:"; tail -5 "$WORK/copies.txt"; }
-  echo "segments whose copies are not identical, per node:"
-  disagreeing_copies "$WORK/copies.txt"
-  keep_copies_evidence "$WORK/copies.txt"
-  fail "segment copies did not reconverge to the same records across the nodes (see the per-copy report above)"
+  summary=$(grep '^COPIES segments=' "$WORK/copies.txt")
+  if [ -z "$summary" ]; then
+    echo "per-copy report unavailable:"
+    tail -5 "$WORK/copies.txt"
+    keep_copies_evidence "$WORK/copies.txt"
+    fail "invariant 4 could not compare the copies: the checker produced no report (see above)"
+  else
+    echo "$summary"
+    case "$summary" in
+      *" segments=0 "*)
+        keep_copies_evidence "$WORK/copies.txt"
+        fail "invariant 4 found no $CHAOS_TOPIC segment copy to compare under $DATA_DIR on any node" ;;
+      *)
+        echo "segments whose copies are not identical, per node:"
+        disagreeing_copies "$WORK/copies.txt"
+        keep_copies_evidence "$WORK/copies.txt"
+        case "$summary" in
+          *" control=unavailable"*)
+            fail "invariant 4 could not read the topology: sealed lengths went unchecked (see the per-copy report above)" ;;
+          *)
+            fail "segment copies did not reconverge to the same records across the nodes (see the per-copy report above)" ;;
+        esac ;;
+    esac
+  fi
 fi
 
 # Opt-in, and run by hand: proof that invariant 4 still fails on a copy that really diverged, so a change to how
