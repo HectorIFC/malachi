@@ -324,7 +324,7 @@ defmodule DockerClusterTest do
       assert output =~ "df could not read /data on malachi1"
     end
 
-    test "when the preallocated bytes are not on the volume afterwards", ctx do
+    test "when the preallocated bytes are not on the volume afterward", ctx do
       assert {output, 1} = run_script(ctx, [{"REAL_DISK", "1"}, {"STUB_DU_KB", "1"}, {"OUT", ctx.out}])
       assert output =~ "on disk: 3072 bytes across the nodes (at least #{4 * @prealloc} expected)"
       assert output =~ "preallocation did not land on the volume"

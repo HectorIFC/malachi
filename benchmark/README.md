@@ -53,7 +53,7 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
 
 - **Real disk.** `REAL_DISK=1` puts each node's data on its named volume, with preallocation at the
   production 64MB. A case fails unless the volume is a real filesystem (not tmpfs) and the preallocated
-  bytes are on it afterwards, because the store quietly falls back to an unpreallocated segment when
+  bytes are on it afterward, because the store quietly falls back to an unpreallocated segment when
   preallocation fails. A case whose host disk cannot hold TOPICS x RF x 64MB (plus a 1GB margin) is
   refused before it runs.
 - **Segment creation stays out of the window.** Every topic's segment is created during setup
@@ -71,8 +71,8 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
 
 **Protocol.** A mode comparison is a manual dispatch of the `Performance Benchmarks` workflow with
 `docker_cluster_durability` checked. It runs both modes `docker_cluster_reps` times (3 by default),
-alternating tmpfs and disk within each repetition, on a 4-core runner (servers on cores 1-3, the
-generator on core 0). The spread between repetitions of one mode is the noise floor, and a difference
+both in every repetition with the order rotating (tmpfs first, then disk first, ...) so no position
+effect lands on one mode every time, on a 4-core runner (servers on cores 1-3, the generator on core 0). The spread between repetitions of one mode is the noise floor, and a difference
 between the modes is claimed only when their min to max ranges do not overlap, and never from a single
 run of either mode; the job summary states which. Per-flush latency is not part of the comparison yet,
 because the flush telemetry is not on `main`; porting it and adding it to this output is #164.

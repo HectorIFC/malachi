@@ -14,11 +14,12 @@
 #   there, which is what keeps runs comparable to each other; it is NOT the durable path.
 # - REAL_DISK=1: data on each node's named volume /data, preallocation at DISK_PREALLOC_BYTES (64MB,
 #   the production default). The durable path, paid in full. A case fails unless /data is a real
-#   filesystem (not tmpfs) and the preallocated bytes are on it afterwards: the store falls back to an
+#   filesystem (not tmpfs) and the preallocated bytes are on it afterward: the store falls back to an
 #   unpreallocated segment when preallocation fails (ENOSPC, say), which would otherwise measure the
 #   wrong path without a word.
-# Comparing the two takes two invocations; alternate them (tmpfs, disk, tmpfs, disk, ...) so the spread
-# between repetitions of one mode is the noise floor a difference has to clear.
+# Comparing the two takes two invocations per repetition, with the order rotating by repetition (tmpfs
+# then disk, disk then tmpfs, ...), so the spread between repetitions of one mode is the noise floor a
+# difference has to clear and no position effect lands on the same mode every time.
 #
 # Every segment is created before the measured window: each topic starts with one range whose segment
 # opens on its first produce, and on a real disk that open writes the whole preallocation (about 249ms

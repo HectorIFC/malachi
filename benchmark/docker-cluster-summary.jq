@@ -3,9 +3,10 @@
 # that failed a check (wrong filesystem, preallocation missing) measured the wrong path, and one without a
 # result measured nothing. Those are listed as failures instead.
 #
-# The protocol is the one benchmark/README.md states: repetitions of each mode, interleaved, and a
-# difference between the modes is claimed only when their min to max ranges do not overlap, and never
-# from a single run of either mode, whose range is a point with no spread to measure noise by.
+# The protocol is the one benchmark/README.md states: repetitions of each mode, interleaved in rotating
+# order, and a difference between the modes is claimed only when their min to max ranges do not
+# overlap, and never from a single run of either mode, whose range is a point with no spread to measure
+# noise by.
 
 def median:
   sort | length as $n

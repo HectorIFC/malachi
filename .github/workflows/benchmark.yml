@@ -187,7 +187,7 @@ jobs:
   # free, against the same cluster on a real disk with production preallocation, where the durable path
   # is paid in full. Opt-in and dispatch-only because it takes about half an hour, and its own job so it
   # runs on a runner nothing else is using. Only this Linux run counts; see benchmark/README.md for the
-  # protocol (interleaved repetitions, a difference claimed only for disjoint ranges).
+  # protocol (interleaved repetitions in rotating order, a difference claimed only for disjoint ranges).
   docker-cluster-durability:
     name: Docker cluster, tmpfs against real disk
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_cluster_durability }}
@@ -212,8 +212,10 @@ jobs:
           df -h /
 
       # The harness defaults assume a workstation with eight cores; a GitHub runner has four, so the
-      # cpusets are re-split here, as the chaos job does. Modes alternate within every repetition so a slow
-      # stretch of the runner lands on both instead of reading as the effect of one.
+      # cpusets are re-split here, as the chaos job does. Both modes run in every repetition, so a slow
+      # stretch of the runner lands on both instead of reading as the effect of one, and which mode goes
+      # first rotates by repetition (tmpfs first, then disk first, ...): with a fixed order any position
+      # effect lands on the second mode every time, which is how #82's arms came out biased.
       - name: Run both data modes, interleaved
         env:
           DOCKER_CLUSTER_REPS: ${{ inputs.docker_cluster_reps }}
@@ -227,7 +229,8 @@ jobs:
           esac
           failed=0
           for rep in $(seq 1 "$DOCKER_CLUSTER_REPS"); do
-            for mode in 0 1; do
+            if [ $((rep % 2)) = 1 ]; then modes="0 1"; else modes="1 0"; fi
+            for mode in $modes; do
               echo "::group::repetition $rep, REAL_DISK=$mode"
               REAL_DISK="$mode" benchmark/docker-cluster.sh || { echo "::error::repetition $rep with REAL_DISK=$mode failed"; failed=1; }
               echo "::endgroup::"
