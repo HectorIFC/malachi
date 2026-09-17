@@ -55,11 +55,12 @@ Worth alerting on:
   else moves. Read it windowed, `histogram_quantile(0.99, rate(malachi_storage_flush_duration_seconds_bucket[5m]))`,
   and sum the buckets across nodes before taking the quantile for a cluster-wide view. Only flushes that
   wrote records and succeeded are counted; a failed one is in `malachi_storage_failures_total`.
-  `malachi_storage_flushed_records_total` divided by `_count` is records per sync, which is how well group
-  commit is coalescing (near 1 means it is not), and `malachi_storage_flushed_bytes_total` over `_count`
-  is the average flush size. `malachi_storage_flush_duration_seconds_created` is the Unix time the
-  histogram began: it changes only when the node restarts, so a tool subtracting two scrapes can tell a
-  restart from counters that simply kept growing.
+  `malachi_storage_flushed_records_total` divided by `malachi_storage_flush_duration_seconds_count` is
+  records per sync, which is how well group commit is coalescing (near 1 means it is not), and
+  `malachi_storage_flushed_bytes_total` over that same count is the average flush size.
+  `malachi_storage_flush_duration_seconds_created` is the Unix time the histogram began: it changes only
+  when the node restarts, so a tool subtracting two scrapes can tell a restart from counters that simply
+  kept growing.
 - Session and auth counters. Note that `:session_expired` and `:session_hijack_attempt` are **not
   disjoint**: one validation can emit both, so summing them does not count failed validations. The hijack
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so
