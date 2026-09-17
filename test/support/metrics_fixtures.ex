@@ -66,4 +66,20 @@ defmodule Malachi.Test.MetricsFixtures do
     |> Prometheus.export([], flush)
     |> IO.iodata_to_binary()
   end
+
+  @doc """
+  The scrapes the benchmark script stubs serve, written into `dir`: `before.prom` holds 100 slow (50ms)
+  setup flushes, and `after.prom` adds 1000 fast (200us) ones, 64 bytes and 10 records each. A window
+  between them is exactly the 1000 fast flushes. `restarted.prom` is a node that booted again (nothing
+  recorded), and `noseries.prom` a page without the flush series.
+  """
+  def write_flush_scrapes!(dir) do
+    histogram = Histogram.new()
+    for _ <- 1..100, do: Histogram.record(histogram, 50_000)
+    File.write!(Path.join(dir, "before.prom"), flush_exposition(histogram, 1000, 100))
+    for _ <- 1..1000, do: Histogram.record(histogram, 200)
+    File.write!(Path.join(dir, "after.prom"), flush_exposition(histogram, 65_000, 10_100))
+    File.write!(Path.join(dir, "restarted.prom"), flush_exposition(Histogram.new()))
+    File.write!(Path.join(dir, "noseries.prom"), "# HELP malachi_up up\nmalachi_up 1\n")
+  end
 end
