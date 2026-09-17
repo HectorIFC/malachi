@@ -12,9 +12,12 @@ defmodule Malachi.Metrics.Prometheus do
   @spec content_type() :: String.t()
   def content_type, do: @content_type
 
-  @doc "Builds the exposition text (as iodata) from a system snapshot and the topic overview."
-  @spec export(map(), [map()]) :: iodata()
-  def export(system, topics) do
+  @doc """
+  Builds the exposition text (as iodata) from a system snapshot, the topic overview and the storage flush
+  histogram (`Malachi.Metrics.storage_flush_histogram/0`).
+  """
+  @spec export(map(), [map()], map()) :: iodata()
+  def export(system, topics, flush) do
     mem = system.memory
     ops = system.operations
 
@@ -124,9 +127,42 @@ defmodule Malachi.Metrics.Prometheus do
           {[result: "reconciled"], ops.fences_reconciled}
         ]
       ),
+      histogram(
+        "malachi_storage_flush_duration_seconds",
+        "Group-commit flush latency: the write plus sync every acknowledged produce waits behind",
+        flush
+      ),
+      metric("malachi_storage_flushed_bytes_total", :counter, "Encoded bytes made durable by group-commit flushes", [
+        {[], flush.bytes}
+      ]),
+      metric(
+        "malachi_storage_flushed_records_total",
+        :counter,
+        "Records made durable by group-commit flushes (divided by the flush count: records per sync)",
+        [{[], flush.records}]
+      ),
       topic_metrics(topics)
     ]
   end
+
+  # A Prometheus histogram in seconds: one cumulative `_bucket` per edge, the `+Inf` bucket (every flush),
+  # then `_sum` and `_count`. Buckets rather than a summary's quantiles because buckets subtract: two
+  # scrapes give the distribution of the flushes between them, and nodes add up, neither of which a
+  # quantile allows.
+  defp histogram(name, help, %{buckets: buckets, count: count, sum_us: sum_us}) do
+    bucket_name = name <> "_bucket"
+
+    [
+      header(name, :histogram, help),
+      Enum.map(buckets, fn {edge_us, below} -> sample(bucket_name, [le: us_to_seconds(edge_us)], below) end),
+      sample(bucket_name, [le: "+Inf"], count),
+      sample(name <> "_sum", [], us_to_seconds(sum_us)),
+      sample(name <> "_count", [], count)
+    ]
+  end
+
+  # Prometheus convention is base units, so latencies are exposed in seconds, not microseconds.
+  defp us_to_seconds(us), do: us / 1_000_000
 
   # One block per per-topic series: a single HELP/TYPE then a sample per topic (labelled by name).
   defp topic_metrics([]), do: []
@@ -157,19 +193,12 @@ defmodule Malachi.Metrics.Prometheus do
   # --- exposition format ---
 
   defp metric(name, type, help, samples) do
-    [
-      "# HELP ",
-      name,
-      " ",
-      help,
-      "\n# TYPE ",
-      name,
-      " ",
-      Atom.to_string(type),
-      "\n",
-      Enum.map(samples, fn {labels, value} -> [name, labels(labels), " ", value(value), "\n"] end)
-    ]
+    [header(name, type, help), Enum.map(samples, fn {labels, value} -> sample(name, labels, value) end)]
   end
+
+  defp header(name, type, help), do: ["# HELP ", name, " ", help, "\n# TYPE ", name, " ", Atom.to_string(type), "\n"]
+
+  defp sample(name, labels, value), do: [name, labels(labels), " ", value(value), "\n"]
 
   defp labels([]), do: ""
 

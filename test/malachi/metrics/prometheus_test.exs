@@ -1,9 +1,10 @@
 defmodule Malachi.Metrics.PrometheusTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Histogram
   alias Malachi.Metrics.Prometheus
 
-  # A minimal system snapshot with the shape Prometheus.export/2 reads.
+  # A minimal system snapshot with the shape Prometheus.export/3 reads.
   defp system do
     %{
       process_count: 120,
@@ -50,7 +51,35 @@ defmodule Malachi.Metrics.PrometheusTest do
     }
   end
 
-  defp render(topics), do: Prometheus.export(system(), topics) |> IO.iodata_to_binary()
+  # 1000 flushes below 4ms, 900 of them below 1ms, and 2 past the last edge, which only `+Inf` counts.
+  defp flush do
+    buckets =
+      for edge <- Histogram.edges() do
+        cond do
+          edge < 1000 -> {edge, 0}
+          edge < 4000 -> {edge, 900}
+          true -> {edge, 1000}
+        end
+      end
+
+    %{buckets: buckets, count: 1002, sum_us: 1_500_000, bytes: 2_048_000, records: 10_000}
+  end
+
+  # A node that has not flushed yet, which is what `Malachi.Metrics.storage_flush_histogram/0` returns
+  # before the first flush.
+  defp no_flush do
+    %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0}
+  end
+
+  defp render(topics, flush \\ flush()),
+    do: Prometheus.export(system(), topics, flush) |> IO.iodata_to_binary()
+
+  defp bucket_lines(out) do
+    for line <- String.split(out, "\n"),
+        [_, le, count] <- [Regex.run(~r/^malachi_storage_flush_duration_seconds_bucket\{le="([^"]+)"\} (\d+)$/, line)] do
+      {le, String.to_integer(count)}
+    end
+  end
 
   test "emits HELP/TYPE and a value line per series" do
     out = render([])
@@ -156,5 +185,57 @@ defmodule Malachi.Metrics.PrometheusTest do
       render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
 
     assert out =~ ~S(malachi_topic_ranges{topic="a\"b\\c"} 1)
+  end
+
+  describe "storage flush histogram" do
+    test "renders a histogram block in seconds: every edge, +Inf, sum and count" do
+      out = render([])
+
+      assert out =~
+               "# HELP malachi_storage_flush_duration_seconds Group-commit flush latency: the write plus sync " <>
+                 "every acknowledged produce waits behind\n" <>
+                 "# TYPE malachi_storage_flush_duration_seconds histogram\n" <>
+                 ~s(malachi_storage_flush_duration_seconds_bucket{le="8.0e-6"} 0\n)
+
+      # Microseconds in, seconds out; 1024us and 2048us are exact edges.
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="0.001024"} 900\n)
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="0.004096"} 1000\n)
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="16.777216"} 1000\n)
+
+      assert out =~
+               ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="+Inf"} 1002\n) <>
+                 "malachi_storage_flush_duration_seconds_sum 1.5\n" <>
+                 "malachi_storage_flush_duration_seconds_count 1002\n"
+    end
+
+    test "the buckets are the exported edges, ascending, with +Inf last" do
+      lines = bucket_lines(render([]))
+      {finite, [{"+Inf", 1002}]} = Enum.split(lines, -1)
+
+      assert Enum.map(finite, fn {le, _count} -> String.to_float(le) end) ==
+               Enum.map(Histogram.edges(), &(&1 / 1_000_000))
+    end
+
+    test "renders the durability totals as counters" do
+      out = render([])
+
+      assert out =~ "# TYPE malachi_storage_flushed_bytes_total counter\nmalachi_storage_flushed_bytes_total 2048000\n"
+
+      assert out =~
+               "# TYPE malachi_storage_flushed_records_total counter\nmalachi_storage_flushed_records_total 10000\n"
+    end
+
+    # A freshly booted node is scraped before its first flush. It must render zeros rather than crash or
+    # omit the series: a scraper that only sees the series under load cannot alert on its absence.
+    test "a node that has never flushed renders every series at zero" do
+      out = render([], no_flush())
+
+      assert length(bucket_lines(out)) == length(Histogram.edges()) + 1
+      assert Enum.all?(bucket_lines(out), fn {_le, count} -> count == 0 end)
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_sum 0.0\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_count 0\n"
+      assert out =~ "\nmalachi_storage_flushed_bytes_total 0\n"
+      assert out =~ "\nmalachi_storage_flushed_records_total 0\n"
+    end
   end
 end

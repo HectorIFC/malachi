@@ -111,4 +111,54 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
 
     assert Metrics.get_system_metrics().operations.fences_reconciled == before.fences_reconciled + 2
   end
+
+  describe "storage flush" do
+    # Flushes in [edge_lo, edge_hi): the band between two exported edges, read off the cumulative buckets.
+    defp flushes_between(edge_lo, edge_hi) do
+      buckets = Map.new(Metrics.storage_flush_histogram().buckets)
+      buckets[edge_hi] - buckets[edge_lo]
+    end
+
+    test "a flush event advances the count, sum and durability totals" do
+      before = Metrics.storage_flush_histogram()
+
+      Telemetry.storage_flush(1500, 4096, 10, "segment-0", "/tmp/seg")
+      Telemetry.storage_flush(2500, 2048, 5, "segment-0", "/tmp/seg")
+
+      after_flushes = Metrics.storage_flush_histogram()
+      assert after_flushes.count == before.count + 2
+      assert after_flushes.sum_us == before.sum_us + 4000
+      assert after_flushes.bytes == before.bytes + 6144
+      assert after_flushes.records == before.records + 15
+
+      summary = Metrics.get_system_metrics().storage_flush
+      assert summary.count == after_flushes.count
+      assert summary.sum_us == after_flushes.sum_us
+      assert summary.bytes == after_flushes.bytes
+      assert summary.records == after_flushes.records
+    end
+
+    test "each flush lands in the bucket its duration belongs to" do
+      # The band between the 2^(65/4) (~77.9ms) and 2^(66/4) (~92.7ms) edges. Comparing that band before
+      # and after, rather than a percentile, keeps the assertion exact whatever else the suite flushed:
+      # a slow disk would have to stall a test flush into this exact band to disturb it.
+      lo = :math.pow(2, 65 / 4)
+      hi = :math.pow(2, 66 / 4)
+      before = flushes_between(lo, hi)
+
+      for _ <- 1..25, do: Telemetry.storage_flush(80_000, 1024, 1, "segment-0", "/tmp/seg")
+      Telemetry.storage_flush(95_000, 1024, 1, "segment-0", "/tmp/seg")
+
+      assert flushes_between(lo, hi) == before + 25
+    end
+
+    test "the dashboard summary percentiles are in microseconds and ordered" do
+      Telemetry.storage_flush(1500, 1, 1, "segment-0", "/tmp/seg")
+      summary = Metrics.get_system_metrics().storage_flush
+
+      assert summary.p50_us > 0.0
+      assert summary.p50_us <= summary.p99_us
+      assert summary.p99_us <= summary.p999_us
+    end
+  end
 end
