@@ -51,8 +51,9 @@ defmodule Malachi.Histogram do
     if cum >= target, do: bucket_us(i), else: find_bucket(hist, target, i + 1, cum)
   end
 
-  # Bucket index for a latency; clamps to [1, @buckets]. us <= 0 lands in bucket 1.
-  defp bucket(us) when us <= 0, do: 1
+  # Bucket index for a latency; clamps to [1, @buckets]. Anything below 1us (zero, negative, or a fraction,
+  # whose log is negative) lands in bucket 1.
+  defp bucket(us) when us < 1, do: 1
   defp bucket(us), do: min(@buckets, trunc(:math.log2(us) * @scale) + 1)
 
   # Representative microseconds for a bucket (its lower edge).

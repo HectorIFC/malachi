@@ -31,5 +31,13 @@ defmodule Malachi.HistogramTest do
       Histogram.record(h, 1_000_000_000)
       assert Histogram.count(h) == 3
     end
+
+    test "a sub-microsecond sample lands in the first bucket instead of off the array" do
+      h = Histogram.new()
+      Histogram.record(h, 0.5)
+
+      assert Histogram.count(h) == 1
+      assert Histogram.percentile(h, 50) == 1.0
+    end
   end
 end
