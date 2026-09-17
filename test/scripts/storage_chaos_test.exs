@@ -150,6 +150,11 @@ defmodule StorageChaosTest do
       assert {output, 1} = run_drill(ctx, [{"STUB_MD5_DIFFER", "1"}])
       assert output =~ "FAIL: rotted sparse index was not rebuilt by the integrity scrub"
     end
+
+    test "the index repair is judged file for file: the same hashes under swapped names do not pass", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_IDX", "swapped"}])
+      assert output =~ "FAIL: rotted sparse index was not rebuilt by the integrity scrub"
+    end
   end
 
   describe "invariant 4 on a failing run" do
@@ -315,6 +320,7 @@ defmodule StorageChaosTest do
   # Answers from these variables:
   #   STUB_RUNNING       names `docker ps` lists as running
   #   STUB_MD5_DIFFER    1: each node's index files hash differently
+  #   STUB_IDX           swapped: both nodes list the same two sidecar hashes, under the other's name
   #   STUB_COPIES        identical, benign, content, none, unavailable or crash: the phase-1 comparison
   #   STUB_NEGATIVE      caught, missed or other: the negative control's comparison
   #   STUB_REPAIR        never: the repair never converges
@@ -353,6 +359,19 @@ defmodule StorageChaosTest do
       exec)
         case "$*" in
           *md5sum*)
+            if [ "${STUB_IDX:-}" = swapped ]; then
+              case "$*" in
+                *.idx*)
+                  d=/data/malachi_log/chaos_acked-r0-s1
+                  if [ "$2" = malachi-cluster-1 ]; then
+                    printf 'h1  %s/00000000000000000000.idx\nh2  %s/00000000000000000003.idx\n' "$d" "$d"
+                  else
+                    # As `md5sum | sort` would list them: by hash, so the swapped names come out in this order.
+                    printf 'h1  %s/00000000000000000003.idx\nh2  %s/00000000000000000000.idx\n' "$d" "$d"
+                  fi
+                  exit 0 ;;
+              esac
+            fi
             if [ "${STUB_MD5_DIFFER:-0}" = 1 ]; then
               echo "md5-$2  /data/malachi_log/chaos_acked-r0-s1/00000000000000000000.log"
             else

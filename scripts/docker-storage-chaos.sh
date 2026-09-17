@@ -162,13 +162,14 @@ wait_segment_repaired() {
   fi
 }
 
-# Waits until the damaged dir's sparse index has the same md5s on the damaged follower and on the
-# primary. The index is derived from the records and rebuilt locally, so byte equality is the honest
-# check for "rebuilt".
+# Waits until the damaged dir's sparse index files have the same md5s, file for file, on the damaged
+# follower and on the primary. The index is derived from the records and rebuilt locally, so byte
+# equality is the honest check for "rebuilt". The file names stay in the comparison: the directory is
+# at the same path on both nodes, and hashes alone would let two sidecars with swapped contents pass.
 wait_index_rebuilt() {
   for _ in $(seq 1 12); do
-    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort" | awk '{print $1}')
-    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort" | awk '{print $1}')
+    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
+    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
       echo "index rebuilt: follower matches primary byte for byte (*.idx)"
       return 0
