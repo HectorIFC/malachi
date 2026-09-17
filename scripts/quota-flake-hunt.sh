@@ -9,9 +9,13 @@
 # test that crossed a window boundary, and print a line for every straddle that changed no assertion.
 # After each iteration the OS clock discipline is recorded, so a report can be lined up with a clock step.
 #
+# An over-limit admission is classified by its report. One that crossed a window boundary is the
+# documented burst of a fixed window, which the tests rerun outside strict mode; it is counted, not
+# failed. One inside a single window is the defect.
+#
 # Only a Linux run counts. Usage: scripts/quota-flake-hunt.sh REPS OUT_DIR
-# Exits 1 when any iteration showed the quota symptom; other failures are recorded, not fatal, because
-# the suite has known unrelated flakes and they must not read as this one.
+# Exits 1 when any iteration admitted over a limit inside one window; other failures are recorded, not
+# fatal, because the suite has known unrelated flakes and they must not read as this one.
 set -uo pipefail
 
 reps=${1:?usage: quota-flake-hunt.sh REPS OUT_DIR}
@@ -37,6 +41,7 @@ clock_state() {
 }
 
 quota=0
+boundary=0
 other=0
 straddles=0
 for i in $(seq 1 "$reps"); do
@@ -50,10 +55,18 @@ for i in $(seq 1 "$reps"); do
   seen=$(grep -c 'quota-forensics straddle' "$log" || true)
   straddles=$((straddles + seen))
 
-  if grep -qE 'expected \{:error, "rate_limited"\}|crossed a window boundary' "$log"; then
+  # Every over-limit report names the expected refusal once; a boundary one is also headed as such.
+  admitted=$(grep -c 'expected {:error, "rate_limited"}' "$log" || true)
+  crossed=$(grep -c 'an admission crossed a window boundary' "$log" || true)
+
+  if [ "$admitted" -gt "$crossed" ]; then
     quota=$((quota + 1))
     status="QUOTA"
-    echo "::error::iteration $i admitted over a quota limit, see iteration-$i.log"
+    echo "::error::iteration $i admitted over a quota limit inside one window, see iteration-$i.log"
+  elif [ "$crossed" -gt 0 ]; then
+    boundary=$((boundary + 1))
+    status="BOUNDARY"
+    echo "::notice::iteration $i admitted across a window boundary (documented), see iteration-$i.log"
   elif [ "$status" = fail ]; then
     other=$((other + 1))
     echo "::warning::iteration $i failed for another reason: $(grep -m1 -E '^\s+[0-9]+\) test' "$log" | sed 's/^ *//')"
@@ -64,6 +77,6 @@ for i in $(seq 1 "$reps"); do
   echo "iteration $i/$reps: $status in $(($(date +%s) - started))s, $seen straddles"
 done
 
-summary="quota failures/iterations: $quota/$reps, other failures: $other, straddles seen: $straddles"
+summary="quota failures/iterations: $quota/$reps, boundary admissions: $boundary, other failures: $other, straddles seen: $straddles"
 echo "$summary" | tee "$out/summary.txt"
 [ "$quota" -eq 0 ]
