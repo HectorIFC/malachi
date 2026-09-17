@@ -82,6 +82,7 @@ defmodule Malachi.RateLimiter do
   alias Malachi.I18n
 
   @table :malachi_rate_limits
+  @shard_count_key {__MODULE__, :shard_count}
 
   # How long an entry may sit untouched before the periodic cleanup reaps it. This is the right rule for a
   # token bucket, which has fully refilled after an hour of idleness under any window shorter than that.
@@ -253,6 +254,9 @@ defmodule Malachi.RateLimiter do
       write_concurrency: true
     ])
 
+    # Read once, before any counter exists; see `shard_count/0`. Re-putting the same value on a restart does
+    # not trigger the global scan a changed persistent term costs.
+    :persistent_term.put(@shard_count_key, :erlang.system_info(:schedulers_online))
     Logger.info(I18n.t(:rate_limiter_started))
     {:ok, %{cleanup_timer: schedule_cleanup()}}
   end
@@ -405,7 +409,14 @@ defmodule Malachi.RateLimiter do
 
   # One shard per scheduler: the point is that concurrent callers write DIFFERENT keys, and the scheduler
   # id is the cheapest identifier that already tracks how much concurrency there actually is.
-  defp shard_count, do: :erlang.system_info(:schedulers_online)
+  #
+  # The count is fixed when the limiter starts, not re-read per check. The caps are derived from it, and a
+  # change mid-window (an operator running `erlang:system_flag(schedulers_online, N)`) would otherwise
+  # give the remaining shards bigger caps over counters already spent, admitting the quota again. A later
+  # increase costs only scaling: the extra scheduler ids fold into existing shards through `rem/2`. No
+  # default on the read: without the limiter there is no table either, and a silent fallback to the live
+  # count would reopen exactly this hole.
+  defp shard_count, do: :persistent_term.get(@shard_count_key)
 
   # The clock the sharded windows are named by: monotonic, so a step of the OS clock can never move a
   # request into a window with a fresh quota. Erlang system time is not safe for this. Under

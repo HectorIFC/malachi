@@ -537,6 +537,58 @@ defmodule Malachi.RateLimiterTest do
       assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
     end
 
+    test "a change in the scheduler count mid-window does not move the caps" do
+      # The quota is split into one cap per shard. If the shard count were re-read on every check, a drop
+      # in `schedulers_online` would give the remaining shard a bigger cap over a counter already spent.
+      # With limit 16 over n >= 2 shards, shard 0 holds at most 8 and its counter pins at its cap plus one,
+      # so after a drop to one shard (cap 16) the spent quota would be admitted again. Shard 0 is swept
+      # first by every caller, which is what makes this hold wherever the checks are scheduled; a limit
+      # of 2 does not show it, because shard 0 then pins at 2, the new cap.
+      prior = :erlang.system_info(:schedulers_online)
+
+      if prior < 2 do
+        # One scheduler means one shard already; there is no count to drop to.
+        IO.puts("skipped: needs at least 2 online schedulers, this VM has #{prior}")
+      else
+        on_exit(fn -> :erlang.system_flag(:schedulers_online, prior) end)
+        config = %{limit: 16, window_ms: 60_000}
+
+        {spent, after_drop} =
+          within_one_window(config.window_ms, fn ->
+            identifier = "shards_#{System.unique_integer([:positive])}"
+            :erlang.system_flag(:schedulers_online, prior)
+            spent = for _ <- 1..16, do: RateLimiter.check_limit_in_caller(identifier, :publish, config)
+
+            :erlang.system_flag(:schedulers_online, 1)
+            {spent, RateLimiter.check_limit_in_caller(identifier, :publish, config)}
+          end)
+
+        assert Enum.all?(spent, &(&1 == :ok))
+        assert {:error, :rate_limit_exceeded, _} = after_drop, "a request over the limit was admitted after the drop"
+      end
+    end
+
+    test "without the shard count the limiter fixed at start, a check fails loudly" do
+      # No fallback to the live scheduler count: that fallback is the mid-window cap shift above. The
+      # term only goes missing if the limiter never started, and then its table is missing too.
+      key = {RateLimiter, :shard_count}
+      fixed = :persistent_term.get(key)
+      on_exit(fn -> :persistent_term.put(key, fixed) end)
+      :persistent_term.erase(key)
+
+      assert_raise ArgumentError, fn ->
+        RateLimiter.check_limit_in_caller("no_shards_#{System.unique_integer([:positive])}", :publish, %{
+          limit: 1,
+          window_ms: 60_000
+        })
+      end
+    end
+
+    test "the shard count is the scheduler count when the limiter started" do
+      assert :persistent_term.get({RateLimiter, :shard_count}) == :erlang.system_info(:schedulers_online)
+      assert length(RateLimiter.shard_caps(1)) == :erlang.system_info(:schedulers_online)
+    end
+
     @tag :concurrent
     test "stays exact under concurrency: every token is claimed atomically" do
       # Sharding is what makes this door fast, and the reason it is still exact is that each token is
