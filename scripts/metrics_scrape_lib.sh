@@ -84,7 +84,7 @@ ms_close_window() { # ms_close_window <token or empty> <login failure> <prefix>
   elif [ -s "$3.error.txt" ]; then
     cat "$3.error.txt"
   elif [ ! -s "$3.before.prom" ]; then
-    echo "no measured window was signalled, so nothing opened the flush window"
+    echo "no measured window was signaled, so nothing opened the flush window"
   else
     ms_scrape "$1" "$3.after.prom"
   fi

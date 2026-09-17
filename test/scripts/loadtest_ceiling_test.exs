@@ -225,7 +225,7 @@ defmodule LoadtestCeilingTest do
       assert login =~ ~s({"username":"admin","password":"admin123"})
     end
 
-    for {behaviour, reason} <- [
+    for {behavior, reason} <- [
           {"login403", "login failed: HTTP 403 (the dashboard refused the credentials)"},
           {"login429", "login failed: HTTP 429 (the dashboard rate limit tripped)"},
           {"notoken", "login failed: the answer carried no token"},
@@ -234,9 +234,9 @@ defmodule LoadtestCeilingTest do
           {"noseries", "the scrape has no flush latency series"},
           {"restart", "a flush counter went backwards between the scrapes (the node restarted)"}
         ] do
-      test "#{behaviour}: the run keeps its throughput and records why there is no flush window", ctx do
+      test "#{behavior}: the run keeps its throughput and records why there is no flush window", ctx do
         assert {_output, 0} =
-                 run_script(ctx, [{"BATCH_LADDER", "10"}, {"CONNS_LADDER_10", "4"}, {"STUB_CURL", unquote(behaviour)}])
+                 run_script(ctx, [{"BATCH_LADDER", "10"}, {"CONNS_LADDER_10", "4"}, {"STUB_CURL", unquote(behavior)}])
 
         run = read_json!(Path.join(ctx.run_dir, "run-b10-c4-r1.json"))
         assert run["records_per_s"] == 40
@@ -264,7 +264,7 @@ defmodule LoadtestCeilingTest do
                ])
 
       run = read_json!(ctx.out)
-      assert run["flush_latency_error"] == "no measured window was signalled, so nothing opened the flush window"
+      assert run["flush_latency_error"] == "no measured window was signaled, so nothing opened the flush window"
       assert Enum.map(curl_calls(ctx), &elem(&1, 0)) |> Enum.uniq() == ["POST /login"]
     end
 
@@ -426,7 +426,7 @@ defmodule LoadtestCeilingTest do
   end
 
   # Answers like curl with `-w '\n%{http_code}'`: the body, then the status on its own line. STUB_CURL
-  # picks the dashboard's behaviour; /metrics alternates between the before and the after scrape, which is
+  # picks the dashboard's behavior; /metrics alternates between the before and the after scrape, which is
   # the order a run asks for them in.
   defp curl_stub do
     ~S"""

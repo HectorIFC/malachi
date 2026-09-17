@@ -483,7 +483,7 @@ defmodule DockerClusterTest do
       assert [%{"flush" => %{"all" => nil, "nodes" => nodes}}] = cases(ctx)
 
       assert Map.values(nodes) ==
-               List.duplicate(%{"error" => "no measured window was signalled, so nothing opened the flush window"}, 3)
+               List.duplicate(%{"error" => "no measured window was signaled, so nothing opened the flush window"}, 3)
 
       refute Enum.any?(docker_calls(ctx), &(&1.args =~ "Bearer"))
     end
@@ -633,7 +633,7 @@ defmodule DockerClusterTest do
   # Answers from STUB_FSTYPE (a filesystem, or `none` for an unreadable mount), STUB_DF_KB and STUB_DU_KB
   # (kilobytes, or `none` for no output), STUB_HEALTHY (healthy node count), STUB_LOADTEST (json, errors,
   # garbage, none, hang), STUB_MARKER (yes, or no for a window that never opens), STUB_LABEL (fail) and
-  # STUB_REAL_MIX (1 sends the label to the real task), STUB_WGET (ok, or `<behaviour>:<node number>` with
+  # STUB_REAL_MIX (1 sends the label to the real task), STUB_WGET (ok, or `<behavior>:<node number>` with
   # login403, down or scrape429 for that node) and STUB_FLUSH (canned, real to run the real flush-window
   # task on the scrapes, fail).
   defp docker_stub do
@@ -670,23 +670,23 @@ defmodule DockerClusterTest do
                 http://*) url="$arg" ;;
               esac
             done
-            behaviour="${STUB_WGET:-ok}"
-            [ "${behaviour#*:}" = "$node" ] || behaviour=ok
-            behaviour="${behaviour%%:*}"
+            behavior="${STUB_WGET:-ok}"
+            [ "${behavior#*:}" = "$node" ] || behavior=ok
+            behavior="${behavior%%:*}"
             stubs="$(dirname "$0")"
-            if [ "$behaviour" = down ]; then
+            if [ "$behavior" = down ]; then
               echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2
               exit 1
             fi
             if [ "$post" = yes ]; then
-              if [ "$behaviour" = login403 ]; then
+              if [ "$behavior" = login403 ]; then
                 echo "wget: server returned error: HTTP/1.1 403 Forbidden" >&2
                 exit 1
               fi
               echo '{"s":"ok","token":"stub-token"}'
               exit 0
             fi
-            if [ "$behaviour" = scrape429 ]; then
+            if [ "$behavior" = scrape429 ]; then
               echo "wget: server returned error: HTTP/1.1 429 Too Many Requests" >&2
               exit 1
             fi
