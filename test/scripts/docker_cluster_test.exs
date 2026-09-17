@@ -11,6 +11,8 @@ defmodule DockerClusterTest do
   # Not async: every case runs a shell script, and the one real-label case runs the real mix task.
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.MetricsFixtures
+
   @moduletag :linux
   @moduletag :tmp_dir
   @moduletag timeout: 120_000
@@ -18,6 +20,7 @@ defmodule DockerClusterTest do
   @script Path.expand("../../benchmark/docker-cluster.sh", __DIR__)
   @project Path.expand("../..", __DIR__)
   @prealloc 67_108_864
+  @scrape_lib Path.expand("../../scripts/metrics_scrape_lib.sh", __DIR__)
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
@@ -33,6 +36,8 @@ defmodule DockerClusterTest do
     root = Path.join(dir, "tree")
     File.mkdir_p!(Path.join(root, "benchmark"))
     File.cp!(@script, Path.join([root, "benchmark", "docker-cluster.sh"]))
+    File.mkdir_p!(Path.join(root, "scripts"))
+    File.cp!(@scrape_lib, Path.join([root, "scripts", "metrics_scrape_lib.sh"]))
 
     stubs = Path.join(dir, "stubs")
     File.mkdir_p!(stubs)
@@ -40,6 +45,7 @@ defmodule DockerClusterTest do
     write_stub!(stubs, "sleep", sleep_stub())
     write_stub!(stubs, "findmnt", findmnt_stub())
     write_stub!(stubs, "lsblk", lsblk_stub())
+    MetricsFixtures.write_flush_scrapes!(stubs)
 
     %{root: root, stubs: stubs, log: Path.join(dir, "docker.log"), out: Path.join([dir, "out", "cases.jsonl"])}
   end
@@ -389,6 +395,114 @@ defmodule DockerClusterTest do
     end
   end
 
+  describe "the nodes' flush latency" do
+    test "each node's window and all of them added up land in OUT", ctx do
+      assert {output, 0} = run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"OUT", ctx.out}])
+
+      assert [%{"outcome" => "ok", "flush" => flush}] = cases(ctx)
+      assert flush["error"] == nil
+      assert Map.keys(flush["nodes"]) == ~w(malachi1 malachi2 malachi3)
+      # The before scrape already holds 100 slow setup flushes per node; only the 1000 fast ones count.
+      assert Enum.all?(Map.values(flush["nodes"]), &(&1["flushes"] == 1000))
+      assert %{"flushes" => 3000, "records" => 30_000, "p99" => p99} = flush["all"]
+      assert p99 < 0.00025
+
+      assert output =~ ~r/flush latency, all nodes: p50 \d+us, p99 \d+us over 3000 flushes \(30000 records\)/
+    end
+
+    test "logs in before the generator, opens the windows at the marker and closes them after the run", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"MALACHI_USER", "bench"}, {"MALACHI_PASS", "s3cret"}, {"OUT", ctx.out}])
+
+      calls = Enum.map(docker_calls(ctx), & &1.args)
+      index = fn pattern -> Enum.find_index(calls, &(&1 =~ pattern)) end
+
+      indices = fn pattern ->
+        calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) =~ pattern)) |> Enum.map(&elem(&1, 1))
+      end
+
+      logins = indices.(~r/wget .*--post-data/)
+      scrapes = indices.(~r/wget .*Bearer stub-token/)
+      generator = index.(~r/^run --rm --name malachi-cluster-loadtest-/)
+      marker = index.(~r/sh -c test -e \/tmp\/malachi-measure-window/)
+
+      assert length(logins) == 3
+      assert length(scrapes) == 6
+      assert Enum.max(logins) < generator
+      assert marker < Enum.min(scrapes)
+
+      for node <- 1..3 do
+        assert Enum.count(calls, &(&1 =~ ~r/^exec malachi-cluster-#{node} wget .*127\.0\.0\.1:4041\/metrics/)) == 2
+      end
+
+      assert Enum.all?(logins, &(Enum.at(calls, &1) =~ ~s(--post-data {"username":"bench","password":"s3cret"})))
+      assert Enum.all?(scrapes, &(Enum.at(calls, &1) =~ "--header Accept: text/plain"))
+
+      # The window closes after the generator is done, before the case is torn down.
+      teardown = calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) == "down -v")) |> List.last() |> elem(1)
+      assert Enum.max(scrapes) < teardown
+      assert Enum.count(calls, &(&1 =~ "flush-window --stdin")) == 1
+    end
+
+    test "a node that refuses the login leaves the aggregate out and says which and why", ctx do
+      assert {output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_WGET", "login403:2"}, {"OUT", ctx.out}])
+
+      assert [%{"outcome" => "ok", "loadtest" => %{"records_per_s" => 1000}, "flush" => flush}] = cases(ctx)
+      assert flush["all"] == nil
+      assert flush["nodes"]["malachi1"]["flushes"] == 1000
+
+      reason = "login failed: HTTP 403 (the dashboard refused the credentials)"
+      assert flush["nodes"]["malachi2"] == %{"error" => reason}
+      assert flush["error"] == "malachi2: " <> reason
+      assert output =~ "flush latency: none (malachi2: #{reason})"
+    end
+
+    test "a node wget cannot reach is named with wget's own words", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_WGET", "down:3"}, {"OUT", ctx.out}])
+
+      assert [%{"flush" => %{"nodes" => %{"malachi3" => %{"error" => error}}}}] = cases(ctx)
+
+      assert error ==
+               "login failed: wget on malachi3 failed: wget: can't connect to remote host (127.0.0.1): Connection refused"
+    end
+
+    test "a node whose scrape fails mid-window is recorded with the status", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_WGET", "scrape429:1"}, {"OUT", ctx.out}])
+
+      assert [%{"flush" => %{"all" => nil, "nodes" => %{"malachi1" => %{"error" => error}}}}] = cases(ctx)
+      assert error == "scrape failed: HTTP 429 (the dashboard rate limit tripped)"
+    end
+
+    test "a window that never opens scrapes no node and says so", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_MARKER", "no"}, {"OUT", ctx.out}])
+
+      assert [%{"flush" => %{"all" => nil, "nodes" => nodes}}] = cases(ctx)
+
+      assert Map.values(nodes) ==
+               List.duplicate(%{"error" => "no measured window was signalled, so nothing opened the flush window"}, 3)
+
+      refute Enum.any?(docker_calls(ctx), &(&1.args =~ "Bearer"))
+    end
+
+    test "a flush-window that gives no answer is recorded, not fatal", ctx do
+      assert {output, 0} = run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "fail"}, {"OUT", ctx.out}])
+
+      assert [%{"outcome" => "ok", "flush" => %{"nodes" => nil, "all" => nil, "error" => error}}] = cases(ctx)
+      assert error == "flush-window gave no answer: flush exploded"
+      assert output =~ "flush latency: none (flush-window gave no answer: flush exploded)"
+    end
+
+    test "a case whose generator produced nothing records no flush", ctx do
+      assert {_output, 1} = run_script(ctx, [{"RFS", "1"}, {"STUB_LOADTEST", "none"}, {"OUT", ctx.out}])
+      assert [%{"outcome" => "no json", "flush" => nil}] = cases(ctx)
+      refute Enum.any?(docker_calls(ctx), &(&1.args =~ "flush-window"))
+    end
+  end
+
   describe "OUT" do
     test "appends one complete JSON object per case", ctx do
       File.mkdir_p!(Path.dirname(ctx.out))
@@ -519,7 +633,9 @@ defmodule DockerClusterTest do
   # Answers from STUB_FSTYPE (a filesystem, or `none` for an unreadable mount), STUB_DF_KB and STUB_DU_KB
   # (kilobytes, or `none` for no output), STUB_HEALTHY (healthy node count), STUB_LOADTEST (json, errors,
   # garbage, none, hang), STUB_MARKER (yes, or no for a window that never opens), STUB_LABEL (fail) and
-  # STUB_REAL_MIX (1 sends the label to the real task).
+  # STUB_REAL_MIX (1 sends the label to the real task), STUB_WGET (ok, or `<behaviour>:<node number>` with
+  # login403, down or scrape429 for that node) and STUB_FLUSH (canned, real to run the real flush-window
+  # task on the scrapes, fail).
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -543,7 +659,42 @@ defmodule DockerClusterTest do
         # `exec <container> sh -c ...` puts it third.
         command="$4"
         [ "$3" = sh ] && command=sh
+        [ "$3" = wget ] && command=wget
         case "$command" in
+          wget)
+            node="${2#malachi-cluster-}"
+            post=no url=""
+            for arg in "$@"; do
+              case "$arg" in
+                --post-data) post=yes ;;
+                http://*) url="$arg" ;;
+              esac
+            done
+            behaviour="${STUB_WGET:-ok}"
+            [ "${behaviour#*:}" = "$node" ] || behaviour=ok
+            behaviour="${behaviour%%:*}"
+            stubs="$(dirname "$0")"
+            if [ "$behaviour" = down ]; then
+              echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2
+              exit 1
+            fi
+            if [ "$post" = yes ]; then
+              if [ "$behaviour" = login403 ]; then
+                echo "wget: server returned error: HTTP/1.1 403 Forbidden" >&2
+                exit 1
+              fi
+              echo '{"s":"ok","token":"stub-token"}'
+              exit 0
+            fi
+            if [ "$behaviour" = scrape429 ]; then
+              echo "wget: server returned error: HTTP/1.1 429 Too Many Requests" >&2
+              exit 1
+            fi
+            calls="$stubs/scrapes-$node"
+            n=$(( $(cat "$calls" 2> /dev/null || echo 0) + 1 ))
+            echo "$n" > "$calls"
+            if [ $((n % 2)) = 1 ]; then cat "$stubs/before.prom"; else cat "$stubs/after.prom"; fi
+            exit 0 ;;
           awk)
             [ "${STUB_FSTYPE:-ext4}" = none ] && exit 1
             echo "${STUB_FSTYPE:-ext4} rw,relatime" ;;
@@ -560,6 +711,18 @@ defmodule DockerClusterTest do
           *) echo "stub docker: unexpected exec $*" >&2; exit 97 ;;
         esac ;;
       run)
+        case "$*" in
+          *flush-window*)
+            case "${STUB_FLUSH:-canned}" in
+              fail) echo "flush exploded" >&2; exit 1 ;;
+              real) cd "$REAL_PROJECT" && MIX_ENV=test exec "$REAL_MIX" malachi.loadtest.ceiling flush-window --stdin ;;
+              *)
+                cat > /dev/null
+                echo "Compiling nothing"
+                echo '{"nodes":{},"all":{"p50":0.0001,"p99":0.0004,"p999":0.0005,"mean":0.0002,"flushes":10,"bytes":640,"records":100},"error":null}'
+                exit 0 ;;
+            esac ;;
+        esac
         batch="" rsize="" gc="" prealloc="" entrypoint=""
         while [ $# -gt 0 ]; do
           case "$1" in
