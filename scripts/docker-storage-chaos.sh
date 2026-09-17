@@ -158,6 +158,7 @@ wait_segment_repaired() {
     echo "copy repaired: follower holds the primary's records ($(sed -n 's/^COPIES verdict=\([a-z_]*\) .*/\1/p' "$WORK/repair.txt"))"
   else
     disagreeing_copies "$WORK/repair.txt"
+    keep_copies_evidence "$WORK/repair.txt" repair
     fail "$1"
   fi
 }
@@ -210,16 +211,21 @@ disagreeing_copies() {
        ($1 == "COPY" && ($2 in keep)) || ($1 == "COPIES" && ($3 in keep))' "$1" "$1"
 }
 
-# Keeps what a failed comparison saw, before phase 2's start_cluster recreates the volumes and it is gone: the
-# report, the substrate and host load, and each node's copy of every segment the report names.
+# Keeps what a failed comparison ($1, a copies report) saw, before phase 2's start_cluster recreates the volumes
+# and it is gone: the report, the substrate and host load, and each node's copy of every segment the report
+# names. Each capture goes to a numbered directory of its own, labelled $2, inside the run's evidence dir: a
+# repair that never converged is followed by invariant 4 failing on the same copies, and a second capture
+# into one directory would overwrite the first report and nest the copies already kept.
 keep_copies_evidence() {
-  mkdir -p "$EVIDENCE_DIR" || { fail "cannot create the evidence directory $EVIDENCE_DIR"; return 1; }
-  cp "$1" "$EVIDENCE_DIR/copies.txt"
+  EVIDENCE_SEQ=$((EVIDENCE_SEQ + 1))
+  capture="$EVIDENCE_DIR/$(printf '%02d' "$EVIDENCE_SEQ")-$2"
+  mkdir -p "$capture" || { fail "cannot create the evidence directory $capture"; return 1; }
+  cp "$1" "$capture/copies.txt"
   {
     date -u +%Y-%m-%dT%H:%M:%SZ
     uptime
     docker info --format 'docker kernel {{.KernelVersion}}, {{.NCPU}} cpus, {{.OperatingSystem}}'
-  } >"$EVIDENCE_DIR/substrate.txt" 2>&1
+  } >"$capture/substrate.txt" 2>&1
 
   dirs=$(disagreeing_copies "$1" | sed -n 's/^COPIES .* segment=\([^ ]*\) .*/\1/p' | tr '\n' ' ')
   # A report that names no segment is a report that itself failed (a checker that crashed, a topology it could
@@ -227,14 +233,14 @@ keep_copies_evidence() {
   # node's shell, on the volume.
   [ -n "$dirs" ] || dirs="${CHAOS_TOPIC}-r*"
   for c in malachi-cluster-1 malachi-cluster-2 malachi-cluster-3; do
-    mkdir -p "$EVIDENCE_DIR/$c"
-    docker run --rm -v "$(data_volume_of "$c"):/data:ro" -v "$EVIDENCE_DIR/$c:/out" --entrypoint sh "$(image_of "$c")" \
+    mkdir -p "$capture/$c"
+    docker run --rm -v "$(data_volume_of "$c"):/data:ro" -v "$capture/$c:/out" --entrypoint sh "$(image_of "$c")" \
       -c "cd $DATA_DIR && for d in $dirs; do if [ -d \$d ]; then cp -a \$d /out/; fi; done" ||
       echo "could not copy the segment directories out of $c"
   done
 
   EVIDENCE_KEPT="$EVIDENCE_DIR"
-  echo "evidence kept in $EVIDENCE_DIR"
+  echo "evidence kept in $capture"
 }
 
 build_images
@@ -318,18 +324,18 @@ else
   if [ -z "$summary" ]; then
     echo "per-copy report unavailable:"
     tail -5 "$WORK/copies.txt"
-    keep_copies_evidence "$WORK/copies.txt"
+    keep_copies_evidence "$WORK/copies.txt" invariant-4
     fail "invariant 4 could not compare the copies: the checker produced no report (see above)"
   else
     echo "$summary"
     case "$summary" in
       *" segments=0 "*)
-        keep_copies_evidence "$WORK/copies.txt"
+        keep_copies_evidence "$WORK/copies.txt" invariant-4
         fail "invariant 4 found no $CHAOS_TOPIC segment copy to compare under $DATA_DIR on any node" ;;
       *)
         echo "segments whose copies are not identical, per node:"
         disagreeing_copies "$WORK/copies.txt"
-        keep_copies_evidence "$WORK/copies.txt"
+        keep_copies_evidence "$WORK/copies.txt" invariant-4
         case "$summary" in
           *" control=unavailable"*)
             fail "invariant 4 could not read the topology: sealed lengths went unchecked (see the per-copy report above)" ;;

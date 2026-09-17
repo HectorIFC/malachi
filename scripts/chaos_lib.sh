@@ -25,6 +25,8 @@ trap 'rm -rf "$WORK"' EXIT
 # named by time and commit so runs never overwrite each other. Created only when something is kept.
 EVIDENCE_DIR="$CHAOS_WORK_ROOT/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 EVIDENCE_KEPT=""
+# Captures kept so far in this run, numbering their directories in order.
+EVIDENCE_SEQ=0
 # Extra `docker compose run` arguments for the next checker_run (mounts, --no-deps). Callers set and reset it.
 CHECKER_RUN_ARGS=()
 # Set once this run has brought the cluster up, so a second start (the storage drill's phase 2) replaces its

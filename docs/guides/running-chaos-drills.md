@@ -90,11 +90,12 @@ a torn write inside the preallocated region, instead of truncating it, is pinned
 The check retries for a minute and prints a `COPIES segments=... whole_file=... content=...` summary.
 When it fails, it prints, per node, every segment whose copies are not identical: the files with their
 sizes and md5s, the records and bytes that verify, a digest of the valid records, and a verdict naming
-the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`: the
-report, the host's substrate and load, and each node's copy of those segments. That happens before the
-second phase, whose fresh cluster deletes the volumes. The result JSON names that directory in
-`evidence_dir`. The repairs of the file-loss and bit-rot events are judged by the same rule, and the
-rotted index by byte equality of the index files.
+the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
+numbered directory per failed check (`01-repair`, `02-invariant-4`): the report, the host's substrate and
+load, and each node's copy of those segments. That happens before the second phase, whose fresh cluster
+deletes the volumes. The result JSON names the run's directory in `evidence_dir`. The repairs of the
+file-loss and bit-rot events are judged by the same rule, and keep their evidence the same way when they
+do not converge; the rotted index is judged by byte equality of the index files.
 
 Set `STORAGE_CHAOS_NEGATIVE_CONTROL=1` to prove the comparison is not vacuous. After the check, the
 drill stops a follower, inverts one byte inside the records of one of its sealed copies, and requires

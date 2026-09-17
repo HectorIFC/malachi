@@ -133,7 +133,7 @@ defmodule StorageChaosTest do
 
       # The report names no disagreeing segment, so the evidence is the whole topic.
       assert %{"evidence_dir" => evidence} = result(ctx)
-      assert File.exists?(Path.join(evidence, "copies.txt"))
+      assert File.exists?(Path.join([evidence, "01-invariant-4", "copies.txt"]))
       assert Enum.count(docker_calls(ctx), &(&1 =~ ":/out" and &1 =~ "for d in chaos_acked-r\*; do")) == 3
     end
 
@@ -142,7 +142,7 @@ defmodule StorageChaosTest do
       assert output =~ "per-copy report unavailable:\n** (RuntimeError) boom"
       assert output =~ "FAIL: invariant 4 could not compare the copies: the checker produced no report"
       assert %{"evidence_dir" => evidence} = result(ctx)
-      assert File.read!(Path.join(evidence, "copies.txt")) =~ "boom"
+      assert File.read!(Path.join([evidence, "01-invariant-4", "copies.txt"])) =~ "boom"
       assert Enum.count(docker_calls(ctx), &(&1 =~ ":/out" and &1 =~ "for d in chaos_acked-r\*; do")) == 3
     end
 
@@ -178,19 +178,20 @@ defmodule StorageChaosTest do
       refute output =~ "COPY segment=chaos_acked-r0-s2"
     end
 
-    test "keeps the report, the substrate and each node's disagreeing copies", ctx do
+    test "keeps the report, the substrate and each node's disagreeing copies, in a capture of its own", ctx do
       assert %{"verdict" => "failed", "evidence_dir" => evidence} = result(ctx)
       assert String.starts_with?(evidence, Path.join(ctx.work_root, "evidence") <> "/")
+      capture = Path.join(evidence, "01-invariant-4")
 
-      assert File.read!(Path.join(evidence, "copies.txt")) =~ "COPIES verdict=content"
-      assert File.read!(Path.join(evidence, "substrate.txt")) =~ "load average"
+      assert File.read!(Path.join(capture, "copies.txt")) =~ "COPIES verdict=content"
+      assert File.read!(Path.join(capture, "substrate.txt")) =~ "load average"
 
       for n <- 1..3 do
         container = "malachi-cluster-#{n}"
-        assert File.dir?(Path.join(evidence, container))
+        assert File.dir?(Path.join(capture, container))
 
         assert Enum.any?(docker_calls(ctx), fn call ->
-                 call =~ "run --rm -v vol-#{n}:/data:ro -v #{evidence}/#{container}:/out" and
+                 call =~ "run --rm -v vol-#{n}:/data:ro -v #{capture}/#{container}:/out" and
                    call =~ "for d in chaos_acked-r0-s1 ; do"
                end)
       end
@@ -202,6 +203,39 @@ defmodule StorageChaosTest do
       phase_2_down = calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) =~ "down -v")) |> Enum.at(1) |> elem(1)
 
       assert last_copy_out < phase_2_down
+    end
+  end
+
+  describe "a repair that never converges" do
+    test "keeps its evidence, before phase 2 recreates the volumes", ctx do
+      # Events g and h wait for the same repair; with the scrub never converging both fail, each with a
+      # capture of its own, and invariant 4 (which passes here) keeps nothing.
+      assert {output, 1} = run_drill(ctx, [{"STUB_REPAIR", "never"}])
+      assert output =~ "FAIL: lost sealed copy was not re-backfilled (silent under-replication)"
+      assert output =~ "FAIL: rotted sealed copy was not repaired by the integrity scrub"
+
+      assert %{"evidence_dir" => evidence} = result(ctx)
+      assert File.ls!(evidence) |> Enum.sort() == ["01-repair", "02-repair"]
+      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=lagging"
+      assert File.dir?(Path.join([evidence, "01-repair", "malachi-cluster-2"]))
+
+      calls = docker_calls(ctx)
+      first_capture = Enum.find_index(calls, &(&1 =~ "01-repair/malachi-cluster-1:/out"))
+      phase_2_down = calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) =~ "down -v")) |> Enum.at(1) |> elem(1)
+      assert first_capture < phase_2_down
+    end
+
+    test "followed by invariant 4 failing keeps both captures, neither over the other", ctx do
+      assert {_output, 1} = run_drill(ctx, [{"STUB_REPAIR", "never"}, {"STUB_COPIES", "content"}])
+
+      assert %{"evidence_dir" => evidence} = result(ctx)
+      assert File.ls!(evidence) |> Enum.sort() == ["01-repair", "02-repair", "03-invariant-4"]
+      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=lagging"
+      assert File.read!(Path.join([evidence, "03-invariant-4", "copies.txt"])) =~ "COPIES verdict=content"
+
+      for capture <- ["01-repair", "03-invariant-4"], n <- 1..3 do
+        assert File.dir?(Path.join([evidence, capture, "malachi-cluster-#{n}"]))
+      end
     end
   end
 
