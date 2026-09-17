@@ -66,13 +66,17 @@ x-malachi-node: &malachi-node
     # Data root: /tmp (tmpfs, RAM) by default so fsync cost is uniform for BENCHMARKS. The chaos
     # certification overrides MALACHI_DATA_ROOT=/data (a per-node named volume) because tmpfs is
     # remounted EMPTY on container restart, and durability-through-restart is exactly what it tests.
+    # benchmark/docker-cluster.sh REAL_DISK=1 overrides it too, to measure the durable path on a real
+    # filesystem; /data is writable here because this image runs as root (the non-root release image of
+    # docker-compose.cluster-durable.yml needs /app/data instead).
     MALACHI_LOG_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_log"
     MALACHI_RA_DATA_DIR: "${MALACHI_DATA_ROOT:-/tmp}/malachi_ra"
     # Segment preallocation. OFF here, where production has it on at 64MB, because the default data
     # root below is /tmp, a 1g tmpfs: on tmpfs there is no filesystem journal to avoid and no delayed
     # allocation to give up, so preallocating buys nothing and costs the RAM it sits in, 64MB per
     # active segment before a record is written. A harness that runs on the real volume
-    # (MALACHI_DATA_ROOT=/data) overrides this, and scripts/docker-storage-chaos.sh does.
+    # (MALACHI_DATA_ROOT=/data) overrides this, as scripts/docker-storage-chaos.sh and
+    # benchmark/docker-cluster.sh REAL_DISK=1 do.
     MALACHI_SEGMENT_PREALLOC_BYTES: "${MALACHI_SEGMENT_PREALLOC_BYTES:-0}"
     # Active-segment roll size; unset keeps the 64MB library default. The storage-chaos harness sets
     # a small value so segments seal (and become repairable sealed copies) within its window.
@@ -138,8 +142,9 @@ services:
     # Overridden per run by `docker compose run --rm loadtest <flags>`; default for a plain `up`.
     command: ["--host", "malachi1,malachi2,malachi3", "--scenario", "produce", "--connections", "192", "--batch", "100", "--topics", "64", "--duration", "4", "--warmup", "1", "--json"]
 
-# Per-node persistent data volumes, used only when MALACHI_DATA_ROOT=/data (chaos certification);
-# benchmarks keep the tmpfs default and never touch these.
+# Per-node persistent data volumes, used only when MALACHI_DATA_ROOT=/data: the chaos certification, and
+# the real-disk mode of benchmark/docker-cluster.sh (which removes them before and after every case).
+# Other benchmarks keep the tmpfs default and never touch these.
 volumes:
   malachi-chaos-1:
   malachi-chaos-2:

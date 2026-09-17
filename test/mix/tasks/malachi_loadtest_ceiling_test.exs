@@ -202,6 +202,100 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     end
   end
 
+  describe "label" do
+    defp label!(argv) do
+      Task.run(["label" | argv])
+      assert_received {:mix_shell, :info, [line]}
+      line
+    end
+
+    @label_argv ["--batch", "100", "--record-size", "256", "--group-commit", "true", "--segment-prealloc-bytes", "0"]
+
+    test "prints the regime in the words regime_label/4 uses" do
+      assert label!(@label_argv) ==
+               "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation off)"
+
+      assert label!([
+               "--batch",
+               "10",
+               "--record-size",
+               "256",
+               "--group-commit",
+               "false",
+               "--segment-prealloc-bytes",
+               "67108864"
+             ]) ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)"
+
+      assert label!([
+               "--batch",
+               "4096",
+               "--record-size",
+               "512",
+               "--group-commit",
+               "false",
+               "--segment-prealloc-bytes",
+               "8192"
+             ]) ==
+               "batch 4096 x 512B (2MB of values per request, group commit off, segment preallocation 8KB)"
+    end
+
+    test "prints nothing else" do
+      Task.run([
+        "label",
+        "--batch",
+        "1",
+        "--record-size",
+        "1",
+        "--group-commit",
+        "true",
+        "--segment-prealloc-bytes",
+        "0"
+      ])
+
+      assert_received {:mix_shell, :info,
+                       ["batch 1 x 1B (1B of values per request, group commit on, segment preallocation off)"]}
+
+      refute_received {:mix_shell, _, _}
+    end
+
+    # Each case is the valid argv with one flag dropped or replaced, so the flag named is the only fault.
+    for {change, message} <- [
+          {{:drop, "--batch"}, "--batch is not set"},
+          {{:drop, "--record-size"}, "--record-size is not set"},
+          {{:drop, "--group-commit"}, "--group-commit is not set"},
+          {{:drop, "--segment-prealloc-bytes"}, "--segment-prealloc-bytes is not set"},
+          {{:set, "--batch", "0"}, "--batch must be a positive integer, got 0"},
+          {{:set, "--record-size", "-1"}, "--record-size must be a positive integer, got -1"},
+          {{:set, "--group-commit", "maybe"}, ~s(--group-commit must be true or false, got "maybe")},
+          {{:set, "--segment-prealloc-bytes", "-1"}, "--segment-prealloc-bytes must be a non-negative integer, got -1"},
+          {{:set, "--segment-prealloc-bytes", "64MB"}, ~s(--segment-prealloc-bytes must be an integer, got "64MB")},
+          {{:append, "extra"}, "label takes no positional arguments, got: extra"}
+        ] do
+      test "rejects #{inspect(change)}" do
+        argv = change_argv(@label_argv, unquote(Macro.escape(change)))
+        assert_raise Mix.Error, unquote(message), fn -> Task.run(["label" | argv]) end
+      end
+    end
+
+    test "an unknown flag is rejected by name" do
+      assert_raise OptionParser.ParseError, ~r/--connections/, fn ->
+        Task.run(["label", "--batch", "100", "--connections", "32"])
+      end
+    end
+  end
+
+  defp change_argv(argv, {:drop, flag}) do
+    index = Enum.find_index(argv, &(&1 == flag))
+    List.delete_at(List.delete_at(argv, index), index)
+  end
+
+  defp change_argv(argv, {:set, flag, value}) do
+    List.replace_at(argv, Enum.find_index(argv, &(&1 == flag)) + 1, value)
+  end
+
+  defp change_argv(argv, {:append, extra}), do: argv ++ [extra]
+
   describe "inputs" do
     test "a run directory that does not exist", ctx do
       plan!(ctx)
@@ -226,7 +320,7 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     end
 
     test "an unknown subcommand prints the usage" do
-      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize/, fn ->
+      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize\|label/, fn ->
         Task.run(["elect"])
       end
     end

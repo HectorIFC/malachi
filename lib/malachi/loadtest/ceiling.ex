@@ -286,8 +286,17 @@ defmodule Malachi.Loadtest.Ceiling do
 
   defp parse_integer(nil, name), do: {:error, "#{name} is not set"}
 
+  # An integer from a string, then held to the same check `validate/1` applies to a sweep.
+  defp parse_checked(value, name, check) do
+    with {:ok, integer} <- parse_integer(value, name),
+         :ok <- check.(integer, name) do
+      {:ok, integer}
+    end
+  end
+
   defp parse_boolean("true", _name), do: {:ok, true}
   defp parse_boolean("false", _name), do: {:ok, false}
+  defp parse_boolean(nil, name), do: {:error, "#{name} is not set"}
   defp parse_boolean(value, name), do: {:error, "#{name} must be true or false, got #{inspect(value)}"}
 
   defp show(list) when is_list(list), do: Enum.map_join(list, " ", &show_term/1)
@@ -414,6 +423,24 @@ defmodule Malachi.Loadtest.Ceiling do
 
   defp preallocation(0), do: "off"
   defp preallocation(bytes), do: format_bytes(bytes)
+
+  @doc """
+  `regime_label/4` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
+
+  `params` has `:batch` and `:record_size` (positive integers), `:group_commit` (\"true\" or \"false\")
+  and `:segment_prealloc_bytes` (a non-negative integer, 0 for off), as the command line gives them.
+  Every problem is returned as a message naming the flag to fix.
+  """
+  @spec label(map()) :: {:ok, String.t()} | {:error, String.t()}
+  def label(params) do
+    with {:ok, batch} <- parse_checked(params[:batch], "--batch", &check_positive/2),
+         {:ok, record_size} <- parse_checked(params[:record_size], "--record-size", &check_positive/2),
+         {:ok, group_commit} <- parse_boolean(params[:group_commit], "--group-commit"),
+         {:ok, prealloc} <-
+           parse_checked(params[:segment_prealloc_bytes], "--segment-prealloc-bytes", &check_non_negative/2) do
+      {:ok, regime_label(batch, record_size, group_commit, prealloc)}
+    end
+  end
 
   @doc """
   A byte count in binary units with at most one decimal, trailing `.0` dropped: 2560 is `2.5KB`, 25600
