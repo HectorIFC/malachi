@@ -54,6 +54,372 @@
 #   mix run --no-start scripts/chaos_checker.exs produce  host1,host2,host3 topic duration_s acked_file
 #   mix run --no-start scripts/chaos_checker.exs verify   host1,host2,host3 topic acked_file
 #   mix run --no-start scripts/chaos_checker.exs topology host1,host2,host3 topic
+#   mix run --no-start scripts/chaos_checker.exs copies   host1,host2,host3 topic attempts interval_ms \
+#     [segment=<dir>] node1=/path/to/its/log/root node2=... node3=...
+#
+# copies mode: reads every copy of every <topic>-r<R>-s<S> segment directory under each node's log root
+# (the drill mounts the per-node data volumes read-only) and prints, per segment and per node, what the
+# copy holds, then one verdict per segment naming the nodes that disagree. See `ChaosChecker.Copies`.
+
+defmodule ChaosChecker.Copies do
+  @moduledoc """
+  What each node holds for a segment, and whether the copies agree (issue #152).
+
+  Comparing whole files is not the question the log model answers. A copy's file layout depends on how
+  that copy came to exist: a produce roll fences only the primary, so only the primary's store trims its
+  preallocated tail; a restart re-preallocates an unmarked last file; and each node rolls its internal
+  files at its own sync points. Two copies holding the same records can therefore differ as files. What
+  the model does promise is the records, so a copy is summarized by:
+
+    * `records` and `bytes`: what `Malachi.Storage.ElixirStore.verify/3` accepts as valid, per file;
+    * `digest`: the md5 of every file's valid prefix, concatenated in base-offset order, which is the
+      same for two copies holding the same frames however their files are cut;
+    * `trailing`: non-zero bytes past a file's valid end, which no writer leaves there;
+    * `files`: each file's base offset, size and whole-file md5, so a report still shows the raw layout.
+
+  The verdict is `:identical` or `:benign` (same records, different files) for copies that agree, and
+  one named failure otherwise. Reading is separate from classifying so the rule is testable without a
+  cluster.
+  """
+
+  alias Malachi.Log
+  alias Malachi.Storage.ElixirStore
+
+  @segment_id_width 20
+  @chunk_bytes 65_536
+  @short_md5 12
+
+  @passing [:identical, :benign]
+
+  @typedoc "Whether a copy could be read, and what was wrong when it could not."
+  @type status :: :ok | :missing | :empty | {:damaged, map()}
+
+  @typedoc "One node's copy of one segment directory."
+  @type copy :: %{
+          status: status(),
+          marker?: boolean(),
+          files: [map()],
+          records: non_neg_integer(),
+          bytes: non_neg_integer(),
+          digest: String.t() | nil,
+          trailing: non_neg_integer()
+        }
+
+  @typedoc "What the control plane says about a segment: its state and length, absent, or not known."
+  @type control :: %{state: String.t(), length: non_neg_integer()} | :absent | :unknown
+
+  @type verdict ::
+          :identical
+          | :benign
+          | :damaged
+          | :trailing_garbage
+          | :missing
+          | :empty
+          | :extra
+          | :lagging
+          | :length_mismatch
+          | :content
+
+  @doc "Whether `verdict` means the copies agree on their records."
+  @spec passing?(verdict()) :: boolean()
+  def passing?(verdict), do: verdict in @passing
+
+  @doc """
+  Reads one node's copy of one segment directory, without writing anything.
+
+  An absent directory is `:missing`, one with no `.log` is `:empty`, and anything `verify/3` refuses (or a
+  directory or file that cannot be read) is `{:damaged, details}`, keeping the files read up to that point.
+  """
+  @spec read_copy(Path.t()) :: copy()
+  def read_copy(dir) do
+    marker? = File.exists?(Log.seal_marker_path(dir))
+    blank = %{status: :ok, marker?: marker?, files: [], records: 0, bytes: 0, digest: nil, trailing: 0}
+
+    if File.exists?(dir), do: read_present(dir, blank), else: %{blank | status: :missing}
+  end
+
+  defp read_present(dir, blank) do
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.flat_map(&log_base_offset/1)
+        |> Enum.sort()
+        |> Enum.reduce_while({blank, :crypto.hash_init(:md5)}, &read_file(dir, &1, &2))
+        |> finish_copy()
+
+      {:error, reason} ->
+        %{blank | status: {:damaged, %{reason: reason, file: dir}}}
+    end
+  end
+
+  defp log_base_offset(name) do
+    case Regex.run(~r/\A(\d+)\.log\z/, name) do
+      [_, digits] -> [String.to_integer(digits)]
+      nil -> []
+    end
+  end
+
+  defp finish_copy({%{status: :ok, files: []} = copy, _content}), do: %{copy | status: :empty}
+
+  defp finish_copy({copy, content}) do
+    %{copy | files: Enum.reverse(copy.files), digest: hex(:crypto.hash_final(content))}
+  end
+
+  # One pass per file: the whole-file md5, the valid prefix into the running content digest, and a count
+  # of the non-zero bytes past the valid end. `verify/3` runs first because the valid end comes from it.
+  defp read_file(dir, base_offset, {copy, content}) do
+    path = Path.join(dir, segment_id(base_offset) <> ".log")
+
+    case ElixirStore.verify(dir, segment_id(base_offset), base_offset: base_offset) do
+      {:ok, %{records: records, bytes: valid}} ->
+        case hash_file(path, valid, content) do
+          {:ok, size, md5, content, trailing} ->
+            file = %{base_offset: base_offset, size: size, md5: md5, records: records, valid: valid}
+
+            {:cont,
+             {%{
+                copy
+                | files: [file | copy.files],
+                  records: copy.records + records,
+                  bytes: copy.bytes + valid,
+                  trailing: copy.trailing + trailing
+              }, content}}
+
+          {:error, reason} ->
+            {:halt, {damaged(copy, %{reason: reason, file: path}), content}}
+        end
+
+      {:error, details} ->
+        {:halt, {damaged(copy, damage_details(details, path)), content}}
+    end
+  end
+
+  defp damaged(copy, details), do: %{copy | status: {:damaged, details}}
+
+  defp damage_details(details, _path) when is_map(details), do: details
+  defp damage_details(reason, path), do: %{reason: reason, file: path}
+
+  defp hash_file(path, valid, content) do
+    case File.open(path, [:read, :raw, :binary], &hash_chunks(&1, 0, valid, :crypto.hash_init(:md5), content, 0)) do
+      {:ok, {:ok, _size, _md5, _content, _trailing} = hashed} -> hashed
+      {:ok, {:error, _reason} = error} -> error
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp hash_chunks(fd, position, valid, whole, content, trailing) do
+    case :file.read(fd, @chunk_bytes) do
+      {:ok, chunk} ->
+        in_prefix = chunk |> byte_size() |> min(max(valid - position, 0))
+        <<prefix::binary-size(in_prefix), past_valid::binary>> = chunk
+
+        hash_chunks(
+          fd,
+          position + byte_size(chunk),
+          valid,
+          :crypto.hash_update(whole, chunk),
+          :crypto.hash_update(content, prefix),
+          trailing + non_zero_bytes(past_valid)
+        )
+
+      :eof ->
+        {:ok, position, hex(:crypto.hash_final(whole)), content, trailing}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp non_zero_bytes(binary) do
+    for <<byte <- binary>>, byte != 0, reduce: 0 do
+      count -> count + 1
+    end
+  end
+
+  defp segment_id(base_offset), do: base_offset |> Integer.to_string() |> String.pad_leading(@segment_id_width, "0")
+
+  defp hex(binary), do: Base.encode16(binary, case: :lower)
+
+  @doc """
+  The verdict for one segment, from each node's copy and what the control plane says about it, with the
+  nodes that disagree.
+
+  Failures are checked in order of how much they explain: a copy that cannot be read, or holds bytes no
+  writer leaves, makes every comparison below it meaningless. Among copies that do read, the nodes named
+  are the minority: the ones whose value differs from what most nodes hold, or every node on a tie.
+  """
+  @spec classify(%{String.t() => copy()}, control()) :: {verdict(), [String.t()]}
+  def classify(copies, control) do
+    cond do
+      (nodes = nodes_where(copies, &match?({:damaged, _}, &1.status))) != [] -> {:damaged, nodes}
+      (nodes = nodes_where(copies, &(&1.trailing > 0))) != [] -> {:trailing_garbage, nodes}
+      (nodes = nodes_where(copies, &(&1.status == :missing))) != [] -> missing_verdict(copies, nodes, control)
+      (nodes = partly_empty(copies)) != [] -> {:empty, nodes}
+      control == :absent -> {:extra, Enum.sort(Map.keys(copies))}
+      (nodes = minority(copies, & &1.records)) != [] -> {:lagging, nodes}
+      (nodes = off_sealed_length(copies, control)) != [] -> {:length_mismatch, nodes}
+      (nodes = minority(copies, & &1.digest)) != [] -> {:content, nodes}
+      (nodes = minority(copies, &layout/1)) != [] -> {:benign, nodes}
+      true -> {:identical, []}
+    end
+  end
+
+  defp nodes_where(copies, predicate), do: for({node, copy} <- copies, predicate.(copy), do: node) |> Enum.sort()
+
+  # A segment with no record on any node, which the control plane does not say holds any, has nothing a copy
+  # could be missing: a replica that never received a push for it never created the directory. Seen on the
+  # drill (issue #152) for a segment sealed at length 0 while one of its replicas was restarting. A segment
+  # missing everywhere is still missing, since there is nothing to say it was empty.
+  defp missing_verdict(copies, missing, control) do
+    blank_everywhere? = Enum.all?(copies, fn {_node, copy} -> copy.status in [:missing, :empty] end)
+
+    if length(missing) < map_size(copies) and blank_everywhere? and not claims_records?(control),
+      do: {:benign, missing},
+      else: {:missing, missing}
+  end
+
+  defp claims_records?(%{length: length}), do: length > 0
+  defp claims_records?(_control), do: false
+
+  # Every copy empty is a segment nobody has written to yet, which agrees; only some empty is a copy that
+  # lost what the others hold.
+  defp partly_empty(copies) do
+    empty = nodes_where(copies, &(&1.status == :empty))
+    if length(empty) == map_size(copies), do: [], else: empty
+  end
+
+  defp off_sealed_length(copies, %{state: "sealed", length: length}), do: nodes_where(copies, &(&1.records != length))
+  defp off_sealed_length(_copies, _control), do: []
+
+  defp layout(copy), do: Enum.map(copy.files, &{&1.base_offset, &1.size, &1.md5})
+
+  defp minority(copies, key) do
+    groups = Enum.group_by(copies, fn {_node, copy} -> key.(copy) end, fn {node, _copy} -> node end)
+
+    case groups |> Map.values() |> Enum.sort_by(&(-length(&1))) do
+      [_only] -> []
+      [largest, next | _rest] when length(largest) == length(next) -> Enum.sort(Map.keys(copies))
+      [largest | _rest] -> (Map.keys(copies) -- largest) |> Enum.sort()
+    end
+  end
+
+  @doc """
+  The control plane's view of each segment directory, keyed by directory name (`<topic>-r<R>-s<S>`), from
+  the dashboard's topic drill-down. `ranges` of `nil` means the topology could not be read.
+  """
+  @spec controls([map()] | nil, String.t()) :: (String.t() -> control())
+  def controls(nil, _topic), do: fn _dir -> :unknown end
+
+  def controls(ranges, topic) do
+    known =
+      for range <- ranges, segment <- range["segments"], into: %{} do
+        {"#{topic}-r#{range["seq"]}-s#{segment["seq"]}", %{state: segment["state"], length: segment["length"]}}
+      end
+
+    &Map.get(known, &1, :absent)
+  end
+
+  @doc """
+  Surveys every segment directory of `topic` found under any node's root (or only `filter`, when given)
+  and classifies each. `nodes` is a list of `{node, log_root}`.
+  """
+  @spec survey([{String.t(), Path.t()}], String.t(), String.t() | nil, (String.t() -> control())) :: [map()]
+  def survey(nodes, topic, filter, control_of) do
+    nodes
+    |> segment_dirs(topic, filter)
+    |> Enum.map(fn dir ->
+      copies = Map.new(nodes, fn {node, root} -> {node, read_copy(Path.join(root, dir))} end)
+      control = control_of.(dir)
+      {verdict, disagreeing} = classify(copies, control)
+      %{segment: dir, control: control, copies: copies, verdict: verdict, nodes: disagreeing}
+    end)
+  end
+
+  # A filter names one directory whether or not any node holds it: a segment deleted everywhere is still
+  # an answer (every copy missing), where an empty survey would read as nothing to compare.
+  defp segment_dirs(_nodes, _topic, filter) when is_binary(filter), do: [filter]
+
+  defp segment_dirs(nodes, topic, nil) do
+    pattern = ~r/\A#{Regex.escape(topic)}-r(\d+)-s(\d+)\z/
+
+    nodes
+    |> Enum.flat_map(fn {_node, root} ->
+      case File.ls(root) do
+        {:ok, names} -> names
+        {:error, _reason} -> []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.flat_map(fn name ->
+      case Regex.run(pattern, name) do
+        [_, range, seq] -> [{{String.to_integer(range), String.to_integer(seq)}, name}]
+        nil -> []
+      end
+    end)
+    |> Enum.sort()
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  @doc """
+  Re-runs `check` until its report passes or `attempts` runs out, sleeping `interval_ms` between tries,
+  and returns the last report. A copy still being repaired converges within the window; one that does
+  not is reported as it stood on the final try.
+  """
+  @spec settle((-> [map()]), pos_integer(), non_neg_integer(), (non_neg_integer() -> any())) :: [map()]
+  def settle(check, attempts, interval_ms, sleep \\ &Process.sleep/1) do
+    report = check.()
+
+    if attempts <= 1 or Enum.all?(report, &passing?(&1.verdict)) do
+      report
+    else
+      sleep.(interval_ms)
+      settle(check, attempts - 1, interval_ms, sleep)
+    end
+  end
+
+  @doc """
+  The report as printed: one `COPY` line per node per segment, one `COPIES verdict=` line per segment,
+  and a closing summary separating whole-file agreement from record agreement.
+  """
+  @spec lines([map()]) :: [String.t()]
+  def lines(report) do
+    per_segment =
+      Enum.flat_map(report, fn entry ->
+        copy_lines =
+          for {node, copy} <- Enum.sort(entry.copies) do
+            "COPY segment=#{entry.segment} node=#{node} status=#{status_text(copy.status)} " <>
+              "marker=#{if copy.marker?, do: "yes", else: "no"} records=#{copy.records} bytes=#{copy.bytes} " <>
+              "digest=#{short(copy.digest)} trailing=#{copy.trailing} files=#{files_text(copy.files)}"
+          end
+
+        copy_lines ++
+          [
+            "COPIES verdict=#{entry.verdict} segment=#{entry.segment} control=#{control_text(entry.control)} " <>
+              "nodes=#{nodes_text(entry.nodes)}"
+          ]
+      end)
+
+    whole_file = if Enum.all?(report, &(&1.verdict == :identical)), do: "ok", else: "differs"
+    content = if Enum.all?(report, &passing?(&1.verdict)), do: "ok", else: "differs"
+
+    per_segment ++ ["COPIES segments=#{length(report)} whole_file=#{whole_file} content=#{content}"]
+  end
+
+  defp status_text({:damaged, details}), do: "damaged:#{details[:reason]}"
+  defp status_text(status), do: Atom.to_string(status)
+
+  defp control_text(%{state: state, length: length}), do: "#{state}:#{length}"
+  defp control_text(control), do: Atom.to_string(control)
+
+  defp nodes_text([]), do: "-"
+  defp nodes_text(nodes), do: Enum.join(nodes, ",")
+
+  defp files_text([]), do: "-"
+  defp files_text(files), do: Enum.map_join(files, ",", &"#{&1.base_offset}:#{&1.size}:#{short(&1.md5)}")
+
+  defp short(nil), do: "-"
+  defp short(md5), do: binary_part(md5, 0, @short_md5)
+end
 
 defmodule ChaosChecker do
   alias Malachi.Loadtest.Conn
@@ -140,11 +506,57 @@ defmodule ChaosChecker do
     end
   end
 
+  def main(["copies", hosts, topic, attempts, interval_ms | rest]) do
+    {filter, node_args} =
+      case rest do
+        ["segment=" <> dir | node_args] -> {dir, node_args}
+        node_args -> {nil, node_args}
+      end
+
+    nodes = Enum.map(node_args, &parse_node_root/1)
+
+    # Read once, before the retries: the control plane's view is context for the verdict, and a topology
+    # that cannot be read leaves the length check out rather than failing the comparison.
+    ranges =
+      case topology(parse_hosts(hosts), topic) do
+        {:ok, ranges} ->
+          ranges
+
+        {:error, reason} ->
+          IO.puts("topology unavailable, comparing copies without it: #{inspect(reason)}")
+          nil
+      end
+
+    control_of = ChaosChecker.Copies.controls(ranges, topic)
+
+    report =
+      ChaosChecker.Copies.settle(
+        fn -> ChaosChecker.Copies.survey(nodes, topic, filter, control_of) end,
+        String.to_integer(attempts),
+        String.to_integer(interval_ms)
+      )
+
+    Enum.each(ChaosChecker.Copies.lines(report), &IO.puts/1)
+    System.halt(if Enum.all?(report, &ChaosChecker.Copies.passing?(&1.verdict)), do: 0, else: 1)
+  end
+
   def main(_argv) do
     IO.puts("usage: chaos_checker.exs produce  <hosts> <topic> <duration_s> <acked_file>")
     IO.puts("       chaos_checker.exs verify   <hosts> <topic> <acked_file>")
     IO.puts("       chaos_checker.exs topology <hosts> <topic>")
+
+    IO.puts(
+      "       chaos_checker.exs copies   <hosts> <topic> <attempts> <interval_ms> [segment=<dir>] <node>=<root>..."
+    )
+
     System.halt(2)
+  end
+
+  defp parse_node_root(arg) do
+    case String.split(arg, "=", parts: 2) do
+      [node, root] when node != "" and root != "" -> {node, root}
+      _malformed -> raise ArgumentError, "expected <node>=<log root>, got: #{inspect(arg)}"
+    end
   end
 
   @doc """
