@@ -87,7 +87,9 @@ the primary's, has its preallocated tail trimmed, so a follower's last file keep
 node rolls its internal files at its own sync points. The report calls that `benign`. That recovery zeroes
 a torn write inside the preallocated region, instead of truncating it, is pinned by the store's own tests.
 
-The check retries for a minute and prints a `COPIES segments=... whole_file=... content=...` summary.
+The check retries for a minute and prints a
+`COPIES segments=... whole_file=... content=... control=...` summary, where `control` says whether the
+topology was read; a report with `control=unavailable` never certifies.
 When it fails, it prints, per node, every segment whose copies are not identical: the files with their
 sizes and md5s, the records and bytes that verify, a digest of the valid records, and a verdict naming
 the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
