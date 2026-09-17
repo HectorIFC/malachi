@@ -161,6 +161,48 @@ defmodule Malachi.RateLimiter do
   def action_config(:publish), do: build_action_config(:publish_rate_limit, :publish_rate_window_ms)
   def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, :subscribe_rate_window_ms)
 
+  @doc false
+  # The window a timestamp falls in, as `{window_start, elapsed_in_window}`. The one place the window
+  # arithmetic lives, so the hot path, `current_window_start/1` and the tests cannot disagree about it.
+  @spec window_bounds(integer(), pos_integer()) :: {integer(), non_neg_integer()}
+  def window_bounds(now_ms, window_ms) do
+    elapsed_in_window = rem(now_ms, window_ms)
+    {now_ms - elapsed_in_window, elapsed_in_window}
+  end
+
+  @doc false
+  # The start of the sharded window that is current right now, read from the same clock the check reads.
+  # Tests measure "did this run stay inside one window" with it, so they measure what the limiter counts.
+  @spec current_window_start(pos_integer()) :: integer()
+  def current_window_start(window_ms) do
+    {window_start, _elapsed} = window_bounds(window_clock_ms(), window_ms)
+    window_start
+  end
+
+  @doc false
+  # How `limit` is split across the shards right now, shard 0 first. Diagnostic only: the check computes
+  # each shard's cap on its own and never builds the list.
+  @spec shard_caps(pos_integer()) :: [non_neg_integer()]
+  def shard_caps(limit) do
+    shards = shard_count()
+    for shard <- 0..(shards - 1), do: shard_cap(limit, shards, shard)
+  end
+
+  @doc false
+  # Every sharded window counter held for `identifier` and `action`, oldest window first. A diagnostic
+  # read of the whole table, for tests and forensics; never call it on a request path.
+  @spec window_counters(term(), atom()) :: [
+          %{window_start: integer(), shard: non_neg_integer(), used: non_neg_integer(), window_ms: pos_integer()}
+        ]
+  def window_counters(identifier, action) do
+    @table
+    |> :ets.match_object({{identifier, action, :_, :_}, :_, :_})
+    |> Enum.map(fn {{_identifier, _action, window_start, shard}, used, window_ms} ->
+      %{window_start: window_start, shard: shard, used: used, window_ms: window_ms}
+    end)
+    |> Enum.sort_by(&{&1.window_start, &1.shard})
+  end
+
   @doc """
   Reset bucket for specific identifier and action.
 
@@ -305,9 +347,7 @@ defmodule Malachi.RateLimiter do
   # scales with cores.
   defp do_check_sharded(identifier, action, limit, window_ms) do
     shards = shard_count()
-    now = System.system_time(:millisecond)
-    elapsed_in_window = rem(now, window_ms)
-    window_start = now - elapsed_in_window
+    {window_start, elapsed_in_window} = window_bounds(window_clock_ms(), window_ms)
     shard = rem(:erlang.system_info(:scheduler_id), shards)
 
     if take_token(identifier, action, window_start, shard, shard_cap(limit, shards, shard), window_ms) do
@@ -362,6 +402,9 @@ defmodule Malachi.RateLimiter do
   # One shard per scheduler: the point is that concurrent callers write DIFFERENT keys, and the scheduler
   # id is the cheapest identifier that already tracks how much concurrency there actually is.
   defp shard_count, do: :erlang.system_info(:schedulers_online)
+
+  # The clock the sharded windows are named by.
+  defp window_clock_ms, do: System.system_time(:millisecond)
 
   defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) do
     now = System.monotonic_time(:millisecond)
@@ -424,7 +467,7 @@ defmodule Malachi.RateLimiter do
   # the quota mid-window).
   defp cleanup_expired_buckets do
     now = System.monotonic_time(:millisecond)
-    now_ms = System.system_time(:millisecond)
+    now_ms = window_clock_ms()
 
     expired_count =
       :ets.foldl(

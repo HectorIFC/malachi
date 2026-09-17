@@ -1,5 +1,7 @@
 defmodule Malachi.RateLimiterTest do
   use ExUnit.Case, async: false
+  import Malachi.Test.QuotaForensics, only: [within_one_window: 2]
+
   alias Malachi.RateLimiter
 
   setup do
@@ -12,25 +14,6 @@ defmodule Malachi.RateLimiterTest do
     end)
 
     :ok
-  end
-
-  # Runs `fun` and returns its result, guaranteeing the whole run happened inside ONE fixed window.
-  #
-  # The sharded window is aligned to the epoch, not to the test, so a run that straddles a boundary is
-  # handed a fresh quota partway through and legitimately admits more than the limit. That is the limiter
-  # working, but it would surface as a rare flaky failure in any exact-equality assertion below. Skipping
-  # the assertion when it happens would be worse than the flake, since a test that silently stops
-  # asserting reports success either way, so the measurement is retried on a fresh window instead.
-  defp within_one_window(window_ms, fun, attempts \\ 5) do
-    window_before = div(System.system_time(:millisecond), window_ms)
-    result = fun.()
-    window_after = div(System.system_time(:millisecond), window_ms)
-
-    cond do
-      window_before == window_after -> result
-      attempts > 1 -> within_one_window(window_ms, fun, attempts - 1)
-      true -> flunk("every attempt straddled a #{window_ms}ms window boundary; the measurement never ran clean")
-    end
   end
 
   describe "token bucket algorithm" do
@@ -439,15 +422,17 @@ defmodule Malachi.RateLimiterTest do
 
   describe "check_limit_in_caller/3" do
     test "admits exactly the limit and then blocks" do
-      identifier = "caller_#{:rand.uniform(1_000_000)}"
       config = %{limit: 5, window_ms: 60_000}
 
-      results = for _ <- 1..5, do: RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      {results, blocked} =
+        within_one_window(config.window_ms, fn ->
+          identifier = "caller_#{System.unique_integer([:positive])}"
+          results = for _ <- 1..5, do: RateLimiter.check_limit_in_caller(identifier, :publish, config)
+          {results, RateLimiter.check_limit_in_caller(identifier, :publish, config)}
+        end)
+
       assert Enum.all?(results, &(&1 == :ok))
-
-      assert {:error, :rate_limit_exceeded, retry_after_ms} =
-               RateLimiter.check_limit_in_caller(identifier, :publish, config)
-
+      assert {:error, :rate_limit_exceeded, retry_after_ms} = blocked
       assert is_integer(retry_after_ms) and retry_after_ms >= 0
     end
 
@@ -474,15 +459,19 @@ defmodule Malachi.RateLimiterTest do
     end
 
     test "retry_after is the time left in the current window" do
-      identifier = "retry_#{:rand.uniform(1_000_000)}"
       window_ms = 30_000
       config = %{limit: 1, window_ms: window_ms}
 
-      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      {first, second} =
+        within_one_window(window_ms, fn ->
+          identifier = "retry_#{System.unique_integer([:positive])}"
 
-      assert {:error, :rate_limit_exceeded, retry_after_ms} =
-               RateLimiter.check_limit_in_caller(identifier, :publish, config)
+          {RateLimiter.check_limit_in_caller(identifier, :publish, config),
+           RateLimiter.check_limit_in_caller(identifier, :publish, config)}
+        end)
 
+      assert :ok = first
+      assert {:error, :rate_limit_exceeded, retry_after_ms} = second
       assert retry_after_ms > 0 and retry_after_ms <= window_ms
     end
 
@@ -490,36 +479,48 @@ defmodule Malachi.RateLimiterTest do
       # check_limit/3 is a token bucket, check_limit_in_caller/3 a sharded fixed window. They deliberately
       # do not share state, so mixing them on one identifier is not a way to spend a quota twice as fast
       # in one direction or to be blocked early in the other.
-      identifier = "doors_#{:rand.uniform(1_000_000)}"
       config = %{limit: 2, window_ms: 60_000}
 
+      {identifier, in_caller} =
+        within_one_window(config.window_ms, fn ->
+          identifier = "doors_#{System.unique_integer([:positive])}"
+          {identifier, for(_ <- 1..3, do: RateLimiter.check_limit_in_caller(identifier, :publish, config))}
+        end)
+
+      # the hot-path door has its own full quota...
+      assert [:ok, :ok, {:error, :rate_limit_exceeded, _}] = in_caller
+
+      # ...and spending it left the token bucket untouched
       assert :ok = RateLimiter.check_limit(identifier, :publish, config)
       assert :ok = RateLimiter.check_limit(identifier, :publish, config)
       assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit(identifier, :publish, config)
-
-      # the hot-path door still has its own full quota
-      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
-      assert :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
-      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(identifier, :publish, config)
     end
 
     test "keeps separate buckets per identifier" do
       config = %{limit: 1, window_ms: 60_000}
-      one = "user_one_#{:rand.uniform(1_000_000)}"
-      two = "user_two_#{:rand.uniform(1_000_000)}"
 
-      assert :ok = RateLimiter.check_limit_in_caller(one, :publish, config)
-      assert {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(one, :publish, config)
+      results =
+        within_one_window(config.window_ms, fn ->
+          one = "user_one_#{System.unique_integer([:positive])}"
+          two = "user_two_#{System.unique_integer([:positive])}"
 
-      assert :ok = RateLimiter.check_limit_in_caller(two, :publish, config)
+          for id <- [one, one, two], do: RateLimiter.check_limit_in_caller(id, :publish, config)
+        end)
+
+      assert [:ok, {:error, :rate_limit_exceeded, _}, :ok] = results
     end
 
     test "feeds the blocked counter that the dashboard reads" do
-      identifier = "blocked_#{:rand.uniform(1_000_000)}"
       config = %{limit: 1, window_ms: 60_000}
 
-      RateLimiter.check_limit_in_caller(identifier, :publish, config)
-      RateLimiter.check_limit_in_caller(identifier, :publish, config)
+      # asserted outside the guard: a failed assertion inside it would not be rerun on a straddle
+      {identifier, results} =
+        within_one_window(config.window_ms, fn ->
+          identifier = "blocked_#{System.unique_integer([:positive])}"
+          {identifier, for(_ <- 1..2, do: RateLimiter.check_limit_in_caller(identifier, :publish, config))}
+        end)
+
+      assert [:ok, {:error, :rate_limit_exceeded, _}] = results
 
       assert {^identifier, 1} =
                RateLimiter.get_top_blocked(:publish, 100) |> Enum.find(&(elem(&1, 0) == identifier))
@@ -557,6 +558,89 @@ defmodule Malachi.RateLimiterTest do
         end)
 
       assert admitted == limit, "#{attempts} concurrent callers admitted #{admitted}, expected #{limit}"
+    end
+  end
+
+  describe "diagnostics" do
+    @table :malachi_rate_limits
+
+    test "window_bounds/2 splits a timestamp into its window start and the time elapsed in it" do
+      assert RateLimiter.window_bounds(0, 1_000) == {0, 0}
+      assert RateLimiter.window_bounds(999, 1_000) == {0, 999}
+      assert RateLimiter.window_bounds(1_000, 1_000) == {1_000, 0}
+      assert RateLimiter.window_bounds(123_456, 60_000) == {120_000, 3_456}
+    end
+
+    test "current_window_start/1 names the window a check made now is counted in" do
+      window_ms = 60_000
+
+      {before, counters, later} =
+        within_one_window(window_ms, fn ->
+          identifier = "current_#{System.unique_integer([:positive])}"
+          before = RateLimiter.current_window_start(window_ms)
+          :ok = RateLimiter.check_limit_in_caller(identifier, :publish, %{limit: 1, window_ms: window_ms})
+          {before, RateLimiter.window_counters(identifier, :publish), RateLimiter.current_window_start(window_ms)}
+        end)
+
+      assert before == later
+      # a shard holding none of the quota still records the attempt, so there may be more than one entry
+      assert counters != []
+      assert Enum.all?(counters, &(&1.window_start == before))
+      assert rem(before, window_ms) == 0
+    end
+
+    test "shard_caps/1 splits the limit over one shard per scheduler and sums to it" do
+      shards = :erlang.system_info(:schedulers_online)
+
+      for limit <- [1, 2, shards, shards + 1, 1_000] do
+        caps = RateLimiter.shard_caps(limit)
+        assert length(caps) == shards
+        assert Enum.sum(caps) == limit, "limit #{limit} split as #{inspect(caps)}"
+        # the remainder goes to the low shards, so the caps never increase with the shard index
+        assert caps == Enum.sort(caps, :desc)
+        assert Enum.max(caps) - Enum.min(caps) <= 1
+      end
+    end
+
+    test "window_counters/2 is empty for an identifier that was never checked" do
+      assert RateLimiter.window_counters("never_#{System.unique_integer([:positive])}", :publish) == []
+    end
+
+    test "window_counters/2 lists every window and shard of one identifier and action, in order" do
+      identifier = "counters_#{System.unique_integer([:positive])}"
+      other = "counters_other_#{System.unique_integer([:positive])}"
+
+      for {id, action, window_start, shard, used} <- [
+            {identifier, :publish, 2_000, 1, 3},
+            {identifier, :publish, 1_000, 0, 1},
+            {identifier, :publish, 1_000, 2, 2},
+            {identifier, :subscribe, 1_000, 0, 9},
+            {other, :publish, 1_000, 0, 9}
+          ] do
+        :ets.insert(@table, {{id, action, window_start, shard}, used, 1_000})
+      end
+
+      on_exit(fn ->
+        for id <- [identifier, other], do: :ets.match_delete(@table, {{id, :_, :_, :_}, :_, :_})
+      end)
+
+      assert RateLimiter.window_counters(identifier, :publish) == [
+               %{window_start: 1_000, shard: 0, used: 1, window_ms: 1_000},
+               %{window_start: 1_000, shard: 2, used: 2, window_ms: 1_000},
+               %{window_start: 2_000, shard: 1, used: 3, window_ms: 1_000}
+             ]
+
+      assert [%{used: 9}] = RateLimiter.window_counters(identifier, :subscribe)
+    end
+
+    test "window_counters/2 ignores token buckets and blocked counters of the same identifier" do
+      identifier = "counters_mixed_#{System.unique_integer([:positive])}"
+      config = %{limit: 1, window_ms: 60_000}
+
+      assert :ok = RateLimiter.check_limit(identifier, :publish, config)
+      assert {:error, _, _} = RateLimiter.check_limit(identifier, :publish, config)
+
+      assert RateLimiter.window_counters(identifier, :publish) == []
     end
   end
 

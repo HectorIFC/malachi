@@ -8,6 +8,8 @@ defmodule Malachi.RateLimitEnforcementTest do
   # changes nothing.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.QuotaForensics, only: [within_one_window: 2, snapshot: 2, assert_refused: 4]
+
   alias Malachi.Auth
   alias Malachi.Metrics
   alias Malachi.Test.TCPHelper
@@ -26,23 +28,34 @@ defmodule Malachi.RateLimitEnforcementTest do
   defp restore(key, nil), do: Application.delete_env(:malachi, key)
   defp restore(key, value), do: Application.put_env(:malachi, key, value)
 
-  # A window long enough that no token is refilled mid-test, so a blocked request stays blocked.
+  # A window long enough that no token is refilled mid-test, so a blocked request stays blocked. It is still
+  # a fixed window aligned to the limiter's clock, so every test that expects a refusal runs its body
+  # inside `within_one_window/2` and asserts the refusal with `assert_refused/4`: a boundary crossed
+  # mid-test is rerun, and any other over-limit admission fails with a report of why (issue #151).
+  @window_ms 60_000
+
   defp limit_publish(limit), do: put_limit(:publish_rate_limit, :publish_rate_window_ms, limit)
   defp limit_subscribe(limit), do: put_limit(:subscribe_rate_limit, :subscribe_rate_window_ms, limit)
 
   defp put_limit(limit_key, window_key, limit) do
     Application.put_env(:malachi, limit_key, limit)
-    Application.put_env(:malachi, window_key, 60_000)
+    Application.put_env(:malachi, window_key, @window_ms)
   end
 
-  # A fresh user (so its bucket starts empty) with an authenticated connection.
-  defp connect_as_new_user do
-    username = "rl_#{System.unique_integer([:positive])}"
-    password = "Rate-Pass-1!"
-    Auth.add_user(username, password, [:produce, :consume])
-    on_exit(fn -> Auth.remove_user(username) end)
+  @password "Rate-Pass-1!"
 
-    {username, connect_as(username, password)}
+  # A fresh user, so its quota starts unspent.
+  defp new_user(prefix \\ "rl") do
+    username = "#{prefix}_#{System.unique_integer([:positive])}"
+    Auth.add_user(username, @password, [:produce, :consume])
+    on_exit(fn -> Auth.remove_user(username) end)
+    username
+  end
+
+  # A fresh user with an authenticated connection.
+  defp connect_as_new_user do
+    username = new_user()
+    {username, connect_as(username, @password)}
   end
 
   defp connect_as(username, password) do
@@ -110,57 +123,63 @@ defmodule Malachi.RateLimitEnforcementTest do
   describe "publish quota" do
     test "produce over the limit is refused as rate_limited and the counter advances" do
       limit_publish(3)
-      {_user, socket} = connect_as_new_user()
-      topic = new_topic()
-      assert :ok = create_topic(socket, topic)
 
-      before = blocked_count(:publish_blocked)
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
 
-      # create_topic is gated by :produce but is not a publish, so it spends no token
-      for _ <- 1..3, do: assert(:ok = produce(socket, topic))
+        before = blocked_count(:publish_blocked)
+        spent = snapshot(user, :publish)
 
-      assert {:error, reason} = produce(socket, topic)
-      assert reason == "rate_limited"
+        # create_topic is gated by :produce but is not a publish, so it spends no token
+        for _ <- 1..3, do: assert(:ok = produce(socket, topic))
 
-      # `overloaded` is the group-commit valve (see test/malachi/group_commit_test.exs); a client must be
-      # able to tell "you are over your quota" from "the broker is saturated", so the two never collide
-      refute reason == "overloaded"
+        # `overloaded` is the group-commit valve (see test/malachi/group_commit_test.exs); a client must be
+        # able to tell "you are over your quota" from "the broker is saturated", so the two never collide,
+        # which the exact match on `rate_limited` pins
+        assert_refused(produce(socket, topic), spent, user, :publish)
 
-      assert blocked_count(:publish_blocked) == before + 1
+        assert blocked_count(:publish_blocked) == before + 1
+      end)
     end
 
     test "the quota is per user, not per connection: a second connection shares the bucket" do
       limit_publish(2)
-      username = "rl_fanout_#{System.unique_integer([:positive])}"
-      password = "Rate-Pass-1!"
-      Auth.add_user(username, password, [:produce, :consume])
-      on_exit(fn -> Auth.remove_user(username) end)
 
-      first = connect_as(username, password)
-      second = connect_as(username, password)
-      topic = new_topic()
-      assert :ok = create_topic(first, topic)
+      within_one_window(@window_ms, fn ->
+        username = new_user("rl_fanout")
+        first = connect_as(username, @password)
+        second = connect_as(username, @password)
+        topic = new_topic()
+        assert :ok = create_topic(first, topic)
 
-      assert :ok = produce(first, topic)
-      assert :ok = produce(second, topic)
+        spent = snapshot(username, :publish)
+        assert :ok = produce(first, topic)
+        assert :ok = produce(second, topic)
 
-      # the two tokens are gone whichever connection spent them: a fan-out client cannot buy more quota
-      # by opening more connections
-      assert {:error, "rate_limited"} = produce(first, topic)
-      assert {:error, "rate_limited"} = produce(second, topic)
+        # the two tokens are gone whichever connection spent them: a fan-out client cannot buy more quota
+        # by opening more connections
+        assert_refused(produce(first, topic), spent, username, :publish)
+        assert_refused(produce(second, topic), spent, username, :publish)
+      end)
     end
 
     test "one user exhausting its quota does not affect another user" do
       limit_publish(1)
-      {_starved, starved_socket} = connect_as_new_user()
-      {_other, other_socket} = connect_as_new_user()
-      topic = new_topic()
-      assert :ok = create_topic(starved_socket, topic)
 
-      assert :ok = produce(starved_socket, topic)
-      assert {:error, "rate_limited"} = produce(starved_socket, topic)
+      within_one_window(@window_ms, fn ->
+        {starved, starved_socket} = connect_as_new_user()
+        {_other, other_socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(starved_socket, topic)
 
-      assert :ok = produce(other_socket, topic)
+        spent = snapshot(starved, :publish)
+        assert :ok = produce(starved_socket, topic)
+        assert_refused(produce(starved_socket, topic), spent, starved, :publish)
+
+        assert :ok = produce(other_socket, topic)
+      end)
     end
 
     test "a request the user was never allowed to make spends no token" do
@@ -196,26 +215,26 @@ defmodule Malachi.RateLimitEnforcementTest do
   describe "subscribe quota" do
     test "subscribe over the limit is refused as rate_limited and the counter advances" do
       limit_subscribe(1)
-      username = "rl_sub_#{System.unique_integer([:positive])}"
-      password = "Rate-Pass-1!"
-      Auth.add_user(username, password, [:produce, :consume])
-      on_exit(fn -> Auth.remove_user(username) end)
 
-      setup_socket = connect_as(username, password)
-      topic = new_topic()
-      assert :ok = create_topic(setup_socket, topic)
+      within_one_window(@window_ms, fn ->
+        username = new_user("rl_sub")
+        setup_socket = connect_as(username, @password)
+        topic = new_topic()
+        assert :ok = create_topic(setup_socket, topic)
 
-      before = blocked_count(:subscribe_blocked)
+        before = blocked_count(:subscribe_blocked)
+        spent = snapshot(username, :subscribe)
 
-      # an accepted subscribe turns its connection into a push stream, so the second one needs its own
-      # connection: same user, so the same bucket
-      streaming = connect_as(username, password)
-      :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
+        # an accepted subscribe turns its connection into a push stream, so the second one needs its own
+        # connection: same user, so the same bucket
+        streaming = connect_as(username, @password)
+        :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
 
-      refused = connect_as(username, password)
-      assert {:error, "rate_limited"} = subscribe(refused, topic)
+        refused = connect_as(username, @password)
+        assert_refused(subscribe(refused, topic), spent, username, :subscribe)
 
-      assert blocked_count(:subscribe_blocked) == before + 1
+        assert blocked_count(:subscribe_blocked) == before + 1
+      end)
     end
 
     test "an unconfigured subscribe limit does not apply" do
@@ -240,35 +259,34 @@ defmodule Malachi.RateLimitEnforcementTest do
       limit_publish(1)
       limit_subscribe(1)
 
-      username = "rl_indep_#{System.unique_integer([:positive])}"
-      password = "Rate-Pass-1!"
-      Auth.add_user(username, password, [:produce, :consume])
-      on_exit(fn -> Auth.remove_user(username) end)
+      within_one_window(@window_ms, fn ->
+        username = new_user("rl_indep")
+        socket = connect_as(username, @password)
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
 
-      socket = connect_as(username, password)
-      topic = new_topic()
-      assert :ok = create_topic(socket, topic)
+        spent = snapshot(username, :publish)
+        assert :ok = produce(socket, topic)
+        assert_refused(produce(socket, topic), spent, username, :publish)
 
-      assert :ok = produce(socket, topic)
-      assert {:error, "rate_limited"} = produce(socket, topic)
+        # Same user, publish quota gone: the subscribe must still be admitted on its own bucket. An accepted
+        # subscribe switches the connection to stream mode and immediately pushes the backlog, so the record
+        # produced above coming back is positive proof it was admitted, not merely an absence of refusal. A
+        # refusal would answer an error frame carrying `rate_limited` on the same correlation id.
+        streaming = connect_as(username, @password)
+        :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
 
-      # Same user, publish quota gone: the subscribe must still be admitted on its own bucket. An accepted
-      # subscribe switches the connection to stream mode and immediately pushes the backlog, so the record
-      # produced above coming back is positive proof it was admitted, not merely an absence of refusal. A
-      # refusal would answer an error frame carrying `rate_limited` on the same correlation id.
-      streaming = connect_as(username, password)
-      :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
+        assert {:ok, frame_body} = TCPHelper.recv_frame(streaming, timeout: 2_000)
+        {7, code, payload} = Wire.decode_response(frame_body)
 
-      assert {:ok, frame_body} = TCPHelper.recv_frame(streaming, timeout: 2_000)
-      {7, code, payload} = Wire.decode_response(frame_body)
+        # Named rather than asserted bare, because the failure that matters here is a refusal, and the
+        # reason is only decodable once we know this IS an error frame.
+        if code != Wire.ok_code() do
+          flunk("the subscribe was refused (#{Wire.decode_error_reason(payload)}), so the quotas share a bucket")
+        end
 
-      # Named rather than asserted bare, because the failure that matters here is a refusal, and the
-      # reason is only decodable once we know this IS an error frame.
-      if code != Wire.ok_code() do
-        flunk("the subscribe was refused (#{Wire.decode_error_reason(payload)}), so the quotas share a bucket")
-      end
-
-      assert {[%{value: "v"}], _cursor} = Wire.decode_fetch_resp(payload)
+        assert {[%{value: "v"}], _cursor} = Wire.decode_fetch_resp(payload)
+      end)
     end
   end
 end
