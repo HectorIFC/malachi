@@ -1,7 +1,7 @@
 defmodule StorageChaosTest do
-  # scripts/docker-storage-chaos.sh decides whether segment copies agree, what a failed comparison of them
-  # leaves behind, and when: phase 2 recreates the volumes, so evidence kept any later is evidence of nothing
-  # (issue #152). None of that needs a cluster, and a real run takes minutes.
+  # scripts/docker-storage-chaos.sh decides whether another harness's cluster may be taken over, what a failed
+  # comparison of segment copies leaves behind, and when: phase 2 recreates the volumes, so evidence kept any
+  # later is evidence of nothing (issue #152). None of that needs a cluster, and a real run takes minutes.
   #
   # The drill runs for real in a throwaway tree with stubs first on the PATH: `docker` logs every call and
   # answers from STUB_* variables, and `sleep` returns at once. Portable on purpose (bash, awk, sed, jq), since
@@ -45,6 +45,23 @@ defmodule StorageChaosTest do
       work_root: Path.join(dir, "chaos"),
       result: Path.join(dir, "result.json")
     }
+  end
+
+  describe "the cluster preflight" do
+    test "refuses to start while another cluster is running, before touching it", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_RUNNING", "malachi-cluster-1\nmalachi-cluster-3"}])
+
+      assert output =~ "refusing to start: another cluster is already running (malachi-cluster-1 malachi-cluster-3)."
+      assert output =~ "down -v"
+      refute Enum.any?(docker_calls(ctx), &String.contains?(&1, " down"))
+      refute Enum.any?(docker_calls(ctx), &String.contains?(&1, " up "))
+    end
+
+    test "prints the host load and replaces only its own cluster in phase 2", ctx do
+      assert {output, 0} = run_drill(ctx, [])
+      assert output =~ ~r/host load: load average/
+      assert Enum.count(docker_calls(ctx), &String.contains?(&1, "down -v")) == 2
+    end
   end
 
   describe "invariant 4 on a passing run" do
@@ -239,9 +256,9 @@ defmodule StorageChaosTest do
     File.chmod!(path, 0o755)
   end
 
-  # Answers from STUB_MD5_DIFFER (1: each node's index files hash differently), STUB_COPIES (identical, benign
-  # or content: the phase-1 comparison), STUB_NEGATIVE (caught, missed or other: the negative control's
-  # comparison) and STUB_REPAIR (never: the repair never converges).
+  # Answers from STUB_RUNNING (names `docker ps` lists as running), STUB_MD5_DIFFER (1: each node's index files hash
+  # differently), STUB_COPIES (identical, benign or content: the phase-1 comparison), STUB_NEGATIVE (caught,
+  # missed or other: the negative control's comparison) and STUB_REPAIR (never: the repair never converges).
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -261,7 +278,7 @@ defmodule StorageChaosTest do
       ps)
         case "$*" in
           *health=healthy*) printf 'malachi-cluster-1\nmalachi-cluster-2\nmalachi-cluster-3\n' ;;
-          *) : ;;
+          *) [ -n "${STUB_RUNNING:-}" ] && printf '%s\n' "$STUB_RUNNING" ;;
         esac ;;
       inspect)
         case "$*" in

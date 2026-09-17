@@ -20,6 +20,12 @@ required as well.
 Each harness builds the cluster images if they are missing, runs to completion, tears the cluster
 down, and exits non-zero if any invariant broke.
 
+Run one harness at a time. They all bring up the same compose project with the same container names
+(`malachi-cluster-1` to `-3`), as does `benchmark/docker-cluster.sh`, and each starts with
+`docker compose down -v`. A harness therefore refuses to start while any `malachi-cluster-*` container
+is running, and prints the command that removes a leftover. It also prints the host load when it starts:
+a drill sharing the machine with a CPU-heavy job can fail for reasons that are not in the broker.
+
 ## Node faults
 
 ```bash
