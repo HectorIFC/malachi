@@ -77,8 +77,9 @@ read-only and compares, per segment, what every copy holds:
 
 - **the records**, byte for byte over the valid part of each file, concatenated in offset order;
 - **the count**, which for a segment the control plane sealed must equal its sealed length;
-- **the readability**, since a copy that fails verification, or holds non-zero bytes past its valid
-  end, is damaged whatever the other copies say.
+- **the readability**, since a copy that fails verification, holds non-zero bytes past its valid end,
+  or whose files do not chain (a file named for an offset its records do not start at, or one that does
+  not start where the previous ended) is damaged whatever the other copies say.
 
 It does not require the files themselves to be identical, and it used to. Healthy copies differ as
 files on every run ([#152](https://github.com/HectorIFC/malachi/issues/152)). Only a fenced copy, usually

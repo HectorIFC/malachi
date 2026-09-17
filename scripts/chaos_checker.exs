@@ -88,6 +88,9 @@ defmodule ChaosChecker.Copies do
   @segment_id_width 20
   @chunk_bytes 65_536
   @short_md5 12
+  # Where a file's first record offset sits: past the frame header (magic, payload length, CRC) at the head
+  # of the payload, per `Malachi.Log.Record`. Read only once `verify/3` has accepted that frame, CRC included.
+  @first_offset_at 10
 
   @passing [:identical, :benign]
 
@@ -107,9 +110,9 @@ defmodule ChaosChecker.Copies do
 
   @typedoc """
   What the control plane says about a segment: its state and length, `:absent` when the topology does not
-  list it, or `:unavailable` when the topology could not be read at all. Copies are still compared with each
-  other under `:unavailable`, since that is the diagnosis, but nothing checked against a sealed length can be
-  certified, so such a report never passes (`passed?/1`).
+  list it, or `:unavailable` when the topology could not be read on that try. Copies are still compared with
+  each other under `:unavailable`, since that is the diagnosis, but nothing checked against a sealed length
+  can be certified, so such a report never passes (`passed?/1`); a later try reads the topology again.
   """
   @type control :: %{state: String.t(), length: non_neg_integer()} | :absent | :unavailable
 
@@ -167,6 +170,12 @@ defmodule ChaosChecker.Copies do
 
   An absent directory is `:missing`, one with no `.log` is `:empty`, and anything `verify/3` refuses (or a
   directory or file that cannot be read) is `{:damaged, details}`, keeping the files read up to that point.
+
+  The files must also chain: each one is named for the offset its first record carries, and starts where
+  the previous one ended. `verify/3` checks every file on its own, so without this a file renamed to
+  another base offset, a file missing from the middle, or two files covering the same offsets would still
+  add up to the same records and the same digest as an intact copy. Such a copy is `{:damaged, details}`
+  too, with the reason `:misplaced` or `:discontiguous`.
   """
   @spec read_copy(Path.t()) :: copy()
   def read_copy(dir) do
@@ -182,7 +191,7 @@ defmodule ChaosChecker.Copies do
         names
         |> Enum.flat_map(&log_base_offset/1)
         |> Enum.sort()
-        |> Enum.reduce_while({blank, :crypto.hash_init(:md5)}, &read_file(dir, &1, &2))
+        |> Enum.reduce_while({blank, :crypto.hash_init(:md5), nil}, &read_file(dir, &1, &2))
         |> finish_copy()
 
       {:error, reason} ->
@@ -197,38 +206,55 @@ defmodule ChaosChecker.Copies do
     end
   end
 
-  defp finish_copy({%{status: :ok, files: []} = copy, _content}), do: %{copy | status: :empty}
+  defp finish_copy({%{status: :ok, files: []} = copy, _content, _next}), do: %{copy | status: :empty}
 
-  defp finish_copy({copy, content}) do
+  defp finish_copy({copy, content, _next}) do
     %{copy | files: Enum.reverse(copy.files), digest: hex(:crypto.hash_final(content))}
   end
 
   # One pass per file: the whole-file md5, the valid prefix into the running content digest, and a count
   # of the non-zero bytes past the valid end. `verify/3` runs first because the valid end comes from it.
-  defp read_file(dir, base_offset, {copy, content}) do
+  # `next` is where this file has to start, given the files before it (`nil` for the first).
+  defp read_file(dir, base_offset, {copy, content, next}) do
     path = Path.join(dir, segment_id(base_offset) <> ".log")
 
-    case ElixirStore.verify(dir, segment_id(base_offset), base_offset: base_offset) do
-      {:ok, %{records: records, bytes: valid}} ->
-        case hash_file(path, valid, content) do
-          {:ok, size, md5, content, trailing} ->
-            file = %{base_offset: base_offset, size: size, md5: md5, records: records, valid: valid}
+    with :ok <- chained(base_offset, next, path),
+         {:ok, %{records: records, bytes: valid}} <-
+           ElixirStore.verify(dir, segment_id(base_offset), base_offset: base_offset),
+         :ok <- named_for_its_first_record(path, base_offset, records),
+         {:ok, size, md5, content, trailing} <- hash_file(path, valid, content) do
+      file = %{base_offset: base_offset, size: size, md5: md5, records: records, valid: valid}
 
-            {:cont,
-             {%{
-                copy
-                | files: [file | copy.files],
-                  records: copy.records + records,
-                  bytes: copy.bytes + valid,
-                  trailing: copy.trailing + trailing
-              }, content}}
+      {:cont,
+       {%{
+          copy
+          | files: [file | copy.files],
+            records: copy.records + records,
+            bytes: copy.bytes + valid,
+            trailing: copy.trailing + trailing
+        }, content, base_offset + records}}
+    else
+      {:error, details} -> {:halt, {damaged(copy, damage_details(details, path)), content, next}}
+    end
+  end
 
-          {:error, reason} ->
-            {:halt, {damaged(copy, %{reason: reason, file: path}), content}}
-        end
+  defp chained(_base_offset, nil, _path), do: :ok
+  defp chained(base_offset, base_offset, _path), do: :ok
 
-      {:error, details} ->
-        {:halt, {damaged(copy, damage_details(details, path)), content}}
+  defp chained(base_offset, next, path),
+    do: {:error, %{reason: :discontiguous, file: path, expected: next, found: base_offset}}
+
+  # A file with no record starts wherever it was created, and there is no frame to disagree with.
+  defp named_for_its_first_record(_path, _base_offset, 0), do: :ok
+
+  defp named_for_its_first_record(path, base_offset, _records) do
+    case File.open(path, [:read, :raw, :binary], &:file.pread(&1, @first_offset_at, 8)) do
+      {:ok, {:ok, <<^base_offset::64>>}} -> :ok
+      {:ok, {:ok, <<first::64>>}} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: first}}
+      {:ok, {:ok, _short}} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: nil}}
+      {:ok, :eof} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: nil}}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -577,26 +603,27 @@ defmodule ChaosChecker do
       System.halt(2)
     end
 
-    # Read once, before the retries: the control plane's view is context for the verdict. A topology that
-    # cannot be read still gets the copies compared with each other, once, for the diagnosis; the result
-    # cannot pass (a sealed length nobody read cannot be checked), so waiting for it to would only wait.
-    {control_of, attempts} =
-      case topology(parse_hosts(hosts), topic) do
+    # The control plane's view is read afresh on every try, beside the copies it is compared with: a
+    # snapshot taken once could describe a segment as active after it sealed, and a dashboard that did not
+    # answer on one try may answer on the next. A try without it still compares the copies with each other,
+    # for the diagnosis, but cannot pass (a sealed length nobody read cannot be checked).
+    hosts = parse_hosts(hosts)
+
+    controls = fn ->
+      case topology(hosts, topic) do
         {:ok, ranges} ->
-          {ChaosChecker.Copies.controls(ranges, topic), String.to_integer(attempts)}
+          ChaosChecker.Copies.controls(ranges, topic)
 
         {:error, reason} ->
-          IO.puts(
-            "topology unavailable: comparing the copies with each other only, which cannot pass: #{inspect(reason)}"
-          )
-
-          {ChaosChecker.Copies.controls(nil, topic), 1}
+          IO.puts("topology unavailable on this try, comparing the copies with each other only: #{inspect(reason)}")
+          ChaosChecker.Copies.controls(nil, topic)
       end
+    end
 
     report =
       ChaosChecker.Copies.settle(
-        fn -> ChaosChecker.Copies.survey(nodes, topic, filter, control_of) end,
-        attempts,
+        fn -> ChaosChecker.Copies.survey(nodes, topic, filter, controls.()) end,
+        String.to_integer(attempts),
         String.to_integer(interval_ms)
       )
 

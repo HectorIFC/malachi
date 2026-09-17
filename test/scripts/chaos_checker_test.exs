@@ -778,6 +778,47 @@ defmodule ChaosCheckerTest do
       assert entry.copies["n2"].status == {:damaged, %{reason: :enotdir, file: not_a_dir}}
     end
 
+    test "a file renamed to another base offset is damage, not a benign layout", %{tmp_dir: tmp_dir} do
+      # `verify/3` accepts each file on its own, and a renamed file holds the same frames as before, so
+      # records and digest still match the intact copy. Only the chain of files tells them apart.
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      dir = write_copy(r2, [@six])
+
+      for ext <- ~w(log idx sealed),
+          do: File.rename!(Path.join(dir, "00000000000000000000.#{ext}"), Path.join(dir, "00000000000000000010.#{ext}"))
+
+      entry = only_entry(nodes, %{state: "sealed", length: 6})
+      assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
+      assert {:damaged, %{reason: :misplaced, expected: 10, found: 0}} = entry.copies["n2"].status
+    end
+
+    test "files that do not start where the previous one ended are damage", %{tmp_dir: tmp_dir} do
+      three = [~w(v1 v2), ~w(v3 v4), ~w(v5 v6)]
+      [{_, intact}, {_, renamed}, {_, gap}, {_, overlap}] = roots(tmp_dir, ~w(intact renamed gap overlap))
+      write_copy(intact, three, roll: true)
+
+      # The last file moved to a later offset: same records, same digest, a hole in the chain.
+      dir = write_copy(renamed, three, roll: true)
+
+      for ext <- ~w(log idx sealed),
+          do: File.rename!(Path.join(dir, "00000000000000000004.#{ext}"), Path.join(dir, "00000000000000000009.#{ext}"))
+
+      # The middle file gone: the chain jumps from 2 to 4.
+      dir = write_copy(gap, three, roll: true)
+      for ext <- ~w(log idx sealed), do: File.rm!(Path.join(dir, "00000000000000000002.#{ext}"))
+
+      # A second copy of the last file under a name inside the middle one's range.
+      dir = write_copy(overlap, three, roll: true)
+      File.cp!(Path.join(dir, "00000000000000000004.log"), Path.join(dir, "00000000000000000003.log"))
+
+      for {name, root, expected, found} <- [{"renamed", renamed, 4, 9}, {"gap", gap, 2, 4}, {"overlap", overlap, 4, 3}] do
+        entry = only_entry([{"intact", intact}, {name, root}], %{state: "sealed", length: 6})
+        assert {entry.verdict, entry.nodes} == {:damaged, [name]}
+        assert {:damaged, %{reason: :discontiguous, expected: ^expected, found: ^found}} = entry.copies[name].status
+      end
+    end
+
     test "copies compared without the control plane are described, but never pass", %{tmp_dir: tmp_dir} do
       # Every copy holding the same record past a sealed end agrees with every other; only the sealed length
       # tells them apart, and it comes from the topology. So a report read without one is a diagnosis, not
@@ -947,13 +988,17 @@ defmodule ChaosCheckerTest do
   describe "ChaosChecker.Copies.settle/4" do
     alias ChaosChecker.Copies
 
-    defp reports(verdicts) do
-      {:ok, agent} = Agent.start_link(fn -> verdicts end)
+    # One report per try: a verdict, or a `{verdict, control}` pair for a try whose topology matters.
+    defp reports(tries) do
+      {:ok, agent} = Agent.start_link(fn -> tries end)
 
       fn ->
-        Agent.get_and_update(agent, fn [verdict | rest] -> {[%{verdict: verdict, control: :absent}], rest} end)
+        Agent.get_and_update(agent, fn [try | rest] -> {[entry(try)], rest} end)
       end
     end
+
+    defp entry({verdict, control}), do: %{verdict: verdict, control: control}
+    defp entry(verdict), do: %{verdict: verdict, control: :absent}
 
     test "stops at the first passing report without sleeping again" do
       slept = :counters.new(1, [])
@@ -974,6 +1019,19 @@ defmodule ChaosCheckerTest do
 
       assert Copies.settle(check, 3, 10, fn 10 -> :ok end) == []
       assert Agent.get(calls, & &1) == 3
+    end
+
+    test "a try without the control plane is retried, and a later try with it can pass" do
+      # The topology is read on every try (issue #172's review): a dashboard that did not answer once must
+      # not decide the run.
+      slept = :counters.new(1, [])
+      sleep = fn _ms -> :counters.add(slept, 1, 1) end
+      sealed = %{state: "sealed", length: 1}
+
+      assert [%{verdict: :identical, control: ^sealed}] =
+               Copies.settle(reports([{:identical, :unavailable}, {:identical, sealed}]), 5, 10, sleep)
+
+      assert :counters.get(slept, 1) == 1
     end
 
     test "a single attempt never sleeps" do
