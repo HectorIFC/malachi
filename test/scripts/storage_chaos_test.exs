@@ -179,6 +179,30 @@ defmodule StorageChaosTest do
     end
   end
 
+  describe "picking a segment to damage" do
+    test "waits for an active segment that appears a few looks later", ctx do
+      assert {output, 0} = run_drill(ctx, [{"STUB_ACTIVE_AFTER", "2"}])
+      assert output =~ "== event e:"
+      assert output =~ "target: /data/malachi_log/chaos_acked-r0-s2 on malachi@malachi2 (primary malachi@malachi1)"
+      refute output =~ "FAIL"
+    end
+
+    test "fails after a minute with no active segment, and shows what the topology held", ctx do
+      # 12 looks per active event: e, e2 and f all find nothing.
+      assert {output, 1} = run_drill(ctx, [{"STUB_ACTIVE_AFTER", "1000"}])
+      assert output =~ "FAIL: no active segment found to damage within a minute"
+      assert output =~ "topology on the last try:\nSEGMENT range=0 seq=1 state=sealed"
+      assert length(Regex.scan(~r/FAIL: no active segment/, output)) == 3
+      assert File.read!(ctx.log <> ".topology") |> String.trim() |> String.to_integer() >= 36
+    end
+
+    test "says so when the topology cannot be read at all", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_TOPOLOGY", "unreadable"}])
+      assert output =~ "topology on the last try:\ntopology failed: {:error, :no_reachable_dashboard}"
+      assert output =~ "FAIL: no sealed segment found to damage within a minute"
+    end
+  end
+
   describe "the negative control" do
     test "passes when invariant 4 names the node whose copy was damaged, and it is repaired", ctx do
       assert {output, 0} = run_drill(ctx, [{"STORAGE_CHAOS_NEGATIVE_CONTROL", "1"}, {"STUB_NEGATIVE", "caught"}])
@@ -267,9 +291,14 @@ defmodule StorageChaosTest do
     File.chmod!(path, 0o755)
   end
 
-  # Answers from STUB_RUNNING (names `docker ps` lists as running), STUB_MD5_DIFFER (1: each node's index files hash
-  # differently), STUB_COPIES (identical, benign, content or none: the phase-1 comparison), STUB_NEGATIVE (caught,
-  # missed or other: the negative control's comparison) and STUB_REPAIR (never: the repair never converges).
+  # Answers from these variables:
+  #   STUB_RUNNING       names `docker ps` lists as running
+  #   STUB_MD5_DIFFER    1: each node's index files hash differently
+  #   STUB_COPIES        identical, benign, content or none: the phase-1 comparison
+  #   STUB_NEGATIVE      caught, missed or other: the negative control's comparison
+  #   STUB_REPAIR        never: the repair never converges
+  #   STUB_ACTIVE_AFTER  how many topology calls list no active segment before one appears
+  #   STUB_TOPOLOGY      unreadable: every topology call fails
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -322,8 +351,15 @@ defmodule StorageChaosTest do
             echo "acked=1 read=1 missing=0"
             echo "VERIFY OK: every acknowledged write survived" ;;
           *"chaos_checker.exs topology"*)
+            calls_file="$STUB_LOG.topology"
+            calls=$(( $(cat "$calls_file" 2>/dev/null || echo 0) + 1 ))
+            echo "$calls" > "$calls_file"
+            if [ "${STUB_TOPOLOGY:-}" = unreadable ]; then
+              echo "topology failed: {:error, :no_reachable_dashboard}"
+              exit 1
+            fi
             echo "SEGMENT range=0 seq=1 state=sealed start=0 length=6 bytes=240 primary=malachi@malachi1 replicas=malachi@malachi1,malachi@malachi2,malachi@malachi3"
-            echo "SEGMENT range=0 seq=2 state=active start=6 length=1 bytes=40 primary=malachi@malachi1 replicas=malachi@malachi1,malachi@malachi2,malachi@malachi3"
+            [ "$calls" -gt "${STUB_ACTIVE_AFTER:-0}" ] && echo "SEGMENT range=0 seq=2 state=active start=6 length=1 bytes=40 primary=malachi@malachi1 replicas=malachi@malachi1,malachi@malachi2,malachi@malachi3"
             echo "SEGMENT range=0 seq=14 state=sealed start=7 length=1 bytes=40 primary=malachi@malachi1 replicas=malachi@malachi1,malachi@malachi2,malachi@malachi3" ;;
           *"chaos_checker.exs copies"*" 12 5000 segment="*)
             copy_line malachi1

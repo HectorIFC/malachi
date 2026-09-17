@@ -102,15 +102,34 @@ follower_of() {
 
 seg_dir() { echo "$DATA_DIR/${CHAOS_TOPIC}-r$(seg_field "$1" range)-s$(seg_field "$1" seq)"; }
 
+# Prints the first SEGMENT line in state $1, waiting up to a minute for one. A single look is not enough: right
+# after a follower restarts, the chaos topic's only range can sit between the fence of its last segment and the
+# creation of the next, with nothing active at that instant (seen once on CI, for #172). The raw answer of the
+# last try stays in $WORK/topology.txt, so a failure can say whether the topology had no such segment or could
+# not be read at all.
+pick_segment() {
+  for _ in $(seq 1 12); do
+    checker_run "topology $CHAOS_HOSTS $CHAOS_TOPIC" >"$WORK/topology.txt" 2>&1
+    found=$(grep '^SEGMENT' "$WORK/topology.txt" | grep "state=$1" | head -1)
+    if [ -n "$found" ]; then
+      echo "$found"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 # Damages a follower copy per $2 (a shell fragment run with $dir set), with the follower node
 # STOPPED: damage is injected through a one-off container on the node's data volume, so no live
 # server can race the injection (append past a truncation, reopen a deleted file's descriptor).
 # Then restarts the node and waits for reconvergence, unless LEAVE_STOPPED=1 (the caller restarts it).
 # Prints what it picked.
 damage_follower() {
-  line=$(topology | grep "state=$1" | head -1)
-  if [ -z "$line" ]; then
-    fail "no $1 segment found to damage"
+  if ! line=$(pick_segment "$1"); then
+    echo "topology on the last try:"
+    grep -E '^(SEGMENT|topology failed)' "$WORK/topology.txt" || tail -5 "$WORK/topology.txt"
+    fail "no $1 segment found to damage within a minute"
     return 1
   fi
 
