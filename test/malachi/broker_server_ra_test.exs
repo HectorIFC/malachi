@@ -256,9 +256,15 @@ defmodule Malachi.BrokerServerRaTest do
     # Two vnodes: one on this node, one routed at a node that does not exist, so its ra cluster can
     # never be read. That is the shape of a broker whose control plane is partly unreachable, which is
     # also the shape of a broker that just restarted and whose vnodes have not come up yet.
+    #
+    # The absent node lives at a literal address, as the other tests' `nonexistent@127.0.0.1` does. It
+    # was `absent@nowhere` once, and every attempt to reach it then resolved `nowhere` through the OS
+    # resolver before failing: with the resolver slow, a single attempt took the whole 5s the ra query
+    # allows, the broker loop sat in it, and the consume below timed out (once in 192 CI runs; every
+    # time with the resolver blackholed). An address needs no resolving, so the attempt fails at once.
     suffix = System.unique_integer([:positive])
     reachable = {:"bs_reach_#{suffix}", 0, [node()]}
-    ghost = {:"bs_ghost_#{suffix}", div(Integer.pow(2, 32), 2), [:absent@nowhere]}
+    ghost = {:"bs_ghost_#{suffix}", div(Integer.pow(2, 32), 2), [:"absent@127.0.0.1"]}
     on_exit(fn -> MetadataServer.delete(elem(reachable, 0)) end)
 
     {:ok, control} =
