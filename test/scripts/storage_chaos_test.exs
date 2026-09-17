@@ -53,8 +53,9 @@ defmodule StorageChaosTest do
 
       assert output =~ "refusing to start: another cluster is already running (malachi-cluster-1 malachi-cluster-3)."
       assert output =~ "down -v"
-      refute Enum.any?(docker_calls(ctx), &String.contains?(&1, " down"))
-      refute Enum.any?(docker_calls(ctx), &String.contains?(&1, " up "))
+      # The stub logs compose commands without their `compose -f ...` prefix, so they start with the verb.
+      refute Enum.any?(docker_calls(ctx), &String.starts_with?(&1, "down"))
+      refute Enum.any?(docker_calls(ctx), &String.starts_with?(&1, "up "))
     end
 
     test "prints the host load and replaces only its own cluster in phase 2", ctx do

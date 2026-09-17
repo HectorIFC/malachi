@@ -762,19 +762,20 @@ defmodule ChaosCheckerTest do
       assert only_entry(nodes).verdict == :identical
     end
 
-    test "a directory nobody can list is damage, not an empty copy", %{tmp_dir: tmp_dir} do
+    test "a copy path that exists but cannot be listed is damage, not an empty or missing copy",
+         %{tmp_dir: tmp_dir} do
+      # A plain file where the directory should be: present, and unlistable for every user, root included.
+      # A permission-locked directory would say the same thing except when the suite runs as root, which
+      # reads through any mode and left the assertion unexercised.
       [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
       write_copy(r1, [@six])
-      locked = write_copy(r2, [@six])
-      File.chmod!(locked, 0o000)
-      on_exit(fn -> File.chmod(locked, 0o755) end)
+      File.mkdir_p!(r2)
+      not_a_dir = Path.join(r2, @dir)
+      File.write!(not_a_dir, "not a directory")
 
-      # Root reads through any mode, and then there is nothing to test.
-      if match?({:error, :eacces}, File.ls(locked)) do
-        entry = only_entry(nodes)
-        assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
-        assert entry.copies["n2"].status == {:damaged, %{reason: :eacces, file: locked}}
-      end
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
+      assert entry.copies["n2"].status == {:damaged, %{reason: :enotdir, file: not_a_dir}}
     end
 
     test "a survey that finds no segment on any node is not a pass", %{tmp_dir: tmp_dir} do
@@ -814,7 +815,7 @@ defmodule ChaosCheckerTest do
       assert {only_entry(nodes).verdict, only_entry(nodes).nodes} == {:lagging, ["n1", "n2"]}
     end
 
-    test "survey orders segments numerically and honours a filter, even for a segment nobody holds",
+    test "survey orders segments numerically and honors a filter, even for a segment nobody holds",
          %{tmp_dir: tmp_dir} do
       [{_, root}] = nodes = roots(tmp_dir, ~w(n1))
 
