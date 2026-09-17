@@ -85,8 +85,13 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
-  The storage flush histogram as the Prometheus exporter needs it: the count of flushes below each of
-  `Malachi.Histogram.edges/0`, the total count and the sum in microseconds, plus the durability totals.
+  The storage flush histogram as the Prometheus exporter needs it: the count of flushes at or below each
+  of `Malachi.Histogram.edges/0`, the total count and the sum in microseconds, the durability totals, and
+  `created`, the Unix time in seconds when this node's histogram began.
+
+  `created` is what tells two scrapes of one histogram from scrapes on either side of a node restart: it
+  changes only when the node boots again, never on a `Malachi.Metrics` restart, which keeps the samples.
+  Counters alone cannot tell, since a restarted node can flush past its old totals before the next scrape.
   Kept out of `get_system_metrics/0`, which is snapshotted every second and sent to the dashboard, neither
   of which has any use for the buckets. All zeros when `Malachi.Metrics` never started.
   """
@@ -95,17 +100,18 @@ defmodule Malachi.Metrics do
           count: non_neg_integer(),
           sum_us: non_neg_integer(),
           bytes: non_neg_integer(),
-          records: non_neg_integer()
+          records: non_neg_integer(),
+          created: float()
         }
   def storage_flush_histogram do
     case :persistent_term.get(@storage_flush_key, nil) do
       nil ->
-        %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0}
+        %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0, created: 0.0}
 
-      %{histogram: histogram} = state ->
+      %{histogram: histogram, created: created} = state ->
         # The count comes from the same pass as the buckets, so `+Inf` is never below the last edge.
         {buckets, count} = Histogram.cumulative(histogram)
-        Map.merge(storage_flush_totals(state), %{buckets: buckets, count: count})
+        Map.merge(storage_flush_totals(state), %{buckets: buckets, count: count, created: created})
     end
   end
 
@@ -449,7 +455,11 @@ defmodule Malachi.Metrics do
     # restarts: the samples are the node's history, and dropping them on a Metrics crash would silently
     # reset a percentile an operator is watching.
     if :persistent_term.get(@storage_flush_key, nil) == nil do
-      :persistent_term.put(@storage_flush_key, %{histogram: Histogram.new(), totals: :atomics.new(2, signed: false)})
+      :persistent_term.put(@storage_flush_key, %{
+        histogram: Histogram.new(),
+        totals: :atomics.new(2, signed: false),
+        created: System.system_time(:millisecond) / 1000
+      })
     end
 
     # Fold the telemetry hot-path events into these counters. Attached here so the ETS table exists

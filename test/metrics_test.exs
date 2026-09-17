@@ -47,6 +47,9 @@ defmodule Malachi.MetricsTest do
 
       assert Enum.map(histogram.buckets, &elem(&1, 0)) == Malachi.Histogram.edges()
       assert Enum.all?([histogram.count, histogram.sum_us, histogram.bytes, histogram.records], &is_integer/1)
+      # When this node's histogram began: a Unix time, not a duration.
+      assert is_float(histogram.created)
+      assert_in_delta histogram.created, System.system_time(:second), 86_400 * 365
     end
 
     test "without the state, recording is a no-op and every reading is zero" do
@@ -56,7 +59,7 @@ defmodule Malachi.MetricsTest do
       try do
         assert Malachi.Metrics.record_flush(1000, 10, 1) == :ok
 
-        assert %{count: 0, sum_us: 0, bytes: 0, records: 0, buckets: buckets} =
+        assert %{count: 0, sum_us: 0, bytes: 0, records: 0, created: +0.0, buckets: buckets} =
                  Malachi.Metrics.storage_flush_histogram()
 
         assert Enum.all?(buckets, fn {_edge, count} -> count == 0 end)
@@ -78,6 +81,7 @@ defmodule Malachi.MetricsTest do
       {:ok, _pid} = Supervisor.restart_child(Malachi.Supervisor, Malachi.Metrics)
 
       assert :persistent_term.get(@flush_key) == state
+      assert Malachi.Metrics.storage_flush_histogram().created == before.created
       assert Malachi.Metrics.storage_flush_histogram().count >= before.count
 
       # And the re-attached reporter still folds flush events into it.

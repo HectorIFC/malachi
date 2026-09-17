@@ -56,7 +56,8 @@ defmodule Malachi.Loadtest.FlushWindowTest do
             "malachi_storage_flush_duration_seconds_sum",
             "malachi_storage_flush_duration_seconds_count",
             "malachi_storage_flushed_bytes_total",
-            "malachi_storage_flushed_records_total"
+            "malachi_storage_flushed_records_total",
+            "malachi_storage_flush_duration_seconds_created"
           ] do
         without = text |> String.split("\n") |> Enum.reject(&String.starts_with?(&1, series <> " ")) |> Enum.join("\n")
         assert FlushWindow.parse(without) == {:error, :series_missing}, "without #{series}"
@@ -105,7 +106,7 @@ defmodule Malachi.Loadtest.FlushWindowTest do
         # a flush series line with no value
         base <> "malachi_storage_flushed_bytes_total\n",
         # a flush series nobody exports
-        base <> "malachi_storage_flush_duration_seconds_created 1\n",
+        base <> "malachi_storage_flush_duration_seconds_bogus 1\n",
         # a bucket line with something glued after the closing brace
         String.replace(base, "le=\"8.0e-6\"}", "le=\"8.0e-6\"}x")
       ]
@@ -141,6 +142,25 @@ defmodule Malachi.Loadtest.FlushWindowTest do
       assert summary.records == 2000
       assert_in_delta summary.mean, 0.0002, 1.0e-12
       assert summary.p99 < 0.0002 * @bucket_ratio
+    end
+
+    test "a node whose histogram began again is a counter_reset, even when its counters grew" do
+      # The restarted node flushed more than the old one had before the second scrape, so every counter is
+      # higher. Only `created` shows the two scrapes describe different histograms.
+      old = Histogram.new()
+      Histogram.record(old, 100)
+      before = parse!(MetricsFixtures.flush_exposition(old, 10, 1, 1_000.0))
+
+      restarted = Histogram.new()
+      for _ <- 1..50, do: Histogram.record(restarted, 100)
+      later = parse!(MetricsFixtures.flush_exposition(restarted, 500, 50, 1_030.0))
+
+      assert FlushWindow.diff(before, later) == {:error, :counter_reset}
+    end
+
+    test "a window carries no created time, so windows of different nodes add up" do
+      assert {:ok, window} = FlushWindow.merge([window_of([100]), window_of([200])])
+      refute Map.has_key?(window, :created)
     end
 
     test "a counter that went backwards is a counter_reset" do

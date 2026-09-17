@@ -16,13 +16,13 @@ defmodule Malachi.Metrics.PrometheusTest do
         end
       end
 
-    %{buckets: buckets, count: 1002, sum_us: 1_500_000, bytes: 2_048_000, records: 10_000}
+    %{buckets: buckets, count: 1002, sum_us: 1_500_000, bytes: 2_048_000, records: 10_000, created: 1_789_000_000.25}
   end
 
   # A node that has not flushed yet, which is what `Malachi.Metrics.storage_flush_histogram/0` returns
   # before the first flush.
   defp no_flush do
-    %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0}
+    %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0, created: 0.0}
   end
 
   defp render(topics, flush \\ flush()),
@@ -168,6 +168,14 @@ defmodule Malachi.Metrics.PrometheusTest do
 
       assert Enum.map(finite, fn {le, _count} -> String.to_float(le) end) ==
                Enum.map(Histogram.edges(), &(&1 / 1_000_000))
+    end
+
+    test "renders when the histogram began as a gauge of its own" do
+      out = render([])
+
+      assert out =~
+               "# TYPE malachi_storage_flush_duration_seconds_created gauge\n" <>
+                 "malachi_storage_flush_duration_seconds_created 1789000000.25\n"
     end
 
     test "renders the durability totals as counters" do

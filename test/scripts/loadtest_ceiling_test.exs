@@ -231,8 +231,9 @@ defmodule LoadtestCeilingTest do
           {"notoken", "login failed: the answer carried no token"},
           {"down", "login failed: curl could not reach http://127.0.0.1:"},
           {"scrape500", "scrape failed: HTTP 500"},
+          {"session401", "scrape failed: HTTP 401 (the session is gone; the node may have restarted)"},
           {"noseries", "the scrape has no flush latency series"},
-          {"restart", "a flush counter went backwards between the scrapes (the node restarted)"}
+          {"restart", "the node restarted between the scrapes"}
         ] do
       test "#{behavior}: the run keeps its throughput and records why there is no flush window", ctx do
         assert {_output, 0} =
@@ -470,6 +471,7 @@ defmodule LoadtestCeilingTest do
         echo "$n" > "$calls"
         case "$STUB_CURL" in
           scrape500) reply 500 "" ;;
+          session401) if [ $((n % 2)) = 1 ]; then reply 200 "$STUB_DIR/before.prom"; else reply 401 ""; fi ;;
           noseries) reply 200 "$STUB_DIR/noseries.prom" ;;
           restart) if [ $((n % 2)) = 1 ]; then reply 200 "$STUB_DIR/before.prom"; else reply 200 "$STUB_DIR/restarted.prom"; fi ;;
           *) if [ $((n % 2)) = 1 ]; then reply 200 "$STUB_DIR/before.prom"; else reply 200 "$STUB_DIR/after.prom"; fi ;;

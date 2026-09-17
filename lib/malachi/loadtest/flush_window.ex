@@ -24,15 +24,28 @@ defmodule Malachi.Loadtest.FlushWindow do
   @quantiles [p50: 0.5, p99: 0.99, p999: 0.999]
 
   @typedoc """
-  The flush series of one scrape, or the difference of two. `buckets` are `{le, count}` in exposition
-  order, with `le` kept as the text the server printed so two scrapes are compared exactly.
+  The flushes of one window, or of several nodes' windows added up. `buckets` are `{le, count}` in
+  exposition order, with `le` kept as the text the server printed so two scrapes are compared exactly.
+  """
+  @type window :: %{
+          buckets: [{String.t(), non_neg_integer()}],
+          count: non_neg_integer(),
+          sum: float(),
+          bytes: non_neg_integer(),
+          records: non_neg_integer()
+        }
+
+  @typedoc """
+  The flush series of one scrape: a window since the node's histogram began, plus `created`, the time it
+  began, which identifies that histogram across scrapes.
   """
   @type snapshot :: %{
           buckets: [{String.t(), non_neg_integer()}],
           count: non_neg_integer(),
           sum: float(),
           bytes: non_neg_integer(),
-          records: non_neg_integer()
+          records: non_neg_integer(),
+          created: float()
         }
 
   @type error :: :series_missing | :counter_reset | :bucket_mismatch
@@ -50,7 +63,8 @@ defmodule Malachi.Loadtest.FlushWindow do
 
   @doc """
   Reads the flush series out of a Prometheus text exposition. Every one of them has to be there (the
-  finite buckets, `+Inf`, `_sum`, `_count` and the two totals), or the answer is `:series_missing`: a
+  finite buckets, `+Inf`, `_sum`, `_count`, `_created` and the two totals), or the answer is
+  `:series_missing`: a
   server that predates them, or a response that is not the exposition at all.
   """
   @spec parse(String.t()) :: {:ok, snapshot()} | {:error, error()}
@@ -68,21 +82,24 @@ defmodule Malachi.Loadtest.FlushWindow do
          {:ok, sum} <- single(samples, :sum),
          {:ok, bytes} <- single(samples, :bytes),
          {:ok, records} <- single(samples, :records),
+         {:ok, created} <- single(samples, :created),
          {:ok, buckets} <- finite_then_inf(buckets),
          true <- Enum.all?([count, bytes, records | Enum.map(buckets, &elem(&1, 1))], &is_integer/1) do
-      {:ok, %{buckets: buckets, count: count, sum: sum / 1, bytes: bytes, records: records}}
+      {:ok, %{buckets: buckets, count: count, sum: sum / 1, bytes: bytes, records: records, created: created / 1}}
     else
       _missing_or_malformed -> {:error, :series_missing}
     end
   end
 
   @doc """
-  The flushes between two scrapes of the same node. `:counter_reset` when any series went down, which
-  means the node restarted in between and the difference describes nothing; `:bucket_mismatch` when the
-  two scrapes do not have the same edges.
+  The flushes between two scrapes of the same node. `:counter_reset` when the node restarted in between,
+  so the difference describes nothing: its histogram began at another time, or any series went down.
+  The first check is the one that counts, since a restarted node can flush past its old totals before the
+  second scrape; the second still catches a server that does not keep `created` steady.
+  `:bucket_mismatch` when the two scrapes do not have the same edges.
   """
-  @spec diff(snapshot(), snapshot()) :: {:ok, snapshot()} | {:error, error()}
-  def diff(before, later) do
+  @spec diff(snapshot(), snapshot()) :: {:ok, window()} | {:error, error()}
+  def diff(%{created: created} = before, %{created: created} = later) do
     with :ok <- same_edges(before, later) do
       delta = combine(later, before, &-/2)
 
@@ -97,8 +114,10 @@ defmodule Malachi.Loadtest.FlushWindow do
     end
   end
 
+  def diff(_before, _later), do: {:error, :counter_reset}
+
   @doc "Adds windows from several nodes into one. `:bucket_mismatch` when their edges differ."
-  @spec merge([snapshot(), ...]) :: {:ok, snapshot()} | {:error, error()}
+  @spec merge([window(), ...]) :: {:ok, window()} | {:error, error()}
   def merge([first | rest]) do
     Enum.reduce_while(rest, {:ok, first}, fn window, {:ok, acc} ->
       case same_edges(acc, window) do
@@ -109,7 +128,7 @@ defmodule Malachi.Loadtest.FlushWindow do
   end
 
   @doc "The quantiles, mean and totals of a window, in seconds."
-  @spec summarize(snapshot()) :: summary()
+  @spec summarize(window()) :: summary()
   def summarize(%{count: 0} = window) do
     %{p50: nil, p99: nil, p999: nil, mean: nil, flushes: 0, bytes: window.bytes, records: window.records}
   end
@@ -128,7 +147,7 @@ defmodule Malachi.Loadtest.FlushWindow do
   @doc "What each error means, in the words a benchmark result records."
   @spec describe(error()) :: String.t()
   def describe(:series_missing), do: "the scrape has no flush latency series"
-  def describe(:counter_reset), do: "a flush counter went backwards between the scrapes (the node restarted)"
+  def describe(:counter_reset), do: "the node restarted between the scrapes"
   def describe(:bucket_mismatch), do: "the scrapes have different histogram buckets"
 
   # --- parsing ---
@@ -152,6 +171,7 @@ defmodule Malachi.Loadtest.FlushWindow do
   defp series(@histogram <> "_sum"), do: :sum
   defp series(@bytes), do: :bytes
   defp series(@records), do: :records
+  defp series(@histogram <> "_created"), do: :created
 
   defp series(@histogram <> "_bucket{le=\"" <> rest) do
     case String.split(rest, "\"}") do

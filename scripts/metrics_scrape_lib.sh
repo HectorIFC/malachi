@@ -24,6 +24,8 @@
 # Turns a transport failure into the words a result records.
 ms_explain() { # ms_explain <transport output>
   case "$1" in
+    # Sessions live in the node's memory, so a token the node no longer knows usually means it restarted.
+    "HTTP 401"*) echo "$1 (the session is gone; the node may have restarted)" ;;
     "HTTP 403"*) echo "$1 (the dashboard refused the credentials)" ;;
     "HTTP 429"*) echo "$1 (the dashboard rate limit tripped)" ;;
     "") echo "no answer" ;;

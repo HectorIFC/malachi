@@ -7,6 +7,9 @@ defmodule Malachi.Test.MetricsFixtures do
   alias Malachi.Histogram
   alias Malachi.Metrics.Prometheus
 
+  # When the fixture node's flush histogram began.
+  @created 1_789_000_000.5
+
   @doc "A minimal system snapshot with the shape `Malachi.Metrics.Prometheus.export/3` reads."
   def system do
     %{
@@ -56,11 +59,20 @@ defmodule Malachi.Test.MetricsFixtures do
 
   @doc """
   The `/metrics` text a node whose flush histogram is `histogram` would serve, rendered by the real
-  exporter, with `bytes` and `records` as the durability totals.
+  exporter, with `bytes` and `records` as the durability totals and `created` as the time the histogram
+  began (a node that restarted has another one).
   """
-  def flush_exposition(histogram, bytes \\ 0, records \\ 0) do
+  def flush_exposition(histogram, bytes \\ 0, records \\ 0, created \\ @created) do
     {buckets, count} = Histogram.cumulative(histogram)
-    flush = %{buckets: buckets, count: count, sum_us: Histogram.sum(histogram), bytes: bytes, records: records}
+
+    flush = %{
+      buckets: buckets,
+      count: count,
+      sum_us: Histogram.sum(histogram),
+      bytes: bytes,
+      records: records,
+      created: created
+    }
 
     system()
     |> Prometheus.export([], flush)
@@ -70,8 +82,9 @@ defmodule Malachi.Test.MetricsFixtures do
   @doc """
   The scrapes the benchmark script stubs serve, written into `dir`: `before.prom` holds 100 slow (50ms)
   setup flushes, and `after.prom` adds 1000 fast (200us) ones, 64 bytes and 10 records each. A window
-  between them is exactly the 1000 fast flushes. `restarted.prom` is a node that booted again (nothing
-  recorded), and `noseries.prom` a page without the flush series.
+  between them is exactly the 1000 fast flushes. `restarted.prom` is a node that booted again and has
+  already flushed past the old totals, so only its `created` gives it away, and `noseries.prom` a page
+  without the flush series.
   """
   def write_flush_scrapes!(dir) do
     histogram = Histogram.new()
@@ -79,7 +92,7 @@ defmodule Malachi.Test.MetricsFixtures do
     File.write!(Path.join(dir, "before.prom"), flush_exposition(histogram, 1000, 100))
     for _ <- 1..1000, do: Histogram.record(histogram, 200)
     File.write!(Path.join(dir, "after.prom"), flush_exposition(histogram, 65_000, 10_100))
-    File.write!(Path.join(dir, "restarted.prom"), flush_exposition(Histogram.new()))
+    File.write!(Path.join(dir, "restarted.prom"), flush_exposition(histogram, 65_000, 10_100, @created + 60))
     File.write!(Path.join(dir, "noseries.prom"), "# HELP malachi_up up\nmalachi_up 1\n")
   end
 end

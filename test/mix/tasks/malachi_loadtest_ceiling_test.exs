@@ -388,7 +388,7 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
       {before, _later} = scrapes([500, 500], [])
       {restarted, _} = scrapes([], [])
       Task.run(["flush-window" | write_scrapes!(ctx, {before, restarted})])
-      assert printed_json() == %{"error" => "a flush counter went backwards between the scrapes (the node restarted)"}
+      assert printed_json() == %{"error" => "the node restarted between the scrapes"}
 
       Task.run(["flush-window" | write_scrapes!(ctx, {before, "<html>login</html>"})])
       assert printed_json() == %{"error" => "the scrape has no flush latency series"}
@@ -455,13 +455,13 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
       assert nodes["malachi1"]["flushes"] == 1
 
       assert nodes["malachi2"] == %{
-               "error" => "a flush counter went backwards between the scrapes (the node restarted)"
+               "error" => "the node restarted between the scrapes"
              }
 
       assert nodes["malachi3"] == %{"error" => "login refused (HTTP 403)"}
 
       assert error ==
-               "malachi2: a flush counter went backwards between the scrapes (the node restarted); " <>
+               "malachi2: the node restarted between the scrapes; " <>
                  "malachi3: login refused (HTTP 403)"
     end
 

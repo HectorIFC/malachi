@@ -148,8 +148,10 @@ defmodule Malachi.Metrics.Prometheus do
   # A Prometheus histogram in seconds: one cumulative `_bucket` per edge, the `+Inf` bucket (every flush),
   # then `_sum` and `_count`. Buckets rather than a summary's quantiles because buckets subtract: two
   # scrapes give the distribution of the flushes between them, and nodes add up, neither of which a
-  # quantile allows.
-  defp histogram(name, help, %{buckets: buckets, count: count, sum_us: sum_us}) do
+  # quantile allows. `_created` (when the histogram began, which is how a reader tells a restarted node
+  # from one whose counters kept growing) follows as a gauge of its own: this endpoint serves the 0.0.4
+  # text format, where a histogram family has no `_created` sample.
+  defp histogram(name, help, %{buckets: buckets, count: count, sum_us: sum_us, created: created}) do
     bucket_name = name <> "_bucket"
 
     [
@@ -157,7 +159,15 @@ defmodule Malachi.Metrics.Prometheus do
       Enum.map(buckets, fn {edge_us, below} -> sample(bucket_name, [le: us_to_seconds(edge_us)], below) end),
       sample(bucket_name, [le: "+Inf"], count),
       sample(name <> "_sum", [], us_to_seconds(sum_us)),
-      sample(name <> "_count", [], count)
+      sample(name <> "_count", [], count),
+      metric(
+        name <> "_created",
+        :gauge,
+        "Unix time the flush latency histogram began (changes when the node restarts)",
+        [
+          {[], created}
+        ]
+      )
     ]
   end
 
