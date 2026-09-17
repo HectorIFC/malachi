@@ -21,6 +21,12 @@ CHAOS_WORK_ROOT="${CHAOS_WORK_ROOT:-$PWD/tmp/chaos}"
 mkdir -p "$CHAOS_WORK_ROOT" || { echo "cannot create $CHAOS_WORK_ROOT"; exit 1; }
 WORK="$(mktemp -d "$CHAOS_WORK_ROOT/work.XXXXXX")" || { echo "cannot create a scratch dir under $CHAOS_WORK_ROOT"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
+# Where a failed check keeps what it saw. Beside WORK rather than inside it, so the EXIT trap leaves it, and
+# named by time and commit so runs never overwrite each other. Created only when something is kept.
+EVIDENCE_DIR="$CHAOS_WORK_ROOT/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+EVIDENCE_KEPT=""
+# Extra `docker compose run` arguments for the next checker_run (mounts, --no-deps). Callers set and reset it.
+CHECKER_RUN_ARGS=()
 FAILED=0
 CHAOS_HOSTS="malachi1,malachi2,malachi3"
 EVENTS=()
@@ -68,9 +74,13 @@ start_cluster() {
 # Runs the checker/topology script inside the compose network (the cluster publishes no host
 # ports); the acked file and the scripts dir are mounted in from the host.
 checker_run() {
-  $COMPOSE run --rm -v "$WORK:/chaos" -v "$PWD/scripts:/chaos_scripts" --entrypoint sh loadtest \
+  $COMPOSE run --rm ${CHECKER_RUN_ARGS[@]+"${CHECKER_RUN_ARGS[@]}"} -v "$WORK:/chaos" -v "$PWD/scripts:/chaos_scripts" --entrypoint sh loadtest \
     -c "cd /app && mix run --no-start /chaos_scripts/chaos_checker.exs $*"
 }
+
+# The named volume mounted at /data in container $1, and the image it runs.
+data_volume_of() { docker inspect "$1" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'; }
+image_of() { docker inspect "$1" --format '{{.Config.Image}}'; }
 
 # Starts the acked-durability checker in the background for $1 seconds; sets CHECKER (pid).
 start_checker() {
@@ -228,9 +238,11 @@ write_result() {
     --argjson events "$(json_array ${EVENTS[@]+"${EVENTS[@]}"})" \
     --argjson invariants "$(chaos_invariants)" \
     --argjson failures "$(json_array ${FAILURES[@]+"${FAILURES[@]}"})" \
+    --arg evidence_dir "$EVIDENCE_KEPT" \
     '{meta: $meta, certification: $certification, verdict: $verdict,
       replication_factor: $replication_factor, events: $events,
-      invariants: $invariants, failures: $failures}' > "$CHAOS_RESULT_FILE"
+      invariants: $invariants, failures: $failures,
+      evidence_dir: (if $evidence_dir == "" then null else $evidence_dir end)}' > "$CHAOS_RESULT_FILE"
 
   echo "result written to $CHAOS_RESULT_FILE"
 }

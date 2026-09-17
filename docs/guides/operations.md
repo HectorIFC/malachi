@@ -180,8 +180,11 @@ repairs the tail), a gross truncation to half, and a sealed-segment directory de
 The deletion exercises the self-healing **integrity probe**: metadata still says the segment has
 all its replicas, so only a physical check (on-disk bytes vs the sealed byte size, run each healing
 pass) can spot the silent under-replication and re-backfill the copy. On top of the three
-invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
-file must end byte-identical across the three nodes. Corruption always targets follower copies;
+invariants above, the storage run requires **physical reconvergence**: every node's copy of every
+chaos-topic segment must be readable and hold the same records, byte for byte over the valid part of
+its files, and a sealed segment exactly its sealed length. The files themselves need not match: only
+a fenced copy has its preallocated tail trimmed, and each node rolls its internal files at its own
+sync points. Corruption always targets follower copies;
 corruption of a primary copy is seal-on-failure territory (roadmap). A storage FAILURE is not: when a
 write or read fails on a node (a full volume, a failing device), that node stops using the segment's
 copy, answers `{:error, {:storage, reason}}` for it, counts it in `malachi_storage_failures_total`, and

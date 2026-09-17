@@ -66,7 +66,28 @@ meant to find.
   derived data, so the repair has to be local, rebuilt from the segment without consulting a peer.
 
 On top of the node-fault invariants, this one certifies that the damaged copies physically
-reconverge: byte-identical segment files across all three nodes.
+reconverge. The check (`copies` mode of `scripts/chaos_checker.exs`) reads each node's data volume
+read-only and compares, per segment, what every copy holds:
+
+- **the records**, byte for byte over the valid part of each file, concatenated in offset order;
+- **the count**, which for a segment the control plane sealed must equal its sealed length;
+- **the readability**, since a copy that fails verification, or holds non-zero bytes past its valid
+  end, is damaged whatever the other copies say.
+
+It does not require the files themselves to be identical, and it used to. Healthy copies differ as
+files on every run ([#152](https://github.com/HectorIFC/malachi/issues/152)). Only a fenced copy, usually
+the primary's, has its preallocated tail trimmed, so a follower's last file keeps its blank tail. And each
+node rolls its internal files at its own sync points. The report calls that `benign`. That recovery zeroes
+a torn write inside the preallocated region, instead of truncating it, is pinned by the store's own tests.
+
+The check retries for a minute and prints a `COPIES segments=... whole_file=... content=...` summary.
+When it fails, it prints, per node, every segment whose copies are not identical: the files with their
+sizes and md5s, the records and bytes that verify, a digest of the valid records, and a verdict naming
+the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`: the
+report, the host's substrate and load, and each node's copy of those segments. That happens before the
+second phase, whose fresh cluster deletes the volumes. The result JSON names that directory in
+`evidence_dir`. The repairs of the file-loss and bit-rot events are judged by the same rule, and the
+rotted index by byte equality of the index files.
 
 Then a second phase, on a fresh cluster of its own:
 
