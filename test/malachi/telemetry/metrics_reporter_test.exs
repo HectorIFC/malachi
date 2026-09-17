@@ -113,7 +113,7 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
   end
 
   describe "storage flush" do
-    # Flushes in [edge_lo, edge_hi): the band between two exported edges, read off the cumulative buckets.
+    # Flushes in (edge_lo, edge_hi]: the band between two exported edges, read off the cumulative buckets.
     defp flushes_between(edge_lo, edge_hi) do
       buckets = Map.new(Metrics.storage_flush_histogram().buckets)
       buckets[edge_hi] - buckets[edge_lo]

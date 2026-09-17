@@ -4,7 +4,7 @@ defmodule Malachi.Histogram do
   concurrently, with no per-op allocation and no shared GenServer. The load generator records request
   latency in it, and `Malachi.Metrics` records storage flush latency in it.
 
-  Latencies are recorded in microseconds. Bucket `b` covers `[2^((b-1)/scale), 2^(b/scale))` us, so the
+  Latencies are recorded in microseconds. Bucket `b` covers `(2^((b-1)/scale), 2^(b/scale)]` us, so the
   resolution is `2^(1/scale) - 1` (about 4.4% at `scale = 16`), fine enough for tail percentiles while
   keeping the array tiny. Percentiles return the representative us of the bucket the rank falls in.
 
@@ -15,8 +15,8 @@ defmodule Malachi.Histogram do
   `cumulative/1` exports the counts at a coarser, fixed set of edges (`edges/0`, four per octave), which is
   what a Prometheus histogram needs: a stable `le` set whose counts can be subtracted between two scrapes.
   Every edge is the upper bound of an internal bucket, so those counts are exact rather than interpolated.
-  Because a bucket excludes its upper bound, a count is of samples strictly BELOW its edge; the only
-  integer samples that can equal an edge are exact powers of two, and those land one edge up.
+  A bucket includes its upper bound, so a count is of samples at or below its edge, which is what a
+  Prometheus `le` means; the only integer samples that can equal an edge are exact powers of two.
   """
 
   import Bitwise
@@ -58,9 +58,9 @@ defmodule Malachi.Histogram do
   def edges, do: Enum.map(@edge_range, &edge_us/1)
 
   @doc """
-  The number of samples strictly below each of `edges/0`, as `[{edge_us, count}]` in ascending order,
+  The number of samples at or below each of `edges/0`, as `[{edge_us, count}]` in ascending order,
   and the total count, all read in one pass so they agree with each other while writers keep adding (the
-  total is never below the last edge's count). Samples at or above the last edge are only in the total.
+  total is never below the last edge's count). Samples above the last edge are only in the total.
   """
   @spec cumulative(t()) :: {[{float(), non_neg_integer()}], non_neg_integer()}
   def cumulative(hist) do
@@ -106,10 +106,11 @@ defmodule Malachi.Histogram do
     if cum >= target, do: bucket_us(i), else: find_bucket(hist, target, i + 1, cum)
   end
 
-  # Bucket index for a latency; clamps to [1, @buckets]. Anything below 1us (zero, negative, or a fraction,
-  # whose log is negative) lands in bucket 1.
-  defp bucket(us) when us < 1, do: 1
-  defp bucket(us), do: min(@buckets, trunc(:math.log2(us) * @scale) + 1)
+  # Bucket index for a latency; clamps to [1, @buckets]. Anything up to 1us (zero, negative, or a fraction,
+  # whose log is not positive) lands in bucket 1. Rounding up puts a sample equal to an upper bound in the
+  # bucket that bound closes, so an exported `le` counts it.
+  defp bucket(us) when us <= 1, do: 1
+  defp bucket(us), do: min(@buckets, ceil(:math.log2(us) * @scale))
 
   defp sum_sample(us) when us <= 0, do: 0
   defp sum_sample(us), do: min(trunc(us), @max_sum_sample)

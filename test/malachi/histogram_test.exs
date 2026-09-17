@@ -154,7 +154,7 @@ defmodule Malachi.HistogramTest do
       assert total == 0
     end
 
-    test "counts samples strictly below each edge" do
+    test "counts samples at or below each edge" do
       h = Histogram.new()
       # 10us sits between the 9.51us and 11.31us edges.
       Histogram.record(h, 10)
@@ -164,14 +164,26 @@ defmodule Malachi.HistogramTest do
       assert counts[:math.pow(2, 14 / 4)] == 1
     end
 
-    test "a sample equal to a power-of-two edge lands one edge up" do
-      # The internal bucket is [lo, hi), so 1024us is NOT below the 1024us edge.
+    test "a sample equal to an edge counts at that edge, as Prometheus le is inclusive" do
       h = Histogram.new()
       Histogram.record(h, 1024)
+      Histogram.record(h, 1025)
 
       counts = Map.new(elem(Histogram.cumulative(h), 0))
-      assert counts[1024.0] == 0
-      assert counts[:math.pow(2, 41 / 4)] == 1
+      assert counts[:math.pow(2, 39 / 4)] == 0
+      assert counts[1024.0] == 1
+      assert counts[:math.pow(2, 41 / 4)] == 2
+    end
+
+    test "every power-of-two edge includes a sample equal to it" do
+      for k <- 3..24 do
+        h = Histogram.new()
+        edge = Bitwise.bsl(1, k)
+        Histogram.record(h, edge)
+
+        counts = Map.new(elem(Histogram.cumulative(h), 0))
+        assert counts[edge * 1.0] == 1, "a #{edge}us sample is missing from le=#{edge}"
+      end
     end
 
     test "samples below the first edge count at every edge" do
@@ -184,7 +196,7 @@ defmodule Malachi.HistogramTest do
       assert total == 2
     end
 
-    test "samples at or past the last edge appear at no edge but are in the total" do
+    test "samples past the last edge appear at no edge but are in the total" do
       h = Histogram.new()
       Histogram.record(h, 20_000_000)
 
@@ -195,7 +207,7 @@ defmodule Malachi.HistogramTest do
 
     test "counts are monotonic and match a direct count of the samples" do
       h = Histogram.new()
-      samples = [9, 40, 40, 700, 5_000, 5_001, 90_000, 3_000_000]
+      samples = [9, 16, 40, 40, 512, 700, 5_000, 5_001, 90_000, 3_000_000]
       Enum.each(samples, &Histogram.record(h, &1))
 
       {cumulative, total} = Histogram.cumulative(h)
@@ -204,7 +216,7 @@ defmodule Malachi.HistogramTest do
       assert total == length(samples)
 
       for {edge, count} <- cumulative do
-        assert count == Enum.count(samples, &(&1 < edge)), "edge #{edge}"
+        assert count == Enum.count(samples, &(&1 <= edge)), "edge #{edge}"
       end
     end
   end
