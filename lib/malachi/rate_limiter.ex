@@ -207,9 +207,8 @@ defmodule Malachi.RateLimiter do
       write_concurrency: true
     ])
 
-    schedule_cleanup()
     Logger.info(I18n.t(:rate_limiter_started))
-    {:ok, %{}}
+    {:ok, %{cleanup_timer: schedule_cleanup()}}
   end
 
   @impl true
@@ -266,10 +265,18 @@ defmodule Malachi.RateLimiter do
     {:reply, results, state}
   end
 
+  # Only the timer's own message reschedules. A manual `:cleanup` (an operator, or a test) just runs a pass:
+  # if it rescheduled too, every manual pass would start one more timer chain that never stops, each
+  # sweeping the whole table on every interval.
+  @impl true
+  def handle_info(:scheduled_cleanup, state) do
+    cleanup_expired_buckets()
+    {:noreply, %{state | cleanup_timer: schedule_cleanup()}}
+  end
+
   @impl true
   def handle_info(:cleanup, state) do
     cleanup_expired_buckets()
-    schedule_cleanup()
     {:noreply, state}
   end
 
@@ -455,7 +462,7 @@ defmodule Malachi.RateLimiter do
 
   defp schedule_cleanup do
     interval = cfg(:rate_limit_cleanup_interval_ms, 300_000)
-    Process.send_after(self(), :cleanup, interval)
+    Process.send_after(self(), :scheduled_cleanup, interval)
   end
 
   defp enabled?, do: cfg(:rate_limit_enabled, true)

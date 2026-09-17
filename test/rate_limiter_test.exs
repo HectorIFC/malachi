@@ -587,6 +587,39 @@ defmodule Malachi.RateLimiterTest do
       :ok
     end
 
+    test "a manual pass cleans without starting another timer chain" do
+      # Only the limiter's own timer reschedules. If a manual pass rescheduled too, every `:cleanup` sent
+      # by hand (this file sends several) would leave one more timer sweeping the table forever.
+      pid = Process.whereis(RateLimiter)
+      %{cleanup_timer: timer} = :sys.get_state(pid)
+      assert is_integer(Process.read_timer(timer))
+
+      run_cleanup()
+      run_cleanup()
+
+      assert %{cleanup_timer: ^timer} = :sys.get_state(pid)
+      assert is_integer(Process.read_timer(timer)), "the scheduled cleanup stopped after a manual pass"
+    end
+
+    test "the scheduled pass cleans and arms exactly one new timer" do
+      pid = Process.whereis(RateLimiter)
+      %{cleanup_timer: old_timer} = :sys.get_state(pid)
+
+      stale = {"scheduled_stale_#{:rand.uniform(1_000_000)}", :publish, System.system_time(:millisecond) - 3_600_000, 0}
+      :ets.insert(@table, {stale, 1, 1_000})
+
+      send(pid, :scheduled_cleanup)
+      %{cleanup_timer: new_timer} = :sys.get_state(pid)
+
+      assert :ets.lookup(@table, stale) == []
+      assert new_timer != old_timer
+      assert is_integer(Process.read_timer(new_timer))
+
+      # The message this test sent stands in for the old timer's; cancel the old one so the chain count
+      # stays at one, as it would in production where the timer message IS the old timer firing.
+      Process.cancel_timer(old_timer)
+    end
+
     test "reaps stale sharded window counters and keeps live ones" do
       tag = :rand.uniform(1_000_000)
       hour_ms = 3_600_000
