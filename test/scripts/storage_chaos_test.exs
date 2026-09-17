@@ -114,6 +114,16 @@ defmodule StorageChaosTest do
       assert Enum.all?(repairs, &(&1 =~ "--no-deps -v vol-1:/copies/malachi1:ro -v vol-2:/copies/malachi2:ro -v"))
     end
 
+    test "a check that compared no segment fails, and says why", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_COPIES", "none"}])
+      assert output =~ "COPIES segments=0 whole_file=none content=none"
+
+      assert output =~
+               "FAIL: invariant 4 found no chaos_acked segment copy to compare under /data/malachi_log on any node"
+
+      refute output =~ "every segment's copies hold the same records"
+    end
+
     test "the index repair is still judged byte for byte", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_MD5_DIFFER", "1"}])
       assert output =~ "FAIL: rotted sparse index was not rebuilt by the integrity scrub"
@@ -257,7 +267,7 @@ defmodule StorageChaosTest do
   end
 
   # Answers from STUB_RUNNING (names `docker ps` lists as running), STUB_MD5_DIFFER (1: each node's index files hash
-  # differently), STUB_COPIES (identical, benign or content: the phase-1 comparison), STUB_NEGATIVE (caught,
+  # differently), STUB_COPIES (identical, benign, content or none: the phase-1 comparison), STUB_NEGATIVE (caught,
   # missed or other: the negative control's comparison) and STUB_REPAIR (never: the repair never converges).
   defp docker_stub do
     ~S"""
@@ -330,6 +340,10 @@ defmodule StorageChaosTest do
               *) echo "COPIES verdict=identical segment=chaos_acked-r0-s1 control=sealed:6 nodes=-" ;;
             esac ;;
           *"chaos_checker.exs copies"*)
+            if [ "${STUB_COPIES:-}" = none ]; then
+              echo "COPIES segments=0 whole_file=none content=none"
+              exit 1
+            fi
             verdict="${STUB_COPIES:-identical}"
             for n in malachi1 malachi2 malachi3; do copy_line "$n"; done
             echo "COPY segment=chaos_acked-r0-s2 node=malachi1 status=ok marker=no records=1 bytes=40 digest=bbbbbbbbbbbb trailing=0 files=6:2048:bbbbbbbbbbbb"

@@ -285,6 +285,11 @@ say "invariant 4: physical convergence of every chaos-topic segment copy"
 if copies 12 5000 malachi-cluster-1 malachi-cluster-2 malachi-cluster-3 >"$WORK/copies.txt" 2>&1; then
   grep '^COPIES segments=' "$WORK/copies.txt"
   echo "every segment's copies hold the same records on the 3 nodes"
+elif grep -q '^COPIES segments=0 ' "$WORK/copies.txt"; then
+  # Nothing compared is not nothing wrong: the check read no segment at all, which is what a log directory
+  # mounted or named differently from DATA_DIR looks like, and passing it would certify nothing.
+  grep '^COPIES segments=' "$WORK/copies.txt"
+  fail "invariant 4 found no $CHAOS_TOPIC segment copy to compare under $DATA_DIR on any node"
 else
   grep '^COPIES segments=' "$WORK/copies.txt" || { echo "per-copy report unavailable:"; tail -5 "$WORK/copies.txt"; }
   echo "segments whose copies are not identical, per node:"

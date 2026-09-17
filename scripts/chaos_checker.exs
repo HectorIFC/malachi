@@ -125,6 +125,32 @@ defmodule ChaosChecker.Copies do
   def passing?(verdict), do: verdict in @passing
 
   @doc """
+  Whether a survey `report` certifies the copies: it covers at least one segment, and every segment's
+  copies agree. An empty report compared nothing, which is what a log root read from the wrong path looks
+  like, so it never passes: a check that finds nothing to check must not read as one that found nothing
+  wrong.
+  """
+  @spec passed?([map()]) :: boolean()
+  def passed?([]), do: false
+  def passed?(report), do: Enum.all?(report, &passing?(&1.verdict))
+
+  @doc """
+  Checks the `{node, log_root}` list a comparison is asked to run over. Fewer than two nodes compare
+  nothing, since a lone copy agrees with itself, and a repeated node name would silently merge two roots
+  into one copy. Both would pass without checking anything, so both are refused.
+  """
+  @spec validate_nodes([{String.t(), Path.t()}]) :: :ok | {:error, String.t()}
+  def validate_nodes(nodes) do
+    names = Enum.map(nodes, &elem(&1, 0))
+
+    cond do
+      length(nodes) < 2 -> {:error, "copies needs at least two <node>=<log root> arguments, got #{length(nodes)}"}
+      length(Enum.uniq(names)) != length(names) -> {:error, "copies got a node name twice: #{Enum.join(names, ",")}"}
+      true -> :ok
+    end
+  end
+
+  @doc """
   Reads one node's copy of one segment directory, without writing anything.
 
   An absent directory is `:missing`, one with no `.log` is `:empty`, and anything `verify/3` refuses (or a
@@ -361,7 +387,7 @@ defmodule ChaosChecker.Copies do
   end
 
   @doc """
-  Re-runs `check` until its report passes or `attempts` runs out, sleeping `interval_ms` between tries,
+  Re-runs `check` until its report passes (`passed?/1`) or `attempts` runs out, sleeping `interval_ms` between tries,
   and returns the last report. A copy still being repaired converges within the window; one that does
   not is reported as it stood on the final try.
   """
@@ -369,7 +395,7 @@ defmodule ChaosChecker.Copies do
   def settle(check, attempts, interval_ms, sleep \\ &Process.sleep/1) do
     report = check.()
 
-    if attempts <= 1 or Enum.all?(report, &passing?(&1.verdict)) do
+    if attempts <= 1 or passed?(report) do
       report
     else
       sleep.(interval_ms)
@@ -379,7 +405,8 @@ defmodule ChaosChecker.Copies do
 
   @doc """
   The report as printed: one `COPY` line per node per segment, one `COPIES verdict=` line per segment,
-  and a closing summary separating whole-file agreement from record agreement.
+  and a closing summary separating whole-file agreement from record agreement. A report with no segment
+  says `none` for both, rather than an agreement nobody measured.
   """
   @spec lines([map()]) :: [String.t()]
   def lines(report) do
@@ -399,11 +426,18 @@ defmodule ChaosChecker.Copies do
           ]
       end)
 
-    whole_file = if Enum.all?(report, &(&1.verdict == :identical)), do: "ok", else: "differs"
-    content = if Enum.all?(report, &passing?(&1.verdict)), do: "ok", else: "differs"
+    {whole_file, content} =
+      cond do
+        report == [] -> {"none", "none"}
+        passed?(report) -> {agreement(Enum.all?(report, &(&1.verdict == :identical))), "ok"}
+        true -> {"differs", "differs"}
+      end
 
     per_segment ++ ["COPIES segments=#{length(report)} whole_file=#{whole_file} content=#{content}"]
   end
+
+  defp agreement(true), do: "ok"
+  defp agreement(false), do: "differs"
 
   defp status_text({:damaged, details}), do: "damaged:#{details[:reason]}"
   defp status_text(status), do: Atom.to_string(status)
@@ -515,6 +549,11 @@ defmodule ChaosChecker do
 
     nodes = Enum.map(node_args, &parse_node_root/1)
 
+    with {:error, reason} <- ChaosChecker.Copies.validate_nodes(nodes) do
+      IO.puts(reason)
+      System.halt(2)
+    end
+
     # Read once, before the retries: the control plane's view is context for the verdict, and a topology
     # that cannot be read leaves the length check out rather than failing the comparison.
     ranges =
@@ -537,7 +576,7 @@ defmodule ChaosChecker do
       )
 
     Enum.each(ChaosChecker.Copies.lines(report), &IO.puts/1)
-    System.halt(if Enum.all?(report, &ChaosChecker.Copies.passing?(&1.verdict)), do: 0, else: 1)
+    System.halt(if ChaosChecker.Copies.passed?(report), do: 0, else: 1)
   end
 
   def main(_argv) do

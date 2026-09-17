@@ -777,6 +777,16 @@ defmodule ChaosCheckerTest do
       end
     end
 
+    test "a survey that finds no segment on any node is not a pass", %{tmp_dir: tmp_dir} do
+      # What a log root read from the wrong path looks like: nothing to compare, which must not read as
+      # nothing wrong (issue #152's review).
+      nodes = [{"n1", Path.join(tmp_dir, "absent-1")}, {"n2", Path.join(tmp_dir, "absent-2")}]
+
+      assert survey(nodes) == []
+      refute Copies.passed?(survey(nodes))
+      assert Copies.lines(survey(nodes)) == ["COPIES segments=0 whole_file=none content=none"]
+    end
+
     test "a segment the control plane does not know is extra", %{tmp_dir: tmp_dir} do
       nodes = roots(tmp_dir, ~w(n1 n2))
       for {_node, root} <- nodes, do: write_copy(root, [@six])
@@ -849,6 +859,12 @@ defmodule ChaosCheckerTest do
       assert Copies.classify(copies, :absent) == {:damaged, ["n1"]}
     end
 
+    test "a report passes only when it covers a segment and every verdict agrees" do
+      assert Copies.passed?([%{verdict: :identical}, %{verdict: :benign}])
+      refute Copies.passed?([%{verdict: :identical}, %{verdict: :missing}])
+      refute Copies.passed?([])
+    end
+
     test "only the two agreeing verdicts pass" do
       assert Copies.passing?(:identical)
       assert Copies.passing?(:benign)
@@ -856,6 +872,27 @@ defmodule ChaosCheckerTest do
       for verdict <- [:damaged, :trailing_garbage, :missing, :empty, :extra, :lagging, :length_mismatch, :content] do
         refute Copies.passing?(verdict)
       end
+    end
+  end
+
+  describe "ChaosChecker.Copies.validate_nodes/1" do
+    alias ChaosChecker.Copies
+
+    test "two or more distinct nodes are a comparison" do
+      assert Copies.validate_nodes([{"n1", "/a"}, {"n2", "/b"}]) == :ok
+      assert Copies.validate_nodes([{"n1", "/a"}, {"n2", "/b"}, {"n3", "/c"}]) == :ok
+    end
+
+    test "fewer than two nodes compare nothing, and are refused" do
+      # A lone copy agrees with itself, so every verdict would be identical.
+      assert {:error, "copies needs at least two <node>=<log root> arguments, got 1"} =
+               Copies.validate_nodes([{"n1", "/a"}])
+
+      assert {:error, "copies needs at least two <node>=<log root> arguments, got 0"} = Copies.validate_nodes([])
+    end
+
+    test "a repeated node name is refused, since it would merge two roots into one copy" do
+      assert {:error, "copies got a node name twice: n1,n1"} = Copies.validate_nodes([{"n1", "/a"}, {"n1", "/b"}])
     end
   end
 
@@ -901,6 +938,14 @@ defmodule ChaosCheckerTest do
     test "returns the last report once the attempts run out" do
       sleep = fn 10 -> :ok end
       assert [%{verdict: :content}] = Copies.settle(reports([:missing, :lagging, :content]), 3, 10, sleep)
+    end
+
+    test "an empty report is retried like a failing one, and returned as it stood" do
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+      check = fn -> Agent.update(calls, &(&1 + 1)) && [] end
+
+      assert Copies.settle(check, 3, 10, fn 10 -> :ok end) == []
+      assert Agent.get(calls, & &1) == 3
     end
 
     test "a single attempt never sleeps" do
@@ -955,7 +1000,7 @@ defmodule ChaosCheckerTest do
     end
 
     test "the summary separates agreeing records from agreeing files" do
-      assert List.last(Copies.lines([])) == "COPIES segments=0 whole_file=ok content=ok"
+      assert List.last(Copies.lines([])) == "COPIES segments=0 whole_file=none content=none"
 
       assert List.last(Copies.lines([%{segment: "s", control: :absent, verdict: :extra, nodes: ["n1"], copies: %{}}])) ==
                "COPIES segments=1 whole_file=differs content=differs"
