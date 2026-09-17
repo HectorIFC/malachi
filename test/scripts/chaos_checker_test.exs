@@ -610,9 +610,9 @@ defmodule ChaosCheckerTest do
 
     defp roots(tmp_dir, names), do: Enum.map(names, &{&1, Path.join(tmp_dir, &1)})
 
-    defp survey(nodes, control \\ :unknown), do: Copies.survey(nodes, "chaos_acked", nil, fn _dir -> control end)
+    defp survey(nodes, control \\ :unavailable), do: Copies.survey(nodes, "chaos_acked", nil, fn _dir -> control end)
 
-    defp only_entry(nodes, control \\ :unknown) do
+    defp only_entry(nodes, control \\ :unavailable) do
       assert [entry] = survey(nodes, control)
       entry
     end
@@ -732,7 +732,7 @@ defmodule ChaosCheckerTest do
         File.write!(Log.seal_marker_path(dir), "")
       end
 
-      for control <- [%{state: "sealed", length: 0}, %{state: "active", length: 0}, :unknown] do
+      for control <- [%{state: "sealed", length: 0}, %{state: "active", length: 0}, :unavailable] do
         entry = only_entry(nodes, control)
         assert {entry.verdict, entry.nodes} == {:benign, ["n3"]}
         assert entry.copies["n1"].status == :empty
@@ -750,7 +750,7 @@ defmodule ChaosCheckerTest do
       write_copy(r1, [@six])
       File.mkdir_p!(Path.join(r2, @dir))
 
-      for control <- [%{state: "sealed", length: 0}, :unknown] do
+      for control <- [%{state: "sealed", length: 0}, :unavailable] do
         assert {only_entry(nodes, control).verdict, only_entry(nodes, control).nodes} == {:missing, ["n3"]}
       end
     end
@@ -778,6 +778,21 @@ defmodule ChaosCheckerTest do
       assert entry.copies["n2"].status == {:damaged, %{reason: :enotdir, file: not_a_dir}}
     end
 
+    test "copies compared without the control plane are described, but never pass", %{tmp_dir: tmp_dir} do
+      # Every copy holding the same record past a sealed end agrees with every other; only the sealed length
+      # tells them apart, and it comes from the topology. So a report read without one is a diagnosis, not
+      # a certification (issue #172's review).
+      nodes = roots(tmp_dir, ~w(n1 n2))
+      for {_node, root} <- nodes, do: write_copy(root, [@six])
+
+      entry = only_entry(nodes, :unavailable)
+      assert {entry.verdict, entry.control} == {:identical, :unavailable}
+      refute Copies.passed?([entry])
+      assert Copies.passed?([%{entry | control: %{state: "sealed", length: 6}}])
+
+      assert List.last(Copies.lines([entry])) == "COPIES segments=1 whole_file=ok content=ok control=unavailable"
+    end
+
     test "a survey that finds no segment on any node is not a pass", %{tmp_dir: tmp_dir} do
       # What a log root read from the wrong path looks like: nothing to compare, which must not read as
       # nothing wrong (issue #152's review).
@@ -785,7 +800,7 @@ defmodule ChaosCheckerTest do
 
       assert survey(nodes) == []
       refute Copies.passed?(survey(nodes))
-      assert Copies.lines(survey(nodes)) == ["COPIES segments=0 whole_file=none content=none"]
+      assert Copies.lines(survey(nodes)) == ["COPIES segments=0 whole_file=none content=none control=none"]
     end
 
     test "a segment the control plane does not know is extra", %{tmp_dir: tmp_dir} do
@@ -826,7 +841,7 @@ defmodule ChaosCheckerTest do
       assert Enum.map(survey(nodes), & &1.segment) == ~w(chaos_acked-r0-s2 chaos_acked-r0-s10 chaos_acked-r1-s0)
 
       assert [%{segment: "chaos_acked-r9-s9", verdict: :missing}] =
-               Copies.survey(nodes, "chaos_acked", "chaos_acked-r9-s9", fn _dir -> :unknown end)
+               Copies.survey(nodes, "chaos_acked", "chaos_acked-r9-s9", fn _dir -> :unavailable end)
     end
 
     test "a node whose log root cannot be listed contributes no directories, and shows up as missing",
@@ -852,7 +867,7 @@ defmodule ChaosCheckerTest do
     test "non-zero bytes past the valid end are reported before any comparison" do
       # `verify/3` refuses such a file today, so this is the guard for a verifier that one day accepts it.
       copies = %{"n1" => copy([]), "n2" => copy(trailing: 3, digest: "other")}
-      assert Copies.classify(copies, :unknown) == {:trailing_garbage, ["n2"]}
+      assert Copies.classify(copies, :unavailable) == {:trailing_garbage, ["n2"]}
     end
 
     test "damage outranks every other finding" do
@@ -860,9 +875,11 @@ defmodule ChaosCheckerTest do
       assert Copies.classify(copies, :absent) == {:damaged, ["n1"]}
     end
 
-    test "a report passes only when it covers a segment and every verdict agrees" do
-      assert Copies.passed?([%{verdict: :identical}, %{verdict: :benign}])
-      refute Copies.passed?([%{verdict: :identical}, %{verdict: :missing}])
+    test "a report passes only when it covers a segment, the control plane was read, and every verdict agrees" do
+      sealed = %{state: "sealed", length: 1}
+      assert Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :benign, control: :absent}])
+      refute Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :missing, control: sealed}])
+      refute Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :identical, control: :unavailable}])
       refute Copies.passed?([])
     end
 
@@ -895,6 +912,16 @@ defmodule ChaosCheckerTest do
     test "a repeated node name is refused, since it would merge two roots into one copy" do
       assert {:error, "copies got a node name twice: n1,n1"} = Copies.validate_nodes([{"n1", "/a"}, {"n1", "/b"}])
     end
+
+    test "one root under two names is refused, however it is spelled" do
+      # One physical copy read twice would count as two replicas that agree.
+      for other <- ["/data/a", "/data/a/", "/data/b/../a", "/data/./a"] do
+        assert {:error, "copies got a log root twice: /data/a,/data/a"} =
+                 Copies.validate_nodes([{"n1", "/data/a"}, {"n2", other}])
+      end
+
+      assert Copies.validate_nodes([{"n1", "/data/a"}, {"n2", "/data/ab"}]) == :ok
+    end
   end
 
   describe "ChaosChecker.Copies.controls/2" do
@@ -912,8 +939,8 @@ defmodule ChaosCheckerTest do
       assert control_of.("t-r0-s4") == :absent
     end
 
-    test "an unreadable topology leaves every segment unknown" do
-      assert Copies.controls(nil, "t").("t-r0-s3") == :unknown
+    test "an unreadable topology marks every segment unavailable" do
+      assert Copies.controls(nil, "t").("t-r0-s3") == :unavailable
     end
   end
 
@@ -924,7 +951,7 @@ defmodule ChaosCheckerTest do
       {:ok, agent} = Agent.start_link(fn -> verdicts end)
 
       fn ->
-        Agent.get_and_update(agent, fn [verdict | rest] -> {[%{verdict: verdict}], rest} end)
+        Agent.get_and_update(agent, fn [verdict | rest] -> {[%{verdict: verdict, control: :absent}], rest} end)
       end
     end
 
@@ -987,7 +1014,7 @@ defmodule ChaosCheckerTest do
             }
           }
         },
-        %{segment: "t-r0-s2", control: :unknown, verdict: :identical, nodes: [], copies: %{}}
+        %{segment: "t-r0-s2", control: %{state: "active", length: 1}, verdict: :identical, nodes: [], copies: %{}}
       ]
 
       assert Copies.lines(report) == [
@@ -995,16 +1022,23 @@ defmodule ChaosCheckerTest do
                "COPY segment=t-r0-s1 node=n2 status=ok marker=no records=6 bytes=240 digest=aaaaaaaaaaaa trailing=0 " <>
                  "files=0:2048:aaaaaaaaaaaa,3:120:aaaaaaaaaaaa",
                "COPIES verdict=benign segment=t-r0-s1 control=sealed:6 nodes=n2",
-               "COPIES verdict=identical segment=t-r0-s2 control=unknown nodes=-",
-               "COPIES segments=2 whole_file=differs content=ok"
+               "COPIES verdict=identical segment=t-r0-s2 control=active:1 nodes=-",
+               "COPIES segments=2 whole_file=differs content=ok control=ok"
              ]
     end
 
     test "the summary separates agreeing records from agreeing files" do
-      assert List.last(Copies.lines([])) == "COPIES segments=0 whole_file=none content=none"
+      assert List.last(Copies.lines([])) == "COPIES segments=0 whole_file=none content=none control=none"
 
       assert List.last(Copies.lines([%{segment: "s", control: :absent, verdict: :extra, nodes: ["n1"], copies: %{}}])) ==
-               "COPIES segments=1 whole_file=differs content=differs"
+               "COPIES segments=1 whole_file=differs content=differs control=ok"
+
+      # Without the control plane the agreement of the copies is still reported, and the summary says why it
+      # does not count.
+      unread = %{segment: "s", control: :unavailable, verdict: :lagging, nodes: ["n1"], copies: %{}}
+
+      assert List.last(Copies.lines([unread])) ==
+               "COPIES segments=1 whole_file=differs content=differs control=unavailable"
     end
   end
 end

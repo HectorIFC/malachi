@@ -105,8 +105,13 @@ defmodule ChaosChecker.Copies do
           trailing: non_neg_integer()
         }
 
-  @typedoc "What the control plane says about a segment: its state and length, absent, or not known."
-  @type control :: %{state: String.t(), length: non_neg_integer()} | :absent | :unknown
+  @typedoc """
+  What the control plane says about a segment: its state and length, `:absent` when the topology does not
+  list it, or `:unavailable` when the topology could not be read at all. Copies are still compared with each
+  other under `:unavailable`, since that is the diagnosis, but nothing checked against a sealed length can be
+  certified, so such a report never passes (`passed?/1`).
+  """
+  @type control :: %{state: String.t(), length: non_neg_integer()} | :absent | :unavailable
 
   @type verdict ::
           :identical
@@ -125,27 +130,34 @@ defmodule ChaosChecker.Copies do
   def passing?(verdict), do: verdict in @passing
 
   @doc """
-  Whether a survey `report` certifies the copies: it covers at least one segment, and every segment's
-  copies agree. An empty report compared nothing, which is what a log root read from the wrong path looks
-  like, so it never passes: a check that finds nothing to check must not read as one that found nothing
-  wrong.
+  Whether a survey `report` certifies the copies: it covers at least one segment, the control plane's view
+  of every segment was read, and every segment's copies agree.
+
+  An empty report compared nothing, which is what a log root read from the wrong path looks like. A report
+  without the control plane compared the copies only with each other, so every copy carrying the same
+  record past a sealed end would agree, which is the divergence a sealed length exists to catch. Neither
+  passes: a check that could not check must not read as one that found nothing wrong.
   """
   @spec passed?([map()]) :: boolean()
   def passed?([]), do: false
-  def passed?(report), do: Enum.all?(report, &passing?(&1.verdict))
+  def passed?(report), do: Enum.all?(report, &(passing?(&1.verdict) and &1.control != :unavailable))
 
   @doc """
   Checks the `{node, log_root}` list a comparison is asked to run over. Fewer than two nodes compare
-  nothing, since a lone copy agrees with itself, and a repeated node name would silently merge two roots
-  into one copy. Both would pass without checking anything, so both are refused.
+  nothing, since a lone copy agrees with itself; a repeated node name would silently merge two roots into
+  one copy; and one root under two names would read one physical copy twice and call it two replicas that
+  agree. All three would pass without checking anything, so all three are refused. Roots are compared
+  expanded, so a trailing slash or a `..` cannot make one directory look like two.
   """
   @spec validate_nodes([{String.t(), Path.t()}]) :: :ok | {:error, String.t()}
   def validate_nodes(nodes) do
     names = Enum.map(nodes, &elem(&1, 0))
+    roots = Enum.map(nodes, fn {_node, root} -> Path.expand(root) end)
 
     cond do
       length(nodes) < 2 -> {:error, "copies needs at least two <node>=<log root> arguments, got #{length(nodes)}"}
       length(Enum.uniq(names)) != length(names) -> {:error, "copies got a node name twice: #{Enum.join(names, ",")}"}
+      length(Enum.uniq(roots)) != length(roots) -> {:error, "copies got a log root twice: #{Enum.join(roots, ",")}"}
       true -> :ok
     end
   end
@@ -331,10 +343,11 @@ defmodule ChaosChecker.Copies do
 
   @doc """
   The control plane's view of each segment directory, keyed by directory name (`<topic>-r<R>-s<S>`), from
-  the dashboard's topic drill-down. `ranges` of `nil` means the topology could not be read.
+  the dashboard's topic drill-down. `ranges` of `nil` means the topology could not be read, and every
+  segment is then `:unavailable`.
   """
   @spec controls([map()] | nil, String.t()) :: (String.t() -> control())
-  def controls(nil, _topic), do: fn _dir -> :unknown end
+  def controls(nil, _topic), do: fn _dir -> :unavailable end
 
   def controls(ranges, topic) do
     known =
@@ -405,8 +418,9 @@ defmodule ChaosChecker.Copies do
 
   @doc """
   The report as printed: one `COPY` line per node per segment, one `COPIES verdict=` line per segment,
-  and a closing summary separating whole-file agreement from record agreement. A report with no segment
-  says `none` for both, rather than an agreement nobody measured.
+  and a closing summary separating whole-file agreement from record agreement, and saying whether the
+  control plane was read. A report with no segment says `none` throughout, rather than an agreement nobody
+  measured.
   """
   @spec lines([map()]) :: [String.t()]
   def lines(report) do
@@ -426,18 +440,27 @@ defmodule ChaosChecker.Copies do
           ]
       end)
 
-    {whole_file, content} =
+    {whole_file, content, control} =
       cond do
-        report == [] -> {"none", "none"}
-        passed?(report) -> {agreement(Enum.all?(report, &(&1.verdict == :identical))), "ok"}
-        true -> {"differs", "differs"}
+        report == [] ->
+          {"none", "none", "none"}
+
+        Enum.any?(report, &(&1.control == :unavailable)) ->
+          {agreement(report), records_agreement(report), "unavailable"}
+
+        passed?(report) ->
+          {agreement(report), "ok", "ok"}
+
+        true ->
+          {"differs", "differs", "ok"}
       end
 
-    per_segment ++ ["COPIES segments=#{length(report)} whole_file=#{whole_file} content=#{content}"]
+    per_segment ++
+      ["COPIES segments=#{length(report)} whole_file=#{whole_file} content=#{content} control=#{control}"]
   end
 
-  defp agreement(true), do: "ok"
-  defp agreement(false), do: "differs"
+  defp agreement(report), do: if(Enum.all?(report, &(&1.verdict == :identical)), do: "ok", else: "differs")
+  defp records_agreement(report), do: if(Enum.all?(report, &passing?(&1.verdict)), do: "ok", else: "differs")
 
   defp status_text({:damaged, details}), do: "damaged:#{details[:reason]}"
   defp status_text(status), do: Atom.to_string(status)
@@ -554,24 +577,26 @@ defmodule ChaosChecker do
       System.halt(2)
     end
 
-    # Read once, before the retries: the control plane's view is context for the verdict, and a topology
-    # that cannot be read leaves the length check out rather than failing the comparison.
-    ranges =
+    # Read once, before the retries: the control plane's view is context for the verdict. A topology that
+    # cannot be read still gets the copies compared with each other, once, for the diagnosis; the result
+    # cannot pass (a sealed length nobody read cannot be checked), so waiting for it to would only wait.
+    {control_of, attempts} =
       case topology(parse_hosts(hosts), topic) do
         {:ok, ranges} ->
-          ranges
+          {ChaosChecker.Copies.controls(ranges, topic), String.to_integer(attempts)}
 
         {:error, reason} ->
-          IO.puts("topology unavailable, comparing copies without it: #{inspect(reason)}")
-          nil
-      end
+          IO.puts(
+            "topology unavailable: comparing the copies with each other only, which cannot pass: #{inspect(reason)}"
+          )
 
-    control_of = ChaosChecker.Copies.controls(ranges, topic)
+          {ChaosChecker.Copies.controls(nil, topic), 1}
+      end
 
     report =
       ChaosChecker.Copies.settle(
         fn -> ChaosChecker.Copies.survey(nodes, topic, filter, control_of) end,
-        String.to_integer(attempts),
+        attempts,
         String.to_integer(interval_ms)
       )
 
