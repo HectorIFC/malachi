@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
-# Paired A/B of the storage error path (issue #147): the baseline tree against the branch tree, with an
-# A-A control, interleaved by run. See benchmark/store_error_path_ab.exs for what is measured and the
-# verdict rule. Needs Elixir on PATH and a real filesystem under AB_DIR (not tmpfs, not macOS: the
+# Paired A/B of the storage hot path (issues #147 and #164): the baseline tree against the branch tree,
+# with an A-A control, interleaved by run. See benchmark/store_error_path_ab.exs for what is measured and
+# the verdict rule. Needs Elixir on PATH and a real filesystem under AB_DIR (not tmpfs, not macOS: the
 # decision is about Linux fsync).
 #
 # Usage: benchmark/store_error_path_ab.sh BASELINE_TREE BRANCH_TREE [OUT_DIR]

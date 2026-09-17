@@ -1,4 +1,5 @@
-# Does returning storage I/O failures cost the hot path anything? (issue #147)
+# Does returning storage I/O failures cost the hot path anything? (issue #147) And does timing and
+# reporting every flush (issue #164)? Both change the same path, so both are judged by this harness.
 #
 # #147 replaces the store's hard matches (`:ok = :file.pwrite(...)`) with matches that hand the error
 # back, on the exact path every produce pays: `ElixirStore.append/2` and `sync/1`. The expected cost is
@@ -54,6 +55,7 @@ defmodule StoreErrorPathAB do
   def sample(directory) do
     File.rm_rf!(directory)
     File.mkdir_p!(directory)
+    start_metrics!()
 
     records =
       for i <- 1..@records_per_batch, do: Record.new(:crypto.strong_rand_bytes(@record_bytes), key: "k#{i}")
@@ -71,7 +73,26 @@ defmodule StoreErrorPathAB do
 
     :ok = ElixirStore.close(store)
     File.rm_rf!(directory)
+    check_flushes_reported!()
     IO.puts(@marker <> Jason.encode!(PairedStats.summarize(latencies)))
+  end
+
+  # The store case runs under `--no-start`, where no telemetry handler is attached and an emitted event
+  # costs only the dispatch lookup. A node always runs the default reporter, so the sample starts it
+  # (issue #164): every flush then pays the handler a production flush pays. Both trees have
+  # `Malachi.Metrics`, so the baseline arm runs the same reporter and differs only by the event.
+  defp start_metrics! do
+    {:ok, _apps} = Application.ensure_all_started(:telemetry)
+    {:ok, _pid} = Malachi.Metrics.start_link([])
+  end
+
+  # A tree that reports flushes must have reported every one of them, or this sample did not measure the
+  # reporter it claims to. A tree without the flush telemetry has nothing to check.
+  defp check_flushes_reported! do
+    if function_exported?(Malachi.Metrics, :storage_flush_histogram, 0) do
+      %{count: count} = Malachi.Metrics.storage_flush_histogram()
+      if count < @batches, do: raise("the reporter saw #{count} flushes of #{@batches}")
+    end
   end
 
   @doc """
