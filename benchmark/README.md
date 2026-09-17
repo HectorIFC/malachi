@@ -396,3 +396,17 @@ mix run --no-halt
 # in another
 mix run benchmark/dashboard_security_benchmark.exs
 ```
+
+### `rate_limit_ab.sh` / `rate_limit_ab.exs`
+
+A paired A/B of the publish quota check (`RateLimiter.check_limit_in_caller/3`), the branch tree
+against a baseline tree, with an A-A control and arms interleaved by run in a shuffled order (issue
+#151). One sample starts the limiter alone, with no broker and no sockets, and times rounds of checks
+on one hot identifier at 1 and 64 concurrent callers. The verdict rule is the one in
+`support/paired_stats.exs`, and the driver and analysis are shared with `store_error_path_ab.sh`
+through `support/ab_lib.sh` and `support/ab_run.exs`. Only a Linux run counts; in CI it is the
+`rate_limit_bench_ab` input of the benchmark workflow.
+
+```bash
+AB_REPS=7 benchmark/rate_limit_ab.sh /path/to/main-checkout . /tmp/rate-limit-ab
+```
