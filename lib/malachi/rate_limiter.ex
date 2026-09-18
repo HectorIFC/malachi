@@ -11,8 +11,9 @@ defmodule Malachi.RateLimiter do
     (`check_limit/3`); as with the sharded counters, the entry carries the window it was written under so
     that ageing it never depends on configuration read somewhere else
   - `{{identifier, action, window_start_ms, shard}, used, window_ms}` - Sharded window counters
-    (`check_limit_in_caller/3`), the window start being in Erlang monotonic ms; the entry carries the window it was counted under so the cleanup can
-    age it without having to re-read config that may since have changed
+    (`check_limit_in_caller/3`), the window start in Erlang monotonic ms; the entry carries the window
+    it was counted under so the cleanup can age it without having to re-read config that may since
+    have changed
   - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
   ## Actions
