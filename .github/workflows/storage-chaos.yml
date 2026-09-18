@@ -1,0 +1,74 @@
+name: Storage chaos certification
+
+# Runs scripts/docker-storage-chaos.sh on a real Linux host. Every earlier run of it was on a laptop under a
+# virtualized kernel, so this is the measurement the drill is meant for (issue #152).
+#
+# Not a gate yet, on purpose: it is not a required check and nothing publishes its result. Invariant 4 failed
+# on main for a reason nobody could name, and a red gate nobody can explain teaches people to ignore gates.
+# It runs where a change can break what it certifies (storage, replication, repair, and the drill itself), on
+# demand, and weekly so a regression elsewhere does not wait for the next such change. Promote it to a
+# required check once it has been green on its own.
+on:
+  pull_request:
+    paths:
+      - scripts/docker-storage-chaos.sh
+      - scripts/chaos_lib.sh
+      - scripts/chaos_checker.exs
+      - docker-compose.cluster.yml
+      - docker-compose.storage-full.yml
+      - benchmark/Dockerfile.loadtest
+      - lib/malachi/storage/**
+      - lib/malachi/log.ex
+      - lib/malachi/log/**
+      - lib/malachi/cluster/replication_server.ex
+      - lib/malachi/cluster/catchup.ex
+      - lib/malachi/cluster/scrubber.ex
+      - lib/malachi/cluster/self_healing.ex
+      - lib/malachi/cluster/heal_coordinator.ex
+      - .github/workflows/storage-chaos.yml
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  storage-chaos:
+    name: Storage chaos certification
+    runs-on: ubuntu-latest
+    # Two clusters, two checker windows (150s and 180s) and six node restarts: estimated at 10 to 14 minutes,
+    # to be replaced by the first measured run. Twice that is stuck rather than slow.
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same cpuset split as the node-fault drill in results.yml: a runner has four cores, and the harness
+      # defaults assume a workstation's eight. The scratch and evidence directories go under the runner's temp
+      # dir so the upload below finds them whatever the drill decided to keep.
+      - name: 💥 Run the storage certification
+        env:
+          SRV_CPUSET: '1,2,3'
+          LT_CPUSET: '0'
+          CHAOS_COMMAND: scripts/docker-storage-chaos.sh
+          CHAOS_WORK_ROOT: ${{ runner.temp }}/chaos
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          CHAOS_RESULT_FILE="$RUNNER_TEMP/results/chaos-storage.json" scripts/docker-storage-chaos.sh
+
+      # if: always() because a failed certification is the run whose record matters most: the harness writes
+      # its JSON and keeps the per-copy evidence before exiting non-zero.
+      - name: 📤 Upload result and evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-storage
+          path: |
+            ${{ runner.temp }}/results/*.json
+            ${{ runner.temp }}/chaos/evidence/
+          if-no-files-found: warn

@@ -48,6 +48,19 @@ Worth alerting on:
   recovery (a partial tail that was never acked); on a sealed segment any reason means corruption at
   rest, and that copy needs to be rebuilt from an intact replica. The matching log line names the
   segment and the byte position.
+- **`malachi_storage_flush_duration_seconds`**: the group-commit flush latency, as a histogram
+  (`_bucket{le}` four per octave from 8us to about 16.8s, plus `_sum` and `_count`). This is the write
+  plus sync every acknowledged produce waits behind, so it is the first place to look when produce
+  throughput drops without CPU rising: an fsync-bound disk shows up here as a rising p99 before anything
+  else moves. Read it windowed, `histogram_quantile(0.99, rate(malachi_storage_flush_duration_seconds_bucket[5m]))`,
+  and sum the buckets across nodes before taking the quantile for a cluster-wide view. Only flushes that
+  wrote records and succeeded are counted; a failed one is in `malachi_storage_failures_total`.
+  `malachi_storage_flushed_records_total` divided by `malachi_storage_flush_duration_seconds_count` is
+  records per sync, which is how well group commit is coalescing (near 1 means it is not), and
+  `malachi_storage_flushed_bytes_total` over that same count is the average flush size.
+  `malachi_storage_flush_duration_seconds_created` is the Unix time the histogram began: it changes only
+  when the node restarts, so a tool subtracting two scrapes can tell a restart from counters that simply
+  kept growing.
 - Session and auth counters. Note that `:session_expired` and `:session_hijack_attempt` are **not
   disjoint**: one validation can emit both, so summing them does not count failed validations. The hijack
   counter means "a token arrived from an unexpected IP", which ordinary NAT rotation can also trigger, so
@@ -180,8 +193,11 @@ repairs the tail), a gross truncation to half, and a sealed-segment directory de
 The deletion exercises the self-healing **integrity probe**: metadata still says the segment has
 all its replicas, so only a physical check (on-disk bytes vs the sealed byte size, run each healing
 pass) can spot the silent under-replication and re-backfill the copy. On top of the three
-invariants above, the storage run requires **physical reconvergence**: every chaos-topic segment
-file must end byte-identical across the three nodes. Corruption always targets follower copies;
+invariants above, the storage run requires **physical reconvergence**: every node's copy of every
+chaos-topic segment must be readable and hold the same records, byte for byte over the valid part of
+its files, and a sealed segment exactly its sealed length. The files themselves need not match: only
+a fenced copy has its preallocated tail trimmed, and each node rolls its internal files at its own
+sync points. Corruption always targets follower copies;
 corruption of a primary copy is seal-on-failure territory (roadmap). A storage FAILURE is not: when a
 write or read fails on a node (a full volume, a failing device), that node stops using the segment's
 copy, answers `{:error, {:storage, reason}}` for it, counts it in `malachi_storage_failures_total`, and

@@ -30,6 +30,9 @@ defmodule Malachi.Loadtest.Ceiling do
     * A peak is a lower bound on the ceiling, with the reasons listed, when it sits at the top of its
       connection ladder (`ladder_limit`) or its generator used at least 90% of its CPU budget
       (`generator_saturated`).
+    * A rung's server flush latency (`flush_latency_seconds`, the window the harness scraped, see
+      `Malachi.Loadtest.FlushWindow`) comes from that same representative run, like its request latency,
+      and so does `flush_latency_error` when that run's scrape gave no window.
     * A run that reports a batch size, record size or connection count other than the point that
       launched it is an error, not a data point: the harness and the generator disagree about what was
       measured.
@@ -602,6 +605,8 @@ defmodule Malachi.Loadtest.Ceiling do
       "records_per_s_max" => rung.records_per_s_max,
       "errors" => representative["errors"],
       "latency_ms" => representative["latency_ms"],
+      "flush_latency_seconds" => representative["flush_latency_seconds"],
+      "flush_latency_error" => representative["flush_latency_error"],
       "server_cpu_cores" => representative["server_cpu_cores"],
       "generator_cpu_cores" => representative["generator_cpu_cores"],
       "generator_saturated" => rung.generator_saturated

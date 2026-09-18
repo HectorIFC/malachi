@@ -7,6 +7,8 @@
 # whole curve is published beside it in $OUT. Every run is kept under $RUN_DIR. A sampler reads the
 # /proc CPU of BOTH the server beam and the generator over each measured window, so the report can say
 # which side saturated: the server (its ceiling was found) or the generator (the number is a lower bound).
+# The server's own group-commit flush latency is read the same way, from its /metrics at the start and
+# the end of each measured window (flush_latency_seconds in every run, #164).
 #
 # Why a curve: the per-flush cost of the commit path changes sign with the flush size (segment
 # preallocation is 69.7% faster at 2.5KB per flush and 16.2% slower at 1MB, crossing near 170KB, see
@@ -23,6 +25,7 @@
 #   CONNS_LADDER="32 64 128 256 512" (for any batch size without its own)
 #   CONNS_LADDER_<batch>="..." (that batch size's ladder; defaults below for 100, 512, 1024 and 4096)
 #   MARKER_TIMEOUT=300  MALACHI_USER=admin  MALACHI_PASS=admin123  MALACHI_PORT=4040
+#   MALACHI_DASHBOARD_PORT=4041  CURL=curl (the client the flush scrape uses)
 # Exit: 0 with a headline peak, 1 without one ($OUT is still written) or on a failed step, 2 on invalid
 # knobs.
 #
@@ -94,7 +97,8 @@ RUN_DIR="${RUN_DIR:-${RUNNER_TEMP:-/tmp}/ceiling-$GENERATOR}"
 mkdir -p "$RUN_DIR"
 # A reused RUN_DIR (the default is a fixed path) still holds the previous sweep's runs, and a point this
 # sweep failed to measure would otherwise be read back from that one.
-rm -f "$RUN_DIR"/run-*.json "$RUN_DIR"/aa-*.json "$RUN_DIR"/*.marker "$RUN_DIR"/*.cpu-*.txt "$RUN_DIR"/sweep.json
+rm -f "$RUN_DIR"/run-*.json "$RUN_DIR"/aa-*.json "$RUN_DIR"/*.marker "$RUN_DIR"/*.cpu-*.txt "$RUN_DIR"/sweep.json \
+  "$RUN_DIR"/*.flush.*
 SWEEP="$RUN_DIR/sweep.json"
 SERVER_LOG="$RUN_DIR/server.log"
 : > "$RUN_DIR/loadtest.err"
@@ -182,6 +186,50 @@ wait_for_marker() { # wait_for_marker <marker> <gen_pid>
   done
 }
 
+# The server's flush latency over the measured window: a scrape of its /metrics when the generator's
+# marker appears and another when the generator exits, subtracted by `ceiling flush-window`. Without the
+# subtraction the cumulative histogram would include the boot and the warmup. A scrape that cannot be
+# taken leaves flush_latency_seconds null and says why in flush_latency_error; it never fails the point.
+source "$ROOT/scripts/metrics_scrape_lib.sh"
+CURL="${CURL:-curl}"
+DASHBOARD_URL="http://127.0.0.1:${MALACHI_DASHBOARD_PORT:-4041}"
+
+# curl ARGS: the body on a 2xx, else one line saying what went wrong (the contract metrics_scrape_lib.sh
+# states). The status comes on the last line of the output, so a body is never mistaken for it.
+dashboard_request() {
+  command -v "$CURL" > /dev/null 2>&1 || { echo "curl not found"; return 1; }
+  local response code
+  response="$("$CURL" -sS --max-time 5 -w '\n%{http_code}' "$@" 2> /dev/null)"
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    echo "curl could not reach $DASHBOARD_URL (exit $code)"
+    return 1
+  fi
+  case "${response##*$'\n'}" in
+    2??) printf '%s\n' "${response%$'\n'*}" ;;
+    *) echo "HTTP ${response##*$'\n'}"; return 1 ;;
+  esac
+}
+ms_http_post() { dashboard_request -X POST -H 'Content-Type: application/json' --data "$2" "$DASHBOARD_URL$1"; }
+ms_http_get() { dashboard_request -H "Authorization: Bearer $2" -H 'Accept: text/plain' "$DASHBOARD_URL$1"; }
+
+# The fields a run gets: {flush_latency_seconds, flush_latency_error}, one of them null. Always valid
+# JSON, so the stamp below never loses the CPU attribution over a flush problem.
+flush_fields() { # flush_fields <reason or empty> <base>
+  local reason="$1" base="$2" window=""
+  if [ -z "$reason" ]; then
+    window="$(ceiling flush-window --before "$base.flush.before.prom" --after "$base.flush.after.prom" \
+      2>> "$RUN_DIR/loadtest.err" | tail -1)"
+    jq -e 'type == "object"' > /dev/null 2>&1 <<< "$window" || reason="flush-window gave no answer (see loadtest.err)"
+  fi
+  if [ -n "$reason" ]; then
+    jq -cn --arg reason "$reason" '{flush_latency_seconds: null, flush_latency_error: $reason}'
+  else
+    jq -c 'if has("error") then {flush_latency_seconds: null, flush_latency_error: .error}
+           else {flush_latency_seconds: ., flush_latency_error: null} end' <<< "$window"
+  fi
+}
+
 SERVER_PID=""
 BEAM_PID=""
 boot_server() {
@@ -227,6 +275,13 @@ run_point() {
   # Fresh server per point: a later point must never measure a server bloated by an earlier one.
   boot_server || return 1
 
+  # Logged in before the generator starts, so opening the flush window costs one request, not two.
+  local flush_token flush_login_failure=""
+  if ! flush_token="$(ms_login "$MALACHI_USER" "$MALACHI_PASS")"; then
+    flush_login_failure="$flush_token"
+    flush_token=""
+  fi
+
   # The generator runs in the background so its pid can be sampled alongside the server's; its exit
   # status is collected by the wait below. taskset/mix/node all exec straight into the measured process,
   # so $! is the right pid for /proc on both sides.
@@ -256,6 +311,8 @@ run_point() {
   # no measured window was signalled.
   (
     wait_for_marker "$marker" "$gen_pid" || exit 0
+    # The flush window opens first: a scrape is one small request, and the CPU span starts right after.
+    ms_open_window "$flush_token" "$base.flush"
     srv_t0="$(cpu_ticks "$BEAM_PID")" || srv_t0=""
     gen_t0="$(cpu_ticks "$gen_pid")" || gen_t0=""
     sleep "$SAMPLE_S"
@@ -280,14 +337,20 @@ run_point() {
   [ -s "$srv_cpu_file" ] && srv_cores="$(cat "$srv_cpu_file")"
   [ -s "$gen_cpu_file" ] && gen_cores="$(cat "$gen_cpu_file")"
 
+  local flush_failure
+  flush_failure="$(ms_close_window "$flush_token" "$flush_login_failure" "$base.flush")"
+
   kill_server
 
   # Stamp the attribution onto the run json (skip a point whose generator produced nothing).
   [ -f "$out" ] || return 0
+  local flush
+  flush="$(flush_fields "$flush_failure" "$base")"
   local tmp="$out.tmp"
   if jq --argjson srv "${srv_cores:-null}" --argjson srvb "$SRV_BUDGET" \
-       --argjson gen "${gen_cores:-null}" --argjson genb "$LT_BUDGET" \
-       '. + {server_cpu_cores: $srv, server_cpu_budget: $srvb, generator_cpu_cores: $gen, generator_cpu_budget: $genb}' \
+       --argjson gen "${gen_cores:-null}" --argjson genb "$LT_BUDGET" --argjson flush "$flush" \
+       '. + {server_cpu_cores: $srv, server_cpu_budget: $srvb, generator_cpu_cores: $gen, generator_cpu_budget: $genb}
+          + $flush' \
        "$out" > "$tmp"; then
     mv "$tmp" "$out"
   else

@@ -3,6 +3,10 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
   # the exit statuses the script passes through. Not async because Mix.shell/1 is global.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureIO
+
+  alias Malachi.Histogram
+  alias Malachi.Test.MetricsFixtures
   alias Mix.Tasks.Malachi.Loadtest.Ceiling, as: Task
 
   @moduletag :tmp_dir
@@ -320,8 +324,177 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     end
 
     test "an unknown subcommand prints the usage" do
-      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize\|label/, fn ->
+      assert_raise Mix.Error, ~r/usage: mix malachi.loadtest.ceiling plan\|peak\|summarize\|label\|flush-window/, fn ->
         Task.run(["elect"])
+      end
+    end
+  end
+
+  describe "flush-window" do
+    # A node's scrapes before and after `samples` flushes, rendered by the real exporter.
+    defp scrapes(setup_samples, samples) do
+      histogram = Histogram.new()
+      Enum.each(setup_samples, &Histogram.record(histogram, &1))
+      before = MetricsFixtures.flush_exposition(histogram, 100, 10)
+      Enum.each(samples, &Histogram.record(histogram, &1))
+      {before, MetricsFixtures.flush_exposition(histogram, 100 + 64 * length(samples), 10 + 2 * length(samples))}
+    end
+
+    defp printed_json do
+      assert_received {:mix_shell, :info, [line]}
+      Jason.decode!(line)
+    end
+
+    defp write_scrapes!(ctx, {before, later}) do
+      before_path = Path.join(ctx.tmp_dir, "before.prom")
+      after_path = Path.join(ctx.tmp_dir, "after.prom")
+      File.write!(before_path, before)
+      File.write!(after_path, later)
+      ["--before", before_path, "--after", after_path]
+    end
+
+    defp run_stdin(input) do
+      capture_io(input, fn -> Task.run(["flush-window", "--stdin"]) end)
+    end
+
+    test "prints the window between two scrape files", ctx do
+      Task.run(["flush-window" | write_scrapes!(ctx, scrapes([90_000, 90_000], [1000, 1000, 1000]))])
+
+      assert %{
+               "flushes" => 3,
+               "bytes" => 192,
+               "records" => 6,
+               "p50" => p50,
+               "p99" => p99,
+               "p999" => p999,
+               "mean" => mean
+             } =
+               printed_json()
+
+      # The setup's 90ms flushes are not in the window.
+      assert p999 < 0.0013
+      assert p50 <= p99 and p99 <= p999
+      assert_in_delta mean, 0.001, 1.0e-12
+    end
+
+    test "a window without flushes prints null latencies", ctx do
+      Task.run(["flush-window" | write_scrapes!(ctx, scrapes([500], []))])
+
+      assert printed_json() ==
+               %{"p50" => nil, "p99" => nil, "p999" => nil, "mean" => nil, "flushes" => 0, "bytes" => 0, "records" => 0}
+    end
+
+    test "scrapes that give no window print the reason and still succeed", ctx do
+      {before, _later} = scrapes([500, 500], [])
+      {restarted, _} = scrapes([], [])
+      Task.run(["flush-window" | write_scrapes!(ctx, {before, restarted})])
+      assert printed_json() == %{"error" => "the node restarted between the scrapes"}
+
+      Task.run(["flush-window" | write_scrapes!(ctx, {before, "<html>login</html>"})])
+      assert printed_json() == %{"error" => "the scrape has no flush latency series"}
+    end
+
+    test "a scrape file that cannot be read fails the task", ctx do
+      assert_raise Mix.Error, ~r/cannot read .*missing.prom: :enoent/, fn ->
+        Task.run(["flush-window", "--before", Path.join(ctx.tmp_dir, "missing.prom"), "--after", "x"])
+      end
+    end
+
+    test "bad arguments fail the task" do
+      assert_raise Mix.Error, ~r/--before is required/, fn -> Task.run(["flush-window"]) end
+      assert_raise Mix.Error, ~r/--after is required/, fn -> Task.run(["flush-window", "--before", "a"]) end
+
+      assert_raise Mix.Error, ~r/--stdin takes no --before or --after/, fn ->
+        Task.run(["flush-window", "--stdin", "--before", "a"])
+      end
+
+      assert_raise Mix.Error, ~r/takes no positional arguments/, fn ->
+        Task.run(["flush-window", "--before", "a", "extra"])
+      end
+
+      assert_raise OptionParser.ParseError, fn -> Task.run(["flush-window", "--node", "x"]) end
+    end
+
+    test "--stdin adds every node's window into one" do
+      {b1, a1} = scrapes([], List.duplicate(100, 99))
+      {b2, a2} = scrapes([80_000], [50_000])
+
+      run_stdin(
+        Jason.encode!(%{
+          "nodes" => %{"malachi1" => %{"before" => b1, "after" => a1}, "malachi2" => %{"before" => b2, "after" => a2}}
+        })
+      )
+
+      assert %{"nodes" => %{"malachi1" => n1, "malachi2" => n2}, "all" => all, "error" => nil} = printed_json()
+      assert n1["flushes"] == 99
+      assert n2["flushes"] == 1
+      assert all["flushes"] == 100
+      assert all["bytes"] == n1["bytes"] + n2["bytes"]
+      assert all["records"] == n1["records"] + n2["records"]
+      # One slow flush in a hundred: the cluster p50 is fast and its p999 is the slow one.
+      assert all["p50"] < 0.00012
+      assert all["p999"] > 0.04
+    end
+
+    test "--stdin reports a failed node and leaves the aggregate out" do
+      {b1, a1} = scrapes([], [100])
+      {b2, _a2} = scrapes([100], [])
+      {restarted, _} = scrapes([], [])
+
+      run_stdin(
+        Jason.encode!(%{
+          "nodes" => %{
+            "malachi1" => %{"before" => b1, "after" => a1},
+            "malachi2" => %{"before" => b2, "after" => restarted},
+            "malachi3" => %{"error" => "login refused (HTTP 403)"}
+          }
+        })
+      )
+
+      assert %{"nodes" => nodes, "all" => nil, "error" => error} = printed_json()
+      assert nodes["malachi1"]["flushes"] == 1
+
+      assert nodes["malachi2"] == %{
+               "error" => "the node restarted between the scrapes"
+             }
+
+      assert nodes["malachi3"] == %{"error" => "login refused (HTTP 403)"}
+
+      assert error ==
+               "malachi2: the node restarted between the scrapes; " <>
+                 "malachi3: login refused (HTTP 403)"
+    end
+
+    test "--stdin reports nodes whose histograms cannot be added up" do
+      {b1, a1} = scrapes([], [100])
+      # Another node exporting different edges (a different server version, say).
+      trimmed = fn text ->
+        text |> String.split("\n") |> Enum.reject(&String.contains?(&1, ~s(le="8.0e-6"))) |> Enum.join("\n")
+      end
+
+      run_stdin(
+        Jason.encode!(%{
+          "nodes" => %{
+            "malachi1" => %{"before" => b1, "after" => a1},
+            "malachi2" => %{"before" => trimmed.(b1), "after" => trimmed.(a1)}
+          }
+        })
+      )
+
+      assert %{"all" => nil, "error" => "the nodes cannot be added up: the scrapes have different histogram buckets"} =
+               printed_json()
+    end
+
+    test "--stdin refuses input that is not the documented shape" do
+      for input <- [
+            "",
+            "not json",
+            ~s({"nodes": {}}),
+            ~s({"nodes": []}),
+            ~s({"nodes": {"a": {"before": "x"}}}),
+            ~s({"nodes": {"a": {"error": 3}}})
+          ] do
+        assert_raise Mix.Error, ~r/--stdin expects/, fn -> run_stdin(input) end
       end
     end
   end
