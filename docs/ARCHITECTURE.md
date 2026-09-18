@@ -249,7 +249,7 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
 - **Storage fault injection** (the "different types of corruption" scenarios): delivered as
   `scripts/docker-storage-chaos.sh`. Follower segment copies are corrupted mid-file, truncated, and
   deleted outright; the harness certifies the same invariants plus physical reconvergence
-  (byte-identical copies across the nodes), exercising CRC-clamped recovery, write-path catch-up,
+  (every copy holds the same records, byte for byte over its valid bytes), exercising CRC-clamped recovery, write-path catch-up,
   and the sealed-copy integrity probe in `Malachi.Cluster.SelfHealing`. **In-place corruption that
   keeps the byte size** is now caught by the integrity scrub (see the storage layer above); the
   harness gains that event with the scrub's certification. A **storage failure** on any copy, primary

@@ -42,11 +42,15 @@
 #                    closing invariants hold.
 #
 # Invariants certified on top of the fatia-1 set (acked durability, convergence, clean produce):
-#   4. The damaged copies physically reconverge: byte-identical segment files across all 3 nodes.
-#      With preallocation on, this certifies one thing more: recovery ZEROES the bytes a torn write
-#      left behind instead of truncating them away (truncating would give back the preallocated
-#      region). A node that crashed and one that never did therefore hold identical files, dead
-#      zone included, and this check is what proves it.
+#   4. The damaged copies physically reconverge: every node's copy of every chaos-topic segment is
+#      readable and holds the same records, byte for byte over the valid part of each file, and a
+#      segment the control plane sealed holds exactly its sealed length (ChaosChecker.Copies).
+#      Not byte-identical FILES, which this invariant once required and which the log model does not
+#      promise (issue #152): only a fenced copy has its preallocated tail trimmed, and each node rolls
+#      its internal files at its own sync points, so healthy copies differ as files on every run.
+#      That recovery zeroes a torn write inside the preallocated region instead of truncating it is
+#      pinned where it is decided, in test/malachi/storage/elixir_store_test.exs. Run with
+#      STORAGE_CHAOS_NEGATIVE_CONTROL=1 to prove this invariant still fails on a diverged copy.
 #
 # Usage: scripts/docker-storage-chaos.sh
 set -uo pipefail
@@ -61,7 +65,9 @@ export MALACHI_SEGMENT_MAX_BYTES="${MALACHI_SEGMENT_MAX_BYTES:-4096}"
 export MALACHI_LOG_ROLL_MAX_BYTES="${MALACHI_LOG_ROLL_MAX_BYTES:-2048}"
 # Preallocation ON, and small: segments are sized ahead of their contents in production (64MB), and
 # the whole point of this drill is the recovery path that a preallocated tail changes. Small enough
-# that invariant 4 can md5 the files whole.
+# that invariant 4 can md5 the files whole. A copy's blank tail is trimmed only when that copy's store
+# is sealed or closed, and a produce roll fences only the primary, so copies of one segment need not
+# have the same length on every node: that is what the per-copy report of invariant 4 separates out.
 #
 # The effective size is clamped to the internal roll above, so the ask here is an upper bound and the
 # file is really preallocated to MALACHI_LOG_ROLL_MAX_BYTES. That is the right size: the segment
@@ -96,14 +102,34 @@ follower_of() {
 
 seg_dir() { echo "$DATA_DIR/${CHAOS_TOPIC}-r$(seg_field "$1" range)-s$(seg_field "$1" seq)"; }
 
+# Prints the first SEGMENT line in state $1, waiting up to a minute for one. A single look is not enough: right
+# after a follower restarts, the chaos topic's only range can sit between the fence of its last segment and the
+# creation of the next, with nothing active at that instant (seen once on CI, for #172). The raw answer of the
+# last try stays in $WORK/topology.txt, so a failure can say whether the topology had no such segment or could
+# not be read at all.
+pick_segment() {
+  for _ in $(seq 1 12); do
+    checker_run "topology $CHAOS_HOSTS $CHAOS_TOPIC" >"$WORK/topology.txt" 2>&1
+    found=$(grep '^SEGMENT' "$WORK/topology.txt" | grep "state=$1" | head -1)
+    if [ -n "$found" ]; then
+      echo "$found"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 # Damages a follower copy per $2 (a shell fragment run with $dir set), with the follower node
 # STOPPED: damage is injected through a one-off container on the node's data volume, so no live
 # server can race the injection (append past a truncation, reopen a deleted file's descriptor).
-# Then restarts the node and waits for reconvergence. Prints what it picked.
+# Then restarts the node and waits for reconvergence, unless LEAVE_STOPPED=1 (the caller restarts it).
+# Prints what it picked.
 damage_follower() {
-  line=$(topology | grep "state=$1" | head -1)
-  if [ -z "$line" ]; then
-    fail "no $1 segment found to damage"
+  if ! line=$(pick_segment "$1"); then
+    echo "topology on the last try:"
+    grep -E '^(SEGMENT|topology failed)' "$WORK/topology.txt" || tail -5 "$WORK/topology.txt"
+    fail "no $1 segment found to damage within a minute"
     return 1
   fi
 
@@ -113,32 +139,108 @@ damage_follower() {
   echo "target: $dir on $follower (primary $(seg_field "$line" primary))"
   DAMAGED_LINE="$line" DAMAGED_DIR="$dir" DAMAGED_PRIMARY=$(container_of "$(seg_field "$line" primary)") DAMAGED_FOLLOWER="$container"
 
-  volume=$(docker inspect "$container" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')
-  image=$(docker inspect "$container" --format '{{.Config.Image}}')
+  volume=$(data_volume_of "$container")
+  image=$(image_of "$container")
 
   docker stop "$container" >/dev/null 2>&1
   docker run --rm -v "$volume:/data" --entrypoint sh "$image" -c "dir=$dir; $2" ||
     { fail "damage command failed for $container"; docker start "$container" >/dev/null 2>&1; return 1; }
+  [ "${LEAVE_STOPPED:-0}" = "1" ] && return 0
   docker start "$container" >/dev/null 2>&1
   wait_healthy || fail "cluster did not reconverge after restarting $follower"
 }
 
-# Waits until the damaged dir's files matching $2 (default the segment's *.log) have the same md5s on
-# the damaged follower and on the primary. Replicas hold identical bytes for both the records and the
-# derived index, so byte equality is the honest check for "repaired" either way.
-wait_copy_repaired() {
-  glob="${2:-*.log}"
+# Waits until the damaged follower's copy of the damaged segment holds the same records as the primary's,
+# by invariant 4's rule (the files themselves need not match: see the header). Fails with $1 otherwise,
+# printing what the two copies held on the last try.
+wait_segment_repaired() {
+  if copies 12 5000 "segment=$(basename "$DAMAGED_DIR")" "$DAMAGED_PRIMARY" "$DAMAGED_FOLLOWER" >"$WORK/repair.txt" 2>&1; then
+    echo "copy repaired: follower holds the primary's records ($(sed -n 's/^COPIES verdict=\([a-z_]*\) .*/\1/p' "$WORK/repair.txt"))"
+  else
+    disagreeing_copies "$WORK/repair.txt"
+    keep_copies_evidence "$WORK/repair.txt" repair
+    fail "$1"
+  fi
+}
 
+# Waits until the damaged dir's sparse index files have the same md5s, file for file, on the damaged
+# follower and on the primary. The index is derived from the records and rebuilt locally, so byte
+# equality is the honest check for "rebuilt". The file names stay in the comparison: the directory is
+# at the same path on both nodes, and hashes alone would let two sidecars with swapped contents pass.
+wait_index_rebuilt() {
   for _ in $(seq 1 12); do
-    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/$glob 2>/dev/null | sort" | awk '{print $1}')
-    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/$glob 2>/dev/null | sort" | awk '{print $1}')
+    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
+    b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
-      echo "copy repaired: follower matches primary byte for byte ($glob)"
+      echo "index rebuilt: follower matches primary byte for byte (*.idx)"
       return 0
     fi
     sleep 5
   done
   fail "$1"
+}
+
+# The checker's copies mode (ChaosChecker.Copies) over the data volumes of the given containers, mounted
+# read-only. --no-deps because a copy on a STOPPED node is a copy too, and `compose run` would otherwise start
+# the node first. Args: attempts interval_ms [segment=<dir>] container... Exit status is the checker's: 0
+# when every segment's copies hold the same records.
+copies() {
+  attempts=$1 interval_ms=$2
+  shift 2
+  filter=""
+  case "${1:-}" in segment=*) filter="$1 " && shift ;; esac
+
+  roots=""
+  CHECKER_RUN_ARGS=(--no-deps)
+  for c in "$@"; do
+    node="malachi${c##*-}"
+    CHECKER_RUN_ARGS+=(-v "$(data_volume_of "$c"):/copies/$node:ro")
+    roots="$roots $node=/copies/$node/${DATA_DIR#/data/}"
+  done
+
+  checker_run "copies $CHAOS_HOSTS $CHAOS_TOPIC $attempts $interval_ms $filter${roots# }"
+  copies_status=$?
+  CHECKER_RUN_ARGS=()
+  return "$copies_status"
+}
+
+# The COPY and COPIES lines of every segment in report $1 whose copies are not identical, which is the part of a
+# report worth reading: on a long run most segments agree to the byte.
+disagreeing_copies() {
+  awk 'NR == FNR { if ($1 == "COPIES" && $2 != "verdict=identical" && $3 ~ /^segment=/) keep[$3] = 1; next }
+       ($1 == "COPY" && ($2 in keep)) || ($1 == "COPIES" && ($3 in keep))' "$1" "$1"
+}
+
+# Keeps what a failed comparison ($1, a copies report) saw, before phase 2's start_cluster recreates the volumes
+# and it is gone: the report, the substrate and host load, and each node's copy of every segment the report
+# names. Each capture goes to a numbered directory of its own, labelled $2, inside the run's evidence dir: a
+# repair that never converged is followed by invariant 4 failing on the same copies, and a second capture
+# into one directory would overwrite the first report and nest the copies already kept.
+keep_copies_evidence() {
+  EVIDENCE_SEQ=$((EVIDENCE_SEQ + 1))
+  capture="$EVIDENCE_DIR/$(printf '%02d' "$EVIDENCE_SEQ")-$2"
+  mkdir -p "$capture" || { fail "cannot create the evidence directory $capture"; return 1; }
+  cp "$1" "$capture/copies.txt"
+  {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    uptime
+    docker info --format 'docker kernel {{.KernelVersion}}, {{.NCPU}} cpus, {{.OperatingSystem}}'
+  } >"$capture/substrate.txt" 2>&1
+
+  dirs=$(disagreeing_copies "$1" | sed -n 's/^COPIES .* segment=\([^ ]*\) .*/\1/p' | tr '\n' ' ')
+  # A report that names no segment is a report that itself failed (a checker that crashed, a topology it could
+  # not read, no copy found at all): keep every copy of the topic rather than none. The glob expands in the
+  # node's shell, on the volume.
+  [ -n "$dirs" ] || dirs="${CHAOS_TOPIC}-r*"
+  for c in malachi-cluster-1 malachi-cluster-2 malachi-cluster-3; do
+    mkdir -p "$capture/$c"
+    docker run --rm -v "$(data_volume_of "$c"):/data:ro" -v "$capture/$c:/out" --entrypoint sh "$(image_of "$c")" \
+      -c "cd $DATA_DIR && for d in $dirs; do if [ -d \$d ]; then cp -a \$d /out/; fi; done" ||
+      echo "could not copy the segment directories out of $c"
+  done
+
+  EVIDENCE_KEPT="$EVIDENCE_DIR"
+  echo "evidence kept in $capture"
 }
 
 build_images
@@ -178,7 +280,7 @@ damage_follower active 'f=$(ls $dir/*.log | head -1); sz=$(wc -c <$f); truncate 
 event "g: delete a follower's sealed-segment directory, then restart it"
 if damage_follower sealed 'rm -rf $dir'; then
   echo "sealed copy deleted and node restarted; waiting for the integrity probe to re-backfill"
-  wait_copy_repaired "lost sealed copy was not re-backfilled (silent under-replication)"
+  wait_segment_repaired "lost sealed copy was not re-backfilled (silent under-replication)"
 fi
 
 event "h: bit rot inside a follower's sealed copy, keeping the file's exact size"
@@ -186,7 +288,7 @@ event "h: bit rot inside a follower's sealed copy, keeping the file's exact size
 # happy, so nothing but a checksum scan can tell this copy from a good one.
 if damage_follower sealed 'f=$(ls $dir/*.log | head -1); before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=32 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
   echo "bit rot injected (size unchanged) and node restarted; waiting for the scrub to repair"
-  wait_copy_repaired "rotted sealed copy was not repaired by the integrity scrub"
+  wait_segment_repaired "rotted sealed copy was not repaired by the integrity scrub"
 fi
 
 event "i: corrupt a follower's sparse-index sidecar, leaving its records untouched"
@@ -196,7 +298,7 @@ event "i: corrupt a follower's sparse-index sidecar, leaving its records untouch
 if damage_follower sealed 'f=$(ls $dir/*.idx 2>/dev/null | head -1); [ -n "$f" ] || { echo "no sidecar in $dir"; exit 1; }; before=$(wc -c <$f); dd if=/dev/urandom of=$f bs=8 count=1 seek=1 conv=notrunc 2>/dev/null; [ "$(wc -c <$f)" = "$before" ]'; then
   logs_before=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.log | sort")
   echo "index corrupted (records untouched) and node restarted; waiting for the scrub to rebuild it"
-  wait_copy_repaired "rotted sparse index was not rebuilt by the integrity scrub" '*.idx'
+  wait_index_rebuilt "rotted sparse index was not rebuilt by the integrity scrub"
 
   logs_after=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.log | sort")
   if [ "$logs_before" = "$logs_after" ]; then
@@ -209,19 +311,71 @@ fi
 close_window
 
 say "invariant 4: physical convergence of every chaos-topic segment copy"
-converged=0
-for _ in $(seq 1 12); do
-  h1=$(docker exec malachi-cluster-1 sh -c "md5sum $DATA_DIR/${CHAOS_TOPIC}-*/*.log 2>/dev/null | sort")
-  h2=$(docker exec malachi-cluster-2 sh -c "md5sum $DATA_DIR/${CHAOS_TOPIC}-*/*.log 2>/dev/null | sort")
-  h3=$(docker exec malachi-cluster-3 sh -c "md5sum $DATA_DIR/${CHAOS_TOPIC}-*/*.log 2>/dev/null | sort")
-  if [ -n "$h1" ] && [ "$h1" = "$h2" ] && [ "$h1" = "$h3" ]; then
-    converged=1
-    echo "all $(echo "$h1" | wc -l | tr -d ' ') segment files byte-identical across the 3 nodes"
-    break
+# Retried for a minute, like every repair wait: a copy still being caught up converges inside the window.
+# Three ways to fail, named apart: a checker that produced no report, a check that could not check (no copy
+# found, or a topology it could not read, which leaves sealed lengths unverified), and copies that really
+# hold different records. Only the last one is about the broker. Evidence is kept in every case, before
+# phase 2's fresh cluster removes the volumes.
+if copies 12 5000 malachi-cluster-1 malachi-cluster-2 malachi-cluster-3 >"$WORK/copies.txt" 2>&1; then
+  grep '^COPIES segments=' "$WORK/copies.txt"
+  echo "every segment's copies hold the same records on the 3 nodes"
+else
+  summary=$(grep '^COPIES segments=' "$WORK/copies.txt")
+  if [ -z "$summary" ]; then
+    echo "per-copy report unavailable:"
+    tail -5 "$WORK/copies.txt"
+    keep_copies_evidence "$WORK/copies.txt" invariant-4
+    fail "invariant 4 could not compare the copies: the checker produced no report (see above)"
+  else
+    echo "$summary"
+    case "$summary" in
+      *" segments=0 "*)
+        keep_copies_evidence "$WORK/copies.txt" invariant-4
+        fail "invariant 4 found no $CHAOS_TOPIC segment copy to compare under $DATA_DIR on any node" ;;
+      *)
+        echo "segments whose copies are not identical, per node:"
+        disagreeing_copies "$WORK/copies.txt"
+        keep_copies_evidence "$WORK/copies.txt" invariant-4
+        case "$summary" in
+          *" control=unavailable"*)
+            fail "invariant 4 could not read the topology: sealed lengths went unchecked (see the per-copy report above)" ;;
+          *)
+            fail "segment copies did not reconverge to the same records across the nodes (see the per-copy report above)" ;;
+        esac ;;
+    esac
   fi
-  sleep 5
-done
-[ "$converged" = "1" ] || fail "segment copies did not physically reconverge across the nodes"
+fi
+
+# Opt-in, and run by hand: proof that invariant 4 still fails on a copy that really diverged, so a change to how
+# copies are compared cannot turn it into a check that passes on anything. It damages a follower's sealed copy
+# INSIDE its valid records with the node stopped, requires the comparison to fail naming that node, then
+# restarts the node and requires the integrity scrub to repair the copy.
+if [ "${STORAGE_CHAOS_NEGATIVE_CONTROL:-0}" = "1" ]; then
+  event "negative control: flip a byte inside a follower's sealed records; invariant 4 must name that node"
+  # The byte is inverted rather than overwritten, so it always changes, and it sits five bytes before the end
+  # of the written records, inside the last frame: the written prefix is measured the way event e2 measures
+  # it, and the guard requires more than one smallest frame (39 bytes) of it. The node stays stopped until
+  # the comparison has run, since the scrub would otherwise repair the copy before anyone looked.
+  flip='f=$(ls $dir/*.log | head -1); written=$(od -An -v -tx1 $f | awk "{for(i=1;i<=NF;i++){n++; if(\$i!=\"00\") last=n}} END{print last+0}"); [ "$written" -gt 40 ] || { echo "no written records in $f to damage (written=$written)"; exit 1; }; at=$((written - 5)); b=$(od -An -tu1 -j$at -N1 $f | tr -d " "); printf "$(printf "\\\\%03o" $((b ^ 255)))" | dd of=$f bs=1 seek=$at count=1 conv=notrunc 2>/dev/null'
+
+  if LEAVE_STOPPED=1 damage_follower sealed "$flip"; then
+    damaged_node="malachi${DAMAGED_FOLLOWER##*-}"
+    segment="segment=$(basename "$DAMAGED_DIR")"
+
+    copies 1 0 "$segment" malachi-cluster-1 malachi-cluster-2 malachi-cluster-3 >"$WORK/negative.txt" 2>&1
+    negative_status=$?
+    grep -E '^(COPY|COPIES)' "$WORK/negative.txt"
+    if [ "$negative_status" != "0" ] && grep -q "^COPIES verdict=.* nodes=.*$damaged_node" "$WORK/negative.txt"; then
+      echo "invariant 4 caught the diverged copy on $damaged_node"
+    else
+      fail "invariant 4 did not catch a byte flipped inside $damaged_node's sealed records"
+    fi
+
+    docker start "$DAMAGED_FOLLOWER" >/dev/null 2>&1
+    wait_healthy || fail "cluster did not reconverge after the negative control"
+    wait_segment_repaired "the negative control's damaged copy was never repaired"
+  fi
+fi
 
 verify_acked
 check_convergence

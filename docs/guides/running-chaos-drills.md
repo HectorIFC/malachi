@@ -20,6 +20,12 @@ required as well.
 Each harness builds the cluster images if they are missing, runs to completion, tears the cluster
 down, and exits non-zero if any invariant broke.
 
+Run one harness at a time. They all bring up the same compose project with the same container names
+(`malachi-cluster-1` to `-3`), as does `benchmark/docker-cluster.sh`, and each starts with
+`docker compose down -v`. A harness therefore refuses to start while any `malachi-cluster-*` container
+is running, and prints the command that removes a leftover. It also prints the host load when it starts:
+a drill sharing the machine with a CPU-heavy job can fail for reasons that are not in the broker.
+
 ## Node faults
 
 ```bash
@@ -66,7 +72,37 @@ meant to find.
   derived data, so the repair has to be local, rebuilt from the segment without consulting a peer.
 
 On top of the node-fault invariants, this one certifies that the damaged copies physically
-reconverge: byte-identical segment files across all three nodes.
+reconverge. The check (`copies` mode of `scripts/chaos_checker.exs`) reads each node's data volume
+read-only and compares, per segment, what every copy holds:
+
+- **the records**, byte for byte over the valid part of each file, concatenated in offset order;
+- **the count**, which for a segment the control plane sealed must equal its sealed length;
+- **the readability**, since a copy that fails verification, holds non-zero bytes past its valid end,
+  or whose files do not chain (a file named for an offset its records do not start at, or one that does
+  not start where the previous ended) is damaged whatever the other copies say.
+
+It does not require the files themselves to be identical, and it used to. Healthy copies differ as
+files on every run ([#152](https://github.com/HectorIFC/malachi/issues/152)). Only a fenced copy, usually
+the primary's, has its preallocated tail trimmed, so a follower's last file keeps its blank tail. And each
+node rolls its internal files at its own sync points. The report calls that `benign`. That recovery zeroes
+a torn write inside the preallocated region, instead of truncating it, is pinned by the store's own tests.
+
+The check retries for a minute and prints a
+`COPIES segments=... whole_file=... content=... control=...` summary, where `control` says whether the
+topology was read; a report with `control=unavailable` never certifies.
+When it fails, it prints, per node, every segment whose copies are not identical: the files with their
+sizes and md5s, the records and bytes that verify, a digest of the valid records, and a verdict naming
+the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
+numbered directory per failed check (`01-repair`, `02-invariant-4`): the report, the host's substrate and
+load, and each node's copy of those segments. That happens before the second phase, whose fresh cluster
+deletes the volumes. The result JSON names the run's directory in `evidence_dir`. The repairs of the
+file-loss and bit-rot events are judged by the same rule, and keep their evidence the same way when they
+do not converge; the rotted index is judged by byte equality of the index files.
+
+Set `STORAGE_CHAOS_NEGATIVE_CONTROL=1` to prove the comparison is not vacuous. After the check, the
+drill stops a follower, inverts one byte inside the records of one of its sealed copies, and requires
+the comparison to fail naming that node before the node comes back. Then it requires the integrity
+scrub to repair the copy. Run it by hand whenever the comparison changes.
 
 Then a second phase, on a fresh cluster of its own:
 
@@ -142,7 +178,10 @@ the same run beside the two load tests.
 
 CI keeps that file current: the Publish results workflow runs the node-fault drill on every push to
 main and commits its record, failures included. Only that drill is published. The storage-corruption
-and config-deployment drills above are run by hand, so a record from either stays wherever you point
+drill also runs in CI (the Storage chaos certification workflow: on demand, weekly, and on pull requests
+that touch storage, replication, repair or the drill). It is not a required check, and it publishes
+nothing: its JSON and any evidence are uploaded as the `chaos-storage` artifact. The config-deployment
+and reshard drills are run by hand, so a record from either stays wherever you point
 `CHAOS_RESULT_FILE`.
 
 ## Reading a failure

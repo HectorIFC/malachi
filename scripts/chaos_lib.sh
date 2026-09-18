@@ -21,6 +21,17 @@ CHAOS_WORK_ROOT="${CHAOS_WORK_ROOT:-$PWD/tmp/chaos}"
 mkdir -p "$CHAOS_WORK_ROOT" || { echo "cannot create $CHAOS_WORK_ROOT"; exit 1; }
 WORK="$(mktemp -d "$CHAOS_WORK_ROOT/work.XXXXXX")" || { echo "cannot create a scratch dir under $CHAOS_WORK_ROOT"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
+# Where a failed check keeps what it saw. Beside WORK rather than inside it, so the EXIT trap leaves it, and
+# named by time and commit so runs never overwrite each other. Created only when something is kept.
+EVIDENCE_DIR="$CHAOS_WORK_ROOT/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+EVIDENCE_KEPT=""
+# Captures kept so far in this run, numbering their directories in order.
+EVIDENCE_SEQ=0
+# Extra `docker compose run` arguments for the next checker_run (mounts, --no-deps). Callers set and reset it.
+CHECKER_RUN_ARGS=()
+# Set once this run has brought the cluster up, so a second start (the storage drill's phase 2) replaces its
+# own cluster instead of being refused as someone else's.
+OWN_CLUSTER=0
 FAILED=0
 CHAOS_HOSTS="malachi1,malachi2,malachi3"
 EVENTS=()
@@ -55,9 +66,30 @@ build_images() {
   $COMPOSE build >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 }
 
+# The compose project and its container names are shared with every other cluster harness (the benchmark in
+# benchmark/docker-cluster.sh brings up the same file), and start_cluster begins with `down -v`: starting a drill
+# while another harness runs would destroy that run's cluster and volumes, and fail both. So a RUNNING cluster
+# that this run did not start is refused. A stopped leftover is not refused, the `down -v` is what clears it.
+#
+# The host load is printed too: a drill that shares the machine with a CPU-heavy job can fail for reasons that
+# are not in the broker, and the run should say so on its face.
+preflight_cluster() {
+  if [ "$OWN_CLUSTER" != "1" ]; then
+    running=$(docker ps --filter "name=malachi-cluster-" --format '{{.Names}}' | sort | tr '\n' ' ')
+    if [ -n "$running" ]; then
+      echo "refusing to start: another cluster is already running (${running% })."
+      echo "Another harness may be using it. If it is a leftover, remove it with: $COMPOSE down -v"
+      exit 1
+    fi
+  fi
+  echo "host load:$(uptime | sed 's/.*load average/ load average/')"
+}
+
 # Fresh cluster on fresh volumes; sets NET to the compose network name for partition events.
 start_cluster() {
   say "starting 3-node RF=${RF} cluster (fresh persistent volumes)"
+  preflight_cluster
+  OWN_CLUSTER=1
   $COMPOSE down -v >/dev/null 2>&1
   $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 >"$WORK/up.log" 2>&1
   wait_healthy || { echo "cluster never converged; aborting"; cat "$WORK/up.log"; exit 1; }
@@ -68,9 +100,13 @@ start_cluster() {
 # Runs the checker/topology script inside the compose network (the cluster publishes no host
 # ports); the acked file and the scripts dir are mounted in from the host.
 checker_run() {
-  $COMPOSE run --rm -v "$WORK:/chaos" -v "$PWD/scripts:/chaos_scripts" --entrypoint sh loadtest \
+  $COMPOSE run --rm ${CHECKER_RUN_ARGS[@]+"${CHECKER_RUN_ARGS[@]}"} -v "$WORK:/chaos" -v "$PWD/scripts:/chaos_scripts" --entrypoint sh loadtest \
     -c "cd /app && mix run --no-start /chaos_scripts/chaos_checker.exs $*"
 }
+
+# The named volume mounted at /data in container $1, and the image it runs.
+data_volume_of() { docker inspect "$1" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'; }
+image_of() { docker inspect "$1" --format '{{.Config.Image}}'; }
 
 # Starts the acked-durability checker in the background for $1 seconds; sets CHECKER (pid).
 start_checker() {
@@ -228,9 +264,11 @@ write_result() {
     --argjson events "$(json_array ${EVENTS[@]+"${EVENTS[@]}"})" \
     --argjson invariants "$(chaos_invariants)" \
     --argjson failures "$(json_array ${FAILURES[@]+"${FAILURES[@]}"})" \
+    --arg evidence_dir "$EVIDENCE_KEPT" \
     '{meta: $meta, certification: $certification, verdict: $verdict,
       replication_factor: $replication_factor, events: $events,
-      invariants: $invariants, failures: $failures}' > "$CHAOS_RESULT_FILE"
+      invariants: $invariants, failures: $failures,
+      evidence_dir: (if $evidence_dir == "" then null else $evidence_dir end)}' > "$CHAOS_RESULT_FILE"
 
   echo "result written to $CHAOS_RESULT_FILE"
 }

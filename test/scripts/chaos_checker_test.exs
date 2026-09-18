@@ -559,4 +559,544 @@ defmodule ChaosCheckerTest do
     # 1000ms of patience in 250ms steps: four sleeps, not a spin.
     assert :counters.get(slept, 1) == 4
   end
+
+  describe "ChaosChecker.Copies (invariant 4 of the storage drill, per copy)" do
+    @describetag :tmp_dir
+
+    alias ChaosChecker.Copies
+    alias Malachi.Log
+    alias Malachi.Log.Record
+
+    @dir "chaos_acked-r0-s1"
+    # Preallocated like the drill's segments (its effective size after the clamp), so a copy that is not
+    # trimmed carries the same blank tail a follower's copy does on the cluster.
+    @prealloc 2048
+
+    # Writes one node's copy of @dir under `root`: each batch is synced, `roll: true` rolls the internal
+    # file between batches, and `finish` says how the copy is left, which is what decides its layout:
+    #   :seal    - a fenced primary (trimmed, SEALED marker)
+    #   :open    - a follower nobody sealed (synced, preallocated tail still there)
+    #   :recover - a follower that was closed and then restarted (recovery pre-allocates again)
+    defp write_copy(root, batches, opts \\ []) do
+      path = Path.join(root, @dir)
+      {:ok, log} = Log.open(path, prealloc_bytes: @prealloc)
+
+      log =
+        batches
+        |> Enum.with_index()
+        |> Enum.reduce(log, fn {values, index}, log ->
+          {:ok, log} = if index > 0 and opts[:roll], do: Log.roll(log), else: {:ok, log}
+          {:ok, log, _first, _last} = Log.append(log, Enum.map(values, &Record.new(&1, timestamp: 1)))
+          {:ok, log} = Log.sync(log)
+          log
+        end)
+
+      case Keyword.get(opts, :finish, :seal) do
+        :seal ->
+          {:ok, log} = Log.seal(log)
+          :ok = Log.close(log)
+
+        :open ->
+          # Left open on purpose, like a live follower; the test process owns the descriptor.
+          :ok
+
+        :recover ->
+          :ok = Log.close(log)
+          {:ok, _log} = Log.recover(path, prealloc_bytes: @prealloc)
+      end
+
+      path
+    end
+
+    defp roots(tmp_dir, names), do: Enum.map(names, &{&1, Path.join(tmp_dir, &1)})
+
+    defp survey(nodes, control \\ :unavailable), do: Copies.survey(nodes, "chaos_acked", nil, fn _dir -> control end)
+
+    defp only_entry(nodes, control \\ :unavailable) do
+      assert [entry] = survey(nodes, control)
+      entry
+    end
+
+    @six ~w(v1 v2 v3 v4 v5 v6)
+
+    test "copies written and sealed the same way are identical", %{tmp_dir: tmp_dir} do
+      nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      for {_node, root} <- nodes, do: write_copy(root, [@six])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:identical, []}
+      assert Enum.all?(entry.copies, fn {_node, copy} -> copy.records == 6 and copy.marker? end)
+    end
+
+    test "a follower's untrimmed preallocated tail is a benign difference", %{tmp_dir: tmp_dir} do
+      [{_, primary}, {_, follower}] = nodes = roots(tmp_dir, ~w(primary follower))
+      write_copy(primary, [@six])
+      follower_dir = write_copy(follower, [@six], finish: :open)
+
+      # The premise, checked rather than assumed: the files really differ as files.
+      primary_log = Path.join(primary, @dir) |> Path.join("00000000000000000000.log")
+      follower_log = Path.join(follower_dir, "00000000000000000000.log")
+      assert File.stat!(follower_log).size == @prealloc
+      assert File.stat!(primary_log).size < @prealloc
+
+      entry = only_entry(nodes)
+      assert entry.verdict == :benign
+      %{"primary" => p, "follower" => f} = entry.copies
+      assert {p.records, p.bytes, p.digest} == {f.records, f.bytes, f.digest}
+      assert f.trailing == 0
+    end
+
+    test "different internal roll points holding the same records are benign", %{tmp_dir: tmp_dir} do
+      [{_, one_file}, {_, two_files}] = nodes = roots(tmp_dir, ~w(a b))
+      write_copy(one_file, [@six])
+      write_copy(two_files, [~w(v1 v2 v3), ~w(v4 v5 v6)], roll: true)
+
+      entry = only_entry(nodes)
+      assert entry.verdict == :benign
+      assert length(entry.copies["a"].files) == 1
+      assert length(entry.copies["b"].files) == 2
+      assert entry.copies["a"].digest == entry.copies["b"].digest
+    end
+
+    test "a restarted copy that recovery pre-allocated again is benign", %{tmp_dir: tmp_dir} do
+      [{_, sealed}, {_, restarted}] = nodes = roots(tmp_dir, ~w(a b))
+      write_copy(sealed, [@six])
+      write_copy(restarted, [@six], finish: :recover)
+
+      assert only_entry(nodes).verdict == :benign
+    end
+
+    test "a copy holding different valid records is a content divergence, and names that node",
+         %{tmp_dir: tmp_dir} do
+      nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      [{_, r1}, {_, r2}, {_, r3}] = nodes
+      write_copy(r1, [@six])
+      write_copy(r2, [@six])
+      write_copy(r3, [~w(v1 v2 v3 v4 v5 XX)])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:content, ["n3"]}
+      refute Copies.passing?(entry.verdict)
+    end
+
+    test "a copy with fewer records is lagging", %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, r2}, {_, r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      write_copy(r1, [@six])
+      write_copy(r2, [Enum.take(@six, 5)])
+      write_copy(r3, [@six])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:lagging, ["n2"]}
+    end
+
+    test "a flipped byte inside the valid prefix is reported as damage on that node", %{tmp_dir: tmp_dir} do
+      # The shape of the drill's negative control: bit rot in a copy that otherwise looks whole.
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      dir = write_copy(r2, [@six])
+      file = Path.join(dir, "00000000000000000000.log")
+      <<head::binary-size(30), byte, rest::binary>> = File.read!(file)
+      File.write!(file, <<head::binary, Bitwise.bxor(byte, 0xFF), rest::binary>>)
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
+      assert {:damaged, %{reason: _}} = entry.copies["n2"].status
+    end
+
+    test "a copy absent from one node is missing there", %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, _r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:missing, ["n2"]}
+      assert entry.copies["n2"].status == :missing
+    end
+
+    test "a directory with no log file on one node is empty there", %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      File.mkdir_p!(Path.join(r2, @dir))
+
+      assert {only_entry(nodes).verdict, only_entry(nodes).nodes} == {:empty, ["n2"]}
+    end
+
+    test "a zero-record segment some replica never created is benign, unless records are claimed",
+         %{tmp_dir: tmp_dir} do
+      # The shape run 3 of issue #152 found: sealed at length 0, a SEALED marker and no log on two nodes, and
+      # no directory at all on the third.
+      [{_, r1}, {_, r2}, {_, _r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
+
+      for root <- [r1, r2] do
+        dir = Path.join(root, @dir)
+        File.mkdir_p!(dir)
+        File.write!(Log.seal_marker_path(dir), "")
+      end
+
+      for control <- [%{state: "sealed", length: 0}, %{state: "active", length: 0}, :unavailable] do
+        entry = only_entry(nodes, control)
+        assert {entry.verdict, entry.nodes} == {:benign, ["n3"]}
+        assert entry.copies["n1"].status == :empty
+        assert entry.copies["n1"].marker?
+      end
+
+      for control <- [%{state: "sealed", length: 3}, %{state: "active", length: 1}] do
+        assert {only_entry(nodes, control).verdict, only_entry(nodes, control).nodes} == {:missing, ["n3"]}
+      end
+    end
+
+    test "a missing copy beside a copy holding records is missing, whatever the control plane says",
+         %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, r2}, {_, _r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      write_copy(r1, [@six])
+      File.mkdir_p!(Path.join(r2, @dir))
+
+      for control <- [%{state: "sealed", length: 0}, :unavailable] do
+        assert {only_entry(nodes, control).verdict, only_entry(nodes, control).nodes} == {:missing, ["n3"]}
+      end
+    end
+
+    test "directories empty on every node agree", %{tmp_dir: tmp_dir} do
+      nodes = roots(tmp_dir, ~w(n1 n2))
+      for {_node, root} <- nodes, do: File.mkdir_p!(Path.join(root, @dir))
+
+      assert only_entry(nodes).verdict == :identical
+    end
+
+    test "a copy path that exists but cannot be listed is damage, not an empty or missing copy",
+         %{tmp_dir: tmp_dir} do
+      # A plain file where the directory should be: present, and unlistable for every user, root included.
+      # A permission-locked directory would say the same thing except when the suite runs as root, which
+      # reads through any mode and left the assertion unexercised.
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      File.mkdir_p!(r2)
+      not_a_dir = Path.join(r2, @dir)
+      File.write!(not_a_dir, "not a directory")
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
+      assert entry.copies["n2"].status == {:damaged, %{reason: :enotdir, file: not_a_dir}}
+    end
+
+    test "a file renamed to another base offset is damage, not a benign layout", %{tmp_dir: tmp_dir} do
+      # `verify/3` accepts each file on its own, and a renamed file holds the same frames as before, so
+      # records and digest still match the intact copy. Only the chain of files tells them apart.
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      dir = write_copy(r2, [@six])
+
+      for ext <- ~w(log idx sealed),
+          do: File.rename!(Path.join(dir, "00000000000000000000.#{ext}"), Path.join(dir, "00000000000000000010.#{ext}"))
+
+      entry = only_entry(nodes, %{state: "sealed", length: 6})
+      assert {entry.verdict, entry.nodes} == {:damaged, ["n2"]}
+      assert {:damaged, %{reason: :misplaced, expected: 10, found: 0}} = entry.copies["n2"].status
+    end
+
+    test "files that do not start where the previous one ended are damage", %{tmp_dir: tmp_dir} do
+      three = [~w(v1 v2), ~w(v3 v4), ~w(v5 v6)]
+      [{_, intact}, {_, renamed}, {_, gap}, {_, overlap}] = roots(tmp_dir, ~w(intact renamed gap overlap))
+      write_copy(intact, three, roll: true)
+
+      # The last file moved to a later offset: same records, same digest, a hole in the chain.
+      dir = write_copy(renamed, three, roll: true)
+
+      for ext <- ~w(log idx sealed),
+          do: File.rename!(Path.join(dir, "00000000000000000004.#{ext}"), Path.join(dir, "00000000000000000009.#{ext}"))
+
+      # The middle file gone: the chain jumps from 2 to 4.
+      dir = write_copy(gap, three, roll: true)
+      for ext <- ~w(log idx sealed), do: File.rm!(Path.join(dir, "00000000000000000002.#{ext}"))
+
+      # A second copy of the last file under a name inside the middle one's range.
+      dir = write_copy(overlap, three, roll: true)
+      File.cp!(Path.join(dir, "00000000000000000004.log"), Path.join(dir, "00000000000000000003.log"))
+
+      for {name, root, expected, found} <- [{"renamed", renamed, 4, 9}, {"gap", gap, 2, 4}, {"overlap", overlap, 4, 3}] do
+        entry = only_entry([{"intact", intact}, {name, root}], %{state: "sealed", length: 6})
+        assert {entry.verdict, entry.nodes} == {:damaged, [name]}
+        assert {:damaged, %{reason: :discontiguous, expected: ^expected, found: ^found}} = entry.copies[name].status
+      end
+    end
+
+    test "copies compared without the control plane are described, but never pass", %{tmp_dir: tmp_dir} do
+      # Every copy holding the same record past a sealed end agrees with every other; only the sealed length
+      # tells them apart, and it comes from the topology. So a report read without one is a diagnosis, not
+      # a certification (issue #172's review).
+      nodes = roots(tmp_dir, ~w(n1 n2))
+      for {_node, root} <- nodes, do: write_copy(root, [@six])
+
+      entry = only_entry(nodes, :unavailable)
+      assert {entry.verdict, entry.control} == {:identical, :unavailable}
+      refute Copies.passed?([entry])
+      assert Copies.passed?([%{entry | control: %{state: "sealed", length: 6}}])
+
+      assert List.last(Copies.lines([entry])) == "COPIES segments=1 whole_file=ok content=ok control=unavailable"
+    end
+
+    test "a survey that finds no segment on any node is not a pass", %{tmp_dir: tmp_dir} do
+      # What a log root read from the wrong path looks like: nothing to compare, which must not read as
+      # nothing wrong (issue #152's review).
+      nodes = [{"n1", Path.join(tmp_dir, "absent-1")}, {"n2", Path.join(tmp_dir, "absent-2")}]
+
+      assert survey(nodes) == []
+      refute Copies.passed?(survey(nodes))
+      assert Copies.lines(survey(nodes)) == ["COPIES segments=0 whole_file=none content=none control=none"]
+    end
+
+    test "a segment the control plane does not know is extra", %{tmp_dir: tmp_dir} do
+      nodes = roots(tmp_dir, ~w(n1 n2))
+      for {_node, root} <- nodes, do: write_copy(root, [@six])
+
+      entry = only_entry(nodes, :absent)
+      assert {entry.verdict, entry.nodes} == {:extra, ["n1", "n2"]}
+    end
+
+    test "copies agreeing with each other but not with the sealed length are a mismatch", %{tmp_dir: tmp_dir} do
+      nodes = roots(tmp_dir, ~w(n1 n2))
+      for {_node, root} <- nodes, do: write_copy(root, [@six])
+
+      assert only_entry(nodes, %{state: "sealed", length: 6}).verdict == :identical
+      assert only_entry(nodes, %{state: "active", length: 2}).verdict == :identical
+
+      entry = only_entry(nodes, %{state: "sealed", length: 5})
+      assert {entry.verdict, entry.nodes} == {:length_mismatch, ["n1", "n2"]}
+    end
+
+    test "a two-way disagreement names both nodes, since neither is the majority", %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, r2}] = nodes = roots(tmp_dir, ~w(n1 n2))
+      write_copy(r1, [@six])
+      write_copy(r2, [Enum.take(@six, 4)])
+
+      assert {only_entry(nodes).verdict, only_entry(nodes).nodes} == {:lagging, ["n1", "n2"]}
+    end
+
+    test "survey orders segments numerically and honors a filter, even for a segment nobody holds",
+         %{tmp_dir: tmp_dir} do
+      [{_, root}] = nodes = roots(tmp_dir, ~w(n1))
+
+      for dir <- ~w(chaos_acked-r0-s10 chaos_acked-r0-s2 chaos_acked-r1-s0 other-r0-s1 chaos_acked-junk) do
+        File.mkdir_p!(Path.join(root, dir))
+      end
+
+      assert Enum.map(survey(nodes), & &1.segment) == ~w(chaos_acked-r0-s2 chaos_acked-r0-s10 chaos_acked-r1-s0)
+
+      assert [%{segment: "chaos_acked-r9-s9", verdict: :missing}] =
+               Copies.survey(nodes, "chaos_acked", "chaos_acked-r9-s9", fn _dir -> :unavailable end)
+    end
+
+    test "a node whose log root cannot be listed contributes no directories, and shows up as missing",
+         %{tmp_dir: tmp_dir} do
+      [{_, r1} | _] = nodes = [{"n1", Path.join(tmp_dir, "n1")}, {"n2", Path.join(tmp_dir, "absent-root")}]
+      write_copy(r1, [@six])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:missing, ["n2"]}
+    end
+  end
+
+  describe "ChaosChecker.Copies.classify/2 (checks no real file can reach)" do
+    alias ChaosChecker.Copies
+
+    defp copy(overrides) do
+      Map.merge(
+        %{status: :ok, marker?: false, files: [], records: 1, bytes: 40, digest: "d", trailing: 0},
+        Map.new(overrides)
+      )
+    end
+
+    test "non-zero bytes past the valid end are reported before any comparison" do
+      # `verify/3` refuses such a file today, so this is the guard for a verifier that one day accepts it.
+      copies = %{"n1" => copy([]), "n2" => copy(trailing: 3, digest: "other")}
+      assert Copies.classify(copies, :unavailable) == {:trailing_garbage, ["n2"]}
+    end
+
+    test "damage outranks every other finding" do
+      copies = %{"n1" => copy(status: {:damaged, %{reason: :bad_crc}}), "n2" => copy(status: :missing)}
+      assert Copies.classify(copies, :absent) == {:damaged, ["n1"]}
+    end
+
+    test "a report passes only when it covers a segment, the control plane was read, and every verdict agrees" do
+      sealed = %{state: "sealed", length: 1}
+      assert Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :benign, control: :absent}])
+      refute Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :missing, control: sealed}])
+      refute Copies.passed?([%{verdict: :identical, control: sealed}, %{verdict: :identical, control: :unavailable}])
+      refute Copies.passed?([])
+    end
+
+    test "only the two agreeing verdicts pass" do
+      assert Copies.passing?(:identical)
+      assert Copies.passing?(:benign)
+
+      for verdict <- [:damaged, :trailing_garbage, :missing, :empty, :extra, :lagging, :length_mismatch, :content] do
+        refute Copies.passing?(verdict)
+      end
+    end
+  end
+
+  describe "ChaosChecker.Copies.validate_nodes/1" do
+    alias ChaosChecker.Copies
+
+    test "two or more distinct nodes are a comparison" do
+      assert Copies.validate_nodes([{"n1", "/a"}, {"n2", "/b"}]) == :ok
+      assert Copies.validate_nodes([{"n1", "/a"}, {"n2", "/b"}, {"n3", "/c"}]) == :ok
+    end
+
+    test "fewer than two nodes compare nothing, and are refused" do
+      # A lone copy agrees with itself, so every verdict would be identical.
+      assert {:error, "copies needs at least two <node>=<log root> arguments, got 1"} =
+               Copies.validate_nodes([{"n1", "/a"}])
+
+      assert {:error, "copies needs at least two <node>=<log root> arguments, got 0"} = Copies.validate_nodes([])
+    end
+
+    test "a repeated node name is refused, since it would merge two roots into one copy" do
+      assert {:error, "copies got a node name twice: n1,n1"} = Copies.validate_nodes([{"n1", "/a"}, {"n1", "/b"}])
+    end
+
+    test "one root under two names is refused, however it is spelled" do
+      # One physical copy read twice would count as two replicas that agree.
+      for other <- ["/data/a", "/data/a/", "/data/b/../a", "/data/./a"] do
+        assert {:error, "copies got a log root twice: /data/a,/data/a"} =
+                 Copies.validate_nodes([{"n1", "/data/a"}, {"n2", other}])
+      end
+
+      assert Copies.validate_nodes([{"n1", "/data/a"}, {"n2", "/data/ab"}]) == :ok
+    end
+  end
+
+  describe "ChaosChecker.Copies.controls/2" do
+    alias ChaosChecker.Copies
+
+    test "maps each segment to its directory name, and anything else to absent" do
+      ranges = [
+        %{"seq" => 0, "segments" => [%{"seq" => 3, "state" => "sealed", "length" => 12}]},
+        %{"seq" => 1, "segments" => [%{"seq" => 0, "state" => "active", "length" => 2}]}
+      ]
+
+      control_of = Copies.controls(ranges, "t")
+      assert control_of.("t-r0-s3") == %{state: "sealed", length: 12}
+      assert control_of.("t-r1-s0") == %{state: "active", length: 2}
+      assert control_of.("t-r0-s4") == :absent
+    end
+
+    test "an unreadable topology marks every segment unavailable" do
+      assert Copies.controls(nil, "t").("t-r0-s3") == :unavailable
+    end
+  end
+
+  describe "ChaosChecker.Copies.settle/4" do
+    alias ChaosChecker.Copies
+
+    # One report per try: a verdict, or a `{verdict, control}` pair for a try whose topology matters.
+    defp reports(tries) do
+      {:ok, agent} = Agent.start_link(fn -> tries end)
+
+      fn ->
+        Agent.get_and_update(agent, fn [try | rest] -> {[entry(try)], rest} end)
+      end
+    end
+
+    defp entry({verdict, control}), do: %{verdict: verdict, control: control}
+    defp entry(verdict), do: %{verdict: verdict, control: :absent}
+
+    test "stops at the first passing report without sleeping again" do
+      slept = :counters.new(1, [])
+      sleep = fn _ms -> :counters.add(slept, 1, 1) end
+
+      assert [%{verdict: :benign}] = Copies.settle(reports([:missing, :benign, :content]), 5, 10, sleep)
+      assert :counters.get(slept, 1) == 1
+    end
+
+    test "returns the last report once the attempts run out" do
+      sleep = fn 10 -> :ok end
+      assert [%{verdict: :content}] = Copies.settle(reports([:missing, :lagging, :content]), 3, 10, sleep)
+    end
+
+    test "an empty report is retried like a failing one, and returned as it stood" do
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+      check = fn -> Agent.update(calls, &(&1 + 1)) && [] end
+
+      assert Copies.settle(check, 3, 10, fn 10 -> :ok end) == []
+      assert Agent.get(calls, & &1) == 3
+    end
+
+    test "a try without the control plane is retried, and a later try with it can pass" do
+      # The topology is read on every try (issue #172's review): a dashboard that did not answer once must
+      # not decide the run.
+      slept = :counters.new(1, [])
+      sleep = fn _ms -> :counters.add(slept, 1, 1) end
+      sealed = %{state: "sealed", length: 1}
+
+      assert [%{verdict: :identical, control: ^sealed}] =
+               Copies.settle(reports([{:identical, :unavailable}, {:identical, sealed}]), 5, 10, sleep)
+
+      assert :counters.get(slept, 1) == 1
+    end
+
+    test "a single attempt never sleeps" do
+      assert [%{verdict: :missing}] = Copies.settle(reports([:missing]), 1, 10, fn _ms -> flunk("slept") end)
+    end
+  end
+
+  describe "ChaosChecker.Copies.lines/1 (the report a failing run leaves behind)" do
+    alias ChaosChecker.Copies
+
+    test "one COPY line per node, a verdict per segment, and a summary" do
+      md5 = String.duplicate("a", 32)
+
+      report = [
+        %{
+          segment: "t-r0-s1",
+          control: %{state: "sealed", length: 6},
+          verdict: :benign,
+          nodes: ["n2"],
+          copies: %{
+            "n2" => %{
+              status: :ok,
+              marker?: false,
+              records: 6,
+              bytes: 240,
+              digest: md5,
+              trailing: 0,
+              files: [%{base_offset: 0, size: 2048, md5: md5}, %{base_offset: 3, size: 120, md5: md5}]
+            },
+            "n1" => %{
+              status: {:damaged, %{reason: :bad_crc}},
+              marker?: true,
+              records: 0,
+              bytes: 0,
+              digest: nil,
+              trailing: 0,
+              files: []
+            }
+          }
+        },
+        %{segment: "t-r0-s2", control: %{state: "active", length: 1}, verdict: :identical, nodes: [], copies: %{}}
+      ]
+
+      assert Copies.lines(report) == [
+               "COPY segment=t-r0-s1 node=n1 status=damaged:bad_crc marker=yes records=0 bytes=0 digest=- trailing=0 files=-",
+               "COPY segment=t-r0-s1 node=n2 status=ok marker=no records=6 bytes=240 digest=aaaaaaaaaaaa trailing=0 " <>
+                 "files=0:2048:aaaaaaaaaaaa,3:120:aaaaaaaaaaaa",
+               "COPIES verdict=benign segment=t-r0-s1 control=sealed:6 nodes=n2",
+               "COPIES verdict=identical segment=t-r0-s2 control=active:1 nodes=-",
+               "COPIES segments=2 whole_file=differs content=ok control=ok"
+             ]
+    end
+
+    test "the summary separates agreeing records from agreeing files" do
+      assert List.last(Copies.lines([])) == "COPIES segments=0 whole_file=none content=none control=none"
+
+      assert List.last(Copies.lines([%{segment: "s", control: :absent, verdict: :extra, nodes: ["n1"], copies: %{}}])) ==
+               "COPIES segments=1 whole_file=differs content=differs control=ok"
+
+      # Without the control plane the agreement of the copies is still reported, and the summary says why it
+      # does not count.
+      unread = %{segment: "s", control: :unavailable, verdict: :lagging, nodes: ["n1"], copies: %{}}
+
+      assert List.last(Copies.lines([unread])) ==
+               "COPIES segments=1 whole_file=differs content=differs control=unavailable"
+    end
+  end
 end
