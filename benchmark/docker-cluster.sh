@@ -27,8 +27,14 @@
 # stalls land there and not in the warmup or the window. Both modes pass it, so the modes differ only in
 # where the data lives.
 #
-# Per-flush latency, the most direct cost of the durable path, is not reported: the flush telemetry is
-# not on main yet. Porting it and scraping it here is #164.
+# Per-flush latency, the most direct cost of the durable path, is read from each node's own /metrics: a
+# scrape when the generator's window opens and one when the generator exits, subtracted and added up
+# across the nodes by `mix malachi.loadtest.ceiling flush-window` (#164). The dashboard port is not
+# published, so the scrape runs inside each node with its busybox wget against 127.0.0.1, logged in with
+# MALACHI_USER/MALACHI_PASS (the dev image's admin by default). The opening scrape waits on the same
+# half-second marker poll as the CPU snapshot, so the flush window starts up to about half a second
+# after the measured one; the flushes are the same steady-state flushes either way. A node that cannot
+# be scraped leaves `flush.all` null with the reason in `flush.error`, and the case keeps its throughput.
 #
 # A `docker stats` snapshot is taken mid-window so a CPU-saturated node set is visible evidence (the
 # three servers share the cores of SRV_CPUSET). The window is the one the generator marks with
@@ -38,6 +44,7 @@
 # run unless ALLOW_NON_LINUX=1, which runs it as a smoke test whose numbers are not comparable.
 #
 # Knobs (env): DUR WARM CONNS BATCH RSIZE TOPICS RFS SRV_CPUSET LT_CPUSET, and
+#   MALACHI_USER, MALACHI_PASS  the dashboard login for the flush scrape (default admin / admin123)
 #   REAL_DISK            0 or 1, see above
 #   DISK_PREALLOC_BYTES  preallocation in disk mode, 1..67108864 (the broker clamps it to the 64MB
 #                        segment size, and the disk check relies on that bound)
@@ -80,6 +87,8 @@ MAX_PREALLOC_BYTES=67108864
 DISK_PREALLOC_BYTES="${DISK_PREALLOC_BYTES:-$MAX_PREALLOC_BYTES}"
 CASE_TIMEOUT="${CASE_TIMEOUT:-300}"
 OUT="${OUT:-}"
+MALACHI_USER="${MALACHI_USER:-admin}"
+MALACHI_PASS="${MALACHI_PASS:-admin123}"
 export SRV_CPUSET="${SRV_CPUSET:-4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1,2,3}"
 
 for knob in DUR WARM CONNS BATCH RSIZE TOPICS CASE_TIMEOUT DISK_PREALLOC_BYTES; do
@@ -136,6 +145,112 @@ LOADTEST_CONTAINER="malachi-cluster-loadtest-$$"
 # Created by the generator, inside its own container, the moment the measured window opens.
 MEASURE_MARKER=/tmp/malachi-measure-window
 FAILED=0
+
+# --- the nodes' own flush latency ---
+
+source scripts/metrics_scrape_lib.sh
+
+# The node a dashboard request goes to, set by the caller before each ms_* call.
+SCRAPE_NODE=""
+
+# wget ARGS inside SCRAPE_NODE: the body on a 2xx, else one line saying what went wrong (the contract
+# metrics_scrape_lib.sh states). busybox wget reports a refused request as `server returned error:
+# HTTP/1.1 <status> ...` on stderr, which is where the status comes from.
+node_request() {
+  local body err="$WORK/wget-$SCRAPE_NODE.err" status
+  if body="$(docker exec "malachi-cluster-${SCRAPE_NODE#malachi}" wget -q -O - -T 5 "$@" 2> "$err")"; then
+    printf '%s\n' "$body"
+    return 0
+  fi
+  status="$(grep -oE 'HTTP/1\.[01] [0-9]{3}' "$err" | head -1 | cut -d' ' -f2)"
+  if [ -n "$status" ]; then
+    echo "HTTP $status"
+  else
+    echo "wget on $SCRAPE_NODE failed: $(head -1 "$err")"
+  fi
+  return 1
+}
+ms_http_post() {
+  node_request --header 'Content-Type: application/json' --post-data "$2" "http://127.0.0.1:4041$1"
+}
+ms_http_get() {
+  node_request --header "Authorization: Bearer $2" --header 'Accept: text/plain' "http://127.0.0.1:4041$1"
+}
+
+declare -A FLUSH_TOKEN FLUSH_LOGIN_FAILURE
+
+# Logs in to every node before the generator starts, so opening the window costs one request per node.
+flush_login() {
+  local node token
+  rm -f "$WORK"/flush-*
+  for node in $NODES; do
+    FLUSH_LOGIN_FAILURE[$node]=""
+    SCRAPE_NODE="$node"
+    if ! token="$(ms_login "$MALACHI_USER" "$MALACHI_PASS")"; then
+      FLUSH_LOGIN_FAILURE[$node]="$token"
+      token=""
+    fi
+    FLUSH_TOKEN[$node]="$token"
+  done
+}
+
+# Opens every node's window at once, in the background; the caller waits on the pids it leaves in
+# FLUSH_OPENERS.
+flush_open() {
+  local node
+  FLUSH_OPENERS=""
+  for node in $NODES; do
+    (SCRAPE_NODE="$node" ms_open_window "${FLUSH_TOKEN[$node]}" "$WORK/flush-$node") &
+    FLUSH_OPENERS="$FLUSH_OPENERS $!"
+  done
+}
+
+# Closes every node's window, in parallel, leaving the reason a node has no window in
+# $WORK/flush-<node>.reason (absent when it has one).
+flush_close() {
+  local node pids=""
+  for node in $NODES; do
+    (
+      SCRAPE_NODE="$node"
+      reason="$(ms_close_window "${FLUSH_TOKEN[$node]}" "${FLUSH_LOGIN_FAILURE[$node]}" "$WORK/flush-$node")" ||
+        reason="${reason:-the closing scrape failed}"
+      [ -z "$reason" ] || printf '%s' "$reason" > "$WORK/flush-$node.reason"
+    ) &
+    pids="$pids $!"
+  done
+  # shellcheck disable=SC2086  # a list of pids
+  wait $pids
+}
+
+# The case's flush object: per node, all nodes added up, and why `all` is missing when it is. Computed by
+# the ceiling task in the load generator image, like the regime label; always valid JSON.
+flush_result() {
+  local rf="$1" input='{}' node result
+  for node in $NODES; do
+    if [ -e "$WORK/flush-$node.reason" ]; then
+      input="$(jq -c --arg n "$node" --rawfile e "$WORK/flush-$node.reason" '. + {($n): {error: $e}}' <<< "$input")"
+    else
+      input="$(jq -c --arg n "$node" --rawfile b "$WORK/flush-$node.before.prom" --rawfile a "$WORK/flush-$node.after.prom" \
+        '. + {($n): {before: $b, after: $a}}' <<< "$input")"
+    fi
+  done
+  result="$(jq -c '{nodes: .}' <<< "$input" |
+    RF="$rf" $COMPOSE run --rm --no-deps -T --entrypoint mix loadtest malachi.loadtest.ceiling flush-window --stdin \
+      2> "$WORK/flush-window.err" | tail -1)"
+  if jq -e 'type == "object" and has("all")' > /dev/null 2>&1 <<< "$result"; then
+    printf '%s\n' "$result"
+  else
+    jq -cn --arg e "flush-window gave no answer: $(tail -1 "$WORK/flush-window.err")" '{nodes: null, all: null, error: $e}'
+  fi
+}
+
+# One console line for the case's flush latency.
+describe_flush() {
+  jq -r 'def us: if . == null then "n/a" else (. * 1e6 | round | tostring) + "us" end;
+    if .all == null then "flush latency: none (\(.error))"
+    else "flush latency, all nodes: p50 \(.all.p50 | us), p99 \(.all.p99 | us) over \(.all.flushes) flushes (\(.all.records) records)"
+    end' <<< "$1"
+}
 
 # --- where the numbers come from ---
 
@@ -243,11 +358,16 @@ needed_bytes() { echo $((TOPICS * $1 * MALACHI_SEGMENT_PREALLOC_BYTES)); }
 # `docker stats --no-stream` samples for about two seconds before it prints (2.4s measured on Docker
 # Desktop), so it starts that much before the middle: started at the middle of a 4s window it ended
 # after the window, and the generator, already gone, was missing from the reading.
+#
+# The same moment opens the flush window on every node, in the background so the snapshot keeps its timing.
 sample_cpu() {
   until [ -e "$WORK/run.done" ]; do
     if [ "$(docker exec "$LOADTEST_CONTAINER" sh -c "test -e $MEASURE_MARKER && echo yes" 2> /dev/null)" = yes ]; then
+      flush_open
       sleep "$((DUR > 2 ? (DUR - 2) / 2 : 0))"
       docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' > "$WORK/stats.txt" 2> /dev/null
+      # shellcheck disable=SC2086  # a list of pids
+      wait $FLUSH_OPENERS
       return
     fi
     sleep 0.5
@@ -256,18 +376,19 @@ sample_cpu() {
 
 # Appends the case to OUT; a no-op without it.
 record_case() {
-  local rf="$1" outcome="$2" loadtest="${3:-null}" du_bytes="${4:-null}" cpu="${5:-}"
+  local rf="$1" outcome="$2" loadtest="${3:-null}" du_bytes="${4:-null}" cpu="${5:-}" flush="${6:-null}"
   [ -n "$OUT" ] || return 0
   jq -cn \
     --arg data_mode "$DATA_MODE" --argjson rf "$rf" --arg regime_label "${LABELS[$rf]}" \
     --arg outcome "$outcome" --argjson prealloc_bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
     --argjson du_bytes "$du_bytes" --argjson nodes "$MOUNTS_JSON" --arg host "$HOST" \
     --arg docker "$DOCKER_DESC" --arg docker_root_backing "$BACKING" --argjson smoke "$SMOKE" \
-    --arg mid_window_cpu "$cpu" --argjson loadtest "$loadtest" \
+    --arg mid_window_cpu "$cpu" --argjson loadtest "$loadtest" --argjson flush "$flush" \
     '{data_mode: $data_mode, rf: $rf, regime_label: $regime_label, outcome: $outcome,
       prealloc_bytes: $prealloc_bytes, du_bytes: $du_bytes, nodes: $nodes, host: $host, docker: $docker,
       docker_root_backing: $docker_root_backing, smoke_test: ($smoke == 1),
-      mid_window_cpu: (if $mid_window_cpu == "" then null else $mid_window_cpu end), loadtest: $loadtest}' \
+      mid_window_cpu: (if $mid_window_cpu == "" then null else $mid_window_cpu end), loadtest: $loadtest,
+      flush: $flush}' \
     >> "$OUT"
 }
 
@@ -327,6 +448,8 @@ for rf in $RFS; do
     fi
   fi
 
+  flush_login
+
   # The CPU snapshot runs beside the generator; it is evidence of who saturated, not a measurement.
   rm -f "$WORK/stats.txt" "$WORK/run.done"
   sample_cpu &
@@ -344,6 +467,8 @@ for rf in $RFS; do
   status=$?
   touch "$WORK/run.done"
   wait "$stats_pid" 2> /dev/null
+  # Right away, while the nodes still hold the window's flushes and nothing else has run.
+  flush_close
   cpu=""
   [ -s "$WORK/stats.txt" ] && cpu="$(tr '\n' ' ' < "$WORK/stats.txt" | sed 's/ $//')"
 
@@ -395,7 +520,10 @@ for rf in $RFS; do
     fi
   fi
 
-  record_case "$rf" "$outcome" "$json" "$du_bytes" "$cpu"
+  flush="$(flush_result "$rf")"
+  echo "     $(describe_flush "$flush")"
+
+  record_case "$rf" "$outcome" "$json" "$du_bytes" "$cpu" "$flush"
   teardown "$rf"
 done
 

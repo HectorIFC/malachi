@@ -52,6 +52,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   alias Malachi.Log.{Record, Segment}
   alias Malachi.Storage.Preallocation
+  alias Malachi.Telemetry
 
   @default_index_interval 4096
   @read_window_bytes 262_144
@@ -832,9 +833,24 @@ defmodule Malachi.Storage.ElixirStore do
     # On either failure the handle is returned untouched, still describing the file as it was before
     # this sync, which may no longer be true: the write can have landed and only its sync failed. That
     # is why a handle that answered an error must not be retried (see the failure contract).
+    #
+    # The write and the sync are timed as one unit because they are one durability barrier: an
+    # acknowledged produce waits for both, so splitting them would report a latency no caller sees. Only
+    # a flush that succeeded is reported. A failed one made nothing durable, and it is already counted as
+    # a storage failure by the caller that takes the copy out of service.
+    started_us = System.monotonic_time(:microsecond)
+
     with :ok <- :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata)),
          :ok <- :file.sync(store.file_descriptor) do
       %Segment{} = current_segment = store.segment
+
+      Telemetry.storage_flush(
+        System.monotonic_time(:microsecond) - started_us,
+        store.pending_bytes,
+        store.pending_count,
+        current_segment.id,
+        current_segment.directory
+      )
 
       segment = %Segment{
         current_segment

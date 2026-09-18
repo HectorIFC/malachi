@@ -66,6 +66,14 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
 - **Where the numbers came from.** The output (and each `OUT` line) records the host, the Docker
   engine, what backs the Docker root (filesystem, mount options, disk), and each node's view of its own
   data mount.
+- **Per-flush latency is the servers' own.** Each node's `/metrics` is scraped from inside the node
+  (busybox `wget` on `127.0.0.1`, since the compose file publishes no port) when the generator's
+  measured window opens and again when the generator exits, and `mix malachi.loadtest.ceiling
+  flush-window` subtracts the two, so setup, prepopulate and warmup flushes are left out. Each `OUT` line
+  carries `flush.nodes` (per node) and `flush.all` (every node's flushes added up into one
+  distribution), p50/p99/p999 and mean in seconds. The opening scrape follows the same half-second
+  marker poll as the CPU snapshot, so it starts up to about half a second into the window. A node that
+  cannot be scraped leaves `flush.all` null with the reason in `flush.error`; the throughput still counts.
 - **Linux only.** The script refuses any other host unless `ALLOW_NON_LINUX=1`, which runs it as a smoke
   test and says so.
 
@@ -74,8 +82,8 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
 both in every repetition with the order rotating (tmpfs first, then disk first, ...) so no position
 effect lands on one mode every time, on a 4-core runner (servers on cores 1-3, the generator on core 0). The spread between repetitions of one mode is the noise floor, and a difference
 between the modes is claimed only when their min to max ranges do not overlap, and never from a single
-run of either mode; the job summary states which. Per-flush latency is not part of the comparison yet,
-because the flush telemetry is not on `main`; porting it and adding it to this output is #164.
+run of either mode; the job summary states which, for rec/s, request p99, and the servers' flush p50
+and p99, and lists any measured case that has no flush latency with the reason.
 
 ## Mechanism investigations
 
