@@ -1,56 +1,39 @@
 defmodule Malachi.Metrics.PrometheusTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Histogram
   alias Malachi.Metrics.Prometheus
+  alias Malachi.Test.MetricsFixtures
 
-  # A minimal system snapshot with the shape Prometheus.export/2 reads.
-  defp system do
-    %{
-      process_count: 120,
-      process_limit: 262_144,
-      run_queue: 0,
-      schedulers_online: 8,
-      ets_tables: 45,
-      uptime_seconds: 3600,
-      memory: %{total_mb: 40.0, processes_mb: 10.0, ets_mb: 2.0, atom_mb: 1.0, binary_mb: 0.5},
-      io: %{input_bytes: 1000, output_bytes: 2000},
-      atom_table: %{atom_count: 20_000, atom_limit: 1_048_576},
-      rate_limiting: %{auth_blocked: 5, publish_blocked: 0, subscribe_blocked: 1, connection_blocks: 3},
-      security: %{
-        failed_auth_attempts: 7,
-        account_lockouts: 2,
-        active_sessions: 4,
-        active_lockouts: 1,
-        dashboard: %{auth_success: 10, auth_failed: 3, auth_blocked: 0}
-      },
-      tls: %{enabled: true, handshakes_success: 9, handshakes_failed: 1},
-      operations: %{
-        records_produced: 100,
-        bytes_produced: 4096,
-        records_consumed: 80,
-        auth_ok: 12,
-        auth_error: 3,
-        replication_ok: 50,
-        replication_no_quorum: 1,
-        integrity_bad_crc: 2,
-        integrity_bad_magic: 0,
-        integrity_incomplete: 1,
-        integrity_short_copy: 0,
-        integrity_bad_index: 4,
-        storage_failure_enospc: 6,
-        storage_failure_eio: 1,
-        storage_failure_eacces: 0,
-        storage_failure_other: 2,
-        scrub_segments_verified: 4200,
-        scrub_segments_repaired: 3,
-        scrub_segments_unrepairable: 2,
-        orphaned_fences: 3,
-        fences_reconciled: 2
-      }
-    }
+  # 1000 flushes below 4ms, 900 of them below 1ms, and 2 past the last edge, which only `+Inf` counts.
+  defp flush do
+    buckets =
+      for edge <- Histogram.edges() do
+        cond do
+          edge < 1000 -> {edge, 0}
+          edge < 4000 -> {edge, 900}
+          true -> {edge, 1000}
+        end
+      end
+
+    %{buckets: buckets, count: 1002, sum_us: 1_500_000, bytes: 2_048_000, records: 10_000, created: 1_789_000_000.25}
   end
 
-  defp render(topics), do: Prometheus.export(system(), topics) |> IO.iodata_to_binary()
+  # A node that has not flushed yet, which is what `Malachi.Metrics.storage_flush_histogram/0` returns
+  # before the first flush.
+  defp no_flush do
+    %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0, created: 0.0}
+  end
+
+  defp render(topics, flush \\ flush()),
+    do: Prometheus.export(MetricsFixtures.system(), topics, flush) |> IO.iodata_to_binary()
+
+  defp bucket_lines(out) do
+    for line <- String.split(out, "\n"),
+        [_, le, count] <- [Regex.run(~r/^malachi_storage_flush_duration_seconds_bucket\{le="([^"]+)"\} (\d+)$/, line)] do
+      {le, String.to_integer(count)}
+    end
+  end
 
   test "emits HELP/TYPE and a value line per series" do
     out = render([])
@@ -156,5 +139,65 @@ defmodule Malachi.Metrics.PrometheusTest do
       render([%{name: ~s(a"b\\c), range_count: 1, active_range_count: 1, segment_count: 0, total_bytes: 0, groups: []}])
 
     assert out =~ ~S(malachi_topic_ranges{topic="a\"b\\c"} 1)
+  end
+
+  describe "storage flush histogram" do
+    test "renders a histogram block in seconds: every edge, +Inf, sum and count" do
+      out = render([])
+
+      assert out =~
+               "# HELP malachi_storage_flush_duration_seconds Group-commit flush latency: the write plus sync " <>
+                 "every acknowledged produce waits behind\n" <>
+                 "# TYPE malachi_storage_flush_duration_seconds histogram\n" <>
+                 ~s(malachi_storage_flush_duration_seconds_bucket{le="8.0e-6"} 0\n)
+
+      # Microseconds in, seconds out; 1024us and 2048us are exact edges.
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="0.001024"} 900\n)
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="0.004096"} 1000\n)
+      assert out =~ ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="16.777216"} 1000\n)
+
+      assert out =~
+               ~s(\nmalachi_storage_flush_duration_seconds_bucket{le="+Inf"} 1002\n) <>
+                 "malachi_storage_flush_duration_seconds_sum 1.5\n" <>
+                 "malachi_storage_flush_duration_seconds_count 1002\n"
+    end
+
+    test "the buckets are the exported edges, ascending, with +Inf last" do
+      lines = bucket_lines(render([]))
+      {finite, [{"+Inf", 1002}]} = Enum.split(lines, -1)
+
+      assert Enum.map(finite, fn {le, _count} -> String.to_float(le) end) ==
+               Enum.map(Histogram.edges(), &(&1 / 1_000_000))
+    end
+
+    test "renders when the histogram began as a gauge of its own" do
+      out = render([])
+
+      assert out =~
+               "# TYPE malachi_storage_flush_duration_seconds_created gauge\n" <>
+                 "malachi_storage_flush_duration_seconds_created 1789000000.25\n"
+    end
+
+    test "renders the durability totals as counters" do
+      out = render([])
+
+      assert out =~ "# TYPE malachi_storage_flushed_bytes_total counter\nmalachi_storage_flushed_bytes_total 2048000\n"
+
+      assert out =~
+               "# TYPE malachi_storage_flushed_records_total counter\nmalachi_storage_flushed_records_total 10000\n"
+    end
+
+    # A freshly booted node is scraped before its first flush. It must render zeros rather than crash or
+    # omit the series: a scraper that only sees the series under load cannot alert on its absence.
+    test "a node that has never flushed renders every series at zero" do
+      out = render([], no_flush())
+
+      assert length(bucket_lines(out)) == length(Histogram.edges()) + 1
+      assert Enum.all?(bucket_lines(out), fn {_le, count} -> count == 0 end)
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_sum 0.0\n"
+      assert out =~ "\nmalachi_storage_flush_duration_seconds_count 0\n"
+      assert out =~ "\nmalachi_storage_flushed_bytes_total 0\n"
+      assert out =~ "\nmalachi_storage_flushed_records_total 0\n"
+    end
   end
 end

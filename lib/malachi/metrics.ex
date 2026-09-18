@@ -12,10 +12,19 @@ defmodule Malachi.Metrics do
   use GenServer
   require Logger
   alias Malachi.Auth.{LockoutManager, SessionManager}
+  alias Malachi.Histogram
   alias Malachi.I18n
   alias Malachi.Telemetry.MetricsReporter
 
   @metrics_table :malachi_metrics
+  # The storage flush numbers live in :atomics reached through :persistent_term, not in ETS. Every
+  # segment's owner flushes on its own, so tens of thousands of writers a second hit the same few
+  # counters, and an ETS row serializes concurrent writers to one key while an :atomics add takes no lock
+  # at all. persistent_term is read-mostly by design (a put triggers a global scan), so the term is put
+  # once, at the first init, and reused by every restart after it.
+  @storage_flush_key {__MODULE__, :storage_flush}
+  @flushed_bytes_slot 1
+  @flushed_records_slot 2
 
   @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
@@ -52,6 +61,83 @@ defmodule Malachi.Metrics do
   def record_consume(count) do
     :ets.update_counter(@metrics_table, :records_consumed, {2, count}, {:records_consumed, 0})
     :ok
+  end
+
+  @doc """
+  Records one group-commit flush (from the storage flush telemetry event): `duration_us` into the latency
+  histogram, plus the bytes and records it made durable.
+
+  Four lock-free adds, not one atomic write: a scrape that lands between them can see a flush in the
+  count before its duration is in the sum, which skews a windowed mean by at most one flush. A no-op when
+  `Malachi.Metrics` never started, so a store used on its own does not need it.
+  """
+  @spec record_flush(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
+  def record_flush(duration_us, bytes, records) do
+    case :persistent_term.get(@storage_flush_key, nil) do
+      nil ->
+        :ok
+
+      %{histogram: histogram, totals: totals} ->
+        :ok = Histogram.record(histogram, duration_us)
+        :ok = :atomics.add(totals, @flushed_bytes_slot, bytes)
+        :atomics.add(totals, @flushed_records_slot, records)
+    end
+  end
+
+  @doc """
+  The storage flush histogram as the Prometheus exporter needs it: the count of flushes at or below each
+  of `Malachi.Histogram.edges/0`, the total count and the sum in microseconds, the durability totals, and
+  `created`, the Unix time in seconds when this node's histogram began.
+
+  `created` is what tells two scrapes of one histogram from scrapes on either side of a node restart: it
+  changes only when the node boots again, never on a `Malachi.Metrics` restart, which keeps the samples.
+  Counters alone cannot tell, since a restarted node can flush past its old totals before the next scrape.
+  Kept out of `get_system_metrics/0`, which is snapshotted every second and sent to the dashboard, neither
+  of which has any use for the buckets. All zeros when `Malachi.Metrics` never started.
+  """
+  @spec storage_flush_histogram() :: %{
+          buckets: [{float(), non_neg_integer()}],
+          count: non_neg_integer(),
+          sum_us: non_neg_integer(),
+          bytes: non_neg_integer(),
+          records: non_neg_integer(),
+          created: float()
+        }
+  def storage_flush_histogram do
+    case :persistent_term.get(@storage_flush_key, nil) do
+      nil ->
+        %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0, created: 0.0}
+
+      %{histogram: histogram, created: created} = state ->
+        # The count comes from the same pass as the buckets, so `+Inf` is never below the last edge.
+        {buckets, count} = Histogram.cumulative(histogram)
+        Map.merge(storage_flush_totals(state), %{buckets: buckets, count: count, created: created})
+    end
+  end
+
+  # The flush summary the dashboard shows: totals plus percentiles cumulative since the node booted (the
+  # histogram never decays). A windowed view comes from subtracting two scrapes of the exported buckets.
+  defp storage_flush_summary do
+    case :persistent_term.get(@storage_flush_key, nil) do
+      nil ->
+        %{count: 0, sum_us: 0, bytes: 0, records: 0, p50_us: 0.0, p99_us: 0.0, p999_us: 0.0}
+
+      %{histogram: histogram} = state ->
+        Map.merge(storage_flush_totals(state), %{
+          p50_us: Histogram.percentile(histogram, 50),
+          p99_us: Histogram.percentile(histogram, 99),
+          p999_us: Histogram.percentile(histogram, 99.9)
+        })
+    end
+  end
+
+  defp storage_flush_totals(%{histogram: histogram, totals: totals}) do
+    %{
+      count: Histogram.count(histogram),
+      sum_us: Histogram.sum(histogram),
+      bytes: :atomics.get(totals, @flushed_bytes_slot),
+      records: :atomics.get(totals, @flushed_records_slot)
+    }
   end
 
   @doc "Records an authentication attempt with `result` (`:ok` / `:error`)."
@@ -318,6 +404,7 @@ defmodule Malachi.Metrics do
         orphaned_fences: get_counter(:orphaned_fences),
         fences_reconciled: get_counter(:fences_reconciled)
       },
+      storage_flush: storage_flush_summary(),
       atom_table: get_atom_monitor_stats(),
       memory_details: get_memory_monitor_stats()
     }
@@ -363,6 +450,17 @@ defmodule Malachi.Metrics do
       :named_table,
       read_concurrency: true
     ])
+
+    # Before the reporter is attached, so no flush event can arrive to a missing histogram. Reused across
+    # restarts: the samples are the node's history, and dropping them on a Metrics crash would silently
+    # reset a percentile an operator is watching.
+    if :persistent_term.get(@storage_flush_key, nil) == nil do
+      :persistent_term.put(@storage_flush_key, %{
+        histogram: Histogram.new(),
+        totals: :atomics.new(2, signed: false),
+        created: System.system_time(:millisecond) / 1000
+      })
+    end
 
     # Fold the telemetry hot-path events into these counters. Attached here so the ETS table exists
     # first; idempotent, so a Metrics restart re-attaches cleanly.

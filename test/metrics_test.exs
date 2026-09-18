@@ -33,6 +33,63 @@ defmodule Malachi.MetricsTest do
     end
   end
 
+  describe "storage flush state" do
+    @flush_key {Malachi.Metrics, :storage_flush}
+
+    test "the bucket list is left out of the per-second snapshot" do
+      summary = Malachi.Metrics.get_system_metrics().storage_flush
+
+      assert Map.keys(summary) |> Enum.sort() == [:bytes, :count, :p50_us, :p999_us, :p99_us, :records, :sum_us]
+    end
+
+    test "storage_flush_histogram/0 lists every exported edge" do
+      histogram = Malachi.Metrics.storage_flush_histogram()
+
+      assert Enum.map(histogram.buckets, &elem(&1, 0)) == Malachi.Histogram.edges()
+      assert Enum.all?([histogram.count, histogram.sum_us, histogram.bytes, histogram.records], &is_integer/1)
+      # When this node's histogram began: a Unix time, not a duration.
+      assert is_float(histogram.created)
+      assert_in_delta histogram.created, System.system_time(:second), 86_400 * 365
+    end
+
+    test "without the state, recording is a no-op and every reading is zero" do
+      state = :persistent_term.get(@flush_key)
+      :persistent_term.erase(@flush_key)
+
+      try do
+        assert Malachi.Metrics.record_flush(1000, 10, 1) == :ok
+
+        assert %{count: 0, sum_us: 0, bytes: 0, records: 0, created: +0.0, buckets: buckets} =
+                 Malachi.Metrics.storage_flush_histogram()
+
+        assert Enum.all?(buckets, fn {_edge, count} -> count == 0 end)
+        assert length(buckets) == length(Malachi.Histogram.edges())
+
+        assert Malachi.Metrics.get_system_metrics().storage_flush ==
+                 %{count: 0, sum_us: 0, bytes: 0, records: 0, p50_us: 0.0, p99_us: 0.0, p999_us: 0.0}
+      after
+        :persistent_term.put(@flush_key, state)
+      end
+    end
+
+    test "a Metrics restart keeps the recorded flushes" do
+      :ok = Malachi.Metrics.record_flush(1000, 10, 1)
+      before = Malachi.Metrics.storage_flush_histogram()
+      state = :persistent_term.get(@flush_key)
+
+      :ok = Supervisor.terminate_child(Malachi.Supervisor, Malachi.Metrics)
+      {:ok, _pid} = Supervisor.restart_child(Malachi.Supervisor, Malachi.Metrics)
+
+      assert :persistent_term.get(@flush_key) == state
+      assert Malachi.Metrics.storage_flush_histogram().created == before.created
+      assert Malachi.Metrics.storage_flush_histogram().count >= before.count
+
+      # And the re-attached reporter still folds flush events into it.
+      Malachi.Telemetry.storage_flush(1000, 10, 1, "segment-0", "/tmp/seg")
+      assert Malachi.Metrics.storage_flush_histogram().count >= before.count + 1
+    end
+  end
+
   describe "metrics history" do
     test "takes snapshots periodically" do
       original = Application.get_env(:malachi, :metrics_snapshot_interval_ms)

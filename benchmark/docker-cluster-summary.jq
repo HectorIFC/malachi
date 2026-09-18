@@ -7,6 +7,10 @@
 # order, and a difference between the modes is claimed only when their min to max ranges do not
 # overlap, and never from a single run of either mode, whose range is a point with no spread to measure
 # noise by.
+#
+# The per-flush latency is the servers' own (`.flush.all`, every node's flushes in the measured window
+# added up), in microseconds. A measured case without it still counts for throughput, and is listed with
+# the reason its flush latency is missing.
 
 def median:
   sort | length as $n
@@ -18,6 +22,8 @@ def median:
 def spread(f): [.[] | f | select(. != null)] | {runs: length, median: median, min: min, max: max};
 
 def show: if .median == null then "n/a" else "\(.median) (\(.min) to \(.max))" end;
+
+def flush_us(q): if .flush.all[q] == null then null else .flush.all[q] * 1e6 | round end;
 
 def verdict($name; $tmpfs; $disk):
   if $tmpfs.median == null or $disk.median == null then "\($name): not comparable, one mode has no result"
@@ -31,13 +37,14 @@ def verdict($name; $tmpfs; $disk):
 map(select(.outcome | startswith("ok"))) as $measured
 | map(select(.outcome | startswith("ok") | not)) as $failed
 | [
-    "| RF | data | runs | rec/s, median (min to max) | p50 ms | p99 ms | filesystem |",
-    "|---|---|---|---|---|---|---|"
+    "| RF | data | runs | rec/s, median (min to max) | p50 ms | p99 ms | flush p50 us | flush p99 us | filesystem |",
+    "|---|---|---|---|---|---|---|---|---|"
   ]
   + [
       $measured | group_by([.rf, .data_mode])[]
       | "| \(.[0].rf) | \(.[0].data_mode) | \(length) | \(spread(.loadtest.records_per_s) | show) "
         + "| \(spread(.loadtest.latency_ms.p50) | show) | \(spread(.loadtest.latency_ms.p99) | show) "
+        + "| \(spread(flush_us("p50")) | show) | \(spread(flush_us("p99")) | show) "
         + "| \([.[].nodes[].fstype] | unique | join(", ")) |"
     ]
   + ["", "Disk against tmpfs, per RF (a difference counts only when the min to max ranges are disjoint):"]
@@ -49,6 +56,10 @@ map(select(.outcome | startswith("ok"))) as $measured
         + verdict("rec/s"; $tmpfs | spread(.loadtest.records_per_s); $disk | spread(.loadtest.records_per_s))
         + "; "
         + verdict("p99 ms"; $tmpfs | spread(.loadtest.latency_ms.p99); $disk | spread(.loadtest.latency_ms.p99))
+        + "; "
+        + verdict("flush p50 us"; $tmpfs | spread(flush_us("p50")); $disk | spread(flush_us("p50")))
+        + "; "
+        + verdict("flush p99 us"; $tmpfs | spread(flush_us("p99")); $disk | spread(flush_us("p99")))
     ]
   + (if ($measured | length) == 0 then ["- no case produced a result"] else [] end)
   + [
@@ -57,6 +68,11 @@ map(select(.outcome | startswith("ok"))) as $measured
       "Docker: \(map(.docker) | unique | join("; "))",
       "Volumes: \(map(.docker_root_backing) | unique | join("; "))"
     ]
+  + ([$measured[] | select(.flush.all == null)] as $unflushed
+     | if ($unflushed | length) == 0 then []
+       else ["", "Measured cases without flush latency:"]
+         + [$unflushed[] | "- RF \(.rf), \(.data_mode): \(.flush.error // "not scraped")"]
+       end)
   + (if ($failed | length) == 0 then []
      else ["", "Failed cases:"] + [$failed[] | "- RF \(.rf), \(.data_mode): \(.outcome)"]
      end)

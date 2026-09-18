@@ -1,8 +1,9 @@
 defmodule Malachi.Telemetry.MetricsReporter do
   @moduledoc """
-  The default telemetry handler: folds the `Malachi.Telemetry` hot-path events into the ETS
-  `Malachi.Metrics` counters, so produce/consume/auth/replication totals show up on the Prometheus
-  `/metrics` endpoint without every operator wiring their own handler. Attached once at boot (when
+  The default telemetry handler: folds the `Malachi.Telemetry` hot-path events into the
+  `Malachi.Metrics` counters and its storage flush histogram, so produce/consume/auth/replication totals
+  and flush latency show up on the Prometheus `/metrics` endpoint without every operator wiring their
+  own handler. Attached once at boot (when
   `Malachi.Metrics` starts); users may still attach their own handlers alongside this one.
   """
 
@@ -15,6 +16,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :consume],
     [:malachi, :auth],
     [:malachi, :replication, :commit],
+    [:malachi, :storage, :flush],
     [:malachi, :storage, :integrity],
     [:malachi, :storage, :failure],
     [:malachi, :storage, :scrub],
@@ -45,6 +47,10 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :replication, :commit], _measurements, %{result: result}, _config) do
     Metrics.record_replication(result)
+  end
+
+  def handle_event([:malachi, :storage, :flush], measurements, _metadata, _config) do
+    Metrics.record_flush(measurements.duration_us, measurements.bytes, measurements.records)
   end
 
   # A torn frame at the END of an ACTIVE segment is ordinary crash recovery: those bytes were never

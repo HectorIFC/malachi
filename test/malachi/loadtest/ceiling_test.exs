@@ -486,6 +486,38 @@ defmodule Malachi.Loadtest.CeilingTest do
                hd(item(result, 10)["rungs"])
     end
 
+    test "the representative repetition supplies the rung's flush latency too" do
+      sweep = sweep(%{batch_ladder: "10", conns_ladders: ["10=32"], repetitions: "3"})
+      rates = %{1 => 300, 2 => 100, 3 => 200}
+
+      runs =
+        runs(sweep, fn
+          10, 32, 1 ->
+            result(10, 32, %{"records_per_s" => rates[1], "flush_latency_error" => "login refused (HTTP 403)"})
+
+          10, 32, rep ->
+            result(10, 32, %{"records_per_s" => rates[rep], "flush_latency_seconds" => %{"p99" => rep / 1000}})
+        end)
+
+      assert {:ok, result} = Ceiling.summarize(sweep, runs, nil)
+      assert result["flush_latency_seconds"] == %{"p99" => 0.003}
+
+      assert %{"flush_latency_seconds" => %{"p99" => 0.003}, "flush_latency_error" => nil} =
+               hd(item(result, 10)["rungs"])
+
+      assert %{"flush_latency_seconds" => %{"p99" => 0.003}} = item(result, 10)["peak"]
+    end
+
+    test "a representative run without a flush window carries its reason" do
+      sweep = sweep(%{batch_ladder: "10", conns_ladders: ["10=32"], repetitions: "1"})
+      runs = runs(sweep, fn 10, 32, _rep -> result(10, 32, %{"flush_latency_error" => "curl not found"}) end)
+
+      assert {:ok, result} = Ceiling.summarize(sweep, runs, nil)
+
+      assert %{"flush_latency_seconds" => nil, "flush_latency_error" => "curl not found"} =
+               hd(item(result, 10)["rungs"])
+    end
+
     test "with an even count the median is the lower middle value, one a run actually measured" do
       sweep = sweep(%{batch_ladder: "10", conns_ladders: ["10=32"], repetitions: "2"})
       runs = runs(sweep, fn 10, 32, rep -> result(10, 32, %{"records_per_s" => rep * 100}) end)
