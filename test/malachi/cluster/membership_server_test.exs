@@ -5,6 +5,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Test.UnknownMessages
 
   # Tight timings so the detector converges quickly in tests.
   @timings [protocol_period: 15, ack_timeout: 15, suspicion_timeout: 90]
@@ -257,5 +258,15 @@ defmodule Malachi.Cluster.MembershipServerTest do
       # b adopts a's topology through gossip and its hook fires
       assert_receive {:b_adopted, %RingTopology{version: 1}}, 2_000
     end
+  end
+
+  # Every cast here is a SWIM message from another node, so a newer member's new message is the first
+  # thing an older one meets during a rolling upgrade.
+  test "an unknown SWIM message, info message or call is counted and survived" do
+    name = start_node(:"ms_unknown_#{System.unique_integer([:positive])}", [])
+
+    UnknownMessages.assert_survives_unknown(name, :membership, fn ->
+      assert MembershipServer.alive_members(name) == [name]
+    end)
   end
 end
