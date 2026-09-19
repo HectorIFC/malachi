@@ -3,6 +3,8 @@ defmodule Malachi.UnexpectedMessageTest do
 
   import ExUnit.CaptureLog
 
+  alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Log.Record
   alias Malachi.Test.UnknownMessages
   alias Malachi.UnexpectedMessage
 
@@ -33,6 +35,10 @@ defmodule Malachi.UnexpectedMessageTest do
     do: send(test, {:drop, metadata.server, metadata.kind, metadata.shape})
 
   def forward(_event, _measurements, _metadata, _config), do: :ok
+
+  @doc false
+  def count(_event, %{count: 1}, %{pid: pid}, %{pid: pid, counter: counter}), do: :counters.add(counter, 1, 1)
+  def count(_event, _measurements, _metadata, _config), do: :ok
 
   defp collect(acc) do
     receive do
@@ -140,6 +146,38 @@ defmodule Malachi.UnexpectedMessageTest do
 
   test "the call reply is the documented cross-version contract" do
     assert UnexpectedMessage.unknown_call_reply() == {:error, :unknown_call}
+  end
+
+  # A newer primary pushing thousands of batches a second at an older follower must cost that follower
+  # a count per message, not a log line per message: a logger pushed into synchronous mode would slow the
+  # process that holds every log on the node.
+  test "a flood of one unknown shape is one log line and a count per message, and the server keeps serving" do
+    name = :"unexpected_flood_#{System.unique_integer([:positive])}"
+    directory = Path.join(System.tmp_dir!(), "malachi_unexpected_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    start_supervised!({ReplicationServer, [name: name, directory: directory]}, id: name)
+    segment = {{"flood", 0}, 0}
+    assert {:ok, 0} = ReplicationServer.replicate(name, segment, [name], 0, [Record.new("kept", key: "k")])
+
+    pid = Process.whereis(name)
+    UnknownMessages.expect_from(pid)
+    counter = :counters.new(1, [])
+    handler_id = {__MODULE__, make_ref()}
+
+    :ok = :telemetry.attach(handler_id, @event, &__MODULE__.count/4, %{pid: pid, counter: counter})
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    log =
+      capture_log(fn ->
+        for i <- 1..50_000, do: GenServer.cast(name, {:replica_append_v2, segment, i, UnknownMessages.secret()})
+        assert {:ok, [%Record{value: "kept"}]} = ReplicationServer.read(name, segment, 0, 10)
+      end)
+
+    assert :counters.get(counter, 1) == 50_000
+    assert [_one] = warning_lines(log, "replication process dropping an unexpected cast: {:replica_append_v2")
+    refute log =~ UnknownMessages.secret()
+    assert Process.whereis(name) == pid
   end
 
   defp capture_log_result(fun) do
