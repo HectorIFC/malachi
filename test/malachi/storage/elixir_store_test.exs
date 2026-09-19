@@ -637,6 +637,91 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "a preserved tail on an ACTIVE segment refuses appends" do
+    # Recovery keeps rot (and a frame from a newer format, which looks the same to it) and hands back
+    # a handle whose write position is where those kept bytes START. Appending there overwrote them,
+    # records the cluster may already have acknowledged included. The handle now reads its valid
+    # prefix and refuses to write, which the replication server turns into a storage failure.
+    defp rotted_active(directory, opts \\ []) do
+      {:ok, store} = seed_frames(directory, 0..4, opts)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      corrupt_payload_byte(path, 2)
+      path
+    end
+
+    test "append answers :damaged_tail and the file is untouched", %{tmp_dir: directory} do
+      path = rotted_active(directory)
+      before = File.read!(path)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert ElixirStore.append(recovered, [rec("overwrite")]) == {:error, :damaged_tail}
+      assert {:ok, synced} = ElixirStore.sync(recovered)
+      :ok = ElixirStore.close(synced)
+      assert File.read!(path) == before
+    end
+
+    test "the valid prefix still reads and the integrity verdict is still reported", %{tmp_dir: directory} do
+      rotted_active(directory)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert %{reason: :bad_crc, sealed?: false} = ElixirStore.integrity(recovered)
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1"]
+    end
+
+    test "an empty append stays a no-op", %{tmp_dir: directory} do
+      rotted_active(directory)
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert {:ok, _store, 2, 1} = ElixirStore.append(recovered, [])
+    end
+
+    test "the same holds in a preallocated segment, and closing does not trim the kept bytes",
+         %{tmp_dir: directory} do
+      path = rotted_active(directory, prealloc_bytes: 128 * 1024)
+      before = File.read!(path)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: 128 * 1024)
+
+      assert ElixirStore.append(recovered, [rec("overwrite")]) == {:error, :damaged_tail}
+      :ok = ElixirStore.close(recovered)
+      assert File.read!(path) == before
+    end
+
+    test "the refusal survives another recovery", %{tmp_dir: directory} do
+      rotted_active(directory)
+      {:ok, first} = ElixirStore.recover(directory, "segment-0")
+      :ok = ElixirStore.close(first)
+
+      {:ok, second} = ElixirStore.recover(directory, "segment-0")
+      assert ElixirStore.append(second, [rec("overwrite")]) == {:error, :damaged_tail}
+    end
+
+    test "a torn tail on an active segment is still repaired and stays writable", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      truncate_to(path, frame_position(path, 4) + 3)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert {:ok, _store, 4, 4} = ElixirStore.append(recovered, [rec("v4 again")])
+    end
+
+    test "a sealed segment keeps answering :sealed", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      {:ok, store} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(store)
+      corrupt_payload_byte(Segment.path(store.segment), 2)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+      assert ElixirStore.append(recovered, [rec("x")]) == {:error, :sealed}
+    end
+  end
+
   describe "integrity/1" do
     test "a clean recovery reports :ok, and so does a freshly opened segment", %{tmp_dir: directory} do
       {:ok, store} = seed_frames(directory, 0..2)

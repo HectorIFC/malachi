@@ -1,0 +1,420 @@
+defmodule Malachi.Storage.FormatMarker do
+  @moduledoc """
+  The data-directory format marker: a small plain-text file at the root of the log data directory
+  that records which on-disk format the directory holds, so a binary that cannot read that format
+  refuses to start instead of opening it.
+
+  Without it, an older release started on data a newer one wrote does not fail. Recovery reads the
+  unknown frame as damage, preserves it, and the node carries on. The marker turns that into a refusal
+  before any process opens a segment.
+
+  ## The file
+
+      format=1
+      written_by=0.12.0
+      requires=0.12.0
+
+  `format` is the level, `written_by` the release that wrote the file, and `requires` the oldest
+  release that understands `format`. The last one is recorded by the WRITER because only the writer
+  can know it: a binary refusing a marker from its future has no other way to name the release the
+  operator should go back to. Unknown keys are ignored, so a later release may add some.
+
+  The parser is strict about everything else. All three keys must be present exactly once and the
+  file must end with a newline, so a marker cut short anywhere reads as invalid rather than as a lower
+  level: `format=12` truncated to `format=1` must never let a release that only understands 1 start.
+  An invalid marker refuses, which is the conservative answer.
+
+  ## The rule
+
+  A binary starts on a directory only when the marker is at or below the highest format it
+  understands (`supported_format/0`). No marker means either a fresh directory or one written before
+  the marker existed; both get a marker at `current_format/0`, the level this release writes. The
+  marker only rises, and it rises when a format-changing feature is switched on through the cluster
+  flag, never because a newer binary merely started. `raise_to/3` is that mechanism.
+
+  ## Durability
+
+  Erlang cannot fsync a directory (`:file.open/2` on one answers `:eisdir`, the same limit
+  `Malachi.Log` documents for its seal marker), so the two writes are shaped around what a lost
+  directory entry would mean:
+
+    * **Creation** writes a temporary file with `:sync` and renames it into place. If a crash loses the
+      new directory entry, the next boot finds no marker and writes `current_format/0` again, which is
+      exactly what was being written. Nothing is lost.
+    * **Raising** overwrites the existing file in place and fsyncs it, without a rename. The file's own
+      fsync makes the new content durable with no new directory entry to lose. A write torn by a crash
+      leaves a file that fails the strict parse, so the node refuses to start, again the conservative
+      answer. A rename here would be wrong: losing its directory entry would bring back the OLD level
+      after new-format bytes were written, which is the very bug the marker exists to prevent.
+  """
+
+  require Logger
+
+  alias Malachi.I18n
+
+  @file_name "malachi.format"
+  @temp_name "malachi.format.tmp"
+
+  # The level this release writes into a directory that has no marker.
+  @current_format 1
+  # The highest level this release can read.
+  @supported_format 1
+
+  # The oldest release that understands each format. The bridge release is the first that reads the
+  # marker at all, so it is the floor for format 1 as far as the marker can express one.
+  @first_release %{1 => "0.12.0"}
+
+  # sysexits EX_CONFIG: the node cannot run with what it was given. A distinct status so a crash loop
+  # under a restart policy is recognizable, and so a service manager can be told not to restart on it.
+  @exit_status 78
+
+  @required_keys ["format", "written_by", "requires"]
+
+  for format <- 1..@supported_format do
+    unless Map.has_key?(@first_release, format),
+      do: raise(CompileError, description: "no first release recorded for format #{format}")
+  end
+
+  @typedoc "A parsed marker."
+  @type marker :: %{format: pos_integer(), written_by: String.t(), requires: String.t()}
+
+  @typedoc "Why a marker could not be parsed."
+  @type parse_error ::
+          :missing_newline
+          | :malformed_line
+          | {:duplicate_key, String.t()}
+          | {:missing_key, String.t()}
+          | {:bad_format, String.t()}
+
+  @typedoc "What was found where the marker should be."
+  @type observation :: {:absent, :fresh | :existing} | {:ok, marker()} | {:error, parse_error()}
+
+  @typedoc "Why a directory is refused, with the marker path for the message."
+  @type refusal ::
+          {:too_new, marker(), pos_integer(), Path.t()}
+          | {:invalid, parse_error(), Path.t()}
+          | {:io, atom(), Path.t()}
+
+  @doc "The marker's path under `dir`."
+  @spec path(Path.t()) :: Path.t()
+  def path(dir), do: Path.join(dir, @file_name)
+
+  @doc "The format level this release writes into a directory without a marker."
+  @spec current_format() :: pos_integer()
+  def current_format, do: @current_format
+
+  @doc "The highest format level this release can read."
+  @spec supported_format() :: pos_integer()
+  def supported_format, do: @supported_format
+
+  @doc "The exit status of a refused start (78, EX_CONFIG)."
+  @spec exit_status() :: non_neg_integer()
+  def exit_status, do: @exit_status
+
+  @doc """
+  Renders `marker` as the file's content.
+
+  ## Examples
+
+      iex> Malachi.Storage.FormatMarker.render(%{format: 1, written_by: "0.12.0", requires: "0.12.0"})
+      "format=1\\nwritten_by=0.12.0\\nrequires=0.12.0\\n"
+  """
+  @spec render(marker()) :: String.t()
+  def render(%{format: format, written_by: written_by, requires: requires}) do
+    "format=#{format}\nwritten_by=#{written_by}\nrequires=#{requires}\n"
+  end
+
+  @doc """
+  Parses the file's content. Never raises: anything that is not a complete marker is an error.
+
+  ## Examples
+
+      iex> Malachi.Storage.FormatMarker.parse("format=2\\nwritten_by=0.13.0\\nrequires=0.13.0\\n")
+      {:ok, %{format: 2, written_by: "0.13.0", requires: "0.13.0"}}
+
+      iex> Malachi.Storage.FormatMarker.parse("format=2\\nwritten_by=0.13.0\\nrequires=0.1")
+      {:error, :missing_newline}
+  """
+  @spec parse(binary()) :: {:ok, marker()} | {:error, parse_error()}
+  def parse(content) when is_binary(content) do
+    with :ok <- terminated(content),
+         {:ok, pairs} <- pairs(content),
+         :ok <- required(pairs),
+         {:ok, format} <- format_level(Map.fetch!(pairs, "format")) do
+      {:ok, %{format: format, written_by: Map.fetch!(pairs, "written_by"), requires: Map.fetch!(pairs, "requires")}}
+    end
+  end
+
+  defp terminated(content) do
+    if String.ends_with?(content, "\n"), do: :ok, else: {:error, :missing_newline}
+  end
+
+  defp pairs(content) do
+    content
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, acc} ->
+      case String.split(line, "=", parts: 2) do
+        [key, value] ->
+          key = String.trim(key)
+
+          if Map.has_key?(acc, key),
+            do: {:halt, {:error, {:duplicate_key, key}}},
+            else: {:cont, {:ok, Map.put(acc, key, String.trim(value))}}
+
+        [_no_equals] ->
+          {:halt, {:error, :malformed_line}}
+      end
+    end)
+  end
+
+  defp required(pairs) do
+    case Enum.find(@required_keys, &(not Map.has_key?(pairs, &1))) do
+      nil -> :ok
+      key -> {:error, {:missing_key, key}}
+    end
+  end
+
+  defp format_level(value) do
+    case Integer.parse(value) do
+      {level, ""} when level >= 1 -> {:ok, level}
+      _other -> {:error, {:bad_format, value}}
+    end
+  end
+
+  @doc """
+  What to do about `observation` for a binary that reads up to `supported`. Pure.
+
+    * `{:write, level, kind}` - no marker: write one at `level` (`kind` says whether the directory
+      held data already, for the log line).
+    * `:ok` - the marker is readable by this binary.
+    * `{:refuse, reason}` - the marker is from a newer format, or is not a marker.
+  """
+  @spec decide(observation(), pos_integer()) ::
+          :ok
+          | {:write, pos_integer(), :fresh | :existing}
+          | {:refuse, {:too_new, marker(), pos_integer()} | {:invalid, parse_error()}}
+  def decide({:absent, kind}, _supported), do: {:write, @current_format, kind}
+  def decide({:ok, %{format: format}}, supported) when format <= supported, do: :ok
+  def decide({:ok, marker}, supported), do: {:refuse, {:too_new, marker, supported}}
+  def decide({:error, reason}, _supported), do: {:refuse, {:invalid, reason}}
+
+  @doc """
+  Reads the marker in `dir`. A missing marker is reported with whether the directory already holds
+  anything else (segments, shard subdirectories), which only changes the log line.
+  """
+  @spec read(Path.t()) :: {:ok, observation()} | {:error, {:io, atom()}}
+  def read(dir) do
+    case File.read(path(dir)) do
+      {:ok, content} -> {:ok, parse(content)}
+      {:error, :enoent} -> with {:ok, kind} <- data_state(dir), do: {:ok, {:absent, kind}}
+      {:error, posix} -> {:error, {:io, posix}}
+    end
+  end
+
+  # Anything at the root other than the marker and its temporary file counts as data. A missing
+  # directory is a fresh one.
+  defp data_state(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        {:ok, if(Enum.any?(entries, &(&1 not in [@file_name, @temp_name])), do: :existing, else: :fresh)}
+
+      {:error, :enoent} ->
+        {:ok, :fresh}
+
+      {:error, posix} ->
+        {:error, {:io, posix}}
+    end
+  end
+
+  @doc """
+  Creates the marker in `dir` at `format`, written by release `version`: a temporary file written
+  with `:sync`, then renamed into place (see the moduledoc on why a lost rename is harmless here).
+  A leftover temporary file from an earlier crash is overwritten.
+  """
+  @spec write(Path.t(), pos_integer(), String.t()) :: :ok | {:error, {:io, atom()}}
+  def write(dir, format, version \\ release_version()) do
+    temp = Path.join(dir, @temp_name)
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(temp, render(marker(format, version)), [:sync]),
+         :ok <- File.rename(temp, path(dir)) do
+      :ok
+    else
+      {:error, posix} -> {:error, {:io, posix}}
+    end
+  end
+
+  @doc """
+  Raises the marker in `dir` to `format`, in place and fsynced (see the moduledoc on why this is not
+  a rename). The marker only rises: the same level is a no-op, a lower one is refused, and so is a
+  level above what this binary reads, since the node would then refuse its own next start. There
+  must already be a marker: creating one here would go through a directory entry nothing fsyncs.
+
+  Must return `:ok` BEFORE the first byte of the new format is written.
+
+  Options (for tests, since this release reads only format 1 and so has nothing to raise to):
+  `:supported` (default `supported_format/0`), `:requires` (default the recorded first release of
+  `format`) and `:version` (default this release's version).
+  """
+  @spec raise_to(Path.t(), pos_integer(), keyword()) ::
+          :ok
+          | {:error,
+             :no_marker
+             | {:lower, pos_integer(), pos_integer()}
+             | {:unsupported, pos_integer()}
+             | {:no_first_release, pos_integer()}
+             | {:invalid, parse_error()}
+             | {:io, atom()}}
+  def raise_to(dir, format, opts \\ []) do
+    supported = Keyword.get(opts, :supported, @supported_format)
+
+    if format > supported do
+      {:error, {:unsupported, format}}
+    else
+      raise_within(dir, format, opts)
+    end
+  end
+
+  defp raise_within(dir, format, opts) do
+    case read(dir) do
+      {:ok, {:ok, %{format: ^format}}} ->
+        :ok
+
+      {:ok, {:ok, %{format: current}}} when current > format ->
+        {:error, {:lower, current, format}}
+
+      {:ok, {:ok, _lower}} ->
+        raise_over(dir, format, opts)
+
+      {:ok, {:absent, _kind}} ->
+        {:error, :no_marker}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:invalid, reason}}
+
+      {:error, _io} = error ->
+        error
+    end
+  end
+
+  # A level with no recorded first release cannot be written: the marker would have no `requires` to
+  # name, and an older binary refusing it could not tell the operator where to go.
+  defp raise_over(dir, format, opts) do
+    case first_release(format, opts) do
+      {:ok, requires} ->
+        marker = %{format: format, written_by: Keyword.get(opts, :version, release_version()), requires: requires}
+        overwrite(path(dir), render(marker))
+
+      :error ->
+        {:error, {:no_first_release, format}}
+    end
+  end
+
+  defp first_release(format, opts) do
+    case Keyword.fetch(opts, :requires) do
+      {:ok, _requires} = given -> given
+      :error -> Map.fetch(@first_release, format)
+    end
+  end
+
+  defp overwrite(file, content) do
+    result =
+      case :file.open(file, [:read, :write, :raw, :binary]) do
+        {:ok, fd} ->
+          try do
+            write_synced(fd, content)
+          after
+            _ = :file.close(fd)
+          end
+
+        {:error, _posix} = error ->
+          error
+      end
+
+    io_result(result)
+  end
+
+  # The whole content from byte 0, then cut at its end so a shorter marker leaves no stale bytes, then
+  # the fsync that makes it durable without any directory entry involved.
+  defp write_synced(fd, content) do
+    with :ok <- :file.pwrite(fd, 0, content),
+         {:ok, _position} <- :file.position(fd, byte_size(content)),
+         :ok <- :file.truncate(fd) do
+      :file.sync(fd)
+    end
+  end
+
+  defp io_result(:ok), do: :ok
+  defp io_result({:error, posix}), do: {:error, {:io, posix}}
+
+  defp marker(format, version),
+    do: %{format: format, written_by: version, requires: Map.fetch!(@first_release, format)}
+
+  @doc """
+  The startup gate: reads the marker in `dir`, writes one when there is none, and answers whether the
+  node may start. Options (for tests): `:supported` (default `supported_format/0`) and `:version`
+  (default this release's version).
+  """
+  @spec enforce(Path.t(), keyword()) :: :ok | {:refuse, refusal()}
+  def enforce(dir, opts \\ []) do
+    supported = Keyword.get(opts, :supported, @supported_format)
+    version = Keyword.get(opts, :version, release_version())
+    file = path(dir)
+
+    with {:ok, observation} <- read(dir),
+         :ok <- act(decide(observation, supported), dir, version) do
+      :ok
+    else
+      {:refuse, {:too_new, marker, supported}} -> {:refuse, {:too_new, marker, supported, file}}
+      {:refuse, {:invalid, reason}} -> {:refuse, {:invalid, reason, file}}
+      {:error, {:io, posix}} -> {:refuse, {:io, posix, file}}
+    end
+  end
+
+  defp act(:ok, _dir, _version), do: :ok
+  defp act({:refuse, _reason} = refusal, _dir, _version), do: refusal
+
+  defp act({:write, format, kind}, dir, version) do
+    with :ok <- write(dir, format, version) do
+      log_created(kind, format, path(dir))
+    end
+  end
+
+  defp log_created(:fresh, format, file),
+    do: Logger.info(I18n.t(:data_format_marker_created_fresh, format: format, path: file))
+
+  defp log_created(:existing, format, file),
+    do: Logger.info(I18n.t(:data_format_marker_created_existing, format: format, path: file))
+
+  @doc """
+  Refuses the start: logs one line through I18n, prints the same line on stderr (a container log
+  shows it even when the logger has not flushed), and halts with `exit_status/0` through `halt_fun`.
+  """
+  @spec refuse!(refusal(), (non_neg_integer() -> any())) :: any()
+  def refuse!(reason, halt_fun \\ &System.halt/1) do
+    detail = refusal_detail(reason)
+    Logger.error(I18n.t(:data_format_refused, detail: detail))
+    IO.puts(:stderr, I18n.t(:data_format_refused, detail: detail))
+    halt_fun.(@exit_status)
+  end
+
+  defp refusal_detail({:too_new, marker, supported, file}) do
+    I18n.t(:data_format_too_new,
+      format: marker.format,
+      supported: supported,
+      requires: marker.requires,
+      written_by: marker.written_by,
+      path: file
+    )
+  end
+
+  defp refusal_detail({:invalid, reason, file}),
+    do: I18n.t(:data_format_marker_invalid, reason: inspect(reason), path: file)
+
+  defp refusal_detail({:io, posix, file}),
+    do: I18n.t(:data_format_marker_io_failed, reason: inspect(posix), path: file)
+
+  defp release_version, do: :malachi |> Application.spec(:vsn) |> to_string()
+end
