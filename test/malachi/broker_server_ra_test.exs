@@ -72,7 +72,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
     # The consume/fetch path (what the chaos verify uses) works too.
-    {consumed, _next} = BrokerServer.consume(second, "events", %{}, 100, 0)
+    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
     assert length(consumed) == 5
 
     # And producing continues cleanly after the restart (recovered offsets + segment seq floor).
@@ -113,7 +113,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert {:ok, records} = BrokerServer.read(second, root, 0, 100)
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
-    {consumed, _next} = BrokerServer.consume(second, "events", %{}, 100, 0)
+    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
     assert length(consumed) == 5, "a cold replication server must not report durable records as drained"
 
     :ok = BrokerServer.stop(second)
@@ -213,7 +213,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert BrokerServer.metadata_ready?(server), "a node serving from its retained view is ready"
     assert {:ok, [record]} = BrokerServer.read(server, root, 0, 100)
     assert record.value == "v1"
-    assert {[_], _positions} = BrokerServer.consume(server, "events", %{}, 100, 0)
+    assert {[_], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 0)
 
     :ok = BrokerServer.stop(server)
   end
@@ -275,7 +275,7 @@ defmodule Malachi.BrokerServerRaTest do
     results = for i <- 0..19, do: BrokerServer.consume(control, "gate_t#{i}", %{}, 100, 0)
 
     refused = Enum.filter(results, &match?({:error, :metadata_unavailable}, &1))
-    answered = Enum.filter(results, &match?({[], _positions}, &1))
+    answered = Enum.filter(results, &match?({[], _positions, []}, &1))
 
     assert refused != [], "expected topics routed to the unreachable vnode to be refused"
     assert answered != [], "expected topics routed to the reachable vnode to still be served"
@@ -378,7 +378,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert length(segment.replica_set) == 3
 
     # committed (quorum-durable) records read back through the broker's primary
-    {read, _cursor} = BrokerServer.consume(control, "events", %{}, 100, 0)
+    {read, _cursor, _skips} = BrokerServer.consume(control, "events", %{}, 100, 0)
     assert read |> Enum.map(& &1.value) |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
 
     :ok = BrokerServer.stop(control)

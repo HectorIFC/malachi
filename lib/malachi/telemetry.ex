@@ -46,8 +46,26 @@ defmodule Malachi.Telemetry do
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
       running.
 
+    * `[:malachi, :retention, :skip]`. `%{count: 1, offsets}` / `%{topic, group, range, source_range,
+      origin, span}` - a consumer was moved past data that is no longer stored (expired by retention,
+      or removed by an operator), once per distinct skip (a re-read before the commit is not counted
+      again). `group` is `nil` for a fetch outside a group. `origin` is `:start` for a reader that had
+      no position (a new group, or a child range after a split) and `:cursor` for one that resumed from
+      a position, which is the reader that fell behind retention. `span` says how far `offsets` can be
+      trusted: `:exact`, `:upper_bound` (the data was an ancestor's, of which this range would only have
+      received its key slice) or `:unknown` (the ancestor's end was not recovered after a restart;
+      `offsets` is then 0). See `Malachi.Broker.Skip`.
+
+  Reserved for later retention work, not emitted yet, so that the names are chosen once:
+
+    * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
+    * `[:malachi, :retention, :pinned]` - segments a consumer group keeps from expiring.
+    * `[:malachi, :storage, :roll]` with `reason: :size | :time` - why a segment was rolled.
+
   Emitting is a no-op fast path when nothing is attached, so these are safe on the hot path.
   """
+
+  alias Malachi.Broker.Skip
 
   @doc "Records appended to `topic` (`count` records, `bytes` total value bytes)."
   @spec produce(String.t(), non_neg_integer(), non_neg_integer()) :: :ok
@@ -122,6 +140,23 @@ defmodule Malachi.Telemetry do
   @spec fence_reconciled(non_neg_integer()) :: :ok
   def fence_reconciled(count) do
     :telemetry.execute([:malachi, :cluster, :fence_reconciled], %{count: count}, %{})
+  end
+
+  @doc """
+  `group` (a consumer group, or `nil` outside one) was moved past the data `skip` describes on `topic`.
+  """
+  @spec retention_skip(String.t(), String.t() | nil, Skip.t()) :: :ok
+  def retention_skip(topic, group, %Skip{} = skip) do
+    offsets = if skip.offsets == :unknown, do: 0, else: skip.offsets
+
+    :telemetry.execute([:malachi, :retention, :skip], %{count: 1, offsets: offsets}, %{
+      topic: topic,
+      group: group,
+      range: skip.range_id,
+      source_range: skip.source_range_id,
+      origin: skip.origin,
+      span: Skip.span(skip)
+    })
   end
 
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."

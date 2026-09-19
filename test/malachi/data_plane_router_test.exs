@@ -121,7 +121,7 @@ defmodule Malachi.DataPlaneRouterTest do
   end
 
   defp consume_values(broker, topic) do
-    {records, _next} = BrokerServer.consume(broker, topic, %{}, 1000, 0)
+    {records, _next, _skips} = BrokerServer.consume(broker, topic, %{}, 1000, 0)
     Enum.map(records, & &1.value)
   end
 end

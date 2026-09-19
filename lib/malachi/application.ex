@@ -48,6 +48,7 @@ defmodule Malachi.Application do
   alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Retention.SkipReporter
   alias Malachi.TLSValidator
 
   # The replicated user store's dedicated ra cluster name (see `user_store_children/1`).
@@ -249,6 +250,7 @@ defmodule Malachi.Application do
           ring_reconciler_child(nodes),
           membership_child(nodes, topology),
           replication_child(),
+          skip_reporter_child(Malachi.LogBroker),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
         ] ++ scrubber_children()
       else
@@ -257,7 +259,7 @@ defmodule Malachi.Application do
         # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
         # the scrubber asks for its replication server.
         Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
+          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
         end)
       end
 
@@ -933,6 +935,13 @@ defmodule Malachi.Application do
 
   # The per-vnode leader gate: true only while this node leads the vnode's ra group.
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
+
+  # The reporter beside a data-plane broker, turning the data its readers were moved past into telemetry
+  # and a rate-limited log line. Started before the broker, so the broker's first push finds it.
+  defp skip_reporter_child(broker_name) do
+    name = SkipReporter.name_for(broker_name)
+    %{id: name, start: {SkipReporter, :start_link, [[name: name]]}}
+  end
 
   defp log_broker_child(cluster, nodes, name, dir, vnodes) do
     # log_roll_opts reaches the single-node broker too: without an external broker set it starts its own

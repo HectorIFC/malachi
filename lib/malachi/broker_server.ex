@@ -34,6 +34,7 @@ defmodule Malachi.BrokerServer do
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
+  alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
@@ -45,6 +46,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Retention.SkipReporter
   alias Malachi.Telemetry
   alias OpenTelemetry.Ctx
 
@@ -95,6 +97,9 @@ defmodule Malachi.BrokerServer do
     * `:group_commit_max_inflight` - past this many parked records, shed produces with `:overloaded`
       instead of dropping the connection (default 200000, or app env).
     * `:segment_max_bytes` - byte threshold at which the active segment asks to roll.
+    * `:skip_reporter` - the `Malachi.Retention.SkipReporter` that push subscriptions report skipped
+      data to. Defaults to `Malachi.Retention.SkipReporter.name_for/1` of `:name` (nil, so no reporting,
+      for an unnamed server).
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
     * standard `GenServer` options (`:name`, etc.) are honored.
@@ -104,6 +109,7 @@ defmodule Malachi.BrokerServer do
     {gen_server_opts, broker_opts} =
       Keyword.split(opts, [:name, :timeout, :debug, :spawn_opt, :hibernate_after])
 
+    broker_opts = Keyword.put_new(broker_opts, :skip_reporter, SkipReporter.name_for(gen_server_opts[:name]))
     GenServer.start_link(__MODULE__, {directory, broker_opts}, gen_server_opts)
   end
 
@@ -132,15 +138,20 @@ defmodule Malachi.BrokerServer do
 
   @doc "Reads one cross-epoch consume page of a range, tailing the active range (see `Malachi.Broker.read_consume/5`)."
   @spec read_consume(GenServer.server(), Malachi.Metadata.range_id(), Broker.consume_cursor(), pos_integer()) ::
-          {:ok, [Malachi.Log.Record.t()], Broker.consume_cursor()} | {:error, term()}
+          {:ok, [Malachi.Log.Record.t()], Broker.consume_cursor(), [Skip.t()]} | {:error, term()}
   def read_consume(server, range_id, cursor, max_records),
     do: GenServer.call(server, {:read_consume, range_id, cursor, max_records})
 
   @doc """
-  Consumes a topic's current ranges from `positions`, returning `{records, next_positions}`. When
-  `wait_ms > 0` and nothing is available yet, the call blocks (long-poll) until a produce to the
-  topic delivers data or `wait_ms` elapses (then `records` is `[]`). With `wait_ms == 0` it returns
-  immediately. `positions`/`next_positions` map each range id to its `Broker.consume_cursor`.
+  Consumes a topic's current ranges from `positions`, returning `{records, next_positions, skips}`.
+  When `wait_ms > 0` and nothing is available yet, the call blocks (long-poll) until a produce to the
+  topic delivers data or `wait_ms` elapses (then `records` and `skips` are `[]`). With `wait_ms == 0`
+  it returns immediately. `positions`/`next_positions` map each range id to its
+  `Broker.consume_cursor`.
+
+  `skips` are the stretches of history the returned positions moved past because they were no longer
+  stored (`Malachi.Broker.Skip`), for the caller to attribute: this server does not know which consumer
+  group a fetch belongs to, so it neither counts nor logs them here.
   """
   @spec consume(
           GenServer.server(),
@@ -150,7 +161,7 @@ defmodule Malachi.BrokerServer do
           non_neg_integer(),
           [term()] | nil
         ) ::
-          {[Malachi.Log.Record.t()], map()} | {:error, :metadata_unavailable}
+          {[Malachi.Log.Record.t()], map(), [Skip.t()]} | {:error, term()}
   def consume(server, topic, positions, max_records, wait_ms, ranges \\ nil) do
     # The call may block up to wait_ms server-side; give it headroom over the default 5s call timeout.
     GenServer.call(server, {:consume, topic, positions, max_records, wait_ms, ranges}, wait_ms + 5_000)
@@ -312,6 +323,7 @@ defmodule Malachi.BrokerServer do
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
     {metadata_vnodes, opts} = Keyword.pop(opts, :metadata_vnodes)
     {bootstrap_orchestrator, opts} = Keyword.pop(opts, :bootstrap_orchestrator, fn -> true end)
+    {skip_reporter, opts} = Keyword.pop(opts, :skip_reporter)
     {external_brokers, log_opts} = Keyword.pop(opts, :brokers)
 
     # With an external broker set we use it as-is; otherwise we own a single local store.
@@ -370,6 +382,8 @@ defmodule Malachi.BrokerServer do
       # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
       # commit the group's position. See `wake_subscribers/3` / `push_subscriber/2`.
       subscribers: %{},
+      # Where a push reports the data it moved a subscriber past (see `push_subscriber/3`); nil = nowhere.
+      skip_reporter: skip_reporter,
       # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
       # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
       # one fsync. Gated on rf=1 (the append path does no follower fan-out). `pending_produce` holds the
@@ -548,7 +562,7 @@ defmodule Malachi.BrokerServer do
     positions = if ranges, do: Map.take(positions, ranges), else: positions
 
     subscriber =
-      push_subscriber(state.broker, %{
+      push_subscriber(state.broker, state.skip_reporter, %{
         pid: pid,
         ref: ref,
         topic: topic,
@@ -582,7 +596,7 @@ defmodule Malachi.BrokerServer do
       |> Map.get(topic, [])
       |> Enum.map(fn sub ->
         if sub.pid == pid do
-          push_subscriber(broker, %{
+          push_subscriber(broker, state.skip_reporter, %{
             sub
             | in_flight: max(sub.in_flight - count, 0),
               ranges: ranges || sub.ranges,
@@ -684,7 +698,7 @@ defmodule Malachi.BrokerServer do
   def handle_info({:longpoll_timeout, ref}, state) do
     case Enum.split_with(state.waiters, &(&1.ref == ref)) do
       {[waiter], rest} ->
-        GenServer.reply(waiter.from, {[], waiter.positions})
+        GenServer.reply(waiter.from, {[], waiter.positions, []})
         {:noreply, %{state | waiters: rest}}
 
       # Already woken by a produce (timer raced the reply); nothing to do.
@@ -1165,7 +1179,7 @@ defmodule Malachi.BrokerServer do
   defp refresh_broker_attributes(broker, attributes_fun), do: Broker.set_broker_attributes(broker, attributes_fun.())
 
   # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
-  # returns {records, next_positions}. This is the read orchestration the LogApi used to do client-side;
+  # returns {records, next_positions, skips}. This is the read orchestration the LogApi used to do client-side;
   # holding it here lets a single call serve a fetch and lets produce re-run it to wake long-pollers.
   # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
   # (a group member's assignment) consumes only those, intersected with the active set, so a stale
@@ -1179,7 +1193,7 @@ defmodule Malachi.BrokerServer do
 
       # Caught up and willing to wait: park the request; a later produce to this topic (or the
       # timeout) replies. Hold the original positions (and range scope) so the wake re-consumes the same.
-      {:ok, {[], _positions}} when wait_ms > 0 ->
+      {:ok, {[], _positions, _skips}} when wait_ms > 0 ->
         ref = make_ref()
         timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
 
@@ -1195,8 +1209,8 @@ defmodule Malachi.BrokerServer do
 
         {:noreply, %{state | waiters: [waiter | state.waiters]}}
 
-      {:ok, {records, next_positions}} ->
-        {:reply, {records, next_positions}, state}
+      {:ok, {records, next_positions, skips}} ->
+        {:reply, {records, next_positions, skips}, state}
     end
   end
 
@@ -1232,20 +1246,21 @@ defmodule Malachi.BrokerServer do
     end
   end
 
+  # The skips of every range read ride along, in range order, for whoever delivers the page to attribute.
   defp consume_ranges(broker, topic, positions, max_records, ranges) do
     broker
     |> selected_ranges(topic, ranges)
-    |> Enum.reduce_while({:ok, {[], positions}}, fn range_id, {:ok, {acc, positions}} ->
+    |> Enum.reduce_while({:ok, {[], positions, []}}, fn range_id, {:ok, {acc, positions, skips}} ->
       cursor = Map.get(positions, range_id, :start)
 
       case Broker.read_consume(broker, range_id, cursor, max_records, &ReplicationServer.read/4) do
-        {:ok, records, next_cursor} ->
-          {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor)}}}
+        {:ok, records, next_cursor, range_skips} ->
+          {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor), skips ++ range_skips}}}
 
         # A range the control plane no longer knows (a stale assignment whose range has since split)
         # holds nothing for this consumer; skipping it is the right answer, not a failure.
         {:error, :no_such_range} ->
-          {:cont, {:ok, {acc, positions}}}
+          {:cont, {:ok, {acc, positions, skips}}}
 
         # Anything else is a read that FAILED: an unreachable segment primary, a storage error. This
         # used to fall into the same skip, so the page came back short (often empty) and successful,
@@ -1429,12 +1444,12 @@ defmodule Malachi.BrokerServer do
           {:error, _reason} ->
             [waiter | keep]
 
-          {:ok, {[], _positions}} ->
+          {:ok, {[], _positions, _skips}} ->
             [waiter | keep]
 
-          {:ok, {records, next_positions}} ->
+          {:ok, {records, next_positions, skips}} ->
             Process.cancel_timer(waiter.timer)
-            GenServer.reply(waiter.from, {records, next_positions})
+            GenServer.reply(waiter.from, {records, next_positions, skips})
             keep
         end
       end)
@@ -1452,13 +1467,19 @@ defmodule Malachi.BrokerServer do
         state
 
       subs ->
-        %{state | subscribers: Map.put(state.subscribers, topic, Enum.map(subs, &push_subscriber(state.broker, &1)))}
+        %{
+          state
+          | subscribers:
+              Map.put(state.subscribers, topic, Enum.map(subs, &push_subscriber(state.broker, state.skip_reporter, &1)))
+        }
     end
   end
 
   # Pushes up to the subscriber's remaining window credit (min with `max`) of records from its current
   # position, advancing the position and the in-flight count. A no-op when out of credit or caught up.
-  defp push_subscriber(broker, subscriber) do
+  # The push is the one delivery path that already serves a known group, so it reports the skips it
+  # delivered itself, to the reporter beside this broker; fetches hand theirs back to `Malachi.LogApi`.
+  defp push_subscriber(broker, skip_reporter, subscriber) do
     budget = min(subscriber.max, subscriber.window - subscriber.in_flight)
 
     if budget <= 0 do
@@ -1471,11 +1492,12 @@ defmodule Malachi.BrokerServer do
         {:error, _reason} ->
           subscriber
 
-        {:ok, {[], _positions}} ->
+        {:ok, {[], _positions, _skips}} ->
           subscriber
 
-        {:ok, {records, next_positions}} ->
+        {:ok, {records, next_positions, skips}} ->
           send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})
+          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
           %{subscriber | positions: next_positions, in_flight: subscriber.in_flight + length(records)}
       end
     end

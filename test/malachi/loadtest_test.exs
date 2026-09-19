@@ -102,7 +102,7 @@ defmodule Malachi.LoadtestTest do
 
       # every fanned-out topic was created and got records (each is independently consumable)
       for i <- 0..2 do
-        {records, _next} = Malachi.BrokerServer.consume(Malachi.LogBroker, "#{t}_#{i}", %{}, 1000, 0)
+        {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, "#{t}_#{i}", %{}, 1000, 0)
         assert records != [], "topic #{t}_#{i} should have received records"
       end
     end
