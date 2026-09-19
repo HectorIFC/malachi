@@ -7,7 +7,9 @@ defmodule Malachi.Loadtest do
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
   lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
   server-shed `overloaded` produces, quota-refused `rate_limited` produces, and reconnects) and a
-  `Malachi.Histogram` for latency. A worker connects and authenticates, waits at a barrier so all
+  `Malachi.Histogram` for latency. A genuine error (any refusal other than those two) is also counted
+  under the reason the server gave, in a table the report returns as `error_reasons`, so a run that
+  records errors says which ones; the reasons always add up to `errors`. A worker connects and authenticates, waits at a barrier so all
   connections start together, runs its scenario for `warmup + duration`, and records only during the
   measured window. It is resilient: a shed produce backs off and continues, and a dropped connection
   reconnects (capped) rather than aborting.
@@ -66,7 +68,8 @@ defmodule Malachi.Loadtest do
            warmup_end: integer(),
            measure_end: integer(),
            conn_opts: keyword(),
-           pipeline: pos_integer()
+           pipeline: pos_integer(),
+           reasons: :ets.tid()
          }
 
   @doc """
@@ -78,12 +81,27 @@ defmodule Malachi.Loadtest do
     cfg = normalize(opts)
     setup(cfg)
 
+    # Genuine errors by reason. A table rather than a `:counters` slot because the reasons are only known
+    # when the server sends them; errors are rare, so the shared writes cost nothing on the hot path.
+    reasons = :ets.new(:loadtest_error_reasons, [:set, :public, write_concurrency: true])
+
+    try do
+      measure(cfg, reasons)
+    after
+      :ets.delete(reasons)
+    end
+  end
+
+  defp measure(cfg, reasons) do
     ops = :counters.new(@counters, [:write_concurrency])
     hist = Histogram.new()
     parent = self()
 
     # The gate only exists for the bounded strategy; the other strategies pace themselves.
-    cfg = Map.put(cfg, :gate, if(cfg.connect_strategy == :bounded, do: start_gate(cfg.connect_concurrency)))
+    cfg =
+      cfg
+      |> Map.put(:gate, if(cfg.connect_strategy == :bounded, do: start_gate(cfg.connect_concurrency)))
+      |> Map.put(:reasons, reasons)
 
     workers =
       for index <- 0..(cfg.connections - 1) do
@@ -410,7 +428,8 @@ defmodule Malachi.Loadtest do
       warmup_end: warmup_end,
       measure_end: measure_end,
       conn_opts: conn_opts,
-      pipeline: cfg.pipeline
+      pipeline: cfg.pipeline,
+      reasons: cfg.reasons
     }
 
     conn = drive(cfg, conn, ctx, m)
@@ -625,8 +644,8 @@ defmodule Malachi.Loadtest do
         st = %{st | cursor: if(records == [], do: nil, else: next_cursor)}
         {{:ok, length(records)}, conn, %{ctx | op: {:fetch, st}}}
 
-      {:ok, _code, _resp, conn} ->
-        {:error, conn, ctx}
+      {:ok, _code, resp, conn} ->
+        {genuine_error(resp), conn, ctx}
 
       {:error, _reason} ->
         {:halt, conn, ctx}
@@ -642,8 +661,8 @@ defmodule Malachi.Loadtest do
         {:ok, _c, _r, conn} = Conn.request(conn, Wire.delete_user_key(), corr + 1, Wire.encode_delete_user_req(user))
         {{:ok, 1}, conn, %{ctx | op: {:user, %{st | seq: st.seq + 1}}}}
 
-      {:ok, _code, _resp, conn} ->
-        {:error, conn, ctx}
+      {:ok, _code, resp, conn} ->
+        {genuine_error(resp), conn, ctx}
 
       {:error, _reason} ->
         {:halt, conn, ctx}
@@ -660,8 +679,8 @@ defmodule Malachi.Loadtest do
         {:ok, _c, _r, conn} = Conn.request(conn, Wire.revoke_acl_key(), corr + 1, acl)
         {{:ok, 1}, conn, %{ctx | op: {:acl, %{st | seq: st.seq + 1}}}}
 
-      {:ok, _code, _resp, conn} ->
-        {:error, conn, ctx}
+      {:ok, _code, resp, conn} ->
+        {genuine_error(resp), conn, ctx}
 
       {:error, _reason} ->
         {:halt, conn, ctx}
@@ -672,16 +691,19 @@ defmodule Malachi.Loadtest do
   defp produce_status(0, <<count::32>>), do: {:ok, count}
   defp produce_status(_code, resp), do: error_status(resp)
 
-  # An error response is one of the server's two refusals, both light events the worker backs off on
-  # (`:overloaded` from the group-commit valve, `:rate_limited` from the configured publish quota), or a
-  # genuine error (`:error`).
+  # A produce error response is one of the server's two refusals, both light events the worker backs off
+  # on (`:overloaded` from the group-commit valve, `:rate_limited` from the configured publish quota), or a
+  # genuine error that keeps its reason.
   defp error_status(resp) do
     case Wire.decode_error_reason(resp) do
       "overloaded" -> :overloaded
       "rate_limited" -> :rate_limited
-      _genuine -> :error
+      reason -> {:error, reason}
     end
   end
+
+  # Any other operation's error response: always genuine, and always with the reason the server gave.
+  defp genuine_error(resp), do: {:error, Wire.decode_error_reason(resp)}
 
   # A refusal the worker retries through, as opposed to a completed op or a genuine error.
   defp shed?(status), do: status in [:overloaded, :rate_limited]
@@ -696,7 +718,10 @@ defmodule Malachi.Loadtest do
     Histogram.record(m.hist, dt)
   end
 
-  defp record(m, :error, _dt, true), do: :counters.add(m.ops, @errors, 1)
+  defp record(m, {:error, reason}, _dt, true) do
+    :counters.add(m.ops, @errors, 1)
+    :ets.update_counter(m.reasons, reason, 1, {reason, 0})
+  end
 
   # The server refused a produce: count it under its own reason (during the measured window) and back off
   # briefly so the worker does not immediately re-flood the broker.
@@ -753,6 +778,7 @@ defmodule Malachi.Loadtest do
   # --- report ---
 
   defp build_report(cfg, ops, hist) do
+    error_reasons = Map.new(:ets.tab2list(cfg.reasons))
     op_count = :counters.get(ops, @ops)
     records = :counters.get(ops, @records)
     errors = :counters.get(ops, @errors)
@@ -775,6 +801,7 @@ defmodule Malachi.Loadtest do
       ops: op_count,
       records: records,
       errors: errors,
+      error_reasons: error_reasons,
       dropped: dropped,
       overloaded: overloaded,
       rate_limited: rate_limited,
@@ -1008,7 +1035,21 @@ defmodule Malachi.Loadtest do
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}
     """)
 
+    print_error_reasons(r.error_reasons)
+
     warn_if_empty(r)
+  end
+
+  # Only when there is something to name, most frequent first, so a clean run prints what it always did.
+  defp print_error_reasons(reasons) when map_size(reasons) == 0, do: :ok
+
+  defp print_error_reasons(reasons) do
+    listed =
+      reasons
+      |> Enum.sort_by(fn {reason, n} -> {-n, reason} end)
+      |> Enum.map_join("  ", fn {reason, n} -> "#{reason}=#{n}" end)
+
+    IO.puts("  error reasons: #{listed}")
   end
 
   # A run that recorded nothing is not "server idle": name the likely cause so it is never a silent zero.

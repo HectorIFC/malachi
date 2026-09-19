@@ -28,12 +28,13 @@ defmodule LoadtestJsTest do
 
   # `stderr: true` folds the generator's error output into the returned string, for the cases that are
   # about what it refuses. The default keeps stderr out, so a run's JSON is the whole of stdout.
+  # `user:` and `pass:` run it as someone other than admin.
   defp run_js(ctx, args, opts \\ []) do
     env = [
       {"MALACHI_HOST", "127.0.0.1"},
       {"MALACHI_PORT", Integer.to_string(@port)},
-      {"MALACHI_USER", "admin"},
-      {"MALACHI_PASS", "admin123"}
+      {"MALACHI_USER", Keyword.get(opts, :user, "admin")},
+      {"MALACHI_PASS", Keyword.get(opts, :pass, "admin123")}
     ]
 
     System.cmd(ctx.node, [@script | args], env: env, stderr_to_stdout: Keyword.get(opts, :stderr, false))
@@ -57,7 +58,7 @@ defmodule LoadtestJsTest do
       # After the last authentication AND the whole warmup: the connections are kept through it, so the
       # last authentication happens before the warmup starts.
       assert appeared_at >= List.last(auths) + 1_000 - LoadtestProbes.poll_ms()
-      assert {:ok, %{"errors" => 0}} = Jason.decode(output)
+      assert {:ok, %{"errors" => 0, "error_reasons" => %{}}} = Jason.decode(output)
     end
 
     test "is left out of the recorded command, value included", ctx do
@@ -175,7 +176,34 @@ defmodule LoadtestJsTest do
 
       assert regime.(node_output) == flags
       assert regime.(elixir_report) == flags
+
+      # The error breakdown too: same name, same shape (reason to count), empty on a clean run.
+      assert %{"errors" => 0, "error_reasons" => %{}} = Jason.decode!(node_output)
+      assert %{"errors" => 0, "error_reasons" => %{}} = Jason.decode!(elixir_report)
     end
+  end
+
+  describe "error reasons" do
+    test "a refused fetch is counted under the reason the broker gave", ctx do
+      # May produce, so the topic is created, but may not consume.
+      {user, pass} = add_user([:produce])
+      args = ~w(--scenario fetch --json --connections 2 --duration 1 --prepopulate 0 --topic) ++ [topic()]
+
+      assert {output, 0} = run_js(ctx, args, user: user, pass: pass)
+      report = Jason.decode!(output)
+
+      assert report["errors"] > 0
+      assert report["error_reasons"] == %{"permission_denied" => report["errors"]}
+    end
+  end
+
+  # A user with `permissions` on the test server, removed when the test ends.
+  defp add_user(permissions) do
+    user = "ltjs_user_#{System.unique_integer([:positive])}"
+    pass = "Ltjs-Pass-1!"
+    Malachi.Auth.add_user(user, pass, permissions)
+    on_exit(fn -> Malachi.Auth.remove_user(user) end)
+    {user, pass}
   end
 
   describe "connections across the warmup" do

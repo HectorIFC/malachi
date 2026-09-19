@@ -123,6 +123,10 @@ class Stats {
     this.min = Infinity;
     this.max = -Infinity;
     this.errors = 0;
+    // errors by reason: the server's reason for a refusal, or the client's message for a local failure
+    // (this generator counts transport failures as errors too). Always adds up to `errors`. Mirrors the
+    // Elixir generator's `error_reasons`.
+    this.errorReasons = {};
     this.records = 0;
     this.bytes = 0;
     this.hist = new Histogram();
@@ -141,8 +145,10 @@ class Stats {
     this.hist.record(Math.round(latencyMs * 1000)); // ms -> us
   }
 
-  error() {
+  error(err) {
     this.errors += 1;
+    const reason = err && err.message ? err.message : 'unknown';
+    this.errorReasons[reason] = (this.errorReasons[reason] || 0) + 1;
   }
 
   // { p: latencyMs } for each requested percentile.
@@ -253,7 +259,7 @@ async function closedLoop(clients, makeOpFor, deadline, stats) {
           const { records, bytes } = await op(client, ctx);
           stats.record(performance.now() - t0, records, bytes);
         } catch (err) {
-          stats.error();
+          stats.error(err);
           if (err.message === 'not connected' || /closed/.test(err.message)) break;
           // Back off briefly so a persistent error (e.g. a permission or topic issue) throttles instead
           // of pegging a core and inflating the error count with a tight retry spin.
@@ -294,7 +300,7 @@ async function openLoop(clients, makeOpFor, opts, durationMs, stats) {
         // fetch is stateful; a fresh ctx per request makes each fetch read from the start (stateless load).
         op(client, { cursor: null })
           .then(({ records, bytes }) => stats.record(performance.now() - intended, records, bytes))
-          .catch(() => stats.error())
+          .catch((err) => stats.error(err))
           .finally(() => {
             inflight -= 1;
           });
@@ -341,13 +347,13 @@ async function streamDriver(clients, opts, durationMs, stats) {
                 stats.record(0, records.length, recordBytes(records));
                 client.streamAck(opts.topic, group, null, cursor, records.length);
               },
-              onError: () => {
-                stats.error();
+              onError: (err) => {
+                stats.error(err);
                 stop();
               },
             })
-            .catch(() => {
-              stats.error();
+            .catch((err) => {
+              stats.error(err);
               stop();
             });
         })
@@ -537,6 +543,7 @@ function report(scenario, opts, elapsedMs, stats) {
           bytes: stats.bytes,
           mb_per_s: Number((stats.bytes / 1e6 / secs).toFixed(3)),
           errors: stats.errors,
+          error_reasons: stats.errorReasons,
           latency_ms: streaming
             ? null
             : {
@@ -576,6 +583,10 @@ function report(scenario, opts, elapsedMs, stats) {
   console.log(`   records:     ${stats.records}  (${colors.green(Math.round(stats.records / secs))} rec/s)`);
   console.log(`   data:        ${(stats.bytes / 1e6).toFixed(1)} MB  (${colors.green((stats.bytes / 1e6 / secs).toFixed(2))} MB/s)`);
   console.log(`   errors:      ${stats.errors > 0 ? colors.red(stats.errors) : 0}`);
+  const reasons = Object.entries(stats.errorReasons)
+    .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+    .map(([reason, n]) => `${reason}=${n}`);
+  if (reasons.length > 0) console.log(`   reasons:     ${colors.red(reasons.join('  '))}`);
   if (openLoopMode && stats.saturated) {
     console.log(colors.red(`   saturated:   server could not sustain ${opts.rate} rps (in-flight hit ${opts.maxInflight})`));
   }
