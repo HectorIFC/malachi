@@ -134,8 +134,10 @@ defmodule Malachi.RateLimiter do
   shards, read and written in the **calling process** so concurrent callers do not serialize on one ETS
   key or on the limiter process.
 
-  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. It admits slightly over
-  the limit under concurrency and across a window boundary, and never under it. See "Two doors, on
+  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. Inside one window it
+  admits exactly `limit`, however many callers race for it: the shard caps sum to `limit` and each token
+  is claimed by one atomic update. Across a window boundary it can admit up to twice the limit (the tail
+  of one window and the head of the next), and it never admits under the limit. See "Two doors, on
   purpose" above.
   """
   @spec check_limit_in_caller(term(), atom(), %{limit: pos_integer(), window_ms: pos_integer()}) ::
