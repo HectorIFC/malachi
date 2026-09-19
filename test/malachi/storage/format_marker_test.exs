@@ -174,6 +174,18 @@ defmodule Malachi.Storage.FormatMarkerTest do
       end
     end
 
+    test "a data directory that cannot be created refuses as an IO failure", %{tmp_dir: tmp} do
+      # The parent exists and cannot be written: reading the marker and listing the directory both find
+      # nothing, so the failure comes from creating it.
+      File.chmod!(tmp, 0o500)
+      on_exit(fn -> File.chmod(tmp, 0o700) end)
+
+      # Root ignores the permission bits, so the refusal can only be observed as a regular user.
+      if File.mkdir(Path.join(tmp, "probe")) == {:error, :eacces} do
+        assert {:refuse, {:io, :eacces, _path}} = FormatMarker.enforce(Path.join(tmp, "log"))
+      end
+    end
+
     test "a data directory that cannot be listed refuses as an IO failure", %{tmp_dir: dir} do
       File.chmod!(dir, 0o300)
       on_exit(fn -> File.chmod(dir, 0o700) end)
@@ -251,14 +263,26 @@ defmodule Malachi.Storage.FormatMarkerTest do
       assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
     end
 
-    test "a marker that cannot be opened for writing is reported", %{tmp_dir: dir} do
+    test "a directory the node cannot write is reported, and the marker is left as it was", %{tmp_dir: dir} do
       :ok = FormatMarker.write(dir, 1, "0.12.0")
-      File.chmod!(FormatMarker.path(dir), 0o400)
-      on_exit(fn -> File.chmod(FormatMarker.path(dir), 0o600) end)
+      before = File.read!(FormatMarker.path(dir))
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o700) end)
 
-      if File.write(FormatMarker.path(dir), "x", [:append]) == {:error, :eacces} do
+      # Root ignores the permission bits, so the refusal can only be observed as a regular user.
+      if File.write(Path.join(dir, "probe"), "") == {:error, :eacces} do
         assert FormatMarker.raise_to(dir, 2, @raise_opts) == {:error, {:io, :eacces}}
+        assert File.read!(FormatMarker.path(dir)) == before
       end
+    end
+
+    test "a leftover temporary file from a crashed raise does not stop the next one", %{tmp_dir: dir} do
+      :ok = FormatMarker.write(dir, 1, "0.12.0")
+      File.write!(Path.join(dir, "malachi.format.tmp"), "format=2\nwrit")
+
+      assert FormatMarker.raise_to(dir, 2, @raise_opts) == :ok
+      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
+      refute File.exists?(Path.join(dir, "malachi.format.tmp"))
     end
   end
 

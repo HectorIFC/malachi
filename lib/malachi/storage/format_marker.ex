@@ -34,23 +34,19 @@ defmodule Malachi.Storage.FormatMarker do
 
   ## Durability
 
-  Erlang cannot fsync a directory (`:file.open/2` on one answers `:eisdir`, the same limit
-  `Malachi.Log` documents for its seal marker), so the two writes are shaped around what a lost
-  directory entry would mean:
-
-    * **Creation** writes a temporary file with `:sync` and renames it into place. If a crash loses the
-      new directory entry, the next boot finds no marker and writes `current_format/0` again, which is
-      exactly what was being written. Nothing is lost.
-    * **Raising** overwrites the existing file in place and fsyncs it, without a rename. The file's own
-      fsync makes the new content durable with no new directory entry to lose. A write torn by a crash
-      leaves a file that fails the strict parse, so the node refuses to start, again the conservative
-      answer. A rename here would be wrong: losing its directory entry would bring back the OLD level
-      after new-format bytes were written, which is the very bug the marker exists to prevent.
+  Both writes, creating the marker and raising it, go the same way: the content into a temporary file
+  written with `:sync`, a rename over the marker, then an fsync of the directory
+  (`Malachi.Storage.Directory.sync/1`), because the rename is a change to the directory that the file's
+  own fsync does not persist. A crash anywhere along that path leaves either the old marker or the new
+  one, never a mix: the rename is atomic, and a torn temporary file is not the marker. Only after the
+  directory fsync does the call return `:ok`, which is what lets `raise_to/3` promise the new level is
+  durable before the first byte of a new format is written.
   """
 
   require Logger
 
   alias Malachi.I18n
+  alias Malachi.Storage.Directory
 
   @file_name "malachi.format"
   @temp_name "malachi.format.tmp"
@@ -229,17 +225,31 @@ defmodule Malachi.Storage.FormatMarker do
   end
 
   @doc """
-  Creates the marker in `dir` at `format`, written by release `version`: a temporary file written
-  with `:sync`, then renamed into place (see the moduledoc on why a lost rename is harmless here).
+  Creates the marker in `dir` at `format`, written by release `version`, durably (see the moduledoc).
   A leftover temporary file from an earlier crash is overwritten.
   """
   @spec write(Path.t(), pos_integer(), String.t()) :: :ok | {:error, {:io, atom()}}
   def write(dir, format, version \\ release_version()) do
+    with :ok <- mkdir(dir) do
+      replace(dir, render(marker(format, version)))
+    end
+  end
+
+  defp mkdir(dir) do
+    case File.mkdir_p(dir) do
+      :ok -> :ok
+      {:error, posix} -> {:error, {:io, posix}}
+    end
+  end
+
+  # The one way the marker file changes: temporary file with `:sync`, rename over the marker, fsync of
+  # the directory. Nothing before the directory fsync counts as written.
+  defp replace(dir, content) do
     temp = Path.join(dir, @temp_name)
 
-    with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(temp, render(marker(format, version)), [:sync]),
-         :ok <- File.rename(temp, path(dir)) do
+    with :ok <- File.write(temp, content, [:sync]),
+         :ok <- File.rename(temp, path(dir)),
+         :ok <- Directory.sync(dir) do
       :ok
     else
       {:error, posix} -> {:error, {:io, posix}}
@@ -247,10 +257,10 @@ defmodule Malachi.Storage.FormatMarker do
   end
 
   @doc """
-  Raises the marker in `dir` to `format`, in place and fsynced (see the moduledoc on why this is not
-  a rename). The marker only rises: the same level is a no-op, a lower one is refused, and so is a
-  level above what this binary reads, since the node would then refuse its own next start. There
-  must already be a marker: creating one here would go through a directory entry nothing fsyncs.
+  Raises the marker in `dir` to `format`, durably (see the moduledoc). The marker only rises: the same
+  level is a no-op, a lower one is refused, and so is a level above what this binary reads, since the
+  node would then refuse its own next start. There must already be a marker: `enforce/2` writes one on
+  every start, so a directory without one is a directory the startup gate never ran on.
 
   Must return `:ok` BEFORE the first byte of the new format is written.
 
@@ -305,7 +315,7 @@ defmodule Malachi.Storage.FormatMarker do
     case first_release(format, opts) do
       {:ok, requires} ->
         marker = %{format: format, written_by: Keyword.get(opts, :version, release_version()), requires: requires}
-        overwrite(path(dir), render(marker))
+        replace(dir, render(marker))
 
       :error ->
         {:error, {:no_first_release, format}}
@@ -318,36 +328,6 @@ defmodule Malachi.Storage.FormatMarker do
       :error -> Map.fetch(@first_release, format)
     end
   end
-
-  defp overwrite(file, content) do
-    result =
-      case :file.open(file, [:read, :write, :raw, :binary]) do
-        {:ok, fd} ->
-          try do
-            write_synced(fd, content)
-          after
-            _ = :file.close(fd)
-          end
-
-        {:error, _posix} = error ->
-          error
-      end
-
-    io_result(result)
-  end
-
-  # The whole content from byte 0, then cut at its end so a shorter marker leaves no stale bytes, then
-  # the fsync that makes it durable without any directory entry involved.
-  defp write_synced(fd, content) do
-    with :ok <- :file.pwrite(fd, 0, content),
-         {:ok, _position} <- :file.position(fd, byte_size(content)),
-         :ok <- :file.truncate(fd) do
-      :file.sync(fd)
-    end
-  end
-
-  defp io_result(:ok), do: :ok
-  defp io_result({:error, posix}), do: {:error, {:io, posix}}
 
   defp marker(format, version),
     do: %{format: format, written_by: version, requires: Map.fetch!(@first_release, format)}
