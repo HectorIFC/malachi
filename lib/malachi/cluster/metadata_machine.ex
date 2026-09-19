@@ -9,15 +9,29 @@ defmodule Malachi.Cluster.MetadataMachine do
 
   Determinism is what makes this safe: every replica applies the same command log and
   reaches the same `Metadata` state (the property the `MetadataPropertyTest` pins down).
+
+  Versioned through `Malachi.Cluster.MachineVersion`: a command above the group's effective
+  machine version, or one this code does not know, is refused identically on every replica.
   """
 
   @behaviour :ra_machine
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Metadata
 
   @impl true
   def init(_config), do: Metadata.new()
 
   @impl true
-  def apply(_meta, command, %Metadata{} = state), do: Metadata.apply(state, command)
+  def version, do: MachineVersion.version()
+
+  @impl true
+  def which_module(_version), do: __MODULE__
+
+  @impl true
+  def apply(meta, command, %Metadata{} = state) do
+    MachineVersion.apply(meta, command, state, Metadata.command_versions(), fn _meta, command, state ->
+      Metadata.apply(state, command)
+    end)
+  end
 end

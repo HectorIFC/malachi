@@ -47,9 +47,15 @@ defmodule Malachi.Cluster.Ring do
 
   @type reply :: :ok | {:error, {:exists, RingTopology.t()}} | {:error, {:conflict, t()}}
 
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "A store with no ring recorded yet (the first-boot state)."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions, do: %{init: 0, advance: 0}
 
   @doc """
   Applies a `command`, returning `{new_state, reply}`. Deterministic: no clock, no randomness, no

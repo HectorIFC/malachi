@@ -22,9 +22,15 @@ defmodule Malachi.Auth.AclRegistry do
           | {:revoke, String.t(), operation(), resource()}
           | {:revoke_user, String.t()}
 
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "An empty registry."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions, do: %{grant: 0, revoke: 0, revoke_user: 0}
 
   @doc "Applies a `command`, returning `{new_state, reply}`. Deterministic; ACLs need no time input."
   @spec apply(t(), command()) :: {t(), term()}
@@ -56,7 +62,8 @@ defmodule Malachi.Auth.AclRegistry do
     {%{state | grants: Map.delete(state.grants, username)}, :ok}
   end
 
-  # Defensive catch-all: an unknown command must not crash a replica (rolling upgrade safety).
+  # Defensive catch-all for callers outside ra (tests, direct use): an unknown command must not raise. Inside
+  # ra, `Malachi.Cluster.MachineVersion` refuses an unknown or not-yet-effective command before it gets here.
   def apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
 
   @doc "Whether `username` has a grant for `operation` on `topic` (a matching literal or prefix resource)."

@@ -39,9 +39,15 @@ defmodule Malachi.Auth.UserRegistry do
           | {:error, :user_exists | :user_not_found | :unknown_command}
           | {:ok, %{imported: non_neg_integer(), skipped: non_neg_integer()}}
 
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "An empty registry."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions, do: %{put_user: 0, delete_user: 0, update_password: 0, import_users: 0}
 
   @doc """
   Applies a `command` at time `now` (the ra leader's `system_time`). Returns `{new_state, reply}`.
@@ -90,9 +96,9 @@ defmodule Malachi.Auth.UserRegistry do
     {new_state, {:ok, counts}}
   end
 
-  # Defensive catch-all: an unknown command must NOT crash the machine. Once replicated by Raft, a command
-  # that raised in apply would crash every replica deterministically (and on replay), e.g. an older replica
-  # seeing a newer command during a rolling upgrade. Keep the replica alive and surface the problem.
+  # Defensive catch-all for callers outside ra (tests, direct use): an unknown command must not raise. Inside
+  # ra, `Malachi.Cluster.MachineVersion` refuses an unknown or not-yet-effective command before it gets here,
+  # so an older replica never skips a newer command while a newer one applies it.
   def apply(%__MODULE__{} = state, _unknown_command, _now), do: {state, {:error, :unknown_command}}
 
   @doc "The user record as `{username, hash, permissions}`, or `{:error, :user_not_found}`."
