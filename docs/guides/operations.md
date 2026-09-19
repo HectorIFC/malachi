@@ -236,6 +236,54 @@ it expires every sealed segment it can.
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
 
+### Retention metrics
+
+Retention is observable from both sides: what the sweep deleted, and which readers were moved past data
+that was no longer there.
+
+The sweep (only the node that leads a vnode sweeps it, so read these summed across nodes):
+
+- **`malachi_retention_sweep_duration_seconds`**: a histogram of sweep durations, with the same buckets as
+  the flush histogram. Its `_count` is the number of sweeps this node ran. **A `_count` that stops
+  advancing on every node means no sweep is running**, the question an operator cannot answer otherwise.
+- **`malachi_retention_segments_expired_total{topic}`** and **`malachi_retention_bytes_expired_total{topic}`**:
+  what the sweep deleted.
+- **`malachi_retention_expire_failures_total{reply}`**: deletes the control plane refused, by reply:
+  `migrating` (the topic was moving between vnodes), `segment_active` (still the write head) or `other`
+  (anything else, a Raft timeout included). A segment the sweep found already gone is neither expired
+  again nor a failure.
+
+The readers:
+
+- **`malachi_retention_skips_total{topic,group,origin,span}`**: how many times a reader was moved past data
+  no longer stored (expired by retention, or deleted by an operator). Each distinct skip is counted
+  once, however often a group re-reads it before committing. `group` is empty for a fetch outside a
+  group. **`origin="cursor"` is the one to alert on**: a group that held a position and fell behind
+  retention. `origin="start"` is a reader that had no position, a new group or a range's children after a
+  split, which start over the range's history; retention reaching them is expected.
+- **`malachi_retention_offsets_skipped_total{topic,group,origin,span}`**: how many offsets those skips
+  stepped over. `span="exact"` is exact. `span="upper_bound"` is a skip over the ancestor of a split
+  range: the count covers the ancestor's whole range, of which this reader would only have received its
+  own key slice. `span="unknown"` is an ancestor with nothing left stored whose end this node could not
+  recover after a restart, so only the fact of the skip is known and the offsets are 0. It counts
+  **offsets, not records lost**.
+
+A suggested alert: `increase(malachi_retention_skips_total{origin="cursor"}[15m]) > 0`, which names the
+group that lost data. The first skip of a reader is also logged, then at most once per reader per
+`MALACHI_RETENTION_SKIP_LOG_WINDOW_MS` (10 minutes), with the count of skips held back since the last
+line.
+
+`group` is a label a client chooses, so it is capped: past `MALACHI_RETENTION_METRICS_MAX_GROUPS` (1000)
+topic and group pairs on a node, new groups are folded into `group="__other__"` and the log line still
+names them. The sum over groups per topic stays exact. The skip reporter's memory is bounded the same
+way by `MALACHI_RETENTION_SKIP_LEDGER_MAX` (10000 skips remembered); a forgotten skip read again is
+counted again.
+
+These names are reserved for later retention work and not emitted yet:
+`malachi_retention_orphan_directories_removed_total` (the orphan directory sweeper),
+`malachi_retention_segments_pinned{topic,group}` (consumer-aware retention) and
+`malachi_segment_rolls_total{reason}` (time-based rolls).
+
 ## TLS
 
 ```bash
