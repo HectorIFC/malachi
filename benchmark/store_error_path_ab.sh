@@ -17,7 +17,7 @@ REPS=${AB_REPS:-15}
 E2E_REPS=${AB_E2E_REPS:-5}
 export AB_DIR=${AB_DIR:-${TMPDIR:-/tmp}/store_error_path_ab}
 
-say() { printf '[ab] %s\n' "$*"; }
+. "$BRANCH/benchmark/support/ab_lib.sh"
 
 # The harness is new with #147, so the baseline tree gets the branch's copy, with the support files it
 # loads. It only calls APIs both trees have (`ElixirStore.open/append/sync/close`), so the baseline
@@ -25,26 +25,8 @@ say() { printf '[ab] %s\n' "$*"; }
 mkdir -p "$BASELINE/benchmark/support"
 cp "$BRANCH/benchmark/store_error_path_ab.exs" "$BASELINE/benchmark/store_error_path_ab.exs"
 cp "$BRANCH/benchmark/support/paired_stats.exs" "$BASELINE/benchmark/support/paired_stats.exs"
+cp "$BRANCH/benchmark/support/ab_run.exs" "$BASELINE/benchmark/support/ab_run.exs"
 cp "$BRANCH/benchmark/support/e2e_sample.exs" "$BASELINE/benchmark/support/e2e_sample.exs"
-
-build() {
-  say "building $1"
-  (
-    cd "$1"
-    for attempt in 1 2 3; do
-      mix deps.get >/dev/null && break
-      say "deps.get failed (attempt $attempt/3)"
-      [ "$attempt" -lt 3 ] && sleep 5
-    done
-    mix compile >/dev/null
-  )
-}
-
-tree_of() {
-  if [ "$1" = branch ]; then echo "$BRANCH"; else echo "$BASELINE"; fi
-}
-
-shuffled_arms() { printf 'main_a1\nmain_a2\nbranch\n' | shuf; }
 
 # One sample of `case` for `arm`, captured whole: the analyzer finds the number in it.
 run_one() {
@@ -55,22 +37,6 @@ run_one() {
   else
     (cd "$(tree_of "$arm")" && mix run benchmark/throughput_1m.exs) >"$file" 2>&1
   fi
-}
-
-run_case() {
-  kase=$1 reps=$2
-  [ "$reps" -gt 0 ] || return 0
-  mkdir -p "$OUT/$kase"
-  # One discarded pass per arm: the first run on a fresh directory pays for cold page cache and
-  # first-touch allocation, which is a property of the harness rather than of either tree.
-  for arm in $(shuffled_arms); do run_one "$kase" warm "$arm"; done
-  rep=1
-  while [ "$rep" -le "$reps" ]; do
-    order=$(shuffled_arms | tr '\n' ' ')
-    say "$kase rep $rep/$reps: $order"
-    for arm in $order; do run_one "$kase" "$rep" "$arm"; done
-    rep=$((rep + 1))
-  done
 }
 
 rm -rf "$OUT"

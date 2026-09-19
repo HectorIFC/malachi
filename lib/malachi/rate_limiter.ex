@@ -11,8 +11,9 @@ defmodule Malachi.RateLimiter do
     (`check_limit/3`); as with the sharded counters, the entry carries the window it was written under so
     that ageing it never depends on configuration read somewhere else
   - `{{identifier, action, window_start_ms, shard}, used, window_ms}` - Sharded window counters
-    (`check_limit_in_caller/3`); the entry carries the window it was counted under so the cleanup can
-    age it without having to re-read config that may since have changed
+    (`check_limit_in_caller/3`), the window start in Erlang monotonic ms; the entry carries the window
+    it was counted under so the cleanup can age it without having to re-read config that may since
+    have changed
   - `{{:blocked, identifier, action}, count}` - Blocked request counters
 
   ## Actions
@@ -58,7 +59,9 @@ defmodule Malachi.RateLimiter do
 
   What this door gives up is the *shape* of the limit, not its arithmetic. A fixed window does not refill
   gradually, so a client can spend the tail of one window and the head of the next back to back and burst
-  to 2x the limit across a boundary; the token bucket smooths that. Bursting is acceptable for a
+  to 2x the limit across a boundary; the token bucket smooths that. The windows are named by the
+  monotonic clock, so that burst is the only way to reach a new window: a step of the system clock cannot
+  hand out a fresh quota mid-window. Bursting is acceptable for a
   throughput quota and not for an auth control, which is why the two doors exist rather than one.
 
   ## Configuration
@@ -80,6 +83,7 @@ defmodule Malachi.RateLimiter do
   alias Malachi.I18n
 
   @table :malachi_rate_limits
+  @shard_count_key {__MODULE__, :shard_count}
 
   # How long an entry may sit untouched before the periodic cleanup reaps it. This is the right rule for a
   # token bucket, which has fully refilled after an hour of idleness under any window shorter than that.
@@ -130,8 +134,10 @@ defmodule Malachi.RateLimiter do
   shards, read and written in the **calling process** so concurrent callers do not serialize on one ETS
   key or on the limiter process.
 
-  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. It admits slightly over
-  the limit under concurrency and across a window boundary, and never under it. See "Two doors, on
+  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. Inside one window it
+  admits exactly `limit`, however many callers race for it: the shard caps sum to `limit` and each token
+  is claimed by one atomic update. Across a window boundary it can admit up to twice the limit (the tail
+  of one window and the head of the next), and it never admits under the limit. See "Two doors, on
   purpose" above.
   """
   @spec check_limit_in_caller(term(), atom(), %{limit: pos_integer(), window_ms: pos_integer()}) ::
@@ -161,8 +167,55 @@ defmodule Malachi.RateLimiter do
   def action_config(:publish), do: build_action_config(:publish_rate_limit, :publish_rate_window_ms)
   def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, :subscribe_rate_window_ms)
 
+  @doc false
+  # The window a timestamp falls in, as `{window_start, elapsed_in_window}`. The one place the window
+  # arithmetic lives, so the hot path, `current_window_start/1` and the tests cannot disagree about it.
+  @spec window_bounds(integer(), pos_integer()) :: {integer(), non_neg_integer()}
+  def window_bounds(now_ms, window_ms) do
+    # `Integer.mod/2`, not `rem/2`: the monotonic clock is often negative, and `rem/2` truncates toward
+    # zero, which would put a negative timestamp's window start after the timestamp itself.
+    elapsed_in_window = Integer.mod(now_ms, window_ms)
+    {now_ms - elapsed_in_window, elapsed_in_window}
+  end
+
+  @doc false
+  # The start of the sharded window that is current right now, read from the same clock the check reads.
+  # Tests measure "did this run stay inside one window" with it, so they measure what the limiter counts.
+  @spec current_window_start(pos_integer()) :: integer()
+  def current_window_start(window_ms) do
+    {window_start, _elapsed} = window_bounds(window_clock_ms(), window_ms)
+    window_start
+  end
+
+  @doc false
+  # How `limit` is split across the shards right now, shard 0 first. Diagnostic only: the check computes
+  # each shard's cap on its own and never builds the list.
+  @spec shard_caps(pos_integer()) :: [non_neg_integer()]
+  def shard_caps(limit) do
+    shards = shard_count()
+    for shard <- 0..(shards - 1), do: shard_cap(limit, shards, shard)
+  end
+
+  @doc false
+  # Every sharded window counter held for `identifier` and `action`, oldest window first. A diagnostic
+  # read of the whole table, for tests and forensics; never call it on a request path.
+  @spec window_counters(term(), atom()) :: [
+          %{window_start: integer(), shard: non_neg_integer(), used: non_neg_integer(), window_ms: pos_integer()}
+        ]
+  def window_counters(identifier, action) do
+    @table
+    |> :ets.select(sharded_counters_spec(identifier, action, :"$_"))
+    |> Enum.map(fn {{_identifier, _action, window_start, shard}, used, window_ms} ->
+      %{window_start: window_start, shard: shard, used: used, window_ms: window_ms}
+    end)
+    |> Enum.sort_by(&{&1.window_start, &1.shard})
+  end
+
   @doc """
-  Reset bucket for specific identifier and action.
+  Gives `identifier` its whole allowance for `action` back and forgets its blocked count.
+
+  Clears both doors: the token bucket of `check_limit/3` and every window counter of
+  `check_limit_in_caller/3`, whatever window and shard it was counted under.
 
   Used for testing or manual intervention.
   """
@@ -207,9 +260,11 @@ defmodule Malachi.RateLimiter do
       write_concurrency: true
     ])
 
-    schedule_cleanup()
+    # Read once, before any counter exists; see `shard_count/0`. Re-putting the same value on a restart does
+    # not trigger the global scan a changed persistent term costs.
+    :persistent_term.put(@shard_count_key, :erlang.system_info(:schedulers_online))
     Logger.info(I18n.t(:rate_limiter_started))
-    {:ok, %{}}
+    {:ok, %{cleanup_timer: schedule_cleanup()}}
   end
 
   @impl true
@@ -219,8 +274,9 @@ defmodule Malachi.RateLimiter do
 
   @impl true
   def handle_call({:reset_bucket, identifier, action}, _from, state) do
-    key = {identifier, action}
-    :ets.delete(@table, key)
+    :ets.delete(@table, {identifier, action})
+    # The sharded counters live under one key per window per shard, so they are selected, not looked up.
+    :ets.select_delete(@table, sharded_counters_spec(identifier, action, true))
     :ets.delete(@table, {:blocked, identifier, action})
     {:reply, :ok, state}
   end
@@ -266,10 +322,18 @@ defmodule Malachi.RateLimiter do
     {:reply, results, state}
   end
 
+  # Only the timer's own message reschedules. A manual `:cleanup` (an operator, or a test) just runs a pass:
+  # if it rescheduled too, every manual pass would start one more timer chain that never stops, each
+  # sweeping the whole table on every interval.
+  @impl true
+  def handle_info(:scheduled_cleanup, state) do
+    cleanup_expired_buckets()
+    {:noreply, %{state | cleanup_timer: schedule_cleanup()}}
+  end
+
   @impl true
   def handle_info(:cleanup, state) do
     cleanup_expired_buckets()
-    schedule_cleanup()
     {:noreply, state}
   end
 
@@ -290,17 +354,26 @@ defmodule Malachi.RateLimiter do
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
 
-  # A fixed window sharded per scheduler. The window is identified by its START in wall-clock ms, derived
-  # from the clock rather than from stored state, so a new window needs no reset: its counters simply live
-  # under a new key, and the periodic cleanup reaps the old ones by age.
+  # A match spec for every sharded window counter of `identifier` and `action`, returning `result`. The two
+  # are compared as constants in a guard rather than written into the pattern: an identifier may be an
+  # atom, and the atoms `:_` and `:"$1"` in a pattern are wildcards, so a user named that way would
+  # otherwise match, and a reset would delete, every user's counters.
+  defp sharded_counters_spec(identifier, action, result) do
+    [
+      {{{:"$1", :"$2", :_, :_}, :_, :_}, [{:"=:=", :"$1", {:const, identifier}}, {:"=:=", :"$2", {:const, action}}],
+       [result]}
+    ]
+  end
+
+  # A fixed window sharded per scheduler. The window is identified by its START in monotonic ms (see
+  # `window_clock_ms/0`), derived from the clock rather than from stored state, so a new window needs no
+  # reset: its counters simply live under a new key, and the periodic cleanup reaps the old ones by age.
   #
   # The fast path is a single atomic `update_counter` on this scheduler's own shard, which is why this
   # scales with cores.
   defp do_check_sharded(identifier, action, limit, window_ms) do
     shards = shard_count()
-    now = System.system_time(:millisecond)
-    elapsed_in_window = rem(now, window_ms)
-    window_start = now - elapsed_in_window
+    {window_start, elapsed_in_window} = window_bounds(window_clock_ms(), window_ms)
     shard = rem(:erlang.system_info(:scheduler_id), shards)
 
     if take_token(identifier, action, window_start, shard, shard_cap(limit, shards, shard), window_ms) do
@@ -354,7 +427,21 @@ defmodule Malachi.RateLimiter do
 
   # One shard per scheduler: the point is that concurrent callers write DIFFERENT keys, and the scheduler
   # id is the cheapest identifier that already tracks how much concurrency there actually is.
-  defp shard_count, do: :erlang.system_info(:schedulers_online)
+  #
+  # The count is fixed when the limiter starts, not re-read per check. The caps are derived from it, and a
+  # change mid-window (an operator running `erlang:system_flag(schedulers_online, N)`) would otherwise
+  # give the remaining shards bigger caps over counters already spent, admitting the quota again. A later
+  # increase costs only scaling: the extra scheduler ids fold into existing shards through `rem/2`. No
+  # default on the read: without the limiter there is no table either, and a silent fallback to the live
+  # count would reopen exactly this hole.
+  defp shard_count, do: :persistent_term.get(@shard_count_key)
+
+  # The clock the sharded windows are named by: monotonic, so a step of the OS clock can never move a
+  # request into a window with a fresh quota. Erlang system time is not safe for this. Under
+  # multi_time_warp (the default from OTP 29) it follows an OS clock step at once, and a forward step
+  # across a boundary would refund the whole quota mid-window. Its origin is arbitrary, and windows only
+  # need to agree within one node, which is the scope the quota is enforced in anyway.
+  defp window_clock_ms, do: System.monotonic_time(:millisecond)
 
   defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) do
     now = System.monotonic_time(:millisecond)
@@ -417,7 +504,7 @@ defmodule Malachi.RateLimiter do
   # the quota mid-window).
   defp cleanup_expired_buckets do
     now = System.monotonic_time(:millisecond)
-    now_ms = System.system_time(:millisecond)
+    window_now = window_clock_ms()
 
     expired_count =
       :ets.foldl(
@@ -433,7 +520,7 @@ defmodule Malachi.RateLimiter do
           # Sharded window counters: the entry carries both the start and the width of the window it
           # counted, so each one is aged against that window and nothing else.
           {{_identifier, _action, window_start, _shard} = key, _used, window_ms}, acc ->
-            if window_start < now_ms - 2 * window_ms do
+            if window_start < window_now - 2 * window_ms do
               :ets.delete(@table, key)
               acc + 1
             else
@@ -455,7 +542,7 @@ defmodule Malachi.RateLimiter do
 
   defp schedule_cleanup do
     interval = cfg(:rate_limit_cleanup_interval_ms, 300_000)
-    Process.send_after(self(), :cleanup, interval)
+    Process.send_after(self(), :scheduled_cleanup, interval)
   end
 
   defp enabled?, do: cfg(:rate_limit_enabled, true)

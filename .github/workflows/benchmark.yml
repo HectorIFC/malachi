@@ -53,6 +53,26 @@ on:
         description: 'Repetitions of each data mode (the spread between them is the noise floor)'
         type: string
         default: '3'
+      quota_flake_hunt:
+        description: 'Run the whole test suite many times, counting publish quotas admitted over their limit (issue #151). About an hour.'
+        type: boolean
+        default: false
+      quota_flake_hunt_jobs:
+        description: 'Parallel runners for the hunt (jobs x reps suite runs in all; 181 is 3/p for the CI rate seen)'
+        type: string
+        default: '12'
+      quota_flake_hunt_reps:
+        description: 'Suite runs per hunt runner'
+        type: string
+        default: '16'
+      rate_limit_bench_ab:
+        description: 'Paired A/B of the publish quota check against main (issue #151). Minutes.'
+        type: boolean
+        default: false
+      rate_limit_bench_ab_reps:
+        description: 'Repetitions per arm (a verdict needs at least 5)'
+        type: string
+        default: '7'
 
 permissions:
   contents: read
@@ -256,4 +276,149 @@ jobs:
         with:
           name: docker-cluster-durability
           path: ${{ runner.temp }}/docker-cluster/cases.jsonl
+          if-no-files-found: warn
+
+  # The hunt behind issue #151: a publish quota admitted one request over its limit twice in CI, in full
+  # suite runs, and never on rerun. Dispatch-only, and on GitHub runners rather than a workstation, so the
+  # load it adds lands on nothing else and the platform is the one the failures happened on. Each runner
+  # repeats the suite with the same toolchain and command as the CI test job; see
+  # scripts/quota-flake-hunt.sh for what is recorded.
+  quota-flake-hunt-matrix:
+    name: Plan the quota flake hunt
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_flake_hunt }}
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.plan.outputs.runners }}
+    steps:
+      - id: plan
+        env:
+          JOBS: ${{ inputs.quota_flake_hunt_jobs }}
+        run: |
+          case "$JOBS" in
+            '' | *[!0-9]* | 0*) echo "quota_flake_hunt_jobs must be a positive integer, got '$JOBS'"; exit 2 ;;
+          esac
+          echo "runners=$(jq -cn --argjson n "$JOBS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
+
+  quota-flake-hunt:
+    name: Quota flake hunt, runner ${{ matrix.runner }}
+    needs: quota-flake-hunt-matrix
+    runs-on: ubuntu-latest
+    # A suite run takes about four minutes here; three times the planned runs is stuck, not slow.
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.quota-flake-hunt-matrix.outputs.runners) }}
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # This job runs repository code (the suite) and does no authenticated git.
+        with:
+          persist-credentials: false
+
+      # The same toolchain as the CI test job, which is where both occurrences were seen.
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      # The load generator tests drive scripts/loadtest.js, as in the CI test job.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Restore only: a dozen runners saving the same key would race each other for nothing.
+      - name: Restore dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-1.19.4-28.1-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-1.19.4-28.1-
+
+      - name: Install dependencies
+        run: |
+          for i in 1 2 3; do
+            mix deps.get && mix compile && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
+
+      - name: Hunt
+        env:
+          REPS: ${{ inputs.quota_flake_hunt_reps }}
+        run: scripts/quota-flake-hunt.sh "$REPS" "$RUNNER_TEMP/quota-flake-hunt"
+
+      - name: Summarize
+        if: always()
+        env:
+          RUNNER_ID: ${{ matrix.runner }}
+        run: |
+          summary="$RUNNER_TEMP/quota-flake-hunt/summary.txt"
+          if [ -s "$summary" ]; then line=$(cat "$summary"); else line="no summary was written"; fi
+          echo "runner $RUNNER_ID: $line" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # always(): the failing iterations' logs, with their forensic reports, are the whole point.
+      - name: Upload the hunt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quota-flake-hunt-${{ matrix.runner }}
+          path: ${{ runner.temp }}/quota-flake-hunt
+          if-no-files-found: warn
+
+  # The cost side of issue #151: the publish quota check before and after its window moved to the
+  # monotonic clock and its shard count started being read once. Its own job, so the samples do not share
+  # a runner with anything, and main is checked out beside the branch, each built from its own sources.
+  rate-limit-bench-ab:
+    name: Publish quota check, branch against main
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rate_limit_bench_ab }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MIX_ENV: dev
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out main as the A/B baseline
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: rate-limit-baseline
+          persist-credentials: false
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.4'
+          otp-version: '28.1'
+
+      - name: Run the publish quota check A/B
+        env:
+          AB_REPS: ${{ inputs.rate_limit_bench_ab_reps }}
+        run: |
+          case "$AB_REPS" in
+            '' | *[!0-9]* | 0*) echo "rate_limit_bench_ab_reps must be a positive integer, got '$AB_REPS'"; exit 2 ;;
+          esac
+          mv rate-limit-baseline "$RUNNER_TEMP/baseline"
+          benchmark/rate_limit_ab.sh "$RUNNER_TEMP/baseline" . "$RUNNER_TEMP/rate-limit-ab"
+
+      - name: Upload the publish quota check A/B
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rate-limit-ab
+          path: ${{ runner.temp }}/rate-limit-ab
           if-no-files-found: warn
