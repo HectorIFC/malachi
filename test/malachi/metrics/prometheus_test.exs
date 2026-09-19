@@ -82,6 +82,13 @@ defmodule Malachi.Metrics.PrometheusTest do
     # flat is a range that has stopped accepting writes, which neither series alone can express.
     assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="detected"} 3)
     assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="reconciled"} 2)
+
+    # One sample per server and kind, zero included: a series that appears only after the first drop can
+    # be neither alerted on with increase() nor asserted to be zero.
+    assert out =~ "# TYPE malachi_unexpected_messages_total counter\n"
+    assert out =~ ~s(malachi_unexpected_messages_total{server="replication",kind="cast"} 5)
+    assert out =~ ~s(malachi_unexpected_messages_total{server="membership",kind="info"} 0)
+    assert out =~ ~s(malachi_unexpected_messages_total{server="other",kind="call"} 1)
   end
 
   test "per-topic series get one HELP/TYPE and a sample per topic" do

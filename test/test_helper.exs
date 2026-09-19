@@ -9,6 +9,11 @@ case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
   {:error, {:already_started, _pid}} -> :ok
 end
 
+# Record every message a long-lived server drops (Malachi.UnexpectedMessage) from here on, the application's
+# own servers included, so the run can fail on any drop no test asked for (see the check at the end).
+{:ok, _} = Application.ensure_all_started(:telemetry)
+:ok = Malachi.Test.UnknownMessages.start_guard()
+
 # Start the application for all tests
 # Individual tests handle their own state isolation via setup/on_exit blocks
 {:ok, _} = Application.ensure_all_started(:malachi)
@@ -24,6 +29,16 @@ ExUnit.after_suite(fn _result ->
       nil -> :ok
       dir -> File.rm_rf(dir)
     end
+  end
+end)
+
+# Registered last, so the cleanup above has run. A drop nobody asked for is what used to be a crash, and
+# the catch-alls would otherwise let it pass silently: ExUnit has no way to fail a run from here once
+# every test passed, so the VM exits with a failing status instead.
+ExUnit.after_suite(fn _result ->
+  case Malachi.Test.UnknownMessages.report_guard() do
+    :ok -> :ok
+    {:error, _violations} -> System.halt(1)
   end
 end)
 

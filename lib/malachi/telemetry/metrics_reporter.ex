@@ -21,7 +21,8 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :storage, :failure],
     [:malachi, :storage, :scrub],
     [:malachi, :cluster, :orphaned_fence],
-    [:malachi, :cluster, :fence_reconciled]
+    [:malachi, :cluster, :fence_reconciled],
+    [:malachi, :process, :unexpected_message]
   ]
 
   @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
@@ -83,5 +84,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :cluster, :fence_reconciled], %{count: count}, _metadata, _config) do
     Metrics.record_fences_reconciled(count)
+  end
+
+  def handle_event([:malachi, :process, :unexpected_message], _measurements, %{server: server, kind: kind}, _config) do
+    Metrics.record_unexpected_message(server, kind)
   end
 end
