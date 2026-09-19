@@ -195,6 +195,23 @@ defmodule LoadtestJsTest do
       assert report["errors"] > 0
       assert report["error_reasons"] == %{"permission_denied" => report["errors"]}
     end
+
+    test "a refused topic creation fails the run and names the reason", ctx do
+      # create_topic is gated by :produce, so a consume-only user is refused it.
+      {user, pass} = add_user([:consume])
+      args = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
+
+      assert {output, 1} = run_js(ctx, args, user: user, pass: pass, stderr: true)
+      assert output =~ "permission_denied"
+    end
+
+    test "a topic that already exists is not a setup failure", ctx do
+      args = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
+
+      assert {_first, 0} = run_js(ctx, args)
+      assert {output, 0} = run_js(ctx, args)
+      assert %{"errors" => 0, "error_reasons" => %{}} = Jason.decode!(output)
+    end
   end
 
   # A user with `permissions` on the test server, removed when the test ends.

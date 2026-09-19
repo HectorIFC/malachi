@@ -361,10 +361,12 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # keyspace_bits 8 (server default); ignore already-exists so re-runs work.
+  # keyspace_bits 8 (server default). A topic that already exists is fine, so a rerun works; any other
+  # refusal fails the setup here, where it names its cause, rather than as a run full of produce errors.
   defp create_topic(conn, topic) do
-    {:ok, _code, _resp, conn} = Conn.request(conn, Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8))
     conn
+    |> Conn.request(Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8))
+    |> expect_setup_ok("create topic", topic, ["already_exists"])
   end
 
   defp prepopulate(conn, %{prepopulate: n}, _topic) when n <= 0, do: conn
@@ -377,10 +379,30 @@ defmodule Malachi.Loadtest do
     # //1 keeps the range empty when prepopulate < batch (1..0 without a step enumerates DOWN and
     # would send two spurious batches).
     Enum.reduce(1..div(cfg.prepopulate, cfg.batch)//1, {conn, 2}, fn _, {conn, corr} ->
-      {:ok, _code, _resp, conn} = Conn.request(conn, Wire.produce_key(), corr, payload)
+      conn = conn |> Conn.request(Wire.produce_key(), corr, payload) |> expect_setup_ok("prepopulate", topic, [])
       {conn, corr + 1}
     end)
     |> elem(0)
+  end
+
+  # A setup request either succeeded, or was refused with one of the `tolerated` reasons, or fails the run
+  # with a SetupError naming the step, the topic and the reason. A backlog shorter than asked for, or a
+  # topic that was never created, would otherwise be measured as if the setup had worked.
+  defp expect_setup_ok({:ok, 0, _resp, conn}, _step, _topic, _tolerated), do: conn
+
+  defp expect_setup_ok({:ok, _code, resp, conn}, step, topic, tolerated) do
+    reason = Wire.decode_error_reason(resp)
+
+    if reason in tolerated do
+      conn
+    else
+      Conn.close(conn)
+      raise SetupError, "could not #{step} #{inspect(topic)}: the server answered #{inspect(reason)}"
+    end
+  end
+
+  defp expect_setup_ok({:error, reason}, step, topic, _tolerated) do
+    raise SetupError, "could not #{step} #{inspect(topic)}: the connection failed (#{inspect(reason)})"
   end
 
   # Signals that the measured window has begun, for a harness that samples CPU over it. The harness

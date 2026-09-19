@@ -674,6 +674,80 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "setup refusals" do
+    test "a refused topic creation fails setup naming the topic and the reason" do
+      # create_topic is gated by :produce, so a consume-only user is refused it.
+      {user, pass} = add_user([:consume])
+      t = topic("denied_create")
+
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          Loadtest.run(port: @port, user: user, pass: pass, scenario: :produce, connections: 1, duration: 1, topic: t)
+        end
+
+      assert error.message =~ t
+      assert error.message =~ "permission_denied"
+    end
+
+    test "a connection lost while creating the topic fails setup with a SetupError, not a MatchError" do
+      answer = fn
+        api_key, _n -> if api_key == Wire.create_topic_key(), do: :close, else: :ok
+      end
+
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          with_scripted_server(answer, fn port ->
+            Loadtest.run(
+              port: port,
+              host: "127.0.0.1",
+              user: "admin",
+              pass: "admin123",
+              connections: 1,
+              duration: 1,
+              topic: "lost"
+            )
+          end)
+        end
+
+      assert error.message =~ "lost"
+      assert error.message =~ "connection failed"
+    end
+
+    test "a topic that already exists is not a setup failure" do
+      t = topic("rerun")
+      run(scenario: :produce, connections: 1, topic: t)
+      r = run(scenario: :produce, connections: 1, topic: t)
+
+      assert r.error_reasons == %{}
+      assert r.ops > 0
+    end
+
+    test "a refused prepopulate fails setup instead of leaving a shorter backlog" do
+      # Every produce is refused, the prepopulate's included. The fetch that would follow is refused too,
+      # so a setup that swallowed the refusal shows up as errors rather than as a crash.
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          with_scripted_server(refuse_after_setup("rate_limited"), fn port ->
+            Loadtest.run(
+              port: port,
+              host: "127.0.0.1",
+              user: "admin",
+              pass: "admin123",
+              scenario: :fetch,
+              connections: 1,
+              duration: 1,
+              batch: 10,
+              prepopulate: 20,
+              topic: "seed"
+            )
+          end)
+        end
+
+      assert error.message =~ "seed"
+      assert error.message =~ "rate_limited"
+    end
+  end
+
   describe "connect strategies and setup failures" do
     test "every connect strategy completes a run against the real server" do
       # bounded with concurrency 1 fully serializes the gate (grant -> connect -> release -> next), so a
@@ -829,8 +903,9 @@ defmodule Malachi.LoadtestTest do
   end
 
   # Runs `fun` with the port of a wire server that answers each request as `answer` says. `answer` gets the
-  # api key and a server-wide count of the requests before this one, and returns `:ok` or
-  # `{:error, reason}`. An ok produce carries a count of 5 records; any other ok carries no payload.
+  # api key and a server-wide count of the requests before this one, and returns `:ok`,
+  # `{:error, reason}`, or `:close` to drop the connection without answering. An ok produce carries a
+  # count of 5 records; any other ok carries no payload.
   defp with_scripted_server(answer, fun) do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: 4, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
@@ -861,8 +936,14 @@ defmodule Malachi.LoadtestTest do
         n = :counters.get(requests, 1)
         :counters.add(requests, 1, 1)
 
-        :gen_tcp.send(sock, scripted_body(api_key, corr, answer.(api_key, n)))
-        scripted_serve(sock, answer, requests)
+        case answer.(api_key, n) do
+          :close ->
+            :gen_tcp.close(sock)
+
+          reply ->
+            :gen_tcp.send(sock, scripted_body(api_key, corr, reply))
+            scripted_serve(sock, answer, requests)
+        end
 
       {:error, _closed} ->
         :ok

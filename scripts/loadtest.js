@@ -740,10 +740,16 @@ async function main() {
 
   let clients = [];
   try {
-    // create the topic (idempotently) via a temporary produce-capable connection
+    // Create the topic via a temporary produce-capable connection. One that already exists is fine, so a
+    // rerun works; any other refusal fails here, naming its cause, rather than as a run full of errors.
     const admin = await connect();
-    await admin.createTopic(opts.topic).catch(() => {});
-    admin.close();
+    try {
+      await admin.createTopic(opts.topic);
+    } catch (err) {
+      if (err.message !== 'already_exists') throw new Error(`could not create topic ${opts.topic}: ${err.message}`);
+    } finally {
+      admin.close();
+    }
 
     await prepopulate(opts.topic, opts.prepopulate, opts.recordSize, opts.keys);
 
