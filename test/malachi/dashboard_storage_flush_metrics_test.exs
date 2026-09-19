@@ -57,17 +57,7 @@ defmodule Malachi.DashboardStorageFlushMetricsTest do
 
   # The same request a harness sends: a bearer token and an Accept header asking for the exposition.
   defp scrape(token) do
-    {:ok, socket} = DashboardHelper.connect(port: port())
-
-    :ok =
-      :gen_tcp.send(
-        socket,
-        "GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer #{token}\r\n" <>
-          "Accept: text/plain\r\nConnection: close\r\n\r\n"
-      )
-
-    response = read_all(socket, "")
-    :gen_tcp.close(socket)
+    response = DashboardHelper.scrape_metrics(token, port: port())
     assert response =~ "HTTP/1.1 200 OK"
     response
   end
@@ -76,16 +66,9 @@ defmodule Malachi.DashboardStorageFlushMetricsTest do
   # (parallel worktrees) scrapes its own node.
   defp port, do: Application.fetch_env!(:malachi, :dashboard_port)
 
-  defp read_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 5000) do
-      {:ok, data} -> read_all(socket, acc <> data)
-      {:error, :closed} -> acc
-    end
-  end
-
   defp value(text, series) do
-    line = text |> String.split("\n") |> Enum.find(&String.starts_with?(&1, series <> " "))
-    assert line, "#{series} is missing from the scrape"
-    line |> String.split(" ") |> List.last() |> String.to_integer()
+    value = DashboardHelper.metric_value(text, series)
+    assert value, "#{series} is missing from the scrape"
+    value
   end
 end

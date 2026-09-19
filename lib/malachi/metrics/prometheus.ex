@@ -6,6 +6,8 @@ defmodule Malachi.Metrics.Prometheus do
   `/metrics` when the client asks for `text/plain` (content negotiation with the JSON dashboard payload).
   """
 
+  alias Malachi.Histogram
+
   @content_type "text/plain; version=0.0.4; charset=utf-8"
 
   @doc "The `Content-Type` a scraper expects for the exposition format."
@@ -13,11 +15,12 @@ defmodule Malachi.Metrics.Prometheus do
   def content_type, do: @content_type
 
   @doc """
-  Builds the exposition text (as iodata) from a system snapshot, the topic overview and the storage flush
-  histogram (`Malachi.Metrics.storage_flush_histogram/0`).
+  Builds the exposition text (as iodata) from a system snapshot, the topic overview, the storage flush
+  histogram (`Malachi.Metrics.storage_flush_histogram/0`) and the retention counters
+  (`Malachi.Metrics.retention_snapshot/0`; a node with none when omitted).
   """
-  @spec export(map(), [map()], map()) :: iodata()
-  def export(system, topics, flush) do
+  @spec export(map(), [map()], map(), map()) :: iodata()
+  def export(system, topics, flush, retention \\ no_retention()) do
     mem = system.memory
     ops = system.operations
 
@@ -130,6 +133,7 @@ defmodule Malachi.Metrics.Prometheus do
       histogram(
         "malachi_storage_flush_duration_seconds",
         "Group-commit flush latency: the write plus sync every acknowledged produce waits behind",
+        "flush latency",
         flush
       ),
       metric("malachi_storage_flushed_bytes_total", :counter, "Encoded bytes made durable by group-commit flushes", [
@@ -141,7 +145,67 @@ defmodule Malachi.Metrics.Prometheus do
         "Records made durable by group-commit flushes (divided by the flush count: records per sync)",
         [{[], flush.records}]
       ),
-      topic_metrics(topics)
+      topic_metrics(topics),
+      retention_metrics(retention)
+    ]
+  end
+
+  # What `Malachi.Metrics.retention_snapshot/0` answers on a node that never swept nor skipped.
+  defp no_retention do
+    %{
+      skips: [],
+      expired: [],
+      failures: %{migrating: 0, segment_active: 0, other: 0},
+      sweeps: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
+    }
+  end
+
+  # The retention series. Skips carry `topic` and `group` labels, which `Malachi.Metrics` keeps bounded
+  # (pairs past its cap are folded into group "__other__"); expiries carry `topic` only, and refusals
+  # the closed set of replies.
+  defp retention_metrics(retention) do
+    skip_labels = fn skip -> [topic: skip.topic, group: skip.group, origin: skip.origin, span: skip.span] end
+
+    [
+      metric(
+        "malachi_retention_skips_total",
+        :counter,
+        "Times a consumer was moved past data no longer stored (expired or deleted), counted once per " <>
+          "distinct skip; origin=cursor is a reader that fell behind, origin=start one that had no position",
+        Enum.map(retention.skips, &{skip_labels.(&1), &1.events})
+      ),
+      metric(
+        "malachi_retention_offsets_skipped_total",
+        :counter,
+        "Offsets those skips stepped over: exact for span=exact, an upper bound for span=upper_bound " <>
+          "(an ancestor's whole range, of which the reader gets only its key slice), 0 for span=unknown; " <>
+          "offsets, not records lost",
+        Enum.map(retention.skips, &{skip_labels.(&1), &1.offsets})
+      ),
+      metric(
+        "malachi_retention_segments_expired_total",
+        :counter,
+        "Sealed segments the retention sweep expired, per topic",
+        Enum.map(retention.expired, &{[topic: &1.topic], &1.segments})
+      ),
+      metric(
+        "malachi_retention_bytes_expired_total",
+        :counter,
+        "Bytes the retention sweep expired, per topic",
+        Enum.map(retention.expired, &{[topic: &1.topic], &1.bytes})
+      ),
+      metric(
+        "malachi_retention_expire_failures_total",
+        :counter,
+        "Segment deletes the control plane refused during a retention sweep, by reply",
+        Enum.map([:migrating, :segment_active, :other], &{[reply: &1], Map.get(retention.failures, &1, 0)})
+      ),
+      histogram(
+        "malachi_retention_sweep_duration_seconds",
+        "Retention sweep duration; its count is the number of sweeps this node ran (only the leader sweeps)",
+        "retention sweep",
+        retention.sweeps
+      )
     ]
   end
 
@@ -151,7 +215,7 @@ defmodule Malachi.Metrics.Prometheus do
   # quantile allows. `_created` (when the histogram began, which is how a reader tells a restarted node
   # from one whose counters kept growing) follows as a gauge of its own: this endpoint serves the 0.0.4
   # text format, where a histogram family has no `_created` sample.
-  defp histogram(name, help, %{buckets: buckets, count: count, sum_us: sum_us, created: created}) do
+  defp histogram(name, help, what, %{buckets: buckets, count: count, sum_us: sum_us, created: created}) do
     bucket_name = name <> "_bucket"
 
     [
@@ -163,7 +227,7 @@ defmodule Malachi.Metrics.Prometheus do
       metric(
         name <> "_created",
         :gauge,
-        "Unix time the flush latency histogram began (changes when the node restarts)",
+        "Unix time the #{what} histogram began (changes when the node restarts)",
         [
           {[], created}
         ]

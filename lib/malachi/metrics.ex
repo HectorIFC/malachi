@@ -26,6 +26,18 @@ defmodule Malachi.Metrics do
   @flushed_bytes_slot 1
   @flushed_records_slot 2
 
+  # Retention. The skip and expiry counters live in the ETS table under tuple keys, off the hot path: a
+  # skip is counted only when a reader was actually moved past missing data, and an expiry once per
+  # segment a sweep tried. The sweep duration histogram is shaped like the flush one.
+  @retention_sweep_key {__MODULE__, :retention_sweep}
+  # The {topic, group} pairs admitted as their own label, so the exported series stay bounded however many
+  # groups clients invent (`:retention_metrics_max_groups`).
+  @retention_groups_table :malachi_retention_groups
+  @default_retention_max_groups 1000
+  @retention_other_group "__other__"
+  # Every refusal a delete can get, so each has a series at zero from boot (`Retention.reply_label/1`).
+  @retention_failure_replies [:migrating, :segment_active, :other]
+
   @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -106,13 +118,21 @@ defmodule Malachi.Metrics do
   def storage_flush_histogram do
     case :persistent_term.get(@storage_flush_key, nil) do
       nil ->
-        %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, bytes: 0, records: 0, created: 0.0}
+        Map.merge(histogram_snapshot(nil), %{bytes: 0, records: 0})
 
-      %{histogram: histogram, created: created} = state ->
-        # The count comes from the same pass as the buckets, so `+Inf` is never below the last edge.
-        {buckets, count} = Histogram.cumulative(histogram)
-        Map.merge(storage_flush_totals(state), %{buckets: buckets, count: count, created: created})
+      state ->
+        Map.merge(storage_flush_totals(state), histogram_snapshot(state))
     end
+  end
+
+  # A histogram kept in :persistent_term as the Prometheus exporter renders it: the cumulative buckets,
+  # the count and the sum in microseconds, and when it began. All zeros when it was never created.
+  defp histogram_snapshot(nil), do: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
+
+  defp histogram_snapshot(%{histogram: histogram, created: created}) do
+    # The count comes from the same pass as the buckets, so `+Inf` is never below the last edge.
+    {buckets, count} = Histogram.cumulative(histogram)
+    %{buckets: buckets, count: count, sum_us: Histogram.sum(histogram), created: created}
   end
 
   # The flush summary the dashboard shows: totals plus percentiles cumulative since the node booted (the
@@ -137,6 +157,108 @@ defmodule Malachi.Metrics do
       sum_us: Histogram.sum(histogram),
       bytes: :atomics.get(totals, @flushed_bytes_slot),
       records: :atomics.get(totals, @flushed_records_slot)
+    }
+  end
+
+  @doc """
+  Records one skip (from the retention skip telemetry event): a reader of `group` on `topic` was moved
+  past `offsets` offsets no longer stored. Counted as one event and as the offsets, under the reader's
+  `origin` and the skip's `span`.
+
+  `group` becomes the label as is (`""` for `nil`, a fetch outside a group) while fewer than
+  `:retention_metrics_max_groups` (default 1000) `{topic, group}` pairs have been admitted on this node,
+  and `"#{@retention_other_group}"` after that, so a client inventing group names cannot grow the scrape
+  without bound. The per-topic sum over groups stays exact. Admission is check-then-insert across the
+  few processes that report (one skip reporter per data-plane shard), so concurrent first skips can
+  admit a pair or two past the cap: a bound, not an exact limit.
+  """
+  @spec record_retention_skip(String.t(), String.t() | nil, atom(), atom(), non_neg_integer()) :: :ok
+  def record_retention_skip(topic, group, origin, span, offsets) do
+    key = {:retention_skip, topic, retention_group_label(topic, group || ""), origin, span}
+    :ets.update_counter(@metrics_table, key, [{2, 1}, {3, offsets}], {key, 0, 0})
+    :ok
+  end
+
+  @doc "How many `{topic, group}` pairs have their own retention skip label on this node."
+  @spec retention_group_count() :: non_neg_integer()
+  def retention_group_count, do: :ets.info(@retention_groups_table, :size)
+
+  defp retention_group_label(topic, group) do
+    max = Application.get_env(:malachi, :retention_metrics_max_groups, @default_retention_max_groups)
+
+    cond do
+      :ets.member(@retention_groups_table, {topic, group}) ->
+        group
+
+      retention_group_count() < max ->
+        # `insert_new` losing a race only means another reporter admitted the same pair first.
+        _ = :ets.insert_new(@retention_groups_table, {{topic, group}})
+        group
+
+      true ->
+        @retention_other_group
+    end
+  end
+
+  @doc """
+  Records what one expire answered (from the retention expire telemetry event): an expired segment
+  (`:ok`) counts itself and its `bytes` under `topic`; a segment already gone (`:no_such_segment`)
+  counts nowhere, since an earlier sweep expired it; anything else is a refusal counted under its reply.
+  """
+  @spec record_retention_expire(String.t(), non_neg_integer(), atom()) :: :ok
+  def record_retention_expire(topic, bytes, :ok) do
+    key = {:retention_expired, topic}
+    :ets.update_counter(@metrics_table, key, [{2, 1}, {3, bytes}], {key, 0, 0})
+    :ok
+  end
+
+  def record_retention_expire(_topic, _bytes, :no_such_segment), do: :ok
+
+  def record_retention_expire(_topic, _bytes, reply) do
+    key = {:retention_expire_failure, if(reply in @retention_failure_replies, do: reply, else: :other)}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
+  @doc """
+  Records one retention sweep's duration (from the retention sweep telemetry event). The histogram exists
+  from this server's first start, before the reporter that calls this is attached.
+  """
+  @spec record_retention_sweep(non_neg_integer()) :: :ok
+  def record_retention_sweep(duration_us) do
+    %{histogram: histogram} = :persistent_term.get(@retention_sweep_key)
+    Histogram.record(histogram, duration_us)
+  end
+
+  @doc """
+  The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `group`,
+  `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
+  refusals per reply (every known reply, zero included), and the sweep duration histogram in the shape
+  of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.
+  """
+  @spec retention_snapshot() :: %{
+          skips: [map()],
+          expired: [map()],
+          failures: %{atom() => non_neg_integer()},
+          sweeps: map()
+        }
+  def retention_snapshot do
+    skips =
+      for [topic, group, origin, span, events, offsets] <-
+            :ets.match(@metrics_table, {{:retention_skip, :"$1", :"$2", :"$3", :"$4"}, :"$5", :"$6"}) do
+        %{topic: topic, group: group, origin: origin, span: span, events: events, offsets: offsets}
+      end
+
+    expired =
+      for [topic, segments, bytes] <- :ets.match(@metrics_table, {{:retention_expired, :"$1"}, :"$2", :"$3"}) do
+        %{topic: topic, segments: segments, bytes: bytes}
+      end
+
+    %{
+      skips: Enum.sort(skips),
+      expired: Enum.sort(expired),
+      failures: Map.new(@retention_failure_replies, &{&1, get_counter({:retention_expire_failure, &1})}),
+      sweeps: histogram_snapshot(:persistent_term.get(@retention_sweep_key, nil))
     }
   end
 
@@ -451,16 +573,13 @@ defmodule Malachi.Metrics do
       read_concurrency: true
     ])
 
+    :ets.new(@retention_groups_table, [:set, :public, :named_table, read_concurrency: true])
+
     # Before the reporter is attached, so no flush event can arrive to a missing histogram. Reused across
     # restarts: the samples are the node's history, and dropping them on a Metrics crash would silently
     # reset a percentile an operator is watching.
-    if :persistent_term.get(@storage_flush_key, nil) == nil do
-      :persistent_term.put(@storage_flush_key, %{
-        histogram: Histogram.new(),
-        totals: :atomics.new(2, signed: false),
-        created: System.system_time(:millisecond) / 1000
-      })
-    end
+    put_new_histogram(@storage_flush_key, %{totals: :atomics.new(2, signed: false)})
+    put_new_histogram(@retention_sweep_key, %{})
 
     # Fold the telemetry hot-path events into these counters. Attached here so the ETS table exists
     # first; idempotent, so a Metrics restart re-attaches cleanly.
@@ -485,6 +604,17 @@ defmodule Malachi.Metrics do
     cleanup_old_snapshots()
     schedule_cleanup()
     {:noreply, state}
+  end
+
+  # Creates the :persistent_term histogram under `key` (with `extra` fields) unless an earlier start of
+  # this server already did, keeping the node's samples across a Metrics restart.
+  defp put_new_histogram(key, extra) do
+    if :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(
+        key,
+        Map.merge(extra, %{histogram: Histogram.new(), created: System.system_time(:millisecond) / 1000})
+      )
+    end
   end
 
   defp get_counter(key) do

@@ -161,4 +161,76 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       assert summary.p99_us <= summary.p999_us
     end
   end
+
+  describe "retention" do
+    alias Malachi.Broker.Skip
+
+    defp skip(offsets, overrides \\ []) do
+      struct!(
+        %Skip{range_id: {"t", 0}, source_range_id: {"t", 0}, from: 0, offsets: offsets, origin: :cursor, source: :self},
+        overrides
+      )
+    end
+
+    defp skips_of(topic), do: Enum.filter(Metrics.retention_snapshot().skips, &(&1.topic == topic))
+
+    defp unique_topic, do: "retention_#{System.unique_integer([:positive])}"
+
+    test "a skip counts one event and its offsets under its topic, group, origin and span" do
+      topic = unique_topic()
+
+      Telemetry.retention_skip(topic, "billing", skip(5))
+      Telemetry.retention_skip(topic, "billing", skip(2))
+      Telemetry.retention_skip(topic, nil, skip(:unknown, source: :ancestor, origin: :start))
+
+      assert Enum.sort_by(skips_of(topic), & &1.group) == [
+               %{topic: topic, group: "", origin: :start, span: :unknown, events: 1, offsets: 0},
+               %{topic: topic, group: "billing", origin: :cursor, span: :exact, events: 2, offsets: 7}
+             ]
+    end
+
+    test "past the cap on topic and group pairs, new groups fold into __other__ and the total stays exact" do
+      topic = unique_topic()
+      previous = Application.get_env(:malachi, :retention_metrics_max_groups)
+      on_exit(fn -> restore_env(:retention_metrics_max_groups, previous) end)
+
+      Telemetry.retention_skip(topic, "first", skip(1))
+      # Whatever other tests admitted, the cap now leaves no room for one more pair.
+      Application.put_env(:malachi, :retention_metrics_max_groups, Metrics.retention_group_count())
+
+      Telemetry.retention_skip(topic, "second", skip(2))
+      Telemetry.retention_skip(topic, "third", skip(3))
+      # an admitted pair keeps its own series
+      Telemetry.retention_skip(topic, "first", skip(4))
+
+      by_group = Map.new(skips_of(topic), &{&1.group, {&1.events, &1.offsets}})
+      assert by_group == %{"first" => {2, 5}, "__other__" => {2, 5}}
+    end
+
+    test "an expired segment counts its bytes, a refusal counts under its reply and frees nothing" do
+      topic = unique_topic()
+      before = Metrics.retention_snapshot().failures
+
+      Telemetry.retention_expire(topic, "s0", 100, :ok)
+      Telemetry.retention_expire(topic, "s1", 50, :ok)
+      Telemetry.retention_expire(topic, "s2", 999, :migrating)
+      Telemetry.retention_expire(topic, "s3", 999, :no_such_segment)
+
+      snapshot = Metrics.retention_snapshot()
+      assert Enum.filter(snapshot.expired, &(&1.topic == topic)) == [%{topic: topic, segments: 2, bytes: 150}]
+      assert snapshot.failures.migrating == before.migrating + 1
+      assert snapshot.failures.other == before.other
+    end
+
+    test "a sweep lands in the duration histogram" do
+      before = Metrics.retention_snapshot().sweeps.count
+
+      Telemetry.retention_sweep(2_500, 1, 0)
+
+      assert Metrics.retention_snapshot().sweeps.count == before + 1
+    end
+
+    defp restore_env(key, nil), do: Application.delete_env(:malachi, key)
+    defp restore_env(key, value), do: Application.put_env(:malachi, key, value)
+  end
 end
