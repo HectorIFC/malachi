@@ -88,6 +88,7 @@ defmodule Malachi.Cluster.Scrubber do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
+  alias Malachi.UnexpectedMessage
 
   @default_interval 60_000
   @default_segments_per_tick 1
@@ -161,7 +162,9 @@ defmodule Malachi.Cluster.Scrubber do
       # The reference resolved for the pass currently running (see `:local_ref`).
       resolved_ref: nil,
       # Whether the pass currently running could not learn which of its copies are latched (see `repair/4`).
-      latches_unknown?: false
+      latches_unknown?: false,
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     schedule(state)
@@ -190,6 +193,14 @@ defmodule Malachi.Cluster.Scrubber do
 
   def handle_call(:damaged, _from, state), do: {:reply, MapSet.to_list(state.damaged), state}
 
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
+  # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
+  @impl true
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+
   @impl true
   def handle_info(:tick, state) do
     {_result, state} = run(state)
@@ -200,23 +211,15 @@ defmodule Malachi.Cluster.Scrubber do
   # A worker meant to run for the lifetime of the node must not die on a message it did not plan for:
   # the crash costs the cycle position and the damaged set, so the restarted walk begins again at the
   # first segment and the tail of the rotation is never reached on a busy node. Nothing here is known
-  # to send one (a reply arriving after `verify_segment/3` times out is dropped by the runtime, which
-  # deactivates the call's alias on timeout), and that is the point: an unexpected message is a fact
-  # worth surfacing, not a reason to take the process down.
-  def handle_info(message, state) do
-    # `printable_limit: 0` is the point of these options, not `limit`: it replaces the CONTENT of
-    # every string in the term with an ellipsis while leaving the term's shape intact, so this prints
-    # something like `{#Reference<...>, {:ok, ...}}`. Whatever reaches this clause is by definition
-    # not a message we planned for, so it may carry record values, and a log line is the one place
-    # user data must not end up in by accident. Truncating the text is not enough for that: a bounded
-    # prefix of a payload is still a payload. The shape is what makes the line worth having, since it
-    # is what identifies the sender.
-    Logger.warning(I18n.t(:scrubber_unexpected_message, message: inspect(message, limit: 3, printable_limit: 0)))
-
-    {:noreply, state}
-  end
+  # to send one, and that is the point: an unexpected message is a fact worth surfacing, not a reason to
+  # take the process down (see `Malachi.UnexpectedMessage`).
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
 
   # --- internals ---
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :scrubber, kind, message)}
+  end
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 

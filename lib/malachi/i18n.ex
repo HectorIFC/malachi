@@ -313,10 +313,6 @@ defmodule Malachi.I18n do
       "pt_BR" => "[AUDIT] %{json}",
       "en_US" => "[AUDIT] %{json}"
     },
-    scrubber_unexpected_message: %{
-      "pt_BR" => "scrubber ignorando mensagem inesperada: %{message}",
-      "en_US" => "scrubber ignoring unexpected message: %{message}"
-    },
     # Malachi.UnexpectedMessage: a long-lived server received something it has no clause for. `server` is
     # the server's label and `message` only the term's shape (strings are elided before this is called).
     unexpected_cast: %{

@@ -779,4 +779,18 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     assert_receive {:telemetry, [:malachi, :storage, :scrub], %{verified: 0, damaged: 1, unrepairable: 1}, _metadata}
   end
+
+  test "an unknown cast and call are survived as well, not only an unknown info message" do
+    # `use GenServer` stops the server on a cast it has no clause for, so before this server defined its
+    # own catch-all a stray cast cost the cycle position and the damaged set just like an info did.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a"])
+
+    scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+    UnknownMessages.assert_survives_unknown(scrubber, :scrubber, fn ->
+      assert Scrubber.damaged(scrubber) == []
+    end)
+  end
 end
