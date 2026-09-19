@@ -41,6 +41,7 @@ defmodule Malachi.Log do
   handle (no GenServer). Time-based flushing and concurrency belong in a layer on top.
   """
 
+  alias Malachi.Storage.Directory
   alias Malachi.Storage.ElixirStore
 
   @default_store ElixirStore
@@ -182,13 +183,14 @@ defmodule Malachi.Log do
     # durable. Empty on purpose: `recover/2` derives `next_offset` from the files, so a marker
     # carrying an end offset would be redundant state that can disagree with them.
     #
-    # `:sync` rather than `File.touch!/1`, because the marker IS the fence after a restart: a create
-    # left in the page cache can be lost by a power failure that keeps the log data, and recovery would
-    # then find an unfenced log and start accepting appends into a segment the control plane has
-    # sealed. What this still does not cover is the parent directory's own entry, which Erlang cannot
-    # fsync without leaving pure Elixir; so the guarantee is that the marker's CONTENT is durable, not
-    # that its creation is, which matches the per-file marker the segment store already writes.
-    File.write(seal_marker_path(directory), <<>>, [:sync])
+    # `:sync` and then an fsync of the directory, rather than `File.touch!/1`, because the marker IS
+    # the fence after a restart: a create left in the page cache can be lost by a power failure that
+    # keeps the log data, and recovery would then find an unfenced log and start accepting appends into
+    # a segment the control plane has sealed. The file's own fsync makes its content durable but not
+    # its name; only the directory's fsync persists the entry that makes the marker exist at all.
+    with :ok <- File.write(seal_marker_path(directory), <<>>, [:sync]) do
+      Directory.sync(directory)
+    end
   end
 
   @doc "Whether the log as a whole is sealed (no further append will ever be accepted for it)."
