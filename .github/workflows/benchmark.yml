@@ -88,7 +88,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # No later step does authenticated git, and this job then runs repo code (deps + the benchmark),
         # so do not leave the GitHub token in the local git config.
         with:
@@ -179,7 +179,7 @@ jobs:
       # the platform the answer is about; the script refuses to call a run too short to judge a pass.
       - name: Check out main as the A/B baseline
         if: ${{ inputs.store_error_path_ab }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           path: store-error-path-baseline
@@ -217,7 +217,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # This job runs repository code (the images and the harness) and does no authenticated git.
         with:
           persist-credentials: false
@@ -314,7 +314,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # This job runs repository code (the suite) and does no authenticated git.
         with:
           persist-credentials: false
@@ -388,12 +388,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Check out main as the A/B baseline
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           path: rate-limit-baseline
