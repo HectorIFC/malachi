@@ -15,18 +15,23 @@ defmodule Malachi.Application do
   # See `segment_prealloc_bytes/0`: matches the broker's default `:segment_max_bytes`, which is the
   # size a segment file actually reaches before the control plane rolls it.
   @default_segment_prealloc_bytes 64 * 1024 * 1024
+  alias Malachi.Auth.AclMachine
   alias Malachi.Auth.AclServer
   alias Malachi.Auth.ConfigValidator
+  alias Malachi.Auth.LockoutMachine
   alias Malachi.Auth.LockoutServer
+  alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
+  alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.LeaseReconciler
   alias Malachi.Cluster.LeaseServer
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
   alias Malachi.Cluster.RaCluster
@@ -36,6 +41,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingBoot
+  alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.Scrubber
@@ -156,7 +162,13 @@ defmodule Malachi.Application do
           id: Malachi.LogUserReconciler,
           start:
             {LeaseReconciler, :start_link,
-             [[name: Malachi.LogUserReconciler, reconcile: fn -> UserServer.reconcile(@log_users, nodes) end]]}
+             [
+               [
+                 name: Malachi.LogUserReconciler,
+                 reconcile: fn -> UserServer.reconcile(@log_users, nodes) end,
+                 version_check: {UserMachine, {@log_users, node()}}
+               ]
+             ]}
         }
       ]
     else
@@ -182,7 +194,8 @@ defmodule Malachi.Application do
                [
                  [
                    name: Malachi.LogLockoutReconciler,
-                   reconcile: fn -> LockoutServer.reconcile(@log_lockouts, nodes) end
+                   reconcile: fn -> LockoutServer.reconcile(@log_lockouts, nodes) end,
+                   version_check: {LockoutMachine, {@log_lockouts, node()}}
                  ]
                ]}
           }
@@ -207,7 +220,13 @@ defmodule Malachi.Application do
           id: Malachi.LogAclReconciler,
           start:
             {LeaseReconciler, :start_link,
-             [[name: Malachi.LogAclReconciler, reconcile: fn -> AclServer.reconcile(@log_acls, nodes) end]]}
+             [
+               [
+                 name: Malachi.LogAclReconciler,
+                 reconcile: fn -> AclServer.reconcile(@log_acls, nodes) end,
+                 version_check: {AclMachine, {@log_acls, node()}}
+               ]
+             ]}
         }
       ]
     else
@@ -336,6 +355,7 @@ defmodule Malachi.Application do
     opts = [
       name: Malachi.LogRingReconciler,
       reconcile: fn -> RingServer.reconcile(@log_ring, nodes) end,
+      version_check: {RingMachine, {@log_ring, node()}},
       interval: Application.get_env(:malachi, :lease_reconcile_interval_ms, 30_000)
     ]
 
@@ -440,6 +460,7 @@ defmodule Malachi.Application do
     opts = [
       name: Malachi.LogLeaseReconciler,
       reconcile: fn -> LeaseServer.reconcile(@log_lease, nodes) end,
+      version_check: {LeaseMachine, {@log_lease, node()}},
       interval: Application.get_env(:malachi, :lease_reconcile_interval_ms, 30_000)
     ]
 
@@ -873,6 +894,7 @@ defmodule Malachi.Application do
            [
              name: Malachi.LogVnodeCoordinatorManager,
              leading: fn -> leading_vnodes(vnodes, node(), &MetadataServer.leader?/1) end,
+             version_servers: fn -> local_vnode_servers(vnodes, node()) end,
              spawn: &start_vnode_coordinators/1,
              stop: &stop_vnode_coordinators/1,
              interval: Application.get_env(:malachi, :vnode_reconcile_interval_ms, 5_000)
@@ -1189,6 +1211,16 @@ defmodule Malachi.Application do
     for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, leader?.({vnode_id, this_node}) do
       vnode_id
     end
+  end
+
+  @doc """
+  The metadata vnode members `this_node` hosts, as `{machine, server_id}` pairs for
+  `Malachi.Cluster.MachineVersion.check/3`: every vnode whose placement includes `this_node`, led or not,
+  since a follower can stop applying its log just as a leader can. Pure over the placement `vnodes`.
+  """
+  @spec local_vnode_servers([{atom(), non_neg_integer(), [node()]}], node()) :: [{module(), {atom(), node()}}]
+  def local_vnode_servers(vnodes, this_node \\ node()) do
+    for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, do: {MetadataMachine, {vnode_id, this_node}}
   end
 
   @doc """

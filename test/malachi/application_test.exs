@@ -302,6 +302,19 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "local_vnode_servers/2" do
+    test "lists every metadata vnode this node hosts, led or not, as a machine and local server id" do
+      vnodes = [{:vn_a, 0, [:n1@h, :n2@h]}, {:vn_b, 1, [:n2@h, :n3@h]}, {:vn_c, 2, [:n3@h, :n1@h]}]
+
+      assert App.local_vnode_servers(vnodes, :n1@h) == [
+               {Malachi.Cluster.MetadataMachine, {:vn_a, :n1@h}},
+               {Malachi.Cluster.MetadataMachine, {:vn_c, :n1@h}}
+             ]
+
+      assert App.local_vnode_servers(vnodes, :n9@h) == []
+    end
+  end
+
   describe "static_seed/1" do
     test "self is the orchestrator only when it is the lowest-sorted node" do
       higher = :zzzz_higher@h

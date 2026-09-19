@@ -118,3 +118,58 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
     refute_receive {:spawn, :a, _}, 300
   end
 end
+
+defmodule Malachi.Cluster.VnodeCoordinatorManagerVersionTest do
+  # async: false: the stuck member is produced with the node-wide machine version pin.
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
+
+  alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.VnodeCoordinatorManager, as: Manager
+  alias Malachi.Test.StuckRaMember
+
+  defp start_manager(version_servers) do
+    {:ok, manager} =
+      Manager.start_link(
+        leading: fn -> [] end,
+        spawn: fn _vnode_id -> spawn(fn -> :ok end) end,
+        stop: fn _pid -> :ok end,
+        version_servers: version_servers,
+        interval: 60_000
+      )
+
+    manager
+  end
+
+  test "watches no member unless told to" do
+    {:ok, manager} =
+      Manager.start_link(leading: fn -> [] end, spawn: fn _ -> self() end, stop: fn _ -> :ok end, interval: 60_000)
+
+    assert Manager.reconcile_now(manager) == []
+    assert Manager.version_status(manager) == %{}
+  end
+
+  test "keeps a status per local vnode member, logs a stuck one once, and forgets members no longer listed" do
+    name = :"vcm_stuck_#{System.unique_integer([:positive])}"
+    on_exit(fn -> StuckRaMember.cleanup({name, node()}) end)
+    server_id = StuckRaMember.start(name)
+    ghost = {:"vcm_ghost_#{System.unique_integer([:positive])}", node()}
+    {:ok, listed} = Agent.start_link(fn -> [{MetadataMachine, server_id}, {MetadataMachine, ghost}] end)
+
+    log =
+      capture_log(fn ->
+        manager = start_manager(fn -> Agent.get(listed, & &1) end)
+        Manager.reconcile_now(manager)
+        Manager.reconcile_now(manager)
+
+        assert Manager.version_status(manager) == %{server_id => {:stuck, 1, 0}, ghost => :ok}
+
+        Agent.update(listed, fn _ -> [{MetadataMachine, ghost}] end)
+        Manager.reconcile_now(manager)
+        assert Manager.version_status(manager) == %{ghost => :ok}
+      end)
+
+    assert length(Regex.scan(~r/stopped applying entries/, log)) == 1
+  end
+end
