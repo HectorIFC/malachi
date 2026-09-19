@@ -603,12 +603,17 @@ defmodule Malachi.Application do
   defp coordinator_leader?(nil), do: fn -> true end
   defp coordinator_leader?(_cluster), do: membership_leader(Malachi.LogMembership)
 
-  # Removes an expired segment from the control plane, then deletes its stored data on each replica.
+  @doc false
+  # Removes an expired segment from the control plane through `broker`, then deletes its stored data on
+  # each replica, and answers what the control plane answered, which the retention coordinator turns
+  # into its sweep telemetry. Public (and documented false) only so it can be tested directly.
   # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
   # segment, so a replica that is momentarily unreachable just leaves harmless files to be retried.
-  defp expire_segment(segment) do
-    _ = BrokerServer.delete_segment(Malachi.LogBroker, segment.id)
-    Enum.each(segment.replica_set, fn broker -> ReplicationServer.delete(broker, segment.id) end)
+  @spec expire_segment(Metadata.segment_meta(), GenServer.server()) :: term()
+  def expire_segment(segment, broker \\ Malachi.LogBroker) do
+    reply = BrokerServer.delete_segment(broker, segment.id)
+    Enum.each(segment.replica_set, fn replica -> ReplicationServer.delete(replica, segment.id) end)
+    reply
   end
 
   @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."

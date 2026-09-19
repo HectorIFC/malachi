@@ -56,6 +56,15 @@ defmodule Malachi.Telemetry do
       received its key slice) or `:unknown` (the ancestor's end was not recovered after a restart;
       `offsets` is then 0). See `Malachi.Broker.Skip`.
 
+    * `[:malachi, :retention, :expire]`. `%{count: 1, bytes}` / `%{topic, segment, result}` - the
+      retention sweep tried to expire one sealed segment of `topic` (`bytes` is its size). `result` is
+      `Malachi.Cluster.Retention.reply_label/1` of what the control plane answered: `:ok` (expired),
+      `:no_such_segment` (already gone), `:migrating`, `:segment_active` or `:other`. Only `:ok` freed
+      the bytes. The segment is metadata for a handler, not a label of the exported metric.
+    * `[:malachi, :retention, :sweep]`. `%{duration_us, expired, failed}` / `%{}` - one retention sweep
+      ran on this node (only the leader sweeps), with how many segments it expired and how many deletes
+      were refused. No events at all means no sweep is running.
+
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
     * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
@@ -157,6 +166,29 @@ defmodule Malachi.Telemetry do
       origin: skip.origin,
       span: Skip.span(skip)
     })
+  end
+
+  @doc """
+  The retention sweep tried to expire `segment_id` of `topic`, `bytes` long, and the control plane's answer
+  was labelled `result`.
+  """
+  @spec retention_expire(String.t(), term(), non_neg_integer(), atom()) :: :ok
+  def retention_expire(topic, segment_id, bytes, result) do
+    :telemetry.execute([:malachi, :retention, :expire], %{count: 1, bytes: bytes}, %{
+      topic: topic,
+      segment: segment_id,
+      result: result
+    })
+  end
+
+  @doc "One retention sweep ran for `duration_us`, expiring `expired` segments with `failed` refusals."
+  @spec retention_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
+  def retention_sweep(duration_us, expired, failed) do
+    :telemetry.execute(
+      [:malachi, :retention, :sweep],
+      %{duration_us: duration_us, expired: expired, failed: failed},
+      %{}
+    )
   end
 
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."
