@@ -85,4 +85,43 @@ defmodule Malachi.Config do
       _malformed_or_out_of_range -> :invalid
     end
   end
+
+  @doc """
+  Normalizes the `ra` machine version pin taken from `MALACHI_RA_MACHINE_VERSION`.
+
+  Returns `nil` when the value is absent or blank (no pin: the node advertises the newest version its
+  code implements) and the integer when it is a whole non-negative number. Anything else raises, so the
+  node refuses to boot. Silently ignoring a typo would be the worst outcome here: an operator who pinned
+  the version to keep a rollback possible would find the pin gone and the upgrade finalized, which
+  moves the rollback floor. See `Malachi.Cluster.MachineVersion` for what the pin holds back.
+
+  ## Examples
+
+      iex> Malachi.Config.ra_machine_version_pin(nil)
+      nil
+
+      iex> Malachi.Config.ra_machine_version_pin(" ")
+      nil
+
+      iex> Malachi.Config.ra_machine_version_pin(" 1 ")
+      1
+  """
+  @spec ra_machine_version_pin(String.t() | nil) :: non_neg_integer() | nil
+  def ra_machine_version_pin(nil), do: nil
+
+  def ra_machine_version_pin(raw) when is_binary(raw) do
+    case String.trim(raw) do
+      "" ->
+        nil
+
+      trimmed ->
+        case Integer.parse(trimmed) do
+          {pin, ""} when pin >= 0 ->
+            pin
+
+          _malformed_or_negative ->
+            raise "MALACHI_RA_MACHINE_VERSION must be a non-negative integer, got: #{inspect(raw)}"
+        end
+    end
+  end
 end
