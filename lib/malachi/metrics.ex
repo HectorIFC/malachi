@@ -34,7 +34,6 @@ defmodule Malachi.Metrics do
   # groups clients invent (`:retention_metrics_max_groups`).
   @retention_groups_table :malachi_retention_groups
   @default_retention_max_groups 1000
-  @retention_other_group "__other__"
   # Every refusal a delete can get, so each has a series at zero from boot (`Retention.reply_label/1`).
   @retention_failure_replies [:migrating, :segment_active, :other]
 
@@ -165,16 +164,22 @@ defmodule Malachi.Metrics do
   past `offsets` offsets no longer stored. Counted as one event and as the offsets, under the reader's
   `origin` and the skip's `span`.
 
-  `group` becomes the label as is (`""` for `nil`, a fetch outside a group) while fewer than
-  `:retention_metrics_max_groups` (default 1000) `{topic, group}` pairs have been admitted on this node,
-  and `"#{@retention_other_group}"` after that, so a client inventing group names cannot grow the scrape
-  without bound. The per-topic sum over groups stays exact. Admission is check-then-insert across the
-  few processes that report (one skip reporter per data-plane shard), so concurrent first skips can
-  admit a pair or two past the cap: a bound, not an exact limit.
+  The series carry WHICH KIND of reader they count (`reader`) beside the name (`group`): `:group` with
+  the name as it is, `:none` with an empty name for a fetch outside a group (`group` is `nil`), and
+  `:other` with an empty name for a group folded by the cap. Nothing reserves a group name, so the kind
+  has to be its own label: with the name alone, a group a client called `"__other__"` would share a
+  series with the folded ones, and one called `""` with a fetch outside a group.
+
+  A `{topic, group}` pair keeps its own name while fewer than `:retention_metrics_max_groups` (default
+  1000) pairs have been admitted on this node, and is folded into `:other` after that, so a client
+  inventing group names cannot grow the scrape without bound. The per-topic sum stays exact. Admission
+  is check-then-insert across the few processes that report (one skip reporter per data-plane shard), so
+  concurrent first skips can admit a pair or two past the cap: a bound, not an exact limit.
   """
   @spec record_retention_skip(String.t(), String.t() | nil, atom(), atom(), non_neg_integer()) :: :ok
   def record_retention_skip(topic, group, origin, span, offsets) do
-    key = {:retention_skip, topic, retention_group_label(topic, group || ""), origin, span}
+    {reader, label} = retention_reader(topic, group)
+    key = {:retention_skip, topic, reader, label, origin, span}
     :ets.update_counter(@metrics_table, key, [{2, 1}, {3, offsets}], {key, 0, 0})
     :ok
   end
@@ -183,20 +188,24 @@ defmodule Malachi.Metrics do
   @spec retention_group_count() :: non_neg_integer()
   def retention_group_count, do: :ets.info(@retention_groups_table, :size)
 
-  defp retention_group_label(topic, group) do
+  # A fetch outside a group has no name to fold and takes no room in the cap.
+  defp retention_reader(_topic, nil), do: {:none, ""}
+
+  defp retention_reader(topic, group) do
     max = Application.get_env(:malachi, :retention_metrics_max_groups, @default_retention_max_groups)
 
     cond do
       :ets.member(@retention_groups_table, {topic, group}) ->
-        group
+        {:group, group}
 
       retention_group_count() < max ->
         # `insert_new` losing a race only means another reporter admitted the same pair first.
         _ = :ets.insert_new(@retention_groups_table, {{topic, group}})
-        group
+        {:group, group}
 
+      # The name is dropped rather than exported: keeping it is what the cap exists to prevent.
       true ->
-        @retention_other_group
+        {:other, ""}
     end
   end
 
@@ -231,8 +240,8 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
-  The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `group`,
-  `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
+  The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `reader`,
+  `group`, `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
   refusals per reply (every known reply, zero included), and the sweep duration histogram in the shape
   of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.
   """
@@ -244,9 +253,9 @@ defmodule Malachi.Metrics do
         }
   def retention_snapshot do
     skips =
-      for [topic, group, origin, span, events, offsets] <-
-            :ets.match(@metrics_table, {{:retention_skip, :"$1", :"$2", :"$3", :"$4"}, :"$5", :"$6"}) do
-        %{topic: topic, group: group, origin: origin, span: span, events: events, offsets: offsets}
+      for [topic, reader, group, origin, span, events, offsets] <-
+            :ets.match(@metrics_table, {{:retention_skip, :"$1", :"$2", :"$3", :"$4", :"$5"}, :"$6", :"$7"}) do
+        %{topic: topic, reader: reader, group: group, origin: origin, span: span, events: events, offsets: offsets}
       end
 
     expired =

@@ -276,8 +276,8 @@ config :malachi,
   # Retention metrics. A consumer moved past data no longer stored is counted once per distinct skip: the
   # skip reporter beside each broker remembers up to MALACHI_RETENTION_SKIP_LEDGER_MAX skips (and as many
   # readers) and logs one reader at most once per MALACHI_RETENTION_SKIP_LOG_WINDOW_MS. The exported
-  # skip series get their own `group` label for at most MALACHI_RETENTION_METRICS_MAX_GROUPS topic and
-  # group pairs per node; the rest are folded into group "__other__".
+  # skip series name the group for at most MALACHI_RETENTION_METRICS_MAX_GROUPS topic and group pairs
+  # per node; the rest are folded into reader="other", which carries no name.
   retention_skip_ledger_max: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LEDGER_MAX"), 10_000),
   retention_skip_log_window_ms: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LOG_WINDOW_MS"), 600_000),
   retention_metrics_max_groups: parse_int.(System.get_env("MALACHI_RETENTION_METRICS_MAX_GROUPS"), 1_000),

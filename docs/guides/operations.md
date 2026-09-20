@@ -278,13 +278,16 @@ The sweep (only the node that leads a vnode sweeps it, so read these summed acro
 
 The readers:
 
-- **`malachi_retention_skips_total{topic,group,origin,span}`**: how many times a reader was moved past data
-  no longer stored (expired by retention, or deleted by an operator). Each distinct skip is counted
-  once, however often a group re-reads it before committing. `group` is empty for a fetch outside a
-  group. **`origin="cursor"` is the one to alert on**: a group that held a position and fell behind
-  retention. `origin="start"` is a reader that had no position, a new group or a range's children after a
-  split, which start over the range's history; retention reaching them is expected.
-- **`malachi_retention_offsets_skipped_total{topic,group,origin,span}`**: how many offsets those skips
+- **`malachi_retention_skips_total{topic,reader,group,origin,span}`**: how many times a reader was moved
+  past data no longer stored (expired by retention, or deleted by an operator). Each distinct skip is
+  counted once, however often a group re-reads it before committing. `reader` says which kind of reader
+  it was: `group` names it in `group`, `none` is a fetch outside a group and `other` a group folded by
+  the label cap, both with an empty `group`. Nothing reserves a group name, so `reader` is what keeps a
+  group that calls itself `__other__` or `""` apart from those two buckets. **`origin="cursor"` is the
+  one to alert on**: a group that held a position and fell behind retention. `origin="start"` is a
+  reader that had no position, a new group or a range's children after a split, which start over the
+  range's history; retention reaching them is expected.
+- **`malachi_retention_offsets_skipped_total{topic,reader,group,origin,span}`**: how many offsets those skips
   stepped over. `span="exact"` is exact. `span="upper_bound"` is a skip over the ancestor of a split
   range: the count covers the ancestor's whole range, of which this reader would only have received its
   own key slice. `span="unknown"` is an ancestor with nothing left stored whose end this node could not
@@ -297,8 +300,8 @@ group that lost data. The first skip of a reader is also logged, then at most on
 line.
 
 `group` is a label a client chooses, so it is capped: past `MALACHI_RETENTION_METRICS_MAX_GROUPS` (1000)
-topic and group pairs on a node, new groups are folded into `group="__other__"` and the log line still
-names them. The sum over groups per topic stays exact. The skip reporter's memory is bounded the same
+topic and group pairs on a node, new groups are folded into `reader="other"` with no name, and the log
+line still names them. The sum over readers per topic stays exact. The skip reporter's memory is bounded the same
 way by `MALACHI_RETENTION_SKIP_LEDGER_MAX` (10000 skips remembered); a forgotten skip read again is
 counted again.
 

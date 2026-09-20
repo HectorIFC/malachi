@@ -176,7 +176,7 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
 
     defp unique_topic, do: "retention_#{System.unique_integer([:positive])}"
 
-    test "a skip counts one event and its offsets under its topic, group, origin and span" do
+    test "a skip counts one event and its offsets under its topic, reader, group, origin and span" do
       topic = unique_topic()
 
       Telemetry.retention_skip(topic, "billing", skip(5))
@@ -184,12 +184,25 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       Telemetry.retention_skip(topic, nil, skip(:unknown, source: :ancestor, origin: :start))
 
       assert Enum.sort_by(skips_of(topic), & &1.group) == [
-               %{topic: topic, group: "", origin: :start, span: :unknown, events: 1, offsets: 0},
-               %{topic: topic, group: "billing", origin: :cursor, span: :exact, events: 2, offsets: 7}
+               %{topic: topic, reader: :none, group: "", origin: :start, span: :unknown, events: 1, offsets: 0},
+               %{topic: topic, reader: :group, group: "billing", origin: :cursor, span: :exact, events: 2, offsets: 7}
              ]
     end
 
-    test "past the cap on topic and group pairs, new groups fold into __other__ and the total stays exact" do
+    test "a group named like a reserved label keeps a series of its own" do
+      # Nothing reserves a group name: a client can call its group "__other__" (the old overflow label)
+      # or "" (what a fetch outside a group exports), and neither may be folded into those buckets.
+      topic = unique_topic()
+
+      Telemetry.retention_skip(topic, "__other__", skip(1))
+      Telemetry.retention_skip(topic, "", skip(2))
+      Telemetry.retention_skip(topic, nil, skip(4))
+
+      rows = Map.new(skips_of(topic), &{{&1.reader, &1.group}, &1.offsets})
+      assert rows == %{{:group, "__other__"} => 1, {:group, ""} => 2, {:none, ""} => 4}
+    end
+
+    test "past the cap on topic and group pairs, new groups fold into reader=other with no name" do
       topic = unique_topic()
       previous = Application.get_env(:malachi, :retention_metrics_max_groups)
       on_exit(fn -> restore_env(:retention_metrics_max_groups, previous) end)
@@ -202,9 +215,11 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       Telemetry.retention_skip(topic, "third", skip(3))
       # an admitted pair keeps its own series
       Telemetry.retention_skip(topic, "first", skip(4))
+      # a group whose NAME is the old overflow label is admitted like any other, past the cap or not
+      Telemetry.retention_skip(topic, "__other__", skip(8))
 
-      by_group = Map.new(skips_of(topic), &{&1.group, {&1.events, &1.offsets}})
-      assert by_group == %{"first" => {2, 5}, "__other__" => {2, 5}}
+      rows = Map.new(skips_of(topic), &{{&1.reader, &1.group}, {&1.events, &1.offsets}})
+      assert rows == %{{:group, "first"} => {2, 5}, {:other, ""} => {3, 13}}
     end
 
     test "an expired segment counts its bytes, a refusal counts under its reply and frees nothing" do

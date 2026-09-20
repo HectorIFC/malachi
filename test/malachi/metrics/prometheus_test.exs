@@ -210,10 +210,19 @@ defmodule Malachi.Metrics.PrometheusTest do
     defp retention do
       %{
         skips: [
-          %{topic: "orders", group: "billing", origin: :cursor, span: :exact, events: 3, offsets: 120},
-          %{topic: "orders", group: "", origin: :start, span: :upper_bound, events: 1, offsets: 7},
-          %{topic: "orders", group: "__other__", origin: :cursor, span: :unknown, events: 2, offsets: 0},
-          %{topic: "orders", group: ~s(we"ird\nname), origin: :cursor, span: :exact, events: 1, offsets: 1}
+          %{topic: "orders", reader: :group, group: "billing", origin: :cursor, span: :exact, events: 3, offsets: 120},
+          %{topic: "orders", reader: :none, group: "", origin: :start, span: :upper_bound, events: 1, offsets: 7},
+          %{topic: "orders", reader: :other, group: "", origin: :cursor, span: :unknown, events: 2, offsets: 0},
+          %{topic: "orders", reader: :group, group: "__other__", origin: :cursor, span: :exact, events: 5, offsets: 9},
+          %{
+            topic: "orders",
+            reader: :group,
+            group: ~s(we"ird\nname),
+            origin: :cursor,
+            span: :exact,
+            events: 1,
+            offsets: 1
+          }
         ],
         expired: [%{topic: "orders", segments: 4, bytes: 4096}, %{topic: "audit", segments: 1, bytes: 10}],
         failures: %{migrating: 1, segment_active: 0, other: 2},
@@ -224,22 +233,27 @@ defmodule Malachi.Metrics.PrometheusTest do
     defp render_retention(retention),
       do: Prometheus.export(MetricsFixtures.system(), [], flush(), retention) |> IO.iodata_to_binary()
 
-    test "skips are counted as events and as offsets, per topic, group, origin and span" do
+    test "skips are counted as events and as offsets, per topic, reader, group, origin and span" do
       out = render_retention(retention())
 
       assert out =~ "# TYPE malachi_retention_skips_total counter\n"
       assert out =~ "# TYPE malachi_retention_offsets_skipped_total counter\n"
 
-      assert out =~
-               ~s(malachi_retention_skips_total{topic="orders",group="billing",origin="cursor",span="exact"} 3\n)
+      billing = ~s(topic="orders",reader="group",group="billing",origin="cursor",span="exact")
+      assert out =~ ~s(malachi_retention_skips_total{#{billing}} 3\n)
+      assert out =~ ~s(malachi_retention_offsets_skipped_total{#{billing}} 120\n)
+    end
 
-      assert out =~
-               ~s(malachi_retention_offsets_skipped_total{topic="orders",group="billing",origin="cursor",span="exact"} 120\n)
+    test "the reader label keeps a fetch with no group, a folded group and a group named __other__ apart" do
+      # Nothing reserves a group name, so the label that says WHICH KIND of reader this is has to be its
+      # own dimension: without it, a group called __other__ would share a series with the folded ones,
+      # and a group called "" with a fetch outside a group.
+      out = render_retention(retention())
+      series = fn labels -> ~s(malachi_retention_skips_total{topic="orders",#{labels}}) end
 
-      assert out =~ ~s(malachi_retention_skips_total{topic="orders",group="",origin="start",span="upper_bound"} 1\n)
-
-      assert out =~
-               ~s(malachi_retention_skips_total{topic="orders",group="__other__",origin="cursor",span="unknown"} 2\n)
+      assert out =~ series.(~s(reader="none",group="",origin="start",span="upper_bound")) <> " 1\n"
+      assert out =~ series.(~s(reader="other",group="",origin="cursor",span="unknown")) <> " 2\n"
+      assert out =~ series.(~s(reader="group",group="__other__",origin="cursor",span="exact")) <> " 5\n"
     end
 
     test "the offsets series says it is not a count of records lost" do

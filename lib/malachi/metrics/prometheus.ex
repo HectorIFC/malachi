@@ -160,18 +160,22 @@ defmodule Malachi.Metrics.Prometheus do
     }
   end
 
-  # The retention series. Skips carry `topic` and `group` labels, which `Malachi.Metrics` keeps bounded
-  # (pairs past its cap are folded into group "__other__"); expiries carry `topic` only, and refusals
-  # the closed set of replies.
+  # The retention series. Skips carry `topic`, `reader` and `group`, which `Malachi.Metrics` keeps
+  # bounded (a pair past its cap becomes reader=other with no name); expiries carry `topic` only, and
+  # refusals the closed set of replies.
   defp retention_metrics(retention) do
-    skip_labels = fn skip -> [topic: skip.topic, group: skip.group, origin: skip.origin, span: skip.span] end
+    skip_labels = fn skip ->
+      [topic: skip.topic, reader: skip.reader, group: skip.group, origin: skip.origin, span: skip.span]
+    end
 
     [
       metric(
         "malachi_retention_skips_total",
         :counter,
         "Times a consumer was moved past data no longer stored (expired or deleted), counted once per " <>
-          "distinct skip; origin=cursor is a reader that fell behind, origin=start one that had no position",
+          "distinct skip; origin=cursor is a reader that fell behind, origin=start one that had no position; " <>
+          "reader=group names the group, reader=none is a fetch outside a group and reader=other a group " <>
+          "folded by the label cap (both with an empty group)",
         Enum.map(retention.skips, &{skip_labels.(&1), &1.events})
       ),
       metric(
