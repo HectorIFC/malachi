@@ -45,6 +45,13 @@ defmodule Malachi.Telemetry do
       background verification pass finished, with how many segments it covered. Steady progress
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
       running.
+    * `[:malachi, :process, :unexpected_message]`. `%{count: 1}` / `%{server, kind, shape, pid}` - a
+      long-lived server received a message it has no clause for and dropped it (`kind` is `:cast` or
+      `:info`) or answered it `{:error, :unknown_call}` (`kind` is `:call`) instead of crashing. See
+      `Malachi.UnexpectedMessage`: `shape` identifies the sender without carrying the message's data, and
+      `pid` is the server that received it. Non-zero on a cluster where every node runs the same build
+      means a bug; during a rolling upgrade it means a newer node is sending a shape an older one does
+      not know.
 
   Emitting is a no-op fast path when nothing is attached, so these are safe on the hot path.
   """
@@ -122,6 +129,19 @@ defmodule Malachi.Telemetry do
   @spec fence_reconciled(non_neg_integer()) :: :ok
   def fence_reconciled(count) do
     :telemetry.execute([:malachi, :cluster, :fence_reconciled], %{count: count}, %{})
+  end
+
+  @doc """
+  The server labelled `server` received a message of `shape` as `kind` (`:cast`, `:info` or `:call`) with
+  no clause for it, and dropped it rather than crash. Emitted from the server's own process.
+  """
+  @spec unexpected_message(atom(), :cast | :info | :call, term()) :: :ok
+  def unexpected_message(server, kind, shape) do
+    :telemetry.execute(
+      [:malachi, :process, :unexpected_message],
+      %{count: 1},
+      %{server: server, kind: kind, shape: shape, pid: self()}
+    )
   end
 
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."

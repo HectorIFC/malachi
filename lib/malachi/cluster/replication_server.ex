@@ -64,6 +64,15 @@ defmodule Malachi.Cluster.ReplicationServer do
   The copy is never retried. This store writes through the page cache (no Direct I/O), and after a
   failed fsync the cache can claim bytes are written that never reached the device, so a retry could
   report success over lost data.
+
+  ## Messages from another version
+
+  For the same reason, a message this server has no clause for never takes it down: during a rolling
+  upgrade a newer primary can push a replication message an older follower does not know. An unknown
+  cast or info message is counted and dropped, and an unknown call is answered `{:error, :unknown_call}`
+  (see `Malachi.UnexpectedMessage`). Dropping a push does not ack it, so the batch it carried waits for
+  the replication timeout on the primary; keeping a new shape from being sent before every replica
+  understands it is not this server's job.
   """
 
   use GenServer
@@ -77,6 +86,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias Malachi.Log
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
+  alias Malachi.UnexpectedMessage
   alias OpenTelemetry.Ctx
 
   @follow_timeout 5_000
@@ -114,7 +124,8 @@ defmodule Malachi.Cluster.ReplicationServer do
            gc_timer: reference() | nil,
            pending_acks: %{{term(), term()} => non_neg_integer()},
            failed: %{term() => term()},
-           lost_unflushed: %{term() => term()}
+           lost_unflushed: %{term() => term()},
+           unexpected_shapes: UnexpectedMessage.seen()
          }
 
   @doc """
@@ -477,7 +488,9 @@ defmodule Malachi.Cluster.ReplicationServer do
       failed: %{},
       # Segments that failed while holding buffered records, which `:flush` has to report because those
       # appends were already answered `{:ok, last}`. One entry per segment, cleared by the flush.
-      lost_unflushed: %{}
+      lost_unflushed: %{},
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     {:ok, state}
@@ -702,6 +715,12 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  # A call from a newer node that this build does not know: answered, so the caller can fall back instead
+  # of waiting out its timeout, and never fatal (see `Malachi.UnexpectedMessage`).
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
   # The asynchronous fence (`seal_async/5`): the same seal as the call, answered as a message.
   @impl true
   def handle_cast({:seal_async, segment_id, base_offset, notify}, state) do
@@ -789,6 +808,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   def handle_cast({:replica_ack, _segment_id, _follower, {:error, _reason}}, state) do
     {:noreply, state}
   end
+
+  # A push or an ack in a shape this build does not know, which is what a newer primary sends an older
+  # follower during a rolling upgrade. Dropping it costs that one batch its ack (the primary waits out its
+  # replication timeout for it); crashing would cost every log on this node (see "Storage failures").
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
 
   # The follower side of one pipelined push, once its log is open.
   defp follow_push(state, log, {segment_id, base, expected_first, records, source}) do
@@ -910,6 +934,8 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
   @impl true
   def terminate(_reason, state) do
     Enum.each(state.logs, fn {_segment_id, log} -> Log.close(log) end)
@@ -917,6 +943,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   # --- internals ---
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :replication, kind, message)}
+  end
 
   # Pipelined replication (NorthGuard style). The primary appends durably, acks itself in the tracker,
   # and, with followers, PARKS the caller and pushes the batch to every follower as a cast from this

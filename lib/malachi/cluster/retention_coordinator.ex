@@ -23,6 +23,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   alias Malachi.Cluster.Retention
   alias Malachi.Metadata
+  alias Malachi.UnexpectedMessage
 
   @default_interval 60_000
 
@@ -45,7 +46,9 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       policy: Keyword.fetch!(opts, :policy),
       clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
       interval: Keyword.get(opts, :interval, @default_interval),
-      leader?: Keyword.get(opts, :leader?, fn -> true end)
+      leader?: Keyword.get(opts, :leader?, fn -> true end),
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     schedule(state)
@@ -55,12 +58,22 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   @impl true
   def handle_call(:run_now, _from, state), do: {:reply, run(state), state}
 
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
+  # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
+  @impl true
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+
   @impl true
   def handle_info(:tick, state) do
     if state.leader?.(), do: run(state)
     schedule(state)
     {:noreply, state}
   end
+
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
 
   defp run(state) do
     metadata = state.metadata_source.()
@@ -72,4 +85,8 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   end
 
   defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :retention, kind, message)}
+  end
 end
