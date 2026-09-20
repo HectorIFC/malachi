@@ -917,6 +917,15 @@ defmodule Malachi.Storage.ElixirStore do
   @impl true
   def seal(%__MODULE__{segment: %Segment{state: :sealed}} = store), do: {:ok, store}
 
+  # A handle whose tail was preserved refuses to be sealed as well as to be appended to, and for a
+  # sharper reason. `durable_stats/4` reports what this copy can READ, which stops at the damage, while
+  # the records past it are still on disk and may have been acknowledged by a quorum this copy was part
+  # of. Sealing it would make that understatement final: the fence answers are what `Failover.plan/5`
+  # counts and seals on, so this copy could carry a majority to a seal point BELOW a record it holds
+  # and cannot read. Refusing takes the copy out of service instead (the caller fails the segment), and
+  # the next heal pass seals on the copies that can vouch for themselves.
+  def seal(%__MODULE__{append_refusal: reason}) when reason != nil, do: {:error, reason}
+
   def seal(%__MODULE__{} = store) do
     # The trim comes before the index and the marker: past this point the segment is immutable, so the
     # tail it will never write into is given back, and the handle stops claiming it may trim anything.

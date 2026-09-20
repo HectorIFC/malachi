@@ -711,6 +711,19 @@ defmodule Malachi.Storage.ElixirStoreTest do
       assert {:ok, _store, 4, 4} = ElixirStore.append(recovered, [rec("v4 again")])
     end
 
+    test "seal refuses too, so the copy cannot carry a fence quorum to a short end", %{tmp_dir: directory} do
+      # `durable_stats/4` reports what this copy can read, which stops at the damage; the records past
+      # it are still on disk. Sealing would make that understatement the segment's final length.
+      path = rotted_active(directory)
+      before = File.read!(path)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert ElixirStore.seal(recovered) == {:error, :damaged_tail}
+      refute File.exists?(Segment.seal_marker_path(recovered.segment))
+      assert File.read!(path) == before
+    end
+
     test "a sealed segment keeps answering :sealed", %{tmp_dir: directory} do
       {:ok, store} = seed_frames(directory, 0..4)
       {:ok, store} = ElixirStore.seal(store)

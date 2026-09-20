@@ -80,6 +80,22 @@ defmodule Malachi.Cluster.ReplicationServerDamagedTailTest do
     assert ReplicationServer.failed_segments(follower, [@segment]) == {:ok, MapSet.new([@segment])}
   end
 
+  test "a fence on the damaged copy is refused, so it cannot carry a seal quorum" do
+    # The heal pass measures with durable_stats and then FENCES what answered, and the fence answers are
+    # what the seal point is taken from. This copy reads only up to the damage, so letting it be fenced
+    # would let it carry a majority to a length below records it holds and cannot read. Refusing takes
+    # it out of service, and the next pass seals on the copies that can vouch for themselves.
+    {name, _directory, log_file} = rotted_copy()
+    before = File.read!(log_file)
+
+    capture_log(fn ->
+      assert ReplicationServer.seal(name, @segment, 0) == {:error, {:storage, :damaged_tail}}
+    end)
+
+    assert ReplicationServer.failed_segments(name, [@segment]) == {:ok, MapSet.new([@segment])}
+    assert File.read!(log_file) == before
+  end
+
   test "a restart does not clear the refusal, because the damage is still there" do
     {name, directory, log_file} = rotted_copy()
     before = File.read!(log_file)
