@@ -106,7 +106,8 @@ defmodule Malachi.Storage.ElixirStore do
           flush_count: pos_integer(),
           prealloc_bytes: non_neg_integer(),
           preallocated_to: non_neg_integer() | nil,
-          integrity: :ok | integrity_verdict()
+          integrity: :ok | integrity_verdict(),
+          append_refusal: nil | :damaged_tail
         }
 
   @typedoc """
@@ -133,6 +134,9 @@ defmodule Malachi.Storage.ElixirStore do
     index_interval: @default_index_interval,
     last_indexed_position: 0,
     flush_bytes: @default_flush_bytes,
+    # Set by `recover/3` when an ACTIVE segment's tail was preserved rather than repaired: the handle
+    # still reads, but `append/2` answers `{:error, :damaged_tail}` instead of writing over the damage.
+    append_refusal: nil,
     flush_count: @default_flush_count,
     prealloc_bytes: @default_prealloc_bytes,
     # How far this handle preallocated, or `nil` when it did not. It is what authorizes trimming
@@ -259,10 +263,23 @@ defmodule Malachi.Storage.ElixirStore do
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
          prealloc_bytes: prealloc_bytes,
          preallocated_to: preallocated_to,
-         integrity: integrity
+         integrity: integrity,
+         append_refusal: append_refusal(action, sealed?)
        }}
     end
   end
+
+  # A preserved tail on an active segment is the one case recovery hands back a handle whose
+  # `write_position` sits at the START of bytes it chose to keep. Appending there would overwrite them:
+  # a frame the scan could not read may be rot, or a record written by a newer release in a format this
+  # one does not know, and either way it and everything after it may have been acknowledged. So the
+  # handle refuses to append, and the replication server takes that as the storage failure it is: the
+  # copy leaves service and, with a majority of intact copies, the segment is sealed on them and writing
+  # rolls to a new one (NorthGuard: "we just seal it, make a new one, move the producers over"). A
+  # sealed segment already refuses every append, so the refusal only needs to be recorded for an
+  # active one.
+  defp append_refusal(:preserve, false), do: :damaged_tail
+  defp append_refusal(_action, _sealed?), do: nil
 
   defp readable({:read_error, reason}), do: {:error, reason}
   defp readable(_halt), do: :ok
@@ -339,6 +356,10 @@ defmodule Malachi.Storage.ElixirStore do
   segment is a control-plane decision, so a segment the cluster considers immutable usually has no
   marker on disk, and keying the guard on the marker alone would leave the destructive path wide
   open in exactly the deployment that matters.
+
+  `:preserve` on an active segment also withdraws permission to append: the recovered handle reads
+  up to the damage and answers `{:error, :damaged_tail}` to `append/2`, since its write position is
+  where the preserved bytes begin.
   """
   @spec action_for(tail_classification(), boolean()) :: :none | :discard_tail | :preserve
   def action_for(:clean, _sealed?), do: :none
@@ -752,6 +773,7 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def append(%__MODULE__{segment: %Segment{state: :sealed}}, _records), do: {:error, :sealed}
+  def append(%__MODULE__{append_refusal: reason}, [_ | _]) when reason != nil, do: {:error, reason}
 
   def append(%__MODULE__{} = store, records) when is_list(records) and records != [] do
     first_offset = store.next_offset
@@ -894,6 +916,15 @@ defmodule Malachi.Storage.ElixirStore do
 
   @impl true
   def seal(%__MODULE__{segment: %Segment{state: :sealed}} = store), do: {:ok, store}
+
+  # A handle whose tail was preserved refuses to be sealed as well as to be appended to, and for a
+  # sharper reason. `durable_stats/4` reports what this copy can READ, which stops at the damage, while
+  # the records past it are still on disk and may have been acknowledged by a quorum this copy was part
+  # of. Sealing it would make that understatement final: the fence answers are what `Failover.plan/5`
+  # counts and seals on, so this copy could carry a majority to a seal point BELOW a record it holds
+  # and cannot read. Refusing takes the copy out of service instead (the caller fails the segment), and
+  # the next heal pass seals on the copies that can vouch for themselves.
+  def seal(%__MODULE__{append_refusal: reason}) when reason != nil, do: {:error, reason}
 
   def seal(%__MODULE__{} = store) do
     # The trim comes before the index and the marker: past this point the segment is immutable, so the
