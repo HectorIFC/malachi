@@ -22,6 +22,18 @@ end
 # never see each other's rules.
 :ok = Malachi.Test.FaultySegmentStore.start()
 
+# A drop nobody asked for is what used to be a crash, and the catch-alls would otherwise let it pass
+# silently: ExUnit has no way to fail a run from here once every test passed, so the VM exits with a
+# failing status instead. Registered BEFORE the cleanup below, because `after_suite` callbacks run in
+# REVERSE registration order (`ExUnit.after_suite/1`): registering this last would halt the VM before the
+# cleanup ran and leave the run's data directories behind.
+ExUnit.after_suite(fn _result ->
+  case Malachi.Test.UnknownMessages.report_guard() do
+    :ok -> :ok
+    {:error, _violations} -> System.halt(1)
+  end
+end)
+
 # Remove this run's isolated log-broker and ra data dirs (config/test.exs) once the suite finishes.
 ExUnit.after_suite(fn _result ->
   for key <- [:log_data_dir, :ra_data_dir] do
@@ -29,16 +41,6 @@ ExUnit.after_suite(fn _result ->
       nil -> :ok
       dir -> File.rm_rf(dir)
     end
-  end
-end)
-
-# Registered last, so the cleanup above has run. A drop nobody asked for is what used to be a crash, and
-# the catch-alls would otherwise let it pass silently: ExUnit has no way to fail a run from here once
-# every test passed, so the VM exits with a failing status instead.
-ExUnit.after_suite(fn _result ->
-  case Malachi.Test.UnknownMessages.report_guard() do
-    :ok -> :ok
-    {:error, _violations} -> System.halt(1)
   end
 end)
 
