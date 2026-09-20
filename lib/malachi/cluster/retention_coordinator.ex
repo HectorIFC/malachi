@@ -7,7 +7,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
     * `:metadata_source` - `(-> Malachi.Metadata.t())`, the current control-plane metadata;
     * `:expire_segment` - `(Malachi.Metadata.segment_meta() -> :ok | {:error, term()})`, removes one
       expired segment from the control plane **and** deletes its stored data on the replicas, and
-      answers what the control plane answered (labelled by `Malachi.Cluster.Retention.reply_label/1`);
+      answers what the control plane answered (labeled by `Malachi.Cluster.Retention.reply_label/1`);
     * `:policy` - a `Malachi.Cluster.Retention.policy()` (`:max_age_ms` / `:max_bytes`; `nil` = off);
     * `:clock` - `(-> non_neg_integer())` epoch ms (default `System.system_time/1`);
     * `:interval` - the sweep period in ms (default 60_000);

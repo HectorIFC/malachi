@@ -170,7 +170,7 @@ defmodule Malachi.Telemetry do
 
   @doc """
   The retention sweep tried to expire `segment_id` of `topic`, `bytes` long, and the control plane's answer
-  was labelled `result`.
+  was labeled `result`.
   """
   @spec retention_expire(String.t(), term(), non_neg_integer(), atom()) :: :ok
   def retention_expire(topic, segment_id, bytes, result) do

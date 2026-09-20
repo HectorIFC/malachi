@@ -504,7 +504,7 @@ defmodule Malachi.BrokerTest do
       assert {:ok, [], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 5}, 100, read_fun(store))
     end
 
-    test "a :start cursor is labelled as a fresh start, not as a lagging reader", %{store: store} do
+    test "a :start cursor is labeled as a fresh start, not as a lagging reader", %{store: store} do
       # `normalize_cursor/1` turns :start into {0, 0}, so without carrying the origin a new group on a
       # topic whose head already expired would read exactly like a group that fell behind.
       {broker, root_id} = one_record_segments(store, 3)

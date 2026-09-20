@@ -168,7 +168,7 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       assert is_integer(duration) and duration >= 0
     end
 
-    test "a refused delete is labelled with the reply and not counted as expired", %{topic: topic} do
+    test "a refused delete is labeled with the reply and not counted as expired", %{topic: topic} do
       replies = %{"old" => {:error, :migrating}, "older" => {:error, :segment_active}}
       server = sweeper(topic, fn segment -> Map.fetch!(replies, segment.id) end)
 
@@ -188,7 +188,7 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       assert_receive {:sweep_event, %{expired: 0, failed: 0}, %{}}
     end
 
-    test "an answer the coordinator does not know is labelled :other", %{topic: topic} do
+    test "an answer the coordinator does not know is labeled :other", %{topic: topic} do
       server = sweeper(topic, fn _segment -> {:error, :timeout} end)
 
       RetentionCoordinator.run_now(server)

@@ -39,7 +39,7 @@ defmodule Malachi.Retention.SkipReporterTest do
   # A cast is processed in order, so a call after it returns only once the cast was handled.
   defp flush(reporter), do: :sys.get_state(reporter)
 
-  test "a skip becomes one telemetry event, labelled with the reader", %{reporter: reporter} do
+  test "a skip becomes one telemetry event, labeled with the reader", %{reporter: reporter} do
     SkipReporter.report(reporter, "orders", "billing", [skip()])
     flush(reporter)
 
