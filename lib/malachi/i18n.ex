@@ -354,9 +354,27 @@ defmodule Malachi.I18n do
       "pt_BR" => "[AUDIT] %{json}",
       "en_US" => "[AUDIT] %{json}"
     },
-    scrubber_unexpected_message: %{
-      "pt_BR" => "scrubber ignorando mensagem inesperada: %{message}",
-      "en_US" => "scrubber ignoring unexpected message: %{message}"
+    # Malachi.UnexpectedMessage: a long-lived server received something it has no clause for. `server` is
+    # the server's label and `message` only the term's shape (strings are elided before this is called).
+    unexpected_cast: %{
+      "pt_BR" => "processo %{server} descartando cast inesperado: %{message}",
+      "en_US" => "%{server} process dropping an unexpected cast: %{message}"
+    },
+    unexpected_info: %{
+      "pt_BR" => "processo %{server} ignorando mensagem inesperada: %{message}",
+      "en_US" => "%{server} process ignoring an unexpected message: %{message}"
+    },
+    unexpected_call: %{
+      "pt_BR" => "processo %{server} respondendo {:error, :unknown_call} a uma chamada inesperada: %{message}",
+      "en_US" => "%{server} process answering {:error, :unknown_call} to an unexpected call: %{message}"
+    },
+    unexpected_messages_log_limit: %{
+      "pt_BR" =>
+        "processo %{server} já registrou %{limit} formatos de mensagem inesperada; os próximos são só " <>
+          "contados em malachi_unexpected_messages_total",
+      "en_US" =>
+        "%{server} process has logged %{limit} unexpected message shapes; further ones are only counted " <>
+          "in malachi_unexpected_messages_total"
     },
     scrubber_invalid_interval: %{
       "pt_BR" =>

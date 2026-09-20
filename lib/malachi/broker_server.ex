@@ -46,6 +46,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Telemetry
+  alias Malachi.UnexpectedMessage
   alias OpenTelemetry.Ctx
 
   @default_brokers_refresh_interval 1_000
@@ -394,7 +395,9 @@ defmodule Malachi.BrokerServer do
       # Produces held behind a fence this frontend sent and has not seen answered, by range: each a refused
       # async dispatch or a whole group-commit call. Released when the answer lands, or when the retry
       # window runs out. See `park_on_fence/3`.
-      fence_parked: %{}
+      fence_parked: %{},
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     # Refresh the placement inputs (live broker set and their attributes) from the given sources.
@@ -600,6 +603,10 @@ defmodule Malachi.BrokerServer do
     {:reply, :ok, drop_subscriber(state, topic, pid)}
   end
 
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
   @impl true
   # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
   # (cache ring + write router) and the refresh source, so the periodic reconcile re-seeds against the new
@@ -612,6 +619,8 @@ defmodule Malachi.BrokerServer do
 
     {:noreply, %{state | broker: broker, metadata_refresh: metadata_refresh, bootstrap: bootstrap}}
   end
+
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
 
   # Completes one dispatch of an async produce. The tag carries the expected last offset, so a primary
   # whose log disagrees with our bookkeeping surfaces as the same offset_mismatch the executing path
@@ -735,6 +744,11 @@ defmodule Malachi.BrokerServer do
     {:noreply, do_flush(state)}
   end
 
+  # Stays the LAST info clause: a clause added below it would never be reached, and one added above it
+  # with a pattern that does not match what is sent is counted here instead of crashing, which the
+  # counter and the test suite's guard are there to catch (see `Malachi.UnexpectedMessage`).
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
   # Fsyncs every pipeline, replies to the parked producers (now durable), wakes each topic's consumers, and
   # resets the group-commit accumulators. Used by both the interval timer and the eager (size-triggered)
   # path; cancels any pending timer so an eager flush leaves no stale one queued (a stale `:group_flush`
@@ -799,6 +813,10 @@ defmodule Malachi.BrokerServer do
   end
 
   # --- internals ---
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :broker, kind, message)}
+  end
 
   defp schedule_refresh(state), do: Process.send_after(self(), :refresh_brokers, state.refresh_interval)
 
