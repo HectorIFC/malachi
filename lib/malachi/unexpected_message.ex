@@ -18,6 +18,9 @@ defmodule Malachi.UnexpectedMessage do
       an answer it can fall back on instead of waiting out its timeout. That atom is part of the
       cross-version contract: callers match on it, so it does not change.
 
+  The logged line carries the message's SHAPE and never its data: strings, charlists and numbers are
+  elided, so what is left is the tags, the atoms and the nesting that identify the sender.
+
   Every drop emits `[:malachi, :process, :unexpected_message]` (see `Malachi.Telemetry`), which the
   metrics reporter folds into `malachi_unexpected_messages_total{server, kind}`. Only the first
   occurrence of each `{kind, shape}` per server process is logged, because a newer primary can push
@@ -131,9 +134,11 @@ defmodule Malachi.UnexpectedMessage do
   # is still a payload. The shape is what makes the line worth having, since it is what identifies the
   # sender.
   #
-  # Lists need `redact/2` on top of that. `printable_limit: 0` also makes EVERY list pass the "is this a
-  # printable charlist" test (zero elements checked), so inspecting a message that holds a list of maps
-  # raised ArgumentError from `List.to_string/1`, inside the very clause meant to keep the server alive.
+  # Lists and numbers need `redact/2` on top of that. `printable_limit: 0` also makes EVERY list pass the
+  # "is this a printable charlist" test (zero elements checked), so inspecting a message that holds a list
+  # of maps raised ArgumentError from `List.to_string/1`, inside the very clause meant to keep the server
+  # alive. And it elides text only: a number reached the line whole, which for an account number or an id
+  # is the entire payload rather than a bounded prefix of one.
   #
   # A reply that arrives after a `GenServer.call/3` timed out does not reach these clauses: on OTP 28 the
   # runtime deactivates the call's alias on timeout and drops the late reply, so an ordinary slow call
@@ -143,9 +148,18 @@ defmodule Malachi.UnexpectedMessage do
     Logger.warning(I18n.t(log_key(kind), server: server, message: printed))
   end
 
-  # Called for every term `inspect/2` visits, nested ones included. Any other list is printed as a list,
-  # never tested for being a charlist; a list of integers may be text, so it is elided like a string
-  # (printed as a list, its first elements would show).
+  # Called for every term `inspect/2` visits, nested ones included.
+  #
+  # A number is elided as `_`, the same wildcard a pattern would use, because a number can be the payload
+  # itself (an id, an account number) and, unlike a string, there is no prefix of it to bound. Atoms are
+  # NOT elided: they come from the sending code rather than from user input, and they are what tells two
+  # messages with the same tag apart. An atom built from user input would be an atom-table exhaustion
+  # problem long before it was a logging one, which `Malachi.AtomMonitor` watches for.
+  #
+  # Any other list is printed as a list, never tested for being a charlist; a list of integers may be
+  # text, so it is elided like a string (printed as a list, its first elements would show).
+  defp redact(number, _opts) when is_number(number), do: Inspect.Algebra.string("_")
+
   defp redact(list, opts) when is_list(list) do
     if integer_list?(list),
       do: Inspect.Algebra.string(~s(~c"...")),

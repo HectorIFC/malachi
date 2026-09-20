@@ -137,6 +137,26 @@ defmodule Malachi.UnexpectedMessageTest do
       end
     end
 
+    test "the log line never carries numbers either: an id in a scalar position is elided" do
+      # A bounded prefix of a payload is still a payload, and a whole number is the whole payload. Record
+      # keys and values are binaries today, so the reachable case is a message from a newer node whose
+      # fields are numbers. Atoms stay: they come from code, not from user input, and they are what tells
+      # two shapes with the same tag apart.
+      message = {:user_event_v2, 90_210, :ssn_verified, %{account: 4_242_424_242, tier: :platinum}, 1.5}
+
+      log = capture_log(fn -> UnexpectedMessage.drop(MapSet.new(), :broker, :info, message) end)
+
+      assert [line] = warning_lines(log, "broker process ignoring an unexpected message: ")
+      [_prefix, printed] = String.split(line, "broker process ignoring an unexpected message: ", parts: 2)
+
+      assert printed =~ ":user_event_v2"
+      assert printed =~ ":ssn_verified"
+
+      for fragment <- ["90210", "90_210", "4242424242", "4_242_424_242", "1.5"] do
+        refute printed =~ fragment, "#{inspect(fragment)} reached the log line: #{line}"
+      end
+    end
+
     test "a list of maps or an improper list does not crash the catch-all, whatever its depth" do
       for message <- [[%{a: "x"}], {:t, {:u, [%{a: "x"}]}}, [1 | 2], {:t, [:a | :b]}, [[[~c"x"]]]] do
         assert %MapSet{} = capture_log_result(fn -> UnexpectedMessage.drop(MapSet.new(), :scrubber, :cast, message) end)
