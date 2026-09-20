@@ -6,6 +6,8 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
 
   alias Malachi.Metrics
   alias Malachi.Telemetry
+  alias Malachi.Test.UnknownMessages
+  alias Malachi.UnexpectedMessage
 
   test "hot-path telemetry events increment the operation counters" do
     before = Metrics.get_system_metrics().operations
@@ -159,6 +161,52 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       assert summary.p50_us > 0.0
       assert summary.p50_us <= summary.p99_us
       assert summary.p99_us <= summary.p999_us
+    end
+  end
+
+  describe "a message a long-lived server had no clause for" do
+    setup do
+      # Emitted from this process on purpose, so the suite's guard must not count it.
+      UnknownMessages.expect_from(self())
+    end
+
+    defp unexpected_count(server, kind) do
+      Enum.find_value(Metrics.get_system_metrics().operations.unexpected_messages, fn
+        %{server: ^server, kind: ^kind, count: count} -> count
+        _other -> nil
+      end)
+    end
+
+    test "is counted by server and kind" do
+      before = unexpected_count(:replication, :cast)
+      other_kinds = {unexpected_count(:replication, :info), unexpected_count(:membership, :cast)}
+
+      Telemetry.unexpected_message(:replication, :cast, {:replica_append_v2, 8})
+      Telemetry.unexpected_message(:replication, :cast, {:replica_append_v2, 8})
+
+      assert unexpected_count(:replication, :cast) == before + 2
+      assert {unexpected_count(:replication, :info), unexpected_count(:membership, :cast)} == other_kinds
+    end
+
+    test "from a server outside the known set is counted as other, so the label set stays closed" do
+      before = unexpected_count(:other, :call)
+
+      Telemetry.unexpected_message(:some_future_server, :call, :status)
+
+      assert unexpected_count(:other, :call) == before + 1
+      refute Enum.any?(Metrics.get_system_metrics().operations.unexpected_messages, &(&1.server == :some_future_server))
+    end
+
+    test "every server and kind is reported, zero included, so the series exists before the first drop" do
+      reported =
+        for %{server: server, kind: kind} <- Metrics.get_system_metrics().operations.unexpected_messages,
+            do: {server, kind}
+
+      expected =
+        for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds(), do: {server, kind}
+
+      assert reported == expected
+      assert length(reported) == 21
     end
   end
 end

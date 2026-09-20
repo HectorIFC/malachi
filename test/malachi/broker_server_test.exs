@@ -14,6 +14,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Test.UnfenceablePrimary
+  alias Malachi.Test.UnknownMessages
 
   @moduletag :tmp_dir
 
@@ -889,6 +890,19 @@ defmodule Malachi.BrokerServerTest do
       task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
 
       assert {:error, :unreachable} = Task.await(task, 1_000)
+    end
+  end
+
+  describe "a message this server has no clause for" do
+    test "an unknown cast, info message and call are counted and survived, and produce still works",
+         %{tmp_dir: directory} do
+      {server, _root} = with_topic(directory)
+      assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0")])
+
+      UnknownMessages.assert_survives_unknown(server, :broker, fn ->
+        assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("b", "k1")])
+        assert [%{name: "events"}] = BrokerServer.topics_overview(server)
+      end)
     end
   end
 end
