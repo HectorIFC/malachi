@@ -302,7 +302,8 @@ know a newer frame, would read it as damage, and could write over records that w
 What that means for a rollback:
 
 - A directory without the file (a fresh node, or one last written by a release older than 0.12.0) gets
-  one at the current format on the first start. Starting a newer release does **not** raise it.
+  one at baseline format 1 on the first start. Starting a newer release does **not** raise it, whatever
+  format that release can read.
 - The format rises only when a format-changing feature is switched on for the cluster. Until then, a
   rollback to any release from 0.12.0 on is free.
 - After a format-changing feature is switched on, the floor is the release named in `requires`. Rolling
