@@ -54,6 +54,7 @@ defmodule Malachi.Application do
   alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
 
   # The replicated user store's dedicated ra cluster name (see `user_store_children/1`).
@@ -72,6 +73,10 @@ defmodule Malachi.Application do
     # In production: raises on invalid config (fail fast)
     # In dev/test: logs warnings only
     TLSValidator.validate!(Application.get_env(:malachi, :config_env, :prod))
+
+    # Before anything opens the data directory, `ra` included: a directory written in a format this
+    # binary cannot read is refused here rather than recovered as damage and overwritten.
+    :ok = ensure_data_format(log_data_dir())
 
     port = Application.get_env(:malachi, :tcp_port, 4040)
     dashboard_port = Application.get_env(:malachi, :dashboard_port, 4041)
@@ -133,6 +138,22 @@ defmodule Malachi.Application do
     case Topology.build(topology) do
       [] -> []
       topologies -> [{Cluster.Supervisor, [topologies, [name: Malachi.ClusterSupervisor]]}]
+    end
+  end
+
+  @doc """
+  The startup gate over the data-directory format marker (`Malachi.Storage.FormatMarker`): answers
+  `:ok` when this binary can read `dir`, writing a marker when there is none, and otherwise refuses
+  the start through `halt_fun` (default `System.halt/1`) with exit status 78 and one log line.
+
+  Checked at the root of the log data directory, so one marker covers every `shard_<n>`
+  subdirectory (`Malachi.DataPlaneRouter.shards/1`).
+  """
+  @spec ensure_data_format(Path.t(), (non_neg_integer() -> term())) :: term()
+  def ensure_data_format(dir, halt_fun \\ &System.halt/1) do
+    case FormatMarker.enforce(dir) do
+      :ok -> :ok
+      {:refuse, reason} -> FormatMarker.refuse!(reason, halt_fun)
     end
   end
 

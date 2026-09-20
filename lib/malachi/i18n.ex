@@ -262,6 +262,47 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"
     },
+    # Data-directory format marker (Malachi.Storage.FormatMarker). The refusal is one line with a fixed,
+    # searchable prefix; the detail is a complete sentence of its own, one key per operator action.
+    data_format_refused: %{
+      "pt_BR" => "RECUSANDO INICIAR (exit 78): %{detail}",
+      "en_US" => "REFUSING TO START (exit 78): %{detail}"
+    },
+    data_format_too_new: %{
+      "pt_BR" =>
+        "o marker de formato %{path} registra o formato %{format}, gravado pelo release %{written_by}, e este " <>
+          "binário entende no máximo o formato %{supported}. Inicie o release %{requires} ou mais novo; " <>
+          "não apague o marker, isso deixaria este binário sobrescrever dados que ele não sabe ler",
+      "en_US" =>
+        "the format marker %{path} records format %{format}, written by release %{written_by}, and this " <>
+          "binary understands at most format %{supported}. Start release %{requires} or newer; do not " <>
+          "delete the marker, that would let this binary overwrite data it cannot read"
+    },
+    data_format_marker_invalid: %{
+      "pt_BR" =>
+        "o marker de formato %{path} não é válido (%{reason}). Restaure-o de um backup ou de outro nó; " <>
+          "o nó não inicia sem saber qual formato o diretório contém",
+      "en_US" =>
+        "the format marker %{path} is not valid (%{reason}). Restore it from a backup or another node; " <>
+          "the node does not start without knowing which format the directory holds"
+    },
+    data_format_marker_io_failed: %{
+      "pt_BR" =>
+        "não foi possível ler ou gravar o marker de formato %{path} (%{reason}). Corrija o volume ou as " <>
+          "permissões e inicie de novo",
+      "en_US" =>
+        "the format marker %{path} could not be read or written (%{reason}). Fix the volume or its " <>
+          "permissions and start again"
+    },
+    data_format_marker_created_fresh: %{
+      "pt_BR" => "Marker de formato criado em %{path} (formato %{format}, diretório novo)",
+      "en_US" => "Format marker created at %{path} (format %{format}, fresh directory)"
+    },
+    data_format_marker_created_existing: %{
+      "pt_BR" =>
+        "Marker de formato criado em %{path} (formato %{format}) para um diretório gravado antes do marker existir",
+      "en_US" => "Format marker created at %{path} (format %{format}) for a directory written before the marker existed"
+    },
     ring_env_ignored: %{
       "pt_BR" =>
         "⚠️ O anel durável (versão %{version}, %{durable} vnodes) vence MALACHI_LOG_VNODES=%{env}; " <>
