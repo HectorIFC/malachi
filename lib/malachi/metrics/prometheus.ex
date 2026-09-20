@@ -242,7 +242,7 @@ defmodule Malachi.Metrics.Prometheus do
   # Prometheus convention is base units, so latencies are exposed in seconds, not microseconds.
   defp us_to_seconds(us), do: us / 1_000_000
 
-  # One block per per-topic series: a single HELP/TYPE then a sample per topic (labelled by name).
+  # One block per per-topic series: a single HELP/TYPE then a sample per topic (labeled by name).
   defp topic_metrics([]), do: []
 
   defp topic_metrics(topics) do

@@ -229,7 +229,7 @@ the file already sized, does `fdatasync` finally win?
 
 - **Interleaved arms.** All arms in one process on one filesystem, so a thermal blip or a noisy
   neighbour on a shared runner hits every arm rather than landing on whichever ran last.
-- **An A-A control.** Two arms that are identical, labelled as if they differed. Its spread is the
+- **An A-A control.** Two arms that are identical, labeled as if they differed. Its spread is the
   harness's noise floor, measured instead of assumed. A delta smaller than it is noise by
   construction.
 - **A bootstrapped 95% CI** of the difference of medians, so the answer is an interval.
@@ -317,7 +317,7 @@ came back stronger than ever, with a noise floor of **zero**:
 | batch 100 x 256B | 459us | 162us | **-64.7%**, ci95 [-301, -290] | 2us |
 
 But in batch 1024 x 1KB the three arms with IDENTICAL configuration split 2060us, 2047us and
-**2897us**. The two labelled controls agreed to within 13us; the third sat 850us above them. The
+**2897us**. The two labeled controls agreed to within 13us; the third sat 850us above them. The
 cause was the rotation: **a cyclic rotation changes which arm goes first but preserves the circular
 order**, so every arm keeps following the same neighbour, and whatever that neighbour leaves behind
 lands on the same arm every time. The odd one out was the only arm that always ran straight after

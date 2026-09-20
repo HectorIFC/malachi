@@ -200,7 +200,7 @@ defmodule Malachi.Cluster.Placement do
 
   # Distinct failure domains a replica set covers: distinct :spread attribute values, or distinct brokers
   # when there is no :spread. A broker with no attribute value falls in the single `nil` domain, so
-  # unlabelled brokers conservatively do not count as extra domains.
+  # unlabeled brokers conservatively do not count as extra domains.
   defp domains_covered(replica_set, opts) do
     case Keyword.get(opts, :spread) do
       {attribute_key, attributes} -> distinct_domains(replica_set, attribute_key, attributes)

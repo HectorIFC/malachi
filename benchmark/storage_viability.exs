@@ -211,7 +211,7 @@ File.rm_rf!("/tmp/ng_bench_data")
 #
 #   1. INTERLEAVED arms in one process on one filesystem, so thermal drift or a noisy neighbour
 #      hits every arm alike instead of landing on whichever ran last.
-#   2. An A-A CONTROL: two arms that are identical, labelled as if they differed. The spread it
+#   2. An A-A CONTROL: two arms that are identical, labeled as if they differed. The spread it
 #      reports is this harness's noise floor, MEASURED rather than assumed.
 #   3. A bootstrapped 95% confidence interval for the difference of medians.
 #   4. The verdict rule fixed HERE, before any number exists: signal requires BOTH that the pair's
@@ -304,7 +304,7 @@ defmodule PreallocAB do
 
   defp key(mechanism, sync), do: :"#{mechanism}_#{sync}"
 
-  # Both control arms are the SAME configuration, labelled as if they differed. Whatever they
+  # Both control arms are the SAME configuration, labeled as if they differed. Whatever they
   # report as a difference is this harness lying to itself, and every real comparison has to beat
   # it. They ride in the same rotation as the arms under test so they carry the same biases.
   defp control_arms do
@@ -364,7 +364,7 @@ defmodule PreallocAB do
   # follows the same neighbour every time, and whatever the neighbour leaves behind (page cache,
   # pending writeback) lands on the same arm forever. In the batch 1024 x 1KB case, where each
   # repetition writes tens of megabytes, three arms with IDENTICAL configuration split 2060us,
-  # 2047us and 2897us: the two that were labelled controls agreed to within 13us while the third,
+  # 2047us and 2897us: the two that were labeled controls agreed to within 13us while the third,
   # the only one that always followed the growing arm, sat 850us above them. A shuffle is what
   # actually breaks that, and keeping a third identical arm in the rotation is what made the bias
   # visible instead of letting it be read as a result.

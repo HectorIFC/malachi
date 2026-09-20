@@ -45,7 +45,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ "# TYPE malachi_uptime_seconds gauge\nmalachi_uptime_seconds 3600\n"
   end
 
-  test "labelled series carry their labels and integer values" do
+  test "labeled series carry their labels and integer values" do
     out = render([])
 
     assert out =~ ~s(malachi_memory_bytes{kind="total"} #{round(40.0 * 1_048_576)})
