@@ -88,8 +88,16 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         {next, reply} = machine.apply(meta(effective, now), command, state)
 
         case Map.fetch(pure.command_versions(), MachineVersion.command_tag(command)) do
-          {:ok, _introduced_at_zero} ->
+          {:ok, introduced} when introduced <= effective ->
             assert {next, reply} == pure_apply(pure, clock, state, command, now)
+
+          # Unreachable while every table sits at 0, and the assertion that holds the day one does not:
+          # a command introduced above the group's effective version is refused, not applied.
+          {:ok, introduced} ->
+            assert next == state
+
+            assert reply ==
+                     {:error, {:unsupported_command, MachineVersion.command_tag(command), introduced, effective}}
 
           :error ->
             assert next == state
