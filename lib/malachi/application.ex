@@ -171,88 +171,47 @@ defmodule Malachi.Application do
   end
 
   # The replicated user store: forms the ra user cluster across `nodes` (so `Malachi.Auth` can seed into it).
-  # Runs in every mode: single-node forms a cheap 1-member cluster. When clustered (more than one node), it
-  # also supervises a reconciler that self-joins this node on a staggered boot (reusing the generic
-  # `LeaseReconciler`); single-node needs no self-join, so it is omitted there.
+  # Runs in every mode: single-node forms a cheap 1-member cluster. Its reconciler child
+  # (`store_reconciler_child/5`) self-joins this node on a staggered boot when clustered, and watches the
+  # store's machine version in every mode, single node included.
   defp user_store_children(nodes) do
     _ = UserServer.start(@log_users, nodes)
 
-    if length(nodes) > 1 do
-      [
-        %{
-          id: Malachi.LogUserReconciler,
-          start:
-            {LeaseReconciler, :start_link,
-             [
-               [
-                 name: Malachi.LogUserReconciler,
-                 reconcile: fn -> UserServer.reconcile(@log_users, nodes) end,
-                 version_check: {UserMachine, {@log_users, node()}}
-               ]
-             ]}
-        }
-      ]
-    else
-      []
-    end
+    [
+      store_reconciler_child(Malachi.LogUserReconciler, UserMachine, @log_users, nodes, fn ->
+        UserServer.reconcile(@log_users, nodes)
+      end)
+    ]
   end
 
   # The replicated account-lockout store: forms the ra lockout cluster across `nodes` and supervises the
-  # `LockoutManager` facade (which owns the cleanup timer). When clustered it also supervises a reconciler that
-  # self-joins this node on a staggered boot (reusing the generic `LeaseReconciler`); single-node needs no
-  # self-join. Mirrors `user_store_children/1`. The cluster is formed here (imperatively) before the facade
-  # starts, so its first read/write addresses a live member. Must precede Auth (the auth path uses lockouts).
+  # `LockoutManager` facade (which owns the cleanup timer), plus the reconciler that self-joins this node
+  # when clustered and watches the machine version in every mode. Mirrors `user_store_children/1`. The
+  # cluster is formed here (imperatively) before the facade starts, so its first read/write addresses a
+  # live member. Must precede Auth (the auth path uses lockouts).
   defp lockout_store_children(nodes) do
     _ = LockoutServer.start(@log_lockouts, nodes)
 
     reconciler =
-      if length(nodes) > 1 do
-        [
-          %{
-            id: Malachi.LogLockoutReconciler,
-            start:
-              {LeaseReconciler, :start_link,
-               [
-                 [
-                   name: Malachi.LogLockoutReconciler,
-                   reconcile: fn -> LockoutServer.reconcile(@log_lockouts, nodes) end,
-                   version_check: {LockoutMachine, {@log_lockouts, node()}}
-                 ]
-               ]}
-          }
-        ]
-      else
-        []
-      end
+      store_reconciler_child(Malachi.LogLockoutReconciler, LockoutMachine, @log_lockouts, nodes, fn ->
+        LockoutServer.reconcile(@log_lockouts, nodes)
+      end)
 
-    reconciler ++ [Malachi.Auth.LockoutManager]
+    [reconciler, Malachi.Auth.LockoutManager]
   end
 
   # The replicated per-topic ACL store: forms the ra ACL cluster across `nodes` (so grants replicate
-  # cluster-wide and every node enforces the same ACLs). When clustered it also supervises a reconciler that
-  # self-joins this node on a staggered boot. Mirrors `user_store_children/1`. Must precede Auth (whose
+  # cluster-wide and every node enforces the same ACLs), plus the reconciler that self-joins this node when
+  # clustered and watches the machine version in every mode. Mirrors `user_store_children/1`. Must precede Auth (whose
   # remove_user revokes a user's grants) and the acceptor (which authorizes produce/consume against it).
   defp acl_store_children(nodes) do
     _ = AclServer.start(@log_acls, nodes)
 
-    if length(nodes) > 1 do
-      [
-        %{
-          id: Malachi.LogAclReconciler,
-          start:
-            {LeaseReconciler, :start_link,
-             [
-               [
-                 name: Malachi.LogAclReconciler,
-                 reconcile: fn -> AclServer.reconcile(@log_acls, nodes) end,
-                 version_check: {AclMachine, {@log_acls, node()}}
-               ]
-             ]}
-        }
-      ]
-    else
-      []
-    end
+    [
+      store_reconciler_child(Malachi.LogAclReconciler, AclMachine, @log_acls, nodes, fn ->
+        AclServer.reconcile(@log_acls, nodes)
+      end)
+    ]
   end
 
   # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a
@@ -290,7 +249,7 @@ defmodule Malachi.Application do
           membership_child(nodes, topology),
           replication_child(),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
-        ] ++ scrubber_children()
+        ] ++ metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
@@ -1233,6 +1192,45 @@ defmodule Malachi.Application do
       vnode_id
     end
   end
+
+  @doc """
+  The reconciler child of a replicated store, which is also its machine-version watcher.
+
+  On a clustered node it self-joins this node through `reconcile` on every tick (see
+  `Malachi.Cluster.LeaseReconciler`). On a single-node deployment there is nothing to join, so the
+  child stays with a no-op reconcile and only watches: a one-member group still reaches a machine
+  version, and a member that restarts on code below it stops applying its log exactly as a clustered
+  one does (`Malachi.Cluster.MachineVersion`). Losing the watch there would leave the only member of
+  the control plane silent.
+  """
+  @spec store_reconciler_child(atom(), module(), atom(), [node()], (-> any())) :: Supervisor.child_spec()
+  def store_reconciler_child(id, machine, cluster_name, nodes, reconcile) do
+    reconcile = if length(nodes) > 1, do: reconcile, else: fn -> :ok end
+
+    %{
+      id: id,
+      start:
+        {LeaseReconciler, :start_link,
+         [[name: id, reconcile: reconcile, version_check: {machine, {cluster_name, node()}}]]}
+    }
+  end
+
+  @doc """
+  The machine-version watcher for an **unsharded** control plane, or none when it is sharded.
+
+  The single metadata group is started by `Malachi.BrokerServer`, not by a reconciler of this
+  application's own, so without this child nothing would call `Malachi.Cluster.MachineVersion.check/3`
+  for it. A sharded control plane needs none: the vnode coordinator manager watches every local vnode
+  member (`local_vnode_servers/2`).
+  """
+  @spec metadata_version_watcher_children(atom() | nil, [{atom(), non_neg_integer(), [node()]}] | nil) ::
+          [Supervisor.child_spec()]
+  def metadata_version_watcher_children(nil, _vnodes), do: []
+
+  def metadata_version_watcher_children(cluster, nil),
+    do: [store_reconciler_child(Malachi.LogMetadataVersionWatcher, MetadataMachine, cluster, [node()], fn -> :ok end)]
+
+  def metadata_version_watcher_children(_cluster, _vnodes), do: []
 
   @doc """
   The metadata vnode members `this_node` hosts, as `{machine, server_id}` pairs for
