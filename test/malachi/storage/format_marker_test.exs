@@ -17,7 +17,7 @@ defmodule Malachi.Storage.FormatMarkerTest do
   defp put_marker(dir, content), do: File.write!(FormatMarker.path(dir), content)
 
   test "the levels and the exit status this release is built with" do
-    assert FormatMarker.current_format() == 1
+    assert FormatMarker.baseline_format() == 1
     assert FormatMarker.supported_format() == 1
     assert FormatMarker.exit_status() == 78
   end

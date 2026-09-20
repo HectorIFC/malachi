@@ -39,6 +39,37 @@ defmodule Malachi.Storage.FormatMarkerDurabilityTest do
            ]
   end
 
+  test "raising to the level already on disk fsyncs the directory again", %{tmp_dir: dir} do
+    # The retry of a raise whose rename landed and whose fsync failed: the marker reads as the level
+    # asked for, and answering :ok is what lets the caller write the first new-format byte.
+    :ok = FormatMarker.write(dir, 1, "0.12.0")
+
+    calls = CallTrace.calls(@traced, fn -> assert FormatMarker.raise_to(dir, 1) == :ok end)
+
+    assert calls == [{Directory, :sync, [dir]}]
+  end
+
+  test "accepting an existing marker at boot fsyncs its directory", %{tmp_dir: dir} do
+    :ok = FormatMarker.write(dir, 1, "0.12.0")
+
+    calls = CallTrace.calls(@traced, fn -> assert FormatMarker.enforce(dir) == :ok end)
+
+    assert calls == [{Directory, :sync, [dir]}]
+  end
+
+  test "a directory that cannot be fsynced refuses the start", %{tmp_dir: dir} do
+    :ok = FormatMarker.write(dir, 1, "0.12.0")
+    # Write and traverse, but no read: the marker file still opens, the directory does not, so the
+    # failure is the fsync of the trust path and nothing else.
+    File.chmod!(dir, 0o300)
+    on_exit(fn -> File.chmod(dir, 0o700) end)
+
+    # Root ignores the permission bits, so the refusal can only be observed as a regular user.
+    if Directory.sync(dir) == {:error, :eacces} do
+      assert {:refuse, {:io, :eacces, _path}} = FormatMarker.enforce(dir)
+    end
+  end
+
   describe "Directory.sync/1" do
     test "fsyncs an existing directory", %{tmp_dir: dir} do
       assert Directory.sync(dir) == :ok

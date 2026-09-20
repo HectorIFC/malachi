@@ -28,7 +28,7 @@ defmodule Malachi.Storage.FormatMarker do
 
   A binary starts on a directory only when the marker is at or below the highest format it
   understands (`supported_format/0`). No marker means either a fresh directory or one written before
-  the marker existed; both get a marker at `current_format/0`, the level this release writes. The
+  the marker existed; both get a marker at `baseline_format/0`, whatever this release reads. The
   marker only rises, and it rises when a format-changing feature is switched on through the cluster
   flag, never because a newer binary merely started. `raise_to/3` is that mechanism.
 
@@ -41,6 +41,11 @@ defmodule Malachi.Storage.FormatMarker do
   one, never a mix: the rename is atomic, and a torn temporary file is not the marker. Only after the
   directory fsync does the call return `:ok`, which is what lets `raise_to/3` promise the new level is
   durable before the first byte of a new format is written.
+
+  A path that TRUSTS an existing marker fsyncs the directory too, rather than assuming an earlier write
+  did: a write whose rename landed and whose fsync failed leaves the marker visible but not durable, and
+  both the startup gate and a repeated `raise_to/3` would otherwise take it at face value. The fsync is
+  cheap and idempotent; skipping it is what is expensive.
   """
 
   require Logger
@@ -51,8 +56,13 @@ defmodule Malachi.Storage.FormatMarker do
   @file_name "malachi.format"
   @temp_name "malachi.format.tmp"
 
-  # The level this release writes into a directory that has no marker.
-  @current_format 1
+  # The level a directory starts at, and the only level the startup gate ever writes. It is the format
+  # of every byte written before the marker existed, so it is what an unmarked directory holds whether
+  # it is empty or full. A release that raises the on-disk format must NOT raise this: a node joining a
+  # cluster whose format-changing flag has not been flipped still writes the baseline, and claiming a
+  # higher level here would refuse a rollback that is still free and label old bytes as new ones. Only
+  # `raise_to/3`, called when the flag flips, moves a directory above it.
+  @baseline_format 1
   # The highest level this release can read.
   @supported_format 1
 
@@ -66,7 +76,7 @@ defmodule Malachi.Storage.FormatMarker do
 
   @required_keys ["format", "written_by", "requires"]
 
-  for format <- 1..@supported_format do
+  for format <- @baseline_format..@supported_format do
     unless Map.has_key?(@first_release, format),
       do: raise(CompileError, description: "no first release recorded for format #{format}")
   end
@@ -95,9 +105,9 @@ defmodule Malachi.Storage.FormatMarker do
   @spec path(Path.t()) :: Path.t()
   def path(dir), do: Path.join(dir, @file_name)
 
-  @doc "The format level this release writes into a directory without a marker."
-  @spec current_format() :: pos_integer()
-  def current_format, do: @current_format
+  @doc "The format level a directory without a marker starts at."
+  @spec baseline_format() :: pos_integer()
+  def baseline_format, do: @baseline_format
 
   @doc "The highest format level this release can read."
   @spec supported_format() :: pos_integer()
@@ -182,8 +192,8 @@ defmodule Malachi.Storage.FormatMarker do
   @doc """
   What to do about `observation` for a binary that reads up to `supported`. Pure.
 
-    * `{:write, level, kind}` - no marker: write one at `level` (`kind` says whether the directory
-      held data already, for the log line).
+    * `{:write, level, kind}` - no marker: write one at `baseline_format/0` (`kind` says whether the
+      directory held data already, for the log line, and never changes the level).
     * `:ok` - the marker is readable by this binary.
     * `{:refuse, reason}` - the marker is from a newer format, or is not a marker.
   """
@@ -191,7 +201,7 @@ defmodule Malachi.Storage.FormatMarker do
           :ok
           | {:write, pos_integer(), :fresh | :existing}
           | {:refuse, {:too_new, marker(), pos_integer()} | {:invalid, parse_error()}}
-  def decide({:absent, kind}, _supported), do: {:write, @current_format, kind}
+  def decide({:absent, kind}, _supported), do: {:write, @baseline_format, kind}
   def decide({:ok, %{format: format}}, supported) when format <= supported, do: :ok
   def decide({:ok, marker}, supported), do: {:refuse, {:too_new, marker, supported}}
   def decide({:error, reason}, _supported), do: {:refuse, {:invalid, reason}}
@@ -242,15 +252,21 @@ defmodule Malachi.Storage.FormatMarker do
     end
   end
 
+  defp sync_directory(dir) do
+    case Directory.sync(dir) do
+      :ok -> :ok
+      {:error, posix} -> {:error, {:io, posix}}
+    end
+  end
+
   # The one way the marker file changes: temporary file with `:sync`, rename over the marker, fsync of
   # the directory. Nothing before the directory fsync counts as written.
   defp replace(dir, content) do
     temp = Path.join(dir, @temp_name)
 
     with :ok <- File.write(temp, content, [:sync]),
-         :ok <- File.rename(temp, path(dir)),
-         :ok <- Directory.sync(dir) do
-      :ok
+         :ok <- File.rename(temp, path(dir)) do
+      sync_directory(dir)
     else
       {:error, posix} -> {:error, {:io, posix}}
     end
@@ -289,8 +305,12 @@ defmodule Malachi.Storage.FormatMarker do
 
   defp raise_within(dir, format, opts) do
     case read(dir) do
+      # Already at the level asked for, which includes the retry of a raise whose rename landed and
+      # whose directory fsync did not: the marker is visible and may still be lost. The fsync is
+      # repeated rather than assumed, because the caller takes this `:ok` as permission to write the
+      # first byte of the new format.
       {:ok, {:ok, %{format: ^format}}} ->
-        :ok
+        sync_directory(dir)
 
       {:ok, {:ok, %{format: current}}} when current > format ->
         {:error, {:lower, current, format}}
@@ -353,7 +373,10 @@ defmodule Malachi.Storage.FormatMarker do
     end
   end
 
-  defp act(:ok, _dir, _version), do: :ok
+  # An existing marker this binary can read: accepted, but its directory entry is fsynced first, for
+  # the same reason the raise path repeats it. A marker left visible by a write whose fsync failed
+  # would otherwise be trusted for the rest of the node's life without ever being made durable.
+  defp act(:ok, dir, _version), do: sync_directory(dir)
   defp act({:refuse, _reason} = refusal, _dir, _version), do: refusal
 
   defp act({:write, format, kind}, dir, version) do
