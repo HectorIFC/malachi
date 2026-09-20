@@ -15,6 +15,7 @@ defmodule Malachi.Metrics do
   alias Malachi.Histogram
   alias Malachi.I18n
   alias Malachi.Telemetry.MetricsReporter
+  alias Malachi.UnexpectedMessage
 
   @metrics_table :malachi_metrics
   # The storage flush numbers live in :atomics reached through :persistent_term, not in ETS. Every
@@ -226,6 +227,30 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records one message a long-lived server had no clause for (see `Malachi.UnexpectedMessage`), by the
+  server's label and the `kind` it arrived as. A label outside `Malachi.UnexpectedMessage.servers/0` is
+  counted as `:other`, so the exported label set stays closed whatever a caller passes.
+  """
+  def record_unexpected_message(server, kind) do
+    key = {:unexpected_message, unexpected_message_bucket(server), kind}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
+  defp unexpected_message_bucket(server) do
+    if server in UnexpectedMessage.servers(), do: server, else: :other
+  end
+
+  # Every server and kind, zero included: a series that exists only after the first drop cannot be
+  # alerted on with `increase()` nor asserted to be zero. Maps rather than tuples: the snapshot is also
+  # served to the dashboard as JSON.
+  defp unexpected_message_counts do
+    for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds() do
+      %{server: server, kind: kind, count: get_counter({:unexpected_message, server, kind})}
+    end
+  end
+
+  @doc """
   Increment failed authentication attempt counter.
   """
   def increment_failed_auth_attempt do
@@ -402,7 +427,8 @@ defmodule Malachi.Metrics do
         scrub_segments_repaired: get_counter(:scrub_segments_repaired),
         scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),
         orphaned_fences: get_counter(:orphaned_fences),
-        fences_reconciled: get_counter(:fences_reconciled)
+        fences_reconciled: get_counter(:fences_reconciled),
+        unexpected_messages: unexpected_message_counts()
       },
       storage_flush: storage_flush_summary(),
       atom_table: get_atom_monitor_stats(),

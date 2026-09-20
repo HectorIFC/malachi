@@ -37,6 +37,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.RingTopology
+  alias Malachi.UnexpectedMessage
 
   @default_protocol_period 1_000
   @default_ack_timeout 500
@@ -128,7 +129,9 @@ defmodule Malachi.Cluster.MembershipServer do
       indirect_timeout: Keyword.get(opts, :indirect_timeout, ack_timeout),
       indirect_fanout: Keyword.get(opts, :indirect_fanout, @default_indirect_fanout),
       suspicion_timeout: Keyword.get(opts, :suspicion_timeout, @default_suspicion_timeout),
-      awaiting: MapSet.new()
+      awaiting: MapSet.new(),
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     schedule_period(state)
@@ -155,6 +158,10 @@ defmodule Malachi.Cluster.MembershipServer do
   def handle_call({:set_topology, topology}, _from, state) do
     # Adopt the higher version (in case gossip already carried a newer one); gossip carries ours onward.
     {:reply, :ok, adopt_topology(state, topology)}
+  end
+
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
   end
 
   @impl true
@@ -205,6 +212,11 @@ defmodule Malachi.Cluster.MembershipServer do
     {:noreply, merge_updates(state, updates)}
   end
 
+  # A SWIM message from a newer member that this build does not know. Dropped rather than fatal, but
+  # dropping is not answering: a newer ping that gets no ack still makes the sender suspect this member
+  # (see `Malachi.UnexpectedMessage`).
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+
   @impl true
   def handle_info(:protocol_period, state) do
     state = ping_random_peer(state)
@@ -244,7 +256,13 @@ defmodule Malachi.Cluster.MembershipServer do
     end
   end
 
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
   # --- internals ---
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :membership, kind, message)}
+  end
 
   defp ping_random_peer(state) do
     case alive_peers(state) do

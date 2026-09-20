@@ -127,6 +127,13 @@ defmodule Malachi.Metrics.Prometheus do
           {[result: "reconciled"], ops.fences_reconciled}
         ]
       ),
+      metric(
+        "malachi_unexpected_messages_total",
+        :counter,
+        "Messages a long-lived server had no clause for and dropped (or answered unknown_call) instead of " <>
+          "crashing (non-zero outside a rolling upgrade means a bug)",
+        unexpected_message_samples(ops.unexpected_messages)
+      ),
       histogram(
         "malachi_storage_flush_duration_seconds",
         "Group-commit flush latency: the write plus sync every acknowledged produce waits behind",
@@ -170,6 +177,9 @@ defmodule Malachi.Metrics.Prometheus do
       )
     ]
   end
+
+  defp unexpected_message_samples(counts),
+    do: for(%{server: server, kind: kind, count: count} <- counts, do: {[server: server, kind: kind], count})
 
   # Prometheus convention is base units, so latencies are exposed in seconds, not microseconds.
   defp us_to_seconds(us), do: us / 1_000_000
