@@ -29,4 +29,17 @@ defmodule Malachi.LogSealDurabilityTest do
     assert marker_written, "the seal marker was not written through File.write/3"
     assert {Directory, :sync, [directory]} in Enum.drop(calls, marker_written + 1)
   end
+
+  test "sealing a log that is already sealed fsyncs its directory again", %{tmp_dir: directory} do
+    # The retry of a seal whose marker was written and whose directory fsync failed: the marker is
+    # visible, and this :ok is what tells the caller the fence is final.
+    {:ok, log} = Log.open(directory)
+    {:ok, log, _first, _last} = Log.append(log, [Record.new("a")])
+    {:ok, sealed} = Log.seal(log)
+
+    calls =
+      CallTrace.calls([{File, :write, 3}, {Directory, :sync, 1}], fn -> assert {:ok, ^sealed} = Log.seal(sealed) end)
+
+    assert calls == [{Directory, :sync, [directory]}]
+  end
 end

@@ -168,7 +168,12 @@ defmodule Malachi.Log do
   so it can never hand out a new offset, which is the only thing a fence has to prevent.
   """
   @spec seal(t()) :: {:ok, t()} | {:error, term()}
-  def seal(%__MODULE__{sealed?: true} = log), do: {:ok, log}
+  # Already sealed, so the marker is on disk. Its directory is fsynced again all the same: a seal whose
+  # marker was written and whose directory fsync failed leaves the marker visible but not durable, and
+  # answering `:ok` here is what tells the caller the fence is final.
+  def seal(%__MODULE__{sealed?: true} = log) do
+    with :ok <- Directory.sync(log.directory), do: {:ok, log}
+  end
 
   def seal(%__MODULE__{} = log) do
     with {:ok, log} <- sync(log),
