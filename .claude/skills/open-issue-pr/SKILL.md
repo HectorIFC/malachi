@@ -49,7 +49,15 @@ the session.
 ```
 S=$(mktemp -d)                                   # or $CLAUDE_JOB_DIR/tmp/open-pr in a background job
 gh issue view <N> --json body --jq .body > "$S/issue.md"
-branch=$(awk '/^\*\*Branch\*\*/{f=1;next} f&&/^```/{if(n++)exit;next} f&&n==1&&NF{print;exit}' "$S/issue.md")
+cat > "$S/branch.awk" <<'AWK'
+!p && /^## PR[[:space:]]*$/ { p = 1; next }
+!p { next }
+/^```/ { fence = !fence; if (b && !c) { c = 1; next } else if (c) { exit } next }
+!fence && /^## / { exit }
+!b && /^\*\*Branch\*\*/ { b = 1; next }
+c && NF { print; exit }
+AWK
+branch=$(awk -f "$S/branch.awk" "$S/issue.md")
 printf '%s\n' "$branch" | grep -Eqx '[A-Za-z0-9._/-]+' \
   && /usr/bin/git check-ref-format --branch "$branch" >/dev/null \
   && printf 'ok: %s\n' "$branch" || printf 'stop: %s\n' "$branch"
@@ -139,9 +147,11 @@ cat > "$S/verification.awk" <<'AWK'
 AWK
 awk -f "$S/description.awk" "$S/issue.md" > "$S/description.md"
 awk -f "$S/verification.awk" "$S/issue.md" | sed -e '/./,$!d' > "$S/verification.md"
+missing=
 for f in description verification; do
-  grep -q '[^[:space:]]' "$S/$f.md" && echo "ok: $f" || echo "stop: the issue has no $f"
+  grep -q '[^[:space:]]' "$S/$f.md" || missing="$missing $f"
 done
+[ -z "$missing" ] && echo "ok: both sections" || { echo "stop: the issue has no$missing"; exit 1; }
 ```
 
 The description scan is bounded to the `## PR` section and takes the first fenced block after
@@ -186,6 +196,15 @@ gh api graphql -F n="$N" -f query='query($n:Int!){repository(owner:"HectorIFC",n
   > "$S/fields.tsv"
 ```
 
+The projects themselves come from the item nodes, not from those rows: an issue can sit on a board with
+every field empty, which produces no row at all, and taking the project list from `fields.tsv` would
+leave the PR off that board.
+
+```
+gh api graphql -F n="$N" -f query='query($n:Int!){repository(owner:"HectorIFC",name:"malachi"){issue(number:$n){projectItems(first:20){nodes{project{id}}}}}}' \
+  --jq '.data.repository.issue.projectItems.nodes[].project.id' | sort -u > "$S/projects"
+```
+
 Then read the page flag the same query answered, before anything consumes `fields.tsv`. `true` means the
 issue is in more than 20 projects and the file holds only some of them, which is a stop, not a warning:
 
@@ -197,7 +216,7 @@ gh api graphql -F n="$N" -f query='query($n:Int!){repository(owner:"HectorIFC",n
   || echo "stop: the issue is in more than 20 projects and fields.tsv is incomplete"
 ```
 
-For each project in the file, add the PR once:
+For each project in `$S/projects`, add the PR once:
 
 ```
 pr_id=$(gh pr view "$branch" --json id --jq .id)
@@ -217,9 +236,24 @@ travels as a GraphQL variable, never inside the query text:
 | `ProjectV2ItemFieldDateValue` | `$v:Date!`, `value:{date:$v}` |
 | `ProjectV2ItemFieldNumberValue` | `$v:Float!` passed with `-F`, `value:{number:$v}` |
 
+Every kind in the table is handled; a row whose kind is not one of them stops the skill rather than
+being skipped in silence, since a field left unset is a PR that does not match its issue.
+
 ```
-gh api graphql -f p="$project" -f i="$item" -f f="$field" -f v="$value" \
-  -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$v}}){projectV2Item{id}}}'
+while IFS=$'\t' read -r p kind field value; do
+  [ "$p" = "$project" ] || continue
+  case $kind in
+    ProjectV2ItemFieldSingleSelectValue) clause='singleSelectOptionId:$v'; type='String!'; flag=-f ;;
+    ProjectV2ItemFieldIterationValue)    clause='iterationId:$v';          type='String!'; flag=-f ;;
+    ProjectV2ItemFieldTextValue)         clause='text:$v';                 type='String!'; flag=-f ;;
+    ProjectV2ItemFieldDateValue)         clause='date:$v';                 type='Date!';   flag=-f ;;
+    ProjectV2ItemFieldNumberValue)       clause='number:$v';               type='Float!';  flag=-F ;;
+    *) echo "stop: unhandled field kind $kind"; exit 1 ;;
+  esac
+  gh api graphql -f p="$p" -f i="$item" -f f="$field" "$flag" v="$value" \
+    -f query="mutation(\$p:ID!,\$i:ID!,\$f:ID!,\$v:$type){updateProjectV2ItemFieldValue(input:{projectId:\$p,itemId:\$i,fieldId:\$f,value:{$clause}}){projectV2Item{id}}}" \
+    --jq .data.updateProjectV2ItemFieldValue.projectV2Item.id
+done < "$S/fields.tsv"
 ```
 
 `@tsv` escapes a tab or newline inside a text value as `\t` or `\n`. Read such a value back with the
