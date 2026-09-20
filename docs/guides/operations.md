@@ -170,6 +170,29 @@ when the control plane seals the segment. That asymmetry is deliberate rather th
 since a torn tail has nothing valid after it by construction, so there is nothing to salvage. Rot is
 the case where the bytes past the damage are still worth keeping.
 
+That holds for an **active** segment too. A node that restarts onto rot in the segment it is still
+writing keeps the damaged frame and everything behind it, and never appends over them: the copy is
+taken out of service as a storage failure (`malachi_storage_failures_total{reason="other"}`, and a
+`failed in storage` log line naming the segment and `damaged_tail`). What happens next depends on the
+replication factor:
+
+- **RF 3 or more.** The heal pass seals the segment on the intact copies at the furthest end they hold,
+  and writing rolls to a new segment, which is what NorthGuard does when a replica of a segment fails.
+  Producers see nothing. The damaged copy is replaced by self-healing.
+- **RF 2 and RF 1.** Sealing needs a majority of intact copies to answer, and one copy is gone, so the
+  range stops taking writes until an operator acts. That is deliberate: the alternative was writing new
+  records over ones that may have been acknowledged. Rolling a single-copy segment on without that
+  risk is tracked in [#210](https://github.com/HectorIFC/malachi/issues/210).
+
+To recover a blocked range by hand, on the node that reported the damage:
+
+1. Stop the node and copy the segment's `.log` file somewhere safe. The frames after the damage are
+   still in it.
+2. Either truncate the file at the `position` the integrity log line reported, accepting the loss of
+   everything from there on, or, with a replica elsewhere, remove this node's copy of the segment
+   directory and let the cluster re-replicate it.
+3. Start the node again.
+
 ## Chaos certification
 
 `scripts/docker-chaos-test.sh` runs the certification drill on a local 3-node RF=3 Docker cluster:
@@ -306,6 +329,53 @@ that way, which disables both at once. Outside production both default to off.
 Invalid TLS configuration **raises at boot** in production rather than starting insecurely; in dev and
 test it only warns.
 
+## Upgrades and the rollback floor
+
+The root of the log data directory (`MALACHI_LOG_DATA_DIR`) holds a small text file, `malachi.format`:
+
+```
+format=1
+written_by=0.12.0
+requires=0.12.0
+```
+
+`format` is the on-disk format the directory holds, `written_by` the release that wrote the file, and
+`requires` the oldest release that can read that format. With several data-plane shards, the one file at
+the root covers every `shard_<n>` subdirectory.
+
+**The rule: a release starts on a data directory only when `format` is at or below the highest format it
+understands.** Otherwise it refuses to start before opening anything, because an older release does not
+know a newer frame, would read it as damage, and could write over records that were acknowledged.
+
+What that means for a rollback:
+
+- A directory without the file (a fresh node, or one last written by a release older than 0.12.0) gets
+  one at baseline format 1 on the first start. Starting a newer release does **not** raise it, whatever
+  format that release can read.
+- The format rises only when a format-changing feature is switched on for the cluster. Until then, a
+  rollback to any release from 0.12.0 on is free.
+- After a format-changing feature is switched on, the floor is the release named in `requires`. Rolling
+  back below it is refused.
+- **Never roll back below 0.12.0 once any format above 1 exists.** Releases before 0.12.0 do not read the
+  file at all, so nothing stops them from opening newer data, and that is exactly the overwrite this file
+  exists to prevent.
+- **Do not delete or edit the file to get a node to start.** It is the only thing between an older
+  release and data it cannot read.
+
+A refused start exits with status **78** and logs one line that begins with `REFUSING TO START (exit 78):`
+and names the directory, both format levels and the release to start instead. The same line is printed
+on stderr, so it reaches container logs even when the logger has not flushed. The same status covers a
+marker that cannot be parsed (restore it from a backup or another node) and one that cannot be read or
+written (fix the volume or its permissions).
+
+A service manager that restarts on failure will restart a refused node again and again. Tell it not to:
+
+- **systemd:** `RestartPreventExitStatus=78`.
+- **Docker Compose:** `restart: on-failure` restarts on any non-zero status, so bound it
+  (`restart: on-failure:5`) and alert on exit code 78 (`docker inspect -f '{{.State.ExitCode}}'`).
+- **Kubernetes:** the pod goes to `CrashLoopBackOff`; the last terminated state shows exit code 78 and
+  the log line above.
+
 ## Before you go to production
 
 The checks that catch the common mistakes:
@@ -320,6 +390,8 @@ The checks that catch the common mistakes:
       is 2, so losing either replica stalls writes.
 - [ ] **Retention configured.** The default keeps everything, and the disk fills quietly.
 - [ ] **Readiness probe on `/ready`**, not `/health`.
+- [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
+      before the first upgrade, and make your service manager stop restarting on exit status 78.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).
