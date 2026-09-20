@@ -161,29 +161,11 @@ empty is a stop: the issue is incomplete, and a PR with an empty section is not 
 Then write `$S/body.md` with the Write tool, pasting the two files' contents into their sections. Show
 the title, the type and the body to the user before creating anything.
 
-## 5. Create the PR as a draft, with the issue's fields
+## 5. Read the issue's project items first
 
-**Every PR opens as a draft.** The user marks it ready.
-
-Read the issue's assignees, labels and milestone into files, one value per line, and pass each one as its
-own argument, so no value is ever split or interpreted by the shell:
-
-```
-gh issue view <N> --json assignees --jq '.assignees[].login' > "$S/assignees"
-gh issue view <N> --json labels --jq '.labels[].name' > "$S/labels"
-printf '%s\n' <version label from step 3> >> "$S/labels"
-gh issue view <N> --json milestone --jq '.milestone.title // empty' > "$S/milestone"
-
-args=(--draft --base main --head "$branch" --title "$title" --body-file "$S/body.md")
-while IFS= read -r a; do [ -n "$a" ] && args+=(--assignee "$a"); done < "$S/assignees"
-while IFS= read -r l; do [ -n "$l" ] && args+=(--label "$l"); done < <(sort -u "$S/labels")
-m=$(cat "$S/milestone"); [ -n "$m" ] && args+=(--milestone "$m")
-gh pr create "${args[@]}"
-```
-
-## 6. Copy the project items and every field value
-
-The PR joins every project the issue is in, with each field set to the issue's value, Status included.
+The PR will join every project the issue is in, with each field set to the issue's value, Status
+included. Everything that can refuse is read BEFORE the PR exists, so a refusal leaves no half-filled
+PR behind.
 Fields GitHub derives on its own (Title, Assignees, Labels, Milestone, Repository, Linked pull requests)
 are not set: the query below leaves out every field value that is not one of the five settable kinds,
 and the Title field by its data type.
@@ -216,50 +198,66 @@ gh api graphql -F n="$N" -f query='query($n:Int!){repository(owner:"HectorIFC",n
   || echo "stop: the issue is in more than 20 projects and fields.tsv is incomplete"
 ```
 
-For each project in `$S/projects`, add the PR once:
+## 6. Create the PR as a draft, with the issue's fields
+
+**Every PR opens as a draft.** The user marks it ready.
+
+Read the issue's assignees, labels and milestone into files, one value per line, and pass each one as its
+own argument, so no value is ever split or interpreted by the shell:
+
+```
+gh issue view <N> --json assignees --jq '.assignees[].login' > "$S/assignees"
+gh issue view <N> --json labels --jq '.labels[].name' > "$S/labels"
+printf '%s\n' <version label from step 3> >> "$S/labels"
+gh issue view <N> --json milestone --jq '.milestone.title // empty' > "$S/milestone"
+
+args=(--draft --base main --head "$branch" --title "$title" --body-file "$S/body.md")
+while IFS= read -r a; do [ -n "$a" ] && args+=(--assignee "$a"); done < "$S/assignees"
+while IFS= read -r l; do [ -n "$l" ] && args+=(--label "$l"); done < <(sort -u "$S/labels")
+m=$(cat "$S/milestone"); [ -n "$m" ] && args+=(--milestone "$m")
+gh pr create "${args[@]}"
+```
+
+## 7. Copy the project items and every field value
+
+Each project takes the PR once, and then its own field rows. Everything below runs inside one loop over
+`$S/projects`, so `$project` and `$item` are the ones bound for the project being copied:
 
 ```
 pr_id=$(gh pr view "$branch" --json id --jq .id)
-gh api graphql -f p="$project" -f c="$pr_id" \
-  -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
-  --jq .data.addProjectV2ItemById.item.id
+
+while IFS= read -r project; do
+  [ -n "$project" ] || continue
+
+  item=$(gh api graphql -f p="$project" -f c="$pr_id" \
+    -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+    --jq .data.addProjectV2ItemById.item.id)
+
+  while IFS=$'\t' read -r p kind field value; do
+    [ "$p" = "$project" ] || continue
+    case $kind in
+      ProjectV2ItemFieldSingleSelectValue) clause='singleSelectOptionId:$v'; type='String!'; flag=-f ;;
+      ProjectV2ItemFieldIterationValue)    clause='iterationId:$v';          type='String!'; flag=-f ;;
+      ProjectV2ItemFieldTextValue)         clause='text:$v';                 type='String!'; flag=-f ;;
+      ProjectV2ItemFieldDateValue)         clause='date:$v';                 type='Date!';   flag=-f ;;
+      ProjectV2ItemFieldNumberValue)       clause='number:$v';               type='Float!';  flag=-F ;;
+      *) echo "stop: unhandled field kind $kind"; exit 1 ;;
+    esac
+    # jq's @tsv writes a tab, a newline or a backslash inside a text value as an escape, so the value
+    # is decoded back before it is sent, or a multiline text field would be set to the escape itself.
+    value=$(printf '%b' "$value")
+    gh api graphql -f p="$p" -f i="$item" -f f="$field" "$flag" v="$value" \
+      -f query="mutation(\$p:ID!,\$i:ID!,\$f:ID!,\$v:$type){updateProjectV2ItemFieldValue(input:{projectId:\$p,itemId:\$i,fieldId:\$f,value:{$clause}}){projectV2Item{id}}}" \
+      --jq .data.updateProjectV2ItemFieldValue.projectV2Item.id
+  done < "$S/fields.tsv"
+done < "$S/projects"
 ```
 
-Then set each field on the item that returned, choosing the mutation by the value's kind. Every value
-travels as a GraphQL variable, never inside the query text:
+The table above is the whole contract: the kinds, their variable types and their value clauses. A row
+of any other kind stops the skill rather than being skipped in silence, since a field left unset is a
+PR that does not match its issue.
 
-| Kind (`__typename`) | Variable type and value clause |
-| --- | --- |
-| `ProjectV2ItemFieldSingleSelectValue` | `$v:String!`, `value:{singleSelectOptionId:$v}` |
-| `ProjectV2ItemFieldIterationValue` | `$v:String!`, `value:{iterationId:$v}` |
-| `ProjectV2ItemFieldTextValue` | `$v:String!`, `value:{text:$v}` |
-| `ProjectV2ItemFieldDateValue` | `$v:Date!`, `value:{date:$v}` |
-| `ProjectV2ItemFieldNumberValue` | `$v:Float!` passed with `-F`, `value:{number:$v}` |
-
-Every kind in the table is handled; a row whose kind is not one of them stops the skill rather than
-being skipped in silence, since a field left unset is a PR that does not match its issue.
-
-```
-while IFS=$'\t' read -r p kind field value; do
-  [ "$p" = "$project" ] || continue
-  case $kind in
-    ProjectV2ItemFieldSingleSelectValue) clause='singleSelectOptionId:$v'; type='String!'; flag=-f ;;
-    ProjectV2ItemFieldIterationValue)    clause='iterationId:$v';          type='String!'; flag=-f ;;
-    ProjectV2ItemFieldTextValue)         clause='text:$v';                 type='String!'; flag=-f ;;
-    ProjectV2ItemFieldDateValue)         clause='date:$v';                 type='Date!';   flag=-f ;;
-    ProjectV2ItemFieldNumberValue)       clause='number:$v';               type='Float!';  flag=-F ;;
-    *) echo "stop: unhandled field kind $kind"; exit 1 ;;
-  esac
-  gh api graphql -f p="$p" -f i="$item" -f f="$field" "$flag" v="$value" \
-    -f query="mutation(\$p:ID!,\$i:ID!,\$f:ID!,\$v:$type){updateProjectV2ItemFieldValue(input:{projectId:\$p,itemId:\$i,fieldId:\$f,value:{$clause}}){projectV2Item{id}}}" \
-    --jq .data.updateProjectV2ItemFieldValue.projectV2Item.id
-done < "$S/fields.tsv"
-```
-
-`@tsv` escapes a tab or newline inside a text value as `\t` or `\n`. Read such a value back with the
-escapes undone before setting it, or skip the field and name it in the report.
-
-## 7. Verify, then hand back
+## 8. Verify, then hand back
 
 Read the PR back and compare it with the issue, field by field:
 
@@ -271,14 +269,19 @@ gh api graphql -F n="$pr" -f query='query($n:Int!){repository(owner:"HectorIFC",
         | select(.field != null and (.field.dataType // "") != "TITLE")
         | [$p, .__typename, .field.id, (.optionId // .number // .text // .date // .iterationId | tostring)] | @tsv' \
   > "$S/pr_fields.tsv"
+gh api graphql -F n="$pr" -f query='query($n:Int!){repository(owner:"HectorIFC",name:"malachi"){pullRequest(number:$n){projectItems(first:20){nodes{project{id}}}}}}' \
+  --jq '.data.repository.pullRequest.projectItems.nodes[].project.id' | sort -u > "$S/pr_projects"
+diff "$S/projects" "$S/pr_projects" && echo "project membership matches"
 diff <(sort "$S/fields.tsv") <(sort "$S/pr_fields.tsv") && echo "project fields match"
 ```
 
 Check that it is a draft, that the assignees and milestone are the issue's, that the labels include the
 issue's and the version label (the repository's labeler adds more on its own, from the files changed;
 those are expected), that the Related Issues section of the body holds `Closes #<N>` (the template's
-versioning note follows it, so it is not the last line), and that the project fields match. Report any
-difference instead of calling it done.
+versioning note follows it, so it is not the last line), that the PR is on the same boards as the issue
+and that the fields match. The boards are compared on their own: a board where the issue has no field
+value set produces no field row, so the field comparison alone would pass while the PR sits on one board
+fewer. Report any difference instead of calling it done.
 
 Print the PR URL on its own line first, then the title, the type and the version label, and the fields
 copied. Delete the scratch directory.
