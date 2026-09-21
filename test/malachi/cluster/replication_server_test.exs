@@ -7,6 +7,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
   alias Malachi.Test.StorageFaults
+  alias Malachi.Test.UnknownMessages
 
   @segment {{"events", 0}, 0}
 
@@ -1332,6 +1333,43 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       # offset, so it read as a batch it already had.
       assert {:ok, [%{value: "acked"}]} = ReplicationServer.read(follower, @segment, 0, 10)
       assert {:ok, [%{value: "after-failover"}]} = ReplicationServer.read(behind, @segment, 0, 10)
+    end
+  end
+
+  describe "a message this server has no clause for" do
+    # This one process holds every log on the node, so an unknown message must cost nothing but a count:
+    # a newer primary pushing a new replication shape at an older follower would otherwise take down the
+    # follower's whole data plane, and keep taking it down after every restart.
+    test "an unknown cast, info message and call are counted and survived, and the open log still reads" do
+      primary = start_broker()
+      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary], 0, records(["kept"]))
+
+      UnknownMessages.assert_survives_unknown(primary, :replication, fn ->
+        assert read_values(primary, @segment) == ["kept"]
+        assert {:ok, 1} = ReplicationServer.replicate(primary, @segment, [primary], 1, records(["after"]))
+      end)
+    end
+
+    test "a push in a newer shape is dropped, and so is a known tag at an arity no clause takes" do
+      follower = start_broker()
+      assert {:ok, 0} = ReplicationServer.follow(follower, @segment, 0, records(["kept"]))
+
+      {drops, _log} =
+        UnknownMessages.drops(follower, fn ->
+          GenServer.cast(follower, {:replica_append_v2, @segment, 0, 1, records(["new"]), 0, self(), :compressed})
+          GenServer.cast(follower, {:replica_ack, @segment, self(), {:weird, 1}})
+          GenServer.cast(follower, {:replica_append, @segment, 0, 1, records(["x"]), 0, self(), :extra})
+        end)
+
+      assert drops == [
+               {:replication, :cast, {:replica_append_v2, 8}},
+               {:replication, :cast, {:replica_ack, 4}},
+               {:replication, :cast, {:replica_append, 8}}
+             ]
+
+      # Nothing was acked back for any of them: the drop keeps the node alive, it does not answer.
+      refute_received {:"$gen_cast", {:replica_ack, _segment, _follower, _result}}
+      assert read_values(follower, @segment) == ["kept"]
     end
   end
 end

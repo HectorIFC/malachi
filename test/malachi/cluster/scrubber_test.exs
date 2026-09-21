@@ -9,6 +9,7 @@ defmodule Malachi.Cluster.ScrubberTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.UnknownMessages
 
   @segment {{"events", 0}, 0}
 
@@ -665,6 +666,8 @@ defmodule Malachi.Cluster.ScrubberTest do
 
     assert [{^root, 0}] = Scrubber.scrub_now(scrubber).verified
 
+    UnknownMessages.expect_from(scrubber)
+
     log =
       capture_log(fn ->
         send(scrubber, {make_ref(), {:ok, %{records: 1, bytes: 1, files: 1}}})
@@ -691,6 +694,8 @@ defmodule Malachi.Cluster.ScrubberTest do
     # few hundred characters of the value, which is every bit as much of a leak.
     fragment = "s3cret-payload"
     secret = String.duplicate(fragment, 200)
+
+    UnknownMessages.expect_from(scrubber)
 
     log =
       capture_log(fn ->
@@ -773,5 +778,19 @@ defmodule Malachi.Cluster.ScrubberTest do
                     %{result: :bad_crc, source: :scrub, segment: @segment}}
 
     assert_receive {:telemetry, [:malachi, :storage, :scrub], %{verified: 0, damaged: 1, unrepairable: 1}, _metadata}
+  end
+
+  test "an unknown cast and call are survived as well, not only an unknown info message" do
+    # `use GenServer` stops the server on a cast it has no clause for, so before this server defined its
+    # own catch-all a stray cast cost the cycle position and the damaged set just like an info did.
+    {replica, directory} = start_replica()
+    metadata = sealed_everywhere([replica], ["a"])
+
+    scrubber =
+      start_scrubber(metadata_source: fn -> metadata end, local_ref: replica, directory: directory)
+
+    UnknownMessages.assert_survives_unknown(scrubber, :scrubber, fn ->
+      assert Scrubber.damaged(scrubber) == []
+    end)
   end
 end

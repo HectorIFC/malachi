@@ -7,6 +7,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.UnknownMessages
 
   defp start_broker, do: elem(start_broker_at([]), 0)
 
@@ -652,5 +653,23 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
       remaining_ms <= 0 -> false
       true -> Process.sleep(15) && eventually(check, remaining_ms - 15)
     end
+  end
+
+  test "an unknown cast, info message or call is counted and survived" do
+    a = start_broker()
+    {metadata, _segment_id} = sealed_segment([a], a, ["x"])
+    {source, apply} = metadata_store(metadata)
+
+    coordinator =
+      start_coordinator(
+        live_brokers: fn -> [a] end,
+        metadata_source: source,
+        apply_command: apply,
+        replication_factor: 1
+      )
+
+    UnknownMessages.assert_survives_unknown(coordinator, :heal, fn ->
+      assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
+    end)
   end
 end

@@ -24,7 +24,8 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :cluster, :fence_reconciled],
     [:malachi, :retention, :skip],
     [:malachi, :retention, :expire],
-    [:malachi, :retention, :sweep]
+    [:malachi, :retention, :sweep],
+    [:malachi, :process, :unexpected_message]
   ]
 
   @doc "Attaches the reporter (idempotent: a previous attachment is replaced)."
@@ -98,5 +99,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :retention, :sweep], %{duration_us: duration_us}, _metadata, _config) do
     Metrics.record_retention_sweep(duration_us)
+  end
+
+  def handle_event([:malachi, :process, :unexpected_message], _measurements, %{server: server, kind: kind}, _config) do
+    Metrics.record_unexpected_message(server, kind)
   end
 end

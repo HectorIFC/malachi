@@ -8,6 +8,7 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.UnknownMessages
 
   defp with_sealed(segments, topic \\ "t") do
     base = elem(Metadata.apply(Metadata.new(), {:create_topic, topic, 4}), 0)
@@ -212,5 +213,13 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       assert_receive {:sweep_event, %{expired: 0, failed: 0}, %{}}
       refute_receive {:expire_event, _measurements, _metadata}
     end
+  end
+
+  test "an unknown cast, info message or call is counted and survived" do
+    server = start([])
+
+    UnknownMessages.assert_survives_unknown(server, :retention, fn ->
+      assert RetentionCoordinator.run_now(server) == ["old"]
+    end)
   end
 end
