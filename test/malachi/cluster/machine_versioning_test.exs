@@ -63,14 +63,27 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       test "refuses an unknown command with the versioned reply and the state unchanged" do
         state = unquote(machine).init(%{})
 
-        assert {^state, {:error, {:unknown_command, :bogus, 1}}} =
+        assert {^state, {:error, {:unknown_command, {:bogus, 2}, 1}}} =
                  unquote(machine).apply(meta(1), {:bogus, "x"}, state)
       end
 
-      test "its command table lists exactly the tags of its @type command, none above the code version" do
+      test "refuses a known tag in a shape it does not implement, instead of raising or skipping it" do
+        # What a later release does to an existing command: another field. Dispatching that on this code
+        # raises where the pure module has no clause (lease, ring) and is skipped where it has a
+        # catch-all (metadata, the auth registries), which is the divergence the gate exists to stop.
+        state = unquote(machine).init(%{})
+        # Taken from @type command rather than from the table, so this reads the same before and after.
+        {tag, arity} = unquote(pure) |> command_keys() |> Enum.sort() |> hd()
+        wider = List.to_tuple([tag | List.duplicate(:filler, arity)])
+
+        assert {^state, {:error, {:unknown_command, {^tag, _wider_arity}, 1}}} =
+                 unquote(machine).apply(meta(1), wider, state)
+      end
+
+      test "its command table lists exactly the shapes of its @type command, none above the code version" do
         table = unquote(pure).command_versions()
 
-        assert MapSet.new(Map.keys(table)) == command_tags(unquote(pure))
+        assert MapSet.new(Map.keys(table)) == command_keys(unquote(pure))
         assert Enum.all?(Map.values(table), &(&1 in 0..MachineVersion.code_version()))
       end
     end
@@ -87,7 +100,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       Enum.reduce(commands, machine.init(%{}), fn command, state ->
         {next, reply} = machine.apply(meta(effective, now), command, state)
 
-        case Map.fetch(pure.command_versions(), MachineVersion.command_tag(command)) do
+        case Map.fetch(pure.command_versions(), MachineVersion.command_key(command)) do
           {:ok, introduced} when introduced <= effective ->
             assert {next, reply} == pure_apply(pure, clock, state, command, now)
 
@@ -97,11 +110,11 @@ defmodule Malachi.Cluster.MachineVersioningTest do
             assert next == state
 
             assert reply ==
-                     {:error, {:unsupported_command, MachineVersion.command_tag(command), introduced, effective}}
+                     {:error, {:unsupported_command, MachineVersion.command_key(command), introduced, effective}}
 
           :error ->
             assert next == state
-            assert reply == {:error, {:unknown_command, MachineVersion.command_tag(command), effective}}
+            assert reply == {:error, {:unknown_command, MachineVersion.command_key(command), effective}}
         end
 
         next
@@ -215,14 +228,15 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     ])
   end
 
-  # --- the tags of a module's @type command, read from its compiled typespecs ---
+  # --- the shapes of a module's @type command, read from its compiled typespecs ---
 
-  defp command_tags(module) do
+  defp command_keys(module) do
     {:ok, types} = Code.Typespec.fetch_types(module)
     {:type, {:command, ast, []}} = Enum.find(types, &match?({:type, {:command, _ast, []}}, &1))
-    ast |> tuple_tags() |> MapSet.new()
+    ast |> tuple_keys() |> MapSet.new()
   end
 
-  defp tuple_tags({:type, _line, :union, members}), do: Enum.flat_map(members, &tuple_tags/1)
-  defp tuple_tags({:type, _line, :tuple, [{:atom, _atom_line, tag} | _rest]}), do: [tag]
+  defp tuple_keys({:type, _line, :union, members}), do: Enum.flat_map(members, &tuple_keys/1)
+
+  defp tuple_keys({:type, _line, :tuple, [{:atom, _atom_line, tag} | rest]}), do: [{tag, length(rest) + 1}]
 end

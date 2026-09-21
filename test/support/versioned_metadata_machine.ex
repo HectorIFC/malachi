@@ -39,7 +39,7 @@ defmodule Malachi.Test.VersionedMetadataMachine do
   @doc "The table this node's code knows: `:probe` only when it implements version 2."
   @spec command_versions() :: MachineVersion.command_versions()
   def command_versions do
-    if version() >= 2, do: Map.put(Metadata.command_versions(), :probe, 2), else: Metadata.command_versions()
+    if version() >= 2, do: Map.put(Metadata.command_versions(), {:probe, 2}, 2), else: Metadata.command_versions()
   end
 
   # A version-1 binary has no clause for :probe, so it lands in Metadata's catch-all like any unknown

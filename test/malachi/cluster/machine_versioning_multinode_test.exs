@@ -92,7 +92,7 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
 
     for {cluster, before_command, _after} <- groups do
       assert accepted?(command(cluster, nodes, before_command)), "#{cluster} refused #{inspect(before_command)}"
-      assert {:ok, {:error, {:unknown_command, :bogus, 1}}} = command(cluster, nodes, {:bogus, 1})
+      assert {:ok, {:error, {:unknown_command, {:bogus, 2}, 1}}} = command(cluster, nodes, {:bogus, 1})
     end
 
     await_converged(clusters, nodes, 1)

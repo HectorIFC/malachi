@@ -45,9 +45,11 @@ defmodule Malachi.Auth.UserRegistry do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
-  def command_versions, do: %{put_user: 0, delete_user: 0, update_password: 0, import_users: 0}
+  def command_versions do
+    %{{:put_user, 4} => 0, {:delete_user, 2} => 0, {:update_password, 3} => 0, {:import_users, 2} => 0}
+  end
 
   @doc """
   Applies a `command` at time `now` (the ra leader's `system_time`). Returns `{new_state, reply}`.

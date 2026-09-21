@@ -24,7 +24,9 @@ defmodule Malachi.Cluster.MachineVersion do
   ## The rule for a new command
 
   A command introduced by a release goes into its module's `c:command_versions/0` table at
-  `code_version() + 1`, and `@code_version` below rises in the same change. With `all`, the command is
+  `code_version() + 1`, and `@code_version` below rises in the same change. Giving an existing command
+  another field is a new command by this rule: the table is keyed by shape, so the wider tuple is its
+  own entry at the new version, and older members refuse it instead of raising on it or skipping it. With `all`, the command is
   then refused identically on every member until the last one runs and advertises the new version.
   Existing commands stay at the version they were introduced at forever: nothing takes a release
   cursor, so every command ever written is replayed on restart and must stay appliable.
@@ -63,8 +65,11 @@ defmodule Malachi.Cluster.MachineVersion do
 
   @code_version 1
 
-  @typedoc "The first machine version that understands a command tag."
-  @type command_versions :: %{atom() => non_neg_integer()}
+  @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
+  @type command_key :: {atom(), non_neg_integer()}
+
+  @typedoc "The first machine version that understands each command shape."
+  @type command_versions :: %{command_key() => non_neg_integer()}
 
   @typedoc "A local member's version health, as reported by `check/3`."
   @type status :: :ok | {:stuck, effective :: non_neg_integer(), supported :: non_neg_integer()}
@@ -72,7 +77,12 @@ defmodule Malachi.Cluster.MachineVersion do
   @typedoc "What changed since the previous status, if anything."
   @type transition :: nil | :stuck | :recovered
 
-  @doc "The command tags a pure state module accepts, each mapped to the version that introduced it."
+  @doc """
+  The command shapes a pure state module accepts, each mapped to the version that introduced it.
+
+  Keyed by shape rather than by tag, because a release that gives an existing command another field
+  changes what old code can apply just as much as a new tag does. See `apply/5`.
+  """
   @callback command_versions() :: command_versions()
 
   @doc "The newest machine version this code implements, before any pin."
@@ -106,9 +116,13 @@ defmodule Malachi.Cluster.MachineVersion do
 
   * `{:machine_version, from, to}` answers `:ok` with the state unchanged. This is where a future
     version that changes the state's shape migrates it.
-  * A tag missing from `table` answers `{:error, {:unknown_command, tag, effective}}`.
-  * A tag introduced above the effective version answers
-    `{:error, {:unsupported_command, tag, introduced, effective}}`.
+  * A shape missing from `table` answers `{:error, {:unknown_command, {tag, arity}, effective}}`.
+    A known tag in an unknown shape lands here too, which is the point: `{:release}` and
+    `{:release, holder, fence, reason}` are not the `{:release, holder, fence}` the code implements,
+    and dispatching either one would raise inside a pure module that has no clause for it, crashing
+    the replica on every replay, or land in a catch-all that skips it while newer members apply it.
+  * A shape introduced above the effective version answers
+    `{:error, {:unsupported_command, {tag, arity}, introduced, effective}}`.
   * An `{:insert_topic, export}` whose `export_format` is above the effective version answers
     `{:error, {:unsupported_export_format, format, effective}}`. An export without the key predates
     the format and counts as 0.
@@ -123,14 +137,14 @@ defmodule Malachi.Cluster.MachineVersion do
   def apply(_meta, {:machine_version, _from, _to}, state, _table, _apply_fun), do: {state, :ok}
 
   def apply(%{machine_version: effective} = meta, command, state, table, apply_fun) do
-    tag = command_tag(command)
+    key = command_key(command)
 
-    case Map.fetch(table, tag) do
+    case Map.fetch(table, key) do
       :error ->
-        {state, {:error, {:unknown_command, tag, effective}}}
+        {state, {:error, {:unknown_command, key, effective}}}
 
       {:ok, introduced} when introduced > effective ->
-        {state, {:error, {:unsupported_command, tag, introduced, effective}}}
+        {state, {:error, {:unsupported_command, key, introduced, effective}}}
 
       {:ok, _introduced} ->
         apply_admitted(meta, command, state, apply_fun, effective)
@@ -150,15 +164,15 @@ defmodule Malachi.Cluster.MachineVersion do
   defp export_format(_export), do: 0
 
   @doc """
-  The tag a command is versioned by: the leading atom of a tuple, a bare atom itself, or `:invalid`
-  for anything else (which no table contains, so it is refused as unknown).
+  The shape a command is versioned by: the leading atom of a tuple with that tuple's size, a bare atom
+  with size 0, or `{:invalid, 0}` for anything else (which no table contains, so it is refused).
   """
-  @spec command_tag(term()) :: atom()
-  def command_tag(command) when is_tuple(command) and tuple_size(command) > 0 and is_atom(elem(command, 0)),
-    do: elem(command, 0)
+  @spec command_key(term()) :: command_key()
+  def command_key(command) when is_tuple(command) and tuple_size(command) > 0 and is_atom(elem(command, 0)),
+    do: {elem(command, 0), tuple_size(command)}
 
-  def command_tag(command) when is_atom(command), do: command
-  def command_tag(_command), do: :invalid
+  def command_key(command) when is_atom(command), do: {command, 0}
+  def command_key(_command), do: {:invalid, 0}
 
   @doc """
   Checks whether the local member `server_id` of a `machine` cluster can still apply its log, given

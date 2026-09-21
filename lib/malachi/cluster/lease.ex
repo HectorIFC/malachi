@@ -38,9 +38,9 @@ defmodule Malachi.Cluster.Lease do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
-  def command_versions, do: %{acquire_or_renew: 0, release: 0}
+  def command_versions, do: %{{:acquire_or_renew, 3} => 0, {:release, 3} => 0}
 
   @doc """
   Applies a lease `command` at time `now` (epoch ms, from the ra leader's `system_time`). Returns

@@ -28,9 +28,9 @@ defmodule Malachi.Auth.AclRegistry do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
-  def command_versions, do: %{grant: 0, revoke: 0, revoke_user: 0}
+  def command_versions, do: %{{:grant, 4} => 0, {:revoke, 4} => 0, {:revoke_user, 2} => 0}
 
   @doc "Applies a `command`, returning `{new_state, reply}`. Deterministic; ACLs need no time input."
   @spec apply(t(), command()) :: {t(), term()}

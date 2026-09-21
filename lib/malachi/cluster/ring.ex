@@ -53,9 +53,9 @@ defmodule Malachi.Cluster.Ring do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
-  def command_versions, do: %{init: 0, advance: 0}
+  def command_versions, do: %{{:init, 2} => 0, {:advance, 4} => 0}
 
   @doc """
   Applies a `command`, returning `{new_state, reply}`. Deterministic: no clock, no randomness, no

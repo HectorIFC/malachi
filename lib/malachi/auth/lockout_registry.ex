@@ -34,10 +34,16 @@ defmodule Malachi.Auth.LockoutRegistry do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
   def command_versions do
-    %{failed_attempt: 0, successful_auth: 0, unlock_user: 0, unlock_key: 0, cleanup: 0}
+    %{
+      {:failed_attempt, 3} => 0,
+      {:successful_auth, 2} => 0,
+      {:unlock_user, 2} => 0,
+      {:unlock_key, 2} => 0,
+      {:cleanup, 2} => 0
+    }
   end
 
   @doc """

@@ -10,7 +10,7 @@ defmodule Malachi.Cluster.MachineVersionTest do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Test.StuckRaMember
 
-  @table %{old: 0, current: 1, future: 2}
+  @table %{{:old, 2} => 0, {:current, 1} => 1, {:future, 2} => 2}
 
   defp meta(effective), do: %{machine_version: effective, index: 1, term: 1, system_time: 0}
 
@@ -27,29 +27,40 @@ defmodule Malachi.Cluster.MachineVersionTest do
       assert {[{{:current}, 1}], :applied} = MachineVersion.apply(meta(1), {:current}, [], @table, &recording_apply/3)
     end
 
+    test "refuses a known tag in a shape the table does not list, state untouched" do
+      # The shape is what old code can apply, so a wider or narrower tuple under a known tag is as
+      # foreign as a new tag: dispatching it would raise in a pure module that has no clause for it.
+      assert {[:before], {:error, {:unknown_command, {:old, 3}, 1}}} =
+               MachineVersion.apply(meta(1), {:old, 1, :extra}, [:before], @table, &recording_apply/3)
+
+      assert {[:before], {:error, {:unknown_command, {:old, 1}, 1}}} =
+               MachineVersion.apply(meta(1), {:old}, [:before], @table, &recording_apply/3)
+    end
+
     test "refuses a command introduced above the effective version, state untouched" do
-      assert {[:before], {:error, {:unsupported_command, :future, 2, 1}}} =
+      assert {[:before], {:error, {:unsupported_command, {:future, 2}, 2, 1}}} =
                MachineVersion.apply(meta(1), {:future, :x}, [:before], @table, &recording_apply/3)
     end
 
     test "refuses a tag missing from the table, state untouched" do
-      assert {[:before], {:error, {:unknown_command, :bogus, 1}}} =
+      assert {[:before], {:error, {:unknown_command, {:bogus, 3}, 1}}} =
                MachineVersion.apply(meta(1), {:bogus, 1, 2}, [:before], @table, &recording_apply/3)
     end
 
     test "refuses a command that is not a tagged tuple or an atom as :invalid" do
-      assert {[], {:error, {:unknown_command, :invalid, 0}}} =
+      assert {[], {:error, {:unknown_command, {:invalid, 0}, 0}}} =
                MachineVersion.apply(meta(0), "garbage", [], @table, &recording_apply/3)
 
-      assert {[], {:error, {:unknown_command, :invalid, 0}}} =
+      assert {[], {:error, {:unknown_command, {:invalid, 0}, 0}}} =
                MachineVersion.apply(meta(0), {}, [], @table, &recording_apply/3)
 
-      assert {[], {:error, {:unknown_command, :invalid, 0}}} =
+      assert {[], {:error, {:unknown_command, {:invalid, 0}, 0}}} =
                MachineVersion.apply(meta(0), {"tag", 1}, [], @table, &recording_apply/3)
     end
 
-    test "versions a bare atom command by the atom itself" do
-      assert {[{:old, 0}], :applied} = MachineVersion.apply(meta(0), :old, [], @table, &recording_apply/3)
+    test "versions a bare atom command by the atom and size 0" do
+      table = Map.put(@table, {:tick, 0}, 0)
+      assert {[{:tick, 0}], :applied} = MachineVersion.apply(meta(0), :tick, [], table, &recording_apply/3)
     end
 
     test "accepts {:machine_version, from, to} with the state unchanged, whatever the table" do
@@ -61,7 +72,7 @@ defmodule Malachi.Cluster.MachineVersionTest do
     end
 
     test "refuses an insert_topic whose export format is above the effective version" do
-      table = %{insert_topic: 0}
+      table = %{{:insert_topic, 2} => 0}
       export = %{topic: %{name: "t"}, export_format: 2}
 
       assert {[:before], {:error, {:unsupported_export_format, 2, 1}}} =
@@ -69,7 +80,7 @@ defmodule Malachi.Cluster.MachineVersionTest do
     end
 
     test "admits an insert_topic whose export format the group has reached, or that predates the format" do
-      table = %{insert_topic: 0}
+      table = %{{:insert_topic, 2} => 0}
       at_effective = %{topic: %{name: "t"}, export_format: 1}
       legacy = %{topic: %{name: "t"}}
       malformed = %{topic: %{name: "t"}, export_format: "2"}
@@ -83,7 +94,11 @@ defmodule Malachi.Cluster.MachineVersionTest do
     property "a refused command never changes the state and never reaches apply_fun" do
       check all(
               entries <-
-                StreamData.list_of(StreamData.tuple({StreamData.member_of([:a, :b, :c, :d]), StreamData.integer(0..3)})),
+                StreamData.list_of(
+                  StreamData.tuple(
+                    {StreamData.member_of([{:a, 2}, {:b, 2}, {:c, 2}, {:d, 2}]), StreamData.integer(0..3)}
+                  )
+                ),
               table = Map.new(entries),
               effective <- StreamData.integer(0..3),
               tags <- StreamData.list_of(StreamData.member_of([:a, :b, :c, :d, :e]), max_length: 30),
@@ -92,17 +107,17 @@ defmodule Malachi.Cluster.MachineVersionTest do
         Enum.reduce(tags, [], fn tag, state ->
           {next, reply} = MachineVersion.apply(meta(effective), {tag, :arg}, state, table, &recording_apply/3)
 
-          case Map.fetch(table, tag) do
+          case Map.fetch(table, {tag, 2}) do
             {:ok, introduced} when introduced <= effective ->
               assert reply == :applied
               assert next == [{{tag, :arg}, effective} | state]
 
             {:ok, introduced} ->
-              assert reply == {:error, {:unsupported_command, tag, introduced, effective}}
+              assert reply == {:error, {:unsupported_command, {tag, 2}, introduced, effective}}
               assert next == state
 
             :error ->
-              assert reply == {:error, {:unknown_command, tag, effective}}
+              assert reply == {:error, {:unknown_command, {tag, 2}, effective}}
               assert next == state
           end
 
@@ -138,13 +153,14 @@ defmodule Malachi.Cluster.MachineVersionTest do
     end
   end
 
-  describe "command_tag/1" do
-    test "is the leading atom of a tuple, the atom itself, or :invalid" do
-      assert MachineVersion.command_tag({:create_topic, "t", 4}) == :create_topic
-      assert MachineVersion.command_tag(:tick) == :tick
-      assert MachineVersion.command_tag({}) == :invalid
-      assert MachineVersion.command_tag({1, 2}) == :invalid
-      assert MachineVersion.command_tag([:create_topic]) == :invalid
+  describe "command_key/1" do
+    test "is the leading atom with the tuple size, a bare atom with size 0, or :invalid" do
+      assert MachineVersion.command_key({:create_topic, "t", 4}) == {:create_topic, 3}
+      assert MachineVersion.command_key({:seal_topic, "t"}) == {:seal_topic, 2}
+      assert MachineVersion.command_key(:tick) == {:tick, 0}
+      assert MachineVersion.command_key({}) == {:invalid, 0}
+      assert MachineVersion.command_key({1, 2}) == {:invalid, 0}
+      assert MachineVersion.command_key([:create_topic]) == {:invalid, 0}
     end
   end
 

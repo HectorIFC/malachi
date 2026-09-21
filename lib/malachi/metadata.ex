@@ -168,26 +168,26 @@ defmodule Malachi.Metadata do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Every command tag, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
   def command_versions do
     %{
-      create_topic: 0,
-      seal_topic: 0,
-      delete_topic: 0,
-      split_range: 0,
-      merge_ranges: 0,
-      register_segment: 0,
-      seal_segment: 0,
-      delete_segment: 0,
-      set_segment_replicas: 0,
-      commit_offset: 0,
-      define_policy: 0,
-      set_topic_policy: 0,
-      extract_topic: 0,
-      insert_topic: 0,
-      begin_migration: 0,
-      end_migration: 0
+      {:create_topic, 3} => 0,
+      {:seal_topic, 2} => 0,
+      {:delete_topic, 2} => 0,
+      {:split_range, 2} => 0,
+      {:merge_ranges, 3} => 0,
+      {:register_segment, 5} => 0,
+      {:seal_segment, 5} => 0,
+      {:delete_segment, 2} => 0,
+      {:set_segment_replicas, 3} => 0,
+      {:commit_offset, 4} => 0,
+      {:define_policy, 3} => 0,
+      {:set_topic_policy, 3} => 0,
+      {:extract_topic, 2} => 0,
+      {:insert_topic, 2} => 0,
+      {:begin_migration, 2} => 0,
+      {:end_migration, 2} => 0
     }
   end
 
