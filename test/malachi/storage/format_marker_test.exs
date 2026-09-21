@@ -18,11 +18,16 @@ defmodule Malachi.Storage.FormatMarkerTest do
 
   defp put_marker(dir, content), do: File.write!(FormatMarker.path(dir), content)
 
-  # The refusal line naming `path`, picked out of whatever else shared the captured device.
+  # The refusal line naming `path`, picked out of whatever else shared the captured device. The path
+  # has to end where the line says it does: a marker beside it, say a .bak of the same name, contains
+  # the requested path as a prefix, and picking that line would let the assertions pass on a refusal
+  # this case never produced.
   defp refusal_line(output, path) do
+    boundary = ~r/#{Regex.escape(path)}(?=$|[^[:alnum:]_.-])/
+
     output
     |> String.split("\n", trim: true)
-    |> Enum.find(&(String.contains?(&1, "REFUSING TO START (exit 78):") and String.contains?(&1, path)))
+    |> Enum.find(&(String.contains?(&1, "REFUSING TO START (exit 78):") and Regex.match?(boundary, &1)))
   end
 
   test "the levels and the exit status this release is built with" do
@@ -326,13 +331,17 @@ defmodule Malachi.Storage.FormatMarkerTest do
       # depend on nothing else in the suite refusing to start at that instant.
       parent = self()
       decoy = "REFUSING TO START (exit 78): the format marker /other/node/malachi.format is not valid"
+      # A marker whose name merely starts with this case's path: the one a substring match would take.
+      neighbour = "REFUSING TO START (exit 78): the format marker /data/malachi.format.bak is not valid"
 
       stderr =
         capture_io(:stderr, fn ->
           log =
             capture_log(fn ->
               IO.puts(:stderr, decoy)
+              IO.puts(:stderr, neighbour)
               Logger.error(decoy)
+              Logger.error(neighbour)
               FormatMarker.refuse!({:invalid, :missing_newline, "/data/malachi.format"}, &send(parent, {:halted, &1}))
             end)
 
@@ -345,6 +354,7 @@ defmodule Malachi.Storage.FormatMarkerTest do
       line = refusal_line(stderr, "/data/malachi.format")
       assert line =~ "REFUSING TO START (exit 78):"
       refute line =~ "/other/node"
+      refute line =~ ".bak"
       assert log =~ line
     end
 
