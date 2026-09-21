@@ -707,7 +707,7 @@ defmodule Malachi.BrokerServer do
   def handle_info({:longpoll_timeout, ref}, state) do
     case Enum.split_with(state.waiters, &(&1.ref == ref)) do
       {[waiter], rest} ->
-        GenServer.reply(waiter.from, {[], waiter.positions, []})
+        GenServer.reply(waiter.from, {[], waiter.positions, waiter.skips})
         {:noreply, %{state | waiters: rest}}
 
       # Already woken by a produce (timer raced the reply); nothing to do.
@@ -1210,8 +1210,12 @@ defmodule Malachi.BrokerServer do
         {:reply, error, state}
 
       # Caught up and willing to wait: park the request; a later produce to this topic (or the
-      # timeout) replies. Hold the original positions (and range scope) so the wake re-consumes the same.
-      {:ok, {[], _positions, _skips}} when wait_ms > 0 ->
+      # timeout) replies. The page found no records, but it can still have made progress: a source whose
+      # data is gone advances the cursor and reports what it skipped. Parking on the ORIGINAL position
+      # would rescan that dead source on every wake and hold the skip back until the range gets traffic
+      # again, so the waiter parks on what the page reached and carries its skips to whichever of the
+      # wake or the timeout answers it.
+      {:ok, {[], next_positions, skips}} when wait_ms > 0 ->
         ref = make_ref()
         timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
 
@@ -1220,7 +1224,8 @@ defmodule Malachi.BrokerServer do
           timer: timer,
           from: from,
           topic: topic,
-          positions: positions,
+          positions: next_positions,
+          skips: skips,
           max: max_records,
           ranges: ranges
         }
@@ -1462,12 +1467,14 @@ defmodule Malachi.BrokerServer do
           {:error, _reason} ->
             [waiter | keep]
 
-          {:ok, {[], _positions, _skips}} ->
-            [waiter | keep]
+          # Still nothing to deliver, but the re-read can have moved past a source whose data is gone:
+          # keep the waiter parked on that progress, with the skips it has gathered so far.
+          {:ok, {[], next_positions, skips}} ->
+            [%{waiter | positions: next_positions, skips: waiter.skips ++ skips} | keep]
 
           {:ok, {records, next_positions, skips}} ->
             Process.cancel_timer(waiter.timer)
-            GenServer.reply(waiter.from, {records, next_positions, skips})
+            GenServer.reply(waiter.from, {records, next_positions, waiter.skips ++ skips})
             keep
         end
       end)
@@ -1510,8 +1517,12 @@ defmodule Malachi.BrokerServer do
         {:error, _reason} ->
           subscriber
 
-        {:ok, {[], _positions, _skips}} ->
-          subscriber
+        # Nothing to push, but the read can still have moved past a source whose data is gone. The
+        # progress is kept and the skips reported; no empty batch is pushed, because what a subscriber
+        # receives is the shipped stream payload and an empty one says nothing to a client.
+        {:ok, {[], next_positions, skips}} ->
+          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
+          %{subscriber | positions: next_positions}
 
         {:ok, {records, next_positions, skips}} ->
           send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})

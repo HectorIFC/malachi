@@ -198,6 +198,66 @@ defmodule Malachi.BrokerServerTest do
       assert {[], %{}, []} = Task.await(task, 1_000)
     end
 
+    # A child whose ancestor has no segment left: consuming it moves the cursor to the child's own
+    # source and reports the whole ancestor, with no record to deliver. The shape every delivery path
+    # used to throw away.
+    defp child_with_expired_ancestor(directory) do
+      {server, topic, root_id} = skipping_broker(directory)
+      produce_sealed(server, topic, root_id, ["v0", "v1", "v2"])
+      {:ok, left_id, _right_id} = BrokerServer.split_range(server, root_id)
+      expire(server, root_id, [0, 1, 2])
+      {server, topic, left_id}
+    end
+
+    test "a long poll parks on the progress a skip-only page made, and hands it back on the timeout",
+         %{tmp_dir: directory} do
+      # Parking on the ORIGINAL position would rescan the dead ancestor on every wake and never report
+      # what the reader lost until the range gets traffic again.
+      {server, topic, left_id} = child_with_expired_ancestor(directory)
+
+      # Scoped to one child, so the page is exactly one range's worth of progress.
+      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 200, [left_id]) end)
+      wait_for_park(server)
+      assert [%{positions: %{^left_id => {1, 0}}, skips: [%Skip{offsets: 3}]}] = :sys.get_state(server).waiters
+
+      assert {[], %{^left_id => {1, 0}}, [%Skip{source: :ancestor, offsets: 3}]} = Task.await(task, 1_000)
+    end
+
+    test "a wake delivers the skips the parked page had already found", %{tmp_dir: directory} do
+      {server, topic, left_id} = child_with_expired_ancestor(directory)
+
+      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 5_000, [left_id]) end)
+      wait_for_park(server)
+      # A key of the left child, so the produce wakes this waiter with a record of its own range.
+      left = server |> BrokerServer.metadata() |> Metadata.get_range(left_id)
+
+      key =
+        Enum.find_value(0..1_000, fn i ->
+          key = "k#{i}"
+          position = Malachi.Keyspace.position_of(key, left.keyspace_size)
+          if Malachi.Keyspace.within?(position, left.key_start, left.key_end), do: key
+        end)
+
+      {:ok, _placements} = BrokerServer.produce(server, topic, [record("v3", key)])
+
+      assert {records, _positions, [%Skip{source: :ancestor, offsets: 3}]} = Task.await(task, 1_000)
+      assert Enum.map(records, & &1.value) == ["v3"]
+    end
+
+    test "a push reports a skip-only page and keeps the position, without pushing an empty batch",
+         %{tmp_dir: directory} do
+      {server, topic, left_id} = child_with_expired_ancestor(directory)
+      :ok = BrokerServer.commit_offset(server, "billing", topic, %{left_id => {0, 0}})
+
+      :ok = BrokerServer.subscribe(server, topic, "billing", 100, 100)
+
+      assert_receive {:skip_event, %{offsets: 3}, %{group: "billing", span: :upper_bound}}
+      refute_receive {:log_records, ^topic, [], _positions}
+
+      # The subscriber moved past the dead ancestor, so the next push does not scan it again.
+      assert [%{positions: %{^left_id => {1, 0}}}] = :sys.get_state(server).subscribers[topic]
+    end
+
     test "a long-poll that times out hands back no skips", %{tmp_dir: directory} do
       {server, topic, root_id} = skipping_broker(directory)
       produce_sealed(server, topic, root_id, ["v0"])
