@@ -53,10 +53,14 @@ defmodule Malachi.DashboardRetentionMetricsTest do
     assert value(now, ~s(malachi_retention_segments_expired_total{topic="#{topic}"})) == 1
     assert value(now, ~s(malachi_retention_bytes_expired_total{topic="#{topic}"})) == 4096
 
-    assert value(now, ~s(malachi_retention_expire_failures_total{reply="migrating"})) ==
+    # These two carry no topic label: they are node-global, and other tests (and a real coordinator on a
+    # node that has retention configured) emit into them while this one runs. The bound is what this test
+    # can prove, which is that the emit reached the endpoint; that it is counted exactly once is the
+    # metrics reporter's test, where the counter is read directly.
+    assert value(now, ~s(malachi_retention_expire_failures_total{reply="migrating"})) >=
              value(before, ~s(malachi_retention_expire_failures_total{reply="migrating"})) + 1
 
-    assert value(now, "malachi_retention_sweep_duration_seconds_count") ==
+    assert value(now, "malachi_retention_sweep_duration_seconds_count") >=
              value(before, "malachi_retention_sweep_duration_seconds_count") + 1
   end
 
