@@ -815,7 +815,8 @@ defmodule Malachi.Dashboard do
 
   defp serve_prometheus(socket, request_origin) do
     text =
-      Prometheus.export(Metrics.get_system_metrics(), topics_overview(), Metrics.storage_flush_histogram())
+      Metrics.get_system_metrics()
+      |> Prometheus.export(topics_overview(), Metrics.storage_flush_histogram(), Metrics.retention_snapshot())
       |> IO.iodata_to_binary()
 
     response = """

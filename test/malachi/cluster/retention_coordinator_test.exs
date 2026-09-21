@@ -10,13 +10,11 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
   alias Malachi.Metadata
   alias Malachi.Test.UnknownMessages
 
-  @range {"t", 0}
-
-  defp with_sealed(segments) do
-    base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", 4}), 0)
+  defp with_sealed(segments, topic \\ "t") do
+    base = elem(Metadata.apply(Metadata.new(), {:create_topic, topic, 4}), 0)
 
     Enum.reduce(segments, base, fn {id, start_offset, bytes, sealed_at}, metadata ->
-      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, @range, id, [:b1], start_offset})
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, {topic, 0}, id, [:b1], start_offset})
       {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, id, 1, bytes, sealed_at})
       metadata
     end)
@@ -100,16 +98,11 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     sealed = first_segment.()
     assert {:ok, [_ | _]} = ReplicationServer.read(repl_name, sealed.id, sealed.start_offset, 10)
 
-    # the real expire_segment: drop from the control plane, then delete on each replica
-    expire = fn segment ->
-      BrokerServer.delete_segment(broker, segment.id)
-      Enum.each(segment.replica_set, &ReplicationServer.delete(&1, segment.id))
-    end
-
     {:ok, coordinator} =
       RetentionCoordinator.start_link(
         metadata_source: fn -> BrokerServer.metadata(broker) end,
-        expire_segment: expire,
+        # the real expire function, pointed at this test's broker
+        expire_segment: &Malachi.Application.expire_segment(&1, broker),
         policy: %{max_age_ms: 5_000},
         clock: fn -> System.system_time(:millisecond) + 60_000 end,
         interval: 60_000
@@ -122,6 +115,104 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     assert ReplicationServer.read(repl_name, sealed.id, sealed.start_offset, 10) == :eof
 
     BrokerServer.stop(broker)
+  end
+
+  describe "sweep telemetry" do
+    # Each test sweeps its own topic, so events from the other tests of this async module are ignored.
+    setup do
+      topic = "sweep_#{System.unique_integer([:positive])}"
+      parent = self()
+      handler_id = "retention-sweep-#{topic}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [[:malachi, :retention, :expire], [:malachi, :retention, :sweep]],
+        fn event, measurements, metadata, config -> forward(event, measurements, metadata, config, parent, topic) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      %{topic: topic}
+    end
+
+    # A sweep event carries no topic, so it is forwarded when it comes from a coordinator this test
+    # started, which is the only process that registers under the test's topic.
+    defp forward([:malachi, :retention, :expire], measurements, %{topic: topic} = metadata, _config, parent, topic),
+      do: send(parent, {:expire_event, measurements, metadata})
+
+    defp forward([:malachi, :retention, :sweep], measurements, metadata, _config, parent, topic) do
+      if Process.get(:retention_test_topic) == topic, do: send(parent, {:sweep_event, measurements, metadata})
+    end
+
+    defp forward(_event, _measurements, _metadata, _config, _parent, _topic), do: :ok
+
+    defp sweeper(topic, expire_segment) do
+      metadata = with_sealed([{"old", 0, 100, 1_000}, {"older", 1, 250, 900}, {"new", 2, 100, 9_500}], topic)
+
+      start(
+        metadata_source: fn -> metadata end,
+        expire_segment: fn segment ->
+          Process.put(:retention_test_topic, topic)
+          expire_segment.(segment)
+        end
+      )
+    end
+
+    test "each expired segment emits its topic, bytes and result, and the sweep its duration", %{topic: topic} do
+      server = sweeper(topic, fn _segment -> :ok end)
+
+      assert RetentionCoordinator.run_now(server) |> Enum.sort() == ["old", "older"]
+
+      assert_receive {:expire_event, %{count: 1, bytes: 100}, %{topic: ^topic, segment: "old", result: :ok}}
+      assert_receive {:expire_event, %{count: 1, bytes: 250}, %{topic: ^topic, segment: "older", result: :ok}}
+      assert_receive {:sweep_event, %{duration_us: duration, expired: 2, failed: 0}, %{}}
+      assert is_integer(duration) and duration >= 0
+    end
+
+    test "a refused delete is labeled with the reply and not counted as expired", %{topic: topic} do
+      replies = %{"old" => {:error, :migrating}, "older" => {:error, :segment_active}}
+      server = sweeper(topic, fn segment -> Map.fetch!(replies, segment.id) end)
+
+      RetentionCoordinator.run_now(server)
+
+      assert_receive {:expire_event, %{bytes: 100}, %{segment: "old", result: :migrating}}
+      assert_receive {:expire_event, %{bytes: 250}, %{segment: "older", result: :segment_active}}
+      assert_receive {:sweep_event, %{expired: 0, failed: 2}, %{}}
+    end
+
+    test "an already-deleted segment is neither expired again nor a failure", %{topic: topic} do
+      server = sweeper(topic, fn _segment -> {:error, :no_such_segment} end)
+
+      RetentionCoordinator.run_now(server)
+
+      assert_receive {:expire_event, _measurements, %{result: :no_such_segment}}
+      assert_receive {:sweep_event, %{expired: 0, failed: 0}, %{}}
+    end
+
+    test "an answer the coordinator does not know is labeled :other", %{topic: topic} do
+      server = sweeper(topic, fn _segment -> {:error, :timeout} end)
+
+      RetentionCoordinator.run_now(server)
+
+      assert_receive {:expire_event, _measurements, %{result: :other}}
+      assert_receive {:sweep_event, %{expired: 0, failed: 2}, %{}}
+    end
+
+    test "a sweep that expires nothing still reports that it ran", %{topic: topic} do
+      metadata = with_sealed([{"new", 0, 100, 9_500}], topic)
+
+      server =
+        start(
+          metadata_source: fn ->
+            Process.put(:retention_test_topic, topic)
+            metadata
+          end
+        )
+
+      assert RetentionCoordinator.run_now(server) == []
+      assert_receive {:sweep_event, %{expired: 0, failed: 0}, %{}}
+      refute_receive {:expire_event, _measurements, _metadata}
+    end
   end
 
   test "an unknown cast, info message or call is counted and survived" do

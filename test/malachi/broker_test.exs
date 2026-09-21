@@ -3,6 +3,7 @@ defmodule Malachi.BrokerTest do
   use ExUnitProperties
 
   alias Malachi.Broker
+  alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
   alias Malachi.Log.Record
@@ -77,8 +78,8 @@ defmodule Malachi.BrokerTest do
 
   defp consume(broker, store, range_id, cursor, accumulated) do
     case Broker.read_consume(broker, range_id, cursor, 100, read_fun(store)) do
-      {:ok, [], next} -> {accumulated |> Enum.reverse() |> List.flatten(), next}
-      {:ok, records, next} -> consume(broker, store, range_id, next, [records | accumulated])
+      {:ok, [], next, _skips} -> {accumulated |> Enum.reverse() |> List.flatten(), next}
+      {:ok, records, next, _skips} -> consume(broker, store, range_id, next, [records | accumulated])
     end
   end
 
@@ -402,7 +403,7 @@ defmodule Malachi.BrokerTest do
       assert first |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b"]
 
       # caught up: resuming from the paused cursor yields nothing and keeps the same cursor
-      assert {:ok, [], ^cursor} = Broker.read_consume(broker, root_id, cursor, 100, read_fun(store))
+      assert {:ok, [], ^cursor, []} = Broker.read_consume(broker, root_id, cursor, 100, read_fun(store))
 
       # a record produced after the pause is delivered when resuming from that same cursor
       {broker, {:ok, _placements}} = produce(broker, store, "events", [record("c", "k3")])
@@ -420,7 +421,211 @@ defmodule Malachi.BrokerTest do
       {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1")])
 
       # a forged/stale cursor pointing past the range's sources has nothing to read, pause, no crash
-      assert {:ok, [], {9999, 0}} = Broker.read_consume(broker, root_id, {9999, 0}, 100, read_fun(store))
+      assert {:ok, [], {9999, 0}, []} = Broker.read_consume(broker, root_id, {9999, 0}, 100, read_fun(store))
+    end
+  end
+
+  describe "skipped offsets (data a consumer is moved past)" do
+    # A range of `count` one-record segments at offsets 0..count-1, every one of them sealed.
+    defp one_record_segments(store, count) do
+      one_record = Record.encoded_size(record("v0", "k0"))
+      {broker, root_id} = broker_with_topic("events", 4, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..(count - 1), broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      {broker, root_id}
+    end
+
+    defp delete_segments(broker, segments) do
+      Enum.reduce(segments, broker, fn segment, broker ->
+        {broker, :ok} = Broker.delete_segment(broker, segment.id)
+        broker
+      end)
+    end
+
+    # A root of four one-record segments split into two children, with `expire` picking which of the
+    # root's segments retention then removed.
+    defp split_with_expired_parent(store, expire) do
+      {broker, root_id} = one_record_segments(store, 4)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+      broker = delete_segments(broker, expire.(segments(broker, root_id)))
+      {broker, root_id, left_id}
+    end
+
+    test "a cursor below the earliest stored offset reports the exact span it skips", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 5)
+      [s0, s1 | _] = segments(broker, root_id)
+      broker = delete_segments(broker, [s0, s1])
+
+      assert {:ok, records, {0, 5}, [skip]} = Broker.read_consume(broker, root_id, {0, 0}, 100, read_fun(store))
+      assert Enum.map(records, & &1.value) == ["v2", "v3", "v4"]
+
+      assert skip == %Skip{
+               range_id: root_id,
+               source_range_id: root_id,
+               from: 0,
+               offsets: 2,
+               origin: :cursor,
+               source: :self
+             }
+
+      assert Skip.span(skip) == :exact
+    end
+
+    test "a cursor inside a hole between two segments reports the hole", %{store: store} do
+      {broker, root_id} = range_with_hole(store)
+
+      assert {:ok, [%{value: "v2"}, %{value: "v3"}], {0, 4}, [skip]} =
+               Broker.read_consume(broker, root_id, {0, 1}, 100, read_fun(store))
+
+      assert %Skip{from: 1, offsets: 1, origin: :cursor, source: :self} = skip
+    end
+
+    test "a hole crossed in the middle of a page is reported with the offset it began at", %{store: store} do
+      {broker, root_id} = range_with_hole(store)
+
+      assert {:ok, records, {0, 4}, [skip]} = Broker.read_consume(broker, root_id, :start, 100, read_fun(store))
+      assert Enum.map(records, & &1.value) == ["v0", "v2", "v3"]
+      assert %Skip{from: 1, offsets: 1, origin: :start, source: :self} = skip
+    end
+
+    test "a cursor at or above the earliest stored offset reports nothing", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 5)
+      [s0, s1 | _] = segments(broker, root_id)
+      broker = delete_segments(broker, [s0, s1])
+
+      assert {:ok, [_, _, _], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 2}, 100, read_fun(store))
+      assert {:ok, [_], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 4}, 100, read_fun(store))
+      assert {:ok, [], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 5}, 100, read_fun(store))
+    end
+
+    test "a :start cursor is labeled as a fresh start, not as a lagging reader", %{store: store} do
+      # `normalize_cursor/1` turns :start into {0, 0}, so without carrying the origin a new group on a
+      # topic whose head already expired would read exactly like a group that fell behind.
+      {broker, root_id} = one_record_segments(store, 3)
+      [s0 | _] = segments(broker, root_id)
+      broker = delete_segments(broker, [s0])
+
+      assert {:ok, [_, _], {0, 3}, [skip]} = Broker.read_consume(broker, root_id, :start, 100, read_fun(store))
+      assert %Skip{from: 0, offsets: 1, origin: :start} = skip
+    end
+
+    test "a skip that is not delivered is not reported", %{store: store} do
+      # The hole is stepped over by the read, but an empty page moves no cursor past it: nothing was
+      # skipped from the consumer's point of view, and the next page that does deliver reports it.
+      {broker, root_id} = range_with_hole(store)
+      empty = fn _ref, _segment, _offset, _max -> {:ok, []} end
+
+      assert {:ok, [], {0, 1}, []} = Broker.read_consume(broker, root_id, {0, 1}, 100, empty)
+    end
+
+    test "a child reading a pruned ancestor reports the ancestor span as an upper bound", %{store: store} do
+      # The ancestor span covers the WHOLE parent range, while the child only ever receives its key
+      # slice of it (`filter_records/2`), so the count is an upper bound on what this child lost.
+      {broker, root_id, left_id} = split_with_expired_parent(store, fn [s0 | _] -> [s0] end)
+
+      assert {:ok, _records, _cursor, [skip]} = Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+
+      assert skip == %Skip{
+               range_id: left_id,
+               source_range_id: root_id,
+               from: 0,
+               offsets: 1,
+               origin: :start,
+               source: :ancestor
+             }
+
+      assert Skip.span(skip) == :upper_bound
+    end
+
+    test "an ancestor with every segment expired reports what was left of it", %{store: store} do
+      # The third way data is skipped: nothing of the ancestor is stored, so `earliest_offset/2` has
+      # no floor to clamp to and the read answers :eof, which moves the consumer to the next source.
+      {broker, root_id, left_id} = split_with_expired_parent(store, & &1)
+
+      assert {:ok, [], {1, 0}, [skip]} = Broker.read_consume(broker, left_id, {0, 1}, 100, read_fun(store))
+
+      assert %Skip{source_range_id: ^root_id, from: 1, offsets: 3, origin: :cursor, source: :ancestor} = skip
+
+      assert {:ok, [], {1, 0}, [%Skip{from: 0, offsets: 4, origin: :start}]} =
+               Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+    end
+
+    test "an expired ancestor whose end was never recovered is reported with an unknown span", %{store: store} do
+      # After a restart `broker.offsets` is seeded from the stored segments, and an ancestor with none
+      # left seeds nothing, so its end is gone. A reader that held a position inside it may have lost
+      # records past that position, and saying so with an unknown size beats saying nothing.
+      {broker, root_id, left_id} = split_with_expired_parent(store, & &1)
+      broker = %{broker | offsets: Map.delete(broker.offsets, root_id)}
+
+      assert {:ok, [], {1, 0}, [skip]} = Broker.read_consume(broker, left_id, {0, 1}, 100, read_fun(store))
+      assert %Skip{from: 1, offsets: :unknown, source: :ancestor} = skip
+      assert Skip.span(skip) == :unknown
+
+      # From the very beginning there is no position to have lost anything past: an ancestor that
+      # never held a record looks exactly like this, so it is not reported.
+      assert {:ok, [], {1, 0}, []} = Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+    end
+
+    test "an ancestor read to its end reports nothing when the consumer moves on", %{store: store} do
+      {broker, _root_id, left_id} = split_with_expired_parent(store, fn _segments -> [] end)
+
+      assert {:ok, _records, {1, 0}, []} = Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+    end
+
+    test "the history read keeps its shape and still steps over expired data", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      [s0 | _] = segments(broker, root_id)
+      broker = delete_segments(broker, [s0])
+
+      # One segment per page, and the first page starts at the earliest record still stored.
+      assert {:ok, [%{value: "v1"}], {0, 2}} = Broker.stream_history(broker, root_id, {0, 0}, 100, read_fun(store))
+      assert {:ok, values} = Broker.read_history(broker, root_id, read_fun(store))
+      assert Enum.map(values, & &1.value) == ["v1", "v2"]
+    end
+
+    property "every offset of a range is either delivered or reported as skipped, exactly once" do
+      check all(
+              count <- integer(2..10),
+              deleted <- list_of(boolean(), length: 10),
+              page <- integer(1..4),
+              max_runs: 80
+            ) do
+        {:ok, store} = FakeSegmentStore.start_link()
+        {broker, root_id} = one_record_segments(store, count)
+        # One more record past the deletions, so the tail always has a segment to read from.
+        {broker, {:ok, _placements}} = produce(broker, store, "events", [record("tail", "tail")])
+
+        expired =
+          segments(broker, root_id) |> Enum.filter(&(&1.start_offset < count and Enum.at(deleted, &1.start_offset)))
+
+        broker = delete_segments(broker, expired)
+
+        {delivered, skipped} = drain(broker, store, root_id, page)
+        skipped_offsets = Enum.flat_map(skipped, fn skip -> Enum.to_list(skip.from..(skip.from + skip.offsets - 1)) end)
+
+        assert Enum.sort(delivered ++ skipped_offsets) == Enum.to_list(0..count)
+        assert Enum.sort(skipped_offsets) == Enum.sort(Enum.map(expired, & &1.start_offset))
+        Agent.stop(store)
+      end
+    end
+
+    # Pages a range from :start until it pauses, collecting the offsets delivered and the skips reported.
+    defp drain(broker, store, range_id, page), do: drain(broker, store, range_id, page, :start, [], [])
+
+    defp drain(broker, store, range_id, page, cursor, delivered, skipped) do
+      case Broker.read_consume(broker, range_id, cursor, page, read_fun(store)) do
+        {:ok, [], ^cursor, more} ->
+          {delivered, skipped ++ more}
+
+        {:ok, records, next, more} ->
+          drain(broker, store, range_id, page, next, delivered ++ Enum.map(records, & &1.offset), skipped ++ more)
+      end
     end
   end
 
@@ -1077,13 +1282,13 @@ defmodule Malachi.BrokerTest do
       # only ONE record left in seq 0, so the cap is 1 and the rest of the page is filled from seq 1.
       # Without the cap that second page would have been v2 and s3, and the cursor would have jumped
       # to 4, skipping v3 for good.
-      assert {:ok, page, {0, 2}} = Broker.read_consume(broker, root_id, :start, 2, read_fun(store))
+      assert {:ok, page, {0, 2}, []} = Broker.read_consume(broker, root_id, :start, 2, read_fun(store))
       assert Enum.map(page, &{&1.offset, &1.value}) == [{0, "v0"}, {1, "v1"}]
 
-      assert {:ok, page, {0, 5}} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
+      assert {:ok, page, {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
       assert Enum.map(page, &{&1.offset, &1.value}) == [{2, "v2"}, {3, "v3"}, {4, "v4"}]
 
-      assert {:ok, [], {0, 5}} = Broker.read_consume(broker, root_id, {0, 5}, 2, read_fun(store))
+      assert {:ok, [], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 5}, 2, read_fun(store))
     end
 
     test "records a store holds beyond the sealed length are not part of the log", %{store: store} do

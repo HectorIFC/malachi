@@ -53,8 +53,8 @@ defmodule Malachi.GroupCommitTest do
 
   defp consume_loop(broker, topic, positions, acc) do
     case BrokerServer.consume(broker, topic, positions, 1000, 0) do
-      {[], _next} -> Enum.reverse(acc)
-      {records, next} -> consume_loop(broker, topic, next, Enum.reverse(records, acc))
+      {[], _next, _skips} -> Enum.reverse(acc)
+      {records, next, _skips} -> consume_loop(broker, topic, next, Enum.reverse(records, acc))
     end
   end
 

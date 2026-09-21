@@ -35,6 +35,7 @@ defmodule Malachi.LogApi do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Retention.SkipReporter
   alias Malachi.Telemetry
 
   # Keyspace size 2^8 = 256, leaving room for the topic's range to split as it grows. The client
@@ -99,7 +100,7 @@ defmodule Malachi.LogApi do
           {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch(server, topic, cursor, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     case decode_cursor(cursor) do
-      {:ok, positions} -> do_fetch(server, topic, positions, max, wait_ms)
+      {:ok, positions} -> do_fetch(server, topic, nil, positions, max, wait_ms)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -113,7 +114,7 @@ defmodule Malachi.LogApi do
           {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch_group(server, topic, group, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
     positions = BrokerServer.committed_offsets(server, group, topic)
-    do_fetch(server, topic, positions, max, wait_ms)
+    do_fetch(server, topic, group, positions, max, wait_ms)
   end
 
   @doc """
@@ -136,7 +137,7 @@ defmodule Malachi.LogApi do
     case GroupCoordinator.poll(coordinator, group, topic, member) do
       {:ok, _generation, ranges} ->
         positions = BrokerServer.committed_offsets(server, group, topic)
-        do_fetch(server, topic, Map.take(positions, ranges), max, wait_ms, ranges)
+        do_fetch(server, topic, group, Map.take(positions, ranges), max, wait_ms, ranges)
 
       # this node no longer owns the topic's coordination (stale routing during failover), the client
       # re-resolves and retries against the new owner
@@ -257,7 +258,10 @@ defmodule Malachi.LogApi do
   @spec encode_cursor(map()) :: cursor()
   def encode_cursor(positions), do: Base.url_encode64(:erlang.term_to_binary(positions))
 
-  defp do_fetch(server, topic, positions, max, wait_ms, ranges \\ nil) do
+  # `group` is the consumer group the page is read for (nil for a plain `fetch/5`). The broker hands back
+  # the data it moved the reader past without knowing whose read it was; this layer knows, so it is the
+  # one that attributes the skips and hands them to the reporter beside that broker.
+  defp do_fetch(server, topic, group, positions, max, wait_ms, ranges \\ nil) do
     Tracer.with_span "malachi.consume" do
       case BrokerServer.consume(server, topic, positions, max, wait_ms, ranges) do
         # The broker cannot see this topic's metadata, so it has nothing true to say. Surfacing the
@@ -266,14 +270,22 @@ defmodule Malachi.LogApi do
           Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.error" => inspect(reason)})
           {:error, reason}
 
-        {records, next_positions} ->
+        {records, next_positions, skips} ->
           count = length(records)
           Tracer.set_attributes(%{"malachi.topic" => topic, "malachi.records" => count})
           Telemetry.consume(topic, count)
+          report_skips(server, topic, group, skips)
           {:ok, records, encode_cursor(next_positions)}
       end
     end
   end
+
+  # The reporter's name is derived only when there is something to report: an ordinary page has no skips,
+  # and deriving it concatenates and looks up an atom, which every fetch would otherwise pay.
+  defp report_skips(_server, _topic, _group, []), do: :ok
+
+  defp report_skips(server, topic, group, skips),
+    do: SkipReporter.report(SkipReporter.name_for(server), topic, group, skips)
 
   defp value_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + byte_size(record.value) end)
 

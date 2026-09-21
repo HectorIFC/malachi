@@ -51,6 +51,20 @@ defmodule Malachi.UnexpectedMessageTest do
   defp warning_lines(log, fragment),
     do: log |> String.split("\n", trim: true) |> Enum.filter(&(&1 =~ fragment))
 
+  describe "the server labels" do
+    test "the public type lists exactly what servers/0 returns" do
+      # The type is the cross-module contract (`Malachi.Metrics` closes its label set on it) and dialyzer
+      # does not catch a label added to the list and not to the union, which is how :skip_reporter ended
+      # up in one and not the other.
+      {:ok, types} = Code.Typespec.fetch_types(UnexpectedMessage)
+      {:type, {:server, definition, []}} = Enum.find(types, &match?({:type, {:server, _, []}}, &1))
+      {:type, _line, :union, members} = definition
+      declared = for {:atom, _line, atom} <- members, do: atom
+
+      assert Enum.sort(declared) == Enum.sort(UnexpectedMessage.servers())
+    end
+  end
+
   describe "shape/1" do
     test "names a tagged tuple by its tag and arity, and anything else by its type" do
       assert UnexpectedMessage.shape({:replica_append_v2, 1, 2}) == {:replica_append_v2, 3}

@@ -22,6 +22,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :storage, :scrub],
     [:malachi, :cluster, :orphaned_fence],
     [:malachi, :cluster, :fence_reconciled],
+    [:malachi, :retention, :skip],
+    [:malachi, :retention, :expire],
+    [:malachi, :retention, :sweep],
     [:malachi, :process, :unexpected_message]
   ]
 
@@ -84,6 +87,18 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :cluster, :fence_reconciled], %{count: count}, _metadata, _config) do
     Metrics.record_fences_reconciled(count)
+  end
+
+  def handle_event([:malachi, :retention, :skip], %{offsets: offsets}, metadata, _config) do
+    Metrics.record_retention_skip(metadata.topic, metadata.group, metadata.origin, metadata.span, offsets)
+  end
+
+  def handle_event([:malachi, :retention, :expire], %{bytes: bytes}, %{topic: topic, result: result}, _config) do
+    Metrics.record_retention_expire(topic, bytes, result)
+  end
+
+  def handle_event([:malachi, :retention, :sweep], %{duration_us: duration_us}, _metadata, _config) do
+    Metrics.record_retention_sweep(duration_us)
   end
 
   def handle_event([:malachi, :process, :unexpected_message], _measurements, %{server: server, kind: kind}, _config) do

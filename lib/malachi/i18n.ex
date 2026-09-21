@@ -635,6 +635,21 @@ defmodule Malachi.I18n do
           "    username: %{username}\n    password: %{password}\n\n" <>
           "Set MALACHI_ADMIN_PASS to provide your own and skip generation.\n" <>
           "════════════════════════════════════════════════════════════════"
+    },
+    # Retention: data a consumer was moved past (Malachi.Retention.SkipReporter)
+    retention_skip_setting_invalid: %{
+      "pt_BR" => "⚠️ %{setting} precisa ser um inteiro dentro do limite e veio %{value}; usando o padrão %{default}",
+      "en_US" => "⚠️ %{setting} must be an integer within its bound and was %{value}; using the default %{default}"
+    },
+    retention_consumer_skipped: %{
+      "pt_BR" =>
+        "⚠️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets que não estão mais " <>
+          "armazenados (range %{range}, range de origem %{source_range}, origem %{origin}, extensão %{span}); " <>
+          "%{held} outros pulos deste leitor foram contados sem linha desde a última",
+      "en_US" =>
+        "⚠️ Group %{group} on topic %{topic} was moved past %{offsets} offsets that are no longer stored " <>
+          "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
+          "%{held} more skips of this reader were counted without a line since the last one"
     }
   }
 
