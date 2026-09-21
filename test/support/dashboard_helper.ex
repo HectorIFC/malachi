@@ -128,6 +128,43 @@ defmodule Malachi.Test.DashboardHelper do
   end
 
   @doc """
+  Scrapes `/metrics` the way a harness does, with a bearer `token` and an Accept header asking for the
+  Prometheus exposition, and returns the whole response once the server closes it. Takes `:port`.
+  """
+  def scrape_metrics(token, opts \\ []) do
+    {:ok, socket} = connect(port: Keyword.get(opts, :port, @dashboard_port))
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer #{token}\r\n" <>
+          "Accept: text/plain\r\nConnection: close\r\n\r\n"
+      )
+
+    response = read_until_closed(socket, "")
+    :gen_tcp.close(socket)
+    response
+  end
+
+  @doc """
+  The integer value of the sample line for `series` (its name with any labels, exactly as rendered) in a
+  scrape, or `nil` when the scrape has no such line.
+  """
+  def metric_value(scrape, series) do
+    case scrape |> String.split("\n") |> Enum.find(&String.starts_with?(&1, series <> " ")) do
+      nil -> nil
+      line -> line |> String.split(" ") |> List.last() |> String.to_integer()
+    end
+  end
+
+  defp read_until_closed(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 5000) do
+      {:ok, data} -> read_until_closed(socket, acc <> data)
+      {:error, :closed} -> acc
+    end
+  end
+
+  @doc """
   Extracts the Set-Cookie value from an HTTP response string.
 
   ## Examples

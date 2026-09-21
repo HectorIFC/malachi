@@ -4,8 +4,9 @@ defmodule Malachi.UnexpectedMessage do
   it, and keeps running.
 
   The servers on the cluster path (`Malachi.Cluster.ReplicationServer`, `Malachi.Cluster.MembershipServer`,
-  `Malachi.BrokerServer`, `Malachi.Cluster.Scrubber`, `Malachi.Cluster.RetentionCoordinator` and
-  `Malachi.Cluster.HealCoordinator`) each end their `handle_cast/2`, `handle_info/2` and `handle_call/3`
+  `Malachi.BrokerServer`, `Malachi.Cluster.Scrubber`, `Malachi.Cluster.RetentionCoordinator`,
+  `Malachi.Cluster.HealCoordinator` and `Malachi.Retention.SkipReporter`) each end their
+  `handle_cast/2`, `handle_info/2` and `handle_call/3`
   with a catch-all that calls `drop/4`. Without it, a message shape a server does not know raises
   `FunctionClauseError`, and during a rolling upgrade a newer node sends exactly that: the first upgraded
   primary that pushed a new replication message would take down the whole data plane of every older
@@ -48,7 +49,7 @@ defmodule Malachi.UnexpectedMessage do
   alias Malachi.I18n
   alias Malachi.Telemetry
 
-  @servers [:replication, :membership, :broker, :scrubber, :retention, :heal]
+  @servers [:replication, :membership, :broker, :scrubber, :retention, :heal, :skip_reporter]
   @kinds [:cast, :info, :call]
 
   # How many distinct {kind, shape} pairs one server process logs. Tags are atoms, so the set is bounded
@@ -56,7 +57,7 @@ defmodule Malachi.UnexpectedMessage do
   @max_logged_shapes 32
 
   @typedoc "The label of a server that drops unexpected messages (anything else is counted as `other`)."
-  @type server :: :replication | :membership | :broker | :scrubber | :retention | :heal
+  @type server :: :replication | :membership | :broker | :scrubber | :retention | :heal | :skip_reporter
 
   @typedoc "How the message arrived."
   @type kind :: :cast | :info | :call

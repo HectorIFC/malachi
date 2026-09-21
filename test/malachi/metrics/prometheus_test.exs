@@ -45,7 +45,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ "# TYPE malachi_uptime_seconds gauge\nmalachi_uptime_seconds 3600\n"
   end
 
-  test "labelled series carry their labels and integer values" do
+  test "labeled series carry their labels and integer values" do
     out = render([])
 
     assert out =~ ~s(malachi_memory_bytes{kind="total"} #{round(40.0 * 1_048_576)})
@@ -205,6 +205,113 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert out =~ "\nmalachi_storage_flush_duration_seconds_count 0\n"
       assert out =~ "\nmalachi_storage_flushed_bytes_total 0\n"
       assert out =~ "\nmalachi_storage_flushed_records_total 0\n"
+    end
+  end
+
+  describe "retention series" do
+    defp sweeps(count, created) do
+      buckets = for edge <- Histogram.edges(), do: {edge, if(edge >= 2_000_000, do: count, else: 0)}
+      %{buckets: buckets, count: count, sum_us: count * 1_500_000, created: created}
+    end
+
+    defp retention do
+      %{
+        skips: [
+          %{topic: "orders", reader: :group, group: "billing", origin: :cursor, span: :exact, events: 3, offsets: 120},
+          %{topic: "orders", reader: :none, group: "", origin: :start, span: :upper_bound, events: 1, offsets: 7},
+          %{topic: "orders", reader: :other, group: "", origin: :cursor, span: :unknown, events: 2, offsets: 0},
+          %{topic: "orders", reader: :group, group: "__other__", origin: :cursor, span: :exact, events: 5, offsets: 9},
+          %{
+            topic: "orders",
+            reader: :group,
+            group: ~s(we"ird\nname),
+            origin: :cursor,
+            span: :exact,
+            events: 1,
+            offsets: 1
+          }
+        ],
+        expired: [%{topic: "orders", segments: 4, bytes: 4096}, %{topic: "audit", segments: 1, bytes: 10}],
+        failures: %{migrating: 1, segment_active: 0, other: 2},
+        sweeps: sweeps(5, 1_789_000_100.5)
+      }
+    end
+
+    defp render_retention(retention),
+      do: Prometheus.export(MetricsFixtures.system(), [], flush(), retention) |> IO.iodata_to_binary()
+
+    test "skips are counted as events and as offsets, per topic, reader, group, origin and span" do
+      out = render_retention(retention())
+
+      assert out =~ "# TYPE malachi_retention_skips_total counter\n"
+      assert out =~ "# TYPE malachi_retention_offsets_skipped_total counter\n"
+
+      billing = ~s(topic="orders",reader="group",group="billing",origin="cursor",span="exact")
+      assert out =~ ~s(malachi_retention_skips_total{#{billing}} 3\n)
+      assert out =~ ~s(malachi_retention_offsets_skipped_total{#{billing}} 120\n)
+    end
+
+    test "the reader label keeps a fetch with no group, a folded group and a group named __other__ apart" do
+      # Nothing reserves a group name, so the label that says WHICH KIND of reader this is has to be its
+      # own dimension: without it, a group called __other__ would share a series with the folded ones,
+      # and a group called "" with a fetch outside a group.
+      out = render_retention(retention())
+      series = fn labels -> ~s(malachi_retention_skips_total{topic="orders",#{labels}}) end
+
+      assert out =~ series.(~s(reader="none",group="",origin="start",span="upper_bound")) <> " 1\n"
+      assert out =~ series.(~s(reader="other",group="",origin="cursor",span="unknown")) <> " 2\n"
+      assert out =~ series.(~s(reader="group",group="__other__",origin="cursor",span="exact")) <> " 5\n"
+    end
+
+    test "the offsets series says it is not a count of records lost" do
+      out = render_retention(retention())
+      assert out =~ ~r/# HELP malachi_retention_offsets_skipped_total .*upper bound.*not records lost/
+    end
+
+    test "a group name is escaped like any label value" do
+      out = render_retention(retention())
+      # a double quote and a newline in the name come out as \" and \n
+      assert out =~ ~S(group="we\"ird\nname")
+    end
+
+    test "expired segments and bytes are per topic" do
+      out = render_retention(retention())
+
+      assert out =~ ~s(malachi_retention_segments_expired_total{topic="orders"} 4\n)
+      assert out =~ ~s(malachi_retention_bytes_expired_total{topic="orders"} 4096\n)
+      assert out =~ ~s(malachi_retention_bytes_expired_total{topic="audit"} 10\n)
+    end
+
+    test "every refusal reply has a series, including the ones that never happened" do
+      out = render_retention(retention())
+
+      assert out =~ ~s(malachi_retention_expire_failures_total{reply="migrating"} 1\n)
+      assert out =~ ~s(malachi_retention_expire_failures_total{reply="segment_active"} 0\n)
+      assert out =~ ~s(malachi_retention_expire_failures_total{reply="other"} 2\n)
+    end
+
+    test "the sweep duration is a histogram in seconds whose count is the number of sweeps" do
+      out = render_retention(retention())
+
+      assert out =~ "# TYPE malachi_retention_sweep_duration_seconds histogram\n"
+      assert out =~ ~s(malachi_retention_sweep_duration_seconds_bucket{le="+Inf"} 5\n)
+      assert out =~ "\nmalachi_retention_sweep_duration_seconds_count 5\n"
+      assert out =~ "\nmalachi_retention_sweep_duration_seconds_sum 7.5\n"
+      assert out =~ "# HELP malachi_retention_sweep_duration_seconds_created Unix time the retention sweep"
+      assert out =~ "\nmalachi_retention_sweep_duration_seconds_created 1789000100.5\n"
+    end
+
+    test "a node that never swept or skipped renders the fixed series at zero and no per-topic sample" do
+      out = render([])
+
+      assert out =~ "\nmalachi_retention_sweep_duration_seconds_count 0\n"
+      assert out =~ ~s(malachi_retention_expire_failures_total{reply="migrating"} 0\n)
+      refute out =~ "malachi_retention_skips_total{"
+      refute out =~ "malachi_retention_segments_expired_total{"
+    end
+
+    test "the flush histogram keeps its own created help" do
+      assert render([]) =~ "# HELP malachi_storage_flush_duration_seconds_created Unix time the flush latency histogram"
     end
   end
 end

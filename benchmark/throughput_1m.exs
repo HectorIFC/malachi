@@ -117,7 +117,7 @@ defmodule Bench1M do
 
   defp consume_loop(broker, positions, count, lats) do
     b0 = System.monotonic_time(:microsecond)
-    {records, next} = BrokerServer.consume(broker, @topic, positions, @batch, 0)
+    {records, next, _skips} = BrokerServer.consume(broker, @topic, positions, @batch, 0)
     lat = System.monotonic_time(:microsecond) - b0
 
     case records do

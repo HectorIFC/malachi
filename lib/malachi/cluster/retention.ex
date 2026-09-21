@@ -26,6 +26,24 @@ defmodule Malachi.Cluster.Retention do
           optional(:max_bytes) => non_neg_integer() | nil
         }
 
+  @typedoc """
+  What an expire answered, as a closed set so it can label a metric: the control plane's own replies to a
+  delete, and `:other` for anything else (a Raft timeout, an unexpected term).
+  """
+  @type reply_label :: :ok | :no_such_segment | :migrating | :segment_active | :other
+
+  @doc """
+  The `reply_label` of an expire's answer. `:ok` deleted the segment; `:no_such_segment` means it was
+  already gone (a retried sweep), which is neither an expiry nor a failure; `:migrating` (the topic is
+  moving between vnodes) and `:segment_active` (the segment is still the write head) are refusals.
+  """
+  @spec reply_label(term()) :: reply_label()
+  def reply_label(:ok), do: :ok
+  def reply_label({:error, :no_such_segment}), do: :no_such_segment
+  def reply_label({:error, :migrating}), do: :migrating
+  def reply_label({:error, :segment_active}), do: :segment_active
+  def reply_label(_other), do: :other
+
   @doc """
   The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
   range uses its topic's policy retention merged over it (see the module doc).

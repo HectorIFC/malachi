@@ -100,4 +100,20 @@ defmodule Malachi.Cluster.RetentionTest do
       assert expired(metadata, 10_000, %{max_age_ms: 5_000}) == ["old"]
     end
   end
+
+  describe "reply_label/1 (what an expire answered, as a bounded label)" do
+    test "the replies the control plane gives a delete each have a label of their own" do
+      assert Retention.reply_label(:ok) == :ok
+      assert Retention.reply_label({:error, :no_such_segment}) == :no_such_segment
+      assert Retention.reply_label({:error, :migrating}) == :migrating
+      assert Retention.reply_label({:error, :segment_active}) == :segment_active
+    end
+
+    test "anything else folds into :other, so a label set can never grow with the replies" do
+      assert Retention.reply_label({:error, :timeout}) == :other
+      assert Retention.reply_label({:error, {:unexpected, make_ref()}}) == :other
+      assert Retention.reply_label(:done) == :other
+      assert Retention.reply_label(nil) == :other
+    end
+  end
 end

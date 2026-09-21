@@ -231,7 +231,7 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     # at the sealed segment's end by design rather than because a record went missing.
     assert eventually(fn ->
              case BrokerServer.consume(control, "events", %{}, 100, 0) do
-               {records, _next} when is_list(records) -> Enum.map(records, & &1.value) == ["a", "b"]
+               {records, _next, _skips} when is_list(records) -> Enum.map(records, & &1.value) == ["a", "b"]
                _ -> false
              end
            end)
@@ -359,8 +359,11 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
 
     assert eventually(fn ->
              case BrokerServer.consume(control, "events", %{}, 100, 0) do
-               {records, _next} when is_list(records) -> Enum.map(records, & &1.value) == ["first", "acked", "after"]
-               _ -> false
+               {records, _next, _skips} when is_list(records) ->
+                 Enum.map(records, & &1.value) == ["first", "acked", "after"]
+
+               _ ->
+                 false
              end
            end)
 

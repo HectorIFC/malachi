@@ -53,8 +53,35 @@ defmodule Malachi.Telemetry do
       means a bug; during a rolling upgrade it means a newer node is sending a shape an older one does
       not know.
 
+    * `[:malachi, :retention, :skip]`. `%{count: 1, offsets}` / `%{topic, group, range, source_range,
+      origin, span}` - a consumer was moved past data that is no longer stored (expired by retention,
+      or removed by an operator), once per distinct skip (a re-read before the commit is not counted
+      again). `group` is `nil` for a fetch outside a group. `origin` is `:start` for a reader that had
+      no position (a new group, or a child range after a split) and `:cursor` for one that resumed from
+      a position, which is the reader that fell behind retention. `span` says how far `offsets` can be
+      trusted: `:exact`, `:upper_bound` (the data was an ancestor's, of which this range would only have
+      received its key slice) or `:unknown` (the ancestor's end was not recovered after a restart;
+      `offsets` is then 0). See `Malachi.Broker.Skip`.
+
+    * `[:malachi, :retention, :expire]`. `%{count: 1, bytes}` / `%{topic, segment, result}` - the
+      retention sweep tried to expire one sealed segment of `topic` (`bytes` is its size). `result` is
+      `Malachi.Cluster.Retention.reply_label/1` of what the control plane answered: `:ok` (expired),
+      `:no_such_segment` (already gone), `:migrating`, `:segment_active` or `:other`. Only `:ok` freed
+      the bytes. The segment is metadata for a handler, not a label of the exported metric.
+    * `[:malachi, :retention, :sweep]`. `%{duration_us, expired, failed}` / `%{}` - one retention sweep
+      ran on this node (only the leader sweeps), with how many segments it expired and how many deletes
+      were refused. No events at all means no sweep is running.
+
+  Reserved for later retention work, not emitted yet, so that the names are chosen once:
+
+    * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
+    * `[:malachi, :retention, :pinned]` - segments a consumer group keeps from expiring.
+    * `[:malachi, :storage, :roll]` with `reason: :size | :time` - why a segment was rolled.
+
   Emitting is a no-op fast path when nothing is attached, so these are safe on the hot path.
   """
+
+  alias Malachi.Broker.Skip
 
   @doc "Records appended to `topic` (`count` records, `bytes` total value bytes)."
   @spec produce(String.t(), non_neg_integer(), non_neg_integer()) :: :ok
@@ -132,7 +159,47 @@ defmodule Malachi.Telemetry do
   end
 
   @doc """
-  The server labelled `server` received a message of `shape` as `kind` (`:cast`, `:info` or `:call`) with
+  `group` (a consumer group, or `nil` outside one) was moved past the data `skip` describes on `topic`.
+  """
+  @spec retention_skip(String.t(), String.t() | nil, Skip.t()) :: :ok
+  def retention_skip(topic, group, %Skip{} = skip) do
+    offsets = if skip.offsets == :unknown, do: 0, else: skip.offsets
+
+    :telemetry.execute([:malachi, :retention, :skip], %{count: 1, offsets: offsets}, %{
+      topic: topic,
+      group: group,
+      range: skip.range_id,
+      source_range: skip.source_range_id,
+      origin: skip.origin,
+      span: Skip.span(skip)
+    })
+  end
+
+  @doc """
+  The retention sweep tried to expire `segment_id` of `topic`, `bytes` long, and the control plane's answer
+  was labeled `result`.
+  """
+  @spec retention_expire(String.t(), term(), non_neg_integer(), atom()) :: :ok
+  def retention_expire(topic, segment_id, bytes, result) do
+    :telemetry.execute([:malachi, :retention, :expire], %{count: 1, bytes: bytes}, %{
+      topic: topic,
+      segment: segment_id,
+      result: result
+    })
+  end
+
+  @doc "One retention sweep ran for `duration_us`, expiring `expired` segments with `failed` refusals."
+  @spec retention_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
+  def retention_sweep(duration_us, expired, failed) do
+    :telemetry.execute(
+      [:malachi, :retention, :sweep],
+      %{duration_us: duration_us, expired: expired, failed: failed},
+      %{}
+    )
+  end
+
+  @doc """
+  The server labeled `server` received a message of `shape` as `kind` (`:cast`, `:info` or `:call`) with
   no clause for it, and dropped it rather than crash. Emitted from the server's own process.
   """
   @spec unexpected_message(atom(), :cast | :info | :call, term()) :: :ok

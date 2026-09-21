@@ -213,7 +213,7 @@ disagreeing_copies() {
 
 # Keeps what a failed comparison ($1, a copies report) saw, before phase 2's start_cluster recreates the volumes
 # and it is gone: the report, the substrate and host load, and each node's copy of every segment the report
-# names. Each capture goes to a numbered directory of its own, labelled $2, inside the run's evidence dir: a
+# names. Each capture goes to a numbered directory of its own, labeled $2, inside the run's evidence dir: a
 # repair that never converged is followed by invariant 4 failing on the same copies, and a second capture
 # into one directory would overwrite the first report and nest the copies already kept.
 keep_copies_evidence() {

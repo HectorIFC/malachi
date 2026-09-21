@@ -54,6 +54,7 @@ defmodule Malachi.Application do
   alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Retention.SkipReporter
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
 
@@ -248,6 +249,7 @@ defmodule Malachi.Application do
           ring_reconciler_child(nodes),
           membership_child(nodes, topology),
           replication_child(),
+          skip_reporter_child(Malachi.LogBroker),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
         ] ++ metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children()
       else
@@ -256,7 +258,7 @@ defmodule Malachi.Application do
         # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
         # the scrubber asks for its replication server.
         Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
+          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
         end)
       end
 
@@ -602,12 +604,17 @@ defmodule Malachi.Application do
   defp coordinator_leader?(nil), do: fn -> true end
   defp coordinator_leader?(_cluster), do: membership_leader(Malachi.LogMembership)
 
-  # Removes an expired segment from the control plane, then deletes its stored data on each replica.
+  @doc false
+  # Removes an expired segment from the control plane through `broker`, then deletes its stored data on
+  # each replica, and answers what the control plane answered, which the retention coordinator turns
+  # into its sweep telemetry. Public (and documented false) only so it can be tested directly.
   # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
   # segment, so a replica that is momentarily unreachable just leaves harmless files to be retried.
-  defp expire_segment(segment) do
-    _ = BrokerServer.delete_segment(Malachi.LogBroker, segment.id)
-    Enum.each(segment.replica_set, fn broker -> ReplicationServer.delete(broker, segment.id) end)
+  @spec expire_segment(Metadata.segment_meta(), GenServer.server()) :: term()
+  def expire_segment(segment, broker \\ Malachi.LogBroker) do
+    reply = BrokerServer.delete_segment(broker, segment.id)
+    Enum.each(segment.replica_set, fn replica -> ReplicationServer.delete(replica, segment.id) end)
+    reply
   end
 
   @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."
@@ -935,6 +942,13 @@ defmodule Malachi.Application do
 
   # The per-vnode leader gate: true only while this node leads the vnode's ra group.
   defp vnode_leader_gate(vnode_id), do: fn -> MetadataServer.leader?({vnode_id, node()}) end
+
+  # The reporter beside a data-plane broker, turning the data its readers were moved past into telemetry
+  # and a rate-limited log line. Started before the broker, so the broker's first push finds it.
+  defp skip_reporter_child(broker_name) do
+    name = SkipReporter.name_for(broker_name)
+    %{id: name, start: {SkipReporter, :start_link, [[name: name]]}}
+  end
 
   defp log_broker_child(cluster, nodes, name, dir, vnodes) do
     # log_roll_opts reaches the single-node broker too: without an external broker set it starts its own
