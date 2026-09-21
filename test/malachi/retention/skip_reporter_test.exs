@@ -65,6 +65,26 @@ defmodule Malachi.Retention.SkipReporterTest do
     refute_receive {:skip_event, _measurements, _meta}
   end
 
+  test "the same position reported with a different origin, span or size is a different fact", %{reporter: reporter} do
+    # Deduplication exists for a group re-reading the page it has not committed yet, which reports the
+    # identical skip. A reader that starts over (:start) and then resumes from a position it held
+    # (:cursor) at the same offset is not that: the second one is the reader that fell behind, and it is
+    # the one an operator alerts on.
+    SkipReporter.report(reporter, "orders", "billing", [skip(origin: :start)])
+    SkipReporter.report(reporter, "orders", "billing", [skip(origin: :cursor)])
+    SkipReporter.report(reporter, "orders", "billing", [skip(origin: :cursor, offsets: 9)])
+    SkipReporter.report(reporter, "orders", "billing", [skip(origin: :cursor, source: :ancestor)])
+    # the identical re-read of the last one is still a duplicate
+    SkipReporter.report(reporter, "orders", "billing", [skip(origin: :cursor, source: :ancestor)])
+    flush(reporter)
+
+    assert_receive {:skip_event, %{offsets: 2}, %{origin: :start, span: :exact}}
+    assert_receive {:skip_event, %{offsets: 2}, %{origin: :cursor, span: :exact}}
+    assert_receive {:skip_event, %{offsets: 9}, %{origin: :cursor, span: :exact}}
+    assert_receive {:skip_event, %{offsets: 2}, %{origin: :cursor, span: :upper_bound}}
+    refute_receive {:skip_event, _measurements, _meta}
+  end
+
   test "the same skip read by two groups is counted for each", %{reporter: reporter} do
     SkipReporter.report(reporter, "orders", "billing", [skip()])
     SkipReporter.report(reporter, "orders", "audit", [skip()])

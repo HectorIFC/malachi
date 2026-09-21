@@ -99,10 +99,13 @@ defmodule Malachi.Retention.SkipReporter do
     %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :skip_reporter, kind, message)}
   end
 
-  # One skip is identified by who read it and where it began; the log is rate limited per reader, a
-  # group on a range.
+  # A skip is identified by the FACT it reports, not by its position alone: who read it, where it began,
+  # and what is being said about it. A group re-reading the page it has not committed reports all of
+  # those identically, which is the duplicate this exists to drop; a reader that resumes from a position
+  # it held after having started over reports the same offset with `origin: :cursor`, and that one is a
+  # different fact, the one an operator alerts on. The log is rate limited per reader, a group on a range.
   defp observe(%Skip{} = skip, ledger, topic, group, now_ms) do
-    skip_key = {topic, group, skip.range_id, skip.source_range_id, skip.from}
+    skip_key = {topic, group, skip.range_id, skip.source_range_id, skip.from, skip.origin, skip.source, skip.offsets}
     log_key = {topic, group, skip.range_id}
     {ledger, verdict} = SkipLedger.observe(ledger, skip_key, log_key, now_ms)
     act(verdict, skip, topic, group)
