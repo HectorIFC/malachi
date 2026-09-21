@@ -637,6 +637,10 @@ defmodule Malachi.I18n do
           "════════════════════════════════════════════════════════════════"
     },
     # Retention: data a consumer was moved past (Malachi.Retention.SkipReporter)
+    retention_skip_setting_invalid: %{
+      "pt_BR" => "⚠️ %{setting} precisa ser um inteiro dentro do limite e veio %{value}; usando o padrão %{default}",
+      "en_US" => "⚠️ %{setting} must be an integer within its bound and was %{value}; using the default %{default}"
+    },
     retention_consumer_skipped: %{
       "pt_BR" =>
         "⚠️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets que não estão mais " <>

@@ -64,12 +64,16 @@ defmodule Malachi.Retention.SkipReporter do
   @impl true
   def init(opts) do
     max =
-      Keyword.get_lazy(opts, :max, fn -> Application.get_env(:malachi, :retention_skip_ledger_max, @default_max) end)
+      opts
+      |> Keyword.get_lazy(:max, fn -> Application.get_env(:malachi, :retention_skip_ledger_max, @default_max) end)
+      |> checked(:retention_skip_ledger_max, @default_max, &(is_integer(&1) and &1 > 0))
 
     window_ms =
-      Keyword.get_lazy(opts, :window_ms, fn ->
+      opts
+      |> Keyword.get_lazy(:window_ms, fn ->
         Application.get_env(:malachi, :retention_skip_log_window_ms, @default_window_ms)
       end)
+      |> checked(:retention_skip_log_window_ms, @default_window_ms, &(is_integer(&1) and &1 >= 0))
 
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
     # `unexpected_shapes`: the unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
@@ -97,6 +101,20 @@ defmodule Malachi.Retention.SkipReporter do
 
   defp drop_unexpected(state, kind, message) do
     %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :skip_reporter, kind, message)}
+  end
+
+  # Both bounds come from env vars the config layer parses without judging (MALACHI_RETENTION_SKIP_LEDGER_MAX
+  # and MALACHI_RETENTION_SKIP_LOG_WINDOW_MS), so a zero or a negative reaches here. Refusing it would be a
+  # `FunctionClauseError` in `SkipLedger.new/2` inside a server the application's supervisor starts, which
+  # turns an operator's typo into a node that does not boot. The documented default is used instead, and
+  # the line says which setting was refused and what it was: losing a knob is not worth losing the node.
+  defp checked(value, setting, default, valid?) do
+    if valid?.(value) do
+      value
+    else
+      Logger.warning(I18n.t(:retention_skip_setting_invalid, setting: setting, value: inspect(value), default: default))
+      default
+    end
   end
 
   # A skip is identified by the FACT it reports, not by its position alone: who read it, where it began,

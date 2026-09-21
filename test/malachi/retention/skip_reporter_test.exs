@@ -158,6 +158,35 @@ defmodule Malachi.Retention.SkipReporterTest do
     assert SkipReporter.report(nil, "orders", "billing", [skip()]) == :ok
   end
 
+  test "a bound that is not a positive integer falls back to the documented default, with a line saying so" do
+    # The bounds come from env vars (MALACHI_RETENTION_SKIP_LEDGER_MAX and _LOG_WINDOW_MS), and the
+    # config layer parses them without judging them. A zero or a negative reached SkipLedger.new/2, whose
+    # guard refused it, and since this server is started by the application's supervisor that turned an
+    # operator's typo into a node that does not boot.
+    name = :"skip_reporter_invalid_#{System.unique_integer([:positive])}"
+
+    log =
+      capture_log(fn ->
+        start_supervised!({SkipReporter, name: name, max: 0, window_ms: -1}, id: name)
+      end)
+
+    assert log =~
+             I18n.t(:retention_skip_setting_invalid, setting: :retention_skip_ledger_max, value: 0, default: 10_000)
+
+    assert log =~
+             I18n.t(:retention_skip_setting_invalid,
+               setting: :retention_skip_log_window_ms,
+               value: -1,
+               default: 600_000
+             )
+
+    # It is serving, on the defaults.
+    assert %{max: 10_000, window_ms: 600_000} = :sys.get_state(name).ledger
+    SkipReporter.report(name, "orders", "billing", [skip()])
+    :sys.get_state(name)
+    assert_receive {:skip_event, _measurements, _meta}
+  end
+
   test "each named broker has its own reporter name, and an anonymous one has none" do
     assert SkipReporter.name_for(Malachi.LogBroker) == Malachi.LogBroker.SkipReporter
     assert SkipReporter.name_for(:"Elixir.Malachi.LogBroker.Shard1") == Malachi.LogBroker.Shard1.SkipReporter
