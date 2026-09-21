@@ -57,7 +57,7 @@ defmodule Malachi.UnexpectedMessage do
   @max_logged_shapes 32
 
   @typedoc "The label of a server that drops unexpected messages (anything else is counted as `other`)."
-  @type server :: :replication | :membership | :broker | :scrubber | :retention | :heal
+  @type server :: :replication | :membership | :broker | :scrubber | :retention | :heal | :skip_reporter
 
   @typedoc "How the message arrived."
   @type kind :: :cast | :info | :call
