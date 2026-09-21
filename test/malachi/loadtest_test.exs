@@ -669,6 +669,39 @@ defmodule Malachi.LoadtestTest do
       assert r.records == 0
     end
 
+    test "an admin cleanup the server refuses is an error with its reason, not a completed op" do
+      # The second half of a user or acl cycle used to be matched with the response code ignored, so a
+      # refused delete or revoke counted as a successful op and left the user or the grant behind.
+      for {scenario, cleanup_key} <- [{:user, Wire.delete_user_key()}, {:acl, Wire.revoke_acl_key()}] do
+        answer = fn api_key, _n ->
+          if api_key == cleanup_key, do: {:error, "permission_denied"}, else: :ok
+        end
+
+        r =
+          with_scripted_server(answer, fn port ->
+            run(port: port, host: "127.0.0.1", scenario: scenario, connections: 1, topic: "cleanup_#{scenario}")
+          end)
+
+        assert r.errors > 0, "#{scenario}: the refused cleanup was not counted"
+        assert r.error_reasons == %{"permission_denied" => r.errors}, "#{scenario}"
+        assert r.ops == 0, "#{scenario}: a cycle whose cleanup was refused is not a completed op"
+      end
+    end
+
+    test "an admin cleanup that loses the connection is a drop, not a MatchError" do
+      for {scenario, cleanup_key} <- [{:user, Wire.delete_user_key()}, {:acl, Wire.revoke_acl_key()}] do
+        answer = fn api_key, _n -> if api_key == cleanup_key, do: :close, else: :ok end
+
+        r =
+          with_scripted_server(answer, fn port ->
+            run(port: port, host: "127.0.0.1", scenario: scenario, connections: 1, topic: "lost_#{scenario}")
+          end)
+
+        assert r.dropped > 0, "#{scenario}: the lost connection was not counted as a drop"
+        assert r.errors == 0, "#{scenario}: a transport failure is a drop, not a server error"
+      end
+    end
+
     test "no reason table outlives a run, whether it completes or fails to connect" do
       run(scenario: :produce, connections: 1, topic: topic("no_leak"))
       assert reason_tables() == []

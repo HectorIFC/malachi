@@ -689,8 +689,9 @@ defmodule Malachi.Loadtest do
 
     case Conn.request(conn, Wire.create_user_key(), corr, Wire.encode_create_user_req(user, "pw", [:produce])) do
       {:ok, 0, _resp, conn} ->
-        {:ok, _c, _r, conn} = Conn.request(conn, Wire.delete_user_key(), corr + 1, Wire.encode_delete_user_req(user))
-        {{:ok, 1}, conn, %{ctx | op: {:user, %{st | seq: st.seq + 1}}}}
+        conn
+        |> Conn.request(Wire.delete_user_key(), corr + 1, Wire.encode_delete_user_req(user))
+        |> admin_cleanup(conn, ctx, {:user, %{st | seq: st.seq + 1}})
 
       {:ok, _code, resp, conn} ->
         {genuine_error(resp), conn, ctx}
@@ -707,8 +708,9 @@ defmodule Malachi.Loadtest do
 
     case Conn.request(conn, Wire.grant_acl_key(), corr, acl) do
       {:ok, 0, _resp, conn} ->
-        {:ok, _c, _r, conn} = Conn.request(conn, Wire.revoke_acl_key(), corr + 1, acl)
-        {{:ok, 1}, conn, %{ctx | op: {:acl, %{st | seq: st.seq + 1}}}}
+        conn
+        |> Conn.request(Wire.revoke_acl_key(), corr + 1, acl)
+        |> admin_cleanup(conn, ctx, {:acl, %{st | seq: st.seq + 1}})
 
       {:ok, _code, resp, conn} ->
         {genuine_error(resp), conn, ctx}
@@ -717,6 +719,16 @@ defmodule Malachi.Loadtest do
         {:halt, conn, ctx}
     end
   end
+
+  # The second half of an admin cycle (delete the user, revoke the grant), with the same three outcomes as
+  # the first half. Ignoring this response counted a refused cleanup as a completed op, left the user or
+  # the grant behind in replicated state, and turned a transport failure into a MatchError that took the
+  # worker down. `sent_on` is the connection the request went out on, for the transport case, which
+  # answers no connection of its own. The sequence advances either way, so a retry after a cleanup that
+  # never happened does not keep colliding with what the previous attempt left behind.
+  defp admin_cleanup({:ok, 0, _resp, conn}, _sent_on, ctx, op), do: {{:ok, 1}, conn, %{ctx | op: op}}
+  defp admin_cleanup({:ok, _code, resp, conn}, _sent_on, ctx, op), do: {genuine_error(resp), conn, %{ctx | op: op}}
+  defp admin_cleanup({:error, _reason}, sent_on, ctx, op), do: {:halt, sent_on, %{ctx | op: op}}
 
   # Produce response payload is `<<count::32>>`; count it as records (pipelined path).
   defp produce_status(0, <<count::32>>), do: {:ok, count}
