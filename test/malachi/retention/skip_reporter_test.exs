@@ -7,6 +7,7 @@ defmodule Malachi.Retention.SkipReporterTest do
   alias Malachi.Broker.Skip
   alias Malachi.I18n
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.UnknownMessages
 
   @event [:malachi, :retention, :skip]
 
@@ -115,20 +116,15 @@ defmodule Malachi.Retention.SkipReporterTest do
     )
   end
 
-  test "an unexpected message is logged and the reporter keeps serving", %{reporter: reporter} do
-    log =
-      capture_log(fn ->
-        GenServer.cast(reporter, :bogus)
-        send(Process.whereis(reporter), :bogus_info)
-        flush(reporter)
-      end)
-
-    assert log =~ I18n.t(:retention_reporter_unexpected_message, message: inspect(:bogus))
-    assert log =~ I18n.t(:retention_reporter_unexpected_message, message: inspect(:bogus_info))
-
-    SkipReporter.report(reporter, "orders", "billing", [skip()])
-    flush(reporter)
-    assert_receive {:skip_event, _measurements, _meta}
+  test "an unknown cast, info message or call is counted and survived", %{reporter: reporter} do
+    # The same catch-all contract every long-lived server here follows (`Malachi.UnexpectedMessage`):
+    # counted by server and kind, the call answered rather than left to time out, the shape logged
+    # without its payload, and the process still serving afterwards.
+    UnknownMessages.assert_survives_unknown(reporter, :skip_reporter, fn ->
+      SkipReporter.report(reporter, "orders", "billing", [skip()])
+      flush(reporter)
+      assert_receive {:skip_event, _measurements, _meta}
+    end)
   end
 
   test "an empty report does nothing" do

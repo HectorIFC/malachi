@@ -11,7 +11,10 @@ defmodule Malachi.Retention.SkipReporter do
   `Malachi.Retention.SkipLedger`, off the broker's loop, which serializes every produce and consume.
 
   Reporting is best effort by design: a cast to a reporter that is restarting is dropped, which loses a
-  count, never a record, and never fails the read that found the skip.
+  count, never a record, and never fails the read that found the skip. A message this server has no
+  clause for is dropped the way every long-lived server here drops one, through
+  `Malachi.UnexpectedMessage`: counted by server and kind, its shape logged once per process, and a call
+  answered rather than left to time out.
 
   Options: `:name`, `:clock` (`(-> integer())` monotonic milliseconds, default
   `System.monotonic_time/1`), `:max` (ledger entries, default `:retention_skip_ledger_max`, 10_000) and
@@ -26,6 +29,7 @@ defmodule Malachi.Retention.SkipReporter do
   alias Malachi.I18n
   alias Malachi.Retention.SkipLedger
   alias Malachi.Telemetry
+  alias Malachi.UnexpectedMessage
 
   @default_max 10_000
   @default_window_ms 600_000
@@ -68,7 +72,8 @@ defmodule Malachi.Retention.SkipReporter do
       end)
 
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
-    {:ok, %{ledger: SkipLedger.new(max, window_ms), clock: clock}}
+    # `unexpected_shapes`: the unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+    {:ok, %{ledger: SkipLedger.new(max, window_ms), clock: clock, unexpected_shapes: MapSet.new()}}
   end
 
   @impl true
@@ -78,15 +83,20 @@ defmodule Malachi.Retention.SkipReporter do
     {:noreply, %{state | ledger: ledger}}
   end
 
-  def handle_cast(message, state) do
-    Logger.warning(I18n.t(:retention_reporter_unexpected_message, message: inspect(message)))
-    {:noreply, state}
-  end
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
 
   @impl true
-  def handle_info(message, state) do
-    Logger.warning(I18n.t(:retention_reporter_unexpected_message, message: inspect(message)))
-    {:noreply, state}
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
+  # Nothing calls this server; without this clause a call from a newer node would wait out its timeout
+  # instead of getting an answer it can fall back on.
+  @impl true
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
+  defp drop_unexpected(state, kind, message) do
+    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :skip_reporter, kind, message)}
   end
 
   # One skip is identified by who read it and where it began; the log is rate limited per reader, a

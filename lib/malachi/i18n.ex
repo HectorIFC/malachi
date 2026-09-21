@@ -636,10 +636,6 @@ defmodule Malachi.I18n do
         "⚠️ Group %{group} on topic %{topic} was moved past %{offsets} offsets that are no longer stored " <>
           "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
           "%{held} more skips of this reader were counted without a line since the last one"
-    },
-    retention_reporter_unexpected_message: %{
-      "pt_BR" => "⚠️ O skip reporter ignorou uma mensagem inesperada: %{message}",
-      "en_US" => "⚠️ The skip reporter ignored an unexpected message: %{message}"
     }
   }
 

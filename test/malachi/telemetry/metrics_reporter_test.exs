@@ -293,7 +293,7 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
         for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds(), do: {server, kind}
 
       assert reported == expected
-      assert length(reported) == 21
+      assert length(reported) == 24
     end
   end
 end
