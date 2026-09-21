@@ -114,12 +114,17 @@ defmodule Malachi.Metadata do
           migrating: %{topic_name() => true}
         }
 
-  @typedoc "A topic's complete metadata, extracted for migration between vnodes."
+  @typedoc """
+  A topic's complete metadata, extracted for migration between vnodes. `export_format` is the machine
+  version whose state shape the export carries (see `export_format/0`); an export logged before the
+  key existed has none and counts as 0.
+  """
   @type topic_export :: %{
-          topic: topic_meta(),
-          ranges: %{range_id() => range_meta()},
-          segments: %{segment_id() => segment_meta()},
-          offsets: %{group() => offsets()}
+          required(:topic) => topic_meta(),
+          required(:ranges) => %{range_id() => range_meta()},
+          required(:segments) => %{segment_id() => segment_meta()},
+          required(:offsets) => %{group() => offsets()},
+          optional(:export_format) => non_neg_integer()
         }
 
   @type command ::
@@ -152,9 +157,43 @@ defmodule Malachi.Metadata do
   # Shared empty MapSet returned for an absent index key (no allocation on the miss path).
   @empty_set MapSet.new()
 
+  # The machine version whose topic state shape `export_topic/2` produces. Raise it to the version a
+  # change ships in whenever that change adds to or reshapes what a topic export carries, so a vnode
+  # whose group has not reached that version refuses the insert instead of storing state it cannot read.
+  @export_format 0
+
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "An empty metadata state."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions do
+    %{
+      {:create_topic, 3} => 0,
+      {:seal_topic, 2} => 0,
+      {:delete_topic, 2} => 0,
+      {:split_range, 2} => 0,
+      {:merge_ranges, 3} => 0,
+      {:register_segment, 5} => 0,
+      {:seal_segment, 5} => 0,
+      {:delete_segment, 2} => 0,
+      {:set_segment_replicas, 3} => 0,
+      {:commit_offset, 4} => 0,
+      {:define_policy, 3} => 0,
+      {:set_topic_policy, 3} => 0,
+      {:extract_topic, 2} => 0,
+      {:insert_topic, 2} => 0,
+      {:begin_migration, 2} => 0,
+      {:end_migration, 2} => 0
+    }
+  end
+
+  @doc "The state shape version a topic export carries (see `t:topic_export/0`)."
+  @spec export_format() :: non_neg_integer()
+  def export_format, do: @export_format
 
   @doc """
   The seal command for `segment` ending at `end_offset` with `byte_size` bytes on disk, at `at`.
@@ -463,10 +502,10 @@ defmodule Malachi.Metadata do
     {%{state | migrating: Map.delete(state.migrating, name)}, :ok}
   end
 
-  # Defensive catch-all: an unknown command must NOT crash the machine. Once this RSM is
-  # replicated by Raft, a command that raises in `apply` would crash every replica
-  # deterministically (and again on replay), e.g. an older replica seeing a newer
-  # command during a rolling upgrade. Keep the replica alive and surface the problem.
+  # Defensive catch-all for callers outside ra (the in-memory `Malachi.Cluster.DSRSM`, tests): an
+  # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
+  # not-yet-effective command before it gets here, so an older replica never skips a command that a
+  # newer one applies.
   defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
 
   # Retiring a range requires its write head to be closed FIRST, and this is the only place that
@@ -703,7 +742,7 @@ defmodule Malachi.Metadata do
         ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
         segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
         offsets = for {{group, ^name}, offs} <- state.committed_offsets, into: %{}, do: {group, offs}
-        %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
+        %{topic: topic, ranges: ranges, segments: segments, offsets: offsets, export_format: @export_format}
     end
   end
 

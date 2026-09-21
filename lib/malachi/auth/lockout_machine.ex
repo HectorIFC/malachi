@@ -7,17 +7,28 @@ defmodule Malachi.Auth.LockoutMachine do
   (the leader's clock, stamped once and replicated in the log) as `now`. The machine never reads a clock
   itself: that would be non-deterministic and break Raft - so every replica applies the same command at the
   same `now` and reaches the same lockout state.
+
+  Versioned through `Malachi.Cluster.MachineVersion`.
   """
 
   @behaviour :ra_machine
 
   alias Malachi.Auth.LockoutRegistry
+  alias Malachi.Cluster.MachineVersion
 
   @impl true
   def init(_config), do: LockoutRegistry.new()
 
   @impl true
+  def version, do: MachineVersion.version()
+
+  @impl true
+  def which_module(_version), do: __MODULE__
+
+  @impl true
   def apply(meta, command, %LockoutRegistry{} = state) do
-    LockoutRegistry.apply(state, command, meta.system_time)
+    MachineVersion.apply(meta, command, state, LockoutRegistry.command_versions(), fn meta, command, state ->
+      LockoutRegistry.apply(state, command, meta.system_time)
+    end)
   end
 end

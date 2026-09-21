@@ -4,6 +4,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
 
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Metadata
 
@@ -90,6 +91,34 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
 
     assert {:ok, cache, []} = ReplicatedDSRSM.snapshot(state)
     assert DSRSM.get_topic(cache, "events").name == "events"
+  end
+
+  test "a split whose destination refuses the insert keeps every topic on its source" do
+    {state, a, b} = start_cluster()
+    names = for index <- 0..15, do: "topic-#{index}"
+    for name <- names, do: {:ok, _root} = ReplicatedDSRSM.command(state, name, {:create_topic, name, 4})
+
+    # The destination vnode's group is already up and refuses every export: ra commits the insert, and
+    # the machine answers {:error, _}. Only that answer can stop the extract that would follow.
+    new_vnode = :"rd_refusing_#{System.unique_integer([:positive])}"
+    {:ok, new_server} = RaCluster.start(Malachi.Test.RefusingInsertMachine, new_vnode, [node()])
+    on_exit(fn -> RaCluster.delete(new_server) end)
+
+    assert {:error, {:migrate, displaced, {:refused, {:unsupported_export_format, 1, 0}}}} =
+             ReplicatedDSRSM.split_vnode(state, new_vnode, 8)
+
+    assert displaced in names
+
+    held =
+      for vnode <- [a, b], name <- names, reduce: MapSet.new() do
+        acc ->
+          case MetadataServer.query(Map.fetch!(state.vnodes, vnode), &Metadata.get_topic(&1, name)) do
+            {:ok, %{name: ^name}} -> MapSet.put(acc, name)
+            _absent -> acc
+          end
+      end
+
+    assert held == MapSet.new(names)
   end
 
   test "route_vnode reaches an already-started vnode without starting it" do

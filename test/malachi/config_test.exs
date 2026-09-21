@@ -90,4 +90,30 @@ defmodule Malachi.ConfigTest do
       assert Config.sampling_ratio("  0.25  ") == {:ok, 0.25}
     end
   end
+
+  describe "ra_machine_version_pin/1" do
+    test "absent or blank means no pin" do
+      assert Config.ra_machine_version_pin(nil) == nil
+      assert Config.ra_machine_version_pin("") == nil
+      assert Config.ra_machine_version_pin("   ") == nil
+    end
+
+    test "a whole non-negative number is the pin, zero included" do
+      assert Config.ra_machine_version_pin("0") == 0
+      assert Config.ra_machine_version_pin("2") == 2
+      assert Config.ra_machine_version_pin(" 1 ") == 1
+    end
+
+    test "anything else refuses to boot rather than silently dropping the pin" do
+      # A dropped pin finalizes the upgrade and moves the rollback floor, so a typo must stop the node.
+      for raw <- ["-1", "1.0", "one", "1a", "0x1"] do
+        assert_raise RuntimeError, ~r/MALACHI_RA_MACHINE_VERSION/, fn -> Config.ra_machine_version_pin(raw) end
+      end
+    end
+  end
+
+  test "ra switches a group's machine version only once every member supports it" do
+    assert Application.get_env(:ra, :machine_upgrade_strategy) == :all
+    assert :ra_system.default_config().machine_upgrade_strategy == :all
+  end
 end

@@ -7,17 +7,28 @@ defmodule Malachi.Auth.UserMachine do
   (the leader's clock, stamped once and replicated in the log) as `now`. The machine never reads a clock
   itself: that would be non-deterministic and break Raft - so every replica applies the same command at
   the same `now` and reaches the same user set.
+
+  Versioned through `Malachi.Cluster.MachineVersion`.
   """
 
   @behaviour :ra_machine
 
   alias Malachi.Auth.UserRegistry
+  alias Malachi.Cluster.MachineVersion
 
   @impl true
   def init(_config), do: UserRegistry.new()
 
   @impl true
+  def version, do: MachineVersion.version()
+
+  @impl true
+  def which_module(_version), do: __MODULE__
+
+  @impl true
   def apply(meta, command, %UserRegistry{} = state) do
-    UserRegistry.apply(state, command, meta.system_time)
+    MachineVersion.apply(meta, command, state, UserRegistry.command_versions(), fn meta, command, state ->
+      UserRegistry.apply(state, command, meta.system_time)
+    end)
   end
 end
