@@ -302,6 +302,66 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "store_reconciler_child/5" do
+    test "a clustered store self-joins and watches its machine version" do
+      test_pid = self()
+
+      spec =
+        App.store_reconciler_child(:my_store_reconciler, Malachi.Auth.UserMachine, :my_store, [:a@h, :b@h], fn ->
+          send(test_pid, :reconciled)
+        end)
+
+      assert %{id: :my_store_reconciler, start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+      assert opts[:version_check] == {Malachi.Auth.UserMachine, {:my_store, node()}}
+      opts[:reconcile].()
+      assert_received :reconciled
+    end
+
+    test "a single-node store keeps the watcher and drops the self-join" do
+      test_pid = self()
+
+      spec =
+        App.store_reconciler_child(:solo_reconciler, Malachi.Auth.UserMachine, :solo_store, [node()], fn ->
+          send(test_pid, :reconciled)
+        end)
+
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+      # The one-member group still reaches a machine version, so the watch stays; there is nobody to join.
+      assert opts[:version_check] == {Malachi.Auth.UserMachine, {:solo_store, node()}}
+      assert opts[:reconcile].() == :ok
+      refute_received :reconciled
+    end
+  end
+
+  describe "metadata_version_watcher_children/2" do
+    test "an unsharded control plane gets a watcher for its single metadata group" do
+      assert [spec] = App.metadata_version_watcher_children(:log_cluster, nil)
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+      assert opts[:version_check] == {Malachi.Cluster.MetadataMachine, {:log_cluster, node()}}
+    end
+
+    test "a sharded control plane gets none: the vnode coordinator manager watches its members" do
+      assert App.metadata_version_watcher_children(:log_cluster, [{:vn_a, 0, [node()]}]) == []
+    end
+
+    test "an unclustered node gets none: it has no metadata group in ra" do
+      assert App.metadata_version_watcher_children(nil, nil) == []
+    end
+  end
+
+  describe "local_vnode_servers/2" do
+    test "lists every metadata vnode this node hosts, led or not, as a machine and local server id" do
+      vnodes = [{:vn_a, 0, [:n1@h, :n2@h]}, {:vn_b, 1, [:n2@h, :n3@h]}, {:vn_c, 2, [:n3@h, :n1@h]}]
+
+      assert App.local_vnode_servers(vnodes, :n1@h) == [
+               {Malachi.Cluster.MetadataMachine, {:vn_a, :n1@h}},
+               {Malachi.Cluster.MetadataMachine, {:vn_c, :n1@h}}
+             ]
+
+      assert App.local_vnode_servers(vnodes, :n9@h) == []
+    end
+  end
+
   describe "static_seed/1" do
     test "self is the orchestrator only when it is the lowest-sorted node" do
       higher = :zzzz_higher@h

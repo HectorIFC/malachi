@@ -19,6 +19,11 @@ config :malachi,
 # traces_exporter at your collector.
 config :opentelemetry, sampler: :always_off, traces_exporter: :none
 
+# A Raft group switches its state machines to a new version only once every member runs code that
+# supports it. This is ra's default since 2.16; it is set here so the guarantee
+# Malachi.Cluster.MachineVersion relies on does not hang on a dependency default.
+config :ra, machine_upgrade_strategy: :all
+
 # Import environment-specific config (test.exs, dev.exs, prod.exs)
 # This allows test.exs to override defaults before runtime.exs loads
 if File.exists?("config/#{config_env()}.exs") do

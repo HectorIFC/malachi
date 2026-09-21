@@ -28,9 +28,23 @@ defmodule Malachi.Auth.LockoutRegistry do
           | {:unlock_key, key()}
           | {:cleanup, attempt_ttl_ms :: non_neg_integer()}
 
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "An empty registry."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions do
+    %{
+      {:failed_attempt, 3} => 0,
+      {:successful_auth, 2} => 0,
+      {:unlock_user, 2} => 0,
+      {:unlock_key, 2} => 0,
+      {:cleanup, 2} => 0
+    }
+  end
 
   @doc """
   Applies a `command` at time `now` (the ra leader's `system_time`, ms). Returns `{new_state, reply}`.
@@ -74,7 +88,8 @@ defmodule Malachi.Auth.LockoutRegistry do
     {%{state | attempts: attempts, lockouts: lockouts}, :ok}
   end
 
-  # Defensive catch-all: an unknown command must not crash a replica (rolling upgrade safety).
+  # Defensive catch-all for callers outside ra (tests, direct use): an unknown command must not raise. Inside
+  # ra, `Malachi.Cluster.MachineVersion` refuses an unknown or not-yet-effective command before it gets here.
   def apply(%__MODULE__{} = state, _unknown_command, _now), do: {state, {:error, :unknown_command}}
 
   @doc "`:not_locked`, or `{:locked, time_remaining_ms}` when `key` is locked at `now`."

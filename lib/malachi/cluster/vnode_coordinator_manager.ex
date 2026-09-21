@@ -12,6 +12,8 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
       `DynamicSupervisor`) and returns the pid of that (sub)tree, which the manager monitors and later
       stops by;
     * `:stop` - `(pid -> any)`, stops a vnode's coordinators;
+    * `:version_servers` - optional `(-> [{machine, server_id}])`, the local vnode members whose machine
+      version to watch (default none);
     * `:interval` - reconcile period in ms (default 5_000);
     * `:name` - optional registered name.
 
@@ -26,11 +28,17 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   leadership changes. The interval paces the retry, so a coordinator that keeps dying respawns at most
   once per reconcile with a log each time instead of spinning. A deliberate stop demonitors first, so
   it is never mistaken for a death.
+
+  Version watch: on the same tick, every member returned by `:version_servers` is checked with
+  `Malachi.Cluster.MachineVersion.check/3`, whether this node leads it or not, since a follower is just
+  as able to stop applying its log. The last status per member is kept here, so a member that stays
+  stuck is logged once, and a member no longer listed is forgotten.
   """
 
   use GenServer
 
   require Logger
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.I18n
 
   @default_interval 5_000
@@ -46,12 +54,18 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   @spec reconcile_now(GenServer.server()) :: [term()]
   def reconcile_now(server), do: GenServer.call(server, :reconcile_now)
 
+  @doc "The last machine version status per watched member, keyed by server id."
+  @spec version_status(GenServer.server()) :: %{term() => MachineVersion.status()}
+  def version_status(server), do: GenServer.call(server, :version_status)
+
   @impl true
   def init(opts) do
     state = %{
       leading: Keyword.fetch!(opts, :leading),
       spawn: Keyword.fetch!(opts, :spawn),
       stop: Keyword.fetch!(opts, :stop),
+      version_servers: Keyword.get(opts, :version_servers, fn -> [] end),
+      version_status: %{},
       interval: Keyword.get(opts, :interval, @default_interval),
       running: %{}
     }
@@ -87,6 +101,8 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
     {:reply, Map.keys(state.running), state}
   end
 
+  def handle_call(:version_status, _from, state), do: {:reply, state.version_status, state}
+
   defp reconcile_and_schedule(state) do
     schedule(state)
     reconcile(state)
@@ -103,6 +119,18 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
     state
     |> stop_vnodes(MapSet.difference(running, desired))
     |> start_vnodes(MapSet.difference(desired, running))
+    |> check_versions()
+  end
+
+  defp check_versions(state) do
+    version_status =
+      Map.new(state.version_servers.(), fn {machine, server_id} ->
+        last_status = Map.get(state.version_status, server_id, :ok)
+        {status, _transition} = MachineVersion.check(machine, server_id, last_status)
+        {server_id, status}
+      end)
+
+    %{state | version_status: version_status}
   end
 
   defp start_vnodes(state, vnode_ids) do

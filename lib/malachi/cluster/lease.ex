@@ -32,9 +32,15 @@ defmodule Malachi.Cluster.Lease do
 
   @type reply :: {:ok, fence :: non_neg_integer()} | {:error, {:held, holder :: term()}} | :ok
 
+  @behaviour Malachi.Cluster.MachineVersion
+
   @doc "A free lease (no holder, fence 0)."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
+  @impl Malachi.Cluster.MachineVersion
+  def command_versions, do: %{{:acquire_or_renew, 3} => 0, {:release, 3} => 0}
 
   @doc """
   Applies a lease `command` at time `now` (epoch ms, from the ra leader's `system_time`). Returns

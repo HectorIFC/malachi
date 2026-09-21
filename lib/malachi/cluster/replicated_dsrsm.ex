@@ -311,11 +311,19 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   # Move a topic between vnodes, copy-first: insert its `export` into `to_server`'s log, then extract it
   # from `from_server`'s: a failure before the extract leaves the source intact (no loss); after it, a
   # harmless duplicate. Used to migrate (source→new) and to roll a failed split back (new→source).
+  #
+  # Reaching consensus is not the same as succeeding: a machine can commit a command and still refuse it
+  # (the destination's group may not understand the export yet, see `Malachi.Cluster.MachineVersion`).
+  # Only an insert the destination answered `:ok` may be followed by the extract, or a refused insert
+  # would delete the topic from both vnodes. A refused extract leaves the source's fence up, so it is a
+  # failure too rather than a split that reports success with writes still blocked.
   defp move_topic(from_server, to_server, export, name) do
-    with {:ok, _ok} <- MetadataServer.command(to_server, {:insert_topic, export}),
-         {:ok, _export} <- MetadataServer.command(from_server, {:extract_topic, name}) do
+    with {:ok, :ok} <- MetadataServer.command(to_server, {:insert_topic, export}),
+         {:ok, extracted} when is_map(extracted) or is_nil(extracted) <-
+           MetadataServer.command(from_server, {:extract_topic, name}) do
       :ok
     else
+      {:ok, {:error, reason}} -> {:error, {:migrate, name, {:refused, reason}}}
       error -> {:error, {:migrate, name, error}}
     end
   end
