@@ -655,6 +655,20 @@ defmodule Malachi.LoadtestTest do
       assert r.error_reasons == %{"permission_denied" => r.errors}
     end
 
+    test "a refused subscription is counted under its reason instead of ending the run silently" do
+      # The server sends no frame for a subscription it refused, so the stream worker has nothing to wait
+      # for. Ending there without recording anything reported a clean run for a scenario that never ran:
+      # errors == 0 and an empty breakdown, which is the exact blindness this issue is about.
+      {user, pass} = add_user([:produce])
+      t = topic("denied_stream")
+
+      r = run(scenario: :stream, connections: 2, prepopulate: 50, user: user, pass: pass, topic: t)
+
+      assert r.errors == 2, "each worker subscribed once and each refusal counts once"
+      assert r.error_reasons == %{"permission_denied" => r.errors}
+      assert r.records == 0
+    end
+
     test "no reason table outlives a run, whether it completes or fails to connect" do
       run(scenario: :produce, connections: 1, topic: topic("no_leak"))
       assert reason_tables() == []

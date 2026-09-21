@@ -644,7 +644,16 @@ defmodule Malachi.Loadtest do
     stream_recv(conn, ctx, s, m)
   end
 
-  defp handle_push(conn, _ctx, _s, _m, _rejected), do: conn
+  # A refused subscribe. The server sends no frame for a subscription it did not accept, so there is
+  # nothing left to wait for: count the refusal under its reason (or under its own counter when the
+  # server is shedding) and end this worker's stream. Returning the connection without recording
+  # anything reported a clean run for a scenario that never received a single record.
+  defp handle_push(conn, _ctx, _s, m, {_corr, _code, resp}) do
+    measuring = mono_ms() >= m.warmup_end
+    status = error_status(resp)
+    if shed?(status), do: shed(m, status, measuring), else: record(m, status, 0, measuring)
+    conn
+  end
 
   # --- ops (closed-loop round trips); each returns {status, conn, ctx} ---
 
