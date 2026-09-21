@@ -324,6 +324,13 @@ if config_env() != :test do
 
   if log_data_dir, do: config(:malachi, log_data_dir: log_data_dir)
   if ra_data_dir, do: config(:malachi, ra_data_dir: ra_data_dir)
+
+  # Holds the control-plane state machines at a version during a rolling upgrade, so the build can still be
+  # rolled back; removing it with a rolling restart finalizes the upgrade (see Malachi.Cluster.MachineVersion).
+  # Malachi.Config.ra_machine_version_pin/1 refuses a malformed value instead of silently dropping the pin.
+  ra_machine_version_pin = Malachi.Config.ra_machine_version_pin(System.get_env("MALACHI_RA_MACHINE_VERSION"))
+
+  if ra_machine_version_pin, do: config(:malachi, ra_machine_version_pin: ra_machine_version_pin)
 end
 
 config :malachi,

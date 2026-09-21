@@ -283,6 +283,12 @@ test it only warns.
 
 ## Upgrades and the rollback floor
 
+An upgrade has two floors, and a rollback has to clear both: the **on-disk format** below, and the
+**control-plane machine version** further down. They move independently, so check them separately
+before rolling a release back.
+
+### The on-disk format
+
 The root of the log data directory (`MALACHI_LOG_DATA_DIR`) holds a small text file, `malachi.format`:
 
 ```
@@ -327,6 +333,33 @@ A service manager that restarts on failure will restart a refused node again and
   (`restart: on-failure:5`) and alert on exit code 78 (`docker inspect -f '{{.State.ExitCode}}'`).
 - **Kubernetes:** the pod goes to `CrashLoopBackOff`; the last terminated state shows exit code 78 and
   the log line above.
+
+### The control-plane machine version
+
+The control plane (topic metadata, the lease, the ring, users, lockouts and ACLs) lives in Raft groups
+whose state machines carry a version. A group moves to a new version only once **every** member runs code
+that supports it, and a command a release introduces is refused, the same way on every member, until then.
+So a cluster in the middle of a rolling upgrade cannot end up with members that disagree about its state.
+
+The version switch happens on its own when the last node has been upgraded. From that moment, a node started
+on the previous build stops applying the control-plane log instead of diverging from it: it stays up, but it
+falls behind, and it logs `stopped applying entries` and emits the `[:malachi, :ra, :machine_version]`
+telemetry event with `stuck: true` until it is upgraded again. That is this floor: it moves with the
+machine version, not with the on-disk format above.
+
+To keep rolling back possible until you are satisfied with a release, hold the version with a pin:
+
+1. Set `MALACHI_RA_MACHINE_VERSION` on every node to the version the cluster runs now, and roll the new build
+   out node by node. The group stays at the pinned version, and any node can go back to the previous build.
+2. When the release is proven, **finalize**: remove `MALACHI_RA_MACHINE_VERSION` and restart the nodes one at
+   a time. The groups switch to the new version once the last node is back, and the rollback floor moves up.
+
+The first release that versions these machines is version 1, and every earlier build counts as version 0.
+To be able to roll back from it to an earlier build, upgrade with `MALACHI_RA_MACHINE_VERSION=0` and
+finalize later.
+
+A malformed value (anything but a non-negative integer) stops the node at boot. Silently dropping the pin would
+finalize the upgrade, so it is treated as an error. A pin above the version a build implements has no effect.
 
 ## Before you go to production
 

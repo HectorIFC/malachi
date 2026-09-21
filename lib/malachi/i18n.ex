@@ -486,6 +486,16 @@ defmodule Malachi.I18n do
       "pt_BR" => "coordenadores do vnode %{vnode} caíram (%{reason}); reiniciando no próximo reconcile",
       "en_US" => "vnode %{vnode} coordinators went down (%{reason}); restarting on the next reconcile"
     },
+    ra_machine_version_unsupported: %{
+      "pt_BR" =>
+        "membro ra %{server} (%{machine}) parou de aplicar entradas: a versão efetiva do cluster é %{effective} e este nó suporta %{supported}; atualize o binário ou suba o pin",
+      "en_US" =>
+        "ra member %{server} (%{machine}) stopped applying entries: the cluster's effective version is %{effective} and this node supports %{supported}; upgrade the binary or raise the pin"
+    },
+    ra_machine_version_recovered: %{
+      "pt_BR" => "membro ra %{server} (%{machine}) voltou a suportar a versão efetiva %{effective}",
+      "en_US" => "ra member %{server} (%{machine}) supports the effective version %{effective} again"
+    },
     ring_publish_refused_completing: %{
       "pt_BR" =>
         "⚠️ O store do anel recusou a publicação ao concluir um split interrompido do vnode %{vnode} " <>
