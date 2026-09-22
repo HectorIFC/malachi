@@ -262,12 +262,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"
     },
-    # Data-directory format marker (Malachi.Storage.FormatMarker). The refusal is one line with a fixed,
-    # searchable prefix; the detail is a complete sentence of its own, one key per operator action.
-    data_format_refused: %{
+    # The envelope every boot gate refuses through (Malachi.StartupRefusal): one line with a fixed,
+    # searchable prefix, wrapping a detail that is a complete sentence of its own, one key per
+    # operator action.
+    startup_refused: %{
       "pt_BR" => "RECUSANDO INICIAR (exit 78): %{detail}",
       "en_US" => "REFUSING TO START (exit 78): %{detail}"
     },
+    # Data-directory format marker (Malachi.Storage.FormatMarker).
     data_format_too_new: %{
       "pt_BR" =>
         "o marker de formato %{path} registra o formato %{format}, gravado pelo release %{written_by}, e este " <>
