@@ -645,13 +645,17 @@ defmodule Malachi.Loadtest do
   end
 
   # A refused subscribe. The server sends no frame for a subscription it did not accept, so there is
-  # nothing left to wait for: count the refusal under its reason (or under its own counter when the
-  # server is shedding) and end this worker's stream. Returning the connection without recording
-  # anything reported a clean run for a scenario that never received a single record.
+  # nothing left to wait for and this worker's stream ends here. That makes the refusal terminal, like a
+  # dropped connection, and it is counted whatever the window `after_drop/1` counts drops in: the
+  # subscribe goes out the moment the barrier lifts, so a warmup (2s by default) would otherwise swallow
+  # every refusal, and the worker never gets a second chance to record one. No backoff either, for the
+  # same reason: there is nothing left to back off from.
   defp handle_push(conn, _ctx, _s, m, {_corr, _code, resp}) do
-    measuring = mono_ms() >= m.warmup_end
-    status = error_status(resp)
-    if shed?(status), do: shed(m, status, measuring), else: record(m, status, 0, measuring)
+    case error_status(resp) do
+      {:error, reason} -> count_error(m, reason)
+      shed_status -> :counters.add(m.ops, shed_counter(shed_status), 1)
+    end
+
     conn
   end
 
@@ -761,7 +765,10 @@ defmodule Malachi.Loadtest do
     Histogram.record(m.hist, dt)
   end
 
-  defp record(m, {:error, reason}, _dt, true) do
+  defp record(m, {:error, reason}, _dt, true), do: count_error(m, reason)
+
+  # The error counter and the reason move together, so the breakdown always adds up to `errors`.
+  defp count_error(m, reason) do
     :counters.add(m.ops, @errors, 1)
     :ets.update_counter(m.reasons, reason, 1, {reason, 0})
   end

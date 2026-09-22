@@ -669,6 +669,50 @@ defmodule Malachi.LoadtestTest do
       assert r.records == 0
     end
 
+    test "a refused subscription is recorded even when it lands inside the warmup" do
+      # The subscribe goes out the moment the barrier lifts, so with any warmup (2s by default) the
+      # refusal always arrives before the measured window. Recording it only while measuring dropped
+      # every one of them, and the worker ends at the refusal, so there is no second chance: a default
+      # stream run against a broker that refuses the subscription reported a clean zero. A refusal is
+      # terminal, like a dropped connection, and `after_drop/1` counts those whatever the window.
+      {user, pass} = add_user([:produce])
+
+      r =
+        run(
+          scenario: :stream,
+          connections: 2,
+          prepopulate: 50,
+          warmup: 1,
+          user: user,
+          pass: pass,
+          topic: topic("denied_stream_warmup")
+        )
+
+      assert r.errors == 2, "a refusal inside the warmup was dropped instead of counted"
+      assert r.error_reasons == %{"permission_denied" => 2}
+    end
+
+    test "a subscription the server sheds is counted apart, under its own refusal counter" do
+      # The other half of the terminal-refusal path: `overloaded` and `rate_limited` keep their own
+      # counters instead of entering the reason breakdown, and are counted whatever the window too.
+      r =
+        with_scripted_server(refuse_after_setup("rate_limited"), fn port ->
+          run(
+            port: port,
+            host: "127.0.0.1",
+            scenario: :stream,
+            connections: 1,
+            prepopulate: 0,
+            warmup: 1,
+            topic: "shed_stream"
+          )
+        end)
+
+      assert r.rate_limited == 1
+      assert r.errors == 0
+      assert r.error_reasons == %{}
+    end
+
     test "an admin cleanup the server refuses is an error with its reason, not a completed op" do
       # The second half of a user or acl cycle used to be matched with the response code ignored, so a
       # refused delete or revoke counted as a successful op and left the user or the grant behind.
