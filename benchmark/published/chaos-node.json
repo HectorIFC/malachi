@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-09-22T00:30:02Z",
+    "timestamp": "2026-09-22T20:46:42Z",
     "command": "scripts/docker-chaos-test.sh",
-    "git_ref": "76d5bb6",
-    "git_ref_date": "2026-09-21T21:26:19-03:00",
-    "malachi_version": "0.13.0",
+    "git_ref": "60405c3",
+    "git_ref_date": "2026-09-22T17:43:12-03:00",
+    "malachi_version": "0.13.1",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -12,7 +12,7 @@
     }
   },
   "certification": "CHAOS CERTIFICATION",
-  "verdict": "passed",
+  "verdict": "failed",
   "replication_factor": 3,
   "events": [
     "a: power pull (SIGKILL node 3)",
@@ -21,9 +21,11 @@
     "d: rolling restart"
   ],
   "invariants": {
-    "acked_writes": 1349,
-    "post_chaos_records_per_s": 18117
+    "acked_writes": 1180,
+    "post_chaos_records_per_s": null
   },
-  "failures": [],
+  "failures": [
+    "post-chaos produce not clean: {\"meta\":{\"command\":\"mix malachi.loadtest --scenario=produce --connections=12 --duration=3 --warmup=3 --batch=10 --record-size=256 --keys=1000 --pipeline=1 --max=100 --window=100 --prepopulate=0 --topics=6 --topic=loadtest_1790109989088 --host=malachi1,malachi2,malachi3 --port=4040 --connect-strategy=bounded --connect-concurrency=32 --user=admin --json\",\"timestamp\":\"2026-09-22T20:46:36.103373Z\",\"git_ref\":null,\"hardware\":{\"cpu\":\"x86_64-pc-linux-musl\",\"os\":\"linux 6.17.0\",\"schedulers\":4,\"cores\":1},\"git_ref_date\":null,\"malachi_version\":\"0.13.1\"},\"dropped\":0,\"overloaded\":0,\"ops\":0,\"errors\":0,\"pipeline\":1,\"scenario\":\"produce\",\"connections\":12,\"batch\":10,\"record_size\":256,\"duration_s\":3,\"error_reasons\":{},\"latency_ms\":{\"p50\":0.0,\"p99\":0.0,\"p99_9\":0.0,\"p99_99\":0.0},\"mb_per_s\":0.0,\"ops_per_s\":0,\"rate_limited\":0,\"reconnects\":0,\"records\":0,\"records_per_s\":0}"
+  ],
   "evidence_dir": null
 }
