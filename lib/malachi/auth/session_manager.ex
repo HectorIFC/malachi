@@ -35,6 +35,7 @@ defmodule Malachi.Auth.SessionManager do
   """
   require Logger
   alias Malachi.I18n
+  alias Malachi.IPAddress
 
   @table_sessions :malachi_sessions
 
@@ -299,7 +300,7 @@ defmodule Malachi.Auth.SessionManager do
       %{
         token_prefix: String.slice(token, 0, 8),
         username: session_data.username,
-        ip: format_ip(session_data.ip),
+        ip: IPAddress.format(session_data.ip),
         created_at: session_data.created_at,
         expires_at: session_data.expires_at,
         last_activity: session_data.last_activity,
@@ -325,10 +326,10 @@ defmodule Malachi.Auth.SessionManager do
     token_prefix = String.slice(token, 0, 8)
 
     Logger.warning(
-      I18n.t(:session_hijack_attempt, username: session_data.username, ip: format_ip(client_ip)),
+      I18n.t(:session_hijack_attempt, username: session_data.username, ip: IPAddress.format(client_ip)),
       username: session_data.username,
-      session_ip: format_ip(session_data.ip),
-      request_ip: format_ip(client_ip),
+      session_ip: IPAddress.format(session_data.ip),
+      request_ip: IPAddress.format(client_ip),
       mismatch: mismatches,
       token_prefix: token_prefix
     )
@@ -339,8 +340,8 @@ defmodule Malachi.Auth.SessionManager do
       "validate_session",
       :failure,
       %{
-        session_ip: format_ip(session_data.ip),
-        request_ip: format_ip(client_ip),
+        session_ip: IPAddress.format(session_data.ip),
+        request_ip: IPAddress.format(client_ip),
         # Which binding(s) differed: [:ip], [:user_agent], or both. A UA-only mismatch has request_ip ==
         # session_ip, so alerting must key off this rather than assuming the IP changed.
         mismatch: mismatches,
@@ -362,6 +363,7 @@ defmodule Malachi.Auth.SessionManager do
     ip_exempt = Map.get(session_data, :ip_binding_disabled, false)
 
     ip_mismatch? = ip_binding and not ip_exempt and session_data.ip != client_ip
+
     ua_mismatch? = ua_binding and session_data.user_agent != user_agent
 
     [{:ip, ip_mismatch?}, {:user_agent, ua_mismatch?}]
@@ -376,7 +378,7 @@ defmodule Malachi.Auth.SessionManager do
       false
     else
       # Convert the IP tuple to the string form inet_cidr accepts
-      ip_string = format_ip(ip)
+      ip_string = IPAddress.format(ip)
 
       Enum.any?(trusted_ranges, fn range ->
         try do
@@ -401,15 +403,4 @@ defmodule Malachi.Auth.SessionManager do
       {:error, _} -> :error
     end
   end
-
-  defp format_ip(ip) when is_tuple(ip) do
-    case tuple_size(ip) do
-      4 -> :inet.ntoa(ip) |> to_string()
-      8 -> :inet.ntoa(ip) |> to_string()
-      _ -> "invalid"
-    end
-  end
-
-  defp format_ip(ip) when is_binary(ip), do: ip
-  defp format_ip(_), do: "unknown"
 end
