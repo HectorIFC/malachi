@@ -9,10 +9,10 @@ defmodule Malachi.Loadtest do
   server-shed `overloaded` produces, quota-refused `rate_limited` produces, and reconnects) and a
   `Malachi.Histogram` for latency. A genuine error (any refusal other than those two) is also counted
   under the reason the server gave, in a table the report returns as `error_reasons`, so a run that
-  records errors says which ones; the reasons always add up to `errors`. A worker connects and authenticates, waits at a barrier so all
-  connections start together, runs its scenario for `warmup + duration`, and records only during the
-  measured window. It is resilient: a shed produce backs off and continues, and a dropped connection
-  reconnects (capped) rather than aborting.
+  records errors says which ones; the reasons always add up to `errors`. A worker connects and
+  authenticates, waits at a barrier so all connections start together, runs its scenario for
+  `warmup + duration`, and records only during the measured window. It is resilient: a shed produce
+  backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
 
   How the connections are OPENED is a strategy (`:connect_strategy`), because each one pays a full
   credential verification on the server and opening hundreds at once is a self-inflicted auth storm:
