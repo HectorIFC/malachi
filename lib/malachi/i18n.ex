@@ -306,6 +306,20 @@ defmodule Malachi.I18n do
       "pt_BR" => "recusando ligar o flag de cluster %{flag}: %{nodes} não anunciam essa capability",
       "en_US" => "refusing to enable the cluster flag %{flag}: %{nodes} do not advertise that capability"
     },
+    cluster_flag_adopted: %{
+      "pt_BR" => "flag de cluster %{flag} adotado neste nó",
+      "en_US" => "cluster flag %{flag} adopted on this node"
+    },
+    cluster_flag_missing_capability: %{
+      "pt_BR" =>
+        "o cluster ligou %{flags}, que este binário não suporta; ele anuncia %{capabilities}. " <>
+          "Inicie um release que suporte %{flags}. Um flag nunca volta a ser desligado, então este nó " <>
+          "não pode servir até lá",
+      "en_US" =>
+        "the cluster has enabled %{flags}, which this binary does not support; it advertises " <>
+          "%{capabilities}. Start a release that supports %{flags}. A flag is never turned back off, " <>
+          "so this node cannot serve until then"
+    },
     data_format_marker_created_fresh: %{
       "pt_BR" => "Marker de formato criado em %{path} (formato %{format}, diretório novo)",
       "en_US" => "Format marker created at %{path} (format %{format}, fresh directory)"

@@ -25,12 +25,17 @@ defmodule Malachi.Application do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.Capabilities
+  alias Malachi.Cluster.ClusterFlags
+  alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.Cluster.ClusterFlagsMachine
+  alias Malachi.Cluster.ClusterFlagsServer
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.LeaseReconciler
   alias Malachi.Cluster.LeaseServer
+  alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.MetadataServer
@@ -65,6 +70,8 @@ defmodule Malachi.Application do
   @log_lockouts Malachi.LogLockouts
   # The replicated per-topic ACL store's dedicated ra cluster name (see `acl_store_children/1`).
   @log_acls Malachi.LogAcls
+  # The cluster feature flag store's dedicated ra cluster name (see `cluster_flags_children/1`).
+  @log_flags Malachi.LogClusterFlags
 
   def start(_type, _args) do
     # Validate authentication configuration before starting
@@ -112,6 +119,7 @@ defmodule Malachi.Application do
         lockout_store_children(configured_nodes()) ++
         acl_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
+        cluster_flags_children(configured_nodes()) ++
         [
           Malachi.Auth,
           Malachi.ConnectionRegistry
@@ -214,6 +222,103 @@ defmodule Malachi.Application do
         AclServer.reconcile(@log_acls, nodes)
       end)
     ]
+  end
+
+  # Forms the ra flag cluster across `nodes` and supervises its reconciler (see `cluster_flags_child/1`).
+  # Runs in every mode, like the user, lockout and ACL stores: a single-node deployment still commits to
+  # a format-changing feature, and the ring store, which only exists when clustered, could not host this.
+  defp cluster_flags_children(nodes) do
+    _ = ClusterFlagsServer.start(@log_flags, nodes)
+    [cluster_flags_child(nodes)]
+  end
+
+  @doc """
+  The flag store's reconciler child, which is also its machine-version watcher and the local flag pass.
+
+  On every tick it self-joins this node when clustered, checks the store's machine version, and runs
+  `Malachi.Cluster.ClusterFlagsCache.refresh/1`: refresh the cache, adopt a newly enabled flag, and
+  refuse to serve when an enabled flag names a capability this build lacks.
+
+  Deliberately not `store_reconciler_child/5`: that helper replaces the reconcile with a no-op on a
+  single-node deployment, and the flag pass has to run there too. A one-node deployment still commits to
+  a format-changing feature, and still must not come back on a build that cannot read what it wrote.
+  """
+  @spec cluster_flags_child([node()]) :: Supervisor.child_spec()
+  def cluster_flags_child(nodes) do
+    server_id = {@log_flags, node()}
+
+    reconcile = fn ->
+      if length(nodes) > 1, do: ClusterFlagsServer.reconcile(@log_flags, nodes)
+      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1))
+    end
+
+    opts = [
+      name: Malachi.LogClusterFlagsReconciler,
+      reconcile: reconcile,
+      version_check: {ClusterFlagsMachine, server_id}
+    ]
+
+    %{id: Malachi.LogClusterFlagsReconciler, start: {LeaseReconciler, :start_link, [opts]}}
+  end
+
+  @doc """
+  Switches the cluster feature flag named `name` on, from this running node. The entry point
+  `mix malachi.flag` reaches over RPC.
+
+  Refuses, naming them, unless every configured node is alive and advertises the capability the flag
+  names. That population is `MALACHI_LOG_NODES`, not the membership's alive set and not the flag
+  store's Raft members: the first silently omits a node that has just joined on an old build, and the
+  second omits every node not yet upgraded, since a build without the flag machine never joins that
+  group at all.
+
+  `:nodes`, `:reads` and `:known` override that population, the membership view and the flag registry;
+  they exist so the wiring can be driven from a test while this build's own registry is still empty.
+  """
+  @spec enable_cluster_flag(String.t(), keyword()) :: :ok | {:error, term()}
+  def enable_cluster_flag(name, opts \\ []) do
+    nodes = Keyword.get(opts, :nodes, configured_nodes())
+    reads = Keyword.get(opts, :reads, membership_reads())
+    known = Keyword.get(opts, :known, Capabilities.known())
+
+    ClusterFlagsServer.enable({@log_flags, node()}, name, nodes, reads, known)
+  end
+
+  @doc """
+  What this cluster knows and what it has switched on: `%{known: [flag], enabled: [flag]}`, read
+  through consensus so an operator never sees a stale answer to a question they are about to act on.
+  """
+  @spec cluster_flags() :: {:ok, %{known: [atom()], enabled: [atom()]}} | {:error, term()}
+  def cluster_flags do
+    case ClusterFlagsServer.read({@log_flags, node()}, :consistent) do
+      {:ok, flags} -> {:ok, %{known: Capabilities.known(), enabled: ClusterFlags.enabled(flags)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The membership view as `node -> {status, attributes}`, for the capability check.
+
+  An unclustered deployment runs no membership server, so it answers for the local node only: any other
+  node reads as unknown, which refuses, which is the safe direction.
+  """
+  @spec membership_reads() :: Capabilities.reads()
+  def membership_reads do
+    case Process.whereis(Malachi.LogMembership) do
+      nil -> local_only_reads()
+      _pid -> view_reads(MembershipServer.view(Malachi.LogMembership))
+    end
+  end
+
+  defp local_only_reads do
+    this = node()
+    fn candidate -> if candidate == this, do: {:alive, membership_attributes()}, else: {nil, %{}} end
+  end
+
+  defp view_reads(view) do
+    fn candidate ->
+      ref = {Malachi.LogMembership, candidate}
+      {Membership.status(view, ref), Membership.attributes(view, ref)}
+    end
   end
 
   # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a

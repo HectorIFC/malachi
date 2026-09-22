@@ -334,6 +334,27 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "cluster_flags_child/1" do
+    test "watches the flag store's machine version on the local member" do
+      spec = App.cluster_flags_child([node()])
+
+      assert spec.id == Malachi.LogClusterFlagsReconciler
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+      assert opts[:version_check] == {Malachi.Cluster.ClusterFlagsMachine, {Malachi.LogClusterFlags, node()}}
+      assert opts[:name] == Malachi.LogClusterFlagsReconciler
+    end
+
+    test "its tick runs the local flag pass, and tolerates a store it cannot read" do
+      # The gate exists only because this child carries it. A store that is not formed must leave the
+      # node running: treating "I could not ask" as "no flag is on" is the mistake the ring boot exists
+      # to avoid, and here it would let a node serve past a flag it cannot honour.
+      spec = App.cluster_flags_child([node()])
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+
+      assert opts[:reconcile].() == :ok
+    end
+  end
+
   describe "membership_attributes/0" do
     test "gossips this build's capability set alongside the operator's own attributes" do
       attributes = App.membership_attributes()
