@@ -2,6 +2,7 @@ defmodule Malachi.ApplicationTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Application, as: App
+  alias Malachi.Cluster.Capabilities
 
   describe "metadata_cluster_opts/2" do
     test "no cluster configured yields no metadata options (single-node in-memory default)" do
@@ -330,6 +331,75 @@ defmodule Malachi.ApplicationTest do
       assert opts[:version_check] == {Malachi.Auth.UserMachine, {:solo_store, node()}}
       assert opts[:reconcile].() == :ok
       refute_received :reconciled
+    end
+  end
+
+  describe "membership_attributes/0" do
+    test "gossips this build's capability set alongside the operator's own attributes" do
+      attributes = App.membership_attributes()
+
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+    end
+
+    test "the operator's attributes survive the merge" do
+      original = Application.get_env(:malachi, :log_attributes)
+      on_exit(fn -> Application.put_env(:malachi, :log_attributes, original) end)
+      Application.put_env(:malachi, :log_attributes, "rack=a,dc=eu")
+
+      attributes = App.membership_attributes()
+
+      assert attributes["rack"] == "a"
+      assert attributes["dc"] == "eu"
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+    end
+  end
+
+  describe "the operator's flag entry points" do
+    test "cluster_flags/0 reads the store this node hosts" do
+      assert {:ok, %{known: known, enabled: enabled}} = App.cluster_flags()
+      assert known == Capabilities.known()
+      assert is_list(enabled)
+    end
+
+    test "an unknown flag is refused before the membership view is even read" do
+      assert App.enable_cluster_flag("no_such_flag") == {:error, :unknown_flag}
+    end
+
+    test "a flag this node itself does not advertise cannot be switched on" do
+      # The local node is always one of the configured nodes, and the membership view reports what this
+      # build really advertises. So the loop is closed: nothing can enable a flag this node would then
+      # refuse to serve. The registry is empty here, so the name is injected; the advertisement is not.
+      flag = :"app_flag_#{System.unique_integer([:positive])}"
+
+      assert App.enable_cluster_flag(to_string(flag), known: [flag], nodes: [node()]) ==
+               {:error, {:unsupported, [node()]}}
+
+      assert {:ok, %{enabled: enabled}} = App.cluster_flags()
+      refute flag in enabled
+    end
+
+    test "refuses and names a configured node the membership view does not vouch for" do
+      flag = :"app_flag_#{System.unique_integer([:positive])}"
+
+      assert App.enable_cluster_flag(to_string(flag),
+               known: [flag],
+               nodes: [node(), :absent@nowhere],
+               reads: fn node ->
+                 if node == node(), do: {:alive, Capabilities.attributes(%{}, [flag])}, else: {nil, %{}}
+               end
+             ) == {:error, {:unsupported, [:absent@nowhere]}}
+    end
+  end
+
+  describe "membership_reads/0" do
+    test "without a membership server it answers for the local node only" do
+      # An unclustered deployment runs no membership server. Answering for a remote node would be a
+      # guess, and a guess in this direction switches a flag on over a node nobody has heard from.
+      reads = App.membership_reads()
+
+      assert {:alive, attributes} = reads.(node())
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+      assert reads.(:somewhere@else) == {nil, %{}}
     end
   end
 

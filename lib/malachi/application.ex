@@ -24,6 +24,7 @@ defmodule Malachi.Application do
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
+  alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
@@ -634,7 +635,7 @@ defmodule Malachi.Application do
         name: Malachi.LogMembership,
         self_ref: {Malachi.LogMembership, node()},
         peers: membership_seeds(nodes),
-        attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
+        attributes: membership_attributes(),
         # adopt a gossiped ring change locally: point consumer-group routing at the new topology
         on_topology: &adopt_ring_topology/1
       ] ++ initial_topology_opt(topology)
@@ -678,6 +679,19 @@ defmodule Malachi.Application do
     # the broker adopts the same ring change for metadata routing, async (a cast) so this inline hook stays
     # fast and never blocks the membership server; a no-op if the broker is not running (single-node).
     GenServer.cast(Malachi.LogBroker, {:adopt_topology, topology})
+  end
+
+  @doc """
+  This node's gossiped membership attributes: the operator's `MALACHI_LOG_ATTRIBUTES` with the capability
+  set this build advertises merged in.
+
+  The one place the merge happens. `Malachi.Cluster.Membership.set_attributes/2` replaces the whole map,
+  so a caller that set placement attributes at runtime without coming through here would silently erase
+  the capabilities, and every cluster flag would then be refused with no obvious cause.
+  """
+  @spec membership_attributes() :: map()
+  def membership_attributes do
+    Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
   end
 
   @doc ~S"""
