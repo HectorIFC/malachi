@@ -15,6 +15,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.BrokerServer
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.I18n
+  alias Malachi.IPAddress
   alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.Metrics.Prometheus
@@ -72,8 +73,11 @@ defmodule Malachi.Dashboard do
   end
 
   defp handle_http(socket) do
-    # Get client IP for logging and authentication
-    {:ok, {client_ip, _port}} = :inet.peername(socket)
+    # The client address is canonicalized here, at the edge, so everything downstream (the auth rate
+    # limiter, Auth.authenticate/4, Auth.validate_token/3 and every audit event) sees the same binary
+    # form the TCP acceptor produces. Reading it through IPAddress.from_socket/2 also drops a hard
+    # match that raised a MatchError whenever a client closed the socket between the accept and here.
+    client_ip = IPAddress.from_socket(socket, :gen_tcp)
 
     case :gen_tcp.recv(socket, 0, recv_timeout()) do
       {:ok, {:http_request, method, {:abs_path, path}, _version}} ->
@@ -263,9 +267,7 @@ defmodule Malachi.Dashboard do
     rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
     rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
 
-    client_ip_string = format_ip_for_rate_limit(client_ip)
-
-    case RateLimiter.check_limit(client_ip_string, :dashboard_auth, %{
+    case RateLimiter.check_limit(client_ip, :dashboard_auth, %{
            limit: rate_limit,
            window_ms: rate_window
          }) do
@@ -314,17 +316,6 @@ defmodule Malachi.Dashboard do
         false
     end
   end
-
-  # The ip here is always a tuple (or an :inet error atom, caught by the catch-all), so dialyzer flags
-  # the is_binary/1 clause as unreachable. Keep it as defense in case a caller ever passes a string ip
-  # and suppress the warning rather than drop the clause.
-  @dialyzer {:nowarn_function, format_ip_for_rate_limit: 1}
-  defp format_ip_for_rate_limit(ip) when is_tuple(ip) do
-    ip |> :inet.ntoa() |> to_string()
-  end
-
-  defp format_ip_for_rate_limit(ip) when is_binary(ip), do: ip
-  defp format_ip_for_rate_limit(_), do: "unknown"
 
   # The two redirects to the login form. Both carry the usual security headers (CSP, HSTS, frame and
   # sniffing guards): the synthetic /login path passed to add_security_headers keeps CORS out, since these
@@ -481,9 +472,8 @@ defmodule Malachi.Dashboard do
         # Rate limit check
         rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
         rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
-        client_ip_string = format_ip_for_rate_limit(client_ip)
 
-        case RateLimiter.check_limit(client_ip_string, :dashboard_auth, %{
+        case RateLimiter.check_limit(client_ip, :dashboard_auth, %{
                limit: rate_limit,
                window_ms: rate_window
              }) do

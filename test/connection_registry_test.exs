@@ -28,7 +28,7 @@ defmodule Malachi.ConnectionRegistryTest do
     {:ok, socket: socket}
   end
 
-  describe "register/3" do
+  describe "register/4" do
     test "registers a new connection", %{socket: socket} do
       pid =
         spawn(fn ->
@@ -39,7 +39,13 @@ defmodule Malachi.ConnectionRegistryTest do
 
       transport = :gen_tcp
 
-      assert :ok = Malachi.ConnectionRegistry.register(pid, socket, transport)
+      assert :ok =
+               Malachi.ConnectionRegistry.register(
+                 pid,
+                 socket,
+                 transport,
+                 Malachi.IPAddress.from_socket(socket, transport)
+               )
 
       count = Malachi.ConnectionRegistry.count()
       assert count >= 1
@@ -62,7 +68,7 @@ defmodule Malachi.ConnectionRegistryTest do
       end
 
       initial_count = Malachi.ConnectionRegistry.count()
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       Process.exit(pid, :kill)
       :timer.sleep(100)
@@ -81,7 +87,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
     end
@@ -94,7 +100,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
     end
@@ -114,7 +120,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "queue1")
       assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "queue2")
@@ -130,7 +136,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       initial_count = Malachi.ConnectionRegistry.count()
       assert :ok = Malachi.ConnectionRegistry.unregister(pid)
@@ -164,7 +170,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.set_connection_type(pid, :producer, queue_name)
 
       producers = Malachi.ConnectionRegistry.list_producers_by_queue(queue_name)
@@ -227,8 +233,19 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(producer_pid, socket1, :gen_tcp)
-      Malachi.ConnectionRegistry.register(consumer_pid, socket2, :gen_tcp)
+      Malachi.ConnectionRegistry.register(
+        producer_pid,
+        socket1,
+        :gen_tcp,
+        Malachi.IPAddress.from_socket(socket1, :gen_tcp)
+      )
+
+      Malachi.ConnectionRegistry.register(
+        consumer_pid,
+        socket2,
+        :gen_tcp,
+        Malachi.IPAddress.from_socket(socket2, :gen_tcp)
+      )
 
       Malachi.ConnectionRegistry.set_connection_type(producer_pid, :producer, queue_name)
       Malachi.ConnectionRegistry.set_connection_type(consumer_pid, :consumer, queue_name)
@@ -251,7 +268,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, queue_name)
 
       consumers = Malachi.ConnectionRegistry.list_consumers_by_queue(queue_name)
@@ -282,7 +299,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
 
       producers = Malachi.ConnectionRegistry.list_producers()
@@ -299,7 +316,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
 
       consumers = Malachi.ConnectionRegistry.list_consumers()
@@ -341,8 +358,8 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid1, socket1, :gen_tcp)
-      Malachi.ConnectionRegistry.register(pid2, socket2, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid1, socket1, :gen_tcp, Malachi.IPAddress.from_socket(socket1, :gen_tcp))
+      Malachi.ConnectionRegistry.register(pid2, socket2, :gen_tcp, Malachi.IPAddress.from_socket(socket2, :gen_tcp))
 
       result = Malachi.ConnectionRegistry.close_all()
       assert result == :ok
@@ -391,7 +408,7 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.close_all()
 
       # The shutdown message should have been sent
@@ -414,7 +431,7 @@ defmodule Malachi.ConnectionRegistryTest do
   describe "process monitoring" do
     test "automatically unregisters dead processes", %{socket: socket} do
       pid = spawn(fn -> :ok end)
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
 
       :timer.sleep(100)
 
@@ -427,7 +444,7 @@ defmodule Malachi.ConnectionRegistryTest do
     test "prunes a dead connection's entry (monitor runs in the registry)", %{socket: socket} do
       pid = spawn(fn -> Process.sleep(:infinity) end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       assert [{^pid, _, _, _, _, _, _}] = :ets.lookup(:malachi_connections, pid)
 
       # Monitor the pid from the test too, so we can wait until it is actually dead before checking.
@@ -470,18 +487,16 @@ defmodule Malachi.ConnectionRegistryTest do
           end
         end)
 
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp)
+      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test")
 
       producers = Malachi.ConnectionRegistry.list_producers_by_queue("test")
 
-      if producers != [] do
-        producer = hd(producers)
-        # IP should be formatted as string
-        assert is_binary(producer.ip)
-        # Should contain dots for IPv4
-        assert String.contains?(producer.ip, ".")
-      end
+      # Exact equality, not is_binary/1 plus "contains a dot": both of those passed under every one of
+      # the three formatters this codebase used to carry, so they pinned nothing about the shape.
+      assert [producer] = producers
+      assert producer.ip == Malachi.IPAddress.from_socket(socket, :gen_tcp)
+      assert producer.ip == "127.0.0.1"
 
       :gen_tcp.close(listen_socket)
     end

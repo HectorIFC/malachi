@@ -227,6 +227,7 @@ defmodule Malachi.MixProject do
         Malachi.TCPAcceptor,
         Malachi.TCPAcceptorPool,
         Malachi.SocketHelper,
+        Malachi.IPAddress,
         Malachi.ConnectionRegistry,
         Malachi.ConnectionLimiter,
         Malachi.RateLimiter

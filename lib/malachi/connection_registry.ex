@@ -15,11 +15,17 @@ defmodule Malachi.ConnectionRegistry do
   end
 
   @doc """
-  Register a client connection with its socket and transport.
+  Register a client connection with its socket, transport and canonical client address.
+
+  The address is passed in rather than read here: the acceptor has already read the peer to key the
+  connection limiter (`Malachi.TCPAcceptor`), and reading it a second time would both cost a second
+  `getpeername` per connection and let the registry record `"unknown"` for a live connection whose
+  socket died in between. Use `Malachi.IPAddress.from_socket/2` to produce it.
   """
-  def register(pid, socket, transport) do
-    ip = get_peer_address(socket, transport)
-    entry = {pid, socket, transport, System.monotonic_time(:millisecond), ip, :unknown, nil}
+  @spec register(pid(), :gen_tcp.socket() | :ssl.sslsocket(), :gen_tcp | :ssl, String.t()) ::
+          :ok
+  def register(pid, socket, transport, client_ip) when is_binary(client_ip) do
+    entry = {pid, socket, transport, System.monotonic_time(:millisecond), client_ip, :unknown, nil}
     # Register through the GenServer so Process.monitor/1 runs in the registry process, not the caller.
     # Otherwise the :DOWN would be delivered to the connection handler and the entry would never be pruned.
     GenServer.call(__MODULE__, {:register, entry})
@@ -275,30 +281,4 @@ defmodule Malachi.ConnectionRegistry do
   def handle_info(_msg, state) do
     {:noreply, state}
   end
-
-  # Private helper functions
-
-  defp get_peer_address(socket, transport) do
-    case transport do
-      :ssl ->
-        case :ssl.peername(socket) do
-          {:ok, {address, _port}} -> format_ip(address)
-          {:error, _} -> "unknown"
-        end
-
-      :gen_tcp ->
-        case :inet.peername(socket) do
-          {:ok, {address, _port}} -> format_ip(address)
-          {:error, _} -> "unknown"
-        end
-    end
-  end
-
-  defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
-
-  defp format_ip({a, b, c, d, e, f, g, h}),
-    do:
-      "#{Integer.to_string(a, 16)}:#{Integer.to_string(b, 16)}:#{Integer.to_string(c, 16)}:#{Integer.to_string(d, 16)}:#{Integer.to_string(e, 16)}:#{Integer.to_string(f, 16)}:#{Integer.to_string(g, 16)}:#{Integer.to_string(h, 16)}"
-
-  defp format_ip(_), do: "unknown"
 end
