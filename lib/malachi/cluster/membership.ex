@@ -38,10 +38,21 @@ defmodule Malachi.Cluster.Membership do
 
   @ranks %{alive: 0, suspect: 1, dead: 2}
 
+  # A seeded peer entry is a **placeholder**: this node's guess that a configured peer is up, carrying no
+  # attributes, made before that peer has said anything. The peer's own first announcement therefore has
+  # to outrank it, and the join is at an equal `{incarnation, rank}`, which is ignored by design. So a
+  # member starts one incarnation above the placeholders it seeds for others.
+  #
+  # Without this, two nodes that seed each other never learn each other's attributes at all: each holds
+  # the other at `{0, alive}` with `%{}`, and every announcement the other makes at incarnation 0 is
+  # ignored as a duplicate. Liveness still converged, which is why this went unnoticed until attributes
+  # carried something a peer acts on (`Malachi.Cluster.Capabilities`).
+  @self_incarnation 1
+
   @doc """
-  Builds a membership view local to `self` (which starts `:alive` at incarnation 0). `:peers`
-  seeds other members, also `:alive` at incarnation 0. `:attributes` are `self`'s own attributes
-  (peers' attributes are learned via gossip).
+  Builds a membership view local to `self` (which starts `:alive` at incarnation #{@self_incarnation}).
+  `:peers` seeds other members `:alive` at incarnation 0, as placeholders until they announce
+  themselves. `:attributes` are `self`'s own attributes (peers' attributes are learned via gossip).
   """
   @spec new(member(), keyword()) :: t()
   def new(self, opts \\ []) do
@@ -49,9 +60,9 @@ defmodule Malachi.Cluster.Membership do
     self_attributes = Keyword.get(opts, :attributes, %{})
 
     members =
-      Map.new([self | peers], fn member ->
-        attributes = if member == self, do: self_attributes, else: %{}
-        {member, %{status: :alive, incarnation: 0, attributes: attributes}}
+      Map.new([self | peers], fn
+        ^self -> {self, %{status: :alive, incarnation: @self_incarnation, attributes: self_attributes}}
+        peer -> {peer, %{status: :alive, incarnation: 0, attributes: %{}}}
       end)
 
     %__MODULE__{self: self, members: members}
