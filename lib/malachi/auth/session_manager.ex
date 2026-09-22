@@ -362,7 +362,16 @@ defmodule Malachi.Auth.SessionManager do
     ua_binding = Application.get_env(:malachi, :session_ua_binding, false)
     ip_exempt = Map.get(session_data, :ip_binding_disabled, false)
 
-    ip_mismatch? = ip_binding and not ip_exempt and session_data.ip != client_ip
+    # Both sides are canonicalized before comparison rather than compared raw. The two listeners used to
+    # hand this function different representations of the same address (the TCP acceptor a formatted
+    # binary, the dashboard the tuple straight from :inet.peername/1), so a token minted on one listener
+    # and presented on the other from the same address could never satisfy the binding and was reported
+    # as a hijack attempt. That was a type accident, not a defence, and it polluted the very metric the
+    # moduledoc asks operators to alert on. Canonicalizing here keeps the invariant local instead of
+    # resting on every distant caller agreeing on a type.
+    ip_mismatch? =
+      ip_binding and not ip_exempt and
+        IPAddress.format(session_data.ip) != IPAddress.format(client_ip)
 
     ua_mismatch? = ua_binding and session_data.user_agent != user_agent
 
@@ -377,30 +386,20 @@ defmodule Malachi.Auth.SessionManager do
     if Enum.empty?(trusted_ranges) do
       false
     else
-      # Convert the IP tuple to the string form inet_cidr accepts
-      ip_string = IPAddress.format(ip)
-
-      Enum.any?(trusted_ranges, fn range ->
-        try do
-          cidr = InetCidr.parse_cidr!(range, true)
-
-          case parse_ip_address(ip_string) do
-            {:ok, parsed_ip} -> InetCidr.contains?(cidr, parsed_ip)
-            _ -> false
-          end
-        rescue
-          _ ->
-            Logger.warning(I18n.t(:invalid_cidr_range, range: range), range: range)
-            false
-        end
-      end)
+      # The caller may hand either representation (a binary from the TCP acceptor, a tuple from the
+      # dashboard), so parse once here rather than formatting to a string only to read it back.
+      case IPAddress.parse(ip) do
+        {:ok, parsed_ip} -> Enum.any?(trusted_ranges, &in_range?(&1, parsed_ip))
+        :error -> false
+      end
     end
   end
 
-  defp parse_ip_address(ip_string) when is_binary(ip_string) do
-    case :inet.parse_address(String.to_charlist(ip_string)) do
-      {:ok, ip} -> {:ok, ip}
-      {:error, _} -> :error
-    end
+  defp in_range?(range, parsed_ip) do
+    InetCidr.contains?(InetCidr.parse_cidr!(range, true), parsed_ip)
+  rescue
+    _error ->
+      Logger.warning(I18n.t(:invalid_cidr_range, range: range), range: range)
+      false
   end
 end
