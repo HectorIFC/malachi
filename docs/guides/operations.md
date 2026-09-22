@@ -375,7 +375,8 @@ A refused start exits with status **78** and logs one line that begins with `REF
 and names the directory, both format levels and the release to start instead. The same line is printed
 on stderr, so it reaches container logs even when the logger has not flushed. The same status covers a
 marker that cannot be parsed (restore it from a backup or another node) and one that cannot be read or
-written (fix the volume or its permissions).
+written (fix the volume or its permissions), and a node whose build cannot honour a cluster flag that is
+already on (see [Cluster flags](#cluster-flags)).
 
 A service manager that restarts on failure will restart a refused node again and again. Tell it not to:
 
@@ -409,8 +410,50 @@ The first release that versions these machines is version 1, and every earlier b
 To be able to roll back from it to an earlier build, upgrade with `MALACHI_RA_MACHINE_VERSION=0` and
 finalize later.
 
+Version **2** adds the cluster flag store's `enable_flag` command, and the other six machines move with
+it at no cost. The same rule applies: to keep a rollback to a version-1 build possible while you roll out,
+upgrade with `MALACHI_RA_MACHINE_VERSION=1` and finalize afterwards.
+
 A malformed value (anything but a non-negative integer) stops the node at boot. Silently dropping the pin would
 finalize the upgrade, so it is treated as an error. A pin above the version a build implements has no effect.
+
+### Cluster flags
+
+Finishing a rolling upgrade and committing to a new behaviour are two different moments. A **cluster
+flag** is the second one: an operator switches a feature on, once, for the whole cluster, after every
+node runs a build that can handle it. Until a flag is on, every node keeps to the old behaviour and a
+rollback stays free.
+
+```
+mix malachi.flag --list
+mix malachi.flag enable <flag>
+```
+
+Both run against a **running** node over Erlang distribution, the same way `mix malachi.ring` and
+`mix malachi.reshard` do (`--node`, `--cookie`).
+
+Each node advertises the set of flags its build can honour, through the same SWIM gossip that carries
+liveness. Switching a flag on is **refused** unless every node listed in `MALACHI_LOG_NODES` is alive and
+advertises that flag, and the refusal names the ones that are not:
+
+```
+these nodes are not alive or do not support that flag: malachi@node3. Upgrade them, or take them
+out of MALACHI_LOG_NODES, then run this again
+```
+
+A node that is down counts as not supporting it. Upgrade it, or take it out of `MALACHI_LOG_NODES` on
+every node, before switching the flag on.
+
+Two things follow from a flag being permanent:
+
+- **There is no command to switch one off.** Once a feature is on, peers and stored data may already be
+  in the new shape, and going back is a migration, not a toggle. Decide before you enable, not after.
+- **A node that cannot honour an enabled flag refuses to start**, with exit status 78 and a line naming
+  the flag and what the build advertises. In practice that means a node brought back on a build from
+  before the feature: upgrade it rather than trying to start it again.
+
+A flag flip is also what raises the on-disk format above the baseline, so the rollback floor described
+under [The on-disk format](#the-on-disk-format) moves at that moment and not at any other.
 
 ## Before you go to production
 
@@ -428,6 +471,8 @@ The checks that catch the common mistakes:
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
       before the first upgrade, and make your service manager stop restarting on exit status 78.
+- [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
+      blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).
