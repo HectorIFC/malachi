@@ -26,6 +26,7 @@ defmodule Malachi.LoadtestTest do
       t = topic("produce")
       r = run(scenario: :produce, connections: 4, batch: 5, topic: t)
 
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.dropped == 0
       assert r.overloaded == 0
@@ -70,6 +71,7 @@ defmodule Malachi.LoadtestTest do
       r = run(scenario: :produce, connections: 2, batch: 1, topic: topic("quota"))
 
       assert r.rate_limited > 0, "the quota never bit, so this case proves nothing"
+      assert r.error_reasons == %{}
       assert r.errors == 0, "refusals were counted as errors, which is exactly what the split prevents"
       assert r.overloaded == 0, "a quota refusal must not be reported as broker saturation"
     end
@@ -77,6 +79,7 @@ defmodule Malachi.LoadtestTest do
     test "pipelining keeps zero errors and still produces" do
       t = topic("pipe")
       r = run(scenario: :produce, connections: 4, batch: 5, pipeline: 8, topic: t)
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.records == r.ops * 5
     end
@@ -87,6 +90,7 @@ defmodule Malachi.LoadtestTest do
       t = topic("multihost")
       r = run(scenario: :produce, connections: 4, batch: 5, host: "127.0.0.1, 127.0.0.1", topic: t)
 
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.dropped == 0
       assert r.records == r.ops * 5
@@ -96,6 +100,7 @@ defmodule Malachi.LoadtestTest do
       t = topic("fanout")
       r = run(scenario: :produce, connections: 6, batch: 5, topics: 3, topic: t)
 
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.dropped == 0
       assert r.records == r.ops * 5
@@ -112,6 +117,7 @@ defmodule Malachi.LoadtestTest do
     test "fetch reads back a prepopulated backlog" do
       t = topic("fetch")
       r = run(scenario: :fetch, connections: 4, batch: 10, prepopulate: 200, max: 50, topic: t)
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.records > 0, "fetch should read the prepopulated records"
     end
@@ -119,6 +125,7 @@ defmodule Malachi.LoadtestTest do
     test "mixed runs produce and fetch together without errors" do
       t = topic("mixed")
       r = run(scenario: :mixed, connections: 4, batch: 10, prepopulate: 200, topic: t)
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.ops > 0
     end
@@ -126,6 +133,7 @@ defmodule Malachi.LoadtestTest do
     test "stream receives pushes from the backlog without errors" do
       t = topic("stream")
       r = run(scenario: :stream, connections: 4, prepopulate: 200, window: 50, max: 25, topic: t)
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.records > 0, "stream should receive pushed records"
     end
@@ -381,6 +389,7 @@ defmodule Malachi.LoadtestTest do
       # The setup connection plus one per worker.
       assert length(auths) == 4
       assert appeared_at >= List.last(auths) + 1_000 - LoadtestProbes.poll_ms()
+      assert r.error_reasons == %{}
       assert r.errors == 0
     end
 
@@ -436,6 +445,7 @@ defmodule Malachi.LoadtestTest do
       r = run(scenario: :produce, connections: 1, batch: 1, measure_marker: marker, topic: topic("marker_exists"))
 
       assert File.read!(marker) == ""
+      assert r.error_reasons == %{}
       assert r.errors == 0
     end
 
@@ -537,6 +547,7 @@ defmodule Malachi.LoadtestTest do
       # the range empty, so the fetch finds a genuinely empty backlog.
       t = topic("tinyprep")
       r = run(scenario: :fetch, connections: 2, batch: 10, prepopulate: 5, max: 50, topic: t)
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.records == 0, "a 5-record prepopulate with batch 10 must seed nothing, read #{r.records}"
     end
@@ -572,8 +583,259 @@ defmodule Malachi.LoadtestTest do
 
       assert r.dropped >= 1, "the forced drop should be counted"
       assert r.reconnects >= 1, "the worker should reconnect and continue, not abort"
+      assert r.error_reasons == %{}
       assert r.errors == 0
       assert r.ops > 0, "after reconnecting the worker should complete produces"
+    end
+  end
+
+  describe "error reasons" do
+    # Issue #181: a healthy node once answered five produces with an error frame and the report said only
+    # `errors: 5`. These cases pin that every genuine error keeps the reason the server gave, that the
+    # reasons add up to `errors`, and that the two backpressure refusals stay out of them.
+
+    test "a produce refused for a reason the generator does not know is counted under that reason" do
+      # The cycle mixes a success, the two refusals that have counters of their own, and two genuine
+      # reasons, one of them the stringified tuple the frontend sends for a term it does not normalize.
+      cycle = [
+        :ok,
+        {:error, "replication_timeout"},
+        {:error, "overloaded"},
+        {:error, "{:sealed, 12}"},
+        {:error, "rate_limited"}
+      ]
+
+      for pipeline <- [1, 4] do
+        r =
+          with_scripted_server(produce_cycle(cycle), fn port ->
+            run(
+              port: port,
+              host: "127.0.0.1",
+              scenario: :produce,
+              connections: 2,
+              batch: 5,
+              pipeline: pipeline,
+              topic: "why"
+            )
+          end)
+
+        assert r.errors > 0, "pipeline #{pipeline}: the scripted refusals never reached the report"
+        assert Map.keys(r.error_reasons) == ["replication_timeout", "{:sealed, 12}"], "pipeline #{pipeline}"
+        assert Enum.sum(Map.values(r.error_reasons)) == r.errors, "pipeline #{pipeline}: reasons must add up to errors"
+        assert r.overloaded > 0 and r.rate_limited > 0, "pipeline #{pipeline}: refusals keep their own counters"
+        assert r.records == r.ops * 5
+      end
+    end
+
+    test "fetch, user and acl errors keep their reason too" do
+      for scenario <- [:fetch, :user, :acl] do
+        r =
+          with_scripted_server(refuse_after_setup("no_such_range"), fn port ->
+            run(
+              port: port,
+              host: "127.0.0.1",
+              scenario: scenario,
+              connections: 1,
+              prepopulate: 0,
+              topic: "why_#{scenario}"
+            )
+          end)
+
+        assert r.errors > 0, "#{scenario}: the scripted refusal never reached the report"
+        assert r.error_reasons == %{"no_such_range" => r.errors}, "#{scenario}"
+      end
+    end
+
+    test "a refused fetch reports the reason the real broker gave, end to end" do
+      # A user that may produce (so setup creates the topic) but not consume.
+      {user, pass} = add_user([:produce])
+      r = run(scenario: :fetch, connections: 2, user: user, pass: pass, topic: topic("denied_fetch"))
+
+      assert r.errors > 0
+      assert r.error_reasons == %{"permission_denied" => r.errors}
+    end
+
+    test "a refused subscription is counted under its reason instead of ending the run silently" do
+      # The server sends no frame for a subscription it refused, so the stream worker has nothing to wait
+      # for. Ending there without recording anything reported a clean run for a scenario that never ran:
+      # errors == 0 and an empty breakdown, which is the exact blindness this issue is about.
+      {user, pass} = add_user([:produce])
+      t = topic("denied_stream")
+
+      r = run(scenario: :stream, connections: 2, prepopulate: 50, user: user, pass: pass, topic: t)
+
+      assert r.errors == 2, "each worker subscribed once and each refusal counts once"
+      assert r.error_reasons == %{"permission_denied" => r.errors}
+      assert r.records == 0
+    end
+
+    test "a refused subscription is recorded even when it lands inside the warmup" do
+      # The subscribe goes out the moment the barrier lifts, so with any warmup (2s by default) the
+      # refusal always arrives before the measured window. Recording it only while measuring dropped
+      # every one of them, and the worker ends at the refusal, so there is no second chance: a default
+      # stream run against a broker that refuses the subscription reported a clean zero. A refusal is
+      # terminal, like a dropped connection, and `after_drop/1` counts those whatever the window.
+      {user, pass} = add_user([:produce])
+
+      r =
+        run(
+          scenario: :stream,
+          connections: 2,
+          prepopulate: 50,
+          warmup: 1,
+          user: user,
+          pass: pass,
+          topic: topic("denied_stream_warmup")
+        )
+
+      assert r.errors == 2, "a refusal inside the warmup was dropped instead of counted"
+      assert r.error_reasons == %{"permission_denied" => 2}
+    end
+
+    test "a subscription the server sheds is counted apart, under its own refusal counter" do
+      # The other half of the terminal-refusal path: `overloaded` and `rate_limited` keep their own
+      # counters instead of entering the reason breakdown, and are counted whatever the window too.
+      r =
+        with_scripted_server(refuse_after_setup("rate_limited"), fn port ->
+          run(
+            port: port,
+            host: "127.0.0.1",
+            scenario: :stream,
+            connections: 1,
+            prepopulate: 0,
+            warmup: 1,
+            topic: "shed_stream"
+          )
+        end)
+
+      assert r.rate_limited == 1
+      assert r.errors == 0
+      assert r.error_reasons == %{}
+    end
+
+    test "an admin cleanup the server refuses is an error with its reason, not a completed op" do
+      # The second half of a user or acl cycle used to be matched with the response code ignored, so a
+      # refused delete or revoke counted as a successful op and left the user or the grant behind.
+      for {scenario, cleanup_key} <- [{:user, Wire.delete_user_key()}, {:acl, Wire.revoke_acl_key()}] do
+        answer = fn api_key, _n ->
+          if api_key == cleanup_key, do: {:error, "permission_denied"}, else: :ok
+        end
+
+        r =
+          with_scripted_server(answer, fn port ->
+            run(port: port, host: "127.0.0.1", scenario: scenario, connections: 1, topic: "cleanup_#{scenario}")
+          end)
+
+        assert r.errors > 0, "#{scenario}: the refused cleanup was not counted"
+        assert r.error_reasons == %{"permission_denied" => r.errors}, "#{scenario}"
+        assert r.ops == 0, "#{scenario}: a cycle whose cleanup was refused is not a completed op"
+      end
+    end
+
+    test "an admin cleanup that loses the connection is a drop, not a MatchError" do
+      for {scenario, cleanup_key} <- [{:user, Wire.delete_user_key()}, {:acl, Wire.revoke_acl_key()}] do
+        answer = fn api_key, _n -> if api_key == cleanup_key, do: :close, else: :ok end
+
+        r =
+          with_scripted_server(answer, fn port ->
+            run(port: port, host: "127.0.0.1", scenario: scenario, connections: 1, topic: "lost_#{scenario}")
+          end)
+
+        assert r.dropped > 0, "#{scenario}: the lost connection was not counted as a drop"
+        assert r.errors == 0, "#{scenario}: a transport failure is a drop, not a server error"
+      end
+    end
+
+    test "no reason table outlives a run, whether it completes or fails to connect" do
+      run(scenario: :produce, connections: 1, topic: topic("no_leak"))
+      assert reason_tables() == []
+
+      seen = :ets.new(:limited_conns, [:public, :set])
+      :ets.insert(seen, {:conns, 0})
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: 4, active: false, reuseaddr: true])
+      {:ok, port} = :inet.port(listen)
+      spawn(fn -> fake_accept_limited(listen, seen, 2) end)
+
+      assert_raise Loadtest.SetupError, fn ->
+        Loadtest.run(port: port, host: "127.0.0.1", user: "admin", pass: "admin123", connections: 3, duration: 1)
+      end
+
+      :gen_tcp.close(listen)
+      assert reason_tables() == []
+    end
+  end
+
+  describe "setup refusals" do
+    test "a refused topic creation fails setup naming the topic and the reason" do
+      # create_topic is gated by :produce, so a consume-only user is refused it.
+      {user, pass} = add_user([:consume])
+      t = topic("denied_create")
+
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          Loadtest.run(port: @port, user: user, pass: pass, scenario: :produce, connections: 1, duration: 1, topic: t)
+        end
+
+      assert error.message =~ t
+      assert error.message =~ "permission_denied"
+    end
+
+    test "a connection lost while creating the topic fails setup with a SetupError, not a MatchError" do
+      answer = fn
+        api_key, _n -> if api_key == Wire.create_topic_key(), do: :close, else: :ok
+      end
+
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          with_scripted_server(answer, fn port ->
+            Loadtest.run(
+              port: port,
+              host: "127.0.0.1",
+              user: "admin",
+              pass: "admin123",
+              connections: 1,
+              duration: 1,
+              topic: "lost"
+            )
+          end)
+        end
+
+      assert error.message =~ "lost"
+      assert error.message =~ "connection failed"
+    end
+
+    test "a topic that already exists is not a setup failure" do
+      t = topic("rerun")
+      run(scenario: :produce, connections: 1, topic: t)
+      r = run(scenario: :produce, connections: 1, topic: t)
+
+      assert r.error_reasons == %{}
+      assert r.ops > 0
+    end
+
+    test "a refused prepopulate fails setup instead of leaving a shorter backlog" do
+      # Every produce is refused, the prepopulate's included. The fetch that would follow is refused too,
+      # so a setup that swallowed the refusal shows up as errors rather than as a crash.
+      error =
+        assert_raise Loadtest.SetupError, fn ->
+          with_scripted_server(refuse_after_setup("rate_limited"), fn port ->
+            Loadtest.run(
+              port: port,
+              host: "127.0.0.1",
+              user: "admin",
+              pass: "admin123",
+              scenario: :fetch,
+              connections: 1,
+              duration: 1,
+              batch: 10,
+              prepopulate: 20,
+              topic: "seed"
+            )
+          end)
+        end
+
+      assert error.message =~ "seed"
+      assert error.message =~ "rate_limited"
     end
   end
 
@@ -587,6 +849,7 @@ defmodule Malachi.LoadtestTest do
             [connect_strategy: :all_at_once]
           ] do
         r = run([scenario: :produce, connections: 4, batch: 2, topic: topic("strat")] ++ opts)
+        assert r.error_reasons == %{}, "#{inspect(opts)} should complete cleanly"
         assert r.errors == 0, "#{inspect(opts)} should complete cleanly"
         assert r.ops > 0
       end
@@ -701,4 +964,88 @@ defmodule Malachi.LoadtestTest do
         :ok
     end
   end
+
+  # --- helpers for the error-reason and setup-refusal tests ---
+
+  # A user with `permissions` on the real server, removed when the test ends.
+  defp add_user(permissions) do
+    user = "lt_user_#{System.unique_integer([:positive])}"
+    pass = "Lt-Pass-1!"
+    Malachi.Auth.add_user(user, pass, permissions)
+    on_exit(fn -> Malachi.Auth.remove_user(user) end)
+    {user, pass}
+  end
+
+  # Every reason table a run may have left behind (the generator names its table, even unregistered).
+  defp reason_tables, do: Enum.filter(:ets.all(), &(:ets.info(&1, :name) == :loadtest_error_reasons))
+
+  # Answers the produces in `cycle` order, server-wide, and acks everything else.
+  defp produce_cycle(cycle) do
+    fn
+      api_key, n -> if api_key == Wire.produce_key(), do: Enum.at(cycle, rem(n, length(cycle))), else: :ok
+    end
+  end
+
+  # Acks auth and create_topic, and refuses every later request with `reason`.
+  defp refuse_after_setup(reason) do
+    fn
+      api_key, _n -> if api_key in [Wire.auth_key(), Wire.create_topic_key()], do: :ok, else: {:error, reason}
+    end
+  end
+
+  # Runs `fun` with the port of a wire server that answers each request as `answer` says. `answer` gets the
+  # api key and a server-wide count of the requests before this one, and returns `:ok`,
+  # `{:error, reason}`, or `:close` to drop the connection without answering. An ok produce carries a
+  # count of 5 records; any other ok carries no payload.
+  defp with_scripted_server(answer, fun) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: 4, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+    requests = :counters.new(1, [:atomics])
+    spawn(fn -> scripted_accept(listen, answer, requests) end)
+
+    try do
+      fun.(port)
+    after
+      :gen_tcp.close(listen)
+    end
+  end
+
+  defp scripted_accept(listen, answer, requests) do
+    case :gen_tcp.accept(listen) do
+      {:ok, sock} ->
+        spawn(fn -> scripted_serve(sock, answer, requests) end)
+        scripted_accept(listen, answer, requests)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  defp scripted_serve(sock, answer, requests) do
+    case :gen_tcp.recv(sock, 0) do
+      {:ok, <<api_key::16, corr::32, _payload::binary>>} ->
+        n = :counters.get(requests, 1)
+        :counters.add(requests, 1, 1)
+
+        case answer.(api_key, n) do
+          :close ->
+            :gen_tcp.close(sock)
+
+          reply ->
+            :gen_tcp.send(sock, scripted_body(api_key, corr, reply))
+            scripted_serve(sock, answer, requests)
+        end
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  defp scripted_body(api_key, corr, :ok) do
+    if api_key == Wire.produce_key(), do: ok_body(corr, <<5::32>>), else: ok_body(corr, <<>>)
+  end
+
+  # An unframed error-response body: the reason as the wire's present-string (tag 1, 32-bit length).
+  defp scripted_body(_api_key, corr, {:error, reason}),
+    do: <<corr::32, Wire.error_code()::16, 1, byte_size(reason)::32, reason::binary>>
 end
