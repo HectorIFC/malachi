@@ -155,6 +155,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerVersionTest do
     on_exit(fn -> StuckRaMember.cleanup({name, node()}) end)
     server_id = StuckRaMember.start(name)
     ghost = {:"vcm_ghost_#{System.unique_integer([:positive])}", node()}
+    stuck = {:stuck, StuckRaMember.effective_version(), StuckRaMember.rolled_back_version()}
     {:ok, listed} = Agent.start_link(fn -> [{MetadataMachine, server_id}, {MetadataMachine, ghost}] end)
 
     log =
@@ -163,7 +164,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerVersionTest do
         Manager.reconcile_now(manager)
         Manager.reconcile_now(manager)
 
-        assert Manager.version_status(manager) == %{server_id => {:stuck, 1, 0}, ghost => :ok}
+        assert Manager.version_status(manager) == %{server_id => stuck, ghost => :ok}
 
         Agent.update(listed, fn _ -> [{MetadataMachine, ghost}] end)
         Manager.reconcile_now(manager)

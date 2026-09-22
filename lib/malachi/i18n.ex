@@ -296,6 +296,16 @@ defmodule Malachi.I18n do
         "the format marker %{path} could not be read or written (%{reason}). Fix the volume or its " <>
           "permissions and start again"
     },
+    # Cluster feature flags (Malachi.Cluster.ClusterFlags). A flag only ever goes from off to on, and
+    # only once every node advertises the capability it names.
+    cluster_flag_enabled: %{
+      "pt_BR" => "flag de cluster %{flag} ligado por um operador",
+      "en_US" => "cluster flag %{flag} enabled by an operator"
+    },
+    cluster_flag_enable_refused: %{
+      "pt_BR" => "recusando ligar o flag de cluster %{flag}: %{nodes} não anunciam essa capability",
+      "en_US" => "refusing to enable the cluster flag %{flag}: %{nodes} do not advertise that capability"
+    },
     data_format_marker_created_fresh: %{
       "pt_BR" => "Marker de formato criado em %{path} (formato %{format}, diretório novo)",
       "en_US" => "Format marker created at %{path} (format %{format}, fresh directory)"
