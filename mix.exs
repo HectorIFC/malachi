@@ -129,6 +129,10 @@ defmodule Malachi.MixProject do
       "README.md": [title: "Overview"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
+      # The companion docs/design/design-tokens.json is deliberately not an extra: ExDoc renders
+      # markdown, and that file is a build input for the web, terminal and Elixir token generators.
+      # The specification links to it by path.
+      "docs/design/operator-interfaces.md": [title: "Operator interfaces (spec)"],
       "SECURITY.md": [title: "Security policy"],
       "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
       "docs/RATE_LIMITING.md": [title: "Rate limiting"],
@@ -171,7 +175,11 @@ defmodule Malachi.MixProject do
         "docs/guides/operations.md",
         "README.md"
       ],
-      Architecture: ["docs/ARCHITECTURE.md", "docs/AUTH_USER_MANAGEMENT.md"],
+      Architecture: [
+        "docs/ARCHITECTURE.md",
+        "docs/AUTH_USER_MANAGEMENT.md",
+        "docs/design/operator-interfaces.md"
+      ],
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [
         "docs/RATE_LIMITING.md",
