@@ -215,12 +215,15 @@ defmodule Malachi.DashboardTest do
       # cluster has committed to. Reporting ready there would put it in rotation before it knows whether
       # it may serve, and refusing to boot instead would deadlock the first node of a rolling upgrade.
       port = Application.get_env(:malachi, :dashboard_port, 4041)
-      published = ClusterFlagsCache.enabled()
+      # Put back what the cache held, unread included: `enabled/0` flattens unread and read-but-empty
+      # to the same `[]`, so restoring the list alone would mark this node as having read a store it
+      # never asked.
+      restore = if ClusterFlagsCache.read?(), do: snapshot_put(), else: &ClusterFlagsCache.forget/0
       _ = Supervisor.terminate_child(Malachi.Supervisor, Malachi.LogClusterFlagsReconciler)
       ClusterFlagsCache.forget()
 
       on_exit(fn ->
-        ClusterFlagsCache.put(published)
+        restore.()
         _ = Supervisor.restart_child(Malachi.Supervisor, Malachi.LogClusterFlagsReconciler)
       end)
 
@@ -321,5 +324,10 @@ defmodule Malachi.DashboardTest do
       # This test ensures the dashboard HTML is functional
       :ok
     end
+  end
+
+  defp snapshot_put do
+    published = ClusterFlagsCache.enabled()
+    fn -> ClusterFlagsCache.put(published) end
   end
 end

@@ -23,16 +23,29 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
   @reconciler Malachi.LogClusterFlagsReconciler
 
   setup do
-    published = ClusterFlagsCache.enabled()
+    # `enabled/0` answers `[]` both for a cache nobody has read and for one that was read and holds
+    # nothing, so restoring that list alone would turn the first into the second and make a later
+    # readiness check pass for a node whose store never answered. The read state is snapshotted too.
+    restore = snapshot()
     _ = Supervisor.terminate_child(Malachi.Supervisor, @reconciler)
     ClusterFlagsCache.forget()
 
     on_exit(fn ->
-      ClusterFlagsCache.put(published)
+      restore.()
       _ = Supervisor.restart_child(Malachi.Supervisor, @reconciler)
     end)
 
     :ok
+  end
+
+  # What the cache held, as a function that puts it back exactly, unread included.
+  defp snapshot do
+    if ClusterFlagsCache.read?() do
+      published = ClusterFlagsCache.enabled()
+      fn -> ClusterFlagsCache.put(published) end
+    else
+      &ClusterFlagsCache.forget/0
+    end
   end
 
   defp store(flags) do
