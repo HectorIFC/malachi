@@ -9,10 +9,13 @@ defmodule Malachi.Test.SecurityHelper do
     {:rand.uniform(254) + 1, :rand.uniform(254) + 1, :rand.uniform(254) + 1, :rand.uniform(254) + 1}
   end
 
-  @doc "Generate a random IP string for ConnectionLimiter (which expects strings)."
-  def random_ip_string do
-    "#{:rand.uniform(254) + 1}.#{:rand.uniform(254) + 1}.#{:rand.uniform(254) + 1}.#{:rand.uniform(254) + 1}"
-  end
+  @doc """
+  Generate a random IP string for ConnectionLimiter (which expects strings).
+
+  Derived from `random_ip/0` through the canonical formatter, so the suite can never grow a second
+  convention for what an address looks like.
+  """
+  def random_ip_string, do: Malachi.IPAddress.format(random_ip())
 
   @doc "Generate N random bytes as a binary."
   def random_binary(size) when size > 0 do
@@ -113,7 +116,4 @@ defmodule Malachi.Test.SecurityHelper do
   def unique_queue_name(prefix \\ "sectest_q") do
     "#{prefix}_#{:erlang.unique_integer([:positive])}"
   end
-
-  @doc "Format IP tuple as string for ConnectionLimiter."
-  def ip_to_string({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
 end

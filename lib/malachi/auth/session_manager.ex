@@ -35,6 +35,7 @@ defmodule Malachi.Auth.SessionManager do
   """
   require Logger
   alias Malachi.I18n
+  alias Malachi.IPAddress
 
   @table_sessions :malachi_sessions
 
@@ -299,7 +300,7 @@ defmodule Malachi.Auth.SessionManager do
       %{
         token_prefix: String.slice(token, 0, 8),
         username: session_data.username,
-        ip: format_ip(session_data.ip),
+        ip: IPAddress.format(session_data.ip),
         created_at: session_data.created_at,
         expires_at: session_data.expires_at,
         last_activity: session_data.last_activity,
@@ -325,10 +326,10 @@ defmodule Malachi.Auth.SessionManager do
     token_prefix = String.slice(token, 0, 8)
 
     Logger.warning(
-      I18n.t(:session_hijack_attempt, username: session_data.username, ip: format_ip(client_ip)),
+      I18n.t(:session_hijack_attempt, username: session_data.username, ip: IPAddress.format(client_ip)),
       username: session_data.username,
-      session_ip: format_ip(session_data.ip),
-      request_ip: format_ip(client_ip),
+      session_ip: IPAddress.format(session_data.ip),
+      request_ip: IPAddress.format(client_ip),
       mismatch: mismatches,
       token_prefix: token_prefix
     )
@@ -339,8 +340,8 @@ defmodule Malachi.Auth.SessionManager do
       "validate_session",
       :failure,
       %{
-        session_ip: format_ip(session_data.ip),
-        request_ip: format_ip(client_ip),
+        session_ip: IPAddress.format(session_data.ip),
+        request_ip: IPAddress.format(client_ip),
         # Which binding(s) differed: [:ip], [:user_agent], or both. A UA-only mismatch has request_ip ==
         # session_ip, so alerting must key off this rather than assuming the IP changed.
         mismatch: mismatches,
@@ -361,7 +362,17 @@ defmodule Malachi.Auth.SessionManager do
     ua_binding = Application.get_env(:malachi, :session_ua_binding, false)
     ip_exempt = Map.get(session_data, :ip_binding_disabled, false)
 
-    ip_mismatch? = ip_binding and not ip_exempt and session_data.ip != client_ip
+    # Both sides are canonicalized before comparison rather than compared raw. The two listeners used to
+    # hand this function different representations of the same address (the TCP acceptor a formatted
+    # binary, the dashboard the tuple straight from :inet.peername/1), so a token minted on one listener
+    # and presented on the other from the same address could never satisfy the binding and was reported
+    # as a hijack attempt. That was a type accident, not a defence, and it polluted the very metric the
+    # moduledoc asks operators to alert on. Canonicalizing here keeps the invariant local instead of
+    # resting on every distant caller agreeing on a type.
+    ip_mismatch? =
+      ip_binding and not ip_exempt and
+        IPAddress.format(session_data.ip) != IPAddress.format(client_ip)
+
     ua_mismatch? = ua_binding and session_data.user_agent != user_agent
 
     [{:ip, ip_mismatch?}, {:user_agent, ua_mismatch?}]
@@ -375,41 +386,20 @@ defmodule Malachi.Auth.SessionManager do
     if Enum.empty?(trusted_ranges) do
       false
     else
-      # Convert the IP tuple to the string form inet_cidr accepts
-      ip_string = format_ip(ip)
-
-      Enum.any?(trusted_ranges, fn range ->
-        try do
-          cidr = InetCidr.parse_cidr!(range, true)
-
-          case parse_ip_address(ip_string) do
-            {:ok, parsed_ip} -> InetCidr.contains?(cidr, parsed_ip)
-            _ -> false
-          end
-        rescue
-          _ ->
-            Logger.warning(I18n.t(:invalid_cidr_range, range: range), range: range)
-            false
-        end
-      end)
+      # The caller may hand either representation (a binary from the TCP acceptor, a tuple from the
+      # dashboard), so parse once here rather than formatting to a string only to read it back.
+      case IPAddress.parse(ip) do
+        {:ok, parsed_ip} -> Enum.any?(trusted_ranges, &in_range?(&1, parsed_ip))
+        :error -> false
+      end
     end
   end
 
-  defp parse_ip_address(ip_string) when is_binary(ip_string) do
-    case :inet.parse_address(String.to_charlist(ip_string)) do
-      {:ok, ip} -> {:ok, ip}
-      {:error, _} -> :error
-    end
+  defp in_range?(range, parsed_ip) do
+    InetCidr.contains?(InetCidr.parse_cidr!(range, true), parsed_ip)
+  rescue
+    _error ->
+      Logger.warning(I18n.t(:invalid_cidr_range, range: range), range: range)
+      false
   end
-
-  defp format_ip(ip) when is_tuple(ip) do
-    case tuple_size(ip) do
-      4 -> :inet.ntoa(ip) |> to_string()
-      8 -> :inet.ntoa(ip) |> to_string()
-      _ -> "invalid"
-    end
-  end
-
-  defp format_ip(ip) when is_binary(ip), do: ip
-  defp format_ip(_), do: "unknown"
 end
