@@ -31,10 +31,12 @@ defmodule Malachi.Cluster.RingBoot do
 
   require Logger
 
-  alias Malachi.Cluster.BootRead
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.RingTopology
   alias Malachi.I18n
+
+  @default_timeout_ms 60_000
+  @default_retry_interval_ms 500
 
   @typedoc "What a single read of the durable store can say."
   @type read :: {:ok, RingTopology.t()} | {:ok, :none} | {:error, term()}
@@ -48,14 +50,44 @@ defmodule Malachi.Cluster.RingBoot do
           {:durable, RingTopology.t()} | {:seed, RingTopology.t()} | :unsharded | {:error, term()}
 
   @doc """
-  Reads the durable ring, retrying while the store is unreachable until `:timeout_ms` elapses.
+  Reads the durable store, retrying while it is unreachable until `:timeout_ms` elapses.
 
-  The wait, and the seams that keep the clock out of a test, are `Malachi.Cluster.BootRead`'s; this is
-  the ring's name for it, kept because the ring's boot is where the retry was first needed and where
-  its timeout knob (`MALACHI_LOG_RING_BOOT_TIMEOUT_MS`) is documented.
+  The retry exists for the ordinary shape of a full-cluster restart: the first node up cannot reach a
+  quorum until a second one joins, and both are in boot at the time. Its Raft server votes as soon as
+  distribution is up, well before the supervision tree finishes, so the wait is normally short.
+
+  A definite answer (a recorded ring, or an affirmation that none exists) returns immediately; only
+  `{:error, _}` is retried, and the **last** error is what comes back on timeout.
+
+  Options: `:timeout_ms` (default `#{@default_timeout_ms}`), `:retry_interval_ms`
+  (default `#{@default_retry_interval_ms}`), and the `:sleep` / `:elapsed_ms` seams tests use to keep
+  the clock out of it.
   """
   @spec read_until((-> read()), keyword()) :: read()
-  def read_until(read_topology, opts \\ []), do: BootRead.until_answered(read_topology, opts)
+  def read_until(read_topology, opts \\ []) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    interval_ms = Keyword.get(opts, :retry_interval_ms, @default_retry_interval_ms)
+    sleep = Keyword.get(opts, :sleep, &Process.sleep/1)
+    started = System.monotonic_time(:millisecond)
+    elapsed = Keyword.get(opts, :elapsed_ms, fn -> System.monotonic_time(:millisecond) - started end)
+
+    retry(read_topology, timeout_ms, interval_ms, sleep, elapsed)
+  end
+
+  defp retry(read_topology, timeout_ms, interval_ms, sleep, elapsed) do
+    case read_topology.() do
+      {:error, _reason} = error ->
+        if elapsed.() >= timeout_ms do
+          error
+        else
+          sleep.(interval_ms)
+          retry(read_topology, timeout_ms, interval_ms, sleep, elapsed)
+        end
+
+      answered ->
+        answered
+    end
+  end
 
   @doc """
   Turns a `read` and the environment's topology (`nil` when `MALACHI_LOG_VNODES` asks for no sharding)
