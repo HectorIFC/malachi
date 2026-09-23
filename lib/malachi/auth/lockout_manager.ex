@@ -32,6 +32,7 @@ defmodule Malachi.Auth.LockoutManager do
   require Logger
   alias Malachi.Auth.LockoutServer
   alias Malachi.I18n
+  alias Malachi.IPAddress
 
   # The dedicated ra cluster's name (formed in Malachi.Application). Reads/writes address the local member.
   @cluster Malachi.LogLockouts
@@ -203,9 +204,9 @@ defmodule Malachi.Auth.LockoutManager do
   defp unlock_one(username, ip) do
     case LockoutServer.unlock_key(server_id(), key(username, ip)) do
       {:ok, :ok} ->
-        Logger.info(I18n.t(:account_unlocked, username: username, ip: format_ip(ip)),
+        Logger.info(I18n.t(:account_unlocked, username: username, ip: IPAddress.format(ip)),
           username: username,
-          ip: format_ip(ip)
+          ip: IPAddress.format(ip)
         )
 
         Malachi.AuditLog.log_event(
@@ -239,7 +240,7 @@ defmodule Malachi.Auth.LockoutManager do
 
     Logger.warning(I18n.t(:account_locked, username: username, time_remaining_ms: duration),
       username: username,
-      ip: format_ip(ip),
+      ip: IPAddress.format(ip),
       attempts: attempt_count,
       duration_ms: duration,
       locked_until: locked_until
@@ -265,18 +266,7 @@ defmodule Malachi.Auth.LockoutManager do
   end
 
   defp server_id, do: {@cluster, node()}
-  defp key(username, ip), do: {username, format_ip(ip)}
+  defp key(username, ip), do: {username, IPAddress.format(ip)}
   defp now, do: System.system_time(:millisecond)
   defp schedule_cleanup, do: Process.send_after(self(), :cleanup, @cleanup_interval_ms)
-
-  defp format_ip(ip) when is_tuple(ip) do
-    case tuple_size(ip) do
-      4 -> :inet.ntoa(ip) |> to_string()
-      8 -> :inet.ntoa(ip) |> to_string()
-      _ -> "invalid"
-    end
-  end
-
-  defp format_ip(ip) when is_binary(ip), do: ip
-  defp format_ip(_), do: "unknown"
 end
