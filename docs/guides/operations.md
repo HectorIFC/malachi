@@ -334,7 +334,9 @@ registered on it since are missing, and their replicas still arrive here over th
 that condition a silence longer than the guards above ends with a live copy deleted.
 
 `report` does everything except the removal, which is how to see the list before trusting it on a
-cluster for the first time. `off` does not even list.
+cluster for the first time. `off` does not even list. A value that is none of the three **stops the
+node at boot** rather than falling back, because the fallback is the mode that deletes and a typo
+would have chosen it in silence.
 
 - **`malachi_retention_orphan_directories_left_total{topic}`**: directories an expire left behind
   because the replica did not answer. It moves whether or not the sweep is on.

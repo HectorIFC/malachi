@@ -116,4 +116,28 @@ defmodule Malachi.ConfigTest do
     assert Application.get_env(:ra, :machine_upgrade_strategy) == :all
     assert :ra_system.default_config().machine_upgrade_strategy == :all
   end
+
+  describe "retention_orphan_sweep/1" do
+    test "an absent or blank value is the documented default" do
+      assert Config.retention_orphan_sweep(nil) == :delete
+      assert Config.retention_orphan_sweep("") == :delete
+      assert Config.retention_orphan_sweep("   ") == :delete
+    end
+
+    test "the three modes are accepted whatever their case and whitespace" do
+      assert Config.retention_orphan_sweep("delete") == :delete
+      assert Config.retention_orphan_sweep("Report") == :report
+      assert Config.retention_orphan_sweep(" OFF ") == :off
+    end
+
+    test "anything else stops the node instead of selecting the mode that deletes" do
+      # The reason this raises where an interval falls back: an operator who typed a mode meant to
+      # choose one, and the value this used to fall back to was the one that removes directories.
+      for bad <- ["reprot", "none", "true", "0"] do
+        assert_raise RuntimeError, ~r/MALACHI_RETENTION_ORPHAN_SWEEP/, fn ->
+          Config.retention_orphan_sweep(bad)
+        end
+      end
+    end
+  end
 end

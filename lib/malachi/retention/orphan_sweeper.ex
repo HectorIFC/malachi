@@ -53,8 +53,10 @@ defmodule Malachi.Retention.OrphanSweeper do
   ## Modes
 
   `:delete` reclaims, `:report` does everything except the removal (for a first run on a cluster whose
-  operator wants to see the list first), and `:off` does not even list. The mode and every bound come
-  from the environment, so each is checked rather than trusted (`Malachi.Config.checked/4`).
+  operator wants to see the list first), and `:off` does not even list. A value that cannot be a mode
+  is refused at boot by `Malachi.Config.retention_orphan_sweep/1` rather than defaulted, because the
+  default is the mode that removes and a typo would have selected it in silence. The bounds come from
+  the environment too, and each is checked rather than trusted (`Malachi.Config.checked/4`).
 
   ## Options
 
@@ -65,7 +67,8 @@ defmodule Malachi.Retention.OrphanSweeper do
     * `:local_ref` - this node's replication server reference, or a `(-> ref)` resolved per pass, as in
       `Malachi.Cluster.Scrubber` (required);
     * `:directory` - the data directory to sweep (required);
-    * `:mode` - `:delete` (default), `:report` or `:off`;
+    * `:mode` - `:delete` (default), `:report` or `:off`. A value outside those three falls back to
+      `:report`, not to the default, since the default removes;
     * `:interval` - ms between passes (default 300_000: a leak accumulates slowly and a pass reads the
       whole directory, so this is deliberately slower than the other workers);
     * `:min_age_ms` - default 600_000;
@@ -144,7 +147,7 @@ defmodule Malachi.Retention.OrphanSweeper do
         # refused at boot by `Malachi.Config.retention_orphan_sweep/1`, so this is the last line for a
         # caller that built its options by hand, and the safe side of a mode is the one that does not
         # remove anything.
-        mode: checked(opts, :mode, :delete, &(&1 in @modes)),
+        mode: checked_mode(opts),
         min_age_ms: checked(opts, :min_age_ms, @default_min_age_ms, &non_neg_integer?/1),
         sightings: checked(opts, :sightings, @default_sightings, &positive_integer?/1),
         max_per_pass: checked(opts, :max_per_pass, @default_max_per_pass, &positive_integer?/1),
@@ -321,6 +324,14 @@ defmodule Malachi.Retention.OrphanSweeper do
     opts |> Keyword.get(key, default) |> Config.checked(:"retention_orphan_#{key}", default, valid?)
   end
 
+  # The absent default and the invalid fallback differ here, and only here. Absent is `:delete`, the
+  # documented default. Invalid falls back to `:report`, because falling back to a mode that removes
+  # is how a value nobody could read would still delete directories.
+  defp checked_mode(opts) do
+    opts
+    |> Keyword.get(:mode, :delete)
+    |> Config.checked(:retention_orphan_sweep, :report, &(&1 in @modes))
+  end
 
   defp non_neg_integer?(value), do: is_integer(value) and value >= 0
   defp positive_integer?(value), do: is_integer(value) and value > 0

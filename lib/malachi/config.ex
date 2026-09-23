@@ -159,4 +159,39 @@ defmodule Malachi.Config do
       default
     end
   end
+
+  @doc """
+  Normalizes the orphan sweep mode taken from `MALACHI_RETENTION_ORPHAN_SWEEP`.
+
+  `nil` or a blank value is `:delete`, the documented default. `delete`, `report` and `off` are
+  accepted whatever their case and surrounding whitespace. Anything else raises.
+
+  Raising rather than falling back is the same rule as `ra_machine_version_pin/1`, and for the same
+  reason: this is a knob whose wrong value is not a lost knob. `checked/4` exists for an interval,
+  where the cost of refusing the value is one cadence; here `MALACHI_RETENTION_ORPHAN_SWEEP=Report`
+  from an operator who meant NOT to delete would have selected the mode that deletes, and said
+  nothing. A node that refuses to start is a problem an operator sees; directories that are gone are
+  not.
+
+  ## Examples
+
+      iex> Malachi.Config.retention_orphan_sweep("  Report ")
+      :report
+
+      iex> Malachi.Config.retention_orphan_sweep(nil)
+      :delete
+
+  """
+  @spec retention_orphan_sweep(String.t() | nil) :: :delete | :report | :off
+  def retention_orphan_sweep(nil), do: :delete
+
+  def retention_orphan_sweep(raw) when is_binary(raw) do
+    case raw |> String.trim() |> String.downcase() do
+      "" -> :delete
+      "delete" -> :delete
+      "report" -> :report
+      "off" -> :off
+      _other -> raise "MALACHI_RETENTION_ORPHAN_SWEEP must be delete, report or off, got: #{inspect(raw)}"
+    end
+  end
 end

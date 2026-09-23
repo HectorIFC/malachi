@@ -1,12 +1,5 @@
 import Config
 
-# What the orphan sweep does with what it finds: act, only list, or not even look.
-orphan_sweep_mode = fn
-  "off" -> :off
-  "report" -> :report
-  _delete_or_absent -> :delete
-end
-
 # Helper function to parse integers with defaults
 parse_int = fn val, default ->
   if val do
@@ -296,7 +289,7 @@ config :malachi,
   # registered looks orphaned), must be unexplained on MALACHI_RETENTION_ORPHAN_SIGHTINGS consecutive
   # passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds the damage if
   # the expected set is ever wrong.
-  retention_orphan_sweep: orphan_sweep_mode.(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
+  retention_orphan_sweep: Malachi.Config.retention_orphan_sweep(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
   retention_orphan_interval_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS"), 300_000),
   retention_orphan_min_age_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_MIN_AGE_MS"), 600_000),
   retention_orphan_sightings: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SIGHTINGS"), 2),

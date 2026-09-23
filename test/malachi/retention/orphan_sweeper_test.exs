@@ -178,9 +178,12 @@ defmodule Malachi.Retention.OrphanSweeperTest do
     test "a bound that cannot be a bound falls back to the default instead of taking the node down", context do
       sweeper = start_sweeper(context, sightings: 0, mode: :sometimes)
 
-      assert OrphanSweeper.mode(sweeper) == :delete
+      # `:report`, not the `:delete` default: the fallback for a mode is the side that removes nothing.
+      # The environment never reaches here with a bad value anyway, since
+      # `Malachi.Config.retention_orphan_sweep/1` refuses one at boot.
+      assert OrphanSweeper.mode(sweeper) == :report
       orphan!(context.directory, "gone-r0-s1")
-      # The default of two sightings applies, so one pass is not enough.
+      # The default of two sightings applies, so one pass is not enough either way.
       assert %{removed: []} = OrphanSweeper.sweep_now(sweeper)
     end
   end
