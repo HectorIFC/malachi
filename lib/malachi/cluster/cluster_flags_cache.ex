@@ -11,8 +11,10 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
 
   ## Why a lagging cache is safe
 
-  Because a flag only ever goes from off to on, and it only goes on once **every** node advertises the
-  capability it names. A node that has not yet noticed a flip keeps to the old behaviour, which every
+  Because a flag only ever goes from off to on here, and it only goes on once **every** node advertises
+  the capability it names. The first half of that is enforced by `adopt/2`, which merges rather than
+  replaces: the replicated set only grows, but a read of a lagging local replica can still answer with
+  fewer flags than a previous read did. A node that has not yet noticed a flip keeps to the old behaviour, which every
   node in the cluster still understands, and a node that has noticed it produces the new behaviour,
   which every node can already handle. Neither direction can surprise a peer. That is the whole
   argument for refreshing on a 30 second tick instead of reading Raft per batch, and it is why
@@ -115,7 +117,12 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
   """
   @spec adopt(ClusterFlags.t(), keyword()) :: :ok
   def adopt(%ClusterFlags{} = flags, opts \\ []) do
-    apply_flags(ClusterFlags.enabled(flags), opts)
+    # Merged with what is already published, never replaced by it. A `:local` read comes from this
+    # node's own replica, which can be behind the leader the first, consistent read went to, so taking
+    # the newer answer at face value would turn an enabled flag off here. The replicated set only ever
+    # grows, so the local view of it must only ever grow too: that is the property everything else
+    # rests on, and this is where it is enforced rather than assumed.
+    apply_flags(Enum.sort(Enum.uniq(ClusterFlags.enabled(flags) ++ enabled())), opts)
   end
 
   @doc """

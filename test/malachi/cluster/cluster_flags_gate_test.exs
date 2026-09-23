@@ -123,6 +123,27 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
       assert ClusterFlagsCache.enabled() == [@cap]
     end
 
+    test "a lagging local read never turns a published flag off" do
+      # The first read is consistent and goes to the leader; a later local read comes from this node's
+      # own replica, which can be behind it. Taking the newer answer at face value would flip a flag
+      # from on to off here, which is the one thing the replicated set cannot do.
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([@cap])} end, advertised: [@cap])
+      assert ClusterFlagsCache.enabled?(@cap)
+
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([])} end, advertised: [@cap])
+
+      assert ClusterFlagsCache.enabled?(@cap)
+      assert ClusterFlagsCache.enabled() == [@cap]
+    end
+
+    test "a lagging read still picks up a flag the node had not seen" do
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([@cap])} end, advertised: [@cap, :compaction])
+
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([:compaction])} end, advertised: [@cap, :compaction])
+
+      assert ClusterFlagsCache.enabled() == [@cap, :compaction]
+    end
+
     test "a new flag reaches the cache" do
       ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([@cap])} end, advertised: [@cap, :compaction])
 
