@@ -79,6 +79,31 @@ defmodule Malachi.Storage.SegmentStore do
   @doc "Flushes, fsyncs, and seals the segment (immutable). Subsequent `append/2` must fail."
   @callback seal(handle()) :: {:ok, handle()} | {:error, term()}
 
+  @doc """
+  Truncates the segment so that `end_offset` becomes the offset after its last record, dropping every
+  record at or above it, and makes the result durable before answering.
+
+  The only callback that destroys committed bytes on purpose, and the only one allowed on a SEALED
+  segment. It exists because a copy can recover holding records past the length the control plane
+  recorded for its segment, and a seal that does not reach the bytes is a seal in name only
+  (`Malachi.Cluster.SealedOverrun`). A sealed segment is immutable in the sense that matters, which is
+  that no new offset is ever issued inside it; bringing a copy DOWN to the recorded length issues
+  nothing and is what makes the record of the seal true.
+
+  Three refusals, none of them optional:
+
+    * an `end_offset` below the segment's base offset answers `{:error, :below_base_offset}`, since a
+      segment cannot hold fewer than zero records and the caller has asked about the wrong segment;
+    * a handle with records still buffered answers `{:error, :pending_records}`, because they describe
+      bytes the file does not have yet and truncating around them is meaningless;
+    * a handle that refuses appends refuses this too, with the same reason, because the bytes it chose
+      to preserve are exactly the ones a truncation would rewrite.
+
+  An `end_offset` at or above the segment's own end is a no-op that answers `{:ok, handle}`: a copy
+  that is short of the recorded length is a different defect, repaired by refetching from a peer.
+  """
+  @callback truncate_to(handle(), end_offset :: non_neg_integer()) :: {:ok, handle()} | {:error, term()}
+
   @doc "The logical offset the next appended record will receive."
   @callback next_offset(handle()) :: non_neg_integer()
 
