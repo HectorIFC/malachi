@@ -43,8 +43,12 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
   the flip itself required every node to advertise the capability.
 
   A store that cannot be read yet (not formed, no quorum, this node still joining) never refuses and
-  never publishes: there is no answer, and treating "I could not ask" as "no flags" is precisely the
-  mistake the durable ring boot exists to avoid.
+  never publishes: there is no answer, and treating a failure to ask as an answer of no is the mistake
+  the durable ring boot exists to avoid. What a node does in the meantime is **start, join and report
+  itself not ready** (`read?/0`), rather than refuse to start. Refusing would deadlock the one case this
+  whole release exists for: the flag store cannot reach a quorum until enough nodes run a build that has
+  its machine module, so the first node of a rolling upgrade would be waiting for a cluster that is
+  waiting for it.
   """
 
   require Logger
@@ -66,6 +70,18 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
   """
   @spec enabled?(ClusterFlags.flag()) :: boolean()
   def enabled?(flag), do: flag in enabled()
+
+  @doc """
+  Whether this node has read the flag store at least once.
+
+  A node that has not is **not ready**: it does not yet know what the cluster has committed to, and `[]`
+  from `enabled/0` would be indistinguishable from an answer. This is deliberately separate from whether
+  the node is up. The flag store cannot reach a quorum until enough nodes run a build that has its
+  machine module, so the first node of a rolling upgrade has to be able to start, join and wait; refusing
+  to boot without the flags would make it wait for a cluster that is waiting for it.
+  """
+  @spec read?() :: boolean()
+  def read?, do: :persistent_term.get(@key, @unread) != @unread
 
   @doc "Every flag this node has seen switched on, sorted. `[]` before the store has been read."
   @spec enabled() :: [ClusterFlags.flag()]
@@ -123,19 +139,6 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
     # grows, so the local view of it must only ever grow too: that is the property everything else
     # rests on, and this is where it is enforced rather than assumed.
     apply_flags(Enum.sort(Enum.uniq(ClusterFlags.enabled(flags) ++ enabled())), opts)
-  end
-
-  @doc """
-  The message for a flag store that could not be read within the boot timeout.
-
-  Deliberately not the refusal of `refuse/3`: that one is exit 78, which says the node cannot run with
-  what it was given and a service manager should stop restarting it. An unreachable store is the
-  opposite, a transient condition that a restart is exactly the right answer to, so it raises and the
-  node dies restartable.
-  """
-  @spec unreadable_message(term(), non_neg_integer()) :: String.t()
-  def unreadable_message(reason, timeout_ms) do
-    I18n.t(:cluster_flags_unreadable, reason: inspect(reason), timeout: timeout_ms)
   end
 
   @doc false

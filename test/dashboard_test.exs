@@ -1,6 +1,8 @@
 defmodule Malachi.DashboardTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Cluster.ClusterFlagsCache
+
   setup do
     # Temporarily disable dashboard auth for these tests
     original_value = Application.get_env(:malachi, :dashboard_auth_enabled)
@@ -202,6 +204,37 @@ defmodule Malachi.DashboardTest do
           assert Process.whereis(Malachi.LogBroker) != nil
           assert String.contains?(response, "HTTP/1.1 200 OK")
           assert String.contains?(response, "\"status\":\"ready\"")
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    test "GET /ready returns 503 while this node has not read the cluster flags" do
+      # The node is up and its broker is healthy; what it does not have is an answer about what the
+      # cluster has committed to. Reporting ready there would put it in rotation before it knows whether
+      # it may serve, and refusing to boot instead would deadlock the first node of a rolling upgrade.
+      port = Application.get_env(:malachi, :dashboard_port, 4041)
+      published = ClusterFlagsCache.enabled()
+      _ = Supervisor.terminate_child(Malachi.Supervisor, Malachi.LogClusterFlagsReconciler)
+      ClusterFlagsCache.forget()
+
+      on_exit(fn ->
+        ClusterFlagsCache.put(published)
+        _ = Supervisor.restart_child(Malachi.Supervisor, Malachi.LogClusterFlagsReconciler)
+      end)
+
+      assert Process.whereis(Malachi.LogBroker) != nil
+      refute ClusterFlagsCache.read?()
+
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+        {:ok, socket} ->
+          :gen_tcp.send(socket, "GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response = read_full_response(socket, "", 5000)
+          :gen_tcp.close(socket)
+
+          assert String.contains?(response, "HTTP/1.1 503 Service Unavailable")
+          assert String.contains?(response, "\"status\":\"not_ready\"")
 
         {:error, _} ->
           :ok

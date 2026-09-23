@@ -16,10 +16,8 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
   import ExUnit.CaptureIO
   import ExUnit.CaptureLog
 
-  alias Malachi.Application, as: App
   alias Malachi.Cluster.ClusterFlags
   alias Malachi.Cluster.ClusterFlagsCache
-  alias Malachi.Cluster.ClusterFlagsServer
 
   @cap :batch_format
   @reconciler Malachi.LogClusterFlagsReconciler
@@ -36,10 +34,6 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
 
     :ok
   end
-
-  # A gate test drives an injected store, so it must not form this node's real one: that would make the
-  # boot evidence below pass because a test ran rather than because the node booted.
-  defp no_start, do: fn -> {:ok, {:not_started, node()}} end
 
   defp store(flags) do
     Enum.reduce(flags, ClusterFlags.new(), fn flag, state ->
@@ -63,97 +57,36 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
 
   defp seen(modes), do: modes |> Agent.get(& &1) |> Enum.reverse()
 
-  describe "ensure_cluster_flags/2" do
-    test "the application's own boot ran it: the store is formed on a running node" do
-      # The suite boots the application once (test_helper.exs). The flag store is formed by
-      # ensure_cluster_flags/2 inside start/2 and by nothing else, so a store that answers on a booted
-      # node is the evidence that the gate ran, and ran before the supervision tree.
-      assert {:ok, flags} = ClusterFlagsServer.read({Malachi.LogClusterFlags, node()}, :consistent)
-      assert ClusterFlags.enabled(flags) == []
-    end
-
-    test "reads the store consistently and publishes before the supervision tree exists" do
-      # The whole point of the gate being here: by the time it answers :ok, this node already knows
-      # which flags are on. A tick that ran alongside the tree would let the acceptor open first.
-      parent = self()
-
-      read = fn mode ->
-        send(parent, {:read, mode})
-        {:ok, store([:batch_format])}
-      end
-
-      assert App.ensure_cluster_flags([node()], start: no_start(), read: read, advertised: [:batch_format]) == :ok
-      assert_received {:read, :consistent}
-      assert ClusterFlagsCache.enabled() == [:batch_format]
-    end
-
-    test "refuses with exit 78 when an enabled flag names a capability this build lacks" do
-      parent = self()
-
-      stderr =
-        capture_io(:stderr, fn ->
-          capture_log(fn ->
-            App.ensure_cluster_flags([node()],
-              start: no_start(),
-              read: fn _mode -> {:ok, store([:batch_format])} end,
-              advertised: [],
-              halt_fun: &send(parent, {:halted, &1})
-            )
-          end)
-        end)
-
-      assert_received {:halted, 78}
-      assert stderr =~ "REFUSING TO START (exit 78):"
-      assert stderr =~ "batch_format"
-    end
-
-    test "retries an unreadable store, then raises rather than assuming no flag is on" do
-      # A read that failed is not an answer. Treating it as one is what lets a node rolled back onto an
-      # older build serve past a flag it cannot honour, which is the failure the gate exists to stop.
-      {:ok, attempts} = Agent.start_link(fn -> 0 end)
-      on_exit(fn -> if Process.alive?(attempts), do: Agent.stop(attempts) end)
-
-      read = fn _mode ->
-        Agent.update(attempts, &(&1 + 1))
-        {:error, :noproc}
-      end
-
-      assert_raise RuntimeError, ~r/could not read the cluster flags/, fn ->
-        App.ensure_cluster_flags([node()], start: no_start(), read: read, timeout_ms: 30, advertised: [])
-      end
-
-      assert Agent.get(attempts, & &1) > 1, "the gate gave up without retrying"
+  describe "read?/0" do
+    test "a node that has not read the store is not ready" do
+      refute ClusterFlagsCache.read?()
       assert ClusterFlagsCache.enabled() == []
     end
 
-    test "a store that answers on a later attempt is adopted, not refused" do
-      {:ok, attempts} = Agent.start_link(fn -> 0 end)
-      on_exit(fn -> if Process.alive?(attempts), do: Agent.stop(attempts) end)
+    test "reading the store, even an empty one, makes the node ready" do
+      # `[]` from enabled/0 has to mean two different things and be told apart: nothing is on, and
+      # nothing has been asked yet. Publishing the empty answer is what marks the node as having asked.
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([])} end, advertised: [])
 
-      read = fn _mode ->
-        if Agent.get_and_update(attempts, &{&1 + 1, &1 + 1}) < 3, do: {:error, :noproc}, else: {:ok, store([])}
-      end
-
-      assert App.ensure_cluster_flags([node()], start: no_start(), read: read, timeout_ms: 5_000, advertised: []) == :ok
+      assert ClusterFlagsCache.read?()
       assert ClusterFlagsCache.enabled() == []
     end
 
-    test "the raise is not exit 78, because an unreachable store is worth restarting for" do
-      # Exit 78 tells a service manager to stop restarting. That is right for a binary that cannot
-      # honour a flag and wrong for a store that is not up yet.
-      parent = self()
+    test "a store it cannot read leaves the node not ready, and it keeps serving nothing" do
+      # This is the case a rolling upgrade spends its first minutes in: the flag store cannot reach a
+      # quorum until a second node runs the new build. The node has to come up and join anyway, because
+      # its own Raft server is what makes that quorum possible, so it stays out of rotation instead.
+      assert ClusterFlagsCache.refresh(read: fn _mode -> {:error, :noproc} end, advertised: []) == :ok
 
-      assert_raise RuntimeError, fn ->
-        App.ensure_cluster_flags([node()],
-          start: no_start(),
-          read: fn _mode -> {:error, :timeout} end,
-          timeout_ms: 20,
-          advertised: [],
-          halt_fun: &send(parent, {:halted, &1})
-        )
-      end
+      refute ClusterFlagsCache.read?()
+    end
 
-      refute_received {:halted, _status}
+    test "a node stays ready once it has read, even if a later read fails" do
+      ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([@cap])} end, advertised: [@cap])
+      ClusterFlagsCache.refresh(read: fn _mode -> {:error, :timeout} end, advertised: [@cap])
+
+      assert ClusterFlagsCache.read?()
+      assert ClusterFlagsCache.enabled() == [@cap]
     end
   end
 

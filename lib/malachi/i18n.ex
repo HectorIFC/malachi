@@ -332,16 +332,6 @@ defmodule Malachi.I18n do
           "it reserves one it can trust on the way back up. Carrying on would serve now and let a " <>
           "future restart resume below what peers remember, where nothing corrects it"
     },
-    cluster_flags_unreadable: %{
-      "pt_BR" =>
-        "não foi possível ler os flags de cluster em %{timeout}ms (%{reason}). Este nó não sobe sem " <>
-          "saber quais features estão ligadas; suba um quórum do cluster ou aumente " <>
-          "MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS",
-      "en_US" =>
-        "could not read the cluster flags within %{timeout}ms (%{reason}). This node does not start " <>
-          "without knowing which features are on; bring up a quorum of the cluster or raise " <>
-          "MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS"
-    },
     cluster_flag_missing_capability: %{
       "pt_BR" =>
         "o cluster ligou %{flags}, que este binário não suporta; ele anuncia %{capabilities}. " <>

@@ -24,7 +24,6 @@ defmodule Malachi.Application do
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
-  alias Malachi.Cluster.BootRead
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.ClusterFlags
   alias Malachi.Cluster.ClusterFlagsCache
@@ -101,11 +100,6 @@ defmodule Malachi.Application do
     # `ra` backs the replicated user store (and, when clustered, the log control plane), so start it before
     # any child that forms an ra cluster: always, including single-node (a 1-member cluster is cheap).
     start_ra!()
-
-    # Before any child that could serve a request: a flag this build cannot honour stops the node here,
-    # and a flag store this node cannot read stops it too. Both have to be decided before the acceptor
-    # opens, not alongside it.
-    :ok = ensure_cluster_flags(configured_nodes())
 
     # Replicated user store: forms the ra user cluster (so Auth can seed into it) + a reconciler for
     # staggered boot. Must precede Auth (which seeds default users on init).
@@ -231,48 +225,18 @@ defmodule Malachi.Application do
     ]
   end
 
-  @doc """
-  The startup gate over the cluster's feature flags: forms the flag store, reads it, and answers `:ok`
-  only once this build is allowed to serve what the cluster has switched on.
-
-  Three outcomes, and they are deliberately different:
-
-    * the store answers and every enabled flag names a capability this build advertises: the flags are
-      adopted and published to the local cache, and the node goes on to build its supervision tree;
-    * the store answers and an enabled flag names a capability this build lacks: the node refuses with
-      exit status 78 through `Malachi.Cluster.ClusterFlagsCache`, the same status an unreadable data
-      directory uses. Restarting will not help; upgrading the binary will;
-    * the store cannot be read within the timeout: the node **raises**, and dies restartable. This is
-      not exit 78: an unreachable store is transient, and a restart is exactly the right answer to it.
-
-  Synchronous, and before the supervision tree, for the reason `ensure_data_format/2` is: a gate that
-  ran alongside the tree would let the acceptor open while the answer was still in flight. And a read
-  that failed must not be taken for an answer, which is the mistake the durable ring boot exists to
-  avoid: a node that cannot see the flags does not know whether it may serve.
-
-  `:start`, `:read`, `:timeout_ms`, `:advertised`, `:adopt` and `:halt_fun` are the seams a test drives
-  it with. `:start` matters as much as `:read`: without it a test would form this node's own flag store
-  as a side effect, and the boot evidence below would then pass because a test ran, not because the node
-  booted.
-  """
-  @spec ensure_cluster_flags([node()], keyword()) :: :ok
-  def ensure_cluster_flags(nodes, opts \\ []) do
-    server_id = {@log_flags, node()}
-    start = Keyword.get(opts, :start, fn -> ClusterFlagsServer.start(@log_flags, nodes) end)
-    read = Keyword.get(opts, :read, &ClusterFlagsServer.read(server_id, &1))
-
-    _ = start.()
-    timeout_ms = Keyword.get(opts, :timeout_ms, Application.get_env(:malachi, :log_flags_boot_timeout_ms, 60_000))
-
-    case BootRead.until_answered(fn -> read.(:consistent) end, timeout_ms: timeout_ms) do
-      {:ok, flags} -> ClusterFlagsCache.adopt(flags, opts)
-      {:error, reason} -> raise ClusterFlagsCache.unreadable_message(reason, timeout_ms)
-    end
+  # Forms the flag store and supervises its reconciler (see `cluster_flags_child/1`). Runs in every mode,
+  # like the user, lockout and ACL stores.
+  #
+  # Nothing here blocks the boot on reading the store. A node that has not read it yet starts, joins, and
+  # reports itself **not ready** until it has (`Malachi.Cluster.ClusterFlagsCache.read?/0`). That is what
+  # lets a rolling upgrade happen at all: the flag store cannot reach a quorum until enough nodes run a
+  # build that has its machine module, so a node that refused to start without it would be waiting for a
+  # cluster that is waiting for it.
+  defp cluster_flags_children(nodes) do
+    _ = ClusterFlagsServer.start(@log_flags, nodes)
+    [cluster_flags_child(nodes)]
   end
-
-  # Supervises the flag store's reconciler (see `cluster_flags_child/1`). The store itself is already
-  # formed and read by `ensure_cluster_flags/2`, before the tree exists.
-  defp cluster_flags_children(nodes), do: [cluster_flags_child(nodes)]
 
   @doc """
   The flag store's reconciler child, which is also its machine-version watcher and the local flag pass.

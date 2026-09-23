@@ -469,23 +469,28 @@ the node is stopped, and copy it along with the data directory if you ever move 
 
 ### What a node does with the flags at boot
 
-Every node reads the flags **before** it opens its listener, for the same reason it reads the ring
-first: a node that cannot see the flags does not know whether it may serve. Three outcomes, and they
-ask for different things from you:
+A node always starts. What waits on the flags is whether it is **ready**, which is what decides if
+traffic is routed to it:
 
-| At boot | What happens | What to do |
+| At boot | `/ready` | What to do |
 | --- | --- | --- |
-| The flags are readable and this build supports every one that is on | The node adopts them and starts | nothing |
-| The flags are readable and one names something this build does not support | Exit **78**, naming the flag | upgrade that node; restarting the old build will not help |
-| The flags cannot be read within `MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS` (default 60000) | The node **does not start**, and exits non-zero but **not** 78 | bring up a quorum of the cluster, or raise the timeout if your nodes boot more than a minute apart |
+| The flags are readable and this build supports every one that is on | 200 | nothing |
+| The flags are readable and one names something this build does not support | the node exits **78**, naming the flag | upgrade that node; restarting the old build will not help |
+| The flags cannot be read yet | 503 `not_ready`, and the node keeps retrying | nothing, if a rolling upgrade or a cluster restart is in progress; otherwise look at why the flag store has no quorum |
 
-The last row is deliberately a normal failure rather than exit 78: an unreachable store is transient
-and restarting is exactly the right answer to it, so a service manager should keep restarting. Exit 78
-is the opposite: it says the node cannot run with the binary it was given.
+**Point the readiness probe at `/ready`**, which the checklist below already asks for. It is what keeps
+a node that does not yet know what the cluster has committed to out of rotation.
 
-Refusing there rather than starting is the point. A node that treated a failed read as
-**no flags are on** would serve with the old behaviour precisely when it most needs not to, which is
-after a rollback onto a build that predates an enabled feature.
+Starting but not serving, rather than refusing to start, is deliberate. The flag store cannot reach a
+quorum until enough nodes run a build that has it, so the first node of a rolling upgrade has to be able
+to come up and join: its own Raft server is part of the quorum the store is waiting for. A node that
+refused to start without the flags would be waiting for a cluster that is waiting for it, and the
+upgrade would stall on its first step.
+
+The protection that matters is not lost by this. A node that cannot honour an enabled flag still exits
+78 the moment it reads one, and a node whose **data directory** was written in a format this binary
+cannot read is stopped earlier and synchronously by the format marker above, which needs no quorum and
+no peers.
 
 A flag flip is also what raises the on-disk format above the baseline, so the rollback floor described
 under [The on-disk format](#the-on-disk-format) moves at that moment and not at any other.
@@ -508,11 +513,10 @@ The checks that catch the common mistakes:
       before the first upgrade, and make your service manager stop restarting on exit status 78.
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
-- [ ] **Your service manager treats exit 78 differently from an ordinary failure.** A node that cannot
-      reach the flag store yet needs the restart; a node whose binary cannot honour an enabled flag needs
-      an upgrade instead, and restarting it only hides that. systemd can stop outright
-      (`RestartPreventExitStatus=78`); Compose cannot tell the two apart, so bound the retries
-      (`restart: on-failure:5`) and alert on exit code 78.
+- [ ] **Your service manager treats exit 78 differently from an ordinary failure.** Exit 78 means the
+      node cannot run with the binary it was given, so restarting it only hides that; an upgrade is what
+      helps. systemd can stop outright (`RestartPreventExitStatus=78`); Compose cannot tell the two
+      apart, so bound the retries (`restart: on-failure:5`) and alert on exit code 78.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).

@@ -13,6 +13,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.AuditLog
   alias Malachi.Auth
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.I18n
   alias Malachi.IPAddress
@@ -873,7 +874,16 @@ defmodule Malachi.Dashboard do
 
   # A short timeout, and a busy broker counts as not ready: a readiness check that blocks on the loop it
   # reports on would hang exactly when the node is under the pressure worth reporting.
+  #
+  # A node that has not read the cluster feature flags is not ready either, however healthy its broker
+  # looks: it does not yet know what the cluster has committed to. That is the whole reason a node no
+  # longer refuses to boot without them. It starts, joins the flag store, and stays out of rotation until
+  # it can answer, which is what lets the first node of a rolling upgrade come up at all.
   defp broker_ready? do
+    ClusterFlagsCache.read?() and broker_metadata_ready?()
+  end
+
+  defp broker_metadata_ready? do
     case Process.whereis(Malachi.LogBroker) do
       nil -> false
       pid -> BrokerServer.metadata_ready?(pid, 1_000)
