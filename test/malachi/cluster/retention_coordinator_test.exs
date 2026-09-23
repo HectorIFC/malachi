@@ -249,10 +249,20 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       end
 
       server = start(policies: policies)
-      assert RetentionCoordinator.run_now(server) == []
+
+      assert capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end) =~
+               "the policy store did not answer"
 
       :counters.put(answer, 1, 1)
       assert RetentionCoordinator.run_now(server) == ["old"]
+
+      # The second outage is the half of the name the test used to leave unchecked. The warning is
+      # silenced after the first line and un-silenced by the sweep that recovered, so without that
+      # reset every later outage passes in silence and nothing here would notice.
+      :counters.put(answer, 1, 0)
+
+      assert capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end) =~
+               "the policy store did not answer"
     end
   end
 
