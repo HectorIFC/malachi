@@ -131,13 +131,20 @@ defmodule Malachi.Cluster.Retention do
   What `effective_retention/5` refuses to expire under the global limits, named so a caller can count
   it. A name that stays unresolved is a misconfiguration (a policy deleted, or a typo in the binding)
   and the disk it holds is invisible otherwise.
+
+  Sorted explicitly, not by accident: `metadata.topics` is a map, and above 32 keys it iterates in hash
+  order rather than key order, so the same set of topics would come back in a different order on a
+  cluster large enough to matter and in a stable one on every cluster small enough to test.
   """
   @spec unresolved_policies(Metadata.t(), %{Metadata.policy_name() => Policy.t()}) :: [Metadata.topic_name()]
   def unresolved_policies(%Metadata{} = metadata, policies) do
-    for {topic, _meta} <- metadata.topics,
-        name = Metadata.topic_policy_name(metadata, topic),
-        name != nil and not Map.has_key?(policies, name),
-        do: topic
+    unresolved =
+      for {topic, _meta} <- metadata.topics,
+          name = Metadata.topic_policy_name(metadata, topic),
+          name != nil and not Map.has_key?(policies, name),
+          do: topic
+
+    Enum.sort(unresolved)
   end
 
   defp expired_by_age(_segments, _now_ms, nil), do: []

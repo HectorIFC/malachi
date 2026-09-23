@@ -146,6 +146,25 @@ defmodule Malachi.Cluster.RetentionTest do
       assert Retention.unresolved_policies(metadata, %{}) == ["t"]
       assert Retention.unresolved_policies(metadata, %{"p" => %{}}) == []
     end
+
+    test "unresolved_policies/2 sorts, which only shows above the 32 keys a map holds in key order" do
+      # The topic map iterates in key order while it is a flatmap and in hash order once it grows past
+      # 32 keys, so a comprehension over it reads as sorted on every cluster small enough to appear in
+      # a test and unsorted on a real one. Forty topics is the smallest round number past that line.
+      names = for i <- 0..39, do: "t#{String.pad_leading(to_string(i), 2, "0")}"
+
+      metadata =
+        Enum.reduce(names, Metadata.new(), fn topic, metadata ->
+          {metadata, {:ok, _root}} = Metadata.apply(metadata, {:create_topic, topic, 4})
+          {metadata, :ok} = Metadata.apply(metadata, {:set_topic_policy, topic, "p"})
+          metadata
+        end)
+
+      unresolved = Retention.unresolved_policies(metadata, %{})
+
+      assert unresolved == Enum.sort(unresolved), "the order a caller gets must not depend on hashing"
+      assert unresolved == names
+    end
   end
 
   describe "reply_label/1 (what an expire answered, as a bounded label)" do
