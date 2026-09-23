@@ -452,6 +452,41 @@ Two things follow from a flag being permanent:
   the flag and what the build advertises. In practice that means a node brought back on a build from
   before the feature: upgrade it rather than trying to start it again.
 
+### Why a node remembers its own incarnation
+
+Each node keeps one number in `malachi.incarnation`, at the root of the log data directory beside
+`malachi.format`. It is how a restarted node outranks what its peers still remember about it.
+
+Membership gossip resolves conflicting news about a member by that number, and a member is the only one
+who raises its own. A node that came back counting from scratch would announce itself below what its
+peers hold, every peer would ignore the announcement, and they would keep the **attributes** they had,
+including the capability list. A node brought back on an older build would then still be counted as
+supporting a feature it no longer does.
+
+Nothing is asked of you for this. It matters only when it goes wrong: if the file cannot be written the
+node logs a warning and starts anyway, and the line says what the consequence is. Do not delete it while
+the node is stopped, and copy it along with the data directory if you ever move one.
+
+### What a node does with the flags at boot
+
+Every node reads the flags **before** it opens its listener, for the same reason it reads the ring
+first: a node that cannot see the flags does not know whether it may serve. Three outcomes, and they
+ask for different things from you:
+
+| At boot | What happens | What to do |
+| --- | --- | --- |
+| The flags are readable and this build supports every one that is on | The node adopts them and starts | nothing |
+| The flags are readable and one names something this build does not support | Exit **78**, naming the flag | upgrade that node; restarting the old build will not help |
+| The flags cannot be read within `MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS` (default 60000) | The node **does not start**, and exits non-zero but **not** 78 | bring up a quorum of the cluster, or raise the timeout if your nodes boot more than a minute apart |
+
+The last row is deliberately a normal failure rather than exit 78: an unreachable store is transient
+and restarting is exactly the right answer to it, so a service manager should keep restarting. Exit 78
+is the opposite: it says the node cannot run with the binary it was given.
+
+Refusing there rather than starting is the point. A node that treated a failed read as
+**no flags are on** would serve with the old behaviour precisely when it most needs not to, which is
+after a rollback onto a build that predates an enabled feature.
+
 A flag flip is also what raises the on-disk format above the baseline, so the rollback floor described
 under [The on-disk format](#the-on-disk-format) moves at that moment and not at any other.
 
@@ -473,6 +508,9 @@ The checks that catch the common mistakes:
       before the first upgrade, and make your service manager stop restarting on exit status 78.
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
+- [ ] **Your service manager restarts on a normal failure and not on exit 78.** A node that cannot reach
+      the flag store yet needs the restart; a node whose binary cannot honour an enabled flag needs an
+      upgrade instead, and restarting it only hides that.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).
