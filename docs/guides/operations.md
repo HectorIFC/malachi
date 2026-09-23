@@ -463,9 +463,15 @@ peers hold, every peer would ignore the announcement, and they would keep the **
 including the capability list. A node brought back on an older build would then still be counted as
 supporting a feature it no longer does.
 
-Nothing is asked of you for this. It matters only when it goes wrong: if the file cannot be written the
-node logs a warning and starts anyway, and the line says what the consequence is. Do not delete it while
-the node is stopped, and copy it along with the data directory if you ever move one.
+Nothing is asked of you for this. It matters only when it goes wrong: **a node whose incarnation cannot
+be reserved does not start**, and one that later cannot record a new ceiling stops itself so it can
+reserve a fresh one on the way back up. Both say so on one line. Starting anyway would be worse than not
+starting, because the node would be ignored by its peers with no way back: they would keep the record
+they have, and since the node answers their pings they never suspect it, so nothing ever provokes the
+refutation that would lift it.
+
+Do not delete the file while the node is stopped, and copy it along with the data directory if you ever
+move one.
 
 ### What a node does with the flags at boot
 
