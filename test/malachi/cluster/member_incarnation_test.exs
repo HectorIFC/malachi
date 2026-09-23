@@ -50,7 +50,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
       assert MemberIncarnation.read(dir) == {:ok, 68}
     end
 
-    test "answers the error rather than raising, so a membership server keeps serving" do
+    test "answers the error rather than raising, leaving the caller to decide what it means" do
       assert {:error, _reason} = MemberIncarnation.extend("/nonexistent/malachi/#{System.unique_integer()}", 1)
     end
   end

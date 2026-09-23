@@ -83,9 +83,11 @@ defmodule Malachi.Cluster.MemberIncarnation do
   @doc """
   Records a ceiling a block above `incarnation`, for a node that has used up the block it reserved.
 
-  Answers the new ceiling, or `{:error, reason}`. The caller keeps serving either way: a ceiling that
-  could not be written costs a future restart one round of being ignored, which is strictly less bad
-  than a membership server that stops to retry a disk.
+  Answers the new ceiling, or `{:error, reason}`. This module only reports the failure; what to do about
+  it belongs to the caller, and `Malachi.Cluster.MembershipServer` stops the node so it comes back and
+  reserves a block it can trust. Carrying on would leave it announcing numbers above the last one on
+  disk, and its next restart would then resume below what peers remember, where nothing corrects it: see
+  the moduledoc.
   """
   @spec extend(Path.t(), pos_integer(), pos_integer()) :: {:ok, pos_integer()} | {:error, term()}
   def extend(dir, incarnation, block \\ @block) do
