@@ -508,9 +508,11 @@ The checks that catch the common mistakes:
       before the first upgrade, and make your service manager stop restarting on exit status 78.
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
-- [ ] **Your service manager restarts on a normal failure and not on exit 78.** A node that cannot reach
-      the flag store yet needs the restart; a node whose binary cannot honour an enabled flag needs an
-      upgrade instead, and restarting it only hides that.
+- [ ] **Your service manager treats exit 78 differently from an ordinary failure.** A node that cannot
+      reach the flag store yet needs the restart; a node whose binary cannot honour an enabled flag needs
+      an upgrade instead, and restarting it only hides that. systemd can stop outright
+      (`RestartPreventExitStatus=78`); Compose cannot tell the two apart, so bound the retries
+      (`restart: on-failure:5`) and alert on exit code 78.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).
