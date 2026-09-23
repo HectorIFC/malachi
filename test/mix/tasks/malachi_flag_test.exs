@@ -134,6 +134,14 @@ defmodule Mix.Tasks.Malachi.FlagTest do
       refute_received {:called, _module, _fun, _args}
     end
 
+    test "--list together with enable is refused rather than resolved in favour of the enable" do
+      # A read switch and an irreversible write in one invocation. Falling through to the write would
+      # switch a flag on because of a switch the operator meant as a read.
+      assert {:error, msg} = Flag.execute(["enable", "batch_format"], [list: true], recording_call({:ok, :ok}))
+      assert msg =~ "usage:"
+      refute_received {:called, _module, _fun, _args}
+    end
+
     test "enable without a name returns usage" do
       assert {:error, msg} = Flag.execute(["enable"], [], recording_call({:ok, :ok}))
       assert msg =~ "usage:"

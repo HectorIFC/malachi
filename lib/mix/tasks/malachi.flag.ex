@@ -67,8 +67,15 @@ defmodule Mix.Tasks.Malachi.Flag do
     if opts[:list], do: list(call), else: {:error, usage()}
   end
 
-  def execute(["enable", name], _opts, call) do
-    finish(call.(Malachi.Application, :enable_cluster_flag, [name]), "cluster flag enabled: #{name}")
+  def execute(["enable", name], opts, call) do
+    # `--list` and `enable` are two different commands, and the invocation asks for both. Resolving it
+    # in favour of `enable` would switch a flag on because of a switch the operator meant as a read,
+    # and a flag is never switched back off, so it is refused before the RPC instead.
+    if opts[:list] do
+      {:error, usage()}
+    else
+      finish(call.(Malachi.Application, :enable_cluster_flag, [name]), "cluster flag enabled: #{name}")
+    end
   end
 
   def execute(_args, _opts, _call), do: {:error, usage()}
