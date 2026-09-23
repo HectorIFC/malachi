@@ -215,8 +215,21 @@ defmodule Malachi.Cluster.Scrubber do
 
   defp run(state) do
     state = %{state | resolved_ref: resolve_ref(state.local_ref)}
-    {segments, state} = take_segments(state)
 
+    case take_segments(state) do
+      {:error, reason} -> {skipped_result(reason), state}
+      {segments, state} -> scrub_batch(segments, state)
+    end
+  end
+
+  # A pass that could not read the metadata is a pass that did not happen: reported, not crashed. The
+  # cycle position and the damaged set are worth more than the tick (see `PeriodicWorker.ask/1`).
+  defp skipped_result(reason) do
+    Logger.warning(I18n.t(:scrub_metadata_unavailable, reason: inspect(reason)))
+    %{empty_result() | unrepairable: [{:metadata, reason}]}
+  end
+
+  defp scrub_batch(segments, state) do
     {failed, state} =
       case latched(state.resolved_ref, Enum.map(segments, & &1.id)) do
         {:ok, failed} -> {failed, %{state | latches_unknown?: false}}
@@ -243,8 +256,9 @@ defmodule Malachi.Cluster.Scrubber do
   # and deleted ones drop out of it.
   defp take_segments(%{pending: []} = state) do
     case sealed_segments_here(state) do
-      [] -> {[], state}
-      segments -> take_segments(%{state | pending: segments})
+      {:error, reason} -> {:error, reason}
+      {:ok, []} -> {[], state}
+      {:ok, segments} -> take_segments(%{state | pending: segments})
     end
   end
 
@@ -254,10 +268,15 @@ defmodule Malachi.Cluster.Scrubber do
   end
 
   defp sealed_segments_here(state) do
-    state.metadata_source.().segments
-    |> Map.values()
-    |> Enum.filter(&(&1.state == :sealed and state.resolved_ref in &1.replica_set))
-    |> Enum.sort_by(& &1.id)
+    with {:ok, metadata} <- PeriodicWorker.ask(state.metadata_source) do
+      sealed =
+        metadata.segments
+        |> Map.values()
+        |> Enum.filter(&(&1.state == :sealed and state.resolved_ref in &1.replica_set))
+        |> Enum.sort_by(& &1.id)
+
+      {:ok, sealed}
+    end
   end
 
   defp scrub_segment(segment, acc, state) do

@@ -252,6 +252,36 @@ defmodule Malachi.Retention.OrphanSweeperTest do
     refute capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ "waiting for metadata"
   end
 
+  test "a broker that cannot answer skips the pass instead of taking the sweeper down", context do
+    # Measured on the reshard drill: a sharded control plane comes back from a full-cluster restart
+    # healthy but unable to serve metadata (#136), and the scrubber died once per tick for as long as
+    # that lasted. A worker that cannot read the state authorizing it to act must not act, and must
+    # not die either: the next pass asks again.
+    orphan!(context.directory, "gone-r0-s1")
+    gone = spawn(fn -> :ok end)
+    ref = Process.monitor(gone)
+    assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+
+    sweeper = start_sweeper(context, metadata_ready?: fn -> GenServer.call(gone, :metadata_ready?) end)
+
+    assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+    assert Process.alive?(sweeper)
+    assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+  end
+
+  test "a broker that answers ready and then stops answering also skips the pass", context do
+    orphan!(context.directory, "gone-r0-s1")
+    gone = spawn(fn -> :ok end)
+    ref = Process.monitor(gone)
+    assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+
+    sweeper = start_sweeper(context, metadata_source: fn -> GenServer.call(gone, :metadata) end)
+
+    assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+    assert Process.alive?(sweeper)
+    assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+  end
+
   test "a data directory it cannot read is reported, not guessed at", context do
     not_a_directory = Path.join(context.directory, "a_file")
     File.write!(not_a_directory, "")

@@ -28,6 +28,10 @@ defmodule Malachi.Retention.OrphanSweeper do
 
   Deleting data is the one thing here that cannot be undone, so the pass gives up rather than guesses:
 
+    * **A broker that answers.** Both questions this pass asks the broker go through
+      `Malachi.Cluster.PeriodicWorker.ask/1`: one that cannot answer skips the pass rather than taking
+      the worker down with it, which is the same rule as the guards below, applied to the act of
+      asking. A sharded control plane coming back from a full-cluster restart is the measured case.
     * **Metadata ready.** `Malachi.BrokerServer.metadata_ready?/2` says every vnode has been read at
       least once since boot. Until then a silent vnode is an empty placeholder in the cache and every
       directory it owns looks unexplained. After it, a vnode that goes silent keeps the view it had
@@ -92,7 +96,7 @@ defmodule Malachi.Retention.OrphanSweeper do
           removed: [String.t()],
           held: [String.t()],
           failed: [{String.t(), term()}],
-          skipped: nil | :off | :metadata_not_ready | {:unreadable, term()}
+          skipped: nil | :off | :metadata_not_ready | {:unreadable, term()} | {:unreachable, term()}
         }
 
   @doc "Starts the sweeper. See the module doc for options."
@@ -161,10 +165,10 @@ defmodule Malachi.Retention.OrphanSweeper do
   defp run(%{mode: :off} = state), do: report(skipped(:off), state)
 
   defp run(state) do
-    if state.metadata_ready?.() do
-      sweep(%{state | waiting?: false})
-    else
-      report(skipped(:metadata_not_ready), announce_waiting(state))
+    case PeriodicWorker.ask(state.metadata_ready?) do
+      {:ok, true} -> sweep(%{state | waiting?: false})
+      {:ok, false} -> report(skipped(:metadata_not_ready), announce_waiting(state))
+      {:error, reason} -> report(skipped({:unreachable, reason}), state)
     end
   end
 
@@ -176,8 +180,13 @@ defmodule Malachi.Retention.OrphanSweeper do
   end
 
   defp act(state, entries) do
-    expected = Orphans.expected(state.metadata_source.(), state.directory)
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> act(state, entries, Orphans.expected(metadata, state.directory))
+      {:error, reason} -> report(skipped({:unreachable, reason}), state)
+    end
+  end
 
+  defp act(state, entries, expected) do
     review =
       Orphans.review(expected, entries, state.seen,
         min_age_ms: state.min_age_ms,

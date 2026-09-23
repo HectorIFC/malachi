@@ -104,6 +104,29 @@ defmodule Malachi.Cluster.PeriodicWorker do
     {:noreply, state}
   end
 
+  @doc """
+  Runs `fun` and catches an exit into `{:error, reason}`.
+
+  What a background worker needs around every call it makes to another process it does not own. These
+  workers ask the broker for metadata on every tick, and that is a plain `GenServer.call`: a broker
+  that is restarting, wedged or simply slower than the timeout exits the CALLER, which takes the
+  worker down with whatever that pass had accumulated. The supervisor restarts it, so the damage is
+  one lost pass rather than a lost node, but a worker that dies on every tick reports nothing and
+  loses its cycle position each time, and the log fills with a crash that says nothing an operator can
+  act on beyond what the broker is already saying about itself.
+
+  Skipping the pass is also the safe half of the sweep rule the two of them share: a worker that
+  cannot read the state authorizing it to act must not act. Measured on the reshard drill, where a
+  sharded control plane comes back from a full-cluster restart healthy but unable to serve metadata
+  (see #136): six scrubber crashes in one run, one per tick, for as long as that lasted.
+  """
+  @spec ask((-> result)) :: {:ok, result} | {:error, term()} when result: term()
+  def ask(fun) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
   @doc "The reply and state for a call this worker does not implement."
   @spec unknown_call(t(), term()) :: {:reply, term(), t()}
   def unknown_call(state, message) do

@@ -381,6 +381,10 @@ defmodule Malachi.I18n do
         "%{server} process has logged %{limit} unexpected message shapes; further ones are only counted " <>
           "in malachi_unexpected_messages_total"
     },
+    scrub_metadata_unavailable: %{
+      "pt_BR" => "⚠️ scrub pulou a passada: o plano de controle não respondeu (%{reason}); a próxima tenta de novo",
+      "en_US" => "⚠️ the scrub skipped the pass: the control plane did not answer (%{reason}); the next one tries again"
+    },
     scrub_segment_damaged: %{
       "pt_BR" => "scrub encontrou %{segment_id} danificado (%{reason} no byte %{position})%{outcome}",
       "en_US" => "scrub found %{segment_id} damaged (%{reason} at byte %{position})%{outcome}"
