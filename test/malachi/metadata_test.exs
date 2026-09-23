@@ -390,6 +390,28 @@ defmodule Malachi.MetadataTest do
       assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, "p", :not_a_map})
     end
 
+    test "define_policy rejects a policy whose contents would silently never fire" do
+      state = Metadata.new()
+
+      # A bound the retention rule compares with `>`: against a binary that comparison never matches,
+      # so the policy would be stored, read back and do nothing forever.
+      assert {^state, {:error, :invalid_policy}} =
+               Metadata.apply(state, {:define_policy, "p", %{retention: %{max_bytes: "10GB"}}})
+
+      assert {^state, {:error, :invalid_policy}} =
+               Metadata.apply(state, {:define_policy, "p", %{retention: %{max_age_ms: -1}}})
+
+      # A plausible typo for `:retention`, which would be kept and never read.
+      assert {^state, {:error, :invalid_policy}} =
+               Metadata.apply(state, {:define_policy, "p", %{retention_ms: 1_000}})
+
+      assert {^state, {:error, :invalid_policy}} =
+               Metadata.apply(state, {:define_policy, "p", %{retention: :always}})
+
+      # `nil` stays valid: it is how a policy turns one of the two rules off.
+      assert {_state, :ok} = Metadata.apply(state, {:define_policy, "p", %{retention: %{max_bytes: nil}}})
+    end
+
     test "set_topic_policy associates a policy with a topic; topic_policy resolves it; nil detaches" do
       {state, _root} = create_topic()
       {state, :ok} = apply!(state, {:define_policy, "durable", %{retention: %{max_bytes: 500}}})

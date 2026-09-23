@@ -25,6 +25,7 @@ defmodule Malachi.Metadata do
   # We define apply/2 (the Raft-style transition function), which shadows Kernel.apply/2.
   import Kernel, except: [apply: 2]
 
+  alias Malachi.Cluster.Policy
   alias Malachi.Keyspace
 
   @type topic_name :: String.t()
@@ -83,19 +84,11 @@ defmodule Malachi.Metadata do
   @typedoc "Identifies a consumer group's position for a topic."
   @type group_topic :: {group(), topic_name()}
 
-  @type policy_name :: String.t()
+  @typedoc "A policy's name. The shape it names lives in `Malachi.Cluster.Policy`."
+  @type policy_name :: Policy.name()
 
-  @typedoc """
-  A named storage policy: per-topic retention overrides and a placement spread attribute. Both keys
-  are optional; a policy applies only the ones it sets, falling back to the global defaults otherwise.
-  """
-  @type policy :: %{
-          optional(:retention) => %{
-            optional(:max_age_ms) => non_neg_integer() | nil,
-            optional(:max_bytes) => non_neg_integer() | nil
-          },
-          optional(:spread_by) => term() | nil
-        }
+  @typedoc "A named storage policy (see `Malachi.Cluster.Policy`)."
+  @type policy :: Policy.t()
 
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
@@ -455,7 +448,14 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
-    if is_binary(name) and name != "" and is_map(policy) do
+    # The contents are checked, not just the shape: a policy whose `max_bytes` is a binary is accepted
+    # by `is_map/1` and then never fires, because `Malachi.Cluster.Retention` compares it with `>`.
+    #
+    # Tightening what an existing command accepts changes what a replay of the Raft log produces, which
+    # is normally a reason not to do it. It is safe here and only here: nothing in `lib/` emits
+    # `:define_policy` yet (the commands exist and nothing reaches them, which is what #185 is about),
+    # so no log in the field contains one. Once a caller exists, this rule can only be widened.
+    if Policy.valid_name?(name) and Policy.valid?(policy) do
       {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
     else
       {state, {:error, :invalid_policy}}
