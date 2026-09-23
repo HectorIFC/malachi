@@ -252,9 +252,10 @@ MALACHI_RETENTION_MAX_BYTES=10737418240    # 10 GiB per range
 MALACHI_RETENTION_INTERVAL_MS=60000
 ```
 
-**Leave a limit unset to disable it.** With both unset, segments are kept forever and no retention
-coordinator starts at all. Do not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and
-it expires every sealed segment it can.
+**Leave a limit unset to disable it.** With both unset, segments are kept forever unless a topic's own
+storage policy says otherwise: the sweep runs either way, and with no bound anywhere it does nothing. Do
+not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and it expires every sealed
+segment it can.
 
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.

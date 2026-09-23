@@ -576,9 +576,11 @@ defmodule Malachi.Application do
      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end}
   end
 
-  defp retention_children(cluster) do
-    if retention_configured?(), do: [retention_child(cluster)], else: []
-  end
+  # Started whatever the environment says. Retention used to be gated on the two global limits being set,
+  # which is not where a policy can be: with both unset, the default, no coordinator existed at all and a
+  # per-topic policy was inert. A sweep with no bound anywhere is a pure no-op (`Retention.expired/4`
+  # answers `[]` for a `nil` bound), so the gate only ever cost the policies it hid.
+  defp retention_children(cluster), do: [retention_child(cluster)]
 
   defp retention_child(cluster) do
     opts =
@@ -643,8 +645,6 @@ defmodule Malachi.Application do
       max_bytes: Application.get_env(:malachi, :retention_max_bytes)
     }
   end
-
-  defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes, topology) do
     opts =
@@ -951,11 +951,9 @@ defmodule Malachi.Application do
 
   # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
   # restarted without the manager losing its handle), returning that supervisor's pid: the handle the
-  # manager stops the vnode by. Heal + the group coordinator always; retention only when a policy is set.
+  # manager stops the vnode by.
   defp start_vnode_coordinators(vnode_id) do
-    children =
-      [heal_vnode_child(vnode_id), group_coordinator_vnode_child(vnode_id)] ++
-        if retention_configured?(), do: [retention_vnode_child(vnode_id)], else: []
+    children = [heal_vnode_child(vnode_id), group_coordinator_vnode_child(vnode_id), retention_vnode_child(vnode_id)]
 
     spec = %{
       id: {Malachi.LogVnodeCoordinators, vnode_id},
