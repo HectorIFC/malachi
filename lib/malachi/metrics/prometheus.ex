@@ -131,6 +131,13 @@ defmodule Malachi.Metrics.Prometheus do
         ]
       ),
       metric(
+        "malachi_broker_reconcile_degraded_total",
+        :counter,
+        "Ticks on which the broker's control plane reconcile did not complete (the node keeps serving " <>
+          "from the view it holds, which goes stale: a rising total means the control plane is not answering)",
+        for(%{reason: reason, count: count} <- ops.reconcile_degraded, do: {[reason: to_string(reason)], count})
+      ),
+      metric(
         "malachi_unexpected_messages_total",
         :counter,
         "Messages a long-lived server had no clause for and dropped (or answered unknown_call) instead of " <>

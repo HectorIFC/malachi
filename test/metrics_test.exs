@@ -154,4 +154,30 @@ defmodule Malachi.MetricsTest do
       :timer.sleep(1500)
     end
   end
+
+  describe "record_reconcile_degraded/2" do
+    test "counts each reason under its own key and folds an unknown one into :other" do
+      # The exported label set has to stay closed, or a caller that invents a reason grows the
+      # cardinality of a series operators alert on.
+      before = degraded_counts()
+
+      :ok = Malachi.Metrics.record_reconcile_degraded(:skipped)
+      :ok = Malachi.Metrics.record_reconcile_degraded(:down, 2)
+      :ok = Malachi.Metrics.record_reconcile_degraded(:timeout)
+      :ok = Malachi.Metrics.record_reconcile_degraded(:something_new)
+
+      now = degraded_counts()
+
+      assert now.skipped - before.skipped == 1
+      assert now.down - before.down == 2
+      assert now.timeout - before.timeout == 1
+      assert now.other - before.other == 1
+      assert Map.keys(now) |> Enum.sort() == [:down, :other, :skipped, :timeout]
+    end
+
+    defp degraded_counts do
+      Malachi.Metrics.get_system_metrics().operations.reconcile_degraded
+      |> Map.new(fn %{reason: reason, count: count} -> {reason, count} end)
+    end
+  end
 end

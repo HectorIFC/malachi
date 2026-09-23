@@ -53,6 +53,12 @@ defmodule Malachi.Test.MetricsFixtures do
         scrub_segments_unrepairable: 2,
         orphaned_fences: 3,
         fences_reconciled: 2,
+        reconcile_degraded: [
+          %{reason: :skipped, count: 4},
+          %{reason: :down, count: 0},
+          %{reason: :timeout, count: 1},
+          %{reason: :other, count: 0}
+        ],
         unexpected_messages: [
           %{server: :replication, kind: :cast, count: 5},
           %{server: :membership, kind: :info, count: 0},

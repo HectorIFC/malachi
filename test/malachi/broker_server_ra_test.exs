@@ -2,6 +2,7 @@ defmodule Malachi.BrokerServerRaTest do
   # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import Malachi.Test.TeardownHelper
 
   alias Malachi.BrokerServer
@@ -13,6 +14,8 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Storage.Layout
   alias Malachi.Test.AliveMembersStub
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.SilentRaMember
+  alias Malachi.Test.UnknownMessages
 
   setup_all do
     :ok
@@ -285,6 +288,298 @@ defmodule Malachi.BrokerServerRaTest do
     refute BrokerServer.metadata_ready?(control)
 
     :ok = BrokerServer.stop(control)
+  end
+
+  # --- #178: the reconcile must not stall the clients of the vnodes that do answer ---
+
+  # A live vnode and a silent one at opposite ends of the ring, with the bootstrap step off so nothing
+  # tries to form the silent one's cluster underneath the assertions. Names split between the two by
+  # hash, exactly as in the "never answered" test above.
+  defp live_and_silent_vnodes(read_timeout, opts \\ []) do
+    suffix = System.unique_integer([:positive])
+    live = :"bs_live_#{suffix}"
+    silent = :"bs_mute_#{suffix}"
+
+    {:ok, _server_id} = MetadataServer.start(live, [node()])
+    on_exit(fn -> MetadataServer.delete(live) end)
+
+    # A vnode whose name is not registered at all fails its read at once (noproc), so a test that wants
+    # a cheap boot and an expensive tick registers the silent member only after the broker is up.
+    {silent_at_boot?, opts} = Keyword.pop(opts, :silent_at_boot, true)
+    if silent_at_boot?, do: start_silent(silent)
+
+    vnodes = [{live, 0, [node()]}, {silent, div(Integer.pow(2, 32), 2), [node()]}]
+
+    broker_opts =
+      Keyword.merge(
+        [
+          brokers: [start_replication()],
+          metadata_vnodes: vnodes,
+          bootstrap_orchestrator: fn -> false end,
+          reconcile_read_timeout: read_timeout
+        ],
+        opts
+      )
+
+    {silent, broker_opts}
+  end
+
+  # `start_link/2` returns once `init/1` has, while the boot `handle_continue` still has a reconcile to
+  # run on the loop. Any call queues behind it, so this is how a test knows boot is over before it makes
+  # the control plane slow: otherwise the boot pass itself pays the new cost and eats the assertion's
+  # window, which passed in isolation and failed behind fifteen other tests.
+  defp await_boot(server), do: BrokerServer.metadata(server)
+
+  defp start_silent(name) do
+    {:ok, _pid} = SilentRaMember.start_link(name)
+    on_exit(fn -> SilentRaMember.stop(name) end)
+    :ok
+  end
+
+  # Forwards every `[:malachi, :cluster, :reconcile_degraded]` reason to the test as `{:degraded, r}`.
+  defp watch_degraded do
+    handler_id = {__MODULE__, make_ref()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:malachi, :cluster, :reconcile_degraded],
+        fn _event, _measurements, %{reason: reason}, _config -> send(test_pid, {:degraded, reason}) end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok
+  end
+
+  test "a vnode that answers nothing does not stall the clients of the vnode that does" do
+    # The defect. The reconcile used to make its control plane reads INSIDE this server's loop, so
+    # while one vnode swallowed a query every client call on the node queued behind it: up to ra's 5s
+    # per silent vnode, every tick. The node held a view it could serve from and did not answer.
+    #
+    # The tick is 50ms here, so on the old code the loop was blocked essentially continuously: each
+    # pass rescheduled before it blocked, so the next `:reconcile` was already in the mailbox when the
+    # previous one gave up. A consume issued at any moment waited seconds.
+    {_silent, opts} = live_and_silent_vnodes(1_000, brokers_refresh_interval: 50)
+    {:ok, control} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(control) end)
+
+    # Let a few ticks go by, so the assertion lands while a reconcile is in flight rather than before
+    # the first one started.
+    Process.sleep(200)
+
+    task = Task.async(fn -> for i <- 0..19, do: BrokerServer.consume(control, "stall_t#{i}", %{}, 100, 0) end)
+    results = Task.await(task, 1_000)
+
+    # Half the names route to the silent vnode and must still be refused rather than reported drained:
+    # moving the reconcile off the loop changes WHEN the node answers, never WHAT it answers.
+    assert Enum.any?(results, &match?({:error, :metadata_unavailable}, &1)),
+           "topics on the silent vnode must still be refused"
+
+    assert Enum.any?(results, &match?({[], _positions, []}, &1)),
+           "topics on the live vnode must still be served"
+  end
+
+  test "boot does not wait out the control plane either" do
+    # `init/1` snapshots the vnodes and `handle_continue` reconciles once more before the first client
+    # call is served, both on this loop. Read sequentially at ra's default that was 5s per silent vnode
+    # in each of them; bounded and concurrent it is one short read. Readiness still has to be answerable
+    # by the time the first call is: that is what the continue is for, and why it stays on the loop.
+    {_silent, opts} = live_and_silent_vnodes(500)
+
+    {elapsed_us, control} =
+      :timer.tc(fn ->
+        {:ok, control} = BrokerServer.start_link("unused", opts)
+        # Queued behind the boot `handle_continue`, so this answers only once that reconcile landed.
+        _ = BrokerServer.metadata(control)
+        control
+      end)
+
+    on_exit(fn -> stop_quietly(control) end)
+
+    assert elapsed_us < 4_000_000,
+           "boot took #{div(elapsed_us, 1000)}ms; the two boot reads are waiting out the control plane"
+
+    # And the live vnode was read, so its topics are servable at once rather than after the first tick.
+    served = for i <- 0..19, do: BrokerServer.consume(control, "boot_t#{i}", %{}, 100, 0)
+    assert Enum.any?(served, &match?({[], _positions, []}, &1))
+  end
+
+  test "a reconcile that overruns its deadline is killed, counted and logged" do
+    # The reads are bounded, but bootstrapping a vnode reaches `:ra.start_cluster`, whose `rpc:call/4`
+    # has no timeout at all. Without this deadline a task wedged there would hold the one-at-a-time slot
+    # for good and no reconcile would ever run again, with nothing in the log to say so. A read timeout
+    # far longer than the deadline puts the task in exactly that position: still running when it fires.
+    {silent, opts} =
+      live_and_silent_vnodes(3_000,
+        silent_at_boot: false,
+        brokers_refresh_interval: 50,
+        reconcile_deadline_ms: 50
+      )
+
+    watch_degraded()
+
+    log =
+      capture_log(fn ->
+        {:ok, control} = BrokerServer.start_link("unused", opts)
+        on_exit(fn -> stop_quietly(control) end)
+        _ = await_boot(control)
+        start_silent(silent)
+
+        assert_receive {:degraded, :timeout}, 10_000
+
+        # The kill freed the slot rather than taking the broker with it, so ticking carries on: a
+        # second overrun proves a later tick started a task of its own.
+        assert_receive {:degraded, :timeout}, 10_000
+        assert Process.alive?(control)
+
+        # And the node is still serving from the view it holds, which is the whole point of the design
+        # this deadline protects.
+        assert BrokerServer.metadata_ready?(control) in [true, false]
+      end)
+
+    assert log =~ "control plane reconcile overran"
+  end
+
+  test "a reply from the task a deadline gave up on is dropped without being counted as unknown" do
+    # The deadline kills the task, but its answer may already be in the mailbox. A reply with no clause
+    # is a counted drop (`Malachi.UnexpectedMessage`), which the suite guard turns into a failed run, so
+    # the one slot that remembers the abandoned ref is what keeps a normal race from reading as a bug.
+    {silent, opts} =
+      live_and_silent_vnodes(3_000,
+        silent_at_boot: false,
+        brokers_refresh_interval: 50,
+        reconcile_deadline_ms: 50
+      )
+
+    watch_degraded()
+
+    capture_log(fn ->
+      {:ok, control} = BrokerServer.start_link("unused", opts)
+      on_exit(fn -> stop_quietly(control) end)
+      _ = await_boot(control)
+      start_silent(silent)
+
+      assert_receive {:degraded, :timeout}, 10_000
+
+      # Let the member answer from here on, so no further deadline fires and the remembered ref stays
+      # the one whose task was just killed.
+      :ok = SilentRaMember.release(silent)
+      abandoned = :sys.get_state(control).abandoned_ref
+      assert is_reference(abandoned)
+
+      {drops, _log} =
+        UnknownMessages.drops(control, fn -> send(control, {abandoned, {:reconciled, 0, nil}}) end)
+
+      assert drops == []
+      assert :sys.get_state(control).abandoned_ref == nil
+    end)
+  end
+
+  test "a reconcile that crashes is logged and counted, and does not take the broker with it" do
+    # `bootstrap_orchestrator` is an injected seam (in production the membership leader, which is a call
+    # into another process). It runs inside the reconcile now, so what it raises lands in a task rather
+    # than on this loop: the broker survives, the tick keeps its rhythm, and an operator gets a line.
+    suffix = System.unique_integer([:positive])
+    live = :"bs_boom_#{suffix}"
+    {:ok, _server_id} = MetadataServer.start(live, [node()])
+    on_exit(fn -> MetadataServer.delete(live) end)
+
+    # It raises from the first TICK on, not at boot: the boot pass runs on this loop, so a raise there
+    # fails `init/1` and the supervisor restarts the broker, which is the right answer for a node that
+    # cannot complete its very first reconcile and is not what this test is about.
+    calls = :counters.new(1, [])
+
+    orchestrator = fn ->
+      :counters.add(calls, 1, 1)
+      if :counters.get(calls, 1) > 1, do: raise("membership is not answering"), else: true
+    end
+
+    watch_degraded()
+
+    log =
+      capture_log(fn ->
+        {:ok, control} =
+          BrokerServer.start_link("unused",
+            brokers: [start_replication()],
+            metadata_vnodes: [{live, 0, [node()]}],
+            bootstrap_orchestrator: orchestrator,
+            brokers_refresh_interval: 50
+          )
+
+        on_exit(fn -> stop_quietly(control) end)
+
+        assert_receive {:degraded, :down}, 10_000
+        assert Process.alive?(control)
+
+        # And it is still serving: this is the node keeping its retained view while the control plane
+        # work fails beside it, which is the whole point of taking that work off this loop.
+        assert {[], _positions, []} = BrokerServer.consume(control, "crash_t", %{}, 100, 0)
+      end)
+
+    assert log =~ "control plane reconcile crashed"
+  end
+
+  test "a reconcile tick reaching a broker with in-memory metadata does nothing" do
+    # The tick timer is only ever armed on the replicated path, so this shape does not arise on its own.
+    # It arrives from outside: `:reconcile` used to be the documented way for a test to drive a pass, and
+    # a stray one must be a no-op rather than start a task with nothing to read.
+    directory = Path.join(System.tmp_dir!(), "malachi_bs_tick_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, control} = BrokerServer.start_link(directory)
+    on_exit(fn -> stop_quietly(control) end)
+
+    send(control, :reconcile)
+
+    assert :sys.get_state(control).reconcile_task == nil
+    assert BrokerServer.metadata_ready?(control)
+  end
+
+  test "a tick that finds the previous reconcile still running counts itself instead of piling on" do
+    # One reconcile at a time. Against a control plane slow enough that a pass outlives the tick, the
+    # passes would otherwise stack up, each with its own vnode bootstrap. The skipped tick is counted
+    # because what it costs is a view that keeps ageing, which nothing else reports.
+    {silent, opts} = live_and_silent_vnodes(3_000, silent_at_boot: false, brokers_refresh_interval: 20)
+
+    watch_degraded()
+
+    {:ok, control} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(control) end)
+    _ = await_boot(control)
+    start_silent(silent)
+
+    assert_receive {:degraded, :skipped}, 10_000
+  end
+
+  test "a deadline for a task that already finished is ignored, not counted as an unknown message" do
+    # The deadline timer is cancelled when the task answers, but cancelling loses a race with a timer
+    # that already fired. The clause that swallows it must exist, or the message reaches the catch-all
+    # and is counted as a drop, which the suite guard turns into a failed run.
+    cluster = :"bs_deadline_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    {:ok, control} = BrokerServer.start_link("unused", brokers: [start_replication()], metadata_cluster: cluster)
+    on_exit(fn -> stop_quietly(control) end)
+
+    {drops, _log} = UnknownMessages.drops(control, fn -> send(control, {:reconcile_deadline, make_ref()}) end)
+
+    assert drops == []
+    assert BrokerServer.metadata_ready?(control)
+  end
+
+  test "reconcile_now is a no-op on a broker with in-memory metadata" do
+    # No control plane to read, so the barrier the tests use has nothing to wait for and must not
+    # depend on one existing.
+    directory = Path.join(System.tmp_dir!(), "malachi_bs_inmem_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, control} = BrokerServer.start_link(directory)
+    on_exit(fn -> stop_quietly(control) end)
+
+    assert BrokerServer.reconcile_now(control) == :ok
+    assert BrokerServer.metadata_ready?(control)
   end
 
   test "a rejected control-plane command surfaces the Raft machine error" do
@@ -574,14 +869,11 @@ defmodule Malachi.BrokerServerRaTest do
     assert broker |> drain_history(root) |> Enum.map(& &1.value) == ["early", "after"]
   end
 
-  # Drives one metadata reconcile and waits for it to land. `:sys.get_state/1` is a system message
-  # queued behind `:reconcile` in the same mailbox, so when it answers the reconcile has been applied:
-  # deterministic where a sleep would be timing-dependent.
-  defp reconcile!(server) do
-    send(server, :reconcile)
-    _ = :sys.get_state(server)
-    :ok
-  end
+  # Drives one metadata reconcile and waits for it to land. It used to be `send(server, :reconcile)`
+  # plus a `:sys.get_state/1` queued behind it in the same mailbox; that stopped proving anything once
+  # the periodic reconcile moved off the loop (#178), because the tick only STARTS a task. The public
+  # call runs the same pass on the loop and answers when its result has been applied.
+  defp reconcile!(server), do: BrokerServer.reconcile_now(server)
 
   defp drain_history(server, range_id, cursor \\ :start, accumulated \\ []) do
     case BrokerServer.stream_history(server, range_id, cursor, 3) do
