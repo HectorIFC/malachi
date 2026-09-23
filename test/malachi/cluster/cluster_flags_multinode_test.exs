@@ -16,6 +16,7 @@ defmodule Malachi.Cluster.ClusterFlagsMultinodeTest do
   alias Malachi.Cluster.ClusterFlags
   alias Malachi.Cluster.ClusterFlagsMachine
   alias Malachi.Cluster.ClusterFlagsServer
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.RaCluster
@@ -47,8 +48,20 @@ defmodule Malachi.Cluster.ClusterFlagsMultinodeTest do
     {:ok, _member} = RaCluster.start(ClusterFlagsMachine, cluster, nodes)
 
     assert converged?(nodes), "membership did not converge: #{inspect(views(nodes))}"
+    assert versioned?(nodes, cluster, effective_version(pins)), "the group did not reach its machine version"
 
     %{peers: peers, nodes: nodes, cluster: cluster, server_id: {cluster, hd(nodes)}}
+  end
+
+  # The version the group settles at: `ra`'s `all` strategy takes the lowest any member advertises, and
+  # a pin is what lowers it.
+  defp effective_version(pins), do: pins |> Enum.map(&(&1 || MachineVersion.code_version())) |> Enum.min()
+
+  # A group is born at version 0 and only reaches its own a tick later, when the leader has heard every
+  # member. A command introduced above 0 is refused until then, correctly, so a test that submits one
+  # without waiting is racing the machine version rather than testing what it means to.
+  defp versioned?(nodes, cluster, expected) do
+    RaPeers.eventually(fn -> Enum.all?(nodes, &(RaPeers.effective(&1, cluster) == expected)) end)
   end
 
   defp start_membership(node, nodes, capabilities) do
@@ -200,7 +213,7 @@ defmodule Malachi.Cluster.ClusterFlagsMultinodeTest do
       %{nodes: nodes, cluster: cluster, server_id: server_id} = context
 
       assert Capabilities.supported_by_all(nodes, @cap, reads(hd(nodes))) == :ok
-      assert RaPeers.eventually(fn -> Enum.all?(nodes, &(RaPeers.effective(&1, cluster) == 1)) end)
+      assert Enum.all?(nodes, &(RaPeers.effective(&1, cluster) == 1)), "the pinned peer did not hold the group at 1"
 
       assert ClusterFlagsServer.enable(server_id, "batch_format", nodes, reads(hd(nodes)), @known) ==
                {:error, {:unsupported_command, {:enable_flag, 2}, 2, 1}}
