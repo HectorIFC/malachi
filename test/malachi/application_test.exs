@@ -360,30 +360,36 @@ defmodule Malachi.ApplicationTest do
   describe "incarnation_opts/1" do
     @describetag :tmp_dir
 
-    test "reserves a block and hands the membership server what it needs", %{tmp_dir: dir} do
+    test "hands the membership server a reservation function, not reserved values", %{tmp_dir: dir} do
+      # A function, because a child spec is built once and reused on every supervisor restart. Reserved
+      # values would seed a restarted server at the number the first one started from.
       opts = App.incarnation_opts(dir)
 
-      assert opts[:incarnation] == 1
-      assert opts[:ceiling] == MemberIncarnation.block()
+      assert is_function(opts[:reserve], 0)
       assert is_function(opts[:on_ceiling], 1)
+      assert {:ok, %{start: 1, ceiling: ceiling}} = opts[:reserve].()
+      assert ceiling == MemberIncarnation.block()
     end
 
-    test "a second boot resumes above the first one's block", %{tmp_dir: dir} do
-      first = App.incarnation_opts(dir)
-      second = App.incarnation_opts(dir)
+    test "every call resumes above the block the previous one took", %{tmp_dir: dir} do
+      reserve = App.incarnation_opts(dir)[:reserve]
 
-      assert second[:incarnation] > first[:ceiling]
+      assert {:ok, first} = reserve.()
+      assert {:ok, second} = reserve.()
+
+      # This is what a supervisor restart of the membership server gets, and why it is a function: the
+      # second process starts above everything the first could have announced.
+      assert second.start > first.ceiling
     end
 
-    test "stops the node when no reservation can be made", %{tmp_dir: dir} do
-      # Starting anyway would announce a number below what peers remember, and nothing corrects that:
-      # a live node is never suspected, so it never refutes, so the peers keep the old record and the
-      # old attributes the capability gate reads.
+    test "raises when no reservation can be made, which stops the node", %{tmp_dir: dir} do
+      # Starting anyway would announce a number below what peers remember, and nothing corrects that: a
+      # live node is never suspected, so it never refutes, so the peers keep the old record and the old
+      # attributes the capability check reads.
       File.write!(MemberIncarnation.path(dir), "not a number")
+      reserve = App.incarnation_opts(dir)[:reserve]
 
-      assert_raise RuntimeError, ~r/could not reserve this node's incarnation/, fn ->
-        App.incarnation_opts(dir)
-      end
+      assert_raise RuntimeError, ~r/could not reserve this node's incarnation/, fn -> reserve.() end
     end
   end
 

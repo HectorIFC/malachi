@@ -767,16 +767,29 @@ defmodule Malachi.Application do
   # provoked to lift it. Carrying on is not a degraded start, it is a silently wrong one, and the
   # capability gate then reads those stale attributes as current.
   @doc """
-  The incarnation options this node's membership server starts with, reserved from `dir`.
+  The incarnation options this node's membership server starts with: a **reservation function** over
+  `dir`, and the callback that extends the ceiling.
+
+  A function rather than reserved values, because a child spec is built once and reused on every
+  supervisor restart. Reserving while the spec was built would seed a restarted membership server at the
+  number the first one started from, below whatever it had raised itself to before it crashed, which is
+  exactly the permanent staleness the reservation exists to prevent.
 
   Raises when no reservation can be made, which stops the node. See the comment above for why starting
   anyway is not a degraded start but a silently wrong one.
   """
   @spec incarnation_opts(Path.t()) :: keyword()
   def incarnation_opts(dir) do
+    [reserve: fn -> reserve_incarnation(dir) end, on_ceiling: &MemberIncarnation.extend(dir, &1)]
+  end
+
+  # Raises rather than answering an error, so the failure reaches the operator with the path in it. The
+  # membership server calls this on every process start, a supervisor restart included, which is the whole
+  # point of it being a function.
+  defp reserve_incarnation(dir) do
     case MemberIncarnation.reserve(dir) do
-      {:ok, %{start: start, ceiling: ceiling}} ->
-        [incarnation: start, ceiling: ceiling, on_ceiling: &MemberIncarnation.extend(dir, &1)]
+      {:ok, reservation} ->
+        {:ok, reservation}
 
       {:error, reason} ->
         raise I18n.t(:member_incarnation_unusable, path: MemberIncarnation.path(dir), reason: inspect(reason))

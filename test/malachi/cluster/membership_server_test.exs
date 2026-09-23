@@ -160,6 +160,34 @@ defmodule Malachi.Cluster.MembershipServerTest do
       assert Membership.incarnation(MembershipServer.view(a), a) == 40
     end
 
+    test "reserves on every process start, so a restart resumes above the last one" do
+      # The defect this closes: a child spec is built once and reused, so a reservation made while the
+      # spec was built would seed a restarted server at the number the first one started from, below
+      # whatever it had raised itself to.
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(calls), do: Agent.stop(calls) end)
+      reserve = fn -> {:ok, %{start: Agent.get_and_update(calls, &{&1 * 10 + 1, &1 + 1}), ceiling: 9_999}} end
+
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], reserve: reserve] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 1
+      assert Agent.get(calls, & &1) == 1
+
+      stop_supervised!(a)
+      start_supervised!({MembershipServer, [name: a, peers: [], reserve: reserve] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 11
+      assert Agent.get(calls, & &1) == 2
+    end
+
+    test "a reservation that fails stops the server from starting" do
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], reserve: fn -> {:error, :enospc} end] ++ @timings
+
+      assert {:error, {{%RuntimeError{}, _stack}, _child}} = start_supervised({MembershipServer, opts}, id: a)
+    end
+
     test "asks for a new ceiling once it has used the block, and adopts the answer" do
       # The block is what keeps the durable write off the failure detector's path: the node raises its
       # own incarnation this many times before it touches a disk again.
@@ -356,5 +384,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
     UnknownMessages.assert_survives_unknown(name, :membership, fn ->
       assert MembershipServer.alive_members(name) == [name]
     end)
+  end
+
   end
 end

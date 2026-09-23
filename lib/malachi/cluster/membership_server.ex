@@ -115,9 +115,17 @@ defmodule Malachi.Cluster.MembershipServer do
     self_ref = Keyword.get(opts, :self_ref) || Keyword.get(opts, :name) || self()
     ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
+    # Reserved here rather than handed in already reserved. A child spec is built once and reused on every
+    # supervisor restart, so a reservation made while the spec was built would seed this process at the
+    # number the FIRST one started from, below whatever it had raised itself to before it crashed, which
+    # is the permanent staleness `Malachi.Cluster.MemberIncarnation` exists to prevent (see its
+    # moduledoc). Reserving per process start means each one resumes above everything its predecessor
+    # could have announced.
+    reserved = reserve(Keyword.get(opts, :reserve))
+
     membership_opts =
       [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})] ++
-        Keyword.take(opts, [:incarnation])
+        Keyword.take(reserved ++ opts, [:incarnation])
 
     state = %{
       view: Membership.new(self_ref, membership_opts),
@@ -126,7 +134,7 @@ defmodule Malachi.Cluster.MembershipServer do
       # remember, and what to call when it gets there (see `Malachi.Cluster.MemberIncarnation`). A view
       # built without a reservation never crosses, which is what keeps tests and the in-memory shape free
       # of a disk.
-      ceiling: Keyword.get(opts, :ceiling, :infinity),
+      ceiling: Keyword.get(reserved ++ opts, :ceiling, :infinity),
       on_ceiling: Keyword.get(opts, :on_ceiling, fn _incarnation -> :error end),
       # What to do when a new ceiling cannot be recorded: stop the node, so it comes back and reserves
       # one it can trust. Seam, so a test observes the decision instead of taking the VM down.
@@ -151,6 +159,21 @@ defmodule Malachi.Cluster.MembershipServer do
     schedule_period(state)
     send_joins(state)
     {:ok, state}
+  end
+
+  # A reservation is a function so it runs on every process start. No function means a caller that hands
+  # in `:incarnation` and `:ceiling` itself, or neither, which is every test and every in-memory use.
+  # A reservation that fails raises: coming up below what peers remember is worse than not coming up.
+  defp reserve(nil), do: []
+
+  defp reserve(reserve_fun) do
+    case reserve_fun.() do
+      {:ok, %{start: start, ceiling: ceiling}} ->
+        [incarnation: start, ceiling: ceiling]
+
+      {:error, reason} ->
+        raise I18n.t(:member_incarnation_unusable, path: "the data directory", reason: inspect(reason))
+    end
   end
 
   @impl true
