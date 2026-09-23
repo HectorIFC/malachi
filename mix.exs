@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.13.0"
+  @version "0.13.2"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -227,6 +227,7 @@ defmodule Malachi.MixProject do
         Malachi.TCPAcceptor,
         Malachi.TCPAcceptorPool,
         Malachi.SocketHelper,
+        Malachi.IPAddress,
         Malachi.ConnectionRegistry,
         Malachi.ConnectionLimiter,
         Malachi.RateLimiter
