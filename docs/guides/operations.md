@@ -322,10 +322,16 @@ MALACHI_RETENTION_ORPHAN_MAX_PER_PASS=50
 ```
 
 It runs on **every node**, not only the one that sweeps retention: only a node can read its own disk.
-It acts only when this node has read every metadata vnode at least once since boot, and a directory is
-removed only after it has been unexplained on `SIGHTINGS` consecutive passes **and** is older than
-`MIN_AGE_MS`. That minimum has to stay above the worst registration lag: a replica creates a
-directory on the first push, which can happen before this node's metadata shows the registration.
+It acts only when this node has read every metadata vnode at least once since boot **and** every vnode
+answered the last refresh, and a directory is removed only after it has been unexplained on
+`SIGHTINGS` consecutive passes **and** is older than `MIN_AGE_MS`. That minimum has to stay above the
+worst registration lag: a replica creates a directory on the first push, which can happen before this
+node's metadata shows the registration.
+
+Both metadata conditions are needed, and the second is the one that is easy to leave out. A vnode that
+goes silent after being read keeps the view it had, so its old segments stay explained while segments
+registered on it since are missing, and their replicas still arrive here over the data plane. Without
+that condition a silence longer than the guards above ends with a live copy deleted.
 
 `report` does everything except the removal, which is how to see the list before trusting it on a
 cluster for the first time. `off` does not even list.

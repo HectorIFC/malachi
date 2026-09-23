@@ -26,6 +26,7 @@ defmodule Malachi.Retention.OrphanSweeperTest do
     defaults = [
       metadata_source: fn -> Metadata.new() end,
       metadata_ready?: fn -> true end,
+      unreachable_vnodes: fn -> [] end,
       local_ref: context.replication,
       directory: context.directory,
       on_result: fn _result -> :ok end,
@@ -98,6 +99,34 @@ defmodule Malachi.Retention.OrphanSweeperTest do
       sweeper = start_sweeper(context, metadata_ready?: fn -> false end)
 
       assert %{skipped: :metadata_not_ready, removed: [], scanned: 0} = OrphanSweeper.sweep_now(sweeper)
+      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "does nothing while a vnode did not answer the last refresh", context do
+      # The guard that readiness cannot give. A vnode that goes silent AFTER being read keeps the view
+      # it had, so its old segments stay explained while ones registered on it since are missing from
+      # the merge. Their replicas still land here over the data plane, which is a different channel
+      # from the ra query this node cannot make, so without this the sweep deletes a live copy once
+      # the silence outlasts the minimum age.
+      orphan!(context.directory, "gone-r0-s1")
+      sweeper = start_sweeper(context, unreachable_vnodes: fn -> [:vnode_2] end)
+
+      assert %{skipped: {:vnodes_unreachable, [:vnode_2]}, removed: [], scanned: 0} =
+               OrphanSweeper.sweep_now(sweeper)
+
+      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "a broker that cannot say which vnodes answered skips the pass", context do
+      orphan!(context.directory, "gone-r0-s1")
+      gone = spawn(fn -> :ok end)
+      ref = Process.monitor(gone)
+      assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+
+      sweeper = start_sweeper(context, unreachable_vnodes: fn -> GenServer.call(gone, :unreachable) end)
+
+      assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+      assert Process.alive?(sweeper)
       assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
     end
 

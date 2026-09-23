@@ -34,9 +34,16 @@ defmodule Malachi.Retention.OrphanSweeper do
       asking. A sharded control plane coming back from a full-cluster restart is the measured case.
     * **Metadata ready.** `Malachi.BrokerServer.metadata_ready?/2` says every vnode has been read at
       least once since boot. Until then a silent vnode is an empty placeholder in the cache and every
-      directory it owns looks unexplained. After it, a vnode that goes silent keeps the view it had
-      (`Malachi.Broker.put_cache/3` retains rather than blanks), so its old segments stay explained and
-      only ones registered during the outage look new, which the minimum age covers.
+      directory it owns looks unexplained.
+    * **Every vnode answering.** `Malachi.BrokerServer.unreachable_vnodes/2` says whether the view
+      being served right now is complete. Readiness alone is not enough, and the difference is where a
+      live replica would have been lost: a vnode that goes silent AFTER being read keeps the view it
+      had (`Malachi.Cluster.DSRSM.retain_vnodes/3` retains rather than blanks), so its old segments
+      stay explained while segments registered on it since are missing from the merge. Their replicas
+      still land on this node's disk over the data plane, which is a different channel from the ra
+      query this node cannot make, so a silence longer than the minimum age plus a sighting interval
+      would have made this sweep delete a live copy. The minimum age bounds the registration lag, not
+      an outage.
     * **Age, repeated sightings and a cap per pass**, which `Malachi.Retention.Orphans` owns and
       explains.
     * **Removal through the replication server.** A directory that looks orphaned may still have an open
@@ -53,6 +60,8 @@ defmodule Malachi.Retention.OrphanSweeper do
 
     * `:metadata_source` - `(-> Malachi.Metadata.t())` (required);
     * `:metadata_ready?` - `(-> boolean())` (required);
+    * `:unreachable_vnodes` - `(-> [vnode_id])`, the vnodes the last metadata refresh could not read
+      (required). Always empty where the metadata is local;
     * `:local_ref` - this node's replication server reference, or a `(-> ref)` resolved per pass, as in
       `Malachi.Cluster.Scrubber` (required);
     * `:directory` - the data directory to sweep (required);
@@ -96,7 +105,13 @@ defmodule Malachi.Retention.OrphanSweeper do
           removed: [String.t()],
           held: [String.t()],
           failed: [{String.t(), term()}],
-          skipped: nil | :off | :metadata_not_ready | {:unreadable, term()} | {:unreachable, term()}
+          skipped:
+            nil
+            | :off
+            | :metadata_not_ready
+            | {:vnodes_unreachable, [term()]}
+            | {:unreadable, term()}
+            | {:unreachable, term()}
         }
 
   @doc "Starts the sweeper. See the module doc for options."
@@ -122,6 +137,7 @@ defmodule Malachi.Retention.OrphanSweeper do
       Map.merge(PeriodicWorker.new(opts, :orphan_sweeper, @default_interval, :retention_orphan_interval_ms), %{
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         metadata_ready?: Keyword.fetch!(opts, :metadata_ready?),
+        unreachable_vnodes: Keyword.fetch!(opts, :unreachable_vnodes),
         local_ref: Keyword.fetch!(opts, :local_ref),
         directory: Keyword.fetch!(opts, :directory),
         # `:report` rather than `:delete` when the value cannot be a mode. The environment is already
@@ -170,12 +186,21 @@ defmodule Malachi.Retention.OrphanSweeper do
 
   defp run(state) do
     case PeriodicWorker.ask(state.metadata_ready?) do
-      {:ok, true} -> sweep(%{state | waiting?: false})
+      {:ok, true} -> run_when_complete(state)
       {:ok, false} -> report(skipped(:metadata_not_ready), announce_waiting(state))
       {:error, reason} -> report(skipped({:unreachable, reason}), state)
     end
   end
 
+  # Ready says every vnode has been read once; this says the view in hand is the current one. Both, or
+  # the pass acts on an absence it cannot account for.
+  defp run_when_complete(state) do
+    case PeriodicWorker.ask(state.unreachable_vnodes) do
+      {:ok, []} -> sweep(%{state | waiting?: false})
+      {:ok, vnodes} -> report(skipped({:vnodes_unreachable, vnodes}), announce_waiting(state))
+      {:error, reason} -> report(skipped({:unreachable, reason}), state)
+    end
+  end
 
   defp sweep(state) do
     case entries(state) do

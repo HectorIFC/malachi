@@ -183,6 +183,21 @@ defmodule Malachi.BrokerServer do
   @spec metadata_ready?(GenServer.server(), timeout()) :: boolean()
   def metadata_ready?(server, timeout \\ 1_000), do: GenServer.call(server, :metadata_ready?, timeout)
 
+  @doc """
+  The metadata vnodes this broker's last refresh could not read.
+
+  Empty is the answer for a broker whose metadata is local (nothing to be unreachable), and for one
+  whose last refresh read every vnode.
+
+  This is not `metadata_ready?/2`, and a caller that acts on something being ABSENT from the metadata
+  needs this one instead. Readiness is monotone: once a vnode has been read, a later outage does not
+  unsee it, and the cache keeps that vnode's previous view rather than blanking it. That is right for
+  serving reads, and not enough before a destructive act, because segments registered on a silent
+  vnode SINCE that view are missing from the merge while their replicas sit on this node's disk.
+  """
+  @spec unreachable_vnodes(GenServer.server(), timeout()) :: [term()]
+  def unreachable_vnodes(server, timeout \\ 1_000), do: GenServer.call(server, :unreachable_vnodes, timeout)
+
   @doc "No-op: writes are already durable on return. Kept for API compatibility."
   @spec sync(GenServer.server()) :: :ok
   def sync(server), do: GenServer.call(server, :sync)
@@ -372,6 +387,15 @@ defmodule Malachi.BrokerServer do
       # clusters were necessarily up. Meaningless without `metadata_refresh` (in-memory metadata is
       # already local truth), which is why `metadata_ready?/2` checks that first.
       seen_vnodes: MapSet.new(),
+      # The metadata vnodes the LAST refresh could not read, which is a different fact from
+      # `seen_vnodes` and answers a different question. `seen_vnodes` is monotone and says whether a
+      # vnode has ever been read, so a cache that is stale is not a cache that is blank. This one says
+      # whether the view being served right now is complete, which is what a caller must know before it
+      # acts on the ABSENCE of something from that view: `Malachi.Retention.OrphanSweeper` reads a
+      # directory on disk against the segments the metadata lists, and a vnode that did not answer
+      # keeps its previous view (`Malachi.Cluster.DSRSM.retain_vnodes/3`), so its segments registered
+      # since are missing from the merge while their replicas are on this node's disk.
+      unreachable_vnodes: [],
       # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
       # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
       # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
@@ -466,6 +490,8 @@ defmodule Malachi.BrokerServer do
   def handle_call(:metadata_ready?, _from, state) do
     {:reply, all_vnodes_seen?(state), state}
   end
+
+  def handle_call(:unreachable_vnodes, _from, state), do: {:reply, state.unreachable_vnodes, state}
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
     {:reply, Broker.read(state.broker, range_id, offset, max_records, &ReplicationServer.read/4), state}
@@ -1135,7 +1161,8 @@ defmodule Malachi.BrokerServer do
         %{
           state
           | broker: recover_range_state(broker),
-            seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
+            seen_vnodes: seen_vnodes(state, dsrsm, unreachable),
+            unreachable_vnodes: unreachable
         }
         |> wake_all_subscribers()
     end

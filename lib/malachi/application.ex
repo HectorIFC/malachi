@@ -786,6 +786,7 @@ defmodule Malachi.Application do
       name: name,
       metadata_source: fn -> BrokerServer.metadata(broker_name) end,
       metadata_ready?: fn -> BrokerServer.metadata_ready?(broker_name) end,
+      unreachable_vnodes: fn -> BrokerServer.unreachable_vnodes(broker_name) end,
       local_ref: local_ref,
       directory: directory,
       mode: Application.get_env(:malachi, :retention_orphan_sweep, :delete),
