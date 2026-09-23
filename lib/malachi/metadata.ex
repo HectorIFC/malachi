@@ -471,6 +471,15 @@ defmodule Malachi.Metadata do
   #
   # Whoever offers this to an operator checks the name against the store first, so a typo is caught
   # where it can be reported rather than becoming a silent fallback (#194).
+  #
+  # This relaxed what the command accepts while leaving it at machine version 0, which the versioning
+  # rule would normally forbid: a member on older code refuses a name it cannot find while a newer one
+  # stores it, and the two replicas then hold different states with no error anywhere. It is admissible
+  # here on one invariant, which is narrow and worth stating because it is not obvious from this file:
+  # NOTHING in `lib/` emits `:set_topic_policy`. No log written by any release can contain one, so
+  # there is no entry whose replay could differ between versions. `Malachi.SetTopicPolicyGuardTest`
+  # fails the build the day that stops being true, and whoever adds the first caller owes this command
+  # a new shape at a new machine version before the caller ships.
   defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
     cond do
       not Map.has_key?(state.topics, topic) ->
