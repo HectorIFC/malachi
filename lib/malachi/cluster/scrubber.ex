@@ -381,12 +381,25 @@ defmodule Malachi.Cluster.Scrubber do
     state = demote_if_primary(segment, state)
     to_offset = segment.start_offset + (segment.length || 0)
 
-    # The point of no return, and it cannot fail (`delete/2` answers `:ok` even for a segment it does
-    # not hold): past this line the damaged bytes are gone and only the peer can put them back. That
-    # is what makes `intact_peer/2` strict about what counts as a source, and why a failure after it
-    # is reported apart from one decided before it, which left the copy untouched.
-    :ok = ReplicationServer.delete(state.resolved_ref, segment.id)
+    # The point of no return: past this line the damaged bytes are gone and only the peer can put them
+    # back. That is what makes `intact_peer/2` strict about what counts as a source, and why a failure
+    # after it is reported apart from one decided before it, which left the copy untouched.
+    #
+    # The one answer that is not past that line is `{:error, :unreachable}`: this node's own
+    # replication server is down or restarting, so nothing was deleted and the damaged copy is still
+    # whole. Matching `:ok` here would turn that into a `MatchError` that takes the whole pass with it,
+    # losing the cycle position and the damaged set over a process that will be back on the next tick.
+    case ReplicationServer.delete(state.resolved_ref, segment.id) do
+      :ok ->
+        refetch(segment, peer, to_offset, acc, state)
 
+      {:error, reason} ->
+        Tracer.set_attributes(%{"malachi.repair" => "failed"})
+        {%{acc | unrepairable: [{segment.id, {:delete, reason}} | acc.unrepairable]}, state}
+    end
+  end
+
+  defp refetch(segment, peer, to_offset, acc, state) do
     # Reaching `to_offset` is itself the completeness check: the catchup copied every offset the seal
     # recorded, so the verify only has to confirm the frames landed readable.
     with {:ok, ^to_offset} <- Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset),

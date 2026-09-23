@@ -837,12 +837,14 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     assert ReplicationServer.delete(ref, @segment) == :ok
   end
 
-  test "delete on an unreachable replica is best-effort (:ok, does not crash the caller)" do
+  test "delete on an unreachable replica says so, rather than crashing the caller or claiming success" do
     ref = start_broker()
     :ok = stop_supervised!(ref)
 
-    # a dead/unreachable replica (a down cluster node during a retention sweep) must not crash us
-    assert ReplicationServer.delete(ref, @segment) == :ok
+    # A dead replica (a down cluster node during a retention sweep) must not crash the sweep, and must
+    # not be reported as deleted either: the segment is gone from the control plane, so nothing will
+    # ever ask for that directory again and the orphan sweeper is what reclaims it.
+    assert ReplicationServer.delete(ref, @segment) == {:error, :unreachable}
   end
 
   test "a write still commits with one follower down (quorum tolerated)" do

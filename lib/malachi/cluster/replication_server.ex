@@ -269,14 +269,20 @@ defmodule Malachi.Cluster.ReplicationServer do
   Deletes `segment_id`'s stored data from this server (used by retention once the control plane has
   dropped the segment). Idempotent. Deleting an unknown or already-removed segment is `:ok`, and it
   also clears any on-disk files left after a restart when the log was not reopened.
+
+  A server that is down or on an unreachable node answers `{:error, :unreachable}` rather than exiting
+  the caller, like `read/4`: retention's periodic sweep must survive a replica that is not there. It
+  says so rather than answering `:ok` because the difference is a directory that stayed on that
+  replica's disk with no control-plane metadata left to name it, which is what
+  `Malachi.Retention.OrphanSweeper` exists to reclaim and what an operator watching the sweep needs to
+  see. The caller cannot retry it either: once the control plane has dropped the segment, no later
+  sweep returns that id.
   """
-  @spec delete(term(), term()) :: :ok
+  @spec delete(term(), term()) :: :ok | {:error, :unreachable}
   def delete(ref, segment_id) do
     GenServer.call(ref, {:delete, segment_id})
   catch
-    # An unreachable replica must not crash the caller (e.g. retention's periodic sweep): the files
-    # are left in place, harmless without control-plane metadata, and cleaned up on a later sweep.
-    :exit, _reason -> :ok
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc """
