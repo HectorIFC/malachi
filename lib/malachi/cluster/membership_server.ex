@@ -139,6 +139,12 @@ defmodule Malachi.Cluster.MembershipServer do
       # What to do when a new ceiling cannot be recorded: stop the node, so it comes back and reserves
       # one it can trust. Seam, so a test observes the decision instead of taking the VM down.
       stop_fun: Keyword.get(opts, :stop_fun, &System.stop/0),
+      # Latched once that decision is taken. `System.stop/0` is asynchronous, so this server keeps
+      # handling messages for the whole shutdown window, and without the latch every ping, ack and join
+      # would see the same incarnation above the same stale ceiling and try the write, the log and the
+      # stop again. It also stops this node announcing itself while the number it would announce is no
+      # longer backed by anything on disk.
+      stopping: false,
       # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
       # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
       topology: Keyword.get(opts, :topology),
@@ -365,6 +371,10 @@ defmodule Malachi.Cluster.MembershipServer do
     end
   end
 
+  # Already stopping: the decision was taken and the write already failed, so trying again would only add
+  # an fsync and a log line per gossip message until the VM goes down.
+  defp extend_ceiling(%{stopping: true} = state, _incarnation), do: state
+
   defp extend_ceiling(state, incarnation) do
     case state.on_ceiling.(incarnation) do
       {:ok, ceiling} ->
@@ -373,11 +383,21 @@ defmodule Malachi.Cluster.MembershipServer do
       failed ->
         Logger.error(I18n.t(:member_incarnation_ceiling_lost, incarnation: incarnation, reason: inspect(failed)))
         state.stop_fun.()
-        state
+        %{state | stopping: true}
     end
   end
 
   # Outbound gossip payload piggybacked on every message: our view updates plus our current topology.
+  #
+  # A node that has lost its ceiling leaves **itself** out. Its incarnation may already be above the last
+  # one on disk, and during the shutdown window a refutation can raise it further; announcing that would
+  # leave peers remembering a number this node cannot resume above, which is the permanent staleness the
+  # reservation exists to prevent. Everything it knows about everyone else still travels: that news is
+  # not this node's to withhold.
+  defp gossip_payload(%{stopping: true} = state) do
+    {Enum.reject(Membership.updates(state.view), fn {member, _s, _i, _a} -> member == state.self end), state.topology}
+  end
+
   defp gossip_payload(state), do: {Membership.updates(state.view), state.topology}
 
   # Ingest a peer's gossip (the value bound in each message handler): merge its view updates and its

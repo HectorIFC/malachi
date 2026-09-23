@@ -213,6 +213,69 @@ defmodule Malachi.Cluster.MembershipServerTest do
       refute_received {:ceiling_asked, _incarnation}
     end
 
+    test "a lost ceiling is latched: it stops once and stops announcing itself" do
+      # System.stop/0 is asynchronous, so this server keeps handling messages for the whole shutdown
+      # window. Without the latch every ping, ack and join would see the same incarnation above the same
+      # stale ceiling and repeat the write, the log and the stop.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn i ->
+            send(parent, {:asked, i})
+            {:error, :enospc}
+          end,
+          stop_fun: fn -> send(parent, :stopping) end
+        ] ++ @timings
+
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      capture_log(fn ->
+        :ok = MembershipServer.set_attributes(a, %{rack: "x"})
+        # Whatever a peer sends afterwards must not restart the storm.
+        for _ <- 1..5, do: GenServer.cast(a, {:ping, :nobody, {[], nil}})
+        _ = MembershipServer.view(a)
+      end)
+
+      assert_received :stopping
+      refute_received :stopping
+      assert_received {:asked, 2}
+      refute_received {:asked, _again}
+    end
+
+    test "a node that has lost its ceiling leaves itself out of its own gossip" do
+      # Its incarnation may already be past the last ceiling on disk, and a refutation in the shutdown
+      # window can raise it further. Announcing that would leave peers remembering a number this node
+      # cannot resume above. Read straight off the wire: pose as a peer, ping it, and look at the view it
+      # piggybacks on the ack.
+      a = :"msgossip_#{System.unique_integer([:positive])}"
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn _i -> {:error, :enospc} end,
+          stop_fun: fn -> :ok end
+        ] ++ @timings
+
+      start_supervised!({MembershipServer, opts}, id: a)
+      {view, _effect} = Membership.apply_update(MembershipServer.view(a), {:peer, :alive, 7, %{}})
+      assert Membership.status(view, :peer) == :alive
+
+      assert gossiped_members(a) == [a], "expected it to announce only itself while healthy"
+
+      capture_log(fn -> :ok = MembershipServer.set_attributes(a, %{rack: "x"}) end)
+
+      assert gossiped_members(a) == [], "a node that lost its ceiling still announced itself"
+    end
+
     test "stops the node when a new ceiling cannot be written" do
       # Carrying on would gossip incarnations above the last one on disk, and the next restart would
       # resume below what peers remember, where nothing corrects it. Stopping is recoverable: the node
@@ -386,5 +449,15 @@ defmodule Malachi.Cluster.MembershipServerTest do
     end)
   end
 
+  # The members a server names in the view it piggybacks on an ack, read by posing as a peer that pings it.
+  defp gossiped_members(server) do
+    probe = self()
+    GenServer.cast(server, {:ping, probe, {[], nil}})
+
+    receive do
+      {:"$gen_cast", {:ack, _from, {updates, _topology}}} -> Enum.map(updates, &elem(&1, 0))
+    after
+      1_000 -> flunk("#{server} never acked the ping")
+    end
   end
 end
