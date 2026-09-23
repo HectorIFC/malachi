@@ -164,6 +164,7 @@ defmodule Malachi.Metrics.Prometheus do
       expired: [],
       orphans_left: [],
       orphans_removed: 0,
+      unresolved_policies: [],
       failures: %{migrating: 0, segment_active: 0, other: 0},
       sweeps: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
     }
@@ -220,6 +221,13 @@ defmodule Malachi.Metrics.Prometheus do
         "Replica directories the orphan sweeper reclaimed; read against " <>
           "malachi_retention_orphan_directories_left_total to see whether it is keeping up",
         [{[], retention.orphans_removed}]
+      ),
+      metric(
+        "malachi_retention_unresolved_policy_sweeps_total",
+        :counter,
+        "Sweeps that found a topic bound to a policy name they could not resolve and expired nothing " <>
+          "of it, per topic; a series that keeps moving is a binding an operator has to fix",
+        Enum.map(retention.unresolved_policies, &{[topic: &1.topic], &1.sweeps})
       ),
       metric(
         "malachi_retention_expire_failures_total",

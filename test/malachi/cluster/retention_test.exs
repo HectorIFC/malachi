@@ -19,8 +19,8 @@ defmodule Malachi.Cluster.RetentionTest do
     end)
   end
 
-  defp expired(metadata, now, policy, policies \\ %{}),
-    do: metadata |> Retention.expired(now, policy, policies) |> Enum.sort()
+  defp expired(metadata, now, policy, policies \\ %{}, unresolved \\ nil),
+    do: metadata |> Retention.expired(now, policy, policies, unresolved) |> Enum.sort()
 
   test "expires sealed segments older than max_age_ms" do
     metadata = with_sealed([{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}])
@@ -106,15 +106,45 @@ defmodule Malachi.Cluster.RetentionTest do
       assert expired(metadata, 10_000, %{max_age_ms: 5_000}) == ["old"]
     end
 
-    test "a topic pointing at a policy this node cannot resolve falls back to the global policy" do
+    test "a topic pointing at a policy that does not resolve expires nothing under the global limits" do
       metadata =
         [{"old", 0, 100, 1_000}]
         |> with_sealed()
         |> with_policy("t")
 
-      # The store answered nothing for "p" (unreachable, or the definition was deleted). Falling back to
-      # the global is what a topic with no policy gets, and what the cluster did before policies existed.
-      assert expired(metadata, 10_000, %{max_age_ms: 5_000}, %{}) == ["old"]
+      # The name exists because the administrator wanted something other than the default, and the
+      # usual something is to keep data LONGER. Expiring under the global bound would delete exactly
+      # what the policy was there to hold, on every replica, with no way back.
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}, %{}) == []
+    end
+
+    test "the operator's backstop is the one bound that does apply to an unresolved name" do
+      metadata =
+        [{"old", 0, 100, 1_000}, {"newer", 1, 100, 9_000}]
+        |> with_sealed()
+        |> with_policy("t")
+
+      # Nothing invents this bound: it applies only because someone set it for this case.
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}, %{}, 5_000) == ["old"]
+    end
+
+    test "an unresolved name ignores the global byte budget too, not just the age" do
+      metadata =
+        [{"s0", 0, 100, 1_000}, {"s1", 1, 100, 1_000}]
+        |> with_sealed()
+        |> with_policy("t")
+
+      assert expired(metadata, 10_000, %{max_bytes: 150}, %{}) == []
+    end
+
+    test "unresolved_policies/2 names the topics that are being held, so the disk is not invisible" do
+      metadata =
+        [{"old", 0, 100, 1_000}]
+        |> with_sealed()
+        |> with_policy("t")
+
+      assert Retention.unresolved_policies(metadata, %{}) == ["t"]
+      assert Retention.unresolved_policies(metadata, %{"p" => %{}}) == []
     end
   end
 

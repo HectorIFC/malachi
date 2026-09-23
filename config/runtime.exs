@@ -290,6 +290,13 @@ config :malachi,
   # passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds the damage if
   # the expected set is ever wrong.
   retention_orphan_sweep: Malachi.Config.retention_orphan_sweep(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
+  # The backstop for a topic bound to a policy name this node cannot resolve. Unset means nothing of
+  # that topic expires, which is the safe side: the name exists because the administrator wanted
+  # something other than the global limits, and expiring under them would delete what the policy was
+  # there to keep. Set this to bound the disk such a topic can hold while the binding stays broken;
+  # malachi_retention_unresolved_policy_sweeps_total names the topic meanwhile.
+  retention_unresolved_policy_max_age_ms:
+    parse_int.(System.get_env("MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS"), nil),
   retention_orphan_interval_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS"), 300_000),
   retention_orphan_min_age_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_MIN_AGE_MS"), 600_000),
   retention_orphan_sightings: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SIGHTINGS"), 2),

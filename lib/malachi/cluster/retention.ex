@@ -17,7 +17,8 @@ defmodule Malachi.Cluster.Retention do
   (the policy overrides only the keys it sets), or the global policy passed in when the topic points at
   no policy, so retention is per-topic (C3c-2b). The topic's metadata says which policy NAME it points
   at (`Malachi.Metadata.topic_policy_name/2`); the definitions come from the cluster's policy store and
-  are passed in already resolved, which keeps this module pure.
+  are passed in already resolved, which keeps this module pure. A name the caller could not resolve
+  expires nothing rather than falling back to the global limits: see `expired/5`.
   """
 
   alias Malachi.Cluster.Policy
@@ -73,18 +74,24 @@ defmodule Malachi.Cluster.Retention do
 
   `policies` maps a policy NAME to its definition. The metadata says which name a topic points at, and
   the definitions are an administrative object of the cluster
-  (`Malachi.Cluster.PolicyStore.all/0`), so the caller resolves them once per sweep and hands them in:
+  (`Malachi.Cluster.PolicyStore.fetch_all/0`), so the caller resolves them once per sweep and hands
+  them in:
   this stays pure, and a sweep costs one read of the policy store rather than one per range.
   """
-  @spec expired(Metadata.t(), non_neg_integer(), policy(), %{Metadata.policy_name() => Policy.t()}) ::
-          [Metadata.segment_id()]
-  def expired(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}) do
+  @spec expired(
+          Metadata.t(),
+          non_neg_integer(),
+          policy(),
+          %{Metadata.policy_name() => Policy.t()},
+          non_neg_integer() | nil
+        ) :: [Metadata.segment_id()]
+  def expired(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}, unresolved_max_age_ms \\ nil) do
     metadata.segments
     |> Map.values()
     |> Enum.filter(&(&1.state == :sealed))
     |> Enum.group_by(& &1.range_id)
     |> Enum.flat_map(fn {range_id, sealed} ->
-      retention = effective_retention(metadata, range_id, global_policy, policies)
+      retention = effective_retention(metadata, range_id, global_policy, policies, unresolved_max_age_ms)
       oldest_first = Enum.sort_by(sealed, & &1.start_offset)
 
       expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
@@ -93,17 +100,44 @@ defmodule Malachi.Cluster.Retention do
     |> Enum.uniq()
   end
 
-  # A range's effective retention: its topic's policy retention merged over the global policy (the
-  # policy overrides only the keys it sets), or the global policy when the topic points at no policy or
-  # at one this node cannot resolve. Falling back to the global there is the same thing a topic with no
-  # policy gets, which is what the cluster did before the policy existed.
-  defp effective_retention(metadata, range_id, global_policy, policies) do
-    name = Metadata.topic_policy_name(metadata, elem(range_id, 0))
+  # A range's effective retention. Three cases, and the third is the one worth spelling out.
+  #
+  # A topic that points at no policy uses the global limits, as it always has. A topic whose policy
+  # resolves merges that policy over them, the policy winning the keys it sets.
+  #
+  # A topic that points at a NAME this node cannot resolve is neither. Falling back to the global
+  # limits there is what the administrator did not ask for: the name exists because they wanted
+  # something other than the default, and the most common reason a more permissive policy is asked for
+  # is to keep data longer. Expiring under the global bound would then delete exactly the data the
+  # policy existed to hold. So nothing expires, unless the operator has set a backstop bound for this
+  # case (`:retention_unresolved_policy_max_age_ms`), which is the only bound anyone has stated for it.
+  defp effective_retention(metadata, range_id, global_policy, policies, unresolved_max_age_ms) do
+    case Metadata.topic_policy_name(metadata, elem(range_id, 0)) do
+      nil ->
+        global_policy
 
-    case Map.get(policies, name) do
-      %{retention: retention} when is_map(retention) -> Map.merge(global_policy, retention)
-      _no_policy_retention -> global_policy
+      name ->
+        case Map.get(policies, name) do
+          %{retention: retention} when is_map(retention) -> Map.merge(global_policy, retention)
+          %{} -> global_policy
+          nil -> %{max_age_ms: unresolved_max_age_ms, max_bytes: nil}
+        end
     end
+  end
+
+  @doc """
+  The topics whose bound policy name `policies` does not resolve, sorted.
+
+  What `effective_retention/5` refuses to expire under the global limits, named so a caller can count
+  it. A name that stays unresolved is a misconfiguration (a policy deleted, or a typo in the binding)
+  and the disk it holds is invisible otherwise.
+  """
+  @spec unresolved_policies(Metadata.t(), %{Metadata.policy_name() => Policy.t()}) :: [Metadata.topic_name()]
+  def unresolved_policies(%Metadata{} = metadata, policies) do
+    for {topic, _meta} <- metadata.topics,
+        name = Metadata.topic_policy_name(metadata, topic),
+        name != nil and not Map.has_key?(policies, name),
+        do: topic
   end
 
   defp expired_by_age(_segments, _now_ms, nil), do: []

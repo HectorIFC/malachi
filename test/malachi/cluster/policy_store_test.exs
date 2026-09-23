@@ -14,7 +14,8 @@ defmodule Malachi.Cluster.PolicyStoreTest do
     assert PolicyStore.define(name, %{retention: %{max_bytes: 500}}) == :ok
 
     assert PolicyStore.get(name) == %{retention: %{max_bytes: 500}}
-    assert Map.fetch!(PolicyStore.all(), name) == %{retention: %{max_bytes: 500}}
+    assert {:ok, all} = PolicyStore.fetch_all()
+    assert Map.fetch!(all, name) == %{retention: %{max_bytes: 500}}
   end
 
   test "a name nothing defined reads as nil, and so does no name at all", %{name: name} do
@@ -49,12 +50,16 @@ defmodule Malachi.Cluster.PolicyStoreTest do
       :ok
     end
 
-    test "reads fall open to the cluster defaults rather than closed", %{name: name} do
-      # Failing closed would mean a node that cannot reach the store stops expiring anything, or places
-      # segments ignoring its operator's rack rule. Neither is safer than the defaults the cluster ran
-      # with before the policy existed, which is what `nil` and `%{}` mean to every caller.
+    test "placement falls open to the cluster defaults, because a worse placement is recoverable", %{name: name} do
       assert PolicyStore.get(name) == nil
-      assert PolicyStore.all() == %{}
+    end
+
+    test "retention gets the failure back, because its fallback deletes", %{name: name} do
+      # An empty map is what a cluster with no policies answers, and retention cannot tell the two
+      # apart: under it, a topic kept for 30 days would expire under a global limit of 7, on every
+      # replica, with no way back. The sweep skips instead.
+      assert {:error, _reason} = PolicyStore.fetch_all()
+      assert PolicyStore.get(name) == nil
     end
 
     test "a write says it failed, because silently losing a definition is not a default", %{name: name} do

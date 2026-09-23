@@ -597,6 +597,7 @@ defmodule Malachi.Application do
       metadata_source: metadata_source,
       expire_segment: &expire_segment/1,
       policy: retention_policy(),
+      unresolved_policy_max_age_ms: Application.get_env(:malachi, :retention_unresolved_policy_max_age_ms),
       interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),
       leader?: leader?
     ]

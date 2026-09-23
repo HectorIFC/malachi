@@ -78,6 +78,9 @@ defmodule Malachi.Telemetry do
 
     * `[:malachi, :retention, :orphan_removed]`. `%{count}` / `%{}` - replica directories
       `Malachi.Retention.OrphanSweeper` reclaimed in one pass.
+    * `[:malachi, :retention, :unresolved_policy]`. `%{count: 1}` / `%{topic}` - a sweep found `topic`
+      bound to a policy name it could not resolve, and expired nothing of it. Once per sweep per topic,
+      so it is a gauge of the misconfiguration rather than a count of anything.
 
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
@@ -201,6 +204,15 @@ defmodule Malachi.Telemetry do
   @spec retention_orphan_left(String.t()) :: :ok
   def retention_orphan_left(topic) do
     :telemetry.execute([:malachi, :retention, :orphan_left], %{count: 1}, %{topic: topic})
+  end
+
+  @doc """
+  A retention sweep found `topic` bound to a policy name its definitions do not resolve, so nothing of
+  that topic was expired.
+  """
+  @spec retention_unresolved_policy(String.t()) :: :ok
+  def retention_unresolved_policy(topic) do
+    :telemetry.execute([:malachi, :retention, :unresolved_policy], %{count: 1}, %{topic: topic})
   end
 
   @doc "The orphan sweeper reclaimed `count` replica directories in one pass."

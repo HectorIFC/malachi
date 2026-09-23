@@ -243,6 +243,18 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records that a sweep found `topic` bound to a policy name it could not resolve, and expired nothing
+  of it. Counted per sweep, so a name that stays unresolved keeps the series moving: the disk it holds
+  is invisible otherwise, and the fix is a binding an operator has to make.
+  """
+  @spec record_retention_unresolved_policy(String.t(), non_neg_integer()) :: :ok
+  def record_retention_unresolved_policy(topic, count) do
+    key = {:retention_unresolved_policy, topic}
+    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
+    :ok
+  end
+
+  @doc """
   Records `count` replica directories the orphan sweeper reclaimed (from the retention orphan
   telemetry event). Unlabeled: a reclaimed directory is named by the sweeper's log line, and the
   segment it belonged to is exactly what the control plane no longer knows.
@@ -275,6 +287,7 @@ defmodule Malachi.Metrics do
           expired: [map()],
           orphans_left: [map()],
           orphans_removed: non_neg_integer(),
+          unresolved_policies: [map()],
           failures: %{atom() => non_neg_integer()},
           sweeps: map()
         }
@@ -295,11 +308,17 @@ defmodule Malachi.Metrics do
         %{topic: topic, directories: directories}
       end
 
+    unresolved_policies =
+      for [topic, sweeps] <- :ets.match(@metrics_table, {{:retention_unresolved_policy, :"$1"}, :"$2"}) do
+        %{topic: topic, sweeps: sweeps}
+      end
+
     %{
       skips: Enum.sort(skips),
       expired: Enum.sort(expired),
       orphans_left: Enum.sort(orphans_left),
       orphans_removed: get_counter(:retention_orphan_removed),
+      unresolved_policies: Enum.sort(unresolved_policies),
       failures: Map.new(@retention_failure_replies, &{&1, get_counter({:retention_expire_failure, &1})}),
       sweeps: histogram_snapshot(:persistent_term.get(@retention_sweep_key, nil))
     }

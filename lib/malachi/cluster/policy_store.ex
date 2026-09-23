@@ -44,14 +44,15 @@ defmodule Malachi.Cluster.PolicyStore do
     end
   end
 
-  @doc "Every definition as a map from name to policy (empty when the store cannot be read)."
-  @spec all() :: %{Policy.name() => Policy.t()}
-  def all do
-    case PolicyServer.all(server_id()) do
-      {:ok, policies} -> policies
-      {:error, _reason} -> %{}
-    end
-  end
+  @doc """
+  Every definition as a map from name to policy, or the read error.
+
+  Hands the failure back rather than answering with an empty map, which a caller cannot tell from a
+  cluster that has defined no policies. Retention is that caller: see the module doc for why the two
+  answers must not look the same there.
+  """
+  @spec fetch_all() :: {:ok, %{Policy.name() => Policy.t()}} | {:error, term()}
+  def fetch_all, do: PolicyServer.all(server_id())
 
   defp server_id, do: {@cluster, node()}
 

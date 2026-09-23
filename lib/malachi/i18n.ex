@@ -648,6 +648,14 @@ defmodule Malachi.I18n do
         "⚠️ the control plane did not answer the delete of segment %{segment} (%{reason}); the bytes " <>
           "were kept and the next sweep tries again"
     },
+    retention_policies_unreadable: %{
+      "pt_BR" =>
+        "⚠️ varredura de retenção pulada: o store de políticas não respondeu (%{reason}); expirar sob o " <>
+          "limite global apagaria justamente o que a política guarda",
+      "en_US" =>
+        "⚠️ retention sweep skipped: the policy store did not answer (%{reason}); expiring under the " <>
+          "global limit would delete exactly what the policy keeps"
+    },
     retention_orphan_removed: %{
       "pt_BR" => "🧹 varredura de órfãos recuperou %{count} diretórios de réplica: %{directories}",
       "en_US" => "🧹 the orphan sweep reclaimed %{count} replica directories: %{directories}"

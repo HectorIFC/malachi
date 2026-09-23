@@ -344,6 +344,28 @@ would have chosen it in silence.
   against the one above: a gap that keeps growing means the sweep is off, is being held back by a
   guard, or is not keeping up with `MAX_PER_PASS`.
 
+### When a topic's policy cannot be read
+
+Retention resolves a topic's policy against the cluster's policy store on every sweep. Two cases stop
+it expiring, both on purpose, because expiring under the cluster-wide limits instead would delete
+exactly the data a more permissive policy exists to keep, on every replica, with no way back.
+
+- **The store did not answer.** The whole sweep is skipped and one line says so. Nothing else is
+  needed to notice: `malachi_retention_sweep_duration_seconds`'s `_count` stops advancing, which is
+  the signal this guide already tells you to alert on.
+- **The topic points at a policy name the store does not define**, because it was deleted or the
+  binding has a typo. That topic expires nothing, and
+  **`malachi_retention_unresolved_policy_sweeps_total{topic}`** names it on every sweep.
+
+The second case holds disk until someone fixes the binding. Bound how much with:
+
+```bash
+MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS=604800000   # 7 days; unset means keep everything
+```
+
+Unset by default on purpose: that bound is a retention decision, and the only person who can make it
+is the one who wrote the policy the binding points at.
+
 These names are reserved for later retention work and not emitted yet:
 `malachi_retention_segments_pinned{topic,group}` (consumer-aware retention) and
 `malachi_segment_rolls_total{reason}` (time-based rolls).
