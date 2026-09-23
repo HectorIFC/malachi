@@ -5,23 +5,41 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
   Every seam is injected, so nothing here reaches `ra` and nothing takes the VM down: `:halt_fun`
   records the status the way `Malachi.Storage.FormatMarker`'s gate is tested, which is the same
   refusal surface underneath.
+
+  The cache these tests drive is the running application's own, so the suite's reconciler is paused for
+  their duration and the value it had is put back afterwards. Without that, its tick refreshes the cache
+  from the real store between an injected write and the assertion that reads it, and the teardown leaves
+  the application with a cache it never validated at boot.
   """
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
   import ExUnit.CaptureLog
 
+  alias Malachi.Application, as: App
   alias Malachi.Cluster.ClusterFlags
   alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.Cluster.ClusterFlagsServer
 
   @cap :batch_format
+  @reconciler Malachi.LogClusterFlagsReconciler
 
   setup do
-    # persistent_term is VM-wide and outlives a test, so every case starts from unread.
+    published = ClusterFlagsCache.enabled()
+    _ = Supervisor.terminate_child(Malachi.Supervisor, @reconciler)
     ClusterFlagsCache.forget()
-    on_exit(&ClusterFlagsCache.forget/0)
+
+    on_exit(fn ->
+      ClusterFlagsCache.put(published)
+      _ = Supervisor.restart_child(Malachi.Supervisor, @reconciler)
+    end)
+
     :ok
   end
+
+  # A gate test drives an injected store, so it must not form this node's real one: that would make the
+  # boot evidence below pass because a test ran rather than because the node booted.
+  defp no_start, do: fn -> {:ok, {:not_started, node()}} end
 
   defp store(flags) do
     Enum.reduce(flags, ClusterFlags.new(), fn flag, state ->
@@ -44,6 +62,100 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
   end
 
   defp seen(modes), do: modes |> Agent.get(& &1) |> Enum.reverse()
+
+  describe "ensure_cluster_flags/2" do
+    test "the application's own boot ran it: the store is formed on a running node" do
+      # The suite boots the application once (test_helper.exs). The flag store is formed by
+      # ensure_cluster_flags/2 inside start/2 and by nothing else, so a store that answers on a booted
+      # node is the evidence that the gate ran, and ran before the supervision tree.
+      assert {:ok, flags} = ClusterFlagsServer.read({Malachi.LogClusterFlags, node()}, :consistent)
+      assert ClusterFlags.enabled(flags) == []
+    end
+
+    test "reads the store consistently and publishes before the supervision tree exists" do
+      # The whole point of the gate being here: by the time it answers :ok, this node already knows
+      # which flags are on. A tick that ran alongside the tree would let the acceptor open first.
+      parent = self()
+
+      read = fn mode ->
+        send(parent, {:read, mode})
+        {:ok, store([:batch_format])}
+      end
+
+      assert App.ensure_cluster_flags([node()], start: no_start(), read: read, advertised: [:batch_format]) == :ok
+      assert_received {:read, :consistent}
+      assert ClusterFlagsCache.enabled() == [:batch_format]
+    end
+
+    test "refuses with exit 78 when an enabled flag names a capability this build lacks" do
+      parent = self()
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_log(fn ->
+            App.ensure_cluster_flags([node()],
+              start: no_start(),
+              read: fn _mode -> {:ok, store([:batch_format])} end,
+              advertised: [],
+              halt_fun: &send(parent, {:halted, &1})
+            )
+          end)
+        end)
+
+      assert_received {:halted, 78}
+      assert stderr =~ "REFUSING TO START (exit 78):"
+      assert stderr =~ "batch_format"
+    end
+
+    test "retries an unreadable store, then raises rather than assuming no flag is on" do
+      # A read that failed is not an answer. Treating it as one is what lets a node rolled back onto an
+      # older build serve past a flag it cannot honour, which is the failure the gate exists to stop.
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(attempts), do: Agent.stop(attempts) end)
+
+      read = fn _mode ->
+        Agent.update(attempts, &(&1 + 1))
+        {:error, :noproc}
+      end
+
+      assert_raise RuntimeError, ~r/could not read the cluster flags/, fn ->
+        App.ensure_cluster_flags([node()], start: no_start(), read: read, timeout_ms: 30, advertised: [])
+      end
+
+      assert Agent.get(attempts, & &1) > 1, "the gate gave up without retrying"
+      assert ClusterFlagsCache.enabled() == []
+    end
+
+    test "a store that answers on a later attempt is adopted, not refused" do
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(attempts), do: Agent.stop(attempts) end)
+
+      read = fn _mode ->
+        if Agent.get_and_update(attempts, &{&1 + 1, &1 + 1}) < 3, do: {:error, :noproc}, else: {:ok, store([])}
+      end
+
+      assert App.ensure_cluster_flags([node()], start: no_start(), read: read, timeout_ms: 5_000, advertised: []) == :ok
+      assert ClusterFlagsCache.enabled() == []
+    end
+
+    test "the raise is not exit 78, because an unreachable store is worth restarting for" do
+      # Exit 78 tells a service manager to stop restarting. That is right for a binary that cannot
+      # honour a flag and wrong for a store that is not up yet.
+      parent = self()
+
+      assert_raise RuntimeError, fn ->
+        App.ensure_cluster_flags([node()],
+          start: no_start(),
+          read: fn _mode -> {:error, :timeout} end,
+          timeout_ms: 20,
+          advertised: [],
+          halt_fun: &send(parent, {:halted, &1})
+        )
+      end
+
+      refute_received {:halted, _status}
+    end
+  end
 
   describe "before the store has been read" do
     test "nothing is enabled" do
