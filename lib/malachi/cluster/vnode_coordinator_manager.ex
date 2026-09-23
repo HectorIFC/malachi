@@ -29,6 +29,11 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   once per reconcile with a log each time instead of spinning. A deliberate stop demonitors first, so
   it is never mistaken for a death.
 
+  Unknown messages: a cast, info message or call this server has no clause for is counted and dropped
+  through `Malachi.UnexpectedMessage` rather than stopping it. It sits under a `one_for_all` supervisor
+  with the dynamic supervisor that holds every running coordinator, so stopping here would take all of
+  them down with it.
+
   Version watch: on the same tick, every member returned by `:version_servers` is checked with
   `Malachi.Cluster.MachineVersion.check/3`, whether this node leads it or not, since a follower is just
   as able to stop applying its log. The last status per member is kept here, so a member that stays
@@ -38,8 +43,10 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   use GenServer
 
   require Logger
+
   alias Malachi.Cluster.MachineVersion
   alias Malachi.I18n
+  alias Malachi.UnexpectedMessage
 
   @default_interval 5_000
 
@@ -67,7 +74,9 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
       version_servers: Keyword.get(opts, :version_servers, fn -> [] end),
       version_status: %{},
       interval: Keyword.get(opts, :interval, @default_interval),
-      running: %{}
+      running: %{},
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     {:ok, state, {:continue, :reconcile}}
@@ -95,6 +104,14 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
     end
   end
 
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
+  # Nothing casts to this server today; without this clause, `use GenServer` would stop it on the first
+  # cast, and it sits under a one_for_all supervisor, so stopping takes every coordinator on the node
+  # down with it.
+  @impl true
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+
   @impl true
   def handle_call(:reconcile_now, _from, state) do
     state = reconcile(state)
@@ -102,6 +119,15 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   end
 
   def handle_call(:version_status, _from, state), do: {:reply, state.version_status, state}
+
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
+  defp drop_unexpected(state, kind, message) do
+    shapes = UnexpectedMessage.drop(state.unexpected_shapes, :vnode_coordinator, kind, message)
+    %{state | unexpected_shapes: shapes}
+  end
 
   defp reconcile_and_schedule(state) do
     schedule(state)

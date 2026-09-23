@@ -2,6 +2,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Cluster.VnodeCoordinatorManager, as: Manager
+  alias Malachi.Test.UnknownMessages
 
   # Starts a manager whose "led vnodes" come from an Agent (so a test can change leadership between
   # reconciles) and whose spawn/stop report to the test as {:spawn, vnode_id, pid} / {:stop, pid}.
@@ -102,6 +103,16 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
     assert_receive {:spawn, :a, pid2}, 1_000
     assert pid2 != pid1
     assert Manager.reconcile_now(manager) == [:a]
+  end
+
+  test "an unknown cast, info message or call is counted and survived" do
+    {:ok, leading} = Agent.start_link(fn -> [:a] end)
+    manager = start_manager(leading)
+    assert_receive {:spawn, :a, _}
+
+    UnknownMessages.assert_survives_unknown(manager, :vnode_coordinator, fn ->
+      assert Manager.reconcile_now(manager) == [:a]
+    end)
   end
 
   test "a deliberate stop does not trigger a respawn" do

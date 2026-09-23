@@ -293,7 +293,9 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
         for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds(), do: {server, kind}
 
       assert reported == expected
-      assert length(reported) == 24
+      # every label pair exists, and the count follows the label set rather than a number to update by
+      # hand every time a server is added to it
+      assert length(reported) == (length(UnexpectedMessage.servers()) + 1) * length(UnexpectedMessage.kinds())
     end
   end
 end
