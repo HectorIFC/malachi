@@ -30,6 +30,7 @@ defmodule Malachi.AuditLog do
   use GenServer
   require Logger
   alias Malachi.I18n
+  alias Malachi.IPAddress
 
   @table_main :malachi_audit_log
   @table_by_type :malachi_audit_by_type
@@ -261,7 +262,7 @@ defmodule Malachi.AuditLog do
     ip = Map.get(context, :ip, nil)
 
     # Format IP as string for storage
-    ip_string = format_ip(ip)
+    ip_string = IPAddress.format(ip)
 
     # Insert into main index
     :ets.insert(state.main, {event_id, timestamp, event_type, username, ip_string, action, status, metadata})
@@ -364,19 +365,6 @@ defmodule Malachi.AuditLog do
     :crypto.strong_rand_bytes(16)
     |> Base.url_encode64(padding: false)
   end
-
-  defp format_ip(nil), do: "unknown"
-
-  defp format_ip(ip) when is_tuple(ip) do
-    case tuple_size(ip) do
-      4 -> :inet.ntoa(ip) |> to_string()
-      8 -> :inet.ntoa(ip) |> to_string()
-      _ -> "invalid"
-    end
-  end
-
-  defp format_ip(ip) when is_binary(ip), do: ip
-  defp format_ip(_), do: "invalid"
 
   defp format_event({event_id, timestamp, event_type, username, ip, action, status, metadata}) do
     %{

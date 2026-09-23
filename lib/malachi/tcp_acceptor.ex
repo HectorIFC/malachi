@@ -18,6 +18,7 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.Auth.OidcConfig
   alias Malachi.Auth.SessionManager
   alias Malachi.I18n
+  alias Malachi.IPAddress
   alias Malachi.LogApi
   alias Malachi.TCPProtocol
   alias Malachi.Wire
@@ -141,14 +142,16 @@ defmodule Malachi.TCPAcceptor do
   defp tls_handshake_timeout, do: Application.get_env(:malachi, :tls_handshake_timeout_ms, 5_000)
 
   defp handle_client(socket, transport) do
-    # Extract client IP address
-    client_ip = get_client_ip(socket, transport)
+    # The client address is read and formatted exactly once, here, and travels as a binary from this
+    # point on: it keys the connection limiter, the auth rate limiter and the replicated lockout store,
+    # and it is the value session binding compares.
+    client_ip = IPAddress.from_socket(socket, transport)
 
     # Check connection limits
     case Malachi.ConnectionLimiter.register_connection(self(), client_ip) do
       :ok ->
         # Register connection for graceful shutdown tracking
-        Malachi.ConnectionRegistry.register(self(), socket, transport)
+        Malachi.ConnectionRegistry.register(self(), socket, transport, client_ip)
 
         try do
           # Create initial state
@@ -534,29 +537,4 @@ defmodule Malachi.TCPAcceptor do
 
   defp set_socket_opts(socket, :ssl, opts), do: :ssl.setopts(socket, opts)
   defp set_socket_opts(socket, :gen_tcp, opts), do: :inet.setopts(socket, opts)
-
-  # IP address formatting helpers
-  defp get_client_ip(socket, transport) do
-    case transport do
-      :ssl ->
-        case :ssl.peername(socket) do
-          {:ok, {address, _port}} -> format_ip(address)
-          {:error, _} -> "unknown"
-        end
-
-      :gen_tcp ->
-        case :inet.peername(socket) do
-          {:ok, {address, _port}} -> format_ip(address)
-          {:error, _} -> "unknown"
-        end
-    end
-  end
-
-  defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
-
-  defp format_ip({a, b, c, d, e, f, g, h}),
-    do:
-      "#{Integer.to_string(a, 16)}:#{Integer.to_string(b, 16)}:#{Integer.to_string(c, 16)}:#{Integer.to_string(d, 16)}:#{Integer.to_string(e, 16)}:#{Integer.to_string(f, 16)}:#{Integer.to_string(g, 16)}:#{Integer.to_string(h, 16)}"
-
-  defp format_ip(_), do: "unknown"
 end
