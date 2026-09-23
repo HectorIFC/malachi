@@ -242,8 +242,11 @@ defmodule Malachi.BrokerServerRaTest do
     assert BrokerServer.metadata_ready?(server)
     assert BrokerServer.unreachable_vnodes(server) == [], "a refresh that succeeded read every vnode"
 
+    # The assertion below is about a state CHANGE, which only happens once a failed reconcile has
+    # landed, so it is driven rather than waited for. A sleep would make the test read the previous
+    # value whenever the runner stalls longer than the window, which is the flake this avoids.
     MetadataServer.delete(cluster)
-    Process.sleep(300)
+    reconcile!(server)
 
     assert BrokerServer.metadata_ready?(server), "the node still serves what it knew"
     assert BrokerServer.unreachable_vnodes(server) == [:vnode_0], "but it says the view is not current"
