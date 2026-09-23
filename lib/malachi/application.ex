@@ -36,6 +36,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.LeaseReconciler
   alias Malachi.Cluster.LeaseServer
+  alias Malachi.Cluster.MemberIncarnation
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataMachine
@@ -776,6 +777,8 @@ defmodule Malachi.Application do
   defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes, topology) do
+    dir = log_data_dir()
+
     opts =
       [
         name: Malachi.LogMembership,
@@ -784,11 +787,34 @@ defmodule Malachi.Application do
         attributes: membership_attributes(),
         # adopt a gossiped ring change locally: point consumer-group routing at the new topology
         on_topology: &adopt_ring_topology/1
-      ] ++ initial_topology_opt(topology)
+      ] ++ initial_topology_opt(topology) ++ incarnation_opts(dir)
 
     %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
   end
 
+  # Resume this node's incarnation above everything its peers still remember of the member it was, so a
+  # restart's announcement is not ignored as a duplicate and its attributes are not stale
+  # (`Malachi.Cluster.MemberIncarnation`).
+  #
+  # A reservation that cannot be written warns and falls back to a first-boot view rather than stopping
+  # the node. `ensure_data_format/2` has already proven this directory writable a moment earlier, so
+  # reaching this branch means something changed in between, and the cost of carrying on is the
+  # behaviour every node had before the reservation existed: one restart that peers ignore for a round,
+  # until the next refutation lifts it. Taking a node out of an otherwise healthy cluster over one small
+  # file would be the larger harm.
+  defp incarnation_opts(dir) do
+    case MemberIncarnation.reserve(dir) do
+      {:ok, %{start: start, ceiling: ceiling}} ->
+        [incarnation: start, ceiling: ceiling, on_ceiling: &MemberIncarnation.extend(dir, &1)]
+
+      {:error, reason} ->
+        Logger.warning(
+          I18n.t(:member_incarnation_unwritable, path: MemberIncarnation.path(dir), reason: inspect(reason))
+        )
+
+        []
+    end
+  end
 
   # Seed the membership with the routing topology this node resolved at boot, so gossip carries it and a
   # split advances from it. A single vnode (or unclustered) has nothing to route, so no topology. Note the

@@ -50,18 +50,24 @@ defmodule Malachi.Cluster.Membership do
   @self_incarnation 1
 
   @doc """
-  Builds a membership view local to `self` (which starts `:alive` at incarnation #{@self_incarnation}).
+  Builds a membership view local to `self`, `:alive` at `:incarnation` (default #{@self_incarnation}).
   `:peers` seeds other members `:alive` at incarnation 0, as placeholders until they announce
   themselves. `:attributes` are `self`'s own attributes (peers' attributes are learned via gossip).
+
+  `:incarnation` is what a **restart** needs. The default outranks a placeholder, which is all a first
+  boot has to beat, but a node coming back has to outrank what its peers still remember of the member it
+  was, and that number is not derivable from anything this process holds. It is resumed from disk by
+  `Malachi.Cluster.MemberIncarnation` and handed in here.
   """
   @spec new(member(), keyword()) :: t()
   def new(self, opts \\ []) do
     peers = Keyword.get(opts, :peers, [])
     self_attributes = Keyword.get(opts, :attributes, %{})
+    incarnation = Keyword.get(opts, :incarnation, @self_incarnation)
 
     members =
       Map.new([self | peers], fn
-        ^self -> {self, %{status: :alive, incarnation: @self_incarnation, attributes: self_attributes}}
+        ^self -> {self, %{status: :alive, incarnation: incarnation, attributes: self_attributes}}
         peer -> {peer, %{status: :alive, incarnation: 0, attributes: %{}}}
       end)
 

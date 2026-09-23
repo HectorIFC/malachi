@@ -310,6 +310,16 @@ defmodule Malachi.I18n do
       "pt_BR" => "flag de cluster %{flag} adotado neste nó",
       "en_US" => "cluster flag %{flag} adopted on this node"
     },
+    member_incarnation_unwritable: %{
+      "pt_BR" =>
+        "não foi possível reservar a incarnation deste nó em %{path} (%{reason}); ele sobe como se " <>
+          "fosse o primeiro boot. Pares que lembram uma incarnation maior vão ignorar o anúncio dele " <>
+          "até a próxima refutação, inclusive os atributos que eles guardam",
+      "en_US" =>
+        "could not reserve this node's incarnation at %{path} (%{reason}); it starts as though this " <>
+          "were its first boot. Peers that remember a higher incarnation will ignore its announcement " <>
+          "until the next refutation, including the attributes they hold for it"
+    },
     cluster_flags_unreadable: %{
       "pt_BR" =>
         "não foi possível ler os flags de cluster em %{timeout}ms (%{reason}). Este nó não sobe sem " <>

@@ -112,11 +112,19 @@ defmodule Malachi.Cluster.MembershipServer do
     self_ref = Keyword.get(opts, :self_ref) || Keyword.get(opts, :name) || self()
     ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
-    membership_opts = [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})]
+    membership_opts =
+      [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})] ++
+        Keyword.take(opts, [:incarnation])
 
     state = %{
       view: Membership.new(self_ref, membership_opts),
       self: self_ref,
+      # The highest incarnation this node may reach before its next restart would start below what peers
+      # remember, and what to call when it gets there (see `Malachi.Cluster.MemberIncarnation`). A view
+      # built without a reservation never crosses, which is what keeps tests and the in-memory shape free
+      # of a disk.
+      ceiling: Keyword.get(opts, :ceiling, :infinity),
+      on_ceiling: Keyword.get(opts, :on_ceiling, fn _incarnation -> :error end),
       # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
       # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
       topology: Keyword.get(opts, :topology),
@@ -150,7 +158,7 @@ defmodule Malachi.Cluster.MembershipServer do
   def handle_call({:set_attributes, attributes}, _from, state) do
     # Update our own attributes locally (raising our incarnation); gossip carries it onward.
     {view, _effect} = Membership.set_attributes(state.view, attributes)
-    {:reply, :ok, %{state | view: view}}
+    {:reply, :ok, put_view(state, view)}
   end
 
   def handle_call(:topology, _from, state), do: {:reply, state.topology, state}
@@ -202,7 +210,7 @@ defmodule Malachi.Cluster.MembershipServer do
   def handle_cast({:join, joiner, updates}, state) do
     state = merge_updates(state, updates)
     {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0, %{}})
-    state = %{state | view: view}
+    state = put_view(state, view)
     cast(joiner, {:join_ok, state.self, gossip_payload(state)})
     {:noreply, state}
   end
@@ -250,7 +258,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
     if still_suspect? do
       {view, _effect} = Membership.confirm(state.view, target)
-      {:noreply, %{state | view: view}}
+      {:noreply, put_view(state, view)}
     else
       {:noreply, state}
     end
@@ -298,10 +306,32 @@ defmodule Malachi.Cluster.MembershipServer do
       {view, {:applied, _update}} ->
         incarnation = Membership.incarnation(view, target)
         Process.send_after(self(), {:suspicion_timeout, target, incarnation}, state.suspicion_timeout)
-        %{state | view: view}
+        put_view(state, view)
 
       {view, _effect} ->
-        %{state | view: view}
+        put_view(state, view)
+    end
+  end
+
+  # The one place the view is replaced, so the one place this node's own incarnation can be seen to rise.
+  #
+  # It rises only on a refutation or a deliberate attribute change, both rare, so crossing the reserved
+  # block is rare too and the durable write that follows stays off the failure detector's path. A write
+  # that fails leaves the ceiling where it was: the node keeps serving, and the cost is that a future
+  # restart may resume below what peers remember, which is the state every node was in before the
+  # reservation existed.
+  defp put_view(state, view) do
+    state = %{state | view: view}
+
+    case Membership.incarnation(view, state.self) do
+      incarnation when is_integer(incarnation) and incarnation >= state.ceiling ->
+        case state.on_ceiling.(incarnation) do
+          {:ok, ceiling} -> %{state | ceiling: ceiling}
+          _failed -> state
+        end
+
+      _below_or_unreserved ->
+        state
     end
   end
 
@@ -313,12 +343,12 @@ defmodule Malachi.Cluster.MembershipServer do
   # view still merges and the topology is left as-is.
   defp merge_updates(state, {updates, topology}) do
     {view, _effects} = Membership.merge(state.view, updates)
-    adopt_topology(%{state | view: view}, topology)
+    adopt_topology(put_view(state, view), topology)
   end
 
   defp merge_updates(state, updates) when is_list(updates) do
     {view, _effects} = Membership.merge(state.view, updates)
-    %{state | view: view}
+    put_view(state, view)
   end
 
   # Adopt `remote` if it is a newer topology than ours (CRDT last-version-wins), firing `on_topology` on

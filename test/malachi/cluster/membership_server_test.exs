@@ -150,6 +150,65 @@ defmodule Malachi.Cluster.MembershipServerTest do
            end)
   end
 
+  describe "the incarnation reservation" do
+    test "starts at the reserved incarnation rather than at the first-boot default" do
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], incarnation: 40] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 40
+    end
+
+    test "asks for a new ceiling once it has used the block, and adopts the answer" do
+      # The block is what keeps the durable write off the failure detector's path: the node raises its
+      # own incarnation this many times before it touches a disk again.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      on_ceiling = fn incarnation ->
+        send(parent, {:ceiling_asked, incarnation})
+        {:ok, incarnation + 10}
+      end
+
+      opts = [name: a, peers: [], incarnation: 1, ceiling: 3, on_ceiling: on_ceiling] ++ @timings
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "1"})
+      refute_received {:ceiling_asked, _incarnation}
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "2"})
+      assert_received {:ceiling_asked, 3}
+
+      # The new ceiling was adopted, so the next rise does not ask again.
+      :ok = MembershipServer.set_attributes(a, %{rack: "3"})
+      refute_received {:ceiling_asked, _incarnation}
+    end
+
+    test "keeps serving when the ceiling cannot be written" do
+      # A disk that refuses costs a future restart one round of being ignored by peers. Stopping the
+      # membership server over it would cost the cluster this node's liveness right now.
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], incarnation: 1, ceiling: 2, on_ceiling: fn _i -> {:error, :enospc} end] ++ @timings
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "x"})
+      :ok = MembershipServer.set_attributes(a, %{rack: "y"})
+
+      assert MembershipServer.attributes(a, a) == %{rack: "y"}
+      assert Membership.incarnation(MembershipServer.view(a), a) == 3
+    end
+
+    test "a server started without a reservation never asks for a ceiling" do
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], on_ceiling: fn i -> send(parent, {:asked, i}) end] ++ @timings
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      for rack <- ["a", "b", "c"], do: :ok = MembershipServer.set_attributes(a, %{rack: rack})
+
+      refute_received {:asked, _incarnation}
+    end
+  end
+
   describe "attributes" do
     test "a node's own attributes are set at start and readable" do
       a = :"msattr_#{System.unique_integer([:positive])}"
