@@ -44,11 +44,13 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
 
   A store that cannot be read yet (not formed, no quorum, this node still joining) never refuses and
   never publishes: there is no answer, and treating a failure to ask as an answer of no is the mistake
-  the durable ring boot exists to avoid. What a node does in the meantime is **start, join and report
-  itself not ready** (`read?/0`), rather than refuse to start. Refusing would deadlock the one case this
-  whole release exists for: the flag store cannot reach a quorum until enough nodes run a build that has
-  its machine module, so the first node of a rolling upgrade would be waiting for a cluster that is
-  waiting for it.
+  the durable ring boot exists to avoid. What a node does in the meantime is carry on with the old
+  behaviour, which every node in the cluster still understands, and try again on the next tick. It does
+  not refuse to start, and it does not hold itself out of rotation: either would deadlock the one case
+  this whole release exists for, because the flag store cannot reach a quorum until enough nodes run a
+  build that has its machine module, so the first node of a rolling upgrade would be waiting for a
+  cluster that is waiting for it. `read?/0` says which state a node is in, for the feature that will
+  need to act on it.
   """
 
   require Logger
@@ -72,13 +74,20 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
   def enabled?(flag), do: flag in enabled()
 
   @doc """
-  Whether this node has read the flag store at least once.
+  Whether this node has read the flag store at least once, as opposed to having read it and found
+  nothing: `enabled/0` answers `[]` for both, and the difference matters to anything that would hold a
+  node back until it knows.
 
-  A node that has not is **not ready**: it does not yet know what the cluster has committed to, and `[]`
-  from `enabled/0` would be indistinguishable from an answer. This is deliberately separate from whether
-  the node is up. The flag store cannot reach a quorum until enough nodes run a build that has its
-  machine module, so the first node of a rolling upgrade has to be able to start, join and wait; refusing
-  to boot without the flags would make it wait for a cluster that is waiting for it.
+  **Nothing gates on this yet, deliberately.** Readiness does not, because the flag store cannot reach a
+  quorum until enough nodes run a build that has its machine module, and a StatefulSet rolling update
+  will not start the second pod until the first is Ready: gating readiness on the flags would stall the
+  rollout of the very release that introduces them. Nor does it need to yet, since this release's
+  capability registry is empty, so no flag can be enabled at all.
+
+  It exists for the first feature that ships a capability (#202), which will run with the store already
+  formed cluster-wide and no bootstrap left to deadlock. That is the same shape as
+  `Malachi.Storage.FormatMarker.raise_to/3`: the hook lands with the mechanism, wired by the feature that
+  needs it.
   """
   @spec read?() :: boolean()
   def read?, do: :persistent_term.get(@key, @unread) != @unread
@@ -115,10 +124,9 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
       {:ok, %ClusterFlags{} = flags} ->
         adopt(flags, opts)
 
-      # Not formed, no quorum, or this node is still joining: no answer is not an answer. The boot gate
-      # is what refuses on an unreadable store (`Malachi.Application.ensure_cluster_flags/2`); by the
-      # time the tick runs, this node has already read the store once and a later failure only means the
-      # cache keeps what it has.
+      # Not formed, no quorum, or this node is still joining: no answer is not an answer, so nothing is
+      # published and nothing is refused. The tick is the only reader and it simply tries again; what a
+      # node has or has not read is observable through `read?/0`.
       {:error, _unreadable} ->
         :ok
     end
@@ -128,8 +136,8 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
   Applies flags this node has already read: refuse if this build cannot honour one, adopt what is new,
   publish.
 
-  Split from `refresh/1` so the boot gate, which reads the store itself and must refuse rather than
-  retry, applies what it read without a second round trip through Raft.
+  Split from `refresh/1` so a caller that has already read the store applies what it read without a
+  second round trip through Raft.
   """
   @spec adopt(ClusterFlags.t(), keyword()) :: :ok
   def adopt(%ClusterFlags{} = flags, opts \\ []) do
