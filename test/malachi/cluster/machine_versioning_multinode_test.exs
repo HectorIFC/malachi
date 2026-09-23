@@ -1,8 +1,9 @@
 defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
   @moduledoc """
-  The six production control-plane machines over real `ra` on three peers: each group reaches machine
-  version 1 on every member, applies its commands, refuses an unknown one with the versioned reply,
-  and comes back from a full-cluster restart with the same state and the same effective version.
+  The seven production control-plane machines over real `ra` on three peers: each group reaches the
+  current machine version on every member, applies its commands, refuses an unknown one with the
+  versioned reply, and comes back from a full-cluster restart with the same state and the same effective
+  version.
 
   Lease and ring are the two whose pure modules have no catch-all clause, so before versioning the
   `{:machine_version, 0, 1}` that `ra` applies on the first version bump would have raised inside
@@ -18,7 +19,9 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
   alias Malachi.Auth.UserMachine
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.LeaseMachine
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.PolicyMachine
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
@@ -38,7 +41,8 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
       {RingMachine, {:init, topology}, {:advance, 1, 1, %{topology | version: 2}}},
       {UserMachine, {:put_user, "before", "hash", [:produce]}, {:put_user, "after", "hash", [:produce]}},
       {LockoutMachine, {:unlock_user, "before"}, {:unlock_user, "after"}},
-      {AclMachine, {:grant, "before", :produce, {:literal, "t"}}, {:grant, "after", :produce, {:literal, "t"}}}
+      {AclMachine, {:grant, "before", :produce, {:literal, "t"}}, {:grant, "after", :produce, {:literal, "t"}}},
+      {PolicyMachine, {:define_policy, "before", %{spread_by: "rack"}}, {:define_policy, "after", %{}}}
     ]
   end
 
@@ -66,7 +70,8 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
            end)
   end
 
-  test "every control-plane machine reaches version 1, refuses unknown commands and survives a full restart" do
+  test "every control-plane machine reaches the current version, refuses unknown commands and survives a restart" do
+    version = MachineVersion.code_version()
     peers = for _ <- 1..3, do: RaPeers.start(nil)
     # Outlives the test process, so on_exit can still stop whatever handles the test replaced.
     {:ok, handles} = Agent.start(fn -> peers |> Enum.with_index() |> Map.new(fn {peer, index} -> {index, peer} end) end)
@@ -87,15 +92,15 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
 
     clusters = Enum.map(groups, &elem(&1, 0))
 
-    # A group is born at version 0 and moves to 1 once its leader has heard every member advertise 1.
-    await_converged(clusters, nodes, 1)
+    # A group is born at version 0 and moves up once its leader has heard every member advertise the same.
+    await_converged(clusters, nodes, version)
 
     for {cluster, before_command, _after} <- groups do
       assert accepted?(command(cluster, nodes, before_command)), "#{cluster} refused #{inspect(before_command)}"
-      assert {:ok, {:error, {:unknown_command, {:bogus, 2}, 1}}} = command(cluster, nodes, {:bogus, 1})
+      assert {:ok, {:error, {:unknown_command, {:bogus, 2}, ^version}}} = command(cluster, nodes, {:bogus, 1})
     end
 
-    await_converged(clusters, nodes, 1)
+    await_converged(clusters, nodes, version)
     before = Map.new(clusters, &{&1, RaPeers.local_state(hd(nodes), &1)})
 
     # Full-cluster restart: every member down before any comes back, so the logs replay from disk.
@@ -109,7 +114,7 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
       end
 
     nodes = Enum.map(restarted, & &1.node)
-    await_converged(clusters, nodes, 1)
+    await_converged(clusters, nodes, version)
 
     for cluster <- clusters, do: assert(RaPeers.local_state(hd(nodes), cluster) == before[cluster])
 
@@ -117,6 +122,6 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
       assert accepted?(command(cluster, nodes, after_command)), "#{cluster} refused #{inspect(after_command)}"
     end
 
-    await_converged(clusters, nodes, 1)
+    await_converged(clusters, nodes, version)
   end
 end

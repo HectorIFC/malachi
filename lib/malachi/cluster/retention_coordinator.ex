@@ -9,6 +9,9 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       expired segment from the control plane **and** deletes its stored data on the replicas, and
       answers what the control plane answered (labeled by `Malachi.Cluster.Retention.reply_label/1`);
     * `:policy` - a `Malachi.Cluster.Retention.policy()` (`:max_age_ms` / `:max_bytes`; `nil` = off);
+    * `:policies` - `(-> %{name => Malachi.Cluster.Policy.t()})`, the cluster's policy definitions,
+      resolved ONCE per sweep (default `Malachi.Cluster.PolicyStore.all/0`). A topic's own metadata says
+      which name it points at; the definitions are an administrative object of the cluster;
     * `:clock` - `(-> non_neg_integer())` epoch ms (default `System.system_time/1`);
     * `:interval` - the sweep period in ms (default 60_000);
     * `:leader?` - `(-> boolean())`, whether this node should sweep (default always). Only the cluster's
@@ -27,6 +30,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   use GenServer
 
   alias Malachi.Cluster.PeriodicWorker
+  alias Malachi.Cluster.PolicyStore
   alias Malachi.Cluster.Retention
   alias Malachi.Metadata
   alias Malachi.Telemetry
@@ -51,6 +55,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         expire_segment: Keyword.fetch!(opts, :expire_segment),
         policy: Keyword.fetch!(opts, :policy),
+        policies: Keyword.get(opts, :policies, &PolicyStore.all/0),
         clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
         leader?: Keyword.get(opts, :leader?, fn -> true end)
       })
@@ -83,7 +88,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
     started = System.monotonic_time()
     metadata = state.metadata_source.()
     now_ms = state.clock.()
-    expired_ids = Retention.expired(metadata, now_ms, state.policy)
+    expired_ids = Retention.expired(metadata, now_ms, state.policy, state.policies.())
 
     labels = for id <- expired_ids, segment = Metadata.get_segment(metadata, id), do: expire(state, segment)
 

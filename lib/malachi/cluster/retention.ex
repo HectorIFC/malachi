@@ -14,10 +14,13 @@ defmodule Malachi.Cluster.Retention do
   bound disables that rule. `Malachi.Cluster.RetentionCoordinator` executes the returned ids.
 
   The bound applied to each range is its **topic's policy retention merged over the global policy**
-  (the policy overrides only the keys it sets; `Malachi.Metadata.topic_policy/2`), or the global
-  policy passed in when the topic has no policy, so retention is per-topic (C3c-2b).
+  (the policy overrides only the keys it sets), or the global policy passed in when the topic points at
+  no policy, so retention is per-topic (C3c-2b). The topic's metadata says which policy NAME it points
+  at (`Malachi.Metadata.topic_policy_name/2`); the definitions come from the cluster's policy store and
+  are passed in already resolved, which keeps this module pure.
   """
 
+  alias Malachi.Cluster.Policy
   alias Malachi.Metadata
 
   @typedoc "A retention policy. A `nil` (or absent) bound disables that rule."
@@ -67,15 +70,21 @@ defmodule Malachi.Cluster.Retention do
   @doc """
   The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
   range uses its topic's policy retention merged over it (see the module doc).
+
+  `policies` maps a policy NAME to its definition. The metadata says which name a topic points at, and
+  the definitions are an administrative object of the cluster
+  (`Malachi.Cluster.PolicyStore.all/0`), so the caller resolves them once per sweep and hands them in:
+  this stays pure, and a sweep costs one read of the policy store rather than one per range.
   """
-  @spec expired(Metadata.t(), non_neg_integer(), policy()) :: [Metadata.segment_id()]
-  def expired(%Metadata{} = metadata, now_ms, global_policy) do
+  @spec expired(Metadata.t(), non_neg_integer(), policy(), %{Metadata.policy_name() => Policy.t()}) ::
+          [Metadata.segment_id()]
+  def expired(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}) do
     metadata.segments
     |> Map.values()
     |> Enum.filter(&(&1.state == :sealed))
     |> Enum.group_by(& &1.range_id)
     |> Enum.flat_map(fn {range_id, sealed} ->
-      retention = effective_retention(metadata, range_id, global_policy)
+      retention = effective_retention(metadata, range_id, global_policy, policies)
       oldest_first = Enum.sort_by(sealed, & &1.start_offset)
 
       expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
@@ -85,9 +94,13 @@ defmodule Malachi.Cluster.Retention do
   end
 
   # A range's effective retention: its topic's policy retention merged over the global policy (the
-  # policy overrides only the keys it sets), or the global policy when the topic has no policy.
-  defp effective_retention(metadata, range_id, global_policy) do
-    case Metadata.topic_policy(metadata, elem(range_id, 0)) do
+  # policy overrides only the keys it sets), or the global policy when the topic points at no policy or
+  # at one this node cannot resolve. Falling back to the global there is the same thing a topic with no
+  # policy gets, which is what the cluster did before the policy existed.
+  defp effective_retention(metadata, range_id, global_policy, policies) do
+    name = Metadata.topic_policy_name(metadata, elem(range_id, 0))
+
+    case Map.get(policies, name) do
       %{retention: retention} when is_map(retention) -> Map.merge(global_policy, retention)
       _no_policy_retention -> global_policy
     end

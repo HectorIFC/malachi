@@ -1,6 +1,6 @@
 defmodule Malachi.Cluster.MachineVersioningTest do
   @moduledoc """
-  The six control-plane `ra` machines, checked against one contract: each declares the shared machine
+  The seven control-plane `ra` machines, checked against one contract: each declares the shared machine
   version, maps every version to itself, accepts `ra`'s `{:machine_version, from, to}` without touching
   its state, refuses a command it does not know with the versioned reply instead of skipping it or
   raising, and keeps its command table in step with its `@type command`.
@@ -24,6 +24,8 @@ defmodule Malachi.Cluster.MachineVersioningTest do
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.PolicyMachine
+  alias Malachi.Cluster.PolicyRegistry
   alias Malachi.Cluster.Ring
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
@@ -36,7 +38,8 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     {RingMachine, Ring, :no_clock},
     {UserMachine, UserRegistry, :clock},
     {LockoutMachine, LockoutRegistry, :clock},
-    {AclMachine, AclRegistry, :no_clock}
+    {AclMachine, AclRegistry, :no_clock},
+    {PolicyMachine, PolicyRegistry, :no_clock}
   ]
 
   defp meta(effective, now \\ 1_700_000_000_000),
@@ -49,7 +52,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     describe "#{inspect(machine)}" do
       test "declares the shared machine version and maps every version to itself" do
         assert unquote(machine).version() == MachineVersion.version()
-        assert unquote(machine).version() == 1
+        assert unquote(machine).version() == 2
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -166,6 +169,24 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       StreamData.tuple({StreamData.constant(:end_migration), topic}),
       StreamData.tuple({StreamData.constant(:extract_topic), topic}),
       StreamData.tuple({StreamData.constant(:commit_offset), StreamData.constant("g"), topic, StreamData.constant(%{})})
+    ])
+  end
+
+  defp known_command(PolicyRegistry) do
+    name = StreamData.member_of(["durable", "cheap"])
+
+    policy =
+      StreamData.member_of([
+        %{},
+        %{retention: %{max_age_ms: 1_000}},
+        %{retention: %{max_bytes: 10}, spread_by: "rack"},
+        # Refused by the registry, which is part of the contract: a refusal leaves the state unchanged.
+        %{retention: %{max_bytes: "10GB"}}
+      ])
+
+    StreamData.one_of([
+      StreamData.tuple({StreamData.constant(:define_policy), name, policy}),
+      StreamData.tuple({StreamData.constant(:delete_policy), name})
     ])
   end
 

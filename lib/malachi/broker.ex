@@ -36,6 +36,7 @@ defmodule Malachi.Broker do
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.PolicyStore
   alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -112,6 +113,10 @@ defmodule Malachi.Broker do
             # broker to its attributes (refreshed from membership).
             spread_by: nil,
             broker_attributes: %{},
+            # How a policy NAME is resolved to its definition. The definitions are an administrative
+            # object of the cluster (`Malachi.Cluster.PolicyStore`), not per-vnode state, so this is a
+            # local read of the policy store's replica rather than a lookup inside the metadata.
+            policy_fun: &PolicyStore.get/1,
             # Failure-domain guarantee: `min_domains` distinct `spread_by` values a segment's replica set
             # must span; `placement_policy` :hard rejects a segment that cannot reach it (produce fails
             # fast), :soft (default) places best-effort. nil min_domains = no requirement.
@@ -159,6 +164,7 @@ defmodule Malachi.Broker do
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes,
        spread_by: Keyword.get(opts, :spread_by),
+       policy_fun: Keyword.get(opts, :policy_fun, &PolicyStore.get/1),
        broker_attributes: Keyword.get(opts, :broker_attributes, %{}),
        min_domains: Keyword.get(opts, :min_domains),
        placement_policy: Keyword.get(opts, :placement_policy, :soft)
@@ -1268,8 +1274,15 @@ defmodule Malachi.Broker do
   # The spread attribute for `range_id`: its topic policy's `spread_by` when the policy sets that key
   # (an explicit nil opts the topic out of spreading), overriding the global; otherwise the broker's
   # global `spread_by`. Mirrors the per-topic retention resolution (a set key wins, nil included).
+  #
+  # Two steps, because the two halves live in different places on purpose: which policy a topic points
+  # at is that topic's own state, in its vnode's metadata, and travels with it across a vnode split;
+  # what the policy SAYS is one administrative definition for the cluster.
   defp effective_spread_by(broker, range_id) do
-    case DSRSM.topic_policy(broker.dsrsm, topic_of_range(range_id)) do
+    broker.dsrsm
+    |> DSRSM.topic_policy_name(topic_of_range(range_id))
+    |> broker.policy_fun.()
+    |> case do
       %{spread_by: spread_by} -> spread_by
       _no_policy_spread_by -> broker.spread_by
     end

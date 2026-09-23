@@ -19,7 +19,8 @@ defmodule Malachi.Cluster.RetentionTest do
     end)
   end
 
-  defp expired(metadata, now, policy), do: metadata |> Retention.expired(now, policy) |> Enum.sort()
+  defp expired(metadata, now, policy, policies \\ %{}),
+    do: metadata |> Retention.expired(now, policy, policies) |> Enum.sort()
 
   test "expires sealed segments older than max_age_ms" do
     metadata = with_sealed([{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}])
@@ -70,35 +71,50 @@ defmodule Malachi.Cluster.RetentionTest do
   end
 
   describe "per-topic policy" do
-    defp with_policy(metadata, topic, policy) do
-      {metadata, :ok} = Metadata.apply(metadata, {:define_policy, "p", policy})
+    # The topic points at a name (its own state, in its vnode); the definitions come from the cluster's
+    # policy store, which the sweep resolves once per pass and hands in.
+    defp with_policy(metadata, topic) do
       {metadata, :ok} = Metadata.apply(metadata, {:set_topic_policy, topic, "p"})
       metadata
     end
+
+    defp definitions(policy), do: %{"p" => policy}
 
     test "a topic's policy retention overrides the global policy" do
       metadata =
         [{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}]
         |> with_sealed()
-        |> with_policy("t", %{retention: %{max_age_ms: 5_000}})
+        |> with_policy("t")
 
       # global has no age limit, but the topic's policy expires anything older than 5_000
-      assert expired(metadata, 10_000, %{}) == ["old"]
+      assert expired(metadata, 10_000, %{}, definitions(%{retention: %{max_age_ms: 5_000}})) == ["old"]
     end
 
     test "a topic policy merges over the global (keys it does not set fall back)" do
       metadata =
         [{"s0", 0, 100, 1_000}, {"s1", 1, 100, 9_900}, {"s2", 2, 100, 9_900}]
         |> with_sealed()
-        |> with_policy("t", %{retention: %{max_age_ms: 5_000}})
+        |> with_policy("t")
 
       # policy sets only max_age_ms (s0 by age); max_bytes falls back to the global 150 (s0, s1 by size)
-      assert expired(metadata, 10_000, %{max_bytes: 150}) == ["s0", "s1"]
+      definitions = definitions(%{retention: %{max_age_ms: 5_000}})
+      assert expired(metadata, 10_000, %{max_bytes: 150}, definitions) == ["s0", "s1"]
     end
 
     test "a topic without a policy uses the global policy" do
       metadata = with_sealed([{"old", 0, 100, 1_000}])
       assert expired(metadata, 10_000, %{max_age_ms: 5_000}) == ["old"]
+    end
+
+    test "a topic pointing at a policy this node cannot resolve falls back to the global policy" do
+      metadata =
+        [{"old", 0, 100, 1_000}]
+        |> with_sealed()
+        |> with_policy("t")
+
+      # The store answered nothing for "p" (unreachable, or the definition was deleted). Falling back to
+      # the global is what a topic with no policy gets, and what the cluster did before policies existed.
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}, %{}) == ["old"]
     end
   end
 

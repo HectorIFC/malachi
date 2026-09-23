@@ -61,7 +61,9 @@ defmodule Malachi.Cluster.LeaseReconcilerVersionTest do
 
         assert LeaseReconciler.reconcile_now(reconciler) == :ok
         assert LeaseReconciler.reconcile_now(reconciler) == :ok
-        assert LeaseReconciler.version_status(reconciler) == {:stuck, 1, 0}
+
+        assert LeaseReconciler.version_status(reconciler) ==
+                 {:stuck, StuckRaMember.current(), StuckRaMember.rolled_back()}
 
         :ok = StuckRaMember.recover(server_id)
         assert LeaseReconciler.reconcile_now(reconciler) == :ok

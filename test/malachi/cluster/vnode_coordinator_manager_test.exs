@@ -163,7 +163,8 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerVersionTest do
         Manager.reconcile_now(manager)
         Manager.reconcile_now(manager)
 
-        assert Manager.version_status(manager) == %{server_id => {:stuck, 1, 0}, ghost => :ok}
+        stuck = {:stuck, StuckRaMember.current(), StuckRaMember.rolled_back()}
+        assert Manager.version_status(manager) == %{server_id => stuck, ghost => :ok}
 
         Agent.update(listed, fn _ -> [{MetadataMachine, ghost}] end)
         Manager.reconcile_now(manager)

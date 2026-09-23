@@ -1,36 +1,48 @@
 defmodule Malachi.Test.StuckRaMember do
   @moduledoc """
   A real, local, single-member `Malachi.Cluster.MetadataMachine` cluster driven into the state a rolled
-  back member ends up in: its log holds the `noop` that moved the group to machine version 1, and it
-  restarts on code pinned to version 0. `ra` replays that `noop`, cannot honor it, and stops applying
+  back member ends up in: its log holds the `noop` that moved the group to the current machine version,
+  and it restarts on code pinned one below it. `ra` replays that `noop`, cannot honor it, and stops applying
   entries, which is what `Malachi.Cluster.MachineVersion.check/3` has to report.
 
   The pin is node-wide application env, so tests using this must be `async: false`, and must call
   `cleanup/1` (normally from `on_exit`).
   """
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.RaCluster
 
   @system :default
 
-  @doc "Forms the cluster, lets it reach version 1, then restarts it pinned to 0. Returns the server id."
+  @doc """
+  Forms the cluster, lets it reach the current machine version, then restarts it pinned one below.
+  Returns the server id.
+  """
   @spec start(atom()) :: {atom(), node()}
   def start(cluster_name) do
     {:ok, _member} = RaCluster.start(MetadataMachine, cluster_name, [node()])
     server_id = {cluster_name, node()}
-    :ok = await_effective(server_id, 1)
+    :ok = await_effective(server_id, current())
 
-    restart(server_id, 0)
-    :ok = await_effective(server_id, 1)
+    restart(server_id, rolled_back())
+    :ok = await_effective(server_id, current())
     server_id
   end
 
-  @doc "Restarts the member on unpinned code, which supports version 1 again."
+  @doc "The version the code implements, which is the one the group reaches."
+  @spec current() :: non_neg_integer()
+  def current, do: MachineVersion.code_version()
+
+  @doc "The version a rolled back binary plays: one below the current one."
+  @spec rolled_back() :: non_neg_integer()
+  def rolled_back, do: current() - 1
+
+  @doc "Restarts the member on unpinned code, which supports the current version again."
   @spec recover({atom(), node()}) :: :ok
   def recover(server_id) do
     restart(server_id, nil)
-    await_effective(server_id, 1)
+    await_effective(server_id, current())
   end
 
   @doc "Drops the pin and deletes the cluster."

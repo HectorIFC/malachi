@@ -1441,13 +1441,23 @@ defmodule Malachi.BrokerTest do
   describe "per-topic placement policy (spread_by override)" do
     @brokers [:a1, :a2, :b1, :c1]
 
-    # Seeds a broker holding topic "events" governed by a policy `policy`, opened with `opts`.
+    # Seeds a broker holding topic "events" bound to policy "p", with `policy` as what the cluster's
+    # policy store answers for that name. The binding lives in the topic's metadata; the definition is
+    # a cluster object, injected here through the same seam production reads it with.
     defp broker_with_policy(policy, opts) do
       metadata =
-        [{:create_topic, "events", 4}, {:define_policy, "p", policy}, {:set_topic_policy, "events", "p"}]
+        [{:create_topic, "events", 4}, {:set_topic_policy, "events", "p"}]
         |> Enum.reduce(Metadata.new(), fn command, metadata -> elem(Metadata.apply(metadata, command), 0) end)
 
-      {open_broker(Keyword.put(opts, :dsrsm, DSRSM.single(metadata))), {"events", 0}}
+      opts =
+        opts
+        |> Keyword.put(:dsrsm, DSRSM.single(metadata))
+        |> Keyword.put(:policy_fun, fn
+          "p" -> policy
+          _other -> nil
+        end)
+
+      {open_broker(opts), {"events", 0}}
     end
 
     test "a topic's policy spread_by turns spreading on over a global-off", %{store: store} do

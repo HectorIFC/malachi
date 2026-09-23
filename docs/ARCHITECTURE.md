@@ -188,6 +188,13 @@ over **attributes**: opaque key/value pairs that operators attach to brokers. Th
 data-center awareness without the core needing to understand what a "rack" is; the same mechanism decides
 segment replica sets and vnode replicas.
 
+The **definitions** are an administrative object of the cluster, replicated in their own Raft group beside
+the user, lockout and ACL stores, because an administrator defines them once for the cluster rather than
+for a vnode. What a topic keeps is the **name** it points at, in its own metadata, so the binding travels
+with the topic when a vnode split moves it while the definition stays put. A topic pointing at a name no
+definition backs resolves to no policy and uses the cluster defaults, exactly as a topic with no policy
+does.
+
 Placement is **deterministic** (raft-safe: every replica computes the same result, with no randomized
 tie-break). It honors a maximum skew across domains, a minimum number of distinct domains, and a hard
 versus soft distinction for unsatisfiable constraints. Healing prefers surviving replicas, which keeps

@@ -462,13 +462,22 @@ defmodule Malachi.Metadata do
     end
   end
 
+  # Binds a topic to a policy NAME. The name is not checked against a definition here, and cannot be:
+  # the definitions are an administrative object of the cluster (`Malachi.Cluster.PolicyStore`), and a
+  # `ra` state machine may only read its own replicated state, so a vnode has no way to know which names
+  # exist. A topic bound to a name nobody defined resolves to no policy and uses the global defaults,
+  # which is what a topic with no policy does; refusing the binding here would instead make every
+  # binding fail, since the vnode's own (deprecated) definitions are empty.
+  #
+  # Whoever offers this to an operator checks the name against the store first, so a typo is caught
+  # where it can be reported rather than becoming a silent fallback (#194).
   defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
     cond do
       not Map.has_key?(state.topics, topic) ->
         {state, {:error, :no_such_topic}}
 
-      policy_name != nil and not Map.has_key?(state.policies, policy_name) ->
-        {state, {:error, :no_such_policy}}
+      policy_name != nil and not Policy.valid_name?(policy_name) ->
+        {state, {:error, :invalid_policy}}
 
       true ->
         topics = Map.update!(state.topics, topic, fn topic -> %{topic | policy: policy_name} end)
@@ -710,15 +719,29 @@ defmodule Malachi.Metadata do
     |> Enum.sort()
   end
 
-  @doc "The policy named `name`, or `nil` if undefined."
+  @doc """
+  The policy named `name` in this vnode's own (deprecated) definitions, or `nil`.
+
+  Definitions moved to `Malachi.Cluster.PolicyStore`, because they are an administrative object of the
+  cluster rather than state a vnode owns, and keeping them here is what made a topic lose its policy
+  when it moved between vnodes. `{:define_policy, name, policy}` stays appliable so every log ever
+  written still replays the same way, and this is the only thing that reads what it wrote. Nothing in
+  the data path does.
+  """
   @spec get_policy(t(), policy_name()) :: policy() | nil
   def get_policy(%__MODULE__{} = state, name), do: Map.get(state.policies, name)
 
-  @doc "The policy governing `topic` (its associated policy), or `nil` if none/unknown (use globals)."
-  @spec topic_policy(t(), topic_name()) :: policy() | nil
-  def topic_policy(%__MODULE__{} = state, topic) do
+  @doc """
+  The NAME of the policy `topic` points at, or `nil` if it points at none or the topic is unknown.
+
+  The binding stays here, and only the binding: which policy a topic uses is a fact about that topic,
+  so it travels with the topic when a vnode split moves it. `Malachi.Cluster.PolicyStore` resolves the
+  name to the definition.
+  """
+  @spec topic_policy_name(t(), topic_name()) :: policy_name() | nil
+  def topic_policy_name(%__MODULE__{} = state, topic) do
     case Map.get(state.topics, topic) do
-      %{policy: name} when is_binary(name) -> Map.get(state.policies, name)
+      %{policy: name} when is_binary(name) -> name
       _topic_without_policy_or_unknown -> nil
     end
   end

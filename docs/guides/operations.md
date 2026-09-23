@@ -416,7 +416,7 @@ A service manager that restarts on failure will restart a refused node again and
 
 ### The control-plane machine version
 
-The control plane (topic metadata, the lease, the ring, users, lockouts and ACLs) lives in Raft groups
+The control plane (topic metadata, the lease, the ring, users, lockouts, ACLs and storage policies) lives in Raft groups
 whose state machines carry a version. A group moves to a new version only once **every** member runs code
 that supports it, and a command a release introduces is refused, the same way on every member, until then.
 So a cluster in the middle of a rolling upgrade cannot end up with members that disagree about its state.
@@ -435,8 +435,9 @@ To keep rolling back possible until you are satisfied with a release, hold the v
    a time. The groups switch to the new version once the last node is back, and the rollback floor moves up.
 
 The first release that versions these machines is version 1, and every earlier build counts as version 0.
-To be able to roll back from it to an earlier build, upgrade with `MALACHI_RA_MACHINE_VERSION=0` and
-finalize later.
+Version 2 adds the storage policy store, whose commands a version 1 member refuses until the whole group
+has moved. To be able to roll back from a release to the build before it, upgrade with
+`MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now and finalize later.
 
 A malformed value (anything but a non-negative integer) stops the node at boot. Silently dropping the pin would
 finalize the upgrade, so it is treated as an error. A pin above the version a build implements has no effect.

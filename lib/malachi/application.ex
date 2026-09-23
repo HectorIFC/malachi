@@ -34,6 +34,8 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.PolicyMachine
+  alias Malachi.Cluster.PolicyServer
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
@@ -65,6 +67,8 @@ defmodule Malachi.Application do
   @log_lockouts Malachi.LogLockouts
   # The replicated per-topic ACL store's dedicated ra cluster name (see `acl_store_children/1`).
   @log_acls Malachi.LogAcls
+  # The replicated storage policy store's dedicated ra cluster name (see `policy_store_children/1`).
+  @log_policies Malachi.LogPolicies
 
   def start(_type, _args) do
     # Validate authentication configuration before starting
@@ -111,6 +115,7 @@ defmodule Malachi.Application do
         ] ++
         lockout_store_children(configured_nodes()) ++
         acl_store_children(configured_nodes()) ++
+        policy_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
         [
           Malachi.Auth,
@@ -212,6 +217,22 @@ defmodule Malachi.Application do
     [
       store_reconciler_child(Malachi.LogAclReconciler, AclMachine, @log_acls, nodes, fn ->
         AclServer.reconcile(@log_acls, nodes)
+      end)
+    ]
+  end
+
+  # The replicated storage policy store: forms the ra policy cluster across `nodes`, plus the reconciler
+  # that self-joins this node when clustered and watches the machine version in every mode. Mirrors
+  # `acl_store_children/1`. A policy is an administrative object of the CLUSTER, not per-vnode state;
+  # which topic points at which policy stays in that topic's metadata, so it travels with the topic
+  # across a vnode split while the definition stays put. Must precede the log stack, whose placement path
+  # resolves a topic's spread attribute against it on every segment creation.
+  defp policy_store_children(nodes) do
+    _ = PolicyServer.start(@log_policies, nodes)
+
+    [
+      store_reconciler_child(Malachi.LogPolicyReconciler, PolicyMachine, @log_policies, nodes, fn ->
+        PolicyServer.reconcile(@log_policies, nodes)
       end)
     ]
   end
