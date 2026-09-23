@@ -81,9 +81,13 @@ defmodule Malachi.Cluster.MetadataServer do
   itself, so pass the **local** server id (`{cluster_name, node()}`) to ask "does this node lead this
   vnode?". Unreachable/unformed clusters answer false (never assume leadership). Used by 1C-b to run a
   vnode's coordinators only on the node that leads its Raft group (the NorthGuard-faithful placement).
+
+  `timeout_ms` bounds the leader call. A caller that asks about many vnodes on one pass (the vnode
+  coordinator manager) passes a timeout well below its own period: a vnode mid-election answers `false`
+  either way, and waiting ra's default would let one such vnode hold up the whole pass.
   """
-  @spec leader?(server_id()) :: boolean()
-  def leader?(server_id), do: RaCluster.leader?(server_id)
+  @spec leader?(server_id(), timeout()) :: boolean()
+  def leader?(server_id, timeout_ms \\ 5_000), do: RaCluster.leader?(server_id, timeout_ms)
 
   @doc """
   Stops and deletes the vnode's Raft cluster (removing its on-disk state). Prefer passing a `server_id`

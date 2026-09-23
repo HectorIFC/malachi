@@ -330,6 +330,29 @@ defmodule Malachi.Application do
     end
   end
 
+  @doc """
+  The vnode placement the cluster has **right now**, from the live gossiped ring:
+  `{:ok, [{vnode_id, token, nodes}]}`, or `:error` when the ring could not be read.
+
+  The live counterpart of `boot_vnodes/1`, and the seam every consumer that must survive a ring change
+  reads instead of closing over the boot list. `{:ok, []}` (an unsharded or not-yet-published ring) is
+  distinct from `:error`, so a caller can tell "there is nothing to do" from "I do not know", and the
+  second one must never be acted on as though it were the first.
+
+  The `nodes` in each entry are the ring's **recorded placement**, which is a routing decision and not
+  live `ra` membership: a rebalance moves members without republishing the ring, so a consumer that
+  needs to know whether this node hosts a vnode asks `Malachi.Cluster.RaCluster.local_member?/1`, not
+  this list. What the ring is authoritative about is which vnodes exist and where they sit.
+  """
+  @spec current_vnodes() :: {:ok, [{atom(), non_neg_integer(), [node()]}]} | :error
+  def current_vnodes do
+    case current_topology() do
+      {:ok, %RingTopology{} = topology} -> {:ok, RingTopology.vnode_placement(topology)}
+      {:ok, nil} -> {:ok, []}
+      :error -> :error
+    end
+  end
+
   # Keeps this node joined to the ring cluster, so a staggered boot converges to a fully-replicated ring.
   # Runs for every clustered node, including an unsharded one whose ring store is still empty: the point
   # is that when a reshard eventually happens, every node is already a member of the store recording it.
@@ -353,13 +376,13 @@ defmodule Malachi.Application do
   # plan/commit coordinator. Nothing moves automatically; an operator drives `RebalanceCoordinator`.
   defp rebalance_children(_nodes, nil), do: []
 
-  defp rebalance_children(nodes, vnodes) do
+  defp rebalance_children(nodes, _vnodes) do
     _ = LeaseServer.start(@log_lease, nodes)
 
     [
       lease_reconciler_child(nodes),
       lease_holder_child(),
-      rebalance_coordinator_child(nodes, vnodes),
+      rebalance_coordinator_child(nodes),
       split_coordinator_child(nodes),
       reshard_coordinator_child()
     ] ++ auto_rebalancer_children()
@@ -398,11 +421,43 @@ defmodule Malachi.Application do
     %{id: Malachi.LogReshardCoordinator, start: {ReshardCoordinator, :start_link, [opts]}}
   end
 
-  # The cluster's current routing ring, from the gossiped topology (nil when there is none yet).
-  defp current_ring do
-    case MembershipServer.topology(Malachi.LogMembership) do
-      %RingTopology{ring: ring} -> ring
-      _absent -> nil
+  # How long a live topology read waits on the membership server. Well under the vnode reconcile period,
+  # because the membership sits on the gossip hot path and a caller that polls it must degrade to "could
+  # not read" rather than block its own loop or, worse, die of a call timeout.
+  @topology_read_timeout_ms 1_000
+
+  # How long the vnode reconcile waits on one vnode's leader call. A vnode mid-election answers "not the
+  # leader" either way, so waiting ra's five-second default would only let one such vnode hold up the
+  # whole pass, and the pass runs every five seconds.
+  @vnode_leader_poll_timeout_ms 1_000
+
+  # The cluster's current routing topology, read from the membership this node already gossips with. The
+  # single live read in this module: `current_ring/0` and `current_vnodes/0` both derive from it, so
+  # there is one place that decides what a read failure means, and no second reader can forget the catch.
+  #
+  # `{:ok, nil}` (no topology published yet) is deliberately distinct from `:error` (could not be read):
+  # a cluster genuinely has no ring before one is published, and a caller must be able to tell the two
+  # apart before it acts on an absence.
+  @spec current_topology() :: {:ok, RingTopology.t() | nil} | :error
+  defp current_topology do
+    {:ok, MembershipServer.topology(Malachi.LogMembership, @topology_read_timeout_ms)}
+  catch
+    # a membership that is not running, is restarting, or is too busy to answer in time
+    :exit, _reason -> :error
+  end
+
+  @doc """
+  The cluster's current routing ring, from the gossiped topology.
+
+  `nil` when no ring has been published yet, and also when the topology could not be read: the reshard
+  coordinator, its only caller, refuses to split without a ring either way, so the two collapse here.
+  `current_vnodes/0` keeps them apart, because its callers act on the difference.
+  """
+  @spec current_ring() :: HashRing.t() | nil
+  def current_ring do
+    case current_topology() do
+      {:ok, %RingTopology{ring: ring}} -> ring
+      _absent_or_unreadable -> nil
     end
   end
 
@@ -476,15 +531,14 @@ defmodule Malachi.Application do
     end
   end
 
-  defp rebalance_coordinator_child(nodes, vnodes) do
-    vnode_configs = Enum.map(vnodes, fn {vnode_id, token, _nodes} -> {vnode_id, token} end)
+  defp rebalance_coordinator_child(nodes) do
     rf = Application.get_env(:malachi, :log_vnode_replication_factor, 3)
     place_opts = vnode_place_opts()
     members_of = fn vnode_id -> try_members(nodes, &ra_member_nodes({vnode_id, &1})) end
 
     opts = [
       name: @log_rebalance_coordinator,
-      plan_fun: fn -> live_rebalance_plan(vnode_configs, members_of, alive_nodes(), rf, place_opts) end,
+      plan_fun: fn -> live_rebalance_plan(current_vnode_configs(), members_of, alive_nodes(), rf, place_opts) end,
       add_member: fn vnode_id, node ->
         rebalance_op(members_of, vnode_id, &Rebalance.ra_add_member(vnode_id, node, &1))
       end,
@@ -495,6 +549,22 @@ defmodule Malachi.Application do
     ]
 
     %{id: @log_rebalance_coordinator, start: {RebalanceCoordinator, :start_link, [opts]}}
+  end
+
+  @doc """
+  The `{vnode_id, token}` pairs a rebalancing plan is computed over, from the live ring.
+
+  From the live ring rather than the boot list: a vnode born from a split would otherwise never enter
+  any plan, so it would never be rebalanced nor have a lost replica replenished until the node
+  restarted. A ring that cannot be read yields no pairs at all, and so an empty plan, which is the safe
+  answer: nothing moves while this node cannot see the ring.
+  """
+  @spec current_vnode_configs() :: [{atom(), non_neg_integer()}]
+  def current_vnode_configs do
+    case current_vnodes() do
+      {:ok, vnodes} -> Enum.map(vnodes, fn {vnode_id, token, _nodes} -> {vnode_id, token} end)
+      :error -> []
+    end
   end
 
   defp rebalance_op(members_of, vnode_id, op) do
@@ -538,8 +608,8 @@ defmodule Malachi.Application do
     [group_coordinator_child()] ++ heal ++ retention_children(cluster)
   end
 
-  defp coordinator_children(_cluster, vnodes) do
-    [vnode_coordinator_tree_spec(vnodes)]
+  defp coordinator_children(_cluster, _vnodes) do
+    [vnode_coordinator_tree_spec()]
   end
 
   # The node-wide consumer-group coordinator (non-sharded control plane): assigns a topic's ranges across
@@ -668,16 +738,28 @@ defmodule Malachi.Application do
     end
   end
 
-  # Applies a newly-adopted `RingTopology` (a vnode split's ring change, learned via gossip) to this
-  # node's consumer-group routing: the `CoordinatorRouter` topology is the ring plus one ra server id per
-  # vnode (any member; the router resolves the live leader). Kept light: it runs inline in the membership
-  # server. The metadata routing (`ReplicatedDSRSM`) adoption is driven by the split orchestration itself.
+  # Applies a newly-adopted `RingTopology` (a ring change learned via gossip) to this node. Three
+  # effects, all fast and none able to raise, because this runs inline in the membership server, on the
+  # gossip path: consumer-group routing adopts the new ring in :persistent_term, the broker is told to
+  # adopt it for metadata routing, and the vnode coordinator manager is nudged to reconcile now rather
+  # than at its next tick. The metadata routing (ReplicatedDSRSM) adoption is driven by the split
+  # orchestration itself.
+  #
+  # Deliberately private and not unit tested: every effect addresses a named process of the running
+  # application, so exercising it in process drives this node's real broker. The nudge it sends is
+  # covered from the other side, by VnodeCoordinatorManager's topology_changed/1.
   defp adopt_ring_topology(%RingTopology{ring: ring} = topology) do
     # consumer-group routing adopts the new ring inline (persistent_term, fast)
     CoordinatorRouter.put_topology(ring, RingTopology.servers(topology))
     # the broker adopts the same ring change for metadata routing, async (a cast) so this inline hook stays
     # fast and never blocks the membership server; a no-op if the broker is not running (single-node).
     GenServer.cast(Malachi.LogBroker, {:adopt_topology, topology})
+    # the vnode coordinator manager reconciles now instead of at its next tick, so a vnode this node
+    # gained in the new ring gets its coordinators in gossip time rather than up to a period later. A
+    # nudge only: the manager's own poll is what makes it correct, and it is what catches a change that
+    # publishes no ring at all (a rebalance adding this node to a vnode's ra cluster). A no-op cast when
+    # the control plane is not sharded and no manager is registered.
+    VnodeCoordinatorManager.topology_changed(Malachi.LogVnodeCoordinatorManager)
   end
 
   @doc ~S"""
@@ -852,14 +934,14 @@ defmodule Malachi.Application do
   # and restarts, the dynamic supervisor (and thus every running coordinator) restarts with it, so the
   # manager never rebuilds its set on top of orphaned coordinators. The dynamic supervisor starts first
   # (the manager references it by name on its first reconcile).
-  defp vnode_coordinator_tree_spec(vnodes) do
+  defp vnode_coordinator_tree_spec do
     %{
       id: Malachi.LogVnodeCoordinatorTree,
       type: :supervisor,
       start:
         {Supervisor, :start_link,
          [
-           [vnode_coordinator_supervisor_spec(), vnode_coordinator_manager_spec(vnodes)],
+           [vnode_coordinator_supervisor_spec(), vnode_coordinator_manager_spec()],
            [strategy: :one_for_all]
          ]}
     }
@@ -871,23 +953,37 @@ defmodule Malachi.Application do
   end
 
   # The manager that reconciles the running coordinators against the vnodes this node leads. It is
-  # level-triggered (polls Raft leadership via `leading_vnodes/3`), so it tolerates leadership flaps.
-  defp vnode_coordinator_manager_spec(vnodes) do
+  # level-triggered on every input, including which vnodes this node hosts (see
+  # `vnode_coordinator_manager_opts/0`), so it tolerates leadership flaps and ring changes alike.
+  defp vnode_coordinator_manager_spec do
     %{
       id: Malachi.LogVnodeCoordinatorManager,
-      start:
-        {VnodeCoordinatorManager, :start_link,
-         [
-           [
-             name: Malachi.LogVnodeCoordinatorManager,
-             leading: fn -> leading_vnodes(vnodes, node(), &MetadataServer.leader?/1) end,
-             version_servers: fn -> local_vnode_servers(vnodes, node()) end,
-             spawn: &start_vnode_coordinators/1,
-             stop: &stop_vnode_coordinators/1,
-             interval: Application.get_env(:malachi, :vnode_reconcile_interval_ms, 5_000)
-           ]
-         ]}
+      start: {VnodeCoordinatorManager, :start_link, [vnode_coordinator_manager_opts()]}
     }
+  end
+
+  @doc """
+  The options the vnode coordinator manager runs with in production.
+
+  Split out of its child spec so a test can drive the **real** seams rather than stand-ins: the bug this
+  wiring exists to prevent lives in the seams, not in the manager, so a test that supplies its own
+  cannot see it.
+
+  The placement is resolved on every reconcile (`current_vnodes/0`), never captured here. Capturing it
+  is what left a vnode gained through a rebalance or a split without coordinators and without a machine
+  version watch until the node restarted.
+  """
+  @spec vnode_coordinator_manager_opts() :: keyword()
+  def vnode_coordinator_manager_opts do
+    [
+      name: Malachi.LogVnodeCoordinatorManager,
+      placement: &current_vnodes/0,
+      leading: &leading_vnodes(&1, node()),
+      version_servers: &local_vnode_servers(&1, node()),
+      spawn: &start_vnode_coordinators/1,
+      stop: &stop_vnode_coordinators/1,
+      interval: Application.get_env(:malachi, :vnode_reconcile_interval_ms, 5_000)
+    ]
   end
 
   # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
@@ -1191,18 +1287,37 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  The vnode ids `this_node` both **hosts** (its placement includes `this_node`) and currently **leads**
-  (its Raft group's leader is the local server `{vnode_id, this_node}`), given the placement `vnodes`
-  (`[{vnode_id, token, nodes}]`, as stored in the bootstrap) and a `leader?` predicate over a local
-  server id (defaults to `MetadataServer.leader?/1`). This is where 1C-b runs each vnode's
-  retention/healing coordinators, so every vnode is managed by exactly one node: the one leading its
-  Raft group: distributing the control-plane work the NorthGuard-faithful way (vs 1C-a's single
-  membership leader). Pure given `leader?`; deterministic given the current leadership.
+  The vnode ids `this_node` both **hosts** and currently **leads**, given `vnodes`, the vnodes the ring
+  names (`[{vnode_id, token, nodes}]`), and two predicates over a local server id: `hosts?` (defaults to
+  `RaCluster.local_member?/1`) and `leader?` (defaults to `MetadataServer.leader?/1`).
+
+  This is where 1C-b runs each vnode's retention/healing coordinators, so every vnode is managed by
+  exactly one node: the one leading its Raft group: distributing the control-plane work the
+  NorthGuard-faithful way (vs 1C-a's single membership leader).
+
+  `vnodes` supplies **which vnodes exist**, not which ones this node holds. The entries' `nodes` are the
+  ring's recorded placement and are deliberately not consulted: they are a routing decision that a
+  rebalance moves members out from under, so hosting is asked of `ra` instead. `hosts?` runs first
+  because it is a local read, while `leader?` is a call that a vnode mid-election makes wait; that order
+  keeps a vnode this node does not host from costing anything at all.
+
+  Pure given the two predicates; deterministic given the current membership and leadership.
   """
-  @spec leading_vnodes([{atom(), non_neg_integer(), [node()]}], node(), (MetadataServer.server_id() ->
-                                                                           boolean())) :: [atom()]
-  def leading_vnodes(vnodes, this_node \\ node(), leader? \\ &MetadataServer.leader?/1) do
-    for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, leader?.({vnode_id, this_node}) do
+  @spec leading_vnodes(
+          [{atom(), non_neg_integer(), [node()]}],
+          node(),
+          (MetadataServer.server_id() -> boolean()),
+          (MetadataServer.server_id() -> boolean())
+        ) :: [atom()]
+  def leading_vnodes(
+        vnodes,
+        this_node \\ node(),
+        hosts? \\ &RaCluster.local_member?/1,
+        leader? \\ &MetadataServer.leader?(&1, @vnode_leader_poll_timeout_ms)
+      ) do
+    for {vnode_id, _token, _nodes} <- vnodes,
+        hosts?.({vnode_id, this_node}),
+        leader?.({vnode_id, this_node}) do
       vnode_id
     end
   end
@@ -1248,12 +1363,20 @@ defmodule Malachi.Application do
 
   @doc """
   The metadata vnode members `this_node` hosts, as `{machine, server_id}` pairs for
-  `Malachi.Cluster.MachineVersion.check/3`: every vnode whose placement includes `this_node`, led or not,
-  since a follower can stop applying its log just as a leader can. Pure over the placement `vnodes`.
+  `Malachi.Cluster.MachineVersion.check/3`: every vnode of `vnodes` this node holds an `ra` member of,
+  led or not, since a follower can stop applying its log just as a leader can.
+
+  Hosting comes from `hosts?` (defaults to `RaCluster.local_member?/1`), not from the ring's recorded
+  placement, for the same reason as `leading_vnodes/4`: a rebalance changes membership without changing
+  the ring. Pure given `hosts?`.
   """
-  @spec local_vnode_servers([{atom(), non_neg_integer(), [node()]}], node()) :: [{module(), {atom(), node()}}]
-  def local_vnode_servers(vnodes, this_node \\ node()) do
-    for {vnode_id, _token, nodes} <- vnodes, this_node in nodes, do: {MetadataMachine, {vnode_id, this_node}}
+  @spec local_vnode_servers([{atom(), non_neg_integer(), [node()]}], node(), (MetadataServer.server_id() ->
+                                                                                boolean())) ::
+          [{module(), {atom(), node()}}]
+  def local_vnode_servers(vnodes, this_node \\ node(), hosts? \\ &RaCluster.local_member?/1) do
+    for {vnode_id, _token, _nodes} <- vnodes,
+        hosts?.({vnode_id, this_node}),
+        do: {MetadataMachine, {vnode_id, this_node}}
   end
 
   @doc """

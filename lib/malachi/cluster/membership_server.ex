@@ -99,9 +99,15 @@ defmodule Malachi.Cluster.MembershipServer do
   @spec set_topology(GenServer.server(), RingTopology.t()) :: :ok
   def set_topology(server, %RingTopology{} = topology), do: GenServer.call(server, {:set_topology, topology})
 
-  @doc "The current cluster routing topology, or `nil` if none has been set/received yet."
-  @spec topology(GenServer.server()) :: RingTopology.t() | nil
-  def topology(server), do: GenServer.call(server, :topology)
+  @doc """
+  The current cluster routing topology, or `nil` if none has been set/received yet.
+
+  `timeout_ms` bounds the call. A caller that reads this on a loop should pass a timeout well below its
+  own period and handle the exit, since this server also carries the gossip protocol period and a
+  default-timeout call that expires would take the caller down with it.
+  """
+  @spec topology(GenServer.server(), timeout()) :: RingTopology.t() | nil
+  def topology(server, timeout_ms \\ 5_000), do: GenServer.call(server, :topology, timeout_ms)
 
   # --- server ---
 

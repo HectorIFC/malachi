@@ -110,6 +110,13 @@ flowchart TB
 > leader, called the coordinator) carries out what the committee agrees on. Sharding means many small
 > committees instead of one giant meeting that everything has to wait on.
 
+Because that position is stable while the replicas move, a node decides what to coordinate from **two**
+sources, and never from one: the gossiped ring says which vnodes exist, and `ra` says which of them this
+node holds a member of and leads. `Malachi.Cluster.VnodeCoordinatorManager` re-reads both every few
+seconds, so a vnode this node gains after boot, whether a rebalance added it as a member or a split
+created it, starts coordinating without the node restarting. A ring it cannot read leaves the
+coordinators it already runs alone, because stopping them all is worse than waiting for the next read.
+
 The metadata state machine is `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). It is a pure
 function of its input: it never reads the wall clock, configuration, or `node()`. Anything time- or
 config-dependent travels inside the command, and the machine reads the `meta.system_time` its server feeds

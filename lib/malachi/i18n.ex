@@ -486,6 +486,16 @@ defmodule Malachi.I18n do
       "pt_BR" => "coordenadores do vnode %{vnode} caíram (%{reason}); reiniciando no próximo reconcile",
       "en_US" => "vnode %{vnode} coordinators went down (%{reason}); restarting on the next reconcile"
     },
+    vnode_placement_unreadable: %{
+      "pt_BR" =>
+        "não foi possível ler a colocação de vnodes (%{reason}); mantendo os coordenadores que este nó já roda até conseguir ler de novo",
+      "en_US" =>
+        "the vnode placement could not be read (%{reason}); keeping the coordinators this node already runs until it can be read again"
+    },
+    vnode_placement_recovered: %{
+      "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó",
+      "en_US" => "the vnode placement is readable again; reconciling this node's coordinators"
+    },
     ra_machine_version_unsupported: %{
       "pt_BR" =>
         "membro ra %{server} (%{machine}) parou de aplicar entradas: a versão efetiva do cluster é %{effective} e este nó suporta %{supported}; atualize o binário ou suba o pin",
