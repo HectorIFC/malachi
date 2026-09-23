@@ -137,6 +137,18 @@ defmodule Malachi.Cluster.RetentionTest do
       assert expired(metadata, 10_000, %{max_bytes: 150}, %{}) == []
     end
 
+    test "a policy that only constrains placement expires under the global limits" do
+      metadata =
+        [{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}]
+        |> with_sealed()
+        |> with_policy("t")
+
+      # The middle of three answers that are easy to confuse: no policy at all, a policy that resolves
+      # and says nothing about retention, and a name nothing defines. Only the last one holds data back.
+      # This one resolved, so the cluster's own limits apply exactly as they would without a policy.
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}, definitions(%{spread_by: "rack"})) == ["old"]
+    end
+
     test "unresolved_policies/2 names the topics that are being held, so the disk is not invisible" do
       metadata =
         [{"old", 0, 100, 1_000}]
