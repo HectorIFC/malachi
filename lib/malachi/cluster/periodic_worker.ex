@@ -31,7 +31,7 @@ defmodule Malachi.Cluster.PeriodicWorker do
 
       @impl true
       def init(opts) do
-        state = Map.merge(PeriodicWorker.new(opts, :scrubber, @default_interval), %{...seams...})
+        state = Map.merge(PeriodicWorker.new(opts, :scrubber, @default_interval, :scrub_interval_ms), %{...})
         PeriodicWorker.schedule(state)
         {:ok, state}
       end
@@ -73,16 +73,23 @@ defmodule Malachi.Cluster.PeriodicWorker do
   @doc """
   The state keys this module owns, for the host to merge into its own.
 
-  `worker` is the `Malachi.UnexpectedMessage` label, `default_interval` the period used when `opts` has
-  no `:interval` or carries one that cannot be a period. The setting name in the warning is derived from
-  `worker`, so an operator reading it knows which of the workers refused its value.
+  `worker` is the `Malachi.UnexpectedMessage` label and `default_interval` the period used when `opts`
+  has no `:interval` or carries one that cannot be a period.
+
+  `setting` is the name the warning about a refused interval prints, and each host passes its own
+  because only the host knows it. Deriving it from `worker` was close enough to read and wrong to act
+  on: it printed `scrubber_interval` where the setting is `scrub_interval_ms`
+  (`MALACHI_SCRUB_INTERVAL_MS`), and an operator cannot find that in any configuration.
+  `Malachi.Config.checked/4` asks for the name the operator can act on, which is this one. A worker
+  whose interval no environment variable reaches (the heal coordinator) names its option instead, so
+  the line still points at something that exists.
   """
-  @spec new(keyword(), UnexpectedMessage.server(), pos_integer()) :: t()
-  def new(opts, worker, default_interval) do
+  @spec new(keyword(), UnexpectedMessage.server(), pos_integer(), atom()) :: t()
+  def new(opts, worker, default_interval, setting) do
     interval =
       opts
       |> Keyword.get(:interval, default_interval)
-      |> Config.checked(:"#{worker}_interval", default_interval, &(is_integer(&1) and &1 > 0))
+      |> Config.checked(setting, default_interval, &(is_integer(&1) and &1 > 0))
 
     %{worker: worker, interval: interval, unexpected_shapes: MapSet.new()}
   end

@@ -51,7 +51,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   @impl true
   def init(opts) do
     state =
-      Map.merge(PeriodicWorker.new(opts, :retention, @default_interval), %{
+      Map.merge(PeriodicWorker.new(opts, :retention, @default_interval, :retention_interval_ms), %{
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         expire_segment: Keyword.fetch!(opts, :expire_segment),
         policy: Keyword.fetch!(opts, :policy),

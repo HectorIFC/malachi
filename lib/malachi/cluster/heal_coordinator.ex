@@ -14,7 +14,9 @@ defmodule Malachi.Cluster.HealCoordinator do
     * `:apply_command` - `(Malachi.Metadata.command() -> any)`, applies a `:set_segment_replicas`
       command to the control plane;
     * `:replication_factor` - the target replica count;
-    * `:interval` - the healing period in ms (default 5000);
+    * `:interval` - the healing period in ms (default 5000). No environment variable sets it, which is
+      why the warning about a value that cannot be a period names the option rather than a setting an
+      operator could look for;
     * `:leader?` - `(-> boolean())`, whether this node should heal this pass (default always). Only the
       cluster's membership leader heals, so N nodes do not redo the same work (1C); a non-leader still
       ticks but skips the pass. `heal_now/1` is a manual trigger and always runs;
@@ -106,7 +108,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   @impl true
   def init(opts) do
     state =
-      Map.merge(PeriodicWorker.new(opts, :heal, @default_interval), %{
+      Map.merge(PeriodicWorker.new(opts, :heal, @default_interval, :heal_coordinator_interval), %{
         live_brokers: Keyword.fetch!(opts, :live_brokers),
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         apply_command: Keyword.fetch!(opts, :apply_command),

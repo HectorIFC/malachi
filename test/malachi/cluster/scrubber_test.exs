@@ -764,7 +764,7 @@ defmodule Malachi.Cluster.ScrubberTest do
           assert :sys.get_state(scrubber).interval == 60_000
         end)
 
-      assert log =~ "scrubber_interval does not accept the value"
+      assert log =~ "scrub_interval_ms does not accept the value"
     end
   end
 

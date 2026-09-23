@@ -148,7 +148,7 @@ defmodule Malachi.Cluster.Scrubber do
     registered_name = Keyword.get(opts, :name, __MODULE__)
 
     state =
-      Map.merge(PeriodicWorker.new(opts, :scrubber, @default_interval), %{
+      Map.merge(PeriodicWorker.new(opts, :scrubber, @default_interval, :scrub_interval_ms), %{
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         local_ref: Keyword.fetch!(opts, :local_ref),
         directory: Keyword.fetch!(opts, :directory),

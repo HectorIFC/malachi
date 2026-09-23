@@ -119,11 +119,15 @@ defmodule Malachi.Retention.OrphanSweeper do
   @impl true
   def init(opts) do
     state =
-      Map.merge(PeriodicWorker.new(opts, :orphan_sweeper, @default_interval), %{
+      Map.merge(PeriodicWorker.new(opts, :orphan_sweeper, @default_interval, :retention_orphan_interval_ms), %{
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         metadata_ready?: Keyword.fetch!(opts, :metadata_ready?),
         local_ref: Keyword.fetch!(opts, :local_ref),
         directory: Keyword.fetch!(opts, :directory),
+        # `:report` rather than `:delete` when the value cannot be a mode. The environment is already
+        # refused at boot by `Malachi.Config.retention_orphan_sweep/1`, so this is the last line for a
+        # caller that built its options by hand, and the safe side of a mode is the one that does not
+        # remove anything.
         mode: checked(opts, :mode, :delete, &(&1 in @modes)),
         min_age_ms: checked(opts, :min_age_ms, @default_min_age_ms, &non_neg_integer?/1),
         sightings: checked(opts, :sightings, @default_sightings, &positive_integer?/1),
@@ -171,6 +175,7 @@ defmodule Malachi.Retention.OrphanSweeper do
       {:error, reason} -> report(skipped({:unreachable, reason}), state)
     end
   end
+
 
   defp sweep(state) do
     case entries(state) do
@@ -290,6 +295,7 @@ defmodule Malachi.Retention.OrphanSweeper do
   defp checked(opts, key, default, valid?) do
     opts |> Keyword.get(key, default) |> Config.checked(:"retention_orphan_#{key}", default, valid?)
   end
+
 
   defp non_neg_integer?(value), do: is_integer(value) and value >= 0
   defp positive_integer?(value), do: is_integer(value) and value > 0

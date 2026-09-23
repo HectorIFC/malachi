@@ -45,7 +45,7 @@ defmodule Malachi.Cluster.AutoRebalancer do
   @impl true
   def init(opts) do
     state =
-      Map.merge(PeriodicWorker.new(opts, :rebalance, @default_interval), %{
+      Map.merge(PeriodicWorker.new(opts, :rebalance, @default_interval, :auto_rebalance_interval_ms), %{
         plan_fun: Keyword.fetch!(opts, :plan_fun),
         commit_fun: Keyword.fetch!(opts, :commit_fun),
         leader?: Keyword.fetch!(opts, :leader?),
