@@ -370,29 +370,26 @@ The TCP acceptor threads a state map so the client IP propagates cleanly:
 
 ### IP Extraction
 
-The transport (`:ssl` or `:gen_tcp`) selects the peername lookup, and both IPv4 and IPv6 addresses are
-formatted:
+`Malachi.IPAddress.from_socket/2` reads the peer for either transport and formats it once, at the
+edge. Every limiter key, lockout key and audit-log address in the system comes from that one
+function:
 
 ```elixir
-defp get_client_ip(socket, transport) do
-  case transport do
-    :ssl ->
-      case :ssl.peername(socket) do
-        {:ok, {address, _port}} -> format_ip(address)
-        {:error, _} -> "unknown"
-      end
-
-    :gen_tcp ->
-      case :inet.peername(socket) do
-        {:ok, {address, _port}} -> format_ip(address)
-        {:error, _} -> "unknown"
-      end
-  end
-end
-
-defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
-defp format_ip({a, b, c, d, e, f, g, h}), do: "#{hex}:#{hex}:..."
+client_ip = Malachi.IPAddress.from_socket(socket, transport)
 ```
+
+The canonical form is `:inet.ntoa/1`, which is RFC 5952: lowercase hex with zero runs compressed,
+and an IPv4-mapped address written as `::ffff:127.0.0.1`. It is the form that reads back through
+`:inet.parse_address/1`, which is what a CIDR allowlist and an operator grepping the audit log both
+expect.
+
+| Input | Key |
+| --- | --- |
+| `{192, 168, 1, 1}` | `192.168.1.1` |
+| `{0, 0, 0, 0, 0, 0, 0, 1}` | `::1` |
+| `{0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 1}` | `::ffff:127.0.0.1` |
+| a tuple that is not an address | `invalid` |
+| no address at all, peer unreadable | `unknown` |
 
 ### Metrics Integration
 
