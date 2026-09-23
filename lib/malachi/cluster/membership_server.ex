@@ -21,9 +21,9 @@ defmodule Malachi.Cluster.MembershipServer do
   On startup a node **joins** by sending each seed (its `:peers`) a `{:join, ...}`; the seed adds
   the joiner as `:alive` and replies with its full view, so the joiner learns the whole cluster at
   once instead of waiting for gossip to converge. Join is best-effort, gossip is the safety net if
-  a seed is unreachable. (A node that restarts after being declared dead would rejoin at
-  incarnation 0, which an existing `:dead` entry outranks; durable/higher rejoin incarnations are a
-  later concern.)
+  a seed is unreachable. A restarting node resumes its incarnation from disk, above everything its peers
+  still remember of the member it was (`Malachi.Cluster.MemberIncarnation`), so its announcement outranks
+  an existing record for it rather than being ignored as a duplicate or outranked by a stale `:dead`.
 
   The same gossip also **piggybacks the cluster's versioned routing topology** (a
   `Malachi.Cluster.RingTopology`): every message carries it alongside the view updates, and peers keep the
