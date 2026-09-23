@@ -385,6 +385,10 @@ defmodule Malachi.BrokerServer do
 
     {:ok, broker} = Broker.open(broker_opts)
 
+    # Only a replicated control plane re-seeds this cache from a read, so only it can undo a local
+    # write by installing one; in-memory metadata IS the truth and never replaces itself.
+    broker = if metadata_refresh, do: Broker.journal(broker), else: broker
+
     # With authoritative (ra-backed) metadata, the topics/ranges/segments survive a restart, but the
     # in-memory offsets and segment_seq maps do not: without recovery, every read of pre-restart data
     # clamps to :eof at offset 0 (durable data unreadable, the failure the chaos harness caught).
@@ -1294,9 +1298,17 @@ defmodule Malachi.BrokerServer do
         # would make every read of them succeed with zero records for as long as it stayed silent.
         # `drop_stale_active_segments/1` right after the cache swap, so a segment sealed on ANOTHER node
         # stops being routed at here within one reconcile instead of only when the store refuses a batch.
+        # The read this installs was taken BEFORE the commands applied on this loop since the last
+        # pass, and a re-seed REPLACES a reachable vnode's metadata. Without the replay, a topic
+        # created, a range split or a group position committed while the task was reading is undone
+        # here and stays undone until a later pass happens to read it back, during which a produce is
+        # refused as :no_such_topic and a consumer is handed a position it already passed.
+        {journaled, broker} = Broker.take_journal(state.broker)
+
         broker =
-          state.broker
+          broker
           |> Broker.put_cache(dsrsm, unreachable)
+          |> Broker.replay_journal(journaled)
           |> Broker.drop_stale_active_segments()
 
         %{
