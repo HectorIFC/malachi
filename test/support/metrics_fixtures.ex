@@ -53,6 +53,10 @@ defmodule Malachi.Test.MetricsFixtures do
         scrub_segments_unrepairable: 2,
         orphaned_fences: 3,
         fences_reconciled: 2,
+        sealed_copies_fenced: 9,
+        sealed_copies_trimmed: 1,
+        sealed_copies_unsettled: 0,
+        sealed_records_dropped: 1,
         unexpected_messages: [
           %{server: :replication, kind: :cast, count: 5},
           %{server: :membership, kind: :info, count: 0},

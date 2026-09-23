@@ -83,6 +83,14 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="detected"} 3)
     assert out =~ ~s(malachi_cluster_orphaned_fences_total{result="reconciled"} 2)
 
+    # Settling a copy of a sealed segment splits by outcome for the same reason: on the first pass after
+    # an upgrade `fenced` is every copy in the cluster, and `trimmed` is the copy that was holding
+    # records its seal excludes. One series would make the second unfindable inside the first.
+    assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="fenced"} 9)
+    assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="trimmed"} 1)
+    assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="failed"} 0)
+    assert out =~ "malachi_cluster_sealed_records_dropped_total 1"
+
     # One sample per server and kind, zero included: a series that appears only after the first drop can
     # be neither alerted on with increase() nor asserted to be zero.
     assert out =~ "# TYPE malachi_unexpected_messages_total counter\n"
