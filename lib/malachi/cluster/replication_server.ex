@@ -36,10 +36,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   ## Closing a segment
 
   `seal/4` is the write fence: it seals the segment's log durably and answers where it ended. Afterwards
-  every write entry point here refuses that segment with `{:error, {:sealed, end_offset}}`, across
-  restarts, while reads and repair (`follow/4`) keep working. That is what makes a control-plane sealed
-  length a consequence of closing the segment rather than a number measured beside a log that is still
-  growing.
+  every write entry point here refuses that segment, across restarts, while reads and repair
+  (`follow/4`) keep working. That is what makes a control-plane sealed length a consequence of closing
+  the segment rather than a number measured beside a log that is still growing. The caller-facing entry
+  points answer `{:error, {:sealed, end_offset}}`; the primary's `:replica_append` fan-out answers
+  `{:error, :sealed}` alone, for the reason given on `seal/4`.
 
   `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
   without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
@@ -356,11 +357,16 @@ defmodule Malachi.Cluster.ReplicationServer do
   @doc """
   Seals `segment_id` on this server and reports what it durably holds: `{:ok, end_offset, byte_size}`.
 
-  The write fence. After it returns, `replicate/5`, `replicate_async/7`, `append/5` and the primary's
-  `:replica_append` fan-out are all refused here with `{:error, {:sealed, end_offset}}`, and again after
-  a restart, so the segment's log can never grow past the offset reported. That is what lets a caller
-  RECORD the returned end as the sealed length instead of measuring one beside it: the length becomes a
-  consequence of closing the segment rather than a number racing it.
+  The write fence. After it returns, `replicate/5`, `replicate_async/7` and `append/5` are all refused
+  here with `{:error, {:sealed, end_offset}}`, and again after a restart, so the segment's log can never
+  grow past the offset reported. That is what lets a caller RECORD the returned end as the sealed length
+  instead of measuring one beside it: the length becomes a consequence of closing the segment rather
+  than a number racing it.
+
+  The primary's `:replica_append` fan-out is refused as well, but it answers `{:error, :sealed}` WITHOUT
+  the end offset. The primary discards an ack's error reason and only stops counting that replica toward
+  the quorum, so an offset nobody reads would be one more message shape to keep in step across a rolling
+  upgrade, for no reader.
 
   Idempotent and cheap on an already-fenced segment (no fsync, the same pair). `base_offset` seats a
   missing or empty log at the segment's base, so fencing a segment this server never stored succeeds at
@@ -818,7 +824,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp follow_push(state, log, {segment_id, base, expected_first, records, source}) do
     cond do
       # Fenced here: ack an ERROR rather than stay silent, so the primary simply does not count this
-      # replica toward the quorum instead of waiting out the follow timeout for an ack that can never come.
+      # replica toward the quorum instead of waiting out the follow timeout for an ack that can never
+      # come. Bare `:sealed`, with no end offset, for the reason spelled out on `seal/4`.
       Log.sealed?(log) ->
         GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, :sealed}})
         {:noreply, state}
