@@ -177,12 +177,14 @@ defmodule Malachi.Cluster.CapabilitiesTest do
     test "creates no atom for an unknown name" do
       # The input is a command line string. String.to_atom/1 here would grow a table that is never
       # collected, from text an operator typed.
-      before = :erlang.system_info(:atom_count)
+      #
+      # Asserted on the name itself rather than on the VM's atom count: this module is async, the count
+      # is VM-wide, and any test running beside it that creates an atom would fail this one. Asking
+      # whether this name became an atom is both deterministic and a tighter question.
+      name = "a_name_this_vm_has_never_seen_#{System.unique_integer([:positive])}"
 
-      assert Capabilities.resolve("a_name_this_vm_has_never_seen_#{System.unique_integer([:positive])}", []) ==
-               {:error, :unknown_flag}
-
-      assert :erlang.system_info(:atom_count) == before
+      assert Capabilities.resolve(name, []) == {:error, :unknown_flag}
+      assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
     end
   end
 

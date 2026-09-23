@@ -362,12 +362,15 @@ defmodule Malachi.ApplicationTest do
       assert attributes[Capabilities.key()] == Capabilities.advertised()
     end
 
-    test "the operator's attributes survive the merge" do
-      original = Application.get_env(:malachi, :log_attributes)
-      on_exit(fn -> Application.put_env(:malachi, :log_attributes, original) end)
-      Application.put_env(:malachi, :log_attributes, "rack=a,dc=eu")
+    test "is the operator's configured attributes put through the capability merge" do
+      # The wiring, read rather than driven: :log_attributes is VM-wide application env and this module
+      # is async, so setting it would race every other test and every application process that reads it.
+      assert App.membership_attributes() ==
+               Capabilities.attributes(App.parse_attributes(Application.get_env(:malachi, :log_attributes)))
+    end
 
-      attributes = App.membership_attributes()
+    test "the operator's attributes survive the merge" do
+      attributes = Capabilities.attributes(App.parse_attributes("rack=a,dc=eu"))
 
       assert attributes["rack"] == "a"
       assert attributes["dc"] == "eu"
