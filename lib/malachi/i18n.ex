@@ -310,6 +310,16 @@ defmodule Malachi.I18n do
       "pt_BR" => "flag de cluster %{flag} adotado neste nó",
       "en_US" => "cluster flag %{flag} adopted on this node"
     },
+    cluster_flags_unreadable: %{
+      "pt_BR" =>
+        "não foi possível ler os flags de cluster em %{timeout}ms (%{reason}). Este nó não sobe sem " <>
+          "saber quais features estão ligadas; suba um quórum do cluster ou aumente " <>
+          "MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS",
+      "en_US" =>
+        "could not read the cluster flags within %{timeout}ms (%{reason}). This node does not start " <>
+          "without knowing which features are on; bring up a quorum of the cluster or raise " <>
+          "MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS"
+    },
     cluster_flag_missing_capability: %{
       "pt_BR" =>
         "o cluster ligou %{flags}, que este binário não suporta; ele anuncia %{capabilities}. " <>

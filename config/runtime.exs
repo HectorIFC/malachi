@@ -246,6 +246,11 @@ config :malachi,
   # The wait exists for the ordinary full-cluster restart, where the first node up has no quorum until a
   # second joins; raise it for clusters that stagger their boots more than a minute apart.
   log_ring_boot_timeout_ms: parse_int.(System.get_env("MALACHI_LOG_RING_BOOT_TIMEOUT_MS"), 60_000),
+  # How long a node waits to read the cluster feature flags at boot before refusing to start. Same
+  # reason as the ring above: on a full-cluster restart the first node up has no quorum until a second
+  # joins. A node that cannot read the flags does not know whether it may serve, so it dies restartable
+  # rather than serving on the assumption that nothing is enabled.
+  log_flags_boot_timeout_ms: parse_int.(System.get_env("MALACHI_LOG_FLAGS_BOOT_TIMEOUT_MS"), 60_000),
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),

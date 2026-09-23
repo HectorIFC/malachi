@@ -94,10 +94,41 @@ defmodule Malachi.Cluster.ClusterFlagsCache do
     read = Keyword.fetch!(opts, :read)
 
     case read.(mode()) do
-      {:ok, %ClusterFlags{} = flags} -> apply_flags(ClusterFlags.enabled(flags), opts)
-      # Not formed, no quorum, or this node is still joining: no answer is not an answer.
-      {:error, _unreadable} -> :ok
+      {:ok, %ClusterFlags{} = flags} ->
+        adopt(flags, opts)
+
+      # Not formed, no quorum, or this node is still joining: no answer is not an answer. The boot gate
+      # is what refuses on an unreadable store (`Malachi.Application.ensure_cluster_flags/2`); by the
+      # time the tick runs, this node has already read the store once and a later failure only means the
+      # cache keeps what it has.
+      {:error, _unreadable} ->
+        :ok
     end
+  end
+
+  @doc """
+  Applies flags this node has already read: refuse if this build cannot honour one, adopt what is new,
+  publish.
+
+  Split from `refresh/1` so the boot gate, which reads the store itself and must refuse rather than
+  retry, applies what it read without a second round trip through Raft.
+  """
+  @spec adopt(ClusterFlags.t(), keyword()) :: :ok
+  def adopt(%ClusterFlags{} = flags, opts \\ []) do
+    apply_flags(ClusterFlags.enabled(flags), opts)
+  end
+
+  @doc """
+  The message for a flag store that could not be read within the boot timeout.
+
+  Deliberately not the refusal of `refuse/3`: that one is exit 78, which says the node cannot run with
+  what it was given and a service manager should stop restarting it. An unreachable store is the
+  opposite, a transient condition that a restart is exactly the right answer to, so it raises and the
+  node dies restartable.
+  """
+  @spec unreadable_message(term(), non_neg_integer()) :: String.t()
+  def unreadable_message(reason, timeout_ms) do
+    I18n.t(:cluster_flags_unreadable, reason: inspect(reason), timeout: timeout_ms)
   end
 
   @doc false
