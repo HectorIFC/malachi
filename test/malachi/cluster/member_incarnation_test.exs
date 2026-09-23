@@ -16,7 +16,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
       assert {:ok, %{start: 1, ceiling: ceiling}} = MemberIncarnation.reserve(dir, 8)
 
       assert ceiling == 8
-      assert MemberIncarnation.read(dir) == 8
+      assert MemberIncarnation.read(dir) == {:ok, 8}
     end
 
     test "a restart resumes above the block the previous boot reserved", %{tmp_dir: dir} do
@@ -47,7 +47,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
       {:ok, _reservation} = MemberIncarnation.reserve(dir, 4)
 
       assert {:ok, 68} = MemberIncarnation.extend(dir, 4, 64)
-      assert MemberIncarnation.read(dir) == 68
+      assert MemberIncarnation.read(dir) == {:ok, 68}
     end
 
     test "answers the error rather than raising, so a membership server keeps serving" do
@@ -57,21 +57,34 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
 
   describe "read/1" do
     test "a directory with no file reads as zero, which is a first boot", %{tmp_dir: dir} do
-      assert MemberIncarnation.read(dir) == 0
+      assert MemberIncarnation.read(dir) == {:ok, 0}
     end
 
-    test "a damaged file reads as zero rather than as a guess", %{tmp_dir: dir} do
-      # Starting low costs one round of being ignored, which the next refutation corrects. Starting high
-      # on a guess would let this node override records it has no right to.
+    test "a damaged file is an error, not a reset to zero", %{tmp_dir: dir} do
+      # Resetting would start this node below what its peers remember, and nothing corrects that: a live
+      # node is never suspected, so it never refutes, so the peers keep the old record forever.
       for content <- ["", "   ", "not a number", "12 34", "-5", "9\nrubbish"] do
         File.write!(MemberIncarnation.path(dir), content)
-        assert MemberIncarnation.read(dir) == 0, "read #{inspect(content)} as something other than 0"
+        assert {:error, {:damaged, _seen}} = MemberIncarnation.read(dir), "read #{inspect(content)} as usable"
       end
+    end
+
+    test "a damaged file stops a reservation rather than overwriting it", %{tmp_dir: dir} do
+      File.write!(MemberIncarnation.path(dir), "not a number")
+
+      assert {:error, {:damaged, _seen}} = MemberIncarnation.reserve(dir, 8)
+      # And the ceiling that could not be read is still there to be recovered, not replaced by a guess.
+      assert File.read!(MemberIncarnation.path(dir)) == "not a number"
+    end
+
+    test "an unreadable file is an error of its own", %{tmp_dir: dir} do
+      File.mkdir_p!(MemberIncarnation.path(dir))
+      assert {:error, {:io, :eisdir}} = MemberIncarnation.read(dir)
     end
 
     test "a value with surrounding whitespace still reads", %{tmp_dir: dir} do
       File.write!(MemberIncarnation.path(dir), "  42\n")
-      assert MemberIncarnation.read(dir) == 42
+      assert MemberIncarnation.read(dir) == {:ok, 42}
     end
   end
 

@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.MembershipServerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
@@ -183,18 +185,29 @@ defmodule Malachi.Cluster.MembershipServerTest do
       refute_received {:ceiling_asked, _incarnation}
     end
 
-    test "keeps serving when the ceiling cannot be written" do
-      # A disk that refuses costs a future restart one round of being ignored by peers. Stopping the
-      # membership server over it would cost the cluster this node's liveness right now.
+    test "stops the node when a new ceiling cannot be written" do
+      # Carrying on would gossip incarnations above the last one on disk, and the next restart would
+      # resume below what peers remember, where nothing corrects it. Stopping is recoverable: the node
+      # comes back and reserves a block it can trust.
+      parent = self()
       a = :"msinc_#{System.unique_integer([:positive])}"
-      opts = [name: a, peers: [], incarnation: 1, ceiling: 2, on_ceiling: fn _i -> {:error, :enospc} end] ++ @timings
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn _i -> {:error, :enospc} end,
+          stop_fun: fn -> send(parent, :stopping) end
+        ] ++ @timings
+
       start_supervised!({MembershipServer, opts}, id: a)
 
-      :ok = MembershipServer.set_attributes(a, %{rack: "x"})
-      :ok = MembershipServer.set_attributes(a, %{rack: "y"})
+      log = capture_log(fn -> :ok = MembershipServer.set_attributes(a, %{rack: "x"}) end)
 
-      assert MembershipServer.attributes(a, a) == %{rack: "y"}
-      assert Membership.incarnation(MembershipServer.view(a), a) == 3
+      assert_received :stopping
+      assert log =~ "incarnation ceiling"
     end
 
     test "a server started without a reservation never asks for a ceiling" do

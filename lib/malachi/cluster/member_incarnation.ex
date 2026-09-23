@@ -31,10 +31,16 @@ defmodule Malachi.Cluster.MemberIncarnation do
   That keeps the write off the refutation path, which is where an fsync would sit in the way of the
   failure detector.
 
-  A missing, empty or unparsable file reads as ceiling 0. That is the first boot of a node, and it is
-  also the safe reading of a damaged one: starting low costs a node one round of being ignored by peers
-  that remember more, which the next refutation corrects, while starting high on a guess would let this
-  node override records it has no right to.
+  ## A missing file and a damaged one are not the same
+
+  Only a genuinely absent file reads as ceiling 0, which is a node's first boot. A file that exists but
+  cannot be read or parsed is an **error**, and the node refuses to start on it.
+
+  That distinction is the whole safety of this module, because a node that resumes below what its peers
+  remember is never corrected. Its announcement loses the merge and is ignored; the peers keep the old
+  record, including the old attributes; and since the node is answering their pings they have no reason
+  to suspect it, so no refutation is ever provoked to lift it. The staleness is permanent, not a round.
+  Starting from a guess is therefore not a lesser evil than not starting at all.
   """
 
   alias Malachi.Storage.Directory
@@ -67,12 +73,10 @@ defmodule Malachi.Cluster.MemberIncarnation do
   """
   @spec reserve(Path.t(), pos_integer()) :: {:ok, reservation()} | {:error, term()}
   def reserve(dir, block \\ @block) do
-    recorded = read(dir)
-    ceiling = recorded + block
-
-    case write(dir, ceiling) do
-      :ok -> {:ok, %{start: recorded + 1, ceiling: ceiling}}
-      {:error, reason} -> {:error, reason}
+    with {:ok, recorded} <- read(dir),
+         ceiling = recorded + block,
+         :ok <- write(dir, ceiling) do
+      {:ok, %{start: recorded + 1, ceiling: ceiling}}
     end
   end
 
@@ -94,21 +98,29 @@ defmodule Malachi.Cluster.MemberIncarnation do
   end
 
   @doc """
-  The ceiling recorded in `dir`, or 0 when there is none to read.
+  The ceiling recorded in `dir`.
 
-  Missing, empty, unparsable or unreadable all answer 0: see the moduledoc for why starting low is the
-  safe direction.
+  `{:ok, 0}` when there is no file, which is a first boot. `{:error, {:damaged, content}}` when a file
+  exists but does not hold one non-negative integer, and `{:error, {:io, posix}}` when it exists and
+  cannot be read. Both errors stop the node rather than resetting it: see the moduledoc.
   """
-  @spec read(Path.t()) :: non_neg_integer()
+  @spec read(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   def read(dir) do
-    with {:ok, content} <- File.read(path(dir)),
-         {value, rest} when value >= 0 <- Integer.parse(String.trim(content)),
-         true <- String.trim(rest) == "" do
-      value
-    else
-      _missing_or_damaged -> 0
+    case File.read(path(dir)) do
+      {:ok, content} -> parse(content)
+      {:error, :enoent} -> {:ok, 0}
+      {:error, posix} -> {:error, {:io, posix}}
     end
   end
+
+  defp parse(content) do
+    case Integer.parse(String.trim(content)) do
+      {value, rest} when value >= 0 -> if String.trim(rest) == "", do: {:ok, value}, else: damaged(content)
+      _not_a_number -> damaged(content)
+    end
+  end
+
+  defp damaged(content), do: {:error, {:damaged, String.slice(content, 0, 64)}}
 
   # The one way the file changes, and the same path `Malachi.Storage.FormatMarker` uses for the format
   # marker: nothing before the directory fsync counts as written.

@@ -35,8 +35,11 @@ defmodule Malachi.Cluster.MembershipServer do
 
   use GenServer
 
+  require Logger
+
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.RingTopology
+  alias Malachi.I18n
   alias Malachi.UnexpectedMessage
 
   @default_protocol_period 1_000
@@ -125,6 +128,9 @@ defmodule Malachi.Cluster.MembershipServer do
       # of a disk.
       ceiling: Keyword.get(opts, :ceiling, :infinity),
       on_ceiling: Keyword.get(opts, :on_ceiling, fn _incarnation -> :error end),
+      # What to do when a new ceiling cannot be recorded: stop the node, so it comes back and reserves
+      # one it can trust. Seam, so a test observes the decision instead of taking the VM down.
+      stop_fun: Keyword.get(opts, :stop_fun, &System.stop/0),
       # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
       # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
       topology: Keyword.get(opts, :topology),
@@ -316,21 +322,34 @@ defmodule Malachi.Cluster.MembershipServer do
   # The one place the view is replaced, so the one place this node's own incarnation can be seen to rise.
   #
   # It rises only on a refutation or a deliberate attribute change, both rare, so crossing the reserved
-  # block is rare too and the durable write that follows stays off the failure detector's path. A write
-  # that fails leaves the ceiling where it was: the node keeps serving, and the cost is that a future
-  # restart may resume below what peers remember, which is the state every node was in before the
-  # reservation existed.
+  # block is rare too and the durable write that follows stays off the failure detector's path.
+  #
+  # A write that fails stops the node. Carrying on would gossip incarnations above the last one on disk,
+  # and the next restart would then resume below what peers remember, where nothing ever corrects it:
+  # a live node is never suspected, so no refutation is provoked to lift the stale record. Stopping is
+  # recoverable, since the node comes back and reserves a block it can trust. Refusing to raise the
+  # incarnation instead, so as to stay within the block, would mean refusing to refute a suspicion, and
+  # the node would be declared dead and taken out of placement for certain rather than at risk.
   defp put_view(state, view) do
     state = %{state | view: view}
 
     case Membership.incarnation(view, state.self) do
       incarnation when is_integer(incarnation) and incarnation >= state.ceiling ->
-        case state.on_ceiling.(incarnation) do
-          {:ok, ceiling} -> %{state | ceiling: ceiling}
-          _failed -> state
-        end
+        extend_ceiling(state, incarnation)
 
       _below_or_unreserved ->
+        state
+    end
+  end
+
+  defp extend_ceiling(state, incarnation) do
+    case state.on_ceiling.(incarnation) do
+      {:ok, ceiling} ->
+        %{state | ceiling: ceiling}
+
+      failed ->
+        Logger.error(I18n.t(:member_incarnation_ceiling_lost, incarnation: incarnation, reason: inspect(failed)))
+        state.stop_fun.()
         state
     end
   end

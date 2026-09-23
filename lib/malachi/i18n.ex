@@ -310,15 +310,27 @@ defmodule Malachi.I18n do
       "pt_BR" => "flag de cluster %{flag} adotado neste nó",
       "en_US" => "cluster flag %{flag} adopted on this node"
     },
-    member_incarnation_unwritable: %{
+    member_incarnation_unusable: %{
       "pt_BR" =>
-        "não foi possível reservar a incarnation deste nó em %{path} (%{reason}); ele sobe como se " <>
-          "fosse o primeiro boot. Pares que lembram uma incarnation maior vão ignorar o anúncio dele " <>
-          "até a próxima refutação, inclusive os atributos que eles guardam",
+        "não foi possível reservar a incarnation deste nó em %{path} (%{reason}). O nó não inicia: " <>
+          "subir sem ela significaria anunciar um número abaixo do que os pares lembram, e nada corrige " <>
+          "isso depois, porque um nó vivo nunca é suspeitado e portanto nunca refuta. Conserte o volume, " <>
+          "ou restaure o arquivo de outro backup deste mesmo nó",
       "en_US" =>
-        "could not reserve this node's incarnation at %{path} (%{reason}); it starts as though this " <>
-          "were its first boot. Peers that remember a higher incarnation will ignore its announcement " <>
-          "until the next refutation, including the attributes they hold for it"
+        "could not reserve this node's incarnation at %{path} (%{reason}). The node does not start: " <>
+          "coming up without it would mean announcing a number below what peers remember, and nothing " <>
+          "corrects that afterwards, because a live node is never suspected and so never refutes. Fix " <>
+          "the volume, or restore the file from a backup of this same node"
+    },
+    member_incarnation_ceiling_lost: %{
+      "pt_BR" =>
+        "não foi possível gravar um teto de incarnation novo em %{incarnation} (%{reason}); parando o " <>
+          "nó para que ele reserve outro ao subir. Seguir serviria agora e deixaria um restart futuro " <>
+          "voltar abaixo do que os pares lembram, onde nada mais corrige",
+      "en_US" =>
+        "could not record a new incarnation ceiling at %{incarnation} (%{reason}); stopping the node so " <>
+          "it reserves one it can trust on the way back up. Carrying on would serve now and let a " <>
+          "future restart resume below what peers remember, where nothing corrects it"
     },
     cluster_flags_unreadable: %{
       "pt_BR" =>

@@ -9,6 +9,7 @@ defmodule Malachi.ApplicationTest do
   alias Malachi.Cluster.ClusterFlags
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.ClusterFlagsServer
+  alias Malachi.Cluster.MemberIncarnation
 
   describe "metadata_cluster_opts/2" do
     test "no cluster configured yields no metadata options (single-node in-memory default)" do
@@ -458,6 +459,36 @@ defmodule Malachi.ApplicationTest do
       assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
 
       assert opts[:reconcile].() == :ok
+    end
+  end
+
+  describe "incarnation_opts/1" do
+    @describetag :tmp_dir
+
+    test "reserves a block and hands the membership server what it needs", %{tmp_dir: dir} do
+      opts = App.incarnation_opts(dir)
+
+      assert opts[:incarnation] == 1
+      assert opts[:ceiling] == MemberIncarnation.block()
+      assert is_function(opts[:on_ceiling], 1)
+    end
+
+    test "a second boot resumes above the first one's block", %{tmp_dir: dir} do
+      first = App.incarnation_opts(dir)
+      second = App.incarnation_opts(dir)
+
+      assert second[:incarnation] > first[:ceiling]
+    end
+
+    test "stops the node when no reservation can be made", %{tmp_dir: dir} do
+      # Starting anyway would announce a number below what peers remember, and nothing corrects that:
+      # a live node is never suspected, so it never refutes, so the peers keep the old record and the
+      # old attributes the capability gate reads.
+      File.write!(MemberIncarnation.path(dir), "not a number")
+
+      assert_raise RuntimeError, ~r/could not reserve this node's incarnation/, fn ->
+        App.incarnation_opts(dir)
+      end
     end
   end
 

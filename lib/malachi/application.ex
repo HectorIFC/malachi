@@ -796,23 +796,26 @@ defmodule Malachi.Application do
   # restart's announcement is not ignored as a duplicate and its attributes are not stale
   # (`Malachi.Cluster.MemberIncarnation`).
   #
-  # A reservation that cannot be written warns and falls back to a first-boot view rather than stopping
-  # the node. `ensure_data_format/2` has already proven this directory writable a moment earlier, so
-  # reaching this branch means something changed in between, and the cost of carrying on is the
-  # behaviour every node had before the reservation existed: one restart that peers ignore for a round,
-  # until the next refutation lifts it. Taking a node out of an otherwise healthy cluster over one small
-  # file would be the larger harm.
-  defp incarnation_opts(dir) do
+  # A reservation that cannot be made **stops the node**, the way an unreadable ring does, and for the
+  # same reason: starting anyway would mean announcing a number below what peers remember, and nothing
+  # would ever correct that. The announcement loses the merge, the peers keep the old record and its old
+  # attributes, and since this node answers their pings they never suspect it, so no refutation is
+  # provoked to lift it. Carrying on is not a degraded start, it is a silently wrong one, and the
+  # capability gate then reads those stale attributes as current.
+  @doc """
+  The incarnation options this node's membership server starts with, reserved from `dir`.
+
+  Raises when no reservation can be made, which stops the node. See the comment above for why starting
+  anyway is not a degraded start but a silently wrong one.
+  """
+  @spec incarnation_opts(Path.t()) :: keyword()
+  def incarnation_opts(dir) do
     case MemberIncarnation.reserve(dir) do
       {:ok, %{start: start, ceiling: ceiling}} ->
         [incarnation: start, ceiling: ceiling, on_ceiling: &MemberIncarnation.extend(dir, &1)]
 
       {:error, reason} ->
-        Logger.warning(
-          I18n.t(:member_incarnation_unwritable, path: MemberIncarnation.path(dir), reason: inspect(reason))
-        )
-
-        []
+        raise I18n.t(:member_incarnation_unusable, path: MemberIncarnation.path(dir), reason: inspect(reason))
     end
   end
 
