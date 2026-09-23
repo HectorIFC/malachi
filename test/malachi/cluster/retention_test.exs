@@ -1,5 +1,6 @@
 defmodule Malachi.Cluster.RetentionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Malachi.Cluster.Retention
   alias Malachi.Metadata
@@ -114,6 +115,30 @@ defmodule Malachi.Cluster.RetentionTest do
       assert Retention.reply_label({:error, {:unexpected, make_ref()}}) == :other
       assert Retention.reply_label(:done) == :other
       assert Retention.reply_label(nil) == :other
+    end
+  end
+
+  describe "delete_replicas?/1 (whether an answer authorizes destroying the stored bytes)" do
+    test "the two answers that mean the control plane no longer lists the segment" do
+      assert Retention.delete_replicas?(:ok)
+      # An earlier sweep dropped it and died before deleting the files: the only retry those files get.
+      assert Retention.delete_replicas?({:error, :no_such_segment})
+    end
+
+    test "a refusal keeps the bytes, because the segment is still listed with its replica set" do
+      refute Retention.delete_replicas?({:error, :migrating})
+      refute Retention.delete_replicas?({:error, :segment_active})
+    end
+
+    test "an ambiguous answer keeps the bytes: the next sweep can delete, an undelete does not exist" do
+      refute Retention.delete_replicas?({:error, :timeout})
+      refute Retention.delete_replicas?({:error, :call_failed})
+    end
+
+    property "no answer outside those two ever authorizes a delete" do
+      check all(reply <- StreamData.term(), reply not in [:ok, {:error, :no_such_segment}], max_runs: 200) do
+        refute Retention.delete_replicas?(reply)
+      end
     end
   end
 end

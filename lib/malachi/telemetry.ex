@@ -72,6 +72,10 @@ defmodule Malachi.Telemetry do
       ran on this node (only the leader sweeps), with how many segments it expired and how many deletes
       were refused. No events at all means no sweep is running.
 
+    * `[:malachi, :retention, :orphan_left]`. `%{count: 1}` / `%{topic}` - an expire deleted a segment
+      from the control plane and one of its replicas did not answer the delete, so that replica kept a
+      directory no later sweep can name. `Malachi.Retention.OrphanSweeper` is what reclaims it.
+
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
     * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
@@ -186,6 +190,15 @@ defmodule Malachi.Telemetry do
       segment: segment_id,
       result: result
     })
+  end
+
+  @doc """
+  An expire removed `topic`'s segment from the control plane and a replica did not answer the delete,
+  leaving a directory behind on it.
+  """
+  @spec retention_orphan_left(String.t()) :: :ok
+  def retention_orphan_left(topic) do
+    :telemetry.execute([:malachi, :retention, :orphan_left], %{count: 1}, %{topic: topic})
   end
 
   @doc "One retention sweep ran for `duration_us`, expiring `expired` segments with `failed` refusals."

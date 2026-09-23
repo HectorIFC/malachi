@@ -37,7 +37,6 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
-  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingBoot
@@ -54,6 +53,7 @@ defmodule Malachi.Application do
   alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Retention.Expirer
   alias Malachi.Retention.SkipReporter
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
@@ -605,17 +605,11 @@ defmodule Malachi.Application do
   defp coordinator_leader?(_cluster), do: membership_leader(Malachi.LogMembership)
 
   @doc false
-  # Removes an expired segment from the control plane through `broker`, then deletes its stored data on
-  # each replica, and answers what the control plane answered, which the retention coordinator turns
-  # into its sweep telemetry. Public (and documented false) only so it can be tested directly.
-  # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
-  # segment, so a replica that is momentarily unreachable just leaves harmless files to be retried.
+  # The retention coordinator's delete seam: `Malachi.Retention.Expirer.expire/3` against this node's
+  # broker. Public (and documented false) only so it can be tested directly. The rule about WHEN the
+  # stored bytes may go lives there, next to the reasoning for it.
   @spec expire_segment(Metadata.segment_meta(), GenServer.server()) :: term()
-  def expire_segment(segment, broker \\ Malachi.LogBroker) do
-    reply = BrokerServer.delete_segment(broker, segment.id)
-    Enum.each(segment.replica_set, fn replica -> ReplicationServer.delete(replica, segment.id) end)
-    reply
-  end
+  def expire_segment(segment, broker \\ Malachi.LogBroker), do: Expirer.expire(segment, broker)
 
   @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."
   @spec retention_policy() :: Malachi.Cluster.Retention.policy()

@@ -162,6 +162,7 @@ defmodule Malachi.Metrics.Prometheus do
     %{
       skips: [],
       expired: [],
+      orphans_left: [],
       failures: %{migrating: 0, segment_active: 0, other: 0},
       sweeps: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
     }
@@ -204,6 +205,13 @@ defmodule Malachi.Metrics.Prometheus do
         :counter,
         "Bytes the retention sweep expired, per topic",
         Enum.map(retention.expired, &{[topic: &1.topic], &1.bytes})
+      ),
+      metric(
+        "malachi_retention_orphan_directories_left_total",
+        :counter,
+        "Replica directories an expire left behind because the replica did not answer its delete, per topic; " <>
+          "the orphan sweeper reclaims them and counts that separately",
+        Enum.map(retention.orphans_left, &{[topic: &1.topic], &1.directories})
       ),
       metric(
         "malachi_retention_expire_failures_total",

@@ -232,6 +232,7 @@ defmodule Malachi.Metrics.PrometheusTest do
           }
         ],
         expired: [%{topic: "orders", segments: 4, bytes: 4096}, %{topic: "audit", segments: 1, bytes: 10}],
+        orphans_left: [%{topic: "orders", directories: 3}],
         failures: %{migrating: 1, segment_active: 0, other: 2},
         sweeps: sweeps(5, 1_789_000_100.5)
       }

@@ -636,6 +636,14 @@ defmodule Malachi.I18n do
           "════════════════════════════════════════════════════════════════"
     },
     # Retention: data a consumer was moved past (Malachi.Retention.SkipReporter)
+    retention_expire_call_failed: %{
+      "pt_BR" =>
+        "⚠️ o plano de controle não respondeu ao delete do segmento %{segment} (%{reason}); os bytes " <>
+          "foram mantidos e a próxima varredura tenta de novo",
+      "en_US" =>
+        "⚠️ the control plane did not answer the delete of segment %{segment} (%{reason}); the bytes " <>
+          "were kept and the next sweep tries again"
+    },
     retention_consumer_skipped: %{
       "pt_BR" =>
         "⚠️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets que não estão mais " <>

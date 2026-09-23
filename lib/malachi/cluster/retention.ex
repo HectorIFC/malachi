@@ -45,6 +45,26 @@ defmodule Malachi.Cluster.Retention do
   def reply_label(_other), do: :other
 
   @doc """
+  Whether a control-plane answer authorizes deleting the segment's stored bytes on its replicas.
+
+  Only two do, and both mean the same thing: the control plane no longer lists the segment, so no read
+  can be served from it and nothing will ever repair it. `:ok` is this sweep having removed it;
+  `:no_such_segment` is an earlier sweep having removed it and died before deleting the files, which is
+  the only retry the files ever get, since a segment gone from the control plane never comes back from
+  `expired/3`.
+
+  Every other answer keeps the files. A refusal (`:migrating`, `:segment_active`) leaves the segment
+  listed with its replica set intact, and deleting the bytes under it would leave every replica short
+  of its recorded `byte_size`: `Malachi.Cluster.SelfHealing` then finds no intact copy to repair from,
+  and a consumer positioned in that segment reads `:eof` until some later sweep finally gets `:ok`.
+  `:other` covers a Raft timeout, where the command may still have committed and may not: skipping the
+  delete is the recoverable side of that ambiguity, because the next sweep gets `:no_such_segment` and
+  deletes then, while deleting now cannot be undone.
+  """
+  @spec delete_replicas?(term()) :: boolean()
+  def delete_replicas?(reply), do: reply_label(reply) in [:ok, :no_such_segment]
+
+  @doc """
   The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
   range uses its topic's policy retention merged over it (see the module doc).
   """

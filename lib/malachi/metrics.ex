@@ -231,6 +231,18 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records `count` replica directories an expire of `topic` left behind, because the replica holding them
+  did not answer its delete (from the retention orphan telemetry event). The counterpart of what the
+  orphan sweeper reclaims: the two together say whether the sweeper is keeping up.
+  """
+  @spec record_retention_orphan_left(String.t(), non_neg_integer()) :: :ok
+  def record_retention_orphan_left(topic, count) do
+    key = {:retention_orphan_left, topic}
+    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
+    :ok
+  end
+
+  @doc """
   Records one retention sweep's duration (from the retention sweep telemetry event). The histogram exists
   from this server's first start, before the reporter that calls this is attached.
   """
@@ -243,12 +255,14 @@ defmodule Malachi.Metrics do
   @doc """
   The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `reader`,
   `group`, `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
-  refusals per reply (every known reply, zero included), and the sweep duration histogram in the shape
+  refusals per reply (every known reply, zero included), the replica directories expiries left behind per
+  topic, and the sweep duration histogram in the shape
   of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.
   """
   @spec retention_snapshot() :: %{
           skips: [map()],
           expired: [map()],
+          orphans_left: [map()],
           failures: %{atom() => non_neg_integer()},
           sweeps: map()
         }
@@ -264,9 +278,15 @@ defmodule Malachi.Metrics do
         %{topic: topic, segments: segments, bytes: bytes}
       end
 
+    orphans_left =
+      for [topic, directories] <- :ets.match(@metrics_table, {{:retention_orphan_left, :"$1"}, :"$2"}) do
+        %{topic: topic, directories: directories}
+      end
+
     %{
       skips: Enum.sort(skips),
       expired: Enum.sort(expired),
+      orphans_left: Enum.sort(orphans_left),
       failures: Map.new(@retention_failure_replies, &{&1, get_counter({:retention_expire_failure, &1})}),
       sweeps: histogram_snapshot(:persistent_term.get(@retention_sweep_key, nil))
     }
