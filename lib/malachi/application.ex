@@ -54,6 +54,7 @@ defmodule Malachi.Application do
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Retention.Expirer
+  alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
@@ -251,14 +252,16 @@ defmodule Malachi.Application do
           replication_child(),
           skip_reporter_child(Malachi.LogBroker),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
-        ] ++ metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children()
+        ] ++
+          metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children() ++ orphan_sweeper_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
         # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
         # the scrubber asks for its replication server.
         Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
+          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil)] ++
+            scrubber_children(name, dir) ++ orphan_sweeper_children(name, dir)
         end)
       end
 
@@ -732,6 +735,47 @@ defmodule Malachi.Application do
       fn -> BrokerServer.replication_ref(broker_name) end,
       directory
     )
+  end
+
+  # The orphan sweep, beside the scrub and for the same reason: the data directory is a fact about this
+  # node, so this is not leader gated and there is one per directory the node writes to. Clustered: one
+  # over the node's named replication server.
+  defp orphan_sweeper_children do
+    orphan_sweeper_child(
+      Malachi.LogOrphanSweeper,
+      Malachi.LogBroker,
+      {Malachi.LogReplication, node()},
+      log_data_dir()
+    )
+  end
+
+  # Single-node: one per data-plane shard, over that shard's own directory and its broker's unnamed
+  # replication server, whose pid a broker restart replaces (hence the function, as in `scrubber_child/4`).
+  defp orphan_sweeper_children(broker_name, directory) do
+    orphan_sweeper_child(
+      :"#{broker_name}OrphanSweeper",
+      broker_name,
+      fn -> BrokerServer.replication_ref(broker_name) end,
+      directory
+    )
+  end
+
+  defp orphan_sweeper_child(name, broker_name, local_ref, directory) do
+    opts = [
+      name: name,
+      metadata_source: fn -> BrokerServer.metadata(broker_name) end,
+      metadata_ready?: fn -> BrokerServer.metadata_ready?(broker_name) end,
+      local_ref: local_ref,
+      directory: directory,
+      mode: Application.get_env(:malachi, :retention_orphan_sweep, :delete),
+      interval: Application.get_env(:malachi, :retention_orphan_interval_ms, 300_000),
+      min_age_ms: Application.get_env(:malachi, :retention_orphan_min_age_ms, 600_000),
+      sightings: Application.get_env(:malachi, :retention_orphan_sightings, 2),
+      max_per_pass: Application.get_env(:malachi, :retention_orphan_max_per_pass, 50),
+      max_tracked: Application.get_env(:malachi, :retention_orphan_max_tracked, 10_000)
+    ]
+
+    [%{id: name, start: {OrphanSweeper, :start_link, [opts]}}]
   end
 
   defp scrubber_child(name, metadata_source, local_ref, directory) do

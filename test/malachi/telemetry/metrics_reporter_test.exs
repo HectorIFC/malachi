@@ -295,7 +295,7 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       assert reported == expected
       # One entry per server label plus `other`, times the three kinds. The count is asserted so a new
       # label has to be a deliberate change here rather than a silent widening of the exported series.
-      assert length(reported) == 27
+      assert length(reported) == 30
     end
   end
 end

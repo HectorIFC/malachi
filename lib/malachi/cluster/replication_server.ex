@@ -286,6 +286,30 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @doc """
+  Deletes one directory under this server's data directory by NAME, closing the log it holds if this
+  server has it open.
+
+  What `Malachi.Retention.OrphanSweeper` calls, and the reason it exists: the mapping from a segment id
+  to its directory is one-way (`Malachi.Storage.Layout`), so a directory the control plane no longer
+  names cannot be turned back into a segment id to pass to `delete/2`. Routing the removal through this
+  server anyway is what keeps one owner of the files: a directory that looks orphaned may still have an
+  open handle here, and removing it behind this server's back would leave that log writing into an
+  unlinked inode. The caller decides WHETHER a directory should go; this decides HOW.
+
+  `name` must be a single path segment. Anything with a separator or a parent reference is refused
+  rather than joined, because a name that escapes the data directory is not something to act on even
+  when it came from a listing of that directory.
+
+  Answers `:ok`, `{:error, :invalid_name}`, or `{:error, :unreachable}` when this server is not there.
+  """
+  @spec delete_directory(term(), String.t(), timeout()) :: :ok | {:error, term()}
+  def delete_directory(ref, name, timeout \\ 5_000) do
+    GenServer.call(ref, {:delete_directory, name}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
   Appends a replicated batch of `segment_id` to this server (the follower side). `expected_first`
   is the offset the batch must start at: it must equal this server's current end for the segment
   (or the segment's base when it is opened here for the first time). Returns `{:ok, last_offset}`
@@ -641,6 +665,14 @@ defmodule Malachi.Cluster.ReplicationServer do
       {nil, logs} ->
         _ = File.rm_rf(segment_directory(state.directory, segment_id))
         {:reply, :ok, %{state | logs: logs}}
+    end
+  end
+
+  def handle_call({:delete_directory, name}, _from, state) do
+    if safe_name?(name) do
+      {:reply, drop_directory(state, name), forget_directory(state, name)}
+    else
+      {:reply, {:error, :invalid_name}, state}
     end
   end
 
@@ -1485,4 +1517,49 @@ defmodule Malachi.Cluster.ReplicationServer do
   # The on-disk mapping lives in Malachi.Storage.Layout: the scrubber reads the same directories to
   # verify their checksums, and a second copy of this rule could drift from the writer's.
   defp segment_directory(base, segment_id), do: Layout.segment_directory(base, segment_id)
+
+  # A single path segment that is not a parent reference. Mirrors the defense in
+  # `Malachi.Storage.Layout`, at the other end of the same path.
+  defp safe_name?(name) do
+    is_binary(name) and name not in ["", ".", ".."] and not String.contains?(name, "/")
+  end
+
+  # Closes the log this directory holds, if it is open here, and removes the directory either way. The
+  # open case goes through `Log.delete/1` so the descriptors are closed before the files go; the closed
+  # case is the same best-effort removal `{:delete, segment_id}` does for a log that is not open.
+  defp drop_directory(state, name) do
+    case open_log_in(state, name) do
+      {_segment_id, log} ->
+        Log.delete(log)
+
+      nil ->
+        case File.rm_rf(Path.join(state.directory, name)) do
+          {:ok, _removed} -> :ok
+          {:error, reason, _path} -> {:error, reason}
+        end
+    end
+  end
+
+  defp forget_directory(state, name) do
+    case open_log_in(state, name) do
+      {segment_id, _log} ->
+        %{
+          state
+          | logs: Map.delete(state.logs, segment_id),
+            failed: Map.delete(state.failed, segment_id),
+            lost_unflushed: Map.delete(state.lost_unflushed, segment_id)
+        }
+
+      nil ->
+        state
+    end
+  end
+
+  # `state.logs` is keyed by segment id and the directory mapping is one-way, so the only way to ask
+  # "which open log lives in this directory" is to map every open id forward and compare.
+  defp open_log_in(state, name) do
+    Enum.find(state.logs, fn {segment_id, _log} ->
+      Path.basename(segment_directory(state.directory, segment_id)) == name
+    end)
+  end
 end

@@ -25,6 +25,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :retention, :skip],
     [:malachi, :retention, :expire],
     [:malachi, :retention, :orphan_left],
+    [:malachi, :retention, :orphan_removed],
     [:malachi, :retention, :sweep],
     [:malachi, :process, :unexpected_message]
   ]
@@ -100,6 +101,10 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :retention, :orphan_left], %{count: count}, %{topic: topic}, _config) do
     Metrics.record_retention_orphan_left(topic, count)
+  end
+
+  def handle_event([:malachi, :retention, :orphan_removed], %{count: count}, _metadata, _config) do
+    Metrics.record_retention_orphan_removed(count)
   end
 
   def handle_event([:malachi, :retention, :sweep], %{duration_us: duration_us}, _metadata, _config) do

@@ -76,9 +76,11 @@ defmodule Malachi.Telemetry do
       from the control plane and one of its replicas did not answer the delete, so that replica kept a
       directory no later sweep can name. `Malachi.Retention.OrphanSweeper` is what reclaims it.
 
+    * `[:malachi, :retention, :orphan_removed]`. `%{count}` / `%{}` - replica directories
+      `Malachi.Retention.OrphanSweeper` reclaimed in one pass.
+
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
-    * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
     * `[:malachi, :retention, :pinned]` - segments a consumer group keeps from expiring.
     * `[:malachi, :storage, :roll]` with `reason: :size | :time` - why a segment was rolled.
 
@@ -199,6 +201,12 @@ defmodule Malachi.Telemetry do
   @spec retention_orphan_left(String.t()) :: :ok
   def retention_orphan_left(topic) do
     :telemetry.execute([:malachi, :retention, :orphan_left], %{count: 1}, %{topic: topic})
+  end
+
+  @doc "The orphan sweeper reclaimed `count` replica directories in one pass."
+  @spec retention_orphan_removed(non_neg_integer()) :: :ok
+  def retention_orphan_removed(count) do
+    :telemetry.execute([:malachi, :retention, :orphan_removed], %{count: count}, %{})
   end
 
   @doc "One retention sweep ran for `duration_us`, expiring `expired` segments with `failed` refusals."

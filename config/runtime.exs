@@ -1,5 +1,12 @@
 import Config
 
+# What the orphan sweep does with what it finds: act, only list, or not even look.
+orphan_sweep_mode = fn
+  "off" -> :off
+  "report" -> :report
+  _delete_or_absent -> :delete
+end
+
 # Helper function to parse integers with defaults
 parse_int = fn val, default ->
   if val do
@@ -281,6 +288,20 @@ config :malachi,
   retention_skip_ledger_max: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LEDGER_MAX"), 10_000),
   retention_skip_log_window_ms: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LOG_WINDOW_MS"), 600_000),
   retention_metrics_max_groups: parse_int.(System.get_env("MALACHI_RETENTION_METRICS_MAX_GROUPS"), 1_000),
+  # The orphan sweep: replica directories retention could not delete, because the replica did not answer.
+  # No later sweep can name them (a segment gone from the control plane never comes back), so a separate
+  # worker per node reclaims them. `delete` acts, `report` only lists what it would take, `off` does not
+  # even look. It is deliberately slower than the other workers and guarded: a directory must be older
+  # than MALACHI_RETENTION_ORPHAN_MIN_AGE_MS (longer than the worst registration lag, or a segment being
+  # registered looks orphaned), must be unexplained on MALACHI_RETENTION_ORPHAN_SIGHTINGS consecutive
+  # passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds the damage if
+  # the expected set is ever wrong.
+  retention_orphan_sweep: orphan_sweep_mode.(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
+  retention_orphan_interval_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS"), 300_000),
+  retention_orphan_min_age_ms: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_MIN_AGE_MS"), 600_000),
+  retention_orphan_sightings: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_SIGHTINGS"), 2),
+  retention_orphan_max_per_pass: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_MAX_PER_PASS"), 50),
+  retention_orphan_max_tracked: parse_int.(System.get_env("MALACHI_RETENTION_ORPHAN_MAX_TRACKED"), 10_000),
   # Rebalancing lease (only used by a sharded control plane). The k8s-style timer triangle must satisfy
   # lease_duration_ms > lease_renew_deadline_ms > lease_retry_period_ms.
   lease_duration_ms: parse_int.(System.get_env("MALACHI_LEASE_DURATION_MS"), 15_000),

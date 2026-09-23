@@ -644,6 +644,30 @@ defmodule Malachi.I18n do
         "⚠️ the control plane did not answer the delete of segment %{segment} (%{reason}); the bytes " <>
           "were kept and the next sweep tries again"
     },
+    retention_orphan_removed: %{
+      "pt_BR" => "🧹 varredura de órfãos recuperou %{count} diretórios de réplica: %{directories}",
+      "en_US" => "🧹 the orphan sweep reclaimed %{count} replica directories: %{directories}"
+    },
+    retention_orphan_remove_failed: %{
+      "pt_BR" => "⚠️ varredura de órfãos não conseguiu remover %{failures}; a próxima passada tenta de novo",
+      "en_US" => "⚠️ the orphan sweep could not remove %{failures}; the next pass tries again"
+    },
+    retention_orphan_waiting_for_metadata: %{
+      "pt_BR" =>
+        "varredura de órfãos em %{directory} aguardando os metadados: enquanto algum vnode não foi lido, " <>
+          "um diretório vivo pareceria órfão",
+      "en_US" =>
+        "the orphan sweep of %{directory} is waiting for metadata: while a vnode has not been read, a " <>
+          "live directory would look orphaned"
+    },
+    retention_orphan_tracking_capped: %{
+      "pt_BR" =>
+        "⚠️ varredura de órfãos passou de %{limit} candidatos e parou de contar o excedente; a remoção " <>
+          "deles só atrasa",
+      "en_US" =>
+        "⚠️ the orphan sweep passed %{limit} candidates and stopped counting the rest; their removal is " <>
+          "only delayed"
+    },
     retention_consumer_skipped: %{
       "pt_BR" =>
         "⚠️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets que não estão mais " <>

@@ -57,7 +57,8 @@ defmodule Malachi.UnexpectedMessage do
     :retention,
     :heal,
     :skip_reporter,
-    :rebalance
+    :rebalance,
+    :orphan_sweeper
   ]
   @kinds [:cast, :info, :call]
 
@@ -75,6 +76,7 @@ defmodule Malachi.UnexpectedMessage do
           | :heal
           | :skip_reporter
           | :rebalance
+          | :orphan_sweeper
 
   @typedoc "How the message arrived."
   @type kind :: :cast | :info | :call

@@ -305,8 +305,37 @@ line still names them. The sum over readers per topic stays exact. The skip repo
 way by `MALACHI_RETENTION_SKIP_LEDGER_MAX` (10000 skips remembered); a forgotten skip read again is
 counted again.
 
+### The orphan sweep
+
+A replica that does not answer its delete keeps the segment's directory, and no later sweep can ask for
+it again: a segment gone from the control plane never comes back. A separate worker per node reclaims
+those directories, and other leaks of the same shape (a catch-up that failed after creating the
+directory, a copy healing moved elsewhere).
+
+```bash
+MALACHI_RETENTION_ORPHAN_SWEEP=delete         # delete | report | off
+MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS=300000
+MALACHI_RETENTION_ORPHAN_MIN_AGE_MS=600000
+MALACHI_RETENTION_ORPHAN_SIGHTINGS=2
+MALACHI_RETENTION_ORPHAN_MAX_PER_PASS=50
+```
+
+It runs on **every node**, not only the one that sweeps retention: only a node can read its own disk.
+It acts only when this node has read every metadata vnode at least once since boot, and a directory is
+removed only after it has been unexplained on `SIGHTINGS` consecutive passes **and** is older than
+`MIN_AGE_MS`. That minimum has to stay above the worst registration lag: a replica creates a
+directory on the first push, which can happen before this node's metadata shows the registration.
+
+`report` does everything except the removal, which is how to see the list before trusting it on a
+cluster for the first time. `off` does not even list.
+
+- **`malachi_retention_orphan_directories_left_total{topic}`**: directories an expire left behind
+  because the replica did not answer. It moves whether or not the sweep is on.
+- **`malachi_retention_orphan_directories_removed_total`**: directories the sweep reclaimed. Read
+  against the one above: a gap that keeps growing means the sweep is off, is being held back by a
+  guard, or is not keeping up with `MAX_PER_PASS`.
+
 These names are reserved for later retention work and not emitted yet:
-`malachi_retention_orphan_directories_removed_total` (the orphan directory sweeper),
 `malachi_retention_segments_pinned{topic,group}` (consumer-aware retention) and
 `malachi_segment_rolls_total{reason}` (time-based rolls).
 

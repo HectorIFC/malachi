@@ -233,6 +233,7 @@ defmodule Malachi.Metrics.PrometheusTest do
         ],
         expired: [%{topic: "orders", segments: 4, bytes: 4096}, %{topic: "audit", segments: 1, bytes: 10}],
         orphans_left: [%{topic: "orders", directories: 3}],
+        orphans_removed: 2,
         failures: %{migrating: 1, segment_active: 0, other: 2},
         sweeps: sweeps(5, 1_789_000_100.5)
       }
@@ -281,6 +282,13 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert out =~ ~s(malachi_retention_segments_expired_total{topic="orders"} 4\n)
       assert out =~ ~s(malachi_retention_bytes_expired_total{topic="orders"} 4096\n)
       assert out =~ ~s(malachi_retention_bytes_expired_total{topic="audit"} 10\n)
+    end
+
+    test "the orphan directories an expire left behind and the ones the sweep reclaimed are both exported" do
+      out = render_retention(retention())
+
+      assert out =~ ~s(malachi_retention_orphan_directories_left_total{topic="orders"} 3\n)
+      assert out =~ ~s(malachi_retention_orphan_directories_removed_total 2\n)
     end
 
     test "every refusal reply has a series, including the ones that never happened" do
