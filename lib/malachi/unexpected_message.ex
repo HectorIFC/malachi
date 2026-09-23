@@ -49,7 +49,16 @@ defmodule Malachi.UnexpectedMessage do
   alias Malachi.I18n
   alias Malachi.Telemetry
 
-  @servers [:replication, :membership, :broker, :scrubber, :retention, :heal, :skip_reporter]
+  @servers [
+    :replication,
+    :membership,
+    :broker,
+    :scrubber,
+    :retention,
+    :heal,
+    :skip_reporter,
+    :rebalance
+  ]
   @kinds [:cast, :info, :call]
 
   # How many distinct {kind, shape} pairs one server process logs. Tags are atoms, so the set is bounded
@@ -57,7 +66,15 @@ defmodule Malachi.UnexpectedMessage do
   @max_logged_shapes 32
 
   @typedoc "The label of a server that drops unexpected messages (anything else is counted as `other`)."
-  @type server :: :replication | :membership | :broker | :scrubber | :retention | :heal | :skip_reporter
+  @type server ::
+          :replication
+          | :membership
+          | :broker
+          | :scrubber
+          | :retention
+          | :heal
+          | :skip_reporter
+          | :rebalance
 
   @typedoc "How the message arrived."
   @type kind :: :cast | :info | :call

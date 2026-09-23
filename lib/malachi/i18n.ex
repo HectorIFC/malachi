@@ -368,6 +368,11 @@ defmodule Malachi.I18n do
       "pt_BR" => "processo %{server} respondendo {:error, :unknown_call} a uma chamada inesperada: %{message}",
       "en_US" => "%{server} process answering {:error, :unknown_call} to an unexpected call: %{message}"
     },
+    # An operator-supplied setting the process that uses it could not accept (`Malachi.Config.checked/4`)
+    setting_invalid: %{
+      "pt_BR" => "⚠️ %{setting} não aceita o valor %{value}; usando o padrão %{default}",
+      "en_US" => "⚠️ %{setting} does not accept the value %{value}; using the default %{default}"
+    },
     unexpected_messages_log_limit: %{
       "pt_BR" =>
         "processo %{server} já registrou %{limit} formatos de mensagem inesperada; os próximos são só " <>
@@ -375,12 +380,6 @@ defmodule Malachi.I18n do
       "en_US" =>
         "%{server} process has logged %{limit} unexpected message shapes; further ones are only counted " <>
           "in malachi_unexpected_messages_total"
-    },
-    scrubber_invalid_interval: %{
-      "pt_BR" =>
-        "intervalo de scrub %{interval} não é um número positivo de milissegundos, usando o padrão de %{default}ms",
-      "en_US" =>
-        "scrub interval %{interval} is not a positive number of milliseconds, using the default of %{default}ms"
     },
     scrub_segment_damaged: %{
       "pt_BR" => "scrub encontrou %{segment_id} danificado (%{reason} no byte %{position})%{outcome}",
@@ -637,10 +636,6 @@ defmodule Malachi.I18n do
           "════════════════════════════════════════════════════════════════"
     },
     # Retention: data a consumer was moved past (Malachi.Retention.SkipReporter)
-    retention_skip_setting_invalid: %{
-      "pt_BR" => "⚠️ %{setting} precisa ser um inteiro dentro do limite e veio %{value}; usando o padrão %{default}",
-      "en_US" => "⚠️ %{setting} must be an integer within its bound and was %{value}; using the default %{default}"
-    },
     retention_consumer_skipped: %{
       "pt_BR" =>
         "⚠️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets que não estão mais " <>

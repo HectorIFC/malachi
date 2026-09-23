@@ -69,7 +69,8 @@ defmodule Malachi.Cluster.Scrubber do
       to this process's own registered name on that node, since every node runs the same worker
       under the same name;
     * `:interval` - ms between ticks (default 60s). A value that is not a positive integer is
-      refused with a warning and the default used instead, since it arrives from the environment;
+      refused with a warning and the default used instead, since it arrives from the environment
+      (`Malachi.Cluster.PeriodicWorker`);
     * `:segments_per_tick` - segments verified per tick (default 1). With the default 64MB segment
       size a full cycle takes `segments * interval / segments_per_tick`, so a node holding 10k
       sealed segments revisits each one about weekly;
@@ -82,13 +83,13 @@ defmodule Malachi.Cluster.Scrubber do
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Cluster.Catchup
+  alias Malachi.Cluster.PeriodicWorker
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.I18n
   alias Malachi.Log
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
-  alias Malachi.UnexpectedMessage
 
   @default_interval 60_000
   @default_segments_per_tick 1
@@ -146,28 +147,26 @@ defmodule Malachi.Cluster.Scrubber do
   def init(opts) do
     registered_name = Keyword.get(opts, :name, __MODULE__)
 
-    state = %{
-      metadata_source: Keyword.fetch!(opts, :metadata_source),
-      local_ref: Keyword.fetch!(opts, :local_ref),
-      directory: Keyword.fetch!(opts, :directory),
-      apply_command: Keyword.fetch!(opts, :apply_command),
-      peer_scrubber: Keyword.get(opts, :peer_scrubber, &{registered_name, &1}),
-      interval: usable_interval(Keyword.get(opts, :interval, @default_interval)),
-      segments_per_tick: max(1, Keyword.get(opts, :segments_per_tick, @default_segments_per_tick)),
-      on_result: Keyword.get(opts, :on_result, &log_result/1),
-      # Segments still to visit in this cycle; refilled from the metadata when it empties, so every
-      # sealed copy is revisited on a fixed period instead of the walk restarting from the top.
-      pending: [],
-      damaged: MapSet.new(),
-      # The reference resolved for the pass currently running (see `:local_ref`).
-      resolved_ref: nil,
-      # Whether the pass currently running could not learn which of its copies are latched (see `repair/4`).
-      latches_unknown?: false,
-      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
-      unexpected_shapes: MapSet.new()
-    }
+    state =
+      Map.merge(PeriodicWorker.new(opts, :scrubber, @default_interval), %{
+        metadata_source: Keyword.fetch!(opts, :metadata_source),
+        local_ref: Keyword.fetch!(opts, :local_ref),
+        directory: Keyword.fetch!(opts, :directory),
+        apply_command: Keyword.fetch!(opts, :apply_command),
+        peer_scrubber: Keyword.get(opts, :peer_scrubber, &{registered_name, &1}),
+        segments_per_tick: max(1, Keyword.get(opts, :segments_per_tick, @default_segments_per_tick)),
+        on_result: Keyword.get(opts, :on_result, &log_result/1),
+        # Segments still to visit in this cycle; refilled from the metadata when it empties, so every
+        # sealed copy is revisited on a fixed period instead of the walk restarting from the top.
+        pending: [],
+        damaged: MapSet.new(),
+        # The reference resolved for the pass currently running (see `:local_ref`).
+        resolved_ref: nil,
+        # Whether the pass currently running could not learn which of its copies are latched (see `repair/4`).
+        latches_unknown?: false
+      })
 
-    schedule(state)
+    PeriodicWorker.schedule(state)
     {:ok, state}
   end
 
@@ -193,48 +192,23 @@ defmodule Malachi.Cluster.Scrubber do
 
   def handle_call(:damaged, _from, state), do: {:reply, MapSet.to_list(state.damaged), state}
 
-  def handle_call(message, _from, state) do
-    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
-  end
+  def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
 
   # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
   @impl true
-  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+  def handle_cast(message, state), do: PeriodicWorker.unknown_cast(state, message)
 
   @impl true
-  def handle_info(:tick, state) do
-    {_result, state} = run(state)
-    schedule(state)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: PeriodicWorker.tick(state, fn state -> state |> run() |> elem(1) end)
 
   # A worker meant to run for the lifetime of the node must not die on a message it did not plan for:
   # the crash costs the cycle position and the damaged set, so the restarted walk begins again at the
   # first segment and the tail of the rotation is never reached on a busy node. Nothing here is known
   # to send one, and that is the point: an unexpected message is a fact worth surfacing, not a reason to
   # take the process down (see `Malachi.UnexpectedMessage`).
-  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+  def handle_info(message, state), do: PeriodicWorker.unknown_info(state, message)
 
   # --- internals ---
-
-  defp drop_unexpected(state, kind, message) do
-    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :scrubber, kind, message)}
-  end
-
-  defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
-
-  # The interval reaches here straight from MALACHI_SCRUB_INTERVAL_MS, which parses any integer: zero
-  # would turn the cadence into a busy loop that scans the disk as fast as it can, and a negative one
-  # would crash `Process.send_after/3` at the first schedule. Neither is what an operator meant to ask
-  # for, and neither is worth refusing to boot over, so the value is rejected and said out loud. This
-  # is the same shape as the `max(1, ...)` on `:segments_per_tick`, which has the same origin.
-  defp usable_interval(interval) when is_integer(interval) and interval > 0, do: interval
-
-  defp usable_interval(interval) do
-    Logger.warning(I18n.t(:scrubber_invalid_interval, interval: inspect(interval), default: @default_interval))
-
-    @default_interval
-  end
 
   defp resolve_ref(local_ref) when is_function(local_ref, 0), do: local_ref.()
   defp resolve_ref(local_ref), do: local_ref

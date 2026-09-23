@@ -26,10 +26,10 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   use GenServer
 
+  alias Malachi.Cluster.PeriodicWorker
   alias Malachi.Cluster.Retention
   alias Malachi.Metadata
   alias Malachi.Telemetry
-  alias Malachi.UnexpectedMessage
 
   @default_interval 60_000
 
@@ -46,40 +46,38 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   @impl true
   def init(opts) do
-    state = %{
-      metadata_source: Keyword.fetch!(opts, :metadata_source),
-      expire_segment: Keyword.fetch!(opts, :expire_segment),
-      policy: Keyword.fetch!(opts, :policy),
-      clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
-      interval: Keyword.get(opts, :interval, @default_interval),
-      leader?: Keyword.get(opts, :leader?, fn -> true end),
-      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
-      unexpected_shapes: MapSet.new()
-    }
+    state =
+      Map.merge(PeriodicWorker.new(opts, :retention, @default_interval), %{
+        metadata_source: Keyword.fetch!(opts, :metadata_source),
+        expire_segment: Keyword.fetch!(opts, :expire_segment),
+        policy: Keyword.fetch!(opts, :policy),
+        clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
+        leader?: Keyword.get(opts, :leader?, fn -> true end)
+      })
 
-    schedule(state)
+    PeriodicWorker.schedule(state)
     {:ok, state}
   end
 
   @impl true
   def handle_call(:run_now, _from, state), do: {:reply, run(state), state}
 
-  def handle_call(message, _from, state) do
-    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
-  end
+  def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
 
   # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
   @impl true
-  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+  def handle_cast(message, state), do: PeriodicWorker.unknown_cast(state, message)
 
   @impl true
-  def handle_info(:tick, state) do
-    if state.leader?.(), do: run(state)
-    schedule(state)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: PeriodicWorker.tick(state, &sweep_if_leader/1)
 
-  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+  def handle_info(message, state), do: PeriodicWorker.unknown_info(state, message)
+
+  # The gate belongs to the tick alone: `run_now/1` is a manual trigger and ignores it.
+  defp sweep_if_leader(state) do
+    if state.leader?.(), do: run(state)
+    state
+  end
 
   defp run(state) do
     started = System.monotonic_time()
@@ -102,10 +100,4 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   # A segment already gone was deleted by an earlier sweep: not this sweep's expiry, and not a failure.
   defp failed?(label), do: label not in [:ok, :no_such_segment]
-
-  defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
-
-  defp drop_unexpected(state, kind, message) do
-    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :retention, kind, message)}
-  end
 end

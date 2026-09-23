@@ -5,7 +5,15 @@ defmodule Malachi.Config do
   Extracted from `config/runtime.exs` so the rules can be tested directly. That file is skipped
   entirely under `config_env() == :test`, so anything defined inline in it is unreachable from the
   suite; a pure function here is not.
+
+  `checked/4` is the other half of the same idea, applied where the value is finally used rather than
+  where it is parsed: the config layer turns an environment variable into a term without judging it,
+  and the process that needs it decides whether the term can do the job.
   """
+
+  require Logger
+
+  alias Malachi.I18n
 
   @doc """
   Normalizes an on-disk data directory taken from an environment variable.
@@ -122,6 +130,33 @@ defmodule Malachi.Config do
           _malformed_or_negative ->
             raise "MALACHI_RA_MACHINE_VERSION must be a non-negative integer, got: #{inspect(raw)}"
         end
+    end
+  end
+
+  @doc """
+  `value` when `valid?` accepts it, otherwise `default`, saying out loud which setting was refused.
+
+  Environment variables reach a process already parsed but not judged: `MALACHI_SCRUB_INTERVAL_MS=0`
+  is a valid integer and a busy loop, and `MALACHI_RETENTION_SKIP_LEDGER_MAX=0` is a valid integer and
+  a `FunctionClauseError` inside a server the application supervisor starts. Refusing to boot over an
+  operator's typo turns one lost knob into a lost node, so the documented default is used and the line
+  names the setting, what arrived and what is being used instead.
+
+  `setting` appears in the log, so it should be the name the operator can act on.
+
+  ## Examples
+
+      iex> Malachi.Config.checked(5_000, :scrubber_interval, 60_000, &(is_integer(&1) and &1 > 0))
+      5_000
+
+  """
+  @spec checked(value, atom(), value, (value -> boolean())) :: value when value: term()
+  def checked(value, setting, default, valid?) do
+    if valid?.(value) do
+      value
+    else
+      Logger.warning(I18n.t(:setting_invalid, setting: setting, value: inspect(value), default: inspect(default)))
+      default
     end
   end
 end
