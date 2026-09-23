@@ -36,6 +36,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   defstruct ring: nil, vnodes: %{}
 
+  # ra's own default, so `snapshot/2` with no `:timeout` reads exactly as `snapshot/1` used to.
+  @default_timeout 5_000
+
   @doc "Builds an empty replicated DS-RSM. Options are forwarded to `HashRing.new/1`."
   @spec new(keyword()) :: t()
   def new(opts \\ []), do: %__MODULE__{ring: HashRing.new(opts), vnodes: %{}}
@@ -193,10 +196,16 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   contributed nothing, the cache replaced the real topics with that nothing, and every read of them
   succeeded with zero records. Re-snapshotting later fills the vnode in (the ra log is authoritative,
   so a refresh only ever moves the cache forward).
+
+  The vnodes are read **concurrently**, and `:timeout` (in ms, default ra's own 5s) bounds each read. Both
+  matter to a caller on a latency-sensitive path: read sequentially with the default, a snapshot of
+  `n` silent vnodes costs `5s x n`, which is what used to be paid inside the broker's own loop while
+  it was supposed to be serving clients (#178). A read that times out is just an unreachable vnode,
+  the case this function already reports, so bounding it adds no outcome a caller must learn.
   """
-  @spec snapshot(t()) :: {:ok, DSRSM.t(), [vnode_id()]}
-  def snapshot(%__MODULE__{} = state) do
-    read = Map.new(state.vnodes, fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id)} end)
+  @spec snapshot(t(), keyword()) :: {:ok, DSRSM.t(), [vnode_id()]}
+  def snapshot(%__MODULE__{} = state, opts \\ []) do
+    read = Map.new(read_vnodes(state.vnodes, Keyword.get(opts, :timeout, @default_timeout)))
 
     metadata_by_vnode = Map.new(read, fn {vnode_id, result} -> {vnode_id, metadata_or_empty(result)} end)
     unreachable = for {vnode_id, :unreachable} <- read, do: vnode_id
@@ -222,12 +231,44 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   # electing, not bootstrapped yet, or partitioned). A linearizable query runs on the (possibly remote)
   # leader, so use a named stdlib function rather than a module-local closure, which the leader node
   # may not have loaded.
-  defp vnode_metadata(server_id) do
-    case MetadataServer.query(server_id, &Function.identity/1) do
+  defp vnode_metadata(server_id, timeout) do
+    case MetadataServer.query(server_id, &Function.identity/1, timeout) do
       {:ok, metadata} -> {:ok, metadata}
       {:error, _reason} -> :unreachable
     end
   end
+
+  # One task per vnode: the reads are independent, and a vnode that is going to cost the whole timeout
+  # must not hold the others behind it. `max_concurrency` covers every vnode, so nothing queues.
+  #
+  # Ordered (the default), and zipped back against the same list the tasks were built from, because
+  # the `:exit` result of a killed task does not carry the vnode it was reading.
+  #
+  # The stream's own timeout is a second looser than the per-read one, so the inner call is normally
+  # what decides "did not answer". It is not redundant: `ra` follows a `{redirect, Leader}` reply by
+  # calling that leader with a FRESH full timeout (`ra_server_proc:statem_call/3`), so members that
+  # redirect to each other cost unbounded time with no single call ever timing out. This is the only
+  # bound on that, and it lands on the same `:unreachable` the caller already knows how to read.
+  defp read_vnodes(vnodes, _timeout) when map_size(vnodes) == 0, do: []
+
+  defp read_vnodes(vnodes, timeout) do
+    entries = Map.to_list(vnodes)
+
+    entries
+    |> Task.async_stream(
+      fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id, timeout)} end,
+      max_concurrency: length(entries),
+      timeout: stream_timeout(timeout),
+      on_timeout: :kill_task
+    )
+    |> Enum.zip(entries)
+    |> Enum.map(fn
+      {{:ok, read}, _entry} -> read
+      {{:exit, _reason}, {vnode_id, _server_id}} -> {vnode_id, :unreachable}
+    end)
+  end
+
+  defp stream_timeout(timeout), do: timeout + 1_000
 
   # The placeholder keeps the cache shape total (every vnode on the ring has an entry). It is only a
   # placeholder: the caller is told which entries it stands for, and decides whether to keep its own
