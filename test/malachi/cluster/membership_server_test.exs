@@ -210,6 +210,22 @@ defmodule Malachi.Cluster.MembershipServerTest do
       assert log =~ "incarnation ceiling"
     end
 
+    test "a peer claiming a higher incarnation for us changes nothing" do
+      # We own our own number and resume it above our past from disk, so a peer's copy of it tells us
+      # nothing. Adopting it would hand a peer the ability to drive this node's incarnation upward from
+      # outside, and each step past the reserved block costs a durable write inline in this server.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], incarnation: 2, ceiling: 3, on_ceiling: fn i -> send(parent, {:asked, i}) end]
+      start_supervised!({MembershipServer, opts ++ @timings}, id: a)
+
+      GenServer.cast(a, {:ping, :nobody, [{a, :alive, 9_999, %{rack: "theirs"}}]})
+      assert MembershipServer.attributes(a, a) == %{}
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 2
+      refute_received {:asked, _incarnation}
+    end
+
     test "a server started without a reservation never asks for a ceiling" do
       parent = self()
       a = :"msinc_#{System.unique_integer([:positive])}"

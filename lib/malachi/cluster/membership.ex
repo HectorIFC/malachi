@@ -177,16 +177,17 @@ defmodule Malachi.Cluster.Membership do
 
   # --- internals ---
 
-  defp refute_or_ignore(view, :alive, incarnation) do
-    # An alive about ourselves: only adopt a strictly higher incarnation (normally never happens,
-    # since only we raise our own); never needs dissemination. We keep our own attributes.
-    self_state = Map.fetch!(view.members, view.self)
-
-    if incarnation > self_state.incarnation do
-      {put_member(view, view.self, :alive, incarnation, self_state.attributes), :ignored}
-    else
-      {view, :ignored}
-    end
+  defp refute_or_ignore(view, :alive, _incarnation) do
+    # An alive about ourselves, at any incarnation, changes nothing. We own our own number and resume it
+    # above our past from disk (`Malachi.Cluster.MemberIncarnation`), so there is nothing a peer's copy
+    # of it can tell us that we do not already know.
+    #
+    # Adopting a higher one used to look harmless, because only we raise our own. It is not: it hands a
+    # peer, or a faulty connection, the ability to drive this node's incarnation upward from outside,
+    # and each step past the reserved block costs a durable write inline in this server. It never
+    # bought anything either, since a node that adopted a peer's number only reached parity with it,
+    # and an announcement that ties is ignored just as one that is lower is.
+    {view, :ignored}
   end
 
   defp refute_or_ignore(view, _suspect_or_dead, incarnation) do
