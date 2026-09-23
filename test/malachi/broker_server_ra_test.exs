@@ -218,6 +218,39 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(server)
   end
 
+  test "a broker that loses the single control plane reports its view as incomplete" do
+    # The other half of the policy above. Readiness says the node can serve; this says whether what it
+    # is serving is current, and a caller that acts on the ABSENCE of something needs the second answer.
+    # `Malachi.Retention.OrphanSweeper` is that caller: a segment registered through another broker
+    # while this one cannot refresh is missing from the view while its replica is on this node's disk,
+    # so sweeping on this view would delete a live replica.
+    #
+    # The single cluster is the case that used to slip through. Its refresh reports no unreachable
+    # vnodes even when it fails, because the failure is the `nil` it returns instead, and the reconcile
+    # left the previous (empty) list in place. The sharded path never had the hole: it reports the
+    # vnodes it could not read by id.
+    cluster = :"bs_incomplete_#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "malachi_incomplete_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(dir) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: dir)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    {:ok, server} =
+      BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster, brokers_refresh_interval: 50)
+
+    {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    assert BrokerServer.metadata_ready?(server)
+    assert BrokerServer.unreachable_vnodes(server) == [], "a refresh that succeeded read every vnode"
+
+    MetadataServer.delete(cluster)
+    Process.sleep(300)
+
+    assert BrokerServer.metadata_ready?(server), "the node still serves what it knew"
+    assert BrokerServer.unreachable_vnodes(server) == [:vnode_0], "but it says the view is not current"
+
+    :ok = BrokerServer.stop(server)
+  end
+
   test "a sharded broker stays ready when a vnode it had already read stops answering" do
     # The case that distinguishes this policy from the previous one. A vnode that was never reachable
     # leaves the node unready under both, because there is no view of it to serve from. One that WAS

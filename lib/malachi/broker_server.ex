@@ -1141,7 +1141,14 @@ defmodule Malachi.BrokerServer do
 
     case state.metadata_refresh.() do
       nil ->
-        state
+        # The single ra cluster answered nothing this tick, so the view being served is the previous
+        # one and nothing refreshed it. `seen_vnodes` is left as it was, which is right: the vnode has
+        # been read, there is a view to serve, and `metadata_ready?/2` should keep saying this node can
+        # serve. What would be wrong is leaving `unreachable_vnodes` empty, because a caller acting on
+        # the ABSENCE of something from this view (`Malachi.Retention.OrphanSweeper`) would be acting
+        # on a view that is stale with no way to tell. The sharded refresh reports its silent vnodes by
+        # id and never answers nil; this branch is the single cluster's equivalent of that report.
+        %{state | unreachable_vnodes: DSRSM.vnode_ids(state.broker.dsrsm)}
 
       {dsrsm, unreachable} ->
         # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
@@ -1621,7 +1628,8 @@ defmodule Malachi.BrokerServer do
 
   # A refresh that re-reads the single ra cluster into a one-vnode DSRSM; nil if the cluster is
   # momentarily unreachable (a leader election), so the cache is simply left as-is that tick. The one
-  # vnode is either read or not read, so the unreachable list is always empty: a failure is the `nil`.
+  # vnode is either read or not read, so the unreachable list this returns is always empty: a failure
+  # is the `nil`, which `reconcile_metadata/1` turns into every vnode being reported unreachable.
   defp single_cluster_refresh(server_id) do
     fn ->
       case MetadataServer.query(server_id, &Function.identity/1) do
