@@ -25,11 +25,26 @@ defmodule Malachi.Cluster.MemberIncarnation do
   `:sync`, a rename over the target, then an fsync of the directory, because a rename is a change to the
   directory that the file's own fsync does not persist.
 
-  The number is a **ceiling**, not the current value. `reserve/2` starts the node one above the recorded
+  The number is a **ceiling**, not the current value. `reserve/3` starts the node one above the recorded
   ceiling and immediately records a ceiling a whole block higher, so the node can raise its incarnation
   that many times without touching the disk again. Only crossing the block writes, through `extend/3`.
   That keeps the write off the refutation path, which is where an fsync would sit in the way of the
   failure detector.
+
+  ## The wall clock is a floor under all of it
+
+  A reservation starts above the recorded ceiling **and** above the current second (`seed/0`). The clock
+  is not a source of incarnations, it is a floor: the recorded ceiling still wins whenever it is higher,
+  so a clock moving backwards can never lower a node.
+
+  It is there for the boot that has no ceiling to read. A node upgraded from a build that never kept
+  this file has no record, while its peers may remember it well above zero, because the old build raised
+  its incarnation in memory on every refutation and every attribute change. Starting that node at 1 puts
+  it below what they hold, which is the permanent staleness described below, and it is not something an
+  operator can repair by hand: the number needed is whatever the peers happen to remember, which is not
+  visible from the node being started. An incarnation counts refutations, so it reaches tens or
+  hundreds; seconds since 1970 do not. Seeding from the clock therefore clears every value an older
+  build could have reached, and asks nothing of whoever runs the upgrade.
 
   ## A missing file and a damaged one are not the same
 
@@ -60,25 +75,39 @@ defmodule Malachi.Cluster.MemberIncarnation do
   @spec path(Path.t()) :: Path.t()
   def path(dir), do: Path.join(dir, @file_name)
 
-  @doc "The size of the block `reserve/2` hands out."
+  @doc "The size of the block `reserve/3` hands out."
   @spec block() :: pos_integer()
   def block, do: @block
 
   @doc """
-  Claims the next block of incarnations for this node in `dir`.
+  Claims the next block of incarnations for this node in `dir`, starting above the recorded ceiling and
+  above `seed`.
 
   Answers `{:ok, %{start: start, ceiling: ceiling}}` once the new ceiling is durably recorded, so a
   crash immediately after cannot hand the same numbers out twice. `{:error, reason}` when the file
   cannot be written, which the caller decides what to do about: this module never guesses.
+
+  `seed` defaults to `seed/0`, the current second, and is a floor rather than a value: the recorded
+  ceiling wins whenever it is higher. Tests pass `0` to keep the numbers readable. The moduledoc says
+  why an upgraded node needs the floor.
   """
-  @spec reserve(Path.t(), pos_integer()) :: {:ok, reservation()} | {:error, term()}
-  def reserve(dir, block \\ @block) do
+  @spec reserve(Path.t(), pos_integer(), non_neg_integer()) :: {:ok, reservation()} | {:error, term()}
+  def reserve(dir, block \\ @block, seed \\ seed()) do
     with {:ok, recorded} <- read(dir),
-         ceiling = recorded + block,
+         floor = max(recorded, seed),
+         ceiling = floor + block,
          :ok <- write(dir, ceiling) do
-      {:ok, %{start: recorded + 1, ceiling: ceiling}}
+      {:ok, %{start: floor + 1, ceiling: ceiling}}
     end
   end
+
+  @doc """
+  The floor a reservation starts from when the recorded ceiling is lower: seconds since the epoch.
+
+  Never negative, so a clock set before 1970 costs the floor rather than the reservation.
+  """
+  @spec seed() :: non_neg_integer()
+  def seed, do: max(System.os_time(:second), 0)
 
   @doc """
   Records a ceiling a block above `incarnation`, for a node that has used up the block it reserved.

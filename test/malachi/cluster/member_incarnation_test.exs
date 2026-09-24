@@ -11,17 +11,17 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
 
   @moduletag :tmp_dir
 
-  describe "reserve/2" do
-    test "a first boot starts at 1 and records a whole block", %{tmp_dir: dir} do
-      assert {:ok, %{start: 1, ceiling: ceiling}} = MemberIncarnation.reserve(dir, 8)
+  describe "reserve/3" do
+    test "a first boot starts one above the seed and records a whole block", %{tmp_dir: dir} do
+      assert {:ok, %{start: 1, ceiling: ceiling}} = MemberIncarnation.reserve(dir, 8, 0)
 
       assert ceiling == 8
       assert MemberIncarnation.read(dir) == {:ok, 8}
     end
 
     test "a restart resumes above the block the previous boot reserved", %{tmp_dir: dir} do
-      {:ok, first} = MemberIncarnation.reserve(dir, 8)
-      {:ok, second} = MemberIncarnation.reserve(dir, 8)
+      {:ok, first} = MemberIncarnation.reserve(dir, 8, 0)
+      {:ok, second} = MemberIncarnation.reserve(dir, 8, 0)
 
       # The point of the whole module: the second boot is above everything the first could have reached,
       # so a peer that remembers the first cannot outrank the second.
@@ -32,7 +32,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
     test "the ceiling is durable before the numbers are handed out", %{tmp_dir: dir} do
       # A crash between handing out and recording would hand the same numbers out twice, which is the
       # one thing a reservation must not do.
-      {:ok, %{ceiling: ceiling}} = MemberIncarnation.reserve(dir, 4)
+      {:ok, %{ceiling: ceiling}} = MemberIncarnation.reserve(dir, 4, 0)
 
       assert File.read!(MemberIncarnation.path(dir)) |> String.trim() == to_string(ceiling)
     end
@@ -42,9 +42,45 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
     end
   end
 
+  describe "the wall clock floor" do
+    test "a first boot with no file starts above the current second", %{tmp_dir: dir} do
+      # The upgrade case: no file to read, and peers that may remember this node well above zero. An
+      # incarnation counts refutations, so seconds since the epoch clear anything an older build reached.
+      before = MemberIncarnation.seed()
+
+      assert {:ok, %{start: start, ceiling: ceiling}} = MemberIncarnation.reserve(dir, 8)
+
+      assert start > before
+      assert ceiling == start - 1 + 8
+    end
+
+    test "a recorded ceiling above the clock still wins, so a clock moving back cannot lower a node", %{
+      tmp_dir: dir
+    } do
+      far_ahead = MemberIncarnation.seed() * 2
+      File.write!(MemberIncarnation.path(dir), "#{far_ahead}\n")
+
+      assert {:ok, %{start: start}} = MemberIncarnation.reserve(dir, 8)
+      assert start == far_ahead + 1
+    end
+
+    test "the seed is a floor, not the value: a higher record is kept", %{tmp_dir: dir} do
+      {:ok, first} = MemberIncarnation.reserve(dir, 8)
+      {:ok, second} = MemberIncarnation.reserve(dir, 8, 0)
+
+      # Seed 0 on the second call, and it still resumes above the first block rather than at 1.
+      assert second.start == first.ceiling + 1
+    end
+
+    test "a clock before the epoch costs the floor, not the reservation", %{tmp_dir: dir} do
+      assert {:ok, %{start: 1}} = MemberIncarnation.reserve(dir, 8, 0)
+      assert MemberIncarnation.seed() >= 0
+    end
+  end
+
   describe "extend/3" do
     test "records a block above where the node has got to", %{tmp_dir: dir} do
-      {:ok, _reservation} = MemberIncarnation.reserve(dir, 4)
+      {:ok, _reservation} = MemberIncarnation.reserve(dir, 4, 0)
 
       assert {:ok, 68} = MemberIncarnation.extend(dir, 4, 64)
       assert MemberIncarnation.read(dir) == {:ok, 68}
@@ -72,7 +108,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
     test "a damaged file stops a reservation rather than overwriting it", %{tmp_dir: dir} do
       File.write!(MemberIncarnation.path(dir), "not a number")
 
-      assert {:error, {:damaged, _seen}} = MemberIncarnation.reserve(dir, 8)
+      assert {:error, {:damaged, _seen}} = MemberIncarnation.reserve(dir, 8, 0)
       # And the ceiling that could not be read is still there to be recovered, not replaced by a guess.
       assert File.read!(MemberIncarnation.path(dir)) == "not a number"
     end
@@ -112,6 +148,31 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
       {current, effect} = Membership.apply_update(peer, resumed)
 
       assert effect == {:applied, resumed}
+      assert Capabilities.supported_by_all([:b], cap, reads(current)) == {:error, {:unsupported, [:b]}}
+    end
+
+    test "a node upgraded from a build without the file still outranks what its peers remember" do
+      cap = :batch_format
+      dir = Path.join(System.tmp_dir!(), "inc#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      # :b ran for a long time on a build that never kept this file, refuting suspicions as it went, so
+      # its peer holds it at 7 and still credits it with the capability.
+      peer = Membership.new(:a, peers: [:b])
+      {peer, _effect} = Membership.apply_update(peer, {:b, :alive, 7, Capabilities.attributes(%{}, [cap])})
+
+      # It is upgraded and boots on the new build, with no ceiling to read.
+      assert {:ok, %{start: start}} = MemberIncarnation.reserve(dir)
+
+      resumed =
+        announcement_of(
+          Membership.new(:b, peers: [:a], attributes: Capabilities.attributes(%{}, []), incarnation: start)
+        )
+
+      {current, effect} = Membership.apply_update(peer, resumed)
+
+      assert effect == {:applied, resumed}, "the upgraded node was ignored, and nothing would correct it"
       assert Capabilities.supported_by_all([:b], cap, reads(current)) == {:error, {:unsupported, [:b]}}
     end
   end

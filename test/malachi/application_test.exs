@@ -367,8 +367,10 @@ defmodule Malachi.ApplicationTest do
 
       assert is_function(opts[:reserve], 0)
       assert is_function(opts[:on_ceiling], 1)
-      assert {:ok, %{start: 1, ceiling: ceiling}} = opts[:reserve].()
-      assert ceiling == MemberIncarnation.block()
+      # Seeded from the clock, so the numbers are whatever today is; what the child spec owes the server
+      # is a whole block above wherever it starts (`Malachi.Cluster.MemberIncarnation`).
+      assert {:ok, %{start: start, ceiling: ceiling}} = opts[:reserve].()
+      assert ceiling == start - 1 + MemberIncarnation.block()
     end
 
     test "every call resumes above the block the previous one took", %{tmp_dir: dir} do

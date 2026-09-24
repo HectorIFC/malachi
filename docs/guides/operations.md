@@ -463,15 +463,28 @@ peers hold, every peer would ignore the announcement, and they would keep the **
 including the capability list. A node brought back on an older build would then still be counted as
 supporting a feature it no longer does.
 
-Nothing is asked of you for this. It matters only when it goes wrong: **a node whose incarnation cannot
-be reserved does not start**, and one that later cannot record a new ceiling stops itself so it can
-reserve a fresh one on the way back up. Both say so on one line. Starting anyway would be worse than not
-starting, because the node would be ignored by its peers with no way back: they would keep the record
-they have, and since the node answers their pings they never suspect it, so nothing ever provokes the
-refutation that would lift it.
+Nothing is asked of you for this, including on the upgrade that introduces the file. A node coming from
+a build that never wrote one has no record to read, while its peers may remember it well above zero,
+because the old build raised its incarnation in memory on every refutation and every attribute change.
+So the first reservation starts above the **current second** rather than at 1. An incarnation counts
+refutations, which reaches tens or hundreds; seconds since 1970 do not, so the upgraded node outranks
+anything the old build could have reached. There is no procedure here, and that is deliberate: the
+number it would have to be given is whatever the peers happen to remember, which is not visible from the
+node being started.
+
+The clock is only a floor. A recorded ceiling higher than it still wins, so a clock moving backwards
+cannot lower a node.
+
+It matters only when it goes wrong: **a node whose incarnation cannot be reserved does not start**, and
+one that later cannot record a new ceiling stops itself so it can reserve a fresh one on the way back
+up. Both say so on one line. Starting anyway would be worse than not starting, because the node would be
+ignored by its peers with no way back: they would keep the record they have, and since the node answers
+their pings they never suspect it, so nothing ever provokes the refutation that would lift it.
 
 Do not delete the file while the node is stopped, and copy it along with the data directory if you ever
-move one.
+move one. The clock floor makes a lost file survivable rather than fatal, which is not the same as a
+licence to remove one: a node restarted within minutes of losing it can still come back below where it
+already was.
 
 ### What a node does with the flags at boot
 
