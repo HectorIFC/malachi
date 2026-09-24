@@ -38,20 +38,37 @@ defmodule Malachi.Cluster.Membership do
 
   @ranks %{alive: 0, suspect: 1, dead: 2}
 
+  # A seeded peer entry is a **placeholder**: this node's guess that a configured peer is up, carrying no
+  # attributes, made before that peer has said anything. The peer's own first announcement therefore has
+  # to outrank it, and the join is at an equal `{incarnation, rank}`, which is ignored by design. So a
+  # member starts one incarnation above the placeholders it seeds for others.
+  #
+  # Without this, two nodes that seed each other never learn each other's attributes at all: each holds
+  # the other at `{0, alive}` with `%{}`, and every announcement the other makes at incarnation 0 is
+  # ignored as a duplicate. Liveness still converged, which is why this went unnoticed until attributes
+  # carried something a peer acts on (`Malachi.Cluster.Capabilities`).
+  @self_incarnation 1
+
   @doc """
-  Builds a membership view local to `self` (which starts `:alive` at incarnation 0). `:peers`
-  seeds other members, also `:alive` at incarnation 0. `:attributes` are `self`'s own attributes
-  (peers' attributes are learned via gossip).
+  Builds a membership view local to `self`, `:alive` at `:incarnation` (default #{@self_incarnation}).
+  `:peers` seeds other members `:alive` at incarnation 0, as placeholders until they announce
+  themselves. `:attributes` are `self`'s own attributes (peers' attributes are learned via gossip).
+
+  `:incarnation` is what a **restart** needs. The default outranks a placeholder, which is all a first
+  boot has to beat, but a node coming back has to outrank what its peers still remember of the member it
+  was, and that number is not derivable from anything this process holds. It is resumed from disk by
+  `Malachi.Cluster.MemberIncarnation` and handed in here.
   """
   @spec new(member(), keyword()) :: t()
   def new(self, opts \\ []) do
     peers = Keyword.get(opts, :peers, [])
     self_attributes = Keyword.get(opts, :attributes, %{})
+    incarnation = Keyword.get(opts, :incarnation, @self_incarnation)
 
     members =
-      Map.new([self | peers], fn member ->
-        attributes = if member == self, do: self_attributes, else: %{}
-        {member, %{status: :alive, incarnation: 0, attributes: attributes}}
+      Map.new([self | peers], fn
+        ^self -> {self, %{status: :alive, incarnation: incarnation, attributes: self_attributes}}
+        peer -> {peer, %{status: :alive, incarnation: 0, attributes: %{}}}
       end)
 
     %__MODULE__{self: self, members: members}
@@ -160,16 +177,17 @@ defmodule Malachi.Cluster.Membership do
 
   # --- internals ---
 
-  defp refute_or_ignore(view, :alive, incarnation) do
-    # An alive about ourselves: only adopt a strictly higher incarnation (normally never happens,
-    # since only we raise our own); never needs dissemination. We keep our own attributes.
-    self_state = Map.fetch!(view.members, view.self)
-
-    if incarnation > self_state.incarnation do
-      {put_member(view, view.self, :alive, incarnation, self_state.attributes), :ignored}
-    else
-      {view, :ignored}
-    end
+  defp refute_or_ignore(view, :alive, _incarnation) do
+    # An alive about ourselves, at any incarnation, changes nothing. We own our own number and resume it
+    # above our past from disk (`Malachi.Cluster.MemberIncarnation`), so there is nothing a peer's copy
+    # of it can tell us that we do not already know.
+    #
+    # Adopting a higher one used to look harmless, because only we raise our own. It is not: it hands a
+    # peer, or a faulty connection, the ability to drive this node's incarnation upward from outside,
+    # and each step past the reserved block costs a durable write inline in this server. It never
+    # bought anything either, since a node that adopted a peer's number only reached parity with it,
+    # and an announcement that ties is ignored just as one that is lower is.
+    {view, :ignored}
   end
 
   defp refute_or_ignore(view, _suspect_or_dead, incarnation) do

@@ -24,12 +24,19 @@ defmodule Malachi.Application do
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
   alias Malachi.Cluster.AutoRebalancer
+  alias Malachi.Cluster.Capabilities
+  alias Malachi.Cluster.ClusterFlags
+  alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.Cluster.ClusterFlagsMachine
+  alias Malachi.Cluster.ClusterFlagsServer
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.LeaseReconciler
   alias Malachi.Cluster.LeaseServer
+  alias Malachi.Cluster.MemberIncarnation
+  alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.MetadataServer
@@ -64,6 +71,8 @@ defmodule Malachi.Application do
   @log_lockouts Malachi.LogLockouts
   # The replicated per-topic ACL store's dedicated ra cluster name (see `acl_store_children/1`).
   @log_acls Malachi.LogAcls
+  # The cluster feature flag store's dedicated ra cluster name (see `cluster_flags_children/1`).
+  @log_flags Malachi.LogClusterFlags
 
   def start(_type, _args) do
     # Validate authentication configuration before starting
@@ -111,6 +120,7 @@ defmodule Malachi.Application do
         lockout_store_children(configured_nodes()) ++
         acl_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
+        cluster_flags_children(configured_nodes()) ++
         [
           Malachi.Auth,
           Malachi.ConnectionRegistry
@@ -213,6 +223,110 @@ defmodule Malachi.Application do
         AclServer.reconcile(@log_acls, nodes)
       end)
     ]
+  end
+
+  # Forms the flag store and supervises its reconciler (see `cluster_flags_child/1`). Runs in every mode,
+  # like the user, lockout and ACL stores.
+  #
+  # Nothing here holds the node back on reading the store. One that has not read it yet starts, joins,
+  # serves with the previous behaviour, and reads again on the next tick; `ClusterFlagsCache.read?/0` says
+  # which of the two it is, for the first feature that needs to act on the difference. Neither refusing to
+  # start nor reporting itself unready would work, and both were tried: the flag store cannot reach a
+  # quorum until enough nodes run a build that has its machine module, so the first node of a rolling
+  # upgrade would be waiting for a cluster that is waiting for it, and a rolling update that waits for
+  # readiness would never start the second node.
+  defp cluster_flags_children(nodes) do
+    _ = ClusterFlagsServer.start(@log_flags, nodes)
+    [cluster_flags_child(nodes)]
+  end
+
+  @doc """
+  The flag store's reconciler child, which is also its machine-version watcher and the local flag pass.
+
+  On every tick it self-joins this node when clustered, checks the store's machine version, and runs
+  `Malachi.Cluster.ClusterFlagsCache.refresh/1`: refresh the cache, adopt a newly enabled flag, and
+  refuse to serve when an enabled flag names a capability this build lacks.
+
+  Deliberately not `store_reconciler_child/5`: that helper replaces the reconcile with a no-op on a
+  single-node deployment, and the flag pass has to run there too. A one-node deployment still commits to
+  a format-changing feature, and still must not come back on a build that cannot read what it wrote.
+  """
+  @spec cluster_flags_child([node()]) :: Supervisor.child_spec()
+  def cluster_flags_child(nodes) do
+    server_id = {@log_flags, node()}
+
+    reconcile = fn ->
+      if length(nodes) > 1, do: ClusterFlagsServer.reconcile(@log_flags, nodes)
+      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1))
+    end
+
+    opts = [
+      name: Malachi.LogClusterFlagsReconciler,
+      reconcile: reconcile,
+      version_check: {ClusterFlagsMachine, server_id}
+    ]
+
+    %{id: Malachi.LogClusterFlagsReconciler, start: {LeaseReconciler, :start_link, [opts]}}
+  end
+
+  @doc """
+  Switches the cluster feature flag named `name` on, from this running node. The entry point
+  `mix malachi.flag` reaches over RPC.
+
+  Refuses, naming them, unless every configured node is alive and advertises the capability the flag
+  names. That population is `MALACHI_LOG_NODES`, not the membership's alive set and not the flag
+  store's Raft members: the first silently omits a node that has just joined on an old build, and the
+  second omits every node not yet upgraded, since a build without the flag machine never joins that
+  group at all.
+
+  `:nodes`, `:reads` and `:known` override that population, the membership view and the flag registry;
+  they exist so the wiring can be driven from a test while this build's own registry is still empty.
+  """
+  @spec enable_cluster_flag(String.t(), keyword()) :: :ok | {:error, term()}
+  def enable_cluster_flag(name, opts \\ []) do
+    nodes = Keyword.get(opts, :nodes, configured_nodes())
+    reads = Keyword.get(opts, :reads, membership_reads())
+    known = Keyword.get(opts, :known, Capabilities.known())
+
+    ClusterFlagsServer.enable({@log_flags, node()}, name, nodes, reads, known)
+  end
+
+  @doc """
+  What this cluster knows and what it has switched on: `%{known: [flag], enabled: [flag]}`, read
+  through consensus so an operator never sees a stale answer to a question they are about to act on.
+  """
+  @spec cluster_flags() :: {:ok, %{known: [atom()], enabled: [atom()]}} | {:error, term()}
+  def cluster_flags do
+    case ClusterFlagsServer.read({@log_flags, node()}, :consistent) do
+      {:ok, flags} -> {:ok, %{known: Capabilities.known(), enabled: ClusterFlags.enabled(flags)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The membership view as `node -> {status, attributes}`, for the capability check.
+
+  An unclustered deployment runs no membership server, so it answers for the local node only: any other
+  node reads as unknown, which refuses, which is the safe direction.
+  """
+  @spec membership_reads() :: Capabilities.reads()
+  def membership_reads do
+    case Process.whereis(Malachi.LogMembership) do
+      nil -> local_only_reads()
+      _pid -> view_reads(MembershipServer.view(Malachi.LogMembership))
+    end
+  end
+
+  defp local_only_reads do
+    this = node()
+    fn candidate -> if candidate == this, do: {:alive, membership_attributes()}, else: {nil, %{}} end
+  end
+
+  defp view_reads(view) do
+    fn candidate ->
+      ref = {Malachi.LogMembership, candidate}
+      {Membership.status(view, ref), Membership.attributes(view, ref)}
+    end
   end
 
   # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a
@@ -629,17 +743,59 @@ defmodule Malachi.Application do
   defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes, topology) do
+    dir = log_data_dir()
+
     opts =
       [
         name: Malachi.LogMembership,
         self_ref: {Malachi.LogMembership, node()},
         peers: membership_seeds(nodes),
-        attributes: parse_attributes(Application.get_env(:malachi, :log_attributes)),
+        attributes: membership_attributes(),
         # adopt a gossiped ring change locally: point consumer-group routing at the new topology
         on_topology: &adopt_ring_topology/1
-      ] ++ initial_topology_opt(topology)
+      ] ++ initial_topology_opt(topology) ++ incarnation_opts(dir)
 
     %{id: Malachi.LogMembership, start: {MembershipServer, :start_link, [opts]}}
+  end
+
+  # Resume this node's incarnation above everything its peers still remember of the member it was, so a
+  # restart's announcement is not ignored as a duplicate and its attributes are not stale
+  # (`Malachi.Cluster.MemberIncarnation`).
+  #
+  # A reservation that cannot be made **stops the node**, the way an unreadable ring does, and for the
+  # same reason: starting anyway would mean announcing a number below what peers remember, and nothing
+  # would ever correct that. The announcement loses the merge, the peers keep the old record and its old
+  # attributes, and since this node answers their pings they never suspect it, so no refutation is
+  # provoked to lift it. Carrying on is not a degraded start, it is a silently wrong one, and the
+  # capability gate then reads those stale attributes as current.
+  @doc """
+  The incarnation options this node's membership server starts with: a **reservation function** over
+  `dir`, and the callback that extends the ceiling.
+
+  A function rather than reserved values, because a child spec is built once and reused on every
+  supervisor restart. Reserving while the spec was built would seed a restarted membership server at the
+  number the first one started from, below whatever it had raised itself to before it crashed, which is
+  exactly the permanent staleness the reservation exists to prevent.
+
+  Raises when no reservation can be made, which stops the node. See the comment above for why starting
+  anyway is not a degraded start but a silently wrong one.
+  """
+  @spec incarnation_opts(Path.t()) :: keyword()
+  def incarnation_opts(dir) do
+    [reserve: fn -> reserve_incarnation(dir) end, on_ceiling: &MemberIncarnation.extend(dir, &1)]
+  end
+
+  # Raises rather than answering an error, so the failure reaches the operator with the path in it. The
+  # membership server calls this on every process start, a supervisor restart included, which is the whole
+  # point of it being a function.
+  defp reserve_incarnation(dir) do
+    case MemberIncarnation.reserve(dir) do
+      {:ok, reservation} ->
+        {:ok, reservation}
+
+      {:error, reason} ->
+        raise I18n.t(:member_incarnation_unusable, path: MemberIncarnation.path(dir), reason: inspect(reason))
+    end
   end
 
   # Seed the membership with the routing topology this node resolved at boot, so gossip carries it and a
@@ -678,6 +834,20 @@ defmodule Malachi.Application do
     # the broker adopts the same ring change for metadata routing, async (a cast) so this inline hook stays
     # fast and never blocks the membership server; a no-op if the broker is not running (single-node).
     GenServer.cast(Malachi.LogBroker, {:adopt_topology, topology})
+  end
+
+  @doc """
+  This node's gossiped membership attributes: the operator's `MALACHI_LOG_ATTRIBUTES` with the capability
+  set this build advertises merged in.
+
+  The seed the membership server starts with. `Malachi.Cluster.Membership.set_attributes/2` replaces the
+  whole map, so attributes set without the capabilities would erase them and every cluster flag would
+  then be refused with no obvious cause; on the runtime path
+  `Malachi.Cluster.MembershipServer.set_attributes/2` merges them back itself, and this is the boot path.
+  """
+  @spec membership_attributes() :: map()
+  def membership_attributes do
+    Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
   end
 
   @doc ~S"""
