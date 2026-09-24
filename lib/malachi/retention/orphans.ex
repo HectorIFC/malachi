@@ -155,6 +155,14 @@ defmodule Malachi.Retention.Orphans do
   # valid Base64 but not a term at all raises here, which is the common case for a directory an operator
   # created, and means the same thing as decoding to a term that encodes back to something else: the
   # layout did not write this name.
+  #
+  # Sobelow reports `binary_to_term` as high confidence, which is what fails the build under the
+  # repository's `exit: "high"` policy, and it is right in the general case. It is not this case: these
+  # bytes are the name of a directory on this node's own disk rather than anything off the wire, and a
+  # remote peer reaches them only through a segment id this node already accepted and encoded itself.
+  # The exception is per site, which is what `.sobelow-conf` enables `skip` for, so the rule keeps
+  # failing the build everywhere else, including on the next `binary_to_term` anyone adds.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp round_trips?(binary, name) do
     term = :erlang.binary_to_term(binary, [:safe])
     Path.basename(Layout.segment_directory(@any_base, term)) == name
