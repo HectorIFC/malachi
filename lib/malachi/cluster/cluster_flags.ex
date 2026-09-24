@@ -54,7 +54,16 @@ defmodule Malachi.Cluster.ClusterFlags do
   """
   @type command :: {:enable_flag, flag()}
 
-  @type reply :: :ok
+  @typedoc """
+  `:ok` for a flag that is now on, or `{:error, :invalid_flag}` for a command whose flag is not an atom.
+
+  The second one is why there is a reply type at all. `Malachi.Cluster.MachineVersion`'s table is keyed
+  by a command's **shape**, its tag and arity, which cannot tell `{:enable_flag, :batch_format}` from
+  `{:enable_flag, "batch_format"}`. A clause that only accepted the atom would let the binary through
+  admission and then raise here, on every replica, on every replay of the log, which is the exact
+  failure that module's own documentation gives as the reason the gate exists.
+  """
+  @type reply :: :ok | {:error, :invalid_flag}
 
   @behaviour Malachi.Cluster.MachineVersion
 
@@ -73,11 +82,18 @@ defmodule Malachi.Cluster.ClusterFlags do
   `{:enable_flag, flag}` always answers `:ok`, whether or not the flag was already on. An operator who
   re-runs the command, and a coordinator retrying after a timeout it never saw the answer to, both get
   the same answer as the first caller.
+
+  A flag that is not an atom is refused with the state untouched. Nothing this repository writes produces
+  one, because `Malachi.Cluster.ClusterFlagsServer` resolves the operator's text to a known atom before
+  submitting, but refusing is the only safe answer available: raising here would take down every replica
+  and keep doing it on every replay, since the log is never truncated.
   """
   @spec apply(t(), command()) :: {t(), reply()}
   def apply(%__MODULE__{} = state, {:enable_flag, flag}) when is_atom(flag) do
     {%{state | enabled: Map.put(state.enabled, flag, true)}, :ok}
   end
+
+  def apply(%__MODULE__{} = state, {:enable_flag, _not_an_atom}), do: {state, {:error, :invalid_flag}}
 
   @doc "Whether `flag` is switched on."
   @spec enabled?(t(), flag()) :: boolean()

@@ -44,6 +44,23 @@ defmodule Malachi.Cluster.ClusterFlagsTest do
       assert ClusterFlags.enabled(a) == [:alpha, :zeta]
     end
 
+    test "a flag that is not an atom is refused, not raised on" do
+      # The version table is keyed by a command's shape, its tag and arity, so it cannot tell this apart
+      # from a well-formed one and admits it. Raising here would crash every replica, and the log is
+      # replayed on every restart, so it would crash them again for good.
+      for bad <- ["batch_format", 42, %{}, a_charlist()] do
+        assert ClusterFlags.apply(ClusterFlags.new(), {:enable_flag, bad}) ==
+                 {ClusterFlags.new(), {:error, :invalid_flag}}
+      end
+    end
+
+    test "a refused flag leaves an already-enabled one alone" do
+      {state, :ok} = ClusterFlags.apply(ClusterFlags.new(), {:enable_flag, :batch_format})
+
+      assert ClusterFlags.apply(state, {:enable_flag, "compaction"}) == {state, {:error, :invalid_flag}}
+      assert ClusterFlags.enabled(state) == [:batch_format]
+    end
+
     test "there is no command that switches a flag off" do
       # The grow-only property is what makes the local cache safe to lag and the log safe to replay in
       # any order. A release that adds a :disable_flag command breaks both, and this is where it is
@@ -75,6 +92,13 @@ defmodule Malachi.Cluster.ClusterFlagsTest do
     end
   end
 
+  test "a malformed flag goes through admission and is refused there, not raised on" do
+    # The whole path, because the defect lives in the interaction: the version table admits the command
+    # by its shape, and only the pure module can tell that the flag is not a flag.
+    assert gate(2, {:enable_flag, "batch_format"}, &apply_pure/3) ==
+             {ClusterFlags.new(), {:error, :invalid_flag}}
+  end
+
   property "the log applies in any order to the same state, because the set only grows" do
     check all(commands <- list_of(member_of([:a, :b, :c, :d]), max_length: 8)) do
       folded = Enum.reduce(commands, ClusterFlags.new(), &enable/2)
@@ -98,4 +122,8 @@ defmodule Malachi.Cluster.ClusterFlagsTest do
   end
 
   defp apply_pure(_meta, command, state), do: ClusterFlags.apply(state, command)
+
+  # A charlist, which is a list of integers and so neither an atom nor a binary: the shape the version
+  # table admits is indifferent to all of them.
+  defp a_charlist, do: ~c"batch_format"
 end
