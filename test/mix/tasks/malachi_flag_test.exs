@@ -1,5 +1,8 @@
 defmodule Mix.Tasks.Malachi.FlagTest do
-  use ExUnit.Case, async: true
+  # Not async: the live-node tests swap `Mix.shell/1`, which is VM-wide, and the other two task suites
+  # that do the same (`malachi.docs.results`, `malachi.loadtest.ceiling`) are synchronous for that reason.
+  # An async module here could have its shell restored by one of them between the call and the assertion.
+  use ExUnit.Case, async: false
 
   alias Mix.Tasks.Malachi.Flag
 
