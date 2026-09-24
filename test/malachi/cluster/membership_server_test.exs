@@ -266,14 +266,20 @@ defmodule Malachi.Cluster.MembershipServerTest do
         ] ++ @timings
 
       start_supervised!({MembershipServer, opts}, id: a)
-      {view, _effect} = Membership.apply_update(MembershipServer.view(a), {:peer, :alive, 7, %{}})
-      assert Membership.status(view, :peer) == :alive
 
-      assert gossiped_members(a) == [a], "expected it to announce only itself while healthy"
+      # Through the real path: a peer's gossip, not a local copy of the view. Applying an update to what
+      # `view/1` hands back changes nothing in the server, and a test that did that would leave the other
+      # half of the contract below unchecked.
+      GenServer.cast(a, {:ping, :nobody, {[{:peer, :alive, 7, %{}}], nil}})
+      assert eventually(fn -> Membership.status(MembershipServer.view(a), :peer) == :alive end)
+
+      assert gossiped_members(a) == Enum.sort([a, :peer]),
+             "expected it to announce itself and the peer while healthy"
 
       capture_log(fn -> :ok = MembershipServer.set_attributes(a, %{rack: "x"}) end)
 
-      assert gossiped_members(a) == [], "a node that lost its ceiling still announced itself"
+      # Itself out, and only itself: what it knows about everyone else is not this node's to withhold.
+      assert gossiped_members(a) == [:peer], "a node that lost its ceiling stopped gossiping the cluster"
     end
 
     test "stops the node when a new ceiling cannot be written" do
@@ -455,7 +461,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
     GenServer.cast(server, {:ping, probe, {[], nil}})
 
     receive do
-      {:"$gen_cast", {:ack, _from, {updates, _topology}}} -> Enum.map(updates, &elem(&1, 0))
+      {:"$gen_cast", {:ack, _from, {updates, _topology}}} -> updates |> Enum.map(&elem(&1, 0)) |> Enum.sort()
     after
       1_000 -> flunk("#{server} never acked the ping")
     end
