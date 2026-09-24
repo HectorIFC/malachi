@@ -37,6 +37,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   require Logger
 
+  alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.RingTopology
   alias Malachi.I18n
@@ -192,7 +193,14 @@ defmodule Malachi.Cluster.MembershipServer do
 
   def handle_call({:set_attributes, attributes}, _from, state) do
     # Update our own attributes locally (raising our incarnation); gossip carries it onward.
-    {view, _effect} = Membership.set_attributes(state.view, attributes)
+    #
+    # `Malachi.Cluster.Membership` replaces the whole attribute map, so a caller setting a rack at runtime
+    # would erase the capability list this node advertises, and its peers would carry the emptied one:
+    # a live node is never suspected, so nothing raises its incarnation to correct it. Putting the list
+    # back here rather than asking every caller to remember it is what makes that impossible instead of
+    # documented. A caller that states a list keeps it, which is the seam the multinode tests use to
+    # stand a node up as though it ran another build (`Malachi.Cluster.Capabilities.ensure/1`).
+    {view, _effect} = Membership.set_attributes(state.view, Capabilities.ensure(attributes))
     {:reply, :ok, put_view(state, view)}
   end
 

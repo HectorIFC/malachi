@@ -52,6 +52,19 @@ defmodule Malachi.Cluster.CapabilitiesTest do
     end
   end
 
+  describe "ensure/1" do
+    test "adds this build's list when the caller did not state one" do
+      assert Capabilities.ensure(%{"rack" => "a"}) == %{"rack" => "a", Capabilities.key() => Capabilities.advertised()}
+    end
+
+    test "leaves a list the caller stated, including an empty one" do
+      # An empty list is a statement, not an omission: it is how a test plays a build that advertises
+      # nothing. Treating it as absent would make that node silently advertise this build's list.
+      assert Capabilities.ensure(Capabilities.attributes(%{}, [])) == Capabilities.attributes(%{}, [])
+      assert Capabilities.ensure(Capabilities.attributes(%{}, [:other])) == Capabilities.attributes(%{}, [:other])
+    end
+  end
+
   describe "of/1" do
     test "reads the advertised list" do
       assert Capabilities.of(Capabilities.attributes(%{}, [@cap])) == [@cap]

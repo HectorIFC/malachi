@@ -3,6 +3,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
   import ExUnit.CaptureLog
 
+  alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
@@ -371,9 +372,35 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
       :ok = MembershipServer.set_attributes(a, %{rack: "x"})
 
-      # b learns a's attributes through gossip (and a knows its own immediately)
-      assert MembershipServer.attributes(a, a) == %{rack: "x"}
-      assert eventually(fn -> MembershipServer.attributes(b, a) == %{rack: "x"} end)
+      # b learns a's attributes through gossip (and a knows its own immediately). The capability list
+      # rides along because the server puts it back on every runtime change.
+      expected = Capabilities.attributes(%{rack: "x"})
+      assert MembershipServer.attributes(a, a) == expected
+      assert eventually(fn -> MembershipServer.attributes(b, a) == expected end)
+    end
+
+    test "a runtime attribute change does not erase this build's capability list" do
+      # The attribute map is replaced wholesale, so without the merge in the server a caller setting a
+      # rack drops the list, and peers go on believing the emptied one: a live node is never suspected,
+      # so nothing raises the incarnation again to correct it.
+      a = :"msattr_cap_#{System.unique_integer([:positive])}"
+      seed = Capabilities.attributes(%{rack: "a"})
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: seed] ++ @timings}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "b"})
+
+      assert MembershipServer.attributes(a, a) == Capabilities.attributes(%{rack: "b"})
+    end
+
+    test "a caller that states a capability list keeps it, which is how a test plays another build" do
+      # The escape hatch, pinned here so it is not closed by accident: one VM cannot run two builds, so
+      # the multinode suite stands a node up advertising a list this build does not have.
+      a = :"msattr_cap_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: %{}] ++ @timings}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, Capabilities.attributes(%{rack: "c"}, [:from_another_build]))
+
+      assert Capabilities.of(MembershipServer.attributes(a, a)) == [:from_another_build]
     end
   end
 

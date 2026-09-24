@@ -43,8 +43,12 @@ defmodule Malachi.Cluster.Capabilities do
   ## Where the merge lives
 
   `Malachi.Cluster.Membership.set_attributes/2` replaces the whole attribute map, so any path that
-  sets attributes at runtime would erase the capabilities. `attributes/1` is the single function that
-  puts them in, and every path that seeds or sets this node's attributes goes through it.
+  sets attributes at runtime would erase the capabilities. `attributes/2` is the single function that
+  puts them in, and the two paths into a node's own attributes both go through it:
+  `Malachi.Cluster.MembershipServer` calls it on every runtime change, so no caller can erase the list
+  or claim one this build does not implement, and `Malachi.Application.membership_attributes/0` calls it
+  for the seed the server starts with. The seed is left to the caller on purpose, because that is what
+  lets a test stand a server up as though it ran another build.
   """
 
   alias Malachi.Cluster.Membership
@@ -89,12 +93,30 @@ defmodule Malachi.Cluster.Capabilities do
   merged in under `key/0`.
 
   The single place the merge happens. An operator key can never shadow it (operator keys are strings),
-  and a caller that sets attributes at runtime keeps the capabilities by going through here rather
-  than through `Malachi.Cluster.MembershipServer.set_attributes/2` directly.
+  and a caller that sets attributes at runtime does not have to remember any of this:
+  `Malachi.Cluster.MembershipServer.set_attributes/2` calls this itself, so what the node advertises is
+  always what its build implements.
   """
   @spec attributes(attributes(), [capability()]) :: attributes()
   def attributes(operator_attributes, capabilities \\ advertised()) do
     Map.put(operator_attributes, @key, capabilities)
+  end
+
+  @doc """
+  `attributes` with this build's capability list added, when the caller did not state one.
+
+  This is what the runtime path goes through: `Malachi.Cluster.MembershipServer.set_attributes/2`
+  replaces the whole attribute map, so an operator changing a rack on a running node would otherwise
+  erase what it advertises, and its peers would keep the emptied list. A live node is never suspected,
+  so nothing raises its incarnation to correct that.
+
+  A caller that does state a list keeps it. In production nothing does, because the list is a
+  compile-time property of the build; in the tests it is the seam that stands one server up as though it
+  ran another build, which is the only way a single VM can play a cluster mid-upgrade.
+  """
+  @spec ensure(attributes()) :: attributes()
+  def ensure(attributes) do
+    if Map.has_key?(attributes, @key), do: attributes, else: attributes(attributes)
   end
 
   @doc """

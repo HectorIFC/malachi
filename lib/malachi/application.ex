@@ -840,9 +840,10 @@ defmodule Malachi.Application do
   This node's gossiped membership attributes: the operator's `MALACHI_LOG_ATTRIBUTES` with the capability
   set this build advertises merged in.
 
-  The one place the merge happens. `Malachi.Cluster.Membership.set_attributes/2` replaces the whole map,
-  so a caller that set placement attributes at runtime without coming through here would silently erase
-  the capabilities, and every cluster flag would then be refused with no obvious cause.
+  The seed the membership server starts with. `Malachi.Cluster.Membership.set_attributes/2` replaces the
+  whole map, so attributes set without the capabilities would erase them and every cluster flag would
+  then be refused with no obvious cause; on the runtime path
+  `Malachi.Cluster.MembershipServer.set_attributes/2` merges them back itself, and this is the boot path.
   """
   @spec membership_attributes() :: map()
   def membership_attributes do
