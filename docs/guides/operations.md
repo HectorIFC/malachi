@@ -333,6 +333,11 @@ goes silent after being read keeps the view it had, so its old segments stay exp
 registered on it since are missing, and their replicas still arrive here over the data plane. Without
 that condition a silence longer than the guards above ends with a live copy deleted.
 
+**The log data directory belongs to Malachi alone.** Do not nest `MALACHI_RA_DATA_DIR` inside it, and do
+not keep backups or hand-made copies there. The sweep only ever considers a directory whose name the
+storage layout could have written, so anything else is out of its reach by construction, but that is a
+check on the name and not a promise about what may share the directory.
+
 `report` does everything except the removal, which is how to see the list before trusting it on a
 cluster for the first time. `off` does not even list. A value that is none of the three **stops the
 node at boot** rather than falling back, because the fallback is the mode that deletes and a typo

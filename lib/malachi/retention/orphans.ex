@@ -27,6 +27,22 @@ defmodule Malachi.Retention.Orphans do
 
   Reserved names are excluded before any of that: the data directory's own format marker and, on a
   sharded single-node data plane, the per-shard subdirectories, neither of which is a segment.
+
+  ## Only a name the layout could have written
+
+  Before the guards, a candidate has to be a name `Malachi.Storage.Layout.segment_directory/2` can
+  actually emit: the readable `topic-r<range>-s<segment>` form with a topic from the allowlist that
+  function screens with, or a Base64 name that decodes to a term the same function encodes back to that
+  exact name. The round trip is a witness, so this is not the reverse mapping ruled out above: it says
+  nothing about WHICH segment a name belongs to, only that the layout could have produced it.
+
+  It cannot hide an orphan, because every directory the replication path creates was named by that
+  function. What it does is keep the sweep off everything else that can sit under a data directory an
+  operator chose: a `ra` data directory nested inside it, a `lost+found`, a copy taken by hand before an
+  upgrade. Removal is an `rm_rf` and there is nothing to undo it with.
+
+  Its one failure mode is the safe one. If `term_to_binary` ever encodes the same term differently, an
+  older Base64 directory stops round-tripping and is never swept, which leaks disk instead of losing it.
   """
 
   alias Malachi.Metadata
@@ -53,6 +69,12 @@ defmodule Malachi.Retention.Orphans do
   @marker_names ["malachi.format", "malachi.format.tmp"]
   # Written by `Malachi.DataPlaneRouter.shards/1` when a single node runs more than one data-plane shard.
   @shard_name ~r/\A shard_ \d+ \z/x
+  # `Layout.segment_directory/2`'s readable form: a topic from the allowlist that function screens with,
+  # then the range and segment sequence numbers. The topic charset holds `-`, so the prefix is greedy and
+  # a topic that itself ends in `-r0-s0` still matches, which is the ambiguity that rules out parsing.
+  @readable_name ~r/\A [A-Za-z0-9._-]+ -r \d+ -s \d+ \z/x
+  # Only the basename of the round trip is compared, so any base does.
+  @any_base "/"
 
   @doc """
   The directory names every segment in `metadata` would occupy under `directory`.
@@ -112,10 +134,33 @@ defmodule Malachi.Retention.Orphans do
   end
 
   defp candidate?(expected, name, age_ms, min_age_ms) do
-    age_ms >= min_age_ms and not reserved?(name) and not MapSet.member?(expected, name)
+    age_ms >= min_age_ms and producible?(name) and not reserved?(name) and
+      not MapSet.member?(expected, name)
   end
 
   defp reserved?(name), do: name in @marker_names or Regex.match?(@shard_name, name)
+
+  # See the moduledoc section: a name the layout could have written, in either of its two forms.
+  defp producible?(name), do: Regex.match?(@readable_name, name) or encoded_name?(name)
+
+  defp encoded_name?(name) do
+    case Base.url_decode64(name, padding: false) do
+      {:ok, binary} -> round_trips?(binary, name)
+      :error -> false
+    end
+  end
+
+  # `:safe` refuses to create atoms and refuses funs and references, and the input is bounded by a
+  # directory name, so a crafted name can neither grow the atom table nor allocate much. A name that is
+  # valid Base64 but not a term at all raises here, which is the common case for a directory an operator
+  # created, and means the same thing as decoding to a term that encodes back to something else: the
+  # layout did not write this name.
+  defp round_trips?(binary, name) do
+    term = :erlang.binary_to_term(binary, [:safe])
+    Path.basename(Layout.segment_directory(@any_base, term)) == name
+  rescue
+    ArgumentError -> false
+  end
 
   # Dropping the tail of a sorted set of names only makes the dropped ones start counting again on the
   # next pass, which delays a removal. There is no cap that could cause one.
