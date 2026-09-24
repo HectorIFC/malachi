@@ -313,7 +313,20 @@ defmodule Malachi.Cluster.MembershipServerTest do
       # outside, and each step past the reserved block costs a durable write inline in this server.
       parent = self()
       a = :"msinc_#{System.unique_integer([:positive])}"
-      opts = [name: a, peers: [], incarnation: 2, ceiling: 3, on_ceiling: fn i -> send(parent, {:asked, i}) end]
+
+      # `stop_fun` matters even though nothing here should reach it. `on_ceiling` answers the return of
+      # `send/2`, which is not `{:ok, ceiling}`, so it counts as a failed write; if a regression let the
+      # peer's claim raise this node's incarnation, the default `System.stop/0` would end the whole test
+      # VM and no assertion would name this test as the cause.
+      opts = [
+        name: a,
+        peers: [],
+        incarnation: 2,
+        ceiling: 3,
+        on_ceiling: fn i -> send(parent, {:asked, i}) end,
+        stop_fun: fn -> send(parent, :stopping) end
+      ]
+
       start_supervised!({MembershipServer, opts ++ @timings}, id: a)
 
       GenServer.cast(a, {:ping, :nobody, [{a, :alive, 9_999, %{rack: "theirs"}}]})
@@ -321,6 +334,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
       assert Membership.incarnation(MembershipServer.view(a), a) == 2
       refute_received {:asked, _incarnation}
+      refute_received :stopping
     end
 
     test "a server started without a reservation never asks for a ceiling" do
