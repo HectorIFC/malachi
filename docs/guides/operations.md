@@ -475,28 +475,25 @@ move one.
 
 ### What a node does with the flags at boot
 
-A node always starts. What waits on the flags is whether it is **ready**, which is what decides if
-traffic is routed to it:
+A node always starts, and it always serves. Nothing about the flags holds it back or takes it out of
+rotation. What the flags decide is when it stops:
 
-| At boot | `/ready` | What to do |
+| At boot | What the node does | What to do |
 | --- | --- | --- |
-| The flags are readable and this build supports every one that is on | 200 | nothing |
-| The flags are readable and one names something this build does not support | the node exits **78**, naming the flag | upgrade that node; restarting the old build will not help |
-| The flags cannot be read yet | 503 `not_ready`, and the node keeps retrying | nothing, if a rolling upgrade or a cluster restart is in progress; otherwise look at why the flag store has no quorum |
+| The flags are readable and this build supports every one that is on | serves, with the enabled features | nothing |
+| The flags are readable and one names something this build does not support | exits **78**, naming the flag | upgrade that node; restarting the old build will not help |
+| The flags cannot be read yet | serves with the previous behaviour, and reads again on the next tick | nothing, if a rolling upgrade or a cluster restart is in progress; otherwise look at why the flag store has no quorum |
 
-**Point the readiness probe at `/ready`**, which the checklist below already asks for. It is what keeps
-a node that does not yet know what the cluster has committed to out of rotation.
+The third row is the one worth understanding. Waiting there, either by refusing to start or by reporting
+itself unready, sounds safer and is not: the flag store cannot reach a quorum until enough nodes run a
+build that has it, so the first node of a rolling upgrade would be waiting for a cluster that is waiting
+for it, and the upgrade would stall on its first step. Serving the previous behaviour is safe in the
+meantime because a flag is only ever switched on once every node already supports it, so the previous
+behaviour is one every node in the cluster still understands.
 
-Starting but not serving, rather than refusing to start, is deliberate. The flag store cannot reach a
-quorum until enough nodes run a build that has it, so the first node of a rolling upgrade has to be able
-to come up and join: its own Raft server is part of the quorum the store is waiting for. A node that
-refused to start without the flags would be waiting for a cluster that is waiting for it, and the
-upgrade would stall on its first step.
-
-The protection that matters is not lost by this. A node that cannot honour an enabled flag still exits
-78 the moment it reads one, and a node whose **data directory** was written in a format this binary
-cannot read is stopped earlier and synchronously by the format marker above, which needs no quorum and
-no peers.
+Nothing is given up by that. A node that cannot honour an enabled flag still exits 78 the moment it reads
+one, and a node whose **data directory** was written in a format this binary cannot read is stopped
+earlier and synchronously by the format marker above, which needs no quorum and no peers.
 
 A flag flip is also what raises the on-disk format above the baseline, so the rollback floor described
 under [The on-disk format](#the-on-disk-format) moves at that moment and not at any other.

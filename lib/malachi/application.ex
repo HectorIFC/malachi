@@ -228,11 +228,13 @@ defmodule Malachi.Application do
   # Forms the flag store and supervises its reconciler (see `cluster_flags_child/1`). Runs in every mode,
   # like the user, lockout and ACL stores.
   #
-  # Nothing here blocks the boot on reading the store. A node that has not read it yet starts, joins, and
-  # reports itself **not ready** until it has (`Malachi.Cluster.ClusterFlagsCache.read?/0`). That is what
-  # lets a rolling upgrade happen at all: the flag store cannot reach a quorum until enough nodes run a
-  # build that has its machine module, so a node that refused to start without it would be waiting for a
-  # cluster that is waiting for it.
+  # Nothing here holds the node back on reading the store. One that has not read it yet starts, joins,
+  # serves with the previous behaviour, and reads again on the next tick; `ClusterFlagsCache.read?/0` says
+  # which of the two it is, for the first feature that needs to act on the difference. Neither refusing to
+  # start nor reporting itself unready would work, and both were tried: the flag store cannot reach a
+  # quorum until enough nodes run a build that has its machine module, so the first node of a rolling
+  # upgrade would be waiting for a cluster that is waiting for it, and a rolling update that waits for
+  # readiness would never start the second node.
   defp cluster_flags_children(nodes) do
     _ = ClusterFlagsServer.start(@log_flags, nodes)
     [cluster_flags_child(nodes)]

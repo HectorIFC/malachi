@@ -71,12 +71,12 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
   defp seen(modes), do: modes |> Agent.get(& &1) |> Enum.reverse()
 
   describe "read?/0" do
-    test "a node that has not read the store is not ready" do
+    test "a node that has not asked the store yet says so" do
       refute ClusterFlagsCache.read?()
       assert ClusterFlagsCache.enabled() == []
     end
 
-    test "reading the store, even an empty one, makes the node ready" do
+    test "reading the store, even an empty one, counts as having asked" do
       # `[]` from enabled/0 has to mean two different things and be told apart: nothing is on, and
       # nothing has been asked yet. Publishing the empty answer is what marks the node as having asked.
       ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([])} end, advertised: [])
@@ -85,16 +85,16 @@ defmodule Malachi.Cluster.ClusterFlagsGateTest do
       assert ClusterFlagsCache.enabled() == []
     end
 
-    test "a store it cannot read leaves the node not ready, and it keeps serving nothing" do
+    test "a store it cannot read leaves the node unasked, and holds nothing back" do
       # This is the case a rolling upgrade spends its first minutes in: the flag store cannot reach a
-      # quorum until a second node runs the new build. The node has to come up and join anyway, because
-      # its own Raft server is what makes that quorum possible, so it stays out of rotation instead.
+      # quorum until a second node runs the new build. Nothing here stops the node serving in the
+      # meantime, and nothing may: its own Raft server is part of the quorum the store is waiting for.
       assert ClusterFlagsCache.refresh(read: fn _mode -> {:error, :noproc} end, advertised: []) == :ok
 
       refute ClusterFlagsCache.read?()
     end
 
-    test "a node stays ready once it has read, even if a later read fails" do
+    test "having asked once survives a later read that fails" do
       ClusterFlagsCache.refresh(read: fn _mode -> {:ok, store([@cap])} end, advertised: [@cap])
       ClusterFlagsCache.refresh(read: fn _mode -> {:error, :timeout} end, advertised: [@cap])
 
