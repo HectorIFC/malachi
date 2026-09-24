@@ -3,7 +3,6 @@ defmodule Malachi.ApplicationTest do
 
   alias Malachi.Application, as: App
   alias Malachi.Cluster.Capabilities
-  alias Malachi.Cluster.ClusterFlagsServer
   alias Malachi.Cluster.MemberIncarnation
 
   describe "metadata_cluster_opts/2" do
