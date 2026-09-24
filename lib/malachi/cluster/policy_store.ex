@@ -5,11 +5,17 @@ defmodule Malachi.Cluster.PolicyStore do
   starts the ra cluster at boot; this module routes definitions through the log (consensus) and reads to
   the local replica.
 
-  **Reads fail open, to the global defaults.** An unreachable policy store answers `nil`, which is what a
-  topic with no policy answers, and a topic with no policy uses the cluster-wide retention and spread.
-  The alternative, failing closed, would mean a node that cannot read the store stops expiring anything
-  or places segments without its operator's rack rule, neither of which is safer than the default the
-  cluster ran with before the policy existed.
+  **Placement reads fail open; retention reads fail closed.** The two callers get opposite treatment on
+  purpose, because the cost of being wrong is not symmetric.
+
+  `get/1` answers `nil` when the store cannot be read, which is the same answer a topic with no policy
+  gets, so placement falls back to the cluster-wide spread. A segment placed without its operator's rack
+  rule is a worse placement, and healing can move it later.
+
+  `fetch_all/0` hands the read error back instead, and `Malachi.Cluster.RetentionCoordinator` skips the
+  whole sweep on it. Falling back there would expire under the cluster-wide limits exactly the data a
+  more permissive policy was written to keep, on every replica, with no way back. A sweep that did not
+  run is recovered by the next one. A deletion is not recovered at all.
 
   There is no wire key, mix task or dashboard route reaching these yet: #194 is what opens the door. This
   module is where it will knock.
