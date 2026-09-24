@@ -134,6 +134,70 @@ defmodule Malachi.Config do
   end
 
   @doc """
+  The whole number in `raw`, or `default` when the variable is absent or blank. Anything else raises,
+  so the node refuses to boot.
+
+  The counterpart of `checked/4`, and what separates them is what being wrong costs. `checked/4` judges
+  a value that parsed: `MALACHI_SCRUB_INTERVAL_MS=0` is a number, the operator's intent is legible, and
+  the documented default is a reasonable stand-in, so refusing to boot there would turn one lost knob
+  into a lost node. This one judges whether there is a number at all.
+
+  `Integer.parse/1` keeps the leading digits and discards the rest, which is worse than refusing and
+  worse than defaulting: `600_000` arrives as `600` and `10m` as `10`, values the operator never wrote
+  and that no default can stand in for, because nothing here knows what was meant. The ones that hurt
+  are the ones that come out smaller. `MALACHI_RETENTION_MAX_AGE_MS=7_776_000_000` would expire
+  everything sealed more than seven milliseconds ago, on every replica, with no way back.
+
+  `var` is the environment variable's own name, because that is what the operator has to go and fix.
+
+  ## Examples
+
+      iex> Malachi.Config.integer("MALACHI_X", nil, 5)
+      5
+
+      iex> Malachi.Config.integer("MALACHI_X", " ", 5)
+      5
+
+      iex> Malachi.Config.integer("MALACHI_X", " 12 ", 5)
+      12
+  """
+  @spec integer(String.t(), String.t() | nil, value) :: integer() | value when value: term()
+  def integer(var, raw, default), do: parsed(var, raw, default, &Integer.parse/1, "a whole number")
+
+  @doc """
+  The number in `raw` as a float, or `default` when the variable is absent or blank. Anything else
+  raises, for the reason given in `integer/3`.
+
+  `Float.parse/1` truncates the same way, and a decimal comma is the everyday case: `0,5` arrives as
+  `0.0`, which as a memory threshold means the alarm fires immediately and forever.
+
+  ## Examples
+
+      iex> Malachi.Config.float("MALACHI_X", nil, 0.7)
+      0.7
+
+      iex> Malachi.Config.float("MALACHI_X", "0.5", 0.7)
+      0.5
+  """
+  @spec float(String.t(), String.t() | nil, value) :: float() | value when value: term()
+  def float(var, raw, default), do: parsed(var, raw, default, &Float.parse/1, "a number")
+
+  defp parsed(_var, nil, default, _parse, _shape), do: default
+
+  defp parsed(var, raw, default, parse, shape) when is_binary(var) and is_binary(raw) do
+    case String.trim(raw) do
+      "" ->
+        default
+
+      trimmed ->
+        case parse.(trimmed) do
+          {value, ""} -> value
+          _malformed -> raise "#{var} must be #{shape}, got: #{inspect(raw)}"
+        end
+    end
+  end
+
+  @doc """
   `value` when `valid?` accepts it, otherwise `default`, saying out loud which setting was refused.
 
   Environment variables reach a process already parsed but not judged: `MALACHI_SCRUB_INTERVAL_MS=0`
