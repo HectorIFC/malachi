@@ -30,8 +30,8 @@ defmodule Malachi.SetTopicPolicyGuardTest do
         |> File.read!()
         |> String.split("\n")
         |> Enum.with_index(1)
-        |> Enum.filter(fn {line, _number} -> String.contains?(line, @command) end)
-        |> Enum.reject(fn {line, _number} -> prose?(line) end)
+        |> Enum.reject(fn {line, _number} -> comment?(line) end)
+        |> Enum.filter(fn {line, _number} -> String.contains?(code_of(line), @command) end)
         |> Enum.map(fn {line, number} -> "#{file}:#{number}: #{String.trim(line)}" end)
       end)
 
@@ -49,9 +49,12 @@ defmodule Malachi.SetTopicPolicyGuardTest do
            """
   end
 
-  # A comment or a doc naming the command is prose, not a caller.
-  defp prose?(line) do
-    trimmed = String.trim(line)
-    String.starts_with?(trimmed, "#") or String.contains?(trimmed, "`")
-  end
+  # A comment line names the command without being able to emit it.
+  defp comment?(line), do: line |> String.trim() |> String.starts_with?("#")
+
+  # What a line says in CODE: everything outside a backtick span, because a doc or a comment that names
+  # the command writes it inside one. The spans are removed rather than the whole line being skipped for
+  # holding a backtick anywhere, which is what let a real caller through: a call followed by an inline
+  # comment mentioning any other module in backticks was read as prose and never reported.
+  defp code_of(line), do: String.replace(line, ~r/`[^`]*`/, "")
 end
