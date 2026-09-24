@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # This job runs repository code (deps and the generators). Nothing here does authenticated
         # git, so the token has no business staying in the local git config.
         with:
@@ -132,7 +132,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -187,7 +187,7 @@ jobs:
       # The full history, because publishing decides between two results by which commit is newer
       # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
