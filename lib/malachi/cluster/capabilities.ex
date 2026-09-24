@@ -42,13 +42,21 @@ defmodule Malachi.Cluster.Capabilities do
 
   ## Where the merge lives
 
-  `Malachi.Cluster.Membership.set_attributes/2` replaces the whole attribute map, so any path that
-  sets attributes at runtime would erase the capabilities. `attributes/2` is the single function that
-  puts them in, and the two paths into a node's own attributes both go through it:
-  `Malachi.Cluster.MembershipServer` calls it on every runtime change, so no caller can erase the list
-  or claim one this build does not implement, and `Malachi.Application.membership_attributes/0` calls it
-  for the seed the server starts with. The seed is left to the caller on purpose, because that is what
-  lets a test stand a server up as though it ran another build.
+  `Malachi.Cluster.Membership.set_attributes/2` replaces the whole attribute map, so any path that sets
+  attributes at runtime would erase the capabilities. `attributes/2` is the single function that puts
+  them in, and both paths into a node's own attributes reach it:
+
+    * the seed, through `Malachi.Application.membership_attributes/0`, when the server starts;
+    * every runtime change, through `ensure/1`, which
+      `Malachi.Cluster.MembershipServer.set_attributes/2` applies before it replaces the map.
+
+  What that guarantees is one thing and not another. A caller that says nothing about capabilities
+  cannot erase them, which is the whole failure this closes: an operator changing a rack on a running
+  node would otherwise empty the list on every peer, with nothing to correct it. A caller that **does**
+  state a list keeps it, so this is not a guarantee that a node advertises only what its build
+  implements. Nothing in production states one, because the list is a compile-time property of the
+  build, and the multinode tests do, because one VM cannot run two builds and they have to play a
+  cluster caught mid-upgrade. Before removing a check elsewhere on the strength of this, read `ensure/1`.
   """
 
   alias Malachi.Cluster.Membership
@@ -92,10 +100,13 @@ defmodule Malachi.Cluster.Capabilities do
   This node's membership attributes: the operator's own `attributes` with this build's capability list
   merged in under `key/0`.
 
-  The single place the merge happens. An operator key can never shadow it (operator keys are strings),
-  and a caller that sets attributes at runtime does not have to remember any of this:
-  `Malachi.Cluster.MembershipServer.set_attributes/2` calls this itself, so what the node advertises is
-  always what its build implements.
+  The single place the merge happens, and it overwrites: whatever `operator_attributes` said about
+  capabilities is replaced by `capabilities`. An operator key can never shadow the list either, because
+  operator keys are strings.
+
+  A caller setting attributes on a running node does not have to come through here, but not because this
+  is applied for it: `Malachi.Cluster.MembershipServer.set_attributes/2` goes through `ensure/1`, which
+  fills the list in only when the caller left it out. See that function for what the difference buys.
   """
   @spec attributes(attributes(), [capability()]) :: attributes()
   def attributes(operator_attributes, capabilities \\ advertised()) do

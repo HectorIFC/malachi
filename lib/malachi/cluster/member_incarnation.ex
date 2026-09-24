@@ -131,7 +131,9 @@ defmodule Malachi.Cluster.MemberIncarnation do
   @doc """
   The ceiling recorded in `dir`.
 
-  `{:ok, 0}` when there is no file, which is a first boot. `{:error, {:damaged, content}}` when a file
+  `{:ok, 0}` when there is no file, which is a node that has never run **or** one upgraded from a build
+  that did not keep this file. The two are indistinguishable here, which is why `reserve/3` puts the
+  clock floor under the answer rather than trusting it. `{:error, {:damaged, content}}` when a file
   exists but does not hold one non-negative integer, and `{:error, {:io, posix}}` when it exists and
   cannot be read. Both errors stop the node rather than resetting it: see the moduledoc.
   """
