@@ -22,6 +22,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   migrating topic (zero-window cutover) is a later step.
   """
 
+  alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
@@ -238,37 +239,18 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end
   end
 
-  # One task per vnode: the reads are independent, and a vnode that is going to cost the whole timeout
-  # must not hold the others behind it. `max_concurrency` covers every vnode, so nothing queues.
-  #
-  # Ordered (the default), and zipped back against the same list the tasks were built from, because
-  # the `:exit` result of a killed task does not carry the vnode it was reading.
-  #
-  # The stream's own timeout is a second looser than the per-read one, so the inner call is normally
-  # what decides "did not answer". It is not redundant: `ra` follows a `{redirect, Leader}` reply by
-  # calling that leader with a FRESH full timeout (`ra_server_proc:statem_call/3`), so members that
-  # redirect to each other cost unbounded time with no single call ever timing out. This is the only
-  # bound on that, and it lands on the same `:unreachable` the caller already knows how to read.
-  defp read_vnodes(vnodes, _timeout) when map_size(vnodes) == 0, do: []
-
+  # One bounded read per vnode, concurrently: the reads are independent, and a vnode that is going to
+  # cost the whole timeout must not hold the others behind it. A read that overran is reported as the
+  # unreachable vnode it is, which is a case this module already answers for.
   defp read_vnodes(vnodes, timeout) do
-    entries = Map.to_list(vnodes)
-
-    entries
-    |> Task.async_stream(
+    vnodes
+    |> Map.to_list()
+    |> BoundedFanout.map(
+      timeout,
       fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id, timeout)} end,
-      max_concurrency: length(entries),
-      timeout: stream_timeout(timeout),
-      on_timeout: :kill_task
+      fn {vnode_id, _server_id} -> {vnode_id, :unreachable} end
     )
-    |> Enum.zip(entries)
-    |> Enum.map(fn
-      {{:ok, read}, _entry} -> read
-      {{:exit, _reason}, {vnode_id, _server_id}} -> {vnode_id, :unreachable}
-    end)
   end
-
-  defp stream_timeout(timeout), do: timeout + 1_000
 
   # The placeholder keeps the cache shape total (every vnode on the ring has an entry). It is only a
   # placeholder: the caller is told which entries it stands for, and decides whether to keep its own

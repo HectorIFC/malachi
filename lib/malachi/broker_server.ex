@@ -35,6 +35,7 @@ defmodule Malachi.BrokerServer do
 
   alias Malachi.Broker
   alias Malachi.Broker.Skip
+  alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
@@ -1357,14 +1358,33 @@ defmodule Malachi.BrokerServer do
 
   defp bootstrap_missing_vnodes(%{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}, read_timeout) do
     if orchestrator?.() do
-      Enum.each(vnodes, fn {vnode_id, _token, nodes} ->
-        unless MetadataServer.ready?(ReplicatedDSRSM.server_for(replicated, vnode_id), read_timeout) do
-          _ = MetadataServer.start(vnode_id, nodes)
-        end
-      end)
+      vnodes
+      |> not_ready(replicated, read_timeout)
+      |> Enum.each(fn {vnode_id, _token, nodes} -> _ = MetadataServer.start(vnode_id, nodes) end)
     end
 
     :ok
+  end
+
+  # The readiness checks are independent and each can cost the whole `read_timeout`, so they run
+  # concurrently. In sequence, a pass over n silent vnodes cost n times that before the metadata read
+  # even began, and this pass runs ON THIS LOOP at boot and in `reconcile_now/2`.
+  #
+  # The starts that follow stay sequential on purpose: each reaches `:ra.start_cluster`, whose
+  # `rpc:call/4` has no timeout, and firing n of those at once would multiply what a single wedged one
+  # already costs rather than bound it.
+  defp not_ready(vnodes, replicated, read_timeout) do
+    vnodes
+    |> BoundedFanout.map(
+      read_timeout,
+      fn {vnode_id, _token, _nodes} = vnode ->
+        if MetadataServer.ready?(ReplicatedDSRSM.server_for(replicated, vnode_id), read_timeout), do: nil, else: vnode
+      end,
+      # A check that overran its own bound says nothing about the cluster, and reading it as not ready
+      # is the harmless half: starting one that is already formed is refused by the name and ignored.
+      fn vnode -> vnode end
+    )
+    |> Enum.reject(&is_nil/1)
   end
 
   # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.

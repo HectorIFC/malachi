@@ -572,6 +572,46 @@ defmodule Malachi.BrokerServerRaTest do
            "the reconcile result rolled a committed group position backwards"
   end
 
+  test "the bootstrap pass checks the vnodes concurrently, so silent ones do not add up" do
+    # The orchestrator asks every vnode whether its cluster is formed before the metadata is read at
+    # all, and this pass runs ON THIS LOOP at boot and in `reconcile_now/2`. Asked in sequence, three
+    # silent vnodes cost three read timeouts before anything else happens; asked together, one.
+    suffix = System.unique_integer([:positive])
+    silent = for i <- 0..2, do: :"bs_boot_#{i}_#{suffix}"
+
+    vnodes =
+      silent
+      |> Enum.with_index()
+      |> Enum.map(fn {name, i} -> {name, i * div(Integer.pow(2, 32), 3), [node()]} end)
+
+    # The orchestrator is held off until the silent members hold the names: left on, boot would form
+    # real clusters under them, which is a different (and fast) pass from the one being measured.
+    gate = :counters.new(1, [])
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: vnodes,
+        bootstrap_orchestrator: fn -> :counters.get(gate, 1) == 1 end,
+        reconcile_read_timeout: 1_000,
+        brokers_refresh_interval: 60_000
+      )
+
+    on_exit(fn -> stop_quietly(control) end)
+    _ = await_boot(control)
+    Enum.each(silent, &start_silent/1)
+
+    # From here the pass runs as it does on the node that holds the role, which is exactly the node the
+    # sequential version made slowest.
+    :counters.put(gate, 1, 1)
+
+    # A pass driven by hand, so what is measured is one pass and not a tick landing mid-measurement.
+    {elapsed_us, :ok} = :timer.tc(fn -> BrokerServer.reconcile_now(control) end)
+
+    assert elapsed_us < 2_500_000,
+           "one pass over three silent vnodes took #{div(elapsed_us, 1000)}ms; the readiness checks are in sequence"
+  end
+
   test "a reconcile that crashes is logged and counted, and does not take the broker with it" do
     # `bootstrap_orchestrator` is an injected seam (in production the membership leader, which is a call
     # into another process). It runs inside the reconcile now, so what it raises lands in a task rather
