@@ -174,9 +174,10 @@ defmodule Malachi.Cluster.MachineVersionTest do
     test "a member that supports the effective version is :ok, with telemetry and no log", %{name: name} do
       {:ok, _member} = RaCluster.start(MetadataMachine, name, [node()])
       server_id = {name, node()}
+      current = StuckRaMember.effective_version()
       attach_telemetry()
 
-      assert eventually(fn -> StuckRaMember.effective(server_id) == 1 end)
+      assert eventually(fn -> StuckRaMember.effective(server_id) == current end)
 
       log =
         capture_log(fn ->
@@ -184,25 +185,27 @@ defmodule Malachi.Cluster.MachineVersionTest do
         end)
 
       assert log == ""
-      assert_receive {:telemetry, %{effective: 1, supported: 1}, %{server_id: ^server_id, stuck: false}}
+      assert_receive {:telemetry, %{effective: ^current, supported: ^current}, %{server_id: ^server_id, stuck: false}}
     end
 
     test "a member rolled back below the effective version is stuck, logged once, then recovers", %{name: name} do
       server_id = StuckRaMember.start(name)
       machine = MetadataMachine
+      current = StuckRaMember.effective_version()
+      behind = StuckRaMember.rolled_back_version()
+      stuck = {:stuck, current, behind}
       attach_telemetry()
 
       log =
         capture_log(fn ->
-          assert {{:stuck, 1, 0}, :stuck} = MachineVersion.check(machine, server_id, :ok)
+          assert {^stuck, :stuck} = MachineVersion.check(machine, server_id, :ok)
         end)
 
       assert log =~ "stopped applying entries"
-      assert_receive {:telemetry, %{effective: 1, supported: 0}, %{server_id: ^server_id, stuck: true}}
+      assert_receive {:telemetry, %{effective: ^current, supported: ^behind}, %{server_id: ^server_id, stuck: true}}
 
       # Still stuck on the next tick: reported through telemetry, not logged again.
-      log =
-        capture_log(fn -> assert {{:stuck, 1, 0}, nil} = MachineVersion.check(machine, server_id, {:stuck, 1, 0}) end)
+      log = capture_log(fn -> assert {^stuck, nil} = MachineVersion.check(machine, server_id, stuck) end)
 
       assert log == ""
       assert_receive {:telemetry, _measurements, %{stuck: true}}
@@ -211,16 +214,18 @@ defmodule Malachi.Cluster.MachineVersionTest do
 
       log =
         capture_log([level: :info], fn ->
-          assert {:ok, :recovered} = MachineVersion.check(machine, server_id, {:stuck, 1, 0})
+          assert {:ok, :recovered} = MachineVersion.check(machine, server_id, stuck)
         end)
 
-      assert log =~ "supports the effective version 1 again"
+      assert log =~ "supports the effective version #{current} again"
     end
 
     test "a member without counters keeps its last status and reports no transition" do
       ghost = {:"mv_ghost_#{System.unique_integer([:positive])}", node()}
+      stuck = {:stuck, StuckRaMember.effective_version(), StuckRaMember.rolled_back_version()}
+
       assert {:ok, nil} = MachineVersion.check(MetadataMachine, ghost, :ok)
-      assert {{:stuck, 1, 0}, nil} = MachineVersion.check(MetadataMachine, ghost, {:stuck, 1, 0})
+      assert {^stuck, nil} = MachineVersion.check(MetadataMachine, ghost, stuck)
     end
   end
 

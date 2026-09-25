@@ -1,36 +1,51 @@
 defmodule Malachi.Test.StuckRaMember do
   @moduledoc """
   A real, local, single-member `Malachi.Cluster.MetadataMachine` cluster driven into the state a rolled
-  back member ends up in: its log holds the `noop` that moved the group to machine version 1, and it
-  restarts on code pinned to version 0. `ra` replays that `noop`, cannot honor it, and stops applying
-  entries, which is what `Malachi.Cluster.MachineVersion.check/3` has to report.
+  back member ends up in: its log holds the `noop` that moved the group to the current machine version,
+  and it restarts on code pinned one version below. `ra` replays that `noop`, cannot honor it, and stops
+  applying entries, which is what `Malachi.Cluster.MachineVersion.check/3` has to report.
+
+  Both versions are taken from `Malachi.Cluster.MachineVersion.code_version/0` rather than written down,
+  so this keeps working as releases raise it (`effective_version/0` and `rolled_back_version/0` say which is which).
 
   The pin is node-wide application env, so tests using this must be `async: false`, and must call
   `cleanup/1` (normally from `on_exit`).
   """
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.RaCluster
 
   @system :default
 
-  @doc "Forms the cluster, lets it reach version 1, then restarts it pinned to 0. Returns the server id."
+  @doc "The machine version the group reaches, which is what this build implements."
+  @spec effective_version() :: pos_integer()
+  def effective_version, do: MachineVersion.code_version()
+
+  @doc "The version the member is rolled back to: one below what the group has already recorded."
+  @spec rolled_back_version() :: non_neg_integer()
+  def rolled_back_version, do: effective_version() - 1
+
+  @doc """
+  Forms the cluster, lets it reach `effective_version/0`, then restarts it pinned to
+  `rolled_back_version/0`. Returns the server id.
+  """
   @spec start(atom()) :: {atom(), node()}
   def start(cluster_name) do
     {:ok, _member} = RaCluster.start(MetadataMachine, cluster_name, [node()])
     server_id = {cluster_name, node()}
-    :ok = await_effective(server_id, 1)
+    :ok = await_effective(server_id, effective_version())
 
-    restart(server_id, 0)
-    :ok = await_effective(server_id, 1)
+    restart(server_id, rolled_back_version())
+    :ok = await_effective(server_id, effective_version())
     server_id
   end
 
-  @doc "Restarts the member on unpinned code, which supports version 1 again."
+  @doc "Restarts the member on unpinned code, which supports the effective version again."
   @spec recover({atom(), node()}) :: :ok
   def recover(server_id) do
     restart(server_id, nil)
-    await_effective(server_id, 1)
+    await_effective(server_id, effective_version())
   end
 
   @doc "Drops the pin and deletes the cluster."

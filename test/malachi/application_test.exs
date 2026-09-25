@@ -2,6 +2,8 @@ defmodule Malachi.ApplicationTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Application, as: App
+  alias Malachi.Cluster.Capabilities
+  alias Malachi.Cluster.MemberIncarnation
 
   describe "metadata_cluster_opts/2" do
     test "no cluster configured yields no metadata options (single-node in-memory default)" do
@@ -352,6 +354,137 @@ defmodule Malachi.ApplicationTest do
       assert opts[:version_check] == {Malachi.Auth.UserMachine, {:solo_store, node()}}
       assert opts[:reconcile].() == :ok
       refute_received :reconciled
+    end
+  end
+
+  describe "cluster_flags_child/1" do
+    test "watches the flag store's machine version on the local member" do
+      spec = App.cluster_flags_child([node()])
+
+      assert spec.id == Malachi.LogClusterFlagsReconciler
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+      assert opts[:version_check] == {Malachi.Cluster.ClusterFlagsMachine, {Malachi.LogClusterFlags, node()}}
+      assert opts[:name] == Malachi.LogClusterFlagsReconciler
+    end
+
+    test "its tick runs the local flag pass, and tolerates a store it cannot read" do
+      # The gate exists only because this child carries it. A store that is not formed must leave the
+      # node running: treating "I could not ask" as "no flag is on" is the mistake the ring boot exists
+      # to avoid, and here it would let a node serve past a flag it cannot honour.
+      spec = App.cluster_flags_child([node()])
+      assert %{start: {Malachi.Cluster.LeaseReconciler, :start_link, [opts]}} = spec
+
+      assert opts[:reconcile].() == :ok
+    end
+  end
+
+  describe "incarnation_opts/1" do
+    @describetag :tmp_dir
+
+    test "hands the membership server a reservation function, not reserved values", %{tmp_dir: dir} do
+      # A function, because a child spec is built once and reused on every supervisor restart. Reserved
+      # values would seed a restarted server at the number the first one started from.
+      opts = App.incarnation_opts(dir)
+
+      assert is_function(opts[:reserve], 0)
+      assert is_function(opts[:on_ceiling], 1)
+      # Seeded from the clock, so the numbers are whatever today is; what the child spec owes the server
+      # is a whole block above wherever it starts (`Malachi.Cluster.MemberIncarnation`).
+      assert {:ok, %{start: start, ceiling: ceiling}} = opts[:reserve].()
+      assert ceiling == start - 1 + MemberIncarnation.block()
+    end
+
+    test "every call resumes above the block the previous one took", %{tmp_dir: dir} do
+      reserve = App.incarnation_opts(dir)[:reserve]
+
+      assert {:ok, first} = reserve.()
+      assert {:ok, second} = reserve.()
+
+      # This is what a supervisor restart of the membership server gets, and why it is a function: the
+      # second process starts above everything the first could have announced.
+      assert second.start > first.ceiling
+    end
+
+    test "raises when no reservation can be made, which stops the node", %{tmp_dir: dir} do
+      # Starting anyway would announce a number below what peers remember, and nothing corrects that: a
+      # live node is never suspected, so it never refutes, so the peers keep the old record and the old
+      # attributes the capability check reads.
+      File.write!(MemberIncarnation.path(dir), "not a number")
+      reserve = App.incarnation_opts(dir)[:reserve]
+
+      assert_raise RuntimeError, ~r/could not reserve this node's incarnation/, fn -> reserve.() end
+    end
+  end
+
+  describe "membership_attributes/0" do
+    test "gossips this build's capability set alongside the operator's own attributes" do
+      attributes = App.membership_attributes()
+
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+    end
+
+    test "is the operator's configured attributes put through the capability merge" do
+      # The wiring, read rather than driven: :log_attributes is VM-wide application env and this module
+      # is async, so setting it would race every other test and every application process that reads it.
+      assert App.membership_attributes() ==
+               Capabilities.attributes(App.parse_attributes(Application.get_env(:malachi, :log_attributes)))
+    end
+
+    test "the operator's attributes survive the merge" do
+      attributes = Capabilities.attributes(App.parse_attributes("rack=a,dc=eu"))
+
+      assert attributes["rack"] == "a"
+      assert attributes["dc"] == "eu"
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+    end
+  end
+
+  describe "the operator's flag entry points" do
+    test "cluster_flags/0 reads the store this node hosts" do
+      assert {:ok, %{known: known, enabled: enabled}} = App.cluster_flags()
+      assert known == Capabilities.known()
+      assert is_list(enabled)
+    end
+
+    test "an unknown flag is refused before the membership view is even read" do
+      assert App.enable_cluster_flag("no_such_flag") == {:error, :unknown_flag}
+    end
+
+    test "a flag this node itself does not advertise cannot be switched on" do
+      # The local node is always one of the configured nodes, and the membership view reports what this
+      # build really advertises. So the loop is closed: nothing can enable a flag this node would then
+      # refuse to serve. The registry is empty here, so the name is injected; the advertisement is not.
+      flag = :"app_flag_#{System.unique_integer([:positive])}"
+
+      assert App.enable_cluster_flag(to_string(flag), known: [flag], nodes: [node()]) ==
+               {:error, {:unsupported, [node()]}}
+
+      assert {:ok, %{enabled: enabled}} = App.cluster_flags()
+      refute flag in enabled
+    end
+
+    test "refuses and names a configured node the membership view does not vouch for" do
+      flag = :"app_flag_#{System.unique_integer([:positive])}"
+
+      assert App.enable_cluster_flag(to_string(flag),
+               known: [flag],
+               nodes: [node(), :absent@nowhere],
+               reads: fn node ->
+                 if node == node(), do: {:alive, Capabilities.attributes(%{}, [flag])}, else: {nil, %{}}
+               end
+             ) == {:error, {:unsupported, [:absent@nowhere]}}
+    end
+  end
+
+  describe "membership_reads/0" do
+    test "without a membership server it answers for the local node only" do
+      # An unclustered deployment runs no membership server. Answering for a remote node would be a
+      # guess, and a guess in this direction switches a flag on over a node nobody has heard from.
+      reads = App.membership_reads()
+
+      assert {:alive, attributes} = reads.(node())
+      assert attributes[Capabilities.key()] == Capabilities.advertised()
+      assert reads.(:somewhere@else) == {nil, %{}}
     end
   end
 

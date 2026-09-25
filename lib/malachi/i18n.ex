@@ -262,12 +262,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"
     },
-    # Data-directory format marker (Malachi.Storage.FormatMarker). The refusal is one line with a fixed,
-    # searchable prefix; the detail is a complete sentence of its own, one key per operator action.
-    data_format_refused: %{
+    # The envelope every boot gate refuses through (Malachi.StartupRefusal): one line with a fixed,
+    # searchable prefix, wrapping a detail that is a complete sentence of its own, one key per
+    # operator action.
+    startup_refused: %{
       "pt_BR" => "RECUSANDO INICIAR (exit 78): %{detail}",
       "en_US" => "REFUSING TO START (exit 78): %{detail}"
     },
+    # Data-directory format marker (Malachi.Storage.FormatMarker).
     data_format_too_new: %{
       "pt_BR" =>
         "o marker de formato %{path} registra o formato %{format}, gravado pelo release %{written_by}, e este " <>
@@ -293,6 +295,52 @@ defmodule Malachi.I18n do
       "en_US" =>
         "the format marker %{path} could not be read or written (%{reason}). Fix the volume or its " <>
           "permissions and start again"
+    },
+    # Cluster feature flags (Malachi.Cluster.ClusterFlags). A flag only ever goes from off to on, and
+    # only once every node advertises the capability it names.
+    cluster_flag_enabled: %{
+      "pt_BR" => "flag de cluster %{flag} ligado por um operador",
+      "en_US" => "cluster flag %{flag} enabled by an operator"
+    },
+    cluster_flag_enable_refused: %{
+      "pt_BR" => "recusando ligar o flag de cluster %{flag}: %{nodes} não anunciam essa capability",
+      "en_US" => "refusing to enable the cluster flag %{flag}: %{nodes} do not advertise that capability"
+    },
+    cluster_flag_adopted: %{
+      "pt_BR" => "flag de cluster %{flag} adotado neste nó",
+      "en_US" => "cluster flag %{flag} adopted on this node"
+    },
+    member_incarnation_unusable: %{
+      "pt_BR" =>
+        "não foi possível reservar a incarnation deste nó em %{path} (%{reason}). O nó não inicia: " <>
+          "subir sem ela significaria anunciar um número abaixo do que os pares lembram, e nada corrige " <>
+          "isso depois, porque um nó vivo nunca é suspeitado e portanto nunca refuta. Conserte o volume, " <>
+          "ou restaure o arquivo de outro backup deste mesmo nó",
+      "en_US" =>
+        "could not reserve this node's incarnation at %{path} (%{reason}). The node does not start: " <>
+          "coming up without it would mean announcing a number below what peers remember, and nothing " <>
+          "corrects that afterwards, because a live node is never suspected and so never refutes. Fix " <>
+          "the volume, or restore the file from a backup of this same node"
+    },
+    member_incarnation_ceiling_lost: %{
+      "pt_BR" =>
+        "não foi possível gravar um teto de incarnation novo em %{incarnation} (%{reason}); parando o " <>
+          "nó para que ele reserve outro ao subir. Seguir serviria agora e deixaria um restart futuro " <>
+          "voltar abaixo do que os pares lembram, onde nada mais corrige",
+      "en_US" =>
+        "could not record a new incarnation ceiling at %{incarnation} (%{reason}); stopping the node so " <>
+          "it reserves one it can trust on the way back up. Carrying on would serve now and let a " <>
+          "future restart resume below what peers remember, where nothing corrects it"
+    },
+    cluster_flag_missing_capability: %{
+      "pt_BR" =>
+        "o cluster ligou %{flags}, que este binário não suporta; ele anuncia %{capabilities}. " <>
+          "Inicie um release que suporte %{flags}. Um flag nunca volta a ser desligado, então este nó " <>
+          "não pode servir até lá",
+      "en_US" =>
+        "the cluster has enabled %{flags}, which this binary does not support; it advertises " <>
+          "%{capabilities}. Start a release that supports %{flags}. A flag is never turned back off, " <>
+          "so this node cannot serve until then"
     },
     data_format_marker_created_fresh: %{
       "pt_BR" => "Marker de formato criado em %{path} (formato %{format}, diretório novo)",
