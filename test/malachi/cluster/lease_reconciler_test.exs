@@ -49,6 +49,7 @@ defmodule Malachi.Cluster.LeaseReconcilerVersionTest do
     name = :"lr_stuck_#{System.unique_integer([:positive])}"
     on_exit(fn -> StuckRaMember.cleanup({name, node()}) end)
     server_id = StuckRaMember.start(name)
+    stuck = {:stuck, StuckRaMember.effective_version(), StuckRaMember.rolled_back_version()}
 
     log =
       capture_log(fn ->
@@ -61,9 +62,7 @@ defmodule Malachi.Cluster.LeaseReconcilerVersionTest do
 
         assert LeaseReconciler.reconcile_now(reconciler) == :ok
         assert LeaseReconciler.reconcile_now(reconciler) == :ok
-
-        assert LeaseReconciler.version_status(reconciler) ==
-                 {:stuck, StuckRaMember.current(), StuckRaMember.rolled_back()}
+        assert LeaseReconciler.version_status(reconciler) == stuck
 
         :ok = StuckRaMember.recover(server_id)
         assert LeaseReconciler.reconcile_now(reconciler) == :ok

@@ -34,7 +34,7 @@ defmodule Malachi.Cluster.PolicyRegistry do
 
   @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
-  def command_versions, do: %{{:define_policy, 3} => 2, {:delete_policy, 2} => 2}
+  def command_versions, do: %{{:define_policy, 3} => 3, {:delete_policy, 2} => 3}
 
   @doc """
   Applies a `command`, returning `{new_state, reply}`.

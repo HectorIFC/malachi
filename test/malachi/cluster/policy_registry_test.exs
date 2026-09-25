@@ -60,7 +60,7 @@ defmodule Malachi.Cluster.PolicyRegistryTest do
   test "its commands are introduced at the version that ships the store, so older members refuse them" do
     table = PolicyRegistry.command_versions()
 
-    assert table == %{{:define_policy, 3} => 2, {:delete_policy, 2} => 2}
+    assert table == %{{:define_policy, 3} => 3, {:delete_policy, 2} => 3}
     assert Enum.all?(Map.values(table), &(&1 == MachineVersion.code_version()))
   end
 end

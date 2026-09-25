@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.MachineVersion do
   @moduledoc """
   The one versioning rule shared by every control-plane `ra` state machine: metadata, lease, ring,
-  users, lockouts, ACLs and storage policies.
+  users, lockouts, ACLs, cluster flags and storage policies.
 
   ## Why a command needs a version
 
@@ -31,8 +31,11 @@ defmodule Malachi.Cluster.MachineVersion do
   Existing commands stay at the version they were introduced at forever: nothing takes a release
   cursor, so every command ever written is replayed on restart and must stay appliable.
 
-  The seven machines share one version number. That keeps one pin meaningful for all of them, and
-  bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`.
+  The eight machines share one version number. That keeps one pin meaningful for all of them, and
+  bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`. Version 2
+  is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version 3 is where
+  `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, so each time the other
+  seven moved with nothing but that no-op.
 
   ## Holding the version during an upgrade
 
@@ -63,9 +66,10 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  # 2 introduces the storage policy store (`Malachi.Cluster.PolicyRegistry`): its commands are refused
-  # until every member of that group runs code that implements them.
-  @code_version 2
+  # 3 introduces the storage policy store (`Malachi.Cluster.PolicyRegistry`): its commands are refused
+  # until every member of that group runs code that implements them. 2 is the cluster flags' and is
+  # already released, which is why the policy commands take the next version rather than sharing it.
+  @code_version 3
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

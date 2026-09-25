@@ -440,7 +440,8 @@ A refused start exits with status **78** and logs one line that begins with `REF
 and names the directory, both format levels and the release to start instead. The same line is printed
 on stderr, so it reaches container logs even when the logger has not flushed. The same status covers a
 marker that cannot be parsed (restore it from a backup or another node) and one that cannot be read or
-written (fix the volume or its permissions).
+written (fix the volume or its permissions), and a node whose build cannot honour a cluster flag that is
+already on (see [Cluster flags](#cluster-flags)).
 
 A service manager that restarts on failure will restart a refused node again and again. Tell it not to:
 
@@ -452,10 +453,11 @@ A service manager that restarts on failure will restart a refused node again and
 
 ### The control-plane machine version
 
-The control plane (topic metadata, the lease, the ring, users, lockouts, ACLs and storage policies) lives in Raft groups
-whose state machines carry a version. A group moves to a new version only once **every** member runs code
-that supports it, and a command a release introduces is refused, the same way on every member, until then.
-So a cluster in the middle of a rolling upgrade cannot end up with members that disagree about its state.
+The control plane (topic metadata, the lease, the ring, users, lockouts, ACLs, cluster flags and storage
+policies) lives in Raft groups whose state machines carry a version. A group moves to a new version only
+once **every** member runs code that supports it, and a command a release introduces is refused, the same
+way on every member, until then. So a cluster in the middle of a rolling upgrade cannot end up with
+members that disagree about its state.
 
 The version switch happens on its own when the last node has been upgraded. From that moment, a node started
 on the previous build stops applying the control-plane log instead of diverging from it: it stays up, but it
@@ -471,12 +473,111 @@ To keep rolling back possible until you are satisfied with a release, hold the v
    a time. The groups switch to the new version once the last node is back, and the rollback floor moves up.
 
 The first release that versions these machines is version 1, and every earlier build counts as version 0.
-Version 2 adds the storage policy store, whose commands a version 1 member refuses until the whole group
-has moved. To be able to roll back from a release to the build before it, upgrade with
-`MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now and finalize later.
+
+Version **2** adds the cluster flag store's `enable_flag` command. Version **3** adds the storage policy
+store's `define_policy` and `delete_policy`. Each time, the machines that gained nothing move with it at
+no cost, and a member on the older build refuses the new command until the whole group has moved.
+
+The same rule applies at every step: to keep a rollback to the previous build possible while you roll
+out, upgrade with `MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now, and finalize
+afterwards.
 
 A malformed value (anything but a non-negative integer) stops the node at boot. Silently dropping the pin would
 finalize the upgrade, so it is treated as an error. A pin above the version a build implements has no effect.
+
+### Cluster flags
+
+Finishing a rolling upgrade and committing to a new behaviour are two different moments. A **cluster
+flag** is the second one: an operator switches a feature on, once, for the whole cluster, after every
+node runs a build that can handle it. Until a flag is on, every node keeps to the old behaviour and a
+rollback stays free.
+
+```
+mix malachi.flag --list
+mix malachi.flag enable <flag>
+```
+
+Both run against a **running** node over Erlang distribution, the same way `mix malachi.ring` and
+`mix malachi.reshard` do (`--node`, `--cookie`).
+
+Each node advertises the set of flags its build can honour, through the same SWIM gossip that carries
+liveness. Switching a flag on is **refused** unless every node listed in `MALACHI_LOG_NODES` is alive and
+advertises that flag, and the refusal names the ones that are not:
+
+```
+these nodes are not alive or do not support that flag: malachi@node3. Upgrade them, or take them
+out of MALACHI_LOG_NODES, then run this again
+```
+
+A node that is down counts as not supporting it. Upgrade it, or take it out of `MALACHI_LOG_NODES` on
+every node, before switching the flag on.
+
+Two things follow from a flag being permanent:
+
+- **There is no command to switch one off.** Once a feature is on, peers and stored data may already be
+  in the new shape, and going back is a migration, not a toggle. Decide before you enable, not after.
+- **A node that cannot honour an enabled flag refuses to start**, with exit status 78 and a line naming
+  the flag and what the build advertises. In practice that means a node brought back on a build from
+  before the feature: upgrade it rather than trying to start it again.
+
+### Why a node remembers its own incarnation
+
+Each node keeps one number in `malachi.incarnation`, at the root of the log data directory beside
+`malachi.format`. It is how a restarted node outranks what its peers still remember about it.
+
+Membership gossip resolves conflicting news about a member by that number, and a member is the only one
+who raises its own. A node that came back counting from scratch would announce itself below what its
+peers hold, every peer would ignore the announcement, and they would keep the **attributes** they had,
+including the capability list. A node brought back on an older build would then still be counted as
+supporting a feature it no longer does.
+
+Nothing is asked of you for this, including on the upgrade that introduces the file. A node coming from
+a build that never wrote one has no record to read, while its peers may remember it well above zero,
+because the old build raised its incarnation in memory on every refutation and every attribute change.
+So the first reservation starts above the **current second** rather than at 1. An incarnation counts
+refutations, which reaches tens or hundreds; seconds since 1970 do not, so the upgraded node outranks
+anything the old build could have reached. There is no procedure here, and that is deliberate: the
+number it would have to be given is whatever the peers happen to remember, which is not visible from the
+node being started.
+
+The clock is only a floor. A recorded ceiling higher than it still wins, so a clock moving backwards
+cannot lower a node.
+
+It matters only when it goes wrong: **a node whose incarnation cannot be reserved does not start**, and
+one that later cannot record a new ceiling stops itself so it can reserve a fresh one on the way back
+up. Both say so on one line. Starting anyway would be worse than not starting, because the node would be
+ignored by its peers with no way back: they would keep the record they have, and since the node answers
+their pings they never suspect it, so nothing ever provokes the refutation that would lift it.
+
+Do not delete the file while the node is stopped, and copy it along with the data directory if you ever
+move one. The clock floor makes a lost file survivable rather than fatal, which is not the same as a
+licence to remove one: a node restarted within minutes of losing it can still come back below where it
+already was.
+
+### What a node does with the flags at boot
+
+A node always starts, and it always serves. Nothing about the flags holds it back or takes it out of
+rotation. What the flags decide is when it stops:
+
+| At boot | What the node does | What to do |
+| --- | --- | --- |
+| The flags are readable and this build supports every one that is on | serves, with the enabled features | nothing |
+| The flags are readable and one names something this build does not support | exits **78**, naming the flag | upgrade that node; restarting the old build will not help |
+| The flags cannot be read yet | serves with the previous behaviour, and reads again on the next tick | nothing, if a rolling upgrade or a cluster restart is in progress; otherwise look at why the flag store has no quorum |
+
+The third row is the one worth understanding. Waiting there, either by refusing to start or by reporting
+itself unready, sounds safer and is not: the flag store cannot reach a quorum until enough nodes run a
+build that has it, so the first node of a rolling upgrade would be waiting for a cluster that is waiting
+for it, and the upgrade would stall on its first step. Serving the previous behaviour is safe in the
+meantime because a flag is only ever switched on once every node already supports it, so the previous
+behaviour is one every node in the cluster still understands.
+
+Nothing is given up by that. A node that cannot honour an enabled flag still exits 78 the moment it reads
+one, and a node whose **data directory** was written in a format this binary cannot read is stopped
+earlier and synchronously by the format marker above, which needs no quorum and no peers.
+
+A flag flip is also what raises the on-disk format above the baseline, so the rollback floor described
+under [The on-disk format](#the-on-disk-format) moves at that moment and not at any other.
 
 ## Before you go to production
 
@@ -494,6 +595,12 @@ The checks that catch the common mistakes:
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
       before the first upgrade, and make your service manager stop restarting on exit status 78.
+- [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
+      blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
+- [ ] **Your service manager treats exit 78 differently from an ordinary failure.** Exit 78 means the
+      node cannot run with the binary it was given, so restarting it only hides that; an upgrade is what
+      helps. systemd can stop outright (`RestartPreventExitStatus=78`); Compose cannot tell the two
+      apart, so bound the retries (`restart: on-failure:5`) and alert on exit code 78.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions
       still allow everything. See [Per-topic ACLs](per-topic-acls.md).

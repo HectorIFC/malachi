@@ -1,6 +1,9 @@
 defmodule Malachi.Cluster.MembershipServerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
+  alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
@@ -150,6 +153,203 @@ defmodule Malachi.Cluster.MembershipServerTest do
            end)
   end
 
+  describe "the incarnation reservation" do
+    test "starts at the reserved incarnation rather than at the first-boot default" do
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], incarnation: 40] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 40
+    end
+
+    test "reserves on every process start, so a restart resumes above the last one" do
+      # The defect this closes: a child spec is built once and reused, so a reservation made while the
+      # spec was built would seed a restarted server at the number the first one started from, below
+      # whatever it had raised itself to.
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(calls), do: Agent.stop(calls) end)
+      reserve = fn -> {:ok, %{start: Agent.get_and_update(calls, &{&1 * 10 + 1, &1 + 1}), ceiling: 9_999}} end
+
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], reserve: reserve] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 1
+      assert Agent.get(calls, & &1) == 1
+
+      stop_supervised!(a)
+      start_supervised!({MembershipServer, [name: a, peers: [], reserve: reserve] ++ @timings}, id: a)
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 11
+      assert Agent.get(calls, & &1) == 2
+    end
+
+    test "a reservation that fails stops the server from starting" do
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], reserve: fn -> {:error, :enospc} end] ++ @timings
+
+      assert {:error, {{%RuntimeError{}, _stack}, _child}} = start_supervised({MembershipServer, opts}, id: a)
+    end
+
+    test "asks for a new ceiling once it has used the block, and adopts the answer" do
+      # The block is what keeps the durable write off the failure detector's path: the node raises its
+      # own incarnation this many times before it touches a disk again.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      on_ceiling = fn incarnation ->
+        send(parent, {:ceiling_asked, incarnation})
+        {:ok, incarnation + 10}
+      end
+
+      opts = [name: a, peers: [], incarnation: 1, ceiling: 3, on_ceiling: on_ceiling] ++ @timings
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "1"})
+      refute_received {:ceiling_asked, _incarnation}
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "2"})
+      assert_received {:ceiling_asked, 3}
+
+      # The new ceiling was adopted, so the next rise does not ask again.
+      :ok = MembershipServer.set_attributes(a, %{rack: "3"})
+      refute_received {:ceiling_asked, _incarnation}
+    end
+
+    test "a lost ceiling is latched: it stops once and stops announcing itself" do
+      # System.stop/0 is asynchronous, so this server keeps handling messages for the whole shutdown
+      # window. Without the latch every ping, ack and join would see the same incarnation above the same
+      # stale ceiling and repeat the write, the log and the stop.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn i ->
+            send(parent, {:asked, i})
+            {:error, :enospc}
+          end,
+          stop_fun: fn -> send(parent, :stopping) end
+        ] ++ @timings
+
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      capture_log(fn ->
+        :ok = MembershipServer.set_attributes(a, %{rack: "x"})
+        # Whatever a peer sends afterwards must not restart the storm.
+        for _ <- 1..5, do: GenServer.cast(a, {:ping, :nobody, {[], nil}})
+        _ = MembershipServer.view(a)
+      end)
+
+      assert_received :stopping
+      refute_received :stopping
+      assert_received {:asked, 2}
+      refute_received {:asked, _again}
+    end
+
+    test "a node that has lost its ceiling leaves itself out of its own gossip" do
+      # Its incarnation may already be past the last ceiling on disk, and a refutation in the shutdown
+      # window can raise it further. Announcing that would leave peers remembering a number this node
+      # cannot resume above. Read straight off the wire: pose as a peer, ping it, and look at the view it
+      # piggybacks on the ack.
+      a = :"msgossip_#{System.unique_integer([:positive])}"
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn _i -> {:error, :enospc} end,
+          stop_fun: fn -> :ok end
+        ] ++ @timings
+
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      # Through the real path: a peer's gossip, not a local copy of the view. Applying an update to what
+      # `view/1` hands back changes nothing in the server, and a test that did that would leave the other
+      # half of the contract below unchecked.
+      GenServer.cast(a, {:ping, :nobody, {[{:peer, :alive, 7, %{}}], nil}})
+      assert eventually(fn -> Membership.status(MembershipServer.view(a), :peer) == :alive end)
+
+      assert gossiped_members(a) == Enum.sort([a, :peer]),
+             "expected it to announce itself and the peer while healthy"
+
+      capture_log(fn -> :ok = MembershipServer.set_attributes(a, %{rack: "x"}) end)
+
+      # Itself out, and only itself: what it knows about everyone else is not this node's to withhold.
+      assert gossiped_members(a) == [:peer], "a node that lost its ceiling stopped gossiping the cluster"
+    end
+
+    test "stops the node when a new ceiling cannot be written" do
+      # Carrying on would gossip incarnations above the last one on disk, and the next restart would
+      # resume below what peers remember, where nothing corrects it. Stopping is recoverable: the node
+      # comes back and reserves a block it can trust.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      opts =
+        [
+          name: a,
+          peers: [],
+          incarnation: 1,
+          ceiling: 2,
+          on_ceiling: fn _i -> {:error, :enospc} end,
+          stop_fun: fn -> send(parent, :stopping) end
+        ] ++ @timings
+
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      log = capture_log(fn -> :ok = MembershipServer.set_attributes(a, %{rack: "x"}) end)
+
+      assert_received :stopping
+      assert log =~ "incarnation ceiling"
+    end
+
+    test "a peer claiming a higher incarnation for us changes nothing" do
+      # We own our own number and resume it above our past from disk, so a peer's copy of it tells us
+      # nothing. Adopting it would hand a peer the ability to drive this node's incarnation upward from
+      # outside, and each step past the reserved block costs a durable write inline in this server.
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+
+      # `stop_fun` matters even though nothing here should reach it. `on_ceiling` answers the return of
+      # `send/2`, which is not `{:ok, ceiling}`, so it counts as a failed write; if a regression let the
+      # peer's claim raise this node's incarnation, the default `System.stop/0` would end the whole test
+      # VM and no assertion would name this test as the cause.
+      opts = [
+        name: a,
+        peers: [],
+        incarnation: 2,
+        ceiling: 3,
+        on_ceiling: fn i -> send(parent, {:asked, i}) end,
+        stop_fun: fn -> send(parent, :stopping) end
+      ]
+
+      start_supervised!({MembershipServer, opts ++ @timings}, id: a)
+
+      GenServer.cast(a, {:ping, :nobody, [{a, :alive, 9_999, %{rack: "theirs"}}]})
+      assert MembershipServer.attributes(a, a) == %{}
+
+      assert Membership.incarnation(MembershipServer.view(a), a) == 2
+      refute_received {:asked, _incarnation}
+      refute_received :stopping
+    end
+
+    test "a server started without a reservation never asks for a ceiling" do
+      parent = self()
+      a = :"msinc_#{System.unique_integer([:positive])}"
+      opts = [name: a, peers: [], on_ceiling: fn i -> send(parent, {:asked, i}) end] ++ @timings
+      start_supervised!({MembershipServer, opts}, id: a)
+
+      for rack <- ["a", "b", "c"], do: :ok = MembershipServer.set_attributes(a, %{rack: rack})
+
+      refute_received {:asked, _incarnation}
+    end
+  end
+
   describe "attributes" do
     test "a node's own attributes are set at start and readable" do
       a = :"msattr_#{System.unique_integer([:positive])}"
@@ -172,9 +372,35 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
       :ok = MembershipServer.set_attributes(a, %{rack: "x"})
 
-      # b learns a's attributes through gossip (and a knows its own immediately)
-      assert MembershipServer.attributes(a, a) == %{rack: "x"}
-      assert eventually(fn -> MembershipServer.attributes(b, a) == %{rack: "x"} end)
+      # b learns a's attributes through gossip (and a knows its own immediately). The capability list
+      # rides along because the server puts it back on every runtime change.
+      expected = Capabilities.attributes(%{rack: "x"})
+      assert MembershipServer.attributes(a, a) == expected
+      assert eventually(fn -> MembershipServer.attributes(b, a) == expected end)
+    end
+
+    test "a runtime attribute change does not erase this build's capability list" do
+      # The attribute map is replaced wholesale, so without the merge in the server a caller setting a
+      # rack drops the list, and peers go on believing the emptied one: a live node is never suspected,
+      # so nothing raises the incarnation again to correct it.
+      a = :"msattr_cap_#{System.unique_integer([:positive])}"
+      seed = Capabilities.attributes(%{rack: "a"})
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: seed] ++ @timings}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{rack: "b"})
+
+      assert MembershipServer.attributes(a, a) == Capabilities.attributes(%{rack: "b"})
+    end
+
+    test "a caller that states a capability list keeps it, which is how a test plays another build" do
+      # The escape hatch, pinned here so it is not closed by accident: one VM cannot run two builds, so
+      # the multinode suite stands a node up advertising a list this build does not have.
+      a = :"msattr_cap_#{System.unique_integer([:positive])}"
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: %{}] ++ @timings}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, Capabilities.attributes(%{rack: "c"}, [:from_another_build]))
+
+      assert Capabilities.of(MembershipServer.attributes(a, a)) == [:from_another_build]
     end
   end
 
@@ -268,5 +494,17 @@ defmodule Malachi.Cluster.MembershipServerTest do
     UnknownMessages.assert_survives_unknown(name, :membership, fn ->
       assert MembershipServer.alive_members(name) == [name]
     end)
+  end
+
+  # The members a server names in the view it piggybacks on an ack, read by posing as a peer that pings it.
+  defp gossiped_members(server) do
+    probe = self()
+    GenServer.cast(server, {:ping, probe, {[], nil}})
+
+    receive do
+      {:"$gen_cast", {:ack, _from, {updates, _topology}}} -> updates |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+    after
+      1_000 -> flunk("#{server} never acked the ping")
+    end
   end
 end

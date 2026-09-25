@@ -19,6 +19,8 @@ defmodule Malachi.Cluster.MachineVersioningTest do
   alias Malachi.Auth.LockoutRegistry
   alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserRegistry
+  alias Malachi.Cluster.ClusterFlags
+  alias Malachi.Cluster.ClusterFlagsMachine
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Lease
   alias Malachi.Cluster.LeaseMachine
@@ -39,6 +41,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     {UserMachine, UserRegistry, :clock},
     {LockoutMachine, LockoutRegistry, :clock},
     {AclMachine, AclRegistry, :no_clock},
+    {ClusterFlagsMachine, ClusterFlags, :no_clock},
     {PolicyMachine, PolicyRegistry, :no_clock}
   ]
 
@@ -52,15 +55,22 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     describe "#{inspect(machine)}" do
       test "declares the shared machine version and maps every version to itself" do
         assert unquote(machine).version() == MachineVersion.version()
-        assert unquote(machine).version() == 2
+        # Version 2 is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version
+        # 3 where `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`; each time
+        # the other seven moved with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 3
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
       end
 
-      test "accepts {:machine_version, 0, 1} with the state unchanged" do
+      test "accepts ra's machine version no-op with the state unchanged" do
         state = unquote(machine).init(%{})
-        assert {^state, :ok} = unquote(machine).apply(meta(1), {:machine_version, 0, 1}, state)
+        current = MachineVersion.code_version()
+
+        for from <- 0..(current - 1) do
+          assert {^state, :ok} = unquote(machine).apply(meta(current), {:machine_version, from, current}, state)
+        end
       end
 
       test "refuses an unknown command with the versioned reply and the state unchanged" do
@@ -107,8 +117,8 @@ defmodule Malachi.Cluster.MachineVersioningTest do
           {:ok, introduced} when introduced <= effective ->
             assert {next, reply} == pure_apply(pure, clock, state, command, now)
 
-          # Unreachable while every table sits at 0, and the assertion that holds the day one does not:
-          # a command introduced above the group's effective version is refused, not applied.
+          # Reached since `{:enable_flag, 2}` was introduced at version 2: a command introduced above the
+          # group's effective version is refused, not applied, and identically on every member.
           {:ok, introduced} ->
             assert next == state
 
@@ -235,6 +245,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       StreamData.map(key, &{:unlock_key, &1}),
       StreamData.map(StreamData.integer(0..100_000), &{:cleanup, &1})
     ])
+  end
+
+  defp known_command(ClusterFlags) do
+    StreamData.map(StreamData.member_of([:batch_format, :compaction]), &{:enable_flag, &1})
   end
 
   defp known_command(AclRegistry) do
