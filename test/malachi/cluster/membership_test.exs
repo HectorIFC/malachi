@@ -5,12 +5,30 @@ defmodule Malachi.Cluster.MembershipTest do
   alias Malachi.Cluster.Membership
 
   describe "construction" do
-    test "self and peers start alive at incarnation 0" do
+    test "peers start alive at incarnation 0 and self starts one above them" do
       view = Membership.new(:self, peers: [:a, :b])
       assert Membership.alive_members(view) == [:a, :b, :self]
       assert Membership.status(view, :a) == :alive
-      assert Membership.incarnation(view, :self) == 0
+      assert Membership.incarnation(view, :a) == 0
+      # A seeded peer entry is a placeholder made before that peer said anything, so a member's own
+      # record has to outrank the placeholders its peers seed for it. See the next test for what breaks
+      # when it does not.
+      assert Membership.incarnation(view, :self) == 1
       assert Membership.status(view, :unknown) == nil
+    end
+
+    test "a seeded peer's own first announcement is adopted, attributes and all" do
+      # Both nodes seed each other and both announce themselves at their starting incarnation. When self
+      # started at 0 like the placeholders, every such announcement lost the {incarnation, rank} join as
+      # a duplicate and a peer's attributes never arrived. Liveness still converged, so nothing noticed
+      # until attributes carried something a peer acts on.
+      view = Membership.new(:self, peers: [:a])
+      announcement = {:a, :alive, 1, %{rack: "a", capabilities: [:batch_format]}}
+
+      {view, effect} = Membership.apply_update(view, announcement)
+
+      assert effect == {:applied, announcement}
+      assert Membership.attributes(view, :a) == %{rack: "a", capabilities: [:batch_format]}
     end
   end
 
@@ -102,8 +120,8 @@ defmodule Malachi.Cluster.MembershipTest do
       {view, effect} = Membership.set_attributes(view, %{rack: "b", dc: "east"})
 
       assert Membership.attributes(view, :self) == %{rack: "b", dc: "east"}
-      assert Membership.incarnation(view, :self) == 1
-      assert effect == {:applied, {:self, :alive, 1, %{rack: "b", dc: "east"}}}
+      assert Membership.incarnation(view, :self) == 2
+      assert effect == {:applied, {:self, :alive, 2, %{rack: "b", dc: "east"}}}
     end
 
     test "a member's attributes travel with the winning (higher-incarnation) update" do

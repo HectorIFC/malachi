@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.13.2"
+  @version "0.14.0"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -19,9 +19,11 @@ defmodule Malachi.MixProject do
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
       elixirc_paths: elixirc_paths(Mix.env()),
-      # `:mix` is a build-time app, so it is not in the default PLT; the `Mix.Tasks.*` admin task references
-      # Mix.Task/Mix.shell/Mix.raise, which dialyzer would otherwise flag as unknown functions.
-      dialyzer: [plt_add_apps: [:mix]]
+      # Both are apps dialyzer does not put in the default PLT, and both are referenced by code it
+      # analyses: `:mix` by the `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), and `:ex_unit`
+      # by the helpers under `test/support`, which are compiled in the test environment and analysed
+      # there. Without them every such call is reported as an unknown function.
+      dialyzer: [plt_add_apps: [:mix, :ex_unit]]
     ]
   end
 

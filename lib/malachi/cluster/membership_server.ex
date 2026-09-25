@@ -21,9 +21,9 @@ defmodule Malachi.Cluster.MembershipServer do
   On startup a node **joins** by sending each seed (its `:peers`) a `{:join, ...}`; the seed adds
   the joiner as `:alive` and replies with its full view, so the joiner learns the whole cluster at
   once instead of waiting for gossip to converge. Join is best-effort, gossip is the safety net if
-  a seed is unreachable. (A node that restarts after being declared dead would rejoin at
-  incarnation 0, which an existing `:dead` entry outranks; durable/higher rejoin incarnations are a
-  later concern.)
+  a seed is unreachable. A restarting node resumes its incarnation from disk, above everything its peers
+  still remember of the member it was (`Malachi.Cluster.MemberIncarnation`), so its announcement outranks
+  an existing record for it rather than being ignored as a duplicate or outranked by a stale `:dead`.
 
   The same gossip also **piggybacks the cluster's versioned routing topology** (a
   `Malachi.Cluster.RingTopology`): every message carries it alongside the view updates, and peers keep the
@@ -35,8 +35,12 @@ defmodule Malachi.Cluster.MembershipServer do
 
   use GenServer
 
+  require Logger
+
+  alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.RingTopology
+  alias Malachi.I18n
   alias Malachi.UnexpectedMessage
 
   @default_protocol_period 1_000
@@ -112,11 +116,36 @@ defmodule Malachi.Cluster.MembershipServer do
     self_ref = Keyword.get(opts, :self_ref) || Keyword.get(opts, :name) || self()
     ack_timeout = Keyword.get(opts, :ack_timeout, @default_ack_timeout)
 
-    membership_opts = [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})]
+    # Reserved here rather than handed in already reserved. A child spec is built once and reused on every
+    # supervisor restart, so a reservation made while the spec was built would seed this process at the
+    # number the FIRST one started from, below whatever it had raised itself to before it crashed, which
+    # is the permanent staleness `Malachi.Cluster.MemberIncarnation` exists to prevent (see its
+    # moduledoc). Reserving per process start means each one resumes above everything its predecessor
+    # could have announced.
+    reserved = reserve(Keyword.get(opts, :reserve))
+
+    membership_opts =
+      [peers: Keyword.get(opts, :peers, []), attributes: Keyword.get(opts, :attributes, %{})] ++
+        Keyword.take(reserved ++ opts, [:incarnation])
 
     state = %{
       view: Membership.new(self_ref, membership_opts),
       self: self_ref,
+      # The highest incarnation this node may reach before its next restart would start below what peers
+      # remember, and what to call when it gets there (see `Malachi.Cluster.MemberIncarnation`). A view
+      # built without a reservation never crosses, which is what keeps tests and the in-memory shape free
+      # of a disk.
+      ceiling: Keyword.get(reserved ++ opts, :ceiling, :infinity),
+      on_ceiling: Keyword.get(opts, :on_ceiling, fn _incarnation -> :error end),
+      # What to do when a new ceiling cannot be recorded: stop the node, so it comes back and reserves
+      # one it can trust. Seam, so a test observes the decision instead of taking the VM down.
+      stop_fun: Keyword.get(opts, :stop_fun, &System.stop/0),
+      # Latched once that decision is taken. `System.stop/0` is asynchronous, so this server keeps
+      # handling messages for the whole shutdown window, and without the latch every ping, ack and join
+      # would see the same incarnation above the same stale ceiling and try the write, the log and the
+      # stop again. It also stops this node announcing itself while the number it would announce is no
+      # longer backed by anything on disk.
+      stopping: false,
       # the cluster's versioned routing topology (a `Malachi.Cluster.RingTopology`), piggybacked on gossip
       # so a vnode split's ring change converges everywhere; `nil` until one is set/received.
       topology: Keyword.get(opts, :topology),
@@ -139,6 +168,21 @@ defmodule Malachi.Cluster.MembershipServer do
     {:ok, state}
   end
 
+  # A reservation is a function so it runs on every process start. No function means a caller that hands
+  # in `:incarnation` and `:ceiling` itself, or neither, which is every test and every in-memory use.
+  # A reservation that fails raises: coming up below what peers remember is worse than not coming up.
+  defp reserve(nil), do: []
+
+  defp reserve(reserve_fun) do
+    case reserve_fun.() do
+      {:ok, %{start: start, ceiling: ceiling}} ->
+        [incarnation: start, ceiling: ceiling]
+
+      {:error, reason} ->
+        raise I18n.t(:member_incarnation_unusable, path: "the data directory", reason: inspect(reason))
+    end
+  end
+
   @impl true
   def handle_call(:alive_members, _from, state), do: {:reply, Membership.alive_members(state.view), state}
   def handle_call(:view, _from, state), do: {:reply, state.view, state}
@@ -149,8 +193,15 @@ defmodule Malachi.Cluster.MembershipServer do
 
   def handle_call({:set_attributes, attributes}, _from, state) do
     # Update our own attributes locally (raising our incarnation); gossip carries it onward.
-    {view, _effect} = Membership.set_attributes(state.view, attributes)
-    {:reply, :ok, %{state | view: view}}
+    #
+    # `Malachi.Cluster.Membership` replaces the whole attribute map, so a caller setting a rack at runtime
+    # would erase the capability list this node advertises, and its peers would carry the emptied one:
+    # a live node is never suspected, so nothing raises its incarnation to correct it. Putting the list
+    # back here rather than asking every caller to remember it is what makes that impossible instead of
+    # documented. A caller that states a list keeps it, which is the seam the multinode tests use to
+    # stand a node up as though it ran another build (`Malachi.Cluster.Capabilities.ensure/1`).
+    {view, _effect} = Membership.set_attributes(state.view, Capabilities.ensure(attributes))
+    {:reply, :ok, put_view(state, view)}
   end
 
   def handle_call(:topology, _from, state), do: {:reply, state.topology, state}
@@ -202,7 +253,7 @@ defmodule Malachi.Cluster.MembershipServer do
   def handle_cast({:join, joiner, updates}, state) do
     state = merge_updates(state, updates)
     {view, _effect} = Membership.apply_update(state.view, {joiner, :alive, 0, %{}})
-    state = %{state | view: view}
+    state = put_view(state, view)
     cast(joiner, {:join_ok, state.self, gossip_payload(state)})
     {:noreply, state}
   end
@@ -250,7 +301,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
     if still_suspect? do
       {view, _effect} = Membership.confirm(state.view, target)
-      {:noreply, %{state | view: view}}
+      {:noreply, put_view(state, view)}
     else
       {:noreply, state}
     end
@@ -298,14 +349,63 @@ defmodule Malachi.Cluster.MembershipServer do
       {view, {:applied, _update}} ->
         incarnation = Membership.incarnation(view, target)
         Process.send_after(self(), {:suspicion_timeout, target, incarnation}, state.suspicion_timeout)
-        %{state | view: view}
+        put_view(state, view)
 
       {view, _effect} ->
-        %{state | view: view}
+        put_view(state, view)
+    end
+  end
+
+  # The one place the view is replaced, so the one place this node's own incarnation can be seen to rise.
+  #
+  # It rises only on a refutation or a deliberate attribute change, both rare, so crossing the reserved
+  # block is rare too and the durable write that follows stays off the failure detector's path.
+  #
+  # A write that fails stops the node. Carrying on would gossip incarnations above the last one on disk,
+  # and the next restart would then resume below what peers remember, where nothing ever corrects it:
+  # a live node is never suspected, so no refutation is provoked to lift the stale record. Stopping is
+  # recoverable, since the node comes back and reserves a block it can trust. Refusing to raise the
+  # incarnation instead, so as to stay within the block, would mean refusing to refute a suspicion, and
+  # the node would be declared dead and taken out of placement for certain rather than at risk.
+  defp put_view(state, view) do
+    state = %{state | view: view}
+
+    case Membership.incarnation(view, state.self) do
+      incarnation when is_integer(incarnation) and incarnation >= state.ceiling ->
+        extend_ceiling(state, incarnation)
+
+      _below_or_unreserved ->
+        state
+    end
+  end
+
+  # Already stopping: the decision was taken and the write already failed, so trying again would only add
+  # an fsync and a log line per gossip message until the VM goes down.
+  defp extend_ceiling(%{stopping: true} = state, _incarnation), do: state
+
+  defp extend_ceiling(state, incarnation) do
+    case state.on_ceiling.(incarnation) do
+      {:ok, ceiling} ->
+        %{state | ceiling: ceiling}
+
+      failed ->
+        Logger.error(I18n.t(:member_incarnation_ceiling_lost, incarnation: incarnation, reason: inspect(failed)))
+        state.stop_fun.()
+        %{state | stopping: true}
     end
   end
 
   # Outbound gossip payload piggybacked on every message: our view updates plus our current topology.
+  #
+  # A node that has lost its ceiling leaves **itself** out. Its incarnation may already be above the last
+  # one on disk, and during the shutdown window a refutation can raise it further; announcing that would
+  # leave peers remembering a number this node cannot resume above, which is the permanent staleness the
+  # reservation exists to prevent. Everything it knows about everyone else still travels: that news is
+  # not this node's to withhold.
+  defp gossip_payload(%{stopping: true} = state) do
+    {Enum.reject(Membership.updates(state.view), fn {member, _s, _i, _a} -> member == state.self end), state.topology}
+  end
+
   defp gossip_payload(state), do: {Membership.updates(state.view), state.topology}
 
   # Ingest a peer's gossip (the value bound in each message handler): merge its view updates and its
@@ -313,12 +413,12 @@ defmodule Malachi.Cluster.MembershipServer do
   # view still merges and the topology is left as-is.
   defp merge_updates(state, {updates, topology}) do
     {view, _effects} = Membership.merge(state.view, updates)
-    adopt_topology(%{state | view: view}, topology)
+    adopt_topology(put_view(state, view), topology)
   end
 
   defp merge_updates(state, updates) when is_list(updates) do
     {view, _effects} = Membership.merge(state.view, updates)
-    %{state | view: view}
+    put_view(state, view)
   end
 
   # Adopt `remote` if it is a newer topology than ours (CRDT last-version-wins), firing `on_topology` on

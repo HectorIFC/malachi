@@ -51,6 +51,7 @@ defmodule Malachi.Storage.FormatMarker do
   require Logger
 
   alias Malachi.I18n
+  alias Malachi.StartupRefusal
   alias Malachi.Storage.Directory
 
   @file_name "malachi.format"
@@ -69,10 +70,6 @@ defmodule Malachi.Storage.FormatMarker do
   # The oldest release that understands each format. The bridge release is the first that reads the
   # marker at all, so it is the floor for format 1 as far as the marker can express one.
   @first_release %{1 => "0.12.0"}
-
-  # sysexits EX_CONFIG: the node cannot run with what it was given. A distinct status so a crash loop
-  # under a restart policy is recognizable, and so a service manager can be told not to restart on it.
-  @exit_status 78
 
   @required_keys ["format", "written_by", "requires"]
 
@@ -115,7 +112,7 @@ defmodule Malachi.Storage.FormatMarker do
 
   @doc "The exit status of a refused start (78, EX_CONFIG)."
   @spec exit_status() :: non_neg_integer()
-  def exit_status, do: @exit_status
+  defdelegate exit_status(), to: StartupRefusal
 
   @doc """
   Renders `marker` as the file's content.
@@ -392,15 +389,12 @@ defmodule Malachi.Storage.FormatMarker do
     do: Logger.info(I18n.t(:data_format_marker_created_existing, format: format, path: file))
 
   @doc """
-  Refuses the start: logs one line through I18n, prints the same line on stderr (a container log
-  shows it even when the logger has not flushed), and halts with `exit_status/0` through `halt_fun`.
+  Refuses the start through `Malachi.StartupRefusal`, which logs the reason, repeats it on stderr and
+  halts with `exit_status/0` through `halt_fun`. Only the detail is this module's to say.
   """
   @spec refuse!(refusal(), (non_neg_integer() -> any())) :: any()
   def refuse!(reason, halt_fun \\ &System.halt/1) do
-    detail = refusal_detail(reason)
-    Logger.error(I18n.t(:data_format_refused, detail: detail))
-    IO.puts(:stderr, I18n.t(:data_format_refused, detail: detail))
-    halt_fun.(@exit_status)
+    StartupRefusal.refuse!(refusal_detail(reason), halt_fun)
   end
 
   defp refusal_detail({:too_new, marker, supported, file}) do
