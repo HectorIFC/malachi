@@ -679,14 +679,41 @@ defmodule ChaosCheckerTest do
       refute Copies.passing?(entry.verdict)
     end
 
-    test "a copy with fewer records is lagging", %{tmp_dir: tmp_dir} do
+    test "a copy with fewer records than its peers is behind", %{tmp_dir: tmp_dir} do
       [{_, r1}, {_, r2}, {_, r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
       write_copy(r1, [@six])
       write_copy(r2, [Enum.take(@six, 5)])
       write_copy(r3, [@six])
 
       entry = only_entry(nodes)
-      assert {entry.verdict, entry.nodes} == {:lagging, ["n2"]}
+      assert {entry.verdict, entry.nodes} == {:behind, ["n2"]}
+    end
+
+    # The shape the storage drill caught twice (issue #175) and reported as `lagging`, which named the
+    # wrong direction: the copy is not behind its peers, it is holding a record its segment's seal
+    # excludes. They are different defects and only one of them is a lost write.
+    test "a copy with more records than its peers is ahead", %{tmp_dir: tmp_dir} do
+      [{_, r1}, {_, r2}, {_, r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      write_copy(r1, [Enum.take(@six, 5)])
+      write_copy(r2, [@six])
+      write_copy(r3, [Enum.take(@six, 5)])
+
+      entry = only_entry(nodes)
+      assert {entry.verdict, entry.nodes} == {:ahead, ["n2"]}
+    end
+
+    test "the control plane's sealed length decides the direction, not what the peers hold",
+         %{tmp_dir: tmp_dir} do
+      # Two copies short of the seal and one at it: the minority is the one that is RIGHT, and measuring
+      # it against its peers would call it ahead. The number the segment was sealed at is what it is
+      # ahead or behind of.
+      [{_, r1}, {_, r2}, {_, r3}] = nodes = roots(tmp_dir, ~w(n1 n2 n3))
+      write_copy(r1, [Enum.take(@six, 5)])
+      write_copy(r2, [@six])
+      write_copy(r3, [Enum.take(@six, 5)])
+
+      entry = only_entry(nodes, %{state: "sealed", length: 6})
+      assert {entry.verdict, entry.nodes} == {:behind, ["n1", "n3"]}
     end
 
     test "a flipped byte inside the valid prefix is reported as damage on that node", %{tmp_dir: tmp_dir} do
@@ -868,7 +895,9 @@ defmodule ChaosCheckerTest do
       write_copy(r1, [@six])
       write_copy(r2, [Enum.take(@six, 4)])
 
-      assert {only_entry(nodes).verdict, only_entry(nodes).nodes} == {:lagging, ["n1", "n2"]}
+      # No majority to be ahead or behind OF, and no control plane to break the tie: naming a direction
+      # here would be exactly the invention the old name made.
+      assert {only_entry(nodes).verdict, only_entry(nodes).nodes} == {:record_count_split, ["n1", "n2"]}
     end
 
     test "survey orders segments numerically and honors a filter, even for a segment nobody holds",
@@ -928,7 +957,20 @@ defmodule ChaosCheckerTest do
       assert Copies.passing?(:identical)
       assert Copies.passing?(:benign)
 
-      for verdict <- [:damaged, :trailing_garbage, :missing, :empty, :extra, :lagging, :length_mismatch, :content] do
+      verdicts = [
+        :damaged,
+        :trailing_garbage,
+        :missing,
+        :empty,
+        :extra,
+        :ahead,
+        :behind,
+        :record_count_split,
+        :length_mismatch,
+        :content
+      ]
+
+      for verdict <- verdicts do
         refute Copies.passing?(verdict)
       end
     end
@@ -1010,7 +1052,7 @@ defmodule ChaosCheckerTest do
 
     test "returns the last report once the attempts run out" do
       sleep = fn 10 -> :ok end
-      assert [%{verdict: :content}] = Copies.settle(reports([:missing, :lagging, :content]), 3, 10, sleep)
+      assert [%{verdict: :content}] = Copies.settle(reports([:missing, :behind, :content]), 3, 10, sleep)
     end
 
     test "an empty report is retried like a failing one, and returned as it stood" do
@@ -1093,7 +1135,7 @@ defmodule ChaosCheckerTest do
 
       # Without the control plane the agreement of the copies is still reported, and the summary says why it
       # does not count.
-      unread = %{segment: "s", control: :unavailable, verdict: :lagging, nodes: ["n1"], copies: %{}}
+      unread = %{segment: "s", control: :unavailable, verdict: :behind, nodes: ["n1"], copies: %{}}
 
       assert List.last(Copies.lines([unread])) ==
                "COPIES segments=1 whole_file=differs content=differs control=unavailable"

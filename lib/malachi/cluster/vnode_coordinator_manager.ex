@@ -1,21 +1,45 @@
 defmodule Malachi.Cluster.VnodeCoordinatorManager do
   @moduledoc """
   Keeps this node's per-vnode coordinators in sync with the vnodes it currently leads (1C-b-ii). On a
-  **level-triggered** reconcile. Right after start (`handle_continue`) and every `:interval` ms - it
-  compares the vnodes this node leads now (`:leading`) with the ones it already runs coordinators for,
-  then **starts** coordinators for newly-led vnodes and **stops** them for vnodes it no longer leads.
+  **level-triggered** reconcile. Right after start (`handle_continue`), every `:interval` ms, and on a
+  `:topology_changed` nudge - it reads the vnode placement, compares the vnodes this node leads now with
+  the ones it already runs coordinators for, then **starts** coordinators for newly-led vnodes and
+  **stops** them for vnodes it no longer leads.
   Generic and testable via seams:
 
-    * `:leading` - `(-> [vnode_id])`, the vnodes this node currently leads (e.g. `leading_vnodes/3`
-      over live Raft leadership);
+    * `:placement` - `(-> {:ok, placement} | {:error, reason})`, the vnodes the cluster has **right now**
+      (e.g. the live ring this node tracks). Read once per reconcile, so the two derivations below can
+      never disagree about which vnodes exist within a pass;
+    * `:leading` - `(placement -> [vnode_id])`, the vnodes this node currently leads (e.g.
+      `leading_vnodes/4` over live `ra` membership and leadership);
     * `:spawn` - `(vnode_id -> pid)`, starts that vnode's coordinators (e.g. a `Supervisor` under a
       `DynamicSupervisor`) and returns the pid of that (sub)tree, which the manager monitors and later
       stops by;
     * `:stop` - `(pid -> any)`, stops a vnode's coordinators;
-    * `:version_servers` - optional `(-> [{machine, server_id}])`, the local vnode members whose machine
-      version to watch (default none);
+    * `:version_servers` - optional `(placement -> [{machine, server_id}])`, the local vnode members whose
+      machine version to watch (default none);
     * `:interval` - reconcile period in ms (default 5_000);
     * `:name` - optional registered name.
+
+  ## Why the placement is a seam and not a list
+
+  Every other input here is level-triggered, and this one used to be the exception: the placement was
+  resolved once at boot and captured. A vnode this node gains afterwards, through a rebalance that adds
+  it as an `ra` member or through a split that creates a new vnode, was then invisible, so none of its
+  per-vnode work ran until the node restarted for some other reason: its segments never expired, its
+  under-replicated ones were never repaired, its consumer-group coordinator never started, and its member
+  was never watched for a machine version it had stopped applying.
+
+  ## An unreadable placement is inert
+
+  A read that fails leaves the running set, and the last version statuses, exactly as they are. The
+  alternative, treating a failed read as "this node leads nothing", would stop **every** coordinator on
+  the node over a transient read error, which is worse than the gap above. The state is logged on the
+  transition into and out of that condition (not on every pass) and reported on every pass through the
+  `[:malachi, :cluster, :vnode_reconcile]` telemetry event.
+
+  An empty placement is **not** a failed read: a cluster genuinely has no vnodes before its ring is
+  published, and a node that hosts none of them correctly runs no coordinators.
 
   Idempotent: a transient leadership flap just starts/stops coordinators; the underlying work is
   idempotent and routed through `ra`, so a brief double-run only redoes work (the same reasoning as
@@ -29,19 +53,25 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   once per reconcile with a log each time instead of spinning. A deliberate stop demonitors first, so
   it is never mistaken for a death.
 
-  Version watch: on the same tick, every member returned by `:version_servers` is checked with
-  `Malachi.Cluster.MachineVersion.check/3`, whether this node leads it or not, since a follower is just
-  as able to stop applying its log. The last status per member is kept here, so a member that stays
-  stuck is logged once, and a member no longer listed is forgotten.
+  Version watch: on the same tick and over the same placement snapshot, every member returned by
+  `:version_servers` is checked with `Malachi.Cluster.MachineVersion.check/3`, whether this node leads it
+  or not, since a follower is just as able to stop applying its log. The last status per member is kept
+  here, so a member that stays stuck is logged once, and a member no longer listed is forgotten.
   """
 
   use GenServer
 
   require Logger
+
   alias Malachi.Cluster.MachineVersion
   alias Malachi.I18n
+  alias Malachi.Telemetry
+  alias Malachi.UnexpectedMessage
 
   @default_interval 5_000
+
+  @typedoc "What `:placement` answers: the vnodes that exist now, or why they could not be read."
+  @type placement_read :: {:ok, [term()]} | {:error, term()}
 
   @doc "Starts the manager. See the module doc for required options."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -54,20 +84,40 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   @spec reconcile_now(GenServer.server()) :: [term()]
   def reconcile_now(server), do: GenServer.call(server, :reconcile_now)
 
+  @doc """
+  Tells the manager the cluster topology changed, so it reconciles now instead of at the next tick.
+
+  A nudge, not the mechanism: the periodic reconcile is what makes the manager correct, and this only
+  makes a ring change visible sooner. A change that publishes no topology event, such as a rebalance
+  adding this node to a vnode's `ra` cluster, is still caught by the tick. Asynchronous and safe to send
+  to a node that runs no manager.
+  """
+  @spec topology_changed(GenServer.server()) :: :ok
+  def topology_changed(server), do: GenServer.cast(server, :topology_changed)
+
   @doc "The last machine version status per watched member, keyed by server id."
   @spec version_status(GenServer.server()) :: %{term() => MachineVersion.status()}
   def version_status(server), do: GenServer.call(server, :version_status)
 
+  @doc "Whether the last reconcile could read the placement."
+  @spec placement_status(GenServer.server()) :: :ok | :unreadable
+  def placement_status(server), do: GenServer.call(server, :placement_status)
+
   @impl true
   def init(opts) do
     state = %{
+      placement: Keyword.fetch!(opts, :placement),
       leading: Keyword.fetch!(opts, :leading),
       spawn: Keyword.fetch!(opts, :spawn),
       stop: Keyword.fetch!(opts, :stop),
-      version_servers: Keyword.get(opts, :version_servers, fn -> [] end),
+      version_servers: Keyword.get(opts, :version_servers, fn _placement -> [] end),
       version_status: %{},
+      # `:ok` until a read fails, so the first failure is a transition and gets logged.
+      placement_status: :ok,
       interval: Keyword.get(opts, :interval, @default_interval),
-      running: %{}
+      running: %{},
+      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
+      unexpected_shapes: MapSet.new()
     }
 
     {:ok, state, {:continue, :reconcile}}
@@ -95,6 +145,15 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
     end
   end
 
+  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+
+  # Reconciles without rescheduling: the periodic timer keeps its own cadence, so a burst of nudges
+  # costs extra passes (idempotent) and never shifts or multiplies the tick.
+  @impl true
+  def handle_cast(:topology_changed, state), do: {:noreply, reconcile(state)}
+
+  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+
   @impl true
   def handle_call(:reconcile_now, _from, state) do
     state = reconcile(state)
@@ -103,6 +162,17 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
 
   def handle_call(:version_status, _from, state), do: {:reply, state.version_status, state}
 
+  def handle_call(:placement_status, _from, state), do: {:reply, state.placement_status, state}
+
+  def handle_call(message, _from, state) do
+    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
+  end
+
+  defp drop_unexpected(state, kind, message) do
+    shapes = UnexpectedMessage.drop(state.unexpected_shapes, :vnode_coordinator, kind, message)
+    %{state | unexpected_shapes: shapes}
+  end
+
   defp reconcile_and_schedule(state) do
     schedule(state)
     reconcile(state)
@@ -110,21 +180,77 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
 
   defp schedule(state), do: Process.send_after(self(), :reconcile, state.interval)
 
-  # Starts coordinators for newly-led vnodes and stops them for no-longer-led ones (stop first, so a
-  # vnode that changed hands frees its coordinators before the new set spins up).
   defp reconcile(state) do
-    desired = MapSet.new(state.leading.())
-    running = MapSet.new(Map.keys(state.running))
-
-    state
-    |> stop_vnodes(MapSet.difference(running, desired))
-    |> start_vnodes(MapSet.difference(desired, running))
-    |> check_versions()
+    case read_placement(state.placement) do
+      {:ok, placement} -> reconcile_placement(state, placement)
+      {:error, reason} -> placement_unreadable(state, reason)
+    end
   end
 
-  defp check_versions(state) do
+  # Total over whatever the seam answers: a raising seam and one that answers a shape we do not know
+  # are both "the placement could not be read", which is inert, rather than a crash that would take the
+  # whole coordinator tree down with this process.
+  @spec read_placement((-> placement_read())) :: placement_read()
+  defp read_placement(placement) do
+    case placement.() do
+      {:ok, vnodes} when is_list(vnodes) -> {:ok, vnodes}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_placement, other}}
+    end
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  # Starts coordinators for newly-led vnodes and stops them for no-longer-led ones (stop first, so a
+  # vnode that changed hands frees its coordinators before the new set spins up).
+  defp reconcile_placement(state, placement) do
+    desired = MapSet.new(state.leading.(placement))
+    running = MapSet.new(Map.keys(state.running))
+    stopping = MapSet.difference(running, desired)
+    starting = MapSet.difference(desired, running)
+    servers = state.version_servers.(placement)
+
+    state =
+      state
+      |> stop_vnodes(stopping)
+      |> start_vnodes(starting)
+      |> check_versions(servers)
+      |> placement_readable()
+
+    Telemetry.vnode_reconcile(
+      length(placement),
+      length(servers),
+      MapSet.size(desired),
+      MapSet.size(starting),
+      MapSet.size(stopping),
+      :ok
+    )
+
+    state
+  end
+
+  # Nothing starts, nothing stops, no version status is recomputed: the set stays exactly as the last
+  # good read left it. Reported every pass, logged only on the way in.
+  defp placement_unreadable(state, reason) do
+    Telemetry.vnode_reconcile(0, map_size(state.version_status), map_size(state.running), 0, 0, :unreadable)
+
+    if state.placement_status == :ok do
+      Logger.warning(I18n.t(:vnode_placement_unreadable, reason: inspect(reason)))
+    end
+
+    %{state | placement_status: :unreadable}
+  end
+
+  defp placement_readable(%{placement_status: :unreadable} = state) do
+    Logger.info(I18n.t(:vnode_placement_recovered))
+    %{state | placement_status: :ok}
+  end
+
+  defp placement_readable(state), do: state
+
+  defp check_versions(state, servers) do
     version_status =
-      Map.new(state.version_servers.(), fn {machine, server_id} ->
+      Map.new(servers, fn {machine, server_id} ->
         last_status = Map.get(state.version_status, server_id, :ok)
         {status, _transition} = MachineVersion.check(machine, server_id, last_status)
         {server_id, status}

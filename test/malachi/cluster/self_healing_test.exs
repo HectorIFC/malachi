@@ -144,9 +144,17 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
   test "does nothing when every sealed segment is fully replicated" do
     [a, b, c] = [start_broker(), start_broker(), start_broker()]
-    {metadata, _segment_id} = sealed_segment([a, b, c], a, ["x"])
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x"])
 
-    assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) == %{applied: [], failed: [], repaired: []}
+    result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
+
+    assert %{applied: [], failed: [], repaired: []} = result
+
+    # `sealed_segment/3` records a byte size of 0 while seeding real records on `a`, so the one copy
+    # that holds anything reads as running past its segment's recorded size. That is the integrity
+    # probe's other answer doing its job on a fixture that lies about the size, not a repair: nothing
+    # is copied from this list, it is handed to `Malachi.Cluster.SealedOverrun` to settle.
+    assert result.unsettled == [{segment_id, a}]
   end
 
   # Builds metadata with one sealed segment held by ALL of `replica_set` (each replica appended
@@ -189,12 +197,13 @@ defmodule Malachi.Cluster.SelfHealingTest do
     result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
 
     # no metadata change (the replica set is intact); the lost copy is rebuilt in place
-    assert result == %{applied: [], failed: [], repaired: [{segment_id, c}]}
+    assert result == %{applied: [], failed: [], repaired: [{segment_id, c}], unsettled: []}
     assert ReplicationServer.stored_bytes(c, segment_id) == byte_size
     assert read_values(c, segment_id) == ["x", "y", "z"]
 
     # a second pass finds nothing to do
-    assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) == %{applied: [], failed: [], repaired: []}
+    assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) ==
+             %{applied: [], failed: [], repaired: [], unsettled: []}
   end
 
   test "repairs a truncated sealed copy from its truncation point, not by recopying" do
@@ -219,7 +228,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
     result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
 
-    assert result == %{applied: [], failed: [], repaired: [{segment_id, c}]}
+    assert result == %{applied: [], failed: [], repaired: [{segment_id, c}], unsettled: []}
     assert ReplicationServer.stored_bytes(c, segment_id) == byte_size
     assert read_values(c, segment_id) == ["x", "y", "z"]
   end
@@ -247,7 +256,8 @@ defmodule Malachi.Cluster.SelfHealingTest do
     {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 1, byte_size, 0})
 
     # the caller believes all three are live; the dead pid does not answer the probe and is skipped
-    assert SelfHealing.heal_sealed(metadata, [a, b, dead], 3) == %{applied: [], failed: [], repaired: []}
+    assert SelfHealing.heal_sealed(metadata, [a, b, dead], 3) ==
+             %{applied: [], failed: [], repaired: [], unsettled: []}
   end
 
   # Replaces the sealed segment's replica set so the restarted replica's NEW ref takes the dead
@@ -280,7 +290,8 @@ defmodule Malachi.Cluster.SelfHealingTest do
     metadata = rewrite_replicas(metadata, segment_id, [a, b, c])
 
     ExUnit.CaptureLog.capture_log(fn ->
-      assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) == %{applied: [], failed: [], repaired: []}
+      assert SelfHealing.heal_sealed(metadata, [a, b, c], 3) ==
+               %{applied: [], failed: [], repaired: [], unsettled: []}
     end)
   end
 
@@ -321,7 +332,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
       result = SelfHealing.heal_sealed(metadata, [:a], 1, failed: MapSet.new([{segment_id, :a}]))
 
-      assert result == %{applied: [], failed: [{segment_id, :no_live_source}], repaired: []}
+      assert result == %{applied: [], failed: [{segment_id, :no_live_source}], repaired: [], unsettled: []}
     end
 
     test "a failed copy of a broker outside the set, of an active segment or of an unknown one changes nothing" do
@@ -357,6 +368,6 @@ defmodule Malachi.Cluster.SelfHealingTest do
     {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
     {:ok, _last} = ReplicationServer.replicate(a, segment_id, [a], 0, records(["x"]))
 
-    assert SelfHealing.heal_sealed(metadata, [a, b, d], 3) == %{applied: [], failed: [], repaired: []}
+    assert SelfHealing.heal_sealed(metadata, [a, b, d], 3) == %{applied: [], failed: [], repaired: [], unsettled: []}
   end
 end

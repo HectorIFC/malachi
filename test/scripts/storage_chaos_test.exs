@@ -216,7 +216,7 @@ defmodule StorageChaosTest do
 
       assert %{"evidence_dir" => evidence} = result(ctx)
       assert File.ls!(evidence) |> Enum.sort() == ["01-repair", "02-repair"]
-      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=lagging"
+      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=behind"
       assert File.dir?(Path.join([evidence, "01-repair", "malachi-cluster-2"]))
 
       calls = docker_calls(ctx)
@@ -230,7 +230,7 @@ defmodule StorageChaosTest do
 
       assert %{"evidence_dir" => evidence} = result(ctx)
       assert File.ls!(evidence) |> Enum.sort() == ["01-repair", "02-repair", "03-invariant-4"]
-      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=lagging"
+      assert File.read!(Path.join([evidence, "01-repair", "copies.txt"])) =~ "COPIES verdict=behind"
       assert File.read!(Path.join([evidence, "03-invariant-4", "copies.txt"])) =~ "COPIES verdict=content"
 
       for capture <- ["01-repair", "03-invariant-4"], n <- 1..3 do
@@ -439,7 +439,7 @@ defmodule StorageChaosTest do
             copy_line malachi1
             copy_line malachi2
             if [ "${STUB_REPAIR:-}" = never ]; then
-              echo "COPIES verdict=lagging segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi2"
+              echo "COPIES verdict=behind segment=chaos_acked-r0-s1 control=sealed:6 nodes=malachi2"
               echo "COPIES segments=1 whole_file=differs content=differs control=ok"
               exit 1
             fi

@@ -124,7 +124,9 @@ defmodule ChaosChecker.Copies do
           | :missing
           | :empty
           | :extra
-          | :lagging
+          | :ahead
+          | :behind
+          | :record_count_split
           | :length_mismatch
           | :content
 
@@ -320,7 +322,7 @@ defmodule ChaosChecker.Copies do
       (nodes = nodes_where(copies, &(&1.status == :missing))) != [] -> missing_verdict(copies, nodes, control)
       (nodes = partly_empty(copies)) != [] -> {:empty, nodes}
       control == :absent -> {:extra, Enum.sort(Map.keys(copies))}
-      (nodes = minority(copies, & &1.records)) != [] -> {:lagging, nodes}
+      (nodes = minority(copies, & &1.records)) != [] -> record_count_verdict(copies, nodes, control)
       (nodes = off_sealed_length(copies, control)) != [] -> {:length_mismatch, nodes}
       (nodes = minority(copies, & &1.digest)) != [] -> {:content, nodes}
       (nodes = minority(copies, &layout/1)) != [] -> {:benign, nodes}
@@ -350,6 +352,51 @@ defmodule ChaosChecker.Copies do
   defp partly_empty(copies) do
     empty = nodes_where(copies, &(&1.status == :empty))
     if length(empty) == map_size(copies), do: [], else: empty
+  end
+
+  # Which DIRECTION the named copies differ in, which the count comparison above deliberately does not
+  # compute: `minority/2` groups on equality, so it names a copy that is ahead exactly as it names one
+  # that is behind. The two are different defects. A copy behind the others is data this replica lost or
+  # has not caught up on yet; a copy ahead of them is holding records its segment's seal excludes, which
+  # is the only shape the drill ever caught (issue #175).
+  #
+  # With a sealed length from the control plane, that length decides BOTH which copies are named and
+  # which way they differ. Peer agreement is the wrong reference when the odd copy out is the correct
+  # one: two replicas short of the seal and one at it would otherwise report the right copy as ahead.
+  # The named list cannot come back empty here, because this is only reached once the counts disagree
+  # across nodes, and at most one of several distinct counts can equal the sealed length.
+  defp record_count_verdict(copies, minority_nodes, control) do
+    case control do
+      %{state: "sealed", length: length} -> direction(copies, off_sealed_length(copies, control), length)
+      _no_sealed_length -> peer_direction(copies, minority_nodes)
+    end
+  end
+
+  # Without a sealed length, what the OTHER copies hold is the best reference there is, and only when
+  # they agree on it. On a tie every node is named (`minority/2`), so there is nothing left to compare
+  # against and no direction to name.
+  defp peer_direction(copies, nodes) do
+    copies
+    |> Map.drop(nodes)
+    |> Map.values()
+    |> Enum.map(& &1.records)
+    |> Enum.uniq()
+    |> case do
+      [records] -> direction(copies, nodes, records)
+      _none_or_several -> {:record_count_split, nodes}
+    end
+  end
+
+  defp direction(copies, nodes, reference) do
+    counts = Enum.map(nodes, &copies[&1].records)
+
+    cond do
+      Enum.all?(counts, &(&1 > reference)) -> {:ahead, nodes}
+      Enum.all?(counts, &(&1 < reference)) -> {:behind, nodes}
+      # Named copies that differ in different directions at once: one direction would be a lie about
+      # the other, which is the mistake the old single name made.
+      true -> {:record_count_split, nodes}
+    end
   end
 
   defp off_sealed_length(copies, %{state: "sealed", length: length}), do: nodes_where(copies, &(&1.records != length))

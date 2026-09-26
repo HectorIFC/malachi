@@ -92,7 +92,13 @@ The check retries for a minute and prints a
 topology was read; a report with `control=unavailable` never certifies.
 When it fails, it prints, per node, every segment whose copies are not identical: the files with their
 sizes and md5s, the records and bytes that verify, a digest of the valid records, and a verdict naming
-the nodes that disagree. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
+the nodes that disagree. A disagreement in record counts is named by its direction, because the two
+directions are different defects: `behind` is a copy short of what the segment holds, which is data this
+replica lost or has not caught up on, while `ahead` is a copy holding records its segment's seal excludes
+([#175](https://github.com/HectorIFC/malachi/issues/175)). `record_count_split` is the case where the
+named copies differ both ways at once, or where a two-copy tie leaves nothing to compare against. When
+the control plane's sealed length is known it is what the direction is measured from, not what the peers
+happen to hold. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
 numbered directory per failed check (`01-repair`, `02-invariant-4`): the report, the host's substrate and
 load, and each node's copy of those segments. That happens before the second phase, whose fresh cluster
 deletes the volumes. The result JSON names the run's directory in `evidence_dir`. The repairs of the

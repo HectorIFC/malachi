@@ -16,8 +16,8 @@ defmodule Malachi.Test.FaultySegmentStore do
       FaultySegmentStore.fail(directory, :sync, {:error, :enospc})
       FaultySegmentStore.count(directory, :flushing_sync)
 
-  Failable operations: `:open`, `:recover`, `:open_read`, `:append`, `:sync`, `:seal`, `:read`,
-  `:verify`, `:rebuild_index`. Counted ones are the same, plus `:flushing_sync`, a sync that actually
+  Failable operations: `:open`, `:recover`, `:open_read`, `:append`, `:sync`, `:seal`, `:truncate_to`,
+  `:read`, `:verify`, `:rebuild_index`. Counted ones are the same, plus `:flushing_sync`, a sync that actually
   had buffered records to write (a sync with nothing buffered is a no-op in the real store, and counting
   it would make a coalescing assertion meaningless).
 
@@ -32,7 +32,7 @@ defmodule Malachi.Test.FaultySegmentStore do
   @table __MODULE__
   @owner Module.concat(__MODULE__, Owner)
 
-  @failable [:open, :recover, :open_read, :append, :sync, :seal, :read, :verify, :rebuild_index]
+  @failable [:open, :recover, :open_read, :append, :sync, :seal, :truncate_to, :read, :verify, :rebuild_index]
 
   @doc "Creates the rules table on this node. Idempotent."
   @spec start() :: :ok
@@ -119,6 +119,10 @@ defmodule Malachi.Test.FaultySegmentStore do
 
   @impl true
   def seal(handle), do: intercept(directory_of(handle), :seal, fn -> ElixirStore.seal(handle) end)
+
+  @impl true
+  def truncate_to(handle, end_offset),
+    do: intercept(directory_of(handle), :truncate_to, fn -> ElixirStore.truncate_to(handle, end_offset) end)
 
   @impl true
   def verify(directory, segment_id, opts),

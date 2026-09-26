@@ -507,6 +507,149 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
+  describe "truncate_to/2" do
+    test "drops the records at or above the target and leaves the file exactly its remainder",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      path = Segment.path(store.segment)
+      cut = frame_position(path, 3)
+
+      assert {:ok, truncated} = ElixirStore.truncate_to(store, 3)
+
+      assert ElixirStore.next_offset(truncated) == 3
+      assert ElixirStore.logical_bytes(truncated) == cut
+      assert File.stat!(path).size == cut
+      assert {:ok, records} = ElixirStore.read(truncated, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1", "v2"]
+    end
+
+    test "the truncation survives a recovery, which is the whole point of it", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      {:ok, truncated} = ElixirStore.truncate_to(store, 3)
+      :ok = ElixirStore.close(truncated)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert ElixirStore.next_offset(recovered) == 3
+      assert ElixirStore.integrity(recovered) == :ok
+      assert {:ok, records} = ElixirStore.read(recovered, 0, 10)
+      assert Enum.map(records, & &1.value) == ["v0", "v1", "v2"]
+    end
+
+    test "the index sidecar is rewritten, so a verify of the truncated segment passes",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..9, index_interval: 16)
+      path = Segment.path(store.segment)
+      cut = frame_position(path, 4)
+
+      {:ok, truncated} = ElixirStore.truncate_to(store, 4)
+      :ok = ElixirStore.close(truncated)
+
+      assert {:ok, %{records: 4, bytes: ^cut}} = ElixirStore.verify(directory, "segment-0")
+    end
+
+    test "a target at or above the segment's own end changes nothing", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      path = Segment.path(store.segment)
+      before = File.read!(path)
+
+      assert {:ok, at_end} = ElixirStore.truncate_to(store, 3)
+      assert {:ok, above_end} = ElixirStore.truncate_to(at_end, 9)
+
+      assert ElixirStore.next_offset(above_end) == 3
+      assert File.read!(path) == before
+    end
+
+    test "a target below the base offset is refused", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2, base_offset: 100)
+      path = Segment.path(store.segment)
+      before = File.read!(path)
+
+      assert ElixirStore.truncate_to(store, 99) == {:error, :below_base_offset}
+      assert File.read!(path) == before
+    end
+
+    test "a target at the base offset empties the segment and leaves it readable", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4, base_offset: 100)
+      path = Segment.path(store.segment)
+
+      assert {:ok, emptied} = ElixirStore.truncate_to(store, 100)
+
+      assert ElixirStore.next_offset(emptied) == 100
+      assert ElixirStore.logical_bytes(emptied) == 0
+      assert File.stat!(path).size == 0
+      assert ElixirStore.read(emptied, 100, 10) == :eof
+    end
+
+    test "a handle with records still buffered is refused", %{tmp_dir: directory} do
+      {:ok, store} = open(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("a"), rec("b")])
+
+      assert ElixirStore.truncate_to(store, 1) == {:error, :pending_records}
+    end
+
+    test "a handle whose damaged tail was preserved is refused, and the bytes stay", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      :ok = ElixirStore.close(store)
+      path = Segment.path(store.segment)
+      corrupt_payload_byte(path, 2)
+      before = File.read!(path)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0")
+
+      assert ElixirStore.truncate_to(recovered, 1) == {:error, :damaged_tail}
+      :ok = ElixirStore.close(recovered)
+      assert File.read!(path) == before
+    end
+
+    # A handle whose counters claim more records than its file holds cannot say where the cut belongs,
+    # and guessing would delete records the copy still serves. Built by hand because recovery derives
+    # the count from the file and so can never disagree with it.
+    test "a handle that claims more records than its file holds is refused", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2)
+      overstated = %{store | next_offset: 10, segment: %{store.segment | record_count: 10}}
+
+      assert ElixirStore.truncate_to(overstated, 5) == {:error, :short_segment}
+    end
+
+    test "a descriptor that will not read answers the device error instead of cutting", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      StorageFaults.close_descriptor!(store)
+
+      assert ElixirStore.truncate_to(store, 3) == {:error, :einval}
+    end
+
+    test "a preallocated segment gives its whole tail back, and closing trims nothing further",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4, prealloc_bytes: 8192)
+      path = Segment.path(store.segment)
+      assert File.stat!(path).size == 8192
+      cut = frame_position(path, 3)
+
+      assert {:ok, truncated} = ElixirStore.truncate_to(store, 3)
+      assert File.stat!(path).size == cut
+
+      :ok = ElixirStore.close(truncated)
+      assert File.stat!(path).size == cut
+    end
+
+    # The one operation allowed on a sealed segment: it issues no offset, it gives one back, and it is
+    # what makes a recorded seal true on a copy that came back holding more than the seal says.
+    test "a sealed segment can still be truncated, and stays sealed", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..4)
+      {:ok, sealed} = ElixirStore.seal(store)
+      path = Segment.path(sealed.segment)
+      cut = frame_position(path, 3)
+
+      assert {:ok, truncated} = ElixirStore.truncate_to(sealed, 3)
+
+      assert ElixirStore.sealed?(truncated)
+      assert ElixirStore.next_offset(truncated) == 3
+      assert File.stat!(path).size == cut
+      assert ElixirStore.append(truncated, [rec("x")]) == {:error, :sealed}
+    end
+  end
+
   describe "open" do
     test "refuses to clobber an existing segment", %{tmp_dir: directory} do
       {:ok, _store} = open(directory)

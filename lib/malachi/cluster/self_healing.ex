@@ -31,6 +31,15 @@ defmodule Malachi.Cluster.SelfHealing do
   In-place corruption that keeps the byte size is out of this probe's reach by construction, since it
   compares sizes: that is what `Malachi.Cluster.Scrubber` verifies checksums for.
 
+  The same probe answers the opposite question at no extra cost. A copy whose bytes RUN PAST the sealed
+  `byte_size` is reported as `:unsettled`, for `Malachi.Cluster.SealedOverrun` to bring back down to
+  the recorded length and fence there. Until that has happened a copy can be past the recorded length
+  for two very different reasons, one benign (a follower that never sealed its store still carries its
+  preallocated tail) and one not (it holds a record the seal excludes), and the byte count alone cannot
+  tell them apart. It does not have to: both end at the same place, and a copy that has been settled is
+  byte-exact and stops being reported. Nothing is repaired from this list, so mistaking the benign case
+  for the other one costs a marker and an fsync, once per copy, ever.
+
   ## A copy that failed in storage
 
   A sealed copy its replication server has latched as failed (see "Storage failures" in
@@ -57,7 +66,8 @@ defmodule Malachi.Cluster.SelfHealing do
   @type result :: %{
           applied: [Metadata.command()],
           failed: [{Metadata.segment_id(), term()}],
-          repaired: [{Metadata.segment_id(), Metadata.broker()}]
+          repaired: [{Metadata.segment_id(), Metadata.broker()}],
+          unsettled: [{Metadata.segment_id(), Metadata.broker()}]
         }
 
   @doc """
@@ -92,7 +102,8 @@ defmodule Malachi.Cluster.SelfHealing do
     finalize(%{
       applied: healed.applied,
       failed: healed.failed ++ integrity.failed,
-      repaired: integrity.repaired
+      repaired: integrity.repaired,
+      unsettled: integrity.unsettled
     })
   end
 
@@ -177,13 +188,21 @@ defmodule Malachi.Cluster.SelfHealing do
         not MapSet.member?(under_replicated, segment.id) and
         Enum.all?(segment.replica_set, &(&1 in live_brokers))
     end)
-    |> Enum.reduce(%{repaired: [], failed: []}, &probe_and_repair(&1, opts, &2))
+    |> Enum.reduce(%{repaired: [], failed: [], unsettled: []}, &probe_and_repair(&1, opts, &2))
   end
 
   defp probe_and_repair(segment, opts, acc) do
     probes = Enum.map(segment.replica_set, &{&1, probe_stored_bytes(&1, segment.id)})
     lost = for {replica, {:ok, bytes}} <- probes, bytes < segment.byte_size, do: replica
+    over = for {replica, {:ok, bytes}} <- probes, bytes > segment.byte_size, do: replica
+
+    # A copy above the recorded size is still a valid SOURCE: what a backfill copies is bounded by the
+    # segment's recorded end (`repair_copy/5`), so the bytes past it cannot travel. Narrowing this to
+    # equality would leave a short copy with no source at all for as long as its peers were untrimmed,
+    # which is every copy in a cluster that has not run the settling pass yet.
     sources = for {replica, {:ok, bytes}} <- probes, bytes >= segment.byte_size, do: replica
+
+    acc = %{acc | unsettled: Enum.map(over, &{segment.id, &1}) ++ acc.unsettled}
 
     cond do
       lost == [] -> acc
@@ -240,7 +259,8 @@ defmodule Malachi.Cluster.SelfHealing do
     %{
       applied: Enum.reverse(acc.applied),
       failed: Enum.reverse(acc.failed),
-      repaired: Enum.reverse(acc.repaired)
+      repaired: Enum.reverse(acc.repaired),
+      unsettled: Enum.reverse(acc.unsettled)
     }
   end
 end

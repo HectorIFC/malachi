@@ -154,9 +154,42 @@ defmodule Malachi.Cluster.RaCluster do
   Whether `server_id` is currently its cluster's **leader**. Pass the local server id
   (`{cluster_name, node()}`) to ask "does this node lead?". An unreachable or unformed cluster
   answers false: never assume leadership.
+
+  `:ra.members/2` is a leader call: a follower forwards it, and a cluster mid-election answers nothing
+  until `timeout` elapses. A caller that polls many clusters on one pass should pass a timeout well
+  below its own period, since the answer for a cluster without a leader is `false` either way and
+  waiting the default only delays the rest of the pass.
   """
-  @spec leader?(server_id()) :: boolean()
-  def leader?(server_id), do: match?({:ok, _members, ^server_id}, :ra.members(server_id))
+  @spec leader?(server_id(), timeout()) :: boolean()
+  def leader?(server_id, timeout \\ @default_timeout) do
+    match?({:ok, _members, ^server_id}, :ra.members(server_id, timeout))
+  end
+
+  @doc """
+  Whether this node hosts a member of `server_id`'s cluster, from `ra`'s own local view.
+
+  This is the live answer to "do I host this vnode", and it is deliberately **not** read from the
+  cluster's recorded placement: a placement is a routing decision, while membership changes under it
+  whenever a member is added or removed (`Malachi.Cluster.Rebalance`), and the two disagree from the
+  moment a rebalance runs.
+
+  `:ra_leaderboard` is an ETS table each node keeps for the clusters it hosts a member of; `ra` writes
+  it from the member process itself on every cluster or leadership change and clears it when the member
+  terminates, so it is populated exactly on the nodes that host a member. The read is local, never
+  reaches the network, and answers `false` rather than raising when the table or the entry is absent.
+
+  Because `ra` writes and clears the entry from the member process, this answer can lag a membership
+  change by the time that process takes to apply it: a member just removed can still read as local for a
+  moment. That direction is safe for every caller here, since a vnode that is gone answers "not the
+  leader" and has no machine-version counters, so a stale `true` produces no work and no false alarm.
+  """
+  @spec local_member?(server_id()) :: boolean()
+  def local_member?({cluster_name, _node} = server_id) do
+    case :ra_leaderboard.lookup_members(cluster_name) do
+      members when is_list(members) -> server_id in members
+      _unknown -> false
+    end
+  end
 
   @doc """
   Stops and deletes the cluster, removing its on-disk state. Prefer a `server_id` addressing a real

@@ -413,6 +413,30 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records `copies` copies of sealed segments brought to the length the control plane recorded, by
+  `result` (`:fenced`, `:trimmed` or `:failed`), and the `records` a trim gave up.
+
+  Split by result for the same reason `record_orphaned_fence/0` is split from
+  `record_fences_reconciled/1`: settling a copy is overwhelmingly a marker and nothing else, and the
+  rare copy that gave up records was holding data its segment's seal excludes. One counter would make
+  the second unfindable inside the first, and the first pass after an upgrade produces thousands of it.
+  """
+  def record_sealed_copies_settled(result, copies, records) do
+    :ets.update_counter(
+      @metrics_table,
+      {:sealed_copies_settled, result},
+      {2, copies},
+      {{:sealed_copies_settled, result}, 0}
+    )
+
+    if records > 0 do
+      :ets.update_counter(@metrics_table, :sealed_records_dropped, {2, records}, {:sealed_records_dropped, 0})
+    end
+
+    :ok
+  end
+
+  @doc """
   Records `count` ticks on which the broker's control plane reconcile did not complete, by `reason`
   (`:skipped`, `:down` or `:timeout`; anything else is counted as `:other`, so the exported label set
   stays closed). See `Malachi.Telemetry.reconcile_degraded/1`.
@@ -635,6 +659,10 @@ defmodule Malachi.Metrics do
         scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),
         orphaned_fences: get_counter(:orphaned_fences),
         fences_reconciled: get_counter(:fences_reconciled),
+        sealed_copies_fenced: get_counter({:sealed_copies_settled, :fenced}),
+        sealed_copies_trimmed: get_counter({:sealed_copies_settled, :trimmed}),
+        sealed_copies_unsettled: get_counter({:sealed_copies_settled, :failed}),
+        sealed_records_dropped: get_counter(:sealed_records_dropped),
         reconcile_degraded: reconcile_degraded_counts(),
         unexpected_messages: unexpected_message_counts()
       },

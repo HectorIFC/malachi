@@ -22,6 +22,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :storage, :scrub],
     [:malachi, :cluster, :orphaned_fence],
     [:malachi, :cluster, :fence_reconciled],
+    [:malachi, :cluster, :sealed_copies_settled],
     [:malachi, :cluster, :reconcile_degraded],
     [:malachi, :retention, :skip],
     [:malachi, :retention, :expire],
@@ -91,6 +92,10 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :cluster, :fence_reconciled], %{count: count}, _metadata, _config) do
     Metrics.record_fences_reconciled(count)
+  end
+
+  def handle_event([:malachi, :cluster, :sealed_copies_settled], measurements, metadata, _config) do
+    Metrics.record_sealed_copies_settled(metadata.result, measurements.copies, measurements.records)
   end
 
   def handle_event([:malachi, :cluster, :reconcile_degraded], %{count: count}, %{reason: reason}, _config) do
