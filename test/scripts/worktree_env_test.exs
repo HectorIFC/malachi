@@ -13,6 +13,10 @@ defmodule WorktreeEnvTest do
   @script Path.expand("../../scripts/worktree-env.sh", __DIR__)
   @repo_root Path.expand("../..", __DIR__)
 
+  # Unset in every command this file runs: git reads them ahead of `-C` and `cd`, so a suite started from
+  # a git hook would otherwise build its fixtures in, and point the script at, another repository.
+  @no_git_env [{"GIT_DIR", nil}, {"GIT_WORK_TREE", nil}, {"GIT_COMMON_DIR", nil}, {"GIT_INDEX_FILE", nil}]
+
   setup do
     dir = TmpDir.path("worktree-env")
     main = Path.join(dir, "main")
@@ -33,7 +37,7 @@ defmodule WorktreeEnvTest do
   end
 
   defp git!(cd, args) do
-    {_out, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+    {_out, 0} = System.cmd("git", args, cd: cd, env: @no_git_env, stderr_to_stdout: true)
     :ok
   end
 
@@ -63,7 +67,13 @@ defmodule WorktreeEnvTest do
 
   defp run(ctx, issue, dir, opts \\ []) do
     path = Keyword.get(opts, :path, "#{ctx.stub_bin}:#{System.get_env("PATH")}")
-    env = [{"PATH", path}, {"STUB_TAKEN_PORT", Keyword.get(opts, :taken, "")}]
+    # Later entries win: the caller's `:env` can set back what @no_git_env clears.
+    env =
+      Map.new(@no_git_env)
+      |> Map.merge(%{"PATH" => path, "STUB_TAKEN_PORT" => Keyword.get(opts, :taken, "")})
+      |> Map.merge(Map.new(Keyword.get(opts, :env, [])))
+      |> Enum.to_list()
+
     System.cmd("bash", [@script, to_string(issue), dir], env: env, stderr_to_stdout: true)
   end
 
@@ -121,6 +131,35 @@ defmodule WorktreeEnvTest do
       File.mkdir_p!(sub)
 
       assert {_output, 0} = run(ctx, 250, sub)
+      assert File.exists?(env_file(ctx))
+    end
+  end
+
+  describe "a worktree whose path needs quoting" do
+    test "is written so that sourcing the file gives back the path", ctx do
+      spaced = Path.join([ctx.dir, "with space", "wt"])
+      File.mkdir_p!(Path.dirname(spaced))
+      git!(ctx.main, ["worktree", "add", "-q", "-b", "spaced", spaced])
+      spaced = resolve(spaced)
+
+      assert {_output, 0} = run(ctx, 250, spaced)
+
+      script = ~S(set -a; . "$1"; printf '%s\n%s' "$MALACHI_LOG_DATA_DIR" "$MALACHI_RA_DATA_DIR")
+      file = Path.join(spaced, "worktree.env")
+
+      assert {out, 0} = System.cmd("bash", ["-c", script, "_", file], stderr_to_stdout: true)
+      assert out == Path.join(spaced, "tmp/data/log") <> "\n" <> Path.join(spaced, "tmp/data/ra")
+    end
+  end
+
+  describe "an inherited GIT_DIR" do
+    test "pointing at another repository does not decide what the directory is", ctx do
+      other = Path.join(ctx.dir, "other")
+      File.mkdir_p!(other)
+      git!(other, ["init", "-q"])
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree, env: [{"GIT_DIR", Path.join(other, ".git")}])
+      assert output =~ "wrote"
       assert File.exists?(env_file(ctx))
     end
   end

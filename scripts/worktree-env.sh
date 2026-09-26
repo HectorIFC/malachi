@@ -21,6 +21,10 @@
 # a compose project name there would orphan that volume with the data inside.
 set -euo pipefail
 
+# Git reads these ahead of `-C <dir>`: inherited from a hook or a `git rebase -x`, they would point every
+# command below at another repository, and a valid worktree would be refused as the main checkout.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+
 usage() {
   echo "usage: $0 <issue number> <worktree directory>" >&2
   exit 64
@@ -101,8 +105,10 @@ tmp="$env_file.tmp.$$"
   for i in "${!names[@]}"; do
     echo "${names[$i]}=$((base + i))"
   done
-  echo "MALACHI_LOG_DATA_DIR=$root/tmp/data/log"
-  echo "MALACHI_RA_DATA_DIR=$root/tmp/data/ra"
+  # Quoted for the shell that sources the file: a worktree path may hold spaces or other characters a
+  # bare assignment would split on.
+  printf 'MALACHI_LOG_DATA_DIR=%q\n' "$root/tmp/data/log"
+  printf 'MALACHI_RA_DATA_DIR=%q\n' "$root/tmp/data/ra"
   echo "MALACHI_NODE=malachi_$issue@127.0.0.1"
   echo "COMPOSE_PROJECT_NAME=malachi-$issue"
 } >"$tmp"
