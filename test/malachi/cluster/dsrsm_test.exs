@@ -164,7 +164,7 @@ defmodule Malachi.Cluster.DSRSMTest do
       assert DSRSM.merged_metadata(DSRSM.single(seed)) == seed
     end
 
-    test "committed_offsets/3 and topic_policy/2 route by topic" do
+    test "committed_offsets/3 and topic_policy_name/2 route by topic" do
       dsrsm = DSRSM.single()
       {dsrsm, {:ok, _root}} = DSRSM.command(dsrsm, "events", {:create_topic, "events", 4})
       {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:commit_offset, "g", "events", %{{"events", 0} => 7}})
@@ -173,8 +173,9 @@ defmodule Malachi.Cluster.DSRSMTest do
 
       assert DSRSM.committed_offsets(dsrsm, "g", "events") == %{{"events", 0} => 7}
       assert DSRSM.committed_offsets(dsrsm, "g", "other") == %{}
-      assert DSRSM.topic_policy(dsrsm, "events") == %{spread_by: "rack"}
-      assert DSRSM.topic_policy(dsrsm, "other") == nil
+      # The binding is the topic's own state; the definition behind the name is a cluster object.
+      assert DSRSM.topic_policy_name(dsrsm, "events") == "p"
+      assert DSRSM.topic_policy_name(dsrsm, "other") == nil
     end
   end
 

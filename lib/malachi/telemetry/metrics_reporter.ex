@@ -22,8 +22,12 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :storage, :scrub],
     [:malachi, :cluster, :orphaned_fence],
     [:malachi, :cluster, :fence_reconciled],
+    [:malachi, :cluster, :reconcile_degraded],
     [:malachi, :retention, :skip],
     [:malachi, :retention, :expire],
+    [:malachi, :retention, :orphan_left],
+    [:malachi, :retention, :orphan_removed],
+    [:malachi, :retention, :unresolved_policy],
     [:malachi, :retention, :sweep],
     [:malachi, :process, :unexpected_message]
   ]
@@ -89,12 +93,28 @@ defmodule Malachi.Telemetry.MetricsReporter do
     Metrics.record_fences_reconciled(count)
   end
 
+  def handle_event([:malachi, :cluster, :reconcile_degraded], %{count: count}, %{reason: reason}, _config) do
+    Metrics.record_reconcile_degraded(reason, count)
+  end
+
   def handle_event([:malachi, :retention, :skip], %{offsets: offsets}, metadata, _config) do
     Metrics.record_retention_skip(metadata.topic, metadata.group, metadata.origin, metadata.span, offsets)
   end
 
   def handle_event([:malachi, :retention, :expire], %{bytes: bytes}, %{topic: topic, result: result}, _config) do
     Metrics.record_retention_expire(topic, bytes, result)
+  end
+
+  def handle_event([:malachi, :retention, :orphan_left], %{count: count}, %{topic: topic}, _config) do
+    Metrics.record_retention_orphan_left(topic, count)
+  end
+
+  def handle_event([:malachi, :retention, :orphan_removed], %{count: count}, _metadata, _config) do
+    Metrics.record_retention_orphan_removed(count)
+  end
+
+  def handle_event([:malachi, :retention, :unresolved_policy], %{count: count}, %{topic: topic}, _config) do
+    Metrics.record_retention_unresolved_policy(topic, count)
   end
 
   def handle_event([:malachi, :retention, :sweep], %{duration_us: duration_us}, _metadata, _config) do

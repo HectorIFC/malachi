@@ -25,6 +25,7 @@ defmodule Malachi.Metadata do
   # We define apply/2 (the Raft-style transition function), which shadows Kernel.apply/2.
   import Kernel, except: [apply: 2]
 
+  alias Malachi.Cluster.Policy
   alias Malachi.Keyspace
 
   @type topic_name :: String.t()
@@ -83,19 +84,11 @@ defmodule Malachi.Metadata do
   @typedoc "Identifies a consumer group's position for a topic."
   @type group_topic :: {group(), topic_name()}
 
-  @type policy_name :: String.t()
+  @typedoc "A policy's name. The shape it names lives in `Malachi.Cluster.Policy`."
+  @type policy_name :: Policy.name()
 
-  @typedoc """
-  A named storage policy: per-topic retention overrides and a placement spread attribute. Both keys
-  are optional; a policy applies only the ones it sets, falling back to the global defaults otherwise.
-  """
-  @type policy :: %{
-          optional(:retention) => %{
-            optional(:max_age_ms) => non_neg_integer() | nil,
-            optional(:max_bytes) => non_neg_integer() | nil
-          },
-          optional(:spread_by) => term() | nil
-        }
+  @typedoc "A named storage policy (see `Malachi.Cluster.Policy`)."
+  @type policy :: Policy.t()
 
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
@@ -455,20 +448,45 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
-    if is_binary(name) and name != "" and is_map(policy) do
+    # The contents are checked, not just the shape: a policy whose `max_bytes` is a binary is accepted
+    # by `is_map/1` and then never fires, because `Malachi.Cluster.Retention` compares it with `>`.
+    #
+    # Tightening what an existing command accepts changes what a replay of the Raft log produces, which
+    # is normally a reason not to do it. It is safe here and only here: nothing in `lib/` emits
+    # `:define_policy` yet (the commands exist and nothing reaches them, which is what #185 is about),
+    # so no log in the field contains one. Once a caller exists, this rule can only be widened.
+    if Policy.valid_name?(name) and Policy.valid?(policy) do
       {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
     else
       {state, {:error, :invalid_policy}}
     end
   end
 
+  # Binds a topic to a policy NAME. The name is not checked against a definition here, and cannot be:
+  # the definitions are an administrative object of the cluster (`Malachi.Cluster.PolicyStore`), and a
+  # `ra` state machine may only read its own replicated state, so a vnode has no way to know which names
+  # exist. A topic bound to a name nobody defined resolves to no policy and uses the global defaults,
+  # which is what a topic with no policy does; refusing the binding here would instead make every
+  # binding fail, since the vnode's own (deprecated) definitions are empty.
+  #
+  # Whoever offers this to an operator checks the name against the store first, so a typo is caught
+  # where it can be reported rather than becoming a silent fallback (#194).
+  #
+  # This relaxed what the command accepts while leaving it at machine version 0, which the versioning
+  # rule would normally forbid: a member on older code refuses a name it cannot find while a newer one
+  # stores it, and the two replicas then hold different states with no error anywhere. It is admissible
+  # here on one invariant, which is narrow and worth stating because it is not obvious from this file:
+  # NOTHING in `lib/` emits `:set_topic_policy`. No log written by any release can contain one, so
+  # there is no entry whose replay could differ between versions. `Malachi.SetTopicPolicyGuardTest`
+  # fails the build the day that stops being true, and whoever adds the first caller owes this command
+  # a new shape at a new machine version before the caller ships.
   defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
     cond do
       not Map.has_key?(state.topics, topic) ->
         {state, {:error, :no_such_topic}}
 
-      policy_name != nil and not Map.has_key?(state.policies, policy_name) ->
-        {state, {:error, :no_such_policy}}
+      policy_name != nil and not Policy.valid_name?(policy_name) ->
+        {state, {:error, :invalid_policy}}
 
       true ->
         topics = Map.update!(state.topics, topic, fn topic -> %{topic | policy: policy_name} end)
@@ -710,15 +728,29 @@ defmodule Malachi.Metadata do
     |> Enum.sort()
   end
 
-  @doc "The policy named `name`, or `nil` if undefined."
+  @doc """
+  The policy named `name` in this vnode's own (deprecated) definitions, or `nil`.
+
+  Definitions moved to `Malachi.Cluster.PolicyStore`, because they are an administrative object of the
+  cluster rather than state a vnode owns, and keeping them here is what made a topic lose its policy
+  when it moved between vnodes. `{:define_policy, name, policy}` stays appliable so every log ever
+  written still replays the same way, and this is the only thing that reads what it wrote. Nothing in
+  the data path does.
+  """
   @spec get_policy(t(), policy_name()) :: policy() | nil
   def get_policy(%__MODULE__{} = state, name), do: Map.get(state.policies, name)
 
-  @doc "The policy governing `topic` (its associated policy), or `nil` if none/unknown (use globals)."
-  @spec topic_policy(t(), topic_name()) :: policy() | nil
-  def topic_policy(%__MODULE__{} = state, topic) do
+  @doc """
+  The NAME of the policy `topic` points at, or `nil` if it points at none or the topic is unknown.
+
+  The binding stays here, and only the binding: which policy a topic uses is a fact about that topic,
+  so it travels with the topic when a vnode split moves it. `Malachi.Cluster.PolicyStore` resolves the
+  name to the definition.
+  """
+  @spec topic_policy_name(t(), topic_name()) :: policy_name() | nil
+  def topic_policy_name(%__MODULE__{} = state, topic) do
     case Map.get(state.topics, topic) do
-      %{policy: name} when is_binary(name) -> Map.get(state.policies, name)
+      %{policy: name} when is_binary(name) -> name
       _topic_without_policy_or_unknown -> nil
     end
   end

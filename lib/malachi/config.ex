@@ -5,7 +5,15 @@ defmodule Malachi.Config do
   Extracted from `config/runtime.exs` so the rules can be tested directly. That file is skipped
   entirely under `config_env() == :test`, so anything defined inline in it is unreachable from the
   suite; a pure function here is not.
+
+  `checked/4` is the other half of the same idea, applied where the value is finally used rather than
+  where it is parsed: the config layer turns an environment variable into a term without judging it,
+  and the process that needs it decides whether the term can do the job.
   """
+
+  require Logger
+
+  alias Malachi.I18n
 
   @doc """
   Normalizes an on-disk data directory taken from an environment variable.
@@ -122,6 +130,132 @@ defmodule Malachi.Config do
           _malformed_or_negative ->
             raise "MALACHI_RA_MACHINE_VERSION must be a non-negative integer, got: #{inspect(raw)}"
         end
+    end
+  end
+
+  @doc """
+  The whole number in `raw`, or `default` when the variable is absent or blank. Anything else raises,
+  so the node refuses to boot.
+
+  The counterpart of `checked/4`, and what separates them is what being wrong costs. `checked/4` judges
+  a value that parsed: `MALACHI_SCRUB_INTERVAL_MS=0` is a number, the operator's intent is legible, and
+  the documented default is a reasonable stand-in, so refusing to boot there would turn one lost knob
+  into a lost node. This one judges whether there is a number at all.
+
+  `Integer.parse/1` keeps the leading digits and discards the rest, which is worse than refusing and
+  worse than defaulting: `600_000` arrives as `600` and `10m` as `10`, values the operator never wrote
+  and that no default can stand in for, because nothing here knows what was meant. The ones that hurt
+  are the ones that come out smaller. `MALACHI_RETENTION_MAX_AGE_MS=7_776_000_000` would expire
+  everything sealed more than seven milliseconds ago, on every replica, with no way back.
+
+  `var` is the environment variable's own name, because that is what the operator has to go and fix.
+
+  ## Examples
+
+      iex> Malachi.Config.integer("MALACHI_X", nil, 5)
+      5
+
+      iex> Malachi.Config.integer("MALACHI_X", " ", 5)
+      5
+
+      iex> Malachi.Config.integer("MALACHI_X", " 12 ", 5)
+      12
+  """
+  @spec integer(String.t(), String.t() | nil, value) :: integer() | value when value: term()
+  def integer(var, raw, default), do: parsed(var, raw, default, &Integer.parse/1, "a whole number")
+
+  @doc """
+  The number in `raw` as a float, or `default` when the variable is absent or blank. Anything else
+  raises, for the reason given in `integer/3`.
+
+  `Float.parse/1` truncates the same way, and a decimal comma is the everyday case: `0,5` arrives as
+  `0.0`, which as a memory threshold means the alarm fires immediately and forever.
+
+  ## Examples
+
+      iex> Malachi.Config.float("MALACHI_X", nil, 0.7)
+      0.7
+
+      iex> Malachi.Config.float("MALACHI_X", "0.5", 0.7)
+      0.5
+  """
+  @spec float(String.t(), String.t() | nil, value) :: float() | value when value: term()
+  def float(var, raw, default), do: parsed(var, raw, default, &Float.parse/1, "a number")
+
+  defp parsed(_var, nil, default, _parse, _shape), do: default
+
+  defp parsed(var, raw, default, parse, shape) when is_binary(var) and is_binary(raw) do
+    case String.trim(raw) do
+      "" ->
+        default
+
+      trimmed ->
+        case parse.(trimmed) do
+          {value, ""} -> value
+          _malformed -> raise "#{var} must be #{shape}, got: #{inspect(raw)}"
+        end
+    end
+  end
+
+  @doc """
+  `value` when `valid?` accepts it, otherwise `default`, saying out loud which setting was refused.
+
+  Environment variables reach a process already parsed but not judged: `MALACHI_SCRUB_INTERVAL_MS=0`
+  is a valid integer and a busy loop, and `MALACHI_RETENTION_SKIP_LEDGER_MAX=0` is a valid integer and
+  a `FunctionClauseError` inside a server the application supervisor starts. Refusing to boot over an
+  operator's typo turns one lost knob into a lost node, so the documented default is used and the line
+  names the setting, what arrived and what is being used instead.
+
+  `setting` appears in the log, so it should be the name the operator can act on.
+
+  ## Examples
+
+      iex> Malachi.Config.checked(5_000, :scrubber_interval, 60_000, &(is_integer(&1) and &1 > 0))
+      5_000
+
+  """
+  @spec checked(value, atom(), value, (value -> boolean())) :: value when value: term()
+  def checked(value, setting, default, valid?) do
+    if valid?.(value) do
+      value
+    else
+      Logger.warning(I18n.t(:setting_invalid, setting: setting, value: inspect(value), default: inspect(default)))
+      default
+    end
+  end
+
+  @doc """
+  Normalizes the orphan sweep mode taken from `MALACHI_RETENTION_ORPHAN_SWEEP`.
+
+  `nil` or a blank value is `:delete`, the documented default. `delete`, `report` and `off` are
+  accepted whatever their case and surrounding whitespace. Anything else raises.
+
+  Raising rather than falling back is the same rule as `ra_machine_version_pin/1`, and for the same
+  reason: this is a knob whose wrong value is not a lost knob. `checked/4` exists for an interval,
+  where the cost of refusing the value is one cadence; here `MALACHI_RETENTION_ORPHAN_SWEEP=Report`
+  from an operator who meant NOT to delete would have selected the mode that deletes, and said
+  nothing. A node that refuses to start is a problem an operator sees; directories that are gone are
+  not.
+
+  ## Examples
+
+      iex> Malachi.Config.retention_orphan_sweep("  Report ")
+      :report
+
+      iex> Malachi.Config.retention_orphan_sweep(nil)
+      :delete
+
+  """
+  @spec retention_orphan_sweep(String.t() | nil) :: :delete | :report | :off
+  def retention_orphan_sweep(nil), do: :delete
+
+  def retention_orphan_sweep(raw) when is_binary(raw) do
+    case raw |> String.trim() |> String.downcase() do
+      "" -> :delete
+      "delete" -> :delete
+      "report" -> :report
+      "off" -> :off
+      _other -> raise "MALACHI_RETENTION_ORPHAN_SWEEP must be delete, report or off, got: #{inspect(raw)}"
     end
   end
 end

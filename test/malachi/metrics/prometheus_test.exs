@@ -57,6 +57,20 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ "malachi_tls_enabled 1\n"
   end
 
+  test "the degraded-reconcile series carries every reason, zeroes included" do
+    # A node that stops reconciling keeps serving the view it holds, correctly and increasingly stale,
+    # so this total is the only thing that says the control plane stopped answering. Every reason is
+    # exported even at zero: a series that appears only after the first degraded tick cannot be alerted
+    # on with `increase()` nor asserted to be zero.
+    out = render([])
+
+    assert out =~ "# TYPE malachi_broker_reconcile_degraded_total counter\n"
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="skipped"} 4)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="down"} 0)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="timeout"} 1)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="other"} 0)
+  end
+
   test "operation counters are emitted" do
     out = render([])
 
@@ -232,6 +246,9 @@ defmodule Malachi.Metrics.PrometheusTest do
           }
         ],
         expired: [%{topic: "orders", segments: 4, bytes: 4096}, %{topic: "audit", segments: 1, bytes: 10}],
+        orphans_left: [%{topic: "orders", directories: 3}],
+        orphans_removed: 2,
+        unresolved_policies: [%{topic: "orders", sweeps: 4}],
         failures: %{migrating: 1, segment_active: 0, other: 2},
         sweeps: sweeps(5, 1_789_000_100.5)
       }
@@ -280,6 +297,19 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert out =~ ~s(malachi_retention_segments_expired_total{topic="orders"} 4\n)
       assert out =~ ~s(malachi_retention_bytes_expired_total{topic="orders"} 4096\n)
       assert out =~ ~s(malachi_retention_bytes_expired_total{topic="audit"} 10\n)
+    end
+
+    test "the orphan directories an expire left behind and the ones the sweep reclaimed are both exported" do
+      out = render_retention(retention())
+
+      assert out =~ ~s(malachi_retention_orphan_directories_left_total{topic="orders"} 3\n)
+      assert out =~ ~s(malachi_retention_orphan_directories_removed_total 2\n)
+    end
+
+    test "a topic held back by a policy name that does not resolve is named, so the disk is not invisible" do
+      out = render_retention(retention())
+
+      assert out =~ ~s(malachi_retention_unresolved_policy_sweeps_total{topic="orders"} 4\n)
     end
 
     test "every refusal reply has a series, including the ones that never happened" do

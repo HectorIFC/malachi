@@ -416,6 +416,11 @@ defmodule Malachi.I18n do
       "pt_BR" => "processo %{server} respondendo {:error, :unknown_call} a uma chamada inesperada: %{message}",
       "en_US" => "%{server} process answering {:error, :unknown_call} to an unexpected call: %{message}"
     },
+    # An operator-supplied setting the process that uses it could not accept (`Malachi.Config.checked/4`)
+    setting_invalid: %{
+      "pt_BR" => "⚠️ %{setting} não aceita o valor %{value}; usando o padrão %{default}",
+      "en_US" => "⚠️ %{setting} does not accept the value %{value}; using the default %{default}"
+    },
     unexpected_messages_log_limit: %{
       "pt_BR" =>
         "processo %{server} já registrou %{limit} formatos de mensagem inesperada; os próximos são só " <>
@@ -424,11 +429,9 @@ defmodule Malachi.I18n do
         "%{server} process has logged %{limit} unexpected message shapes; further ones are only counted " <>
           "in malachi_unexpected_messages_total"
     },
-    scrubber_invalid_interval: %{
-      "pt_BR" =>
-        "intervalo de scrub %{interval} não é um número positivo de milissegundos, usando o padrão de %{default}ms",
-      "en_US" =>
-        "scrub interval %{interval} is not a positive number of milliseconds, using the default of %{default}ms"
+    scrub_metadata_unavailable: %{
+      "pt_BR" => "⚠️ scrub pulou a passada: o plano de controle não respondeu (%{reason}); a próxima tenta de novo",
+      "en_US" => "⚠️ the scrub skipped the pass: the control plane did not answer (%{reason}); the next one tries again"
     },
     scrub_segment_damaged: %{
       "pt_BR" => "scrub encontrou %{segment_id} danificado (%{reason} no byte %{position})%{outcome}",
@@ -553,6 +556,27 @@ defmodule Malachi.I18n do
     ra_machine_version_recovered: %{
       "pt_BR" => "membro ra %{server} (%{machine}) voltou a suportar a versão efetiva %{effective}",
       "en_US" => "ra member %{server} (%{machine}) supports the effective version %{effective} again"
+    },
+    # Malachi.BrokerServer: the control plane reconcile runs off the broker's loop, so its two ways of
+    # not finishing are the only place an operator hears about them. One key each: they are different
+    # failures and lead to different checks.
+    broker_reconcile_task_down: %{
+      "pt_BR" =>
+        "⚠️ O reconcile do control plane caiu (%{reason}); o nó segue servindo a visão que já tem, " <>
+          "que envelhece até o próximo tick conseguir ler",
+      "en_US" =>
+        "⚠️ The control plane reconcile crashed (%{reason}); the node keeps serving the view it already " <>
+          "holds, which goes stale until a later tick manages to read"
+    },
+    broker_reconcile_task_timeout: %{
+      "pt_BR" =>
+        "⚠️ O reconcile do control plane passou de %{timeout_ms}ms e foi encerrado; alguma chamada " <>
+          "remota não retornou (o bootstrap de um vnode não tem timeout próprio) e o nó segue " <>
+          "servindo a visão que já tem",
+      "en_US" =>
+        "⚠️ The control plane reconcile overran %{timeout_ms}ms and was killed; a remote call did not " <>
+          "return (a vnode bootstrap has no timeout of its own) and the node keeps serving the view it " <>
+          "already holds"
     },
     ring_publish_refused_completing: %{
       "pt_BR" =>
@@ -695,9 +719,45 @@ defmodule Malachi.I18n do
           "════════════════════════════════════════════════════════════════"
     },
     # Retention: data a consumer was moved past (Malachi.Retention.SkipReporter)
-    retention_skip_setting_invalid: %{
-      "pt_BR" => "⚠️ %{setting} precisa ser um inteiro dentro do limite e veio %{value}; usando o padrão %{default}",
-      "en_US" => "⚠️ %{setting} must be an integer within its bound and was %{value}; using the default %{default}"
+    retention_expire_call_failed: %{
+      "pt_BR" =>
+        "⚠️ o plano de controle não respondeu ao delete do segmento %{segment} (%{reason}); os bytes " <>
+          "foram mantidos e a próxima varredura tenta de novo",
+      "en_US" =>
+        "⚠️ the control plane did not answer the delete of segment %{segment} (%{reason}); the bytes " <>
+          "were kept and the next sweep tries again"
+    },
+    retention_policies_unreadable: %{
+      "pt_BR" =>
+        "⚠️ varredura de retenção pulada: o store de políticas não respondeu (%{reason}); expirar sob o " <>
+          "limite global apagaria justamente o que a política guarda",
+      "en_US" =>
+        "⚠️ retention sweep skipped: the policy store did not answer (%{reason}); expiring under the " <>
+          "global limit would delete exactly what the policy keeps"
+    },
+    retention_orphan_removed: %{
+      "pt_BR" => "🧹 varredura de órfãos recuperou %{count} diretórios de réplica: %{directories}",
+      "en_US" => "🧹 the orphan sweep reclaimed %{count} replica directories: %{directories}"
+    },
+    retention_orphan_remove_failed: %{
+      "pt_BR" => "⚠️ varredura de órfãos não conseguiu remover %{failures}; a próxima passada tenta de novo",
+      "en_US" => "⚠️ the orphan sweep could not remove %{failures}; the next pass tries again"
+    },
+    retention_orphan_waiting_for_metadata: %{
+      "pt_BR" =>
+        "varredura de órfãos em %{directory} aguardando os metadados: enquanto algum vnode não foi lido, " <>
+          "um diretório vivo pareceria órfão",
+      "en_US" =>
+        "the orphan sweep of %{directory} is waiting for metadata: while a vnode has not been read, a " <>
+          "live directory would look orphaned"
+    },
+    retention_orphan_tracking_capped: %{
+      "pt_BR" =>
+        "⚠️ varredura de órfãos passou de %{limit} candidatos e parou de contar o excedente; a remoção " <>
+          "deles só atrasa",
+      "en_US" =>
+        "⚠️ the orphan sweep passed %{limit} candidates and stopped counting the rest; their removal is " <>
+          "only delayed"
     },
     retention_consumer_skipped: %{
       "pt_BR" =>

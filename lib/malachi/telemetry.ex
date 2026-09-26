@@ -81,9 +81,18 @@ defmodule Malachi.Telemetry do
       ran on this node (only the leader sweeps), with how many segments it expired and how many deletes
       were refused. No events at all means no sweep is running.
 
+    * `[:malachi, :retention, :orphan_left]`. `%{count: 1}` / `%{topic}` - an expire deleted a segment
+      from the control plane and one of its replicas did not answer the delete, so that replica kept a
+      directory no later sweep can name. `Malachi.Retention.OrphanSweeper` is what reclaims it.
+
+    * `[:malachi, :retention, :orphan_removed]`. `%{count}` / `%{}` - replica directories
+      `Malachi.Retention.OrphanSweeper` reclaimed in one pass.
+    * `[:malachi, :retention, :unresolved_policy]`. `%{count: 1}` / `%{topic}` - a sweep found `topic`
+      bound to a policy name it could not resolve, and expired nothing of it. Once per sweep per topic,
+      so it is a gauge of the misconfiguration rather than a count of anything.
+
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
-    * `[:malachi, :retention, :orphan_removed]` - replica directories the orphan sweeper reclaimed.
     * `[:malachi, :retention, :pinned]` - segments a consumer group keeps from expiring.
     * `[:malachi, :storage, :roll]` with `reason: :size | :time` - why a segment was rolled.
 
@@ -197,6 +206,30 @@ defmodule Malachi.Telemetry do
     })
   end
 
+  @doc """
+  An expire removed `topic`'s segment from the control plane and a replica did not answer the delete,
+  leaving a directory behind on it.
+  """
+  @spec retention_orphan_left(String.t()) :: :ok
+  def retention_orphan_left(topic) do
+    :telemetry.execute([:malachi, :retention, :orphan_left], %{count: 1}, %{topic: topic})
+  end
+
+  @doc """
+  A retention sweep found `topic` bound to a policy name its definitions do not resolve, so nothing of
+  that topic was expired.
+  """
+  @spec retention_unresolved_policy(String.t()) :: :ok
+  def retention_unresolved_policy(topic) do
+    :telemetry.execute([:malachi, :retention, :unresolved_policy], %{count: 1}, %{topic: topic})
+  end
+
+  @doc "The orphan sweeper reclaimed `count` replica directories in one pass."
+  @spec retention_orphan_removed(non_neg_integer()) :: :ok
+  def retention_orphan_removed(count) do
+    :telemetry.execute([:malachi, :retention, :orphan_removed], %{count: count}, %{})
+  end
+
   @doc "One retention sweep ran for `duration_us`, expiring `expired` segments with `failed` refusals."
   @spec retention_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
   def retention_sweep(duration_us, expired, failed) do
@@ -218,6 +251,22 @@ defmodule Malachi.Telemetry do
       %{count: 1},
       %{server: server, kind: kind, shape: shape, pid: self()}
     )
+  end
+
+  @doc """
+  The broker's control plane reconcile did not complete this tick, for `reason`:
+
+    * `:skipped` - the previous tick's reconcile was still running, so this one did not start one;
+    * `:down` - the reconcile task crashed;
+    * `:timeout` - the reconcile task overran its deadline and was killed.
+
+  All three leave the node serving from the view it already holds, which is correct but increasingly
+  stale, so a rising total is the signal that the control plane is not answering. Emitted from the
+  broker's own process.
+  """
+  @spec reconcile_degraded(:skipped | :down | :timeout) :: :ok
+  def reconcile_degraded(reason) do
+    :telemetry.execute([:malachi, :cluster, :reconcile_degraded], %{count: 1}, %{reason: reason})
   end
 
   @doc """

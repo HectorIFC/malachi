@@ -13,6 +13,7 @@ defmodule Malachi.Cluster.RaClusterTest do
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.SilentRaMember
 
   defp start_cluster do
     name = :"racluster_#{System.unique_integer([:positive])}"
@@ -92,7 +93,41 @@ defmodule Malachi.Cluster.RaClusterTest do
     assert RaCluster.ready?({name, node()})
   end
 
-  test "command/2 and query/1 report an unreachable cluster rather than blocking" do
+  test "query/2 and ready?/2 bound the wait on a member that answers nothing" do
+    # The production shape #178 is about: a peer that swallows the call instead of refusing it. The
+    # default is ra's 5s, which is what used to be paid inside the broker's own loop; a caller that
+    # serves clients passes a bound and reads the timeout as "did not answer".
+    name = :"racluster_silent_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = SilentRaMember.start_link(name)
+    on_exit(fn -> SilentRaMember.stop(name) end)
+    server_id = {name, node()}
+
+    {query_us, query_result} = :timer.tc(fn -> RaCluster.query(server_id, 150) end)
+    {ready_us, ready_result} = :timer.tc(fn -> RaCluster.ready?(server_id, 150) end)
+
+    assert query_result == {:error, :timeout}
+    refute ready_result
+
+    # Generous upper bounds: the point is that neither waited anywhere near ra's 5s default, not that
+    # the scheduler hit 150ms on the nose.
+    assert query_us < 2_000_000, "query/2 waited #{div(query_us, 1000)}ms with a 150ms bound"
+    assert ready_us < 2_000_000, "ready?/2 waited #{div(ready_us, 1000)}ms with a 150ms bound"
+  end
+
+  test "the arities without a timeout keep ra's own default" do
+    # The 14 existing call sites must not change behaviour, so the default is pinned here rather than
+    # left implicit. 5s is ra's `?DEFAULT_TIMEOUT`.
+    name = :"racluster_default_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = SilentRaMember.start_link(name)
+    on_exit(fn -> SilentRaMember.stop(name) end)
+
+    {elapsed_us, result} = :timer.tc(fn -> RaCluster.query({name, node()}) end)
+
+    assert result == {:error, :timeout}
+    assert elapsed_us >= 4_000_000, "query/1 gave up after #{div(elapsed_us, 1000)}ms, before ra's 5s default"
+  end
+
+  test "command/2 and query/2 report an unreachable cluster rather than blocking" do
     absent = {:"racluster_gone_#{System.unique_integer([:positive])}", node()}
 
     assert {:error, _reason} = RaCluster.command(absent, {:init, seed_topology()})
@@ -111,7 +146,7 @@ defmodule Malachi.Cluster.RaClusterTest do
     assert {:error, _reason} = RaCluster.delete(:"racluster_never_#{System.unique_integer([:positive])}")
   end
 
-  test "ready?/1 and leader?/1 answer false for a cluster that does not exist" do
+  test "ready?/2 and leader?/1 answer false for a cluster that does not exist" do
     absent = {:"racluster_absent_#{System.unique_integer([:positive])}", node()}
 
     refute RaCluster.ready?(absent)

@@ -114,6 +114,26 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert Metrics.get_system_metrics().operations.fences_reconciled == before.fences_reconciled + 2
   end
 
+  test "a degraded reconcile lands on the counter for its reason" do
+    # The broker emits this from its own loop when a reconcile does not complete. It is the only signal
+    # that the node is serving from a view that is no longer being refreshed.
+    before = degraded_counts()
+
+    Telemetry.reconcile_degraded(:skipped)
+    Telemetry.reconcile_degraded(:timeout)
+
+    now = degraded_counts()
+
+    assert now.skipped == before.skipped + 1
+    assert now.timeout == before.timeout + 1
+    assert now.down == before.down
+  end
+
+  defp degraded_counts do
+    Metrics.get_system_metrics().operations.reconcile_degraded
+    |> Map.new(fn %{reason: reason, count: count} -> {reason, count} end)
+  end
+
   describe "storage flush" do
     # Flushes in (edge_lo, edge_hi]: the band between two exported edges, read off the cumulative buckets.
     defp flushes_between(edge_lo, edge_hi) do
@@ -293,9 +313,9 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
         for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds(), do: {server, kind}
 
       assert reported == expected
-      # every label pair exists, and the count follows the label set rather than a number to update by
-      # hand every time a server is added to it
-      assert length(reported) == (length(UnexpectedMessage.servers()) + 1) * length(UnexpectedMessage.kinds())
+      # One entry per server label plus `other`, times the three kinds. The count is asserted so a new
+      # label has to be a deliberate change here rather than a silent widening of the exported series.
+      assert length(reported) == 33
     end
   end
 end

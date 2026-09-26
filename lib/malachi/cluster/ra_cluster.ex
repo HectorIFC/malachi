@@ -20,9 +20,9 @@ defmodule Malachi.Cluster.RaCluster do
 
   @system :default
 
-  # ra's own default for a leader call (`?DEFAULT_TIMEOUT` in ra.hrl). Named here so a caller that wants
-  # a shorter one is opting out of a documented default rather than inventing a number.
-  @default_ra_timeout 5_000
+  # ra's own `?DEFAULT_TIMEOUT` (`ra.hrl`), repeated here so a caller that wants to bound a read can
+  # see what it is bounding and the arity without a timeout keeps behaving exactly as before.
+  @default_timeout 5_000
 
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
@@ -112,10 +112,14 @@ defmodule Malachi.Cluster.RaCluster do
   it as `apply(M, F, A ++ [State])`, so asking for the state itself and projecting in the calling
   process is both the simplest translation and the one that keeps a raising projection from taking
   the replicated server down with it.
+
+  `timeout` bounds the wait, and defaults to ra's own 5s. That default is far too long for a caller
+  that runs inside a loop serving clients: such a caller passes a short one and reads the timeout as
+  "this cluster did not answer" (see `Malachi.Cluster.ReplicatedDSRSM.snapshot/2`).
   """
-  @spec query(server_id()) :: {:ok, term()} | {:error, term()}
-  def query(server_id) do
-    case :ra.consistent_query(server_id, {Function, :identity, []}) do
+  @spec query(server_id(), timeout()) :: {:ok, term()} | {:error, term()}
+  def query(server_id, timeout \\ @default_timeout) do
+    case :ra.consistent_query(server_id, {Function, :identity, []}, timeout) do
       {:ok, state, _leader} -> {:ok, state}
       {:error, reason} -> {:error, reason}
       {:timeout, _server} -> {:error, :timeout}
@@ -125,7 +129,7 @@ defmodule Malachi.Cluster.RaCluster do
   @doc """
   Reads the **local** replica's state through `query_fun` (no consensus round-trip). Eventually
   consistent: a just-written value propagates within replication lag. For hot paths that tolerate
-  that; use `query/1` when the read must be linearizable.
+  that; use `query/2` when the read must be linearizable.
   """
   @spec local_query(server_id(), (term() -> result)) :: {:ok, result} | {:error, term()} when result: term()
   def local_query(server_id, query_fun) do
@@ -136,9 +140,15 @@ defmodule Malachi.Cluster.RaCluster do
     end
   end
 
-  @doc "Whether the cluster is formed and reachable (a member answers `:ra.members`)."
-  @spec ready?(server_id()) :: boolean()
-  def ready?(server_id), do: match?({:ok, _members, _leader}, :ra.members(server_id))
+  @doc """
+  Whether the cluster is formed and reachable (a member answers `:ra.members`) within `timeout`.
+
+  An unreachable member costs the whole `timeout`, so a caller on a latency-sensitive path passes a
+  short one rather than ra's 5s default.
+  """
+  @spec ready?(server_id(), timeout()) :: boolean()
+  def ready?(server_id, timeout \\ @default_timeout),
+    do: match?({:ok, _members, _leader}, :ra.members(server_id, timeout))
 
   @doc """
   Whether `server_id` is currently its cluster's **leader**. Pass the local server id
@@ -146,13 +156,13 @@ defmodule Malachi.Cluster.RaCluster do
   answers false: never assume leadership.
 
   `:ra.members/2` is a leader call: a follower forwards it, and a cluster mid-election answers nothing
-  until `timeout_ms` elapses. A caller that polls many clusters on one pass should pass a timeout well
+  until `timeout` elapses. A caller that polls many clusters on one pass should pass a timeout well
   below its own period, since the answer for a cluster without a leader is `false` either way and
   waiting the default only delays the rest of the pass.
   """
   @spec leader?(server_id(), timeout()) :: boolean()
-  def leader?(server_id, timeout_ms \\ @default_ra_timeout) do
-    match?({:ok, _members, ^server_id}, :ra.members(server_id, timeout_ms))
+  def leader?(server_id, timeout \\ @default_timeout) do
+    match?({:ok, _members, ^server_id}, :ra.members(server_id, timeout))
   end
 
   @doc """

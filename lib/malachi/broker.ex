@@ -36,6 +36,7 @@ defmodule Malachi.Broker do
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.PolicyStore
   alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -104,6 +105,14 @@ defmodule Malachi.Broker do
 
   defstruct dsrsm: nil,
             command_fun: nil,
+            # Control plane commands this broker applied locally, newest first, since the journal was
+            # last taken. `nil` means journaling is off, which is every caller that does not re-seed
+            # its cache from elsewhere: in-memory metadata, and the tests that build a broker directly.
+            #
+            # It exists because a re-seed REPLACES a vnode's metadata (`put_cache/3`), and the value it
+            # installs was read before these commands were applied. Replaying them on top is what keeps
+            # a re-seed from undoing a local write. See `take_journal/1`.
+            journal: nil,
             brokers: nil,
             replication_factor: 1,
             segment_max_bytes: @default_segment_max_bytes,
@@ -112,6 +121,10 @@ defmodule Malachi.Broker do
             # broker to its attributes (refreshed from membership).
             spread_by: nil,
             broker_attributes: %{},
+            # How a policy NAME is resolved to its definition. The definitions are an administrative
+            # object of the cluster (`Malachi.Cluster.PolicyStore`), not per-vnode state, so this is a
+            # local read of the policy store's replica rather than a lookup inside the metadata.
+            policy_fun: &PolicyStore.get/1,
             # Failure-domain guarantee: `min_domains` distinct `spread_by` values a segment's replica set
             # must span; `placement_policy` :hard rejects a segment that cannot reach it (produce fails
             # fast), :soft (default) places best-effort. nil min_domains = no requirement.
@@ -159,6 +172,7 @@ defmodule Malachi.Broker do
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes,
        spread_by: Keyword.get(opts, :spread_by),
+       policy_fun: Keyword.get(opts, :policy_fun, &PolicyStore.get/1),
        broker_attributes: Keyword.get(opts, :broker_attributes, %{}),
        min_domains: Keyword.get(opts, :min_domains),
        placement_policy: Keyword.get(opts, :placement_policy, :soft)
@@ -187,8 +201,7 @@ defmodule Malachi.Broker do
   """
   @spec create_topic(t(), Metadata.topic_name(), pos_integer()) :: {t(), term()}
   def create_topic(%__MODULE__{} = broker, name, keyspace_bits) do
-    {dsrsm, reply} = apply_metadata(broker, {:create_topic, name, keyspace_bits})
-    {%{broker | dsrsm: dsrsm}, reply}
+    apply_metadata(broker, {:create_topic, name, keyspace_bits})
   end
 
   @doc """
@@ -421,10 +434,10 @@ defmodule Malachi.Broker do
   @spec split_range(t(), Metadata.range_id()) :: {t(), term()}
   def split_range(%__MODULE__{} = broker, range_id) do
     case apply_metadata(broker, {:split_range, range_id}) do
-      {dsrsm, {:ok, _left, _right} = reply} ->
-        {%{broker | dsrsm: dsrsm}, reply}
+      {applied, {:ok, _left, _right} = reply} ->
+        {applied, reply}
 
-      {_dsrsm, {:error, _reason} = error} ->
+      {_applied, {:error, _reason} = error} ->
         {broker, error}
     end
   end
@@ -439,10 +452,10 @@ defmodule Malachi.Broker do
   @spec merge_ranges(t(), Metadata.range_id(), Metadata.range_id()) :: {t(), term()}
   def merge_ranges(%__MODULE__{} = broker, range_id_a, range_id_b) do
     case apply_metadata(broker, {:merge_ranges, range_id_a, range_id_b}) do
-      {dsrsm, {:ok, _child} = reply} ->
-        {%{broker | dsrsm: dsrsm}, reply}
+      {applied, {:ok, _child} = reply} ->
+        {applied, reply}
 
-      {_dsrsm, {:error, _reason} = error} ->
+      {_applied, {:error, _reason} = error} ->
         {broker, error}
     end
   end
@@ -465,8 +478,7 @@ defmodule Malachi.Broker do
   end
 
   defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker) do
-    {dsrsm, _reply} = apply_metadata(broker, command)
-    broker = %{broker | dsrsm: dsrsm}
+    {broker, _reply} = apply_metadata(broker, command)
     update_active_replica_set(broker, segment_id, replica_set)
   end
 
@@ -479,8 +491,7 @@ defmodule Malachi.Broker do
   # That is how a failover seal performed on another node unblocks a frontend caught mid-roll: without
   # it the frontend keeps re-fencing a segment somebody else already closed.
   defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
-    {dsrsm, _reply} = apply_metadata(broker, command)
-    broker = %{broker | dsrsm: dsrsm}
+    {broker, _reply} = apply_metadata(broker, command)
     {range_id, _seq} = segment_id
 
     case DSRSM.get_segment(broker.dsrsm, topic_of_segment(segment_id), segment_id) do
@@ -495,8 +506,8 @@ defmodule Malachi.Broker do
   end
 
   defp apply_replica_command(command, broker) do
-    {dsrsm, _reply} = apply_metadata(broker, command)
-    %{broker | dsrsm: dsrsm}
+    {broker, _reply} = apply_metadata(broker, command)
+    broker
   end
 
   # Drops the range's cached active segment when the seal targets exactly it. Guarded on the id, so a
@@ -684,16 +695,16 @@ defmodule Malachi.Broker do
     segment = %{id: roll.segment_id, start_offset: start_offset}
 
     case apply_metadata(broker, Metadata.seal_command(segment, end_offset, byte_size, sealed_at)) do
-      {dsrsm, :ok} ->
-        {settle_roll(%{broker | dsrsm: dsrsm}, roll, end_offset), :ok}
+      {applied, :ok} ->
+        {settle_roll(applied, roll, end_offset), :ok}
 
-      {dsrsm, {:error, {:already_sealed, existing}}} ->
-        {settle_roll(%{broker | dsrsm: dsrsm}, roll, start_offset + existing), :ok}
+      {applied, {:error, {:already_sealed, existing}}} ->
+        {settle_roll(applied, roll, start_offset + existing), :ok}
 
-      {_dsrsm, {:error, _reason} = error} ->
+      {_applied, {:error, _reason} = error} ->
         {broker, error}
 
-      {_dsrsm, other} ->
+      {_applied, other} ->
         {broker, {:error, {:unexpected_seal_reply, other}}}
     end
   end
@@ -840,8 +851,7 @@ defmodule Malachi.Broker do
   """
   @spec commit_offset(t(), Metadata.group(), Metadata.topic_name(), Metadata.offsets()) :: {t(), term()}
   def commit_offset(%__MODULE__{} = broker, group, topic, offsets) do
-    {dsrsm, reply} = apply_metadata(broker, {:commit_offset, group, topic, offsets})
-    {%{broker | dsrsm: dsrsm}, reply}
+    apply_metadata(broker, {:commit_offset, group, topic, offsets})
   end
 
   @doc """
@@ -851,8 +861,7 @@ defmodule Malachi.Broker do
   """
   @spec delete_segment(t(), Metadata.segment_id()) :: {t(), term()}
   def delete_segment(%__MODULE__{} = broker, segment_id) do
-    {dsrsm, reply} = apply_metadata(broker, {:delete_segment, segment_id})
-    {%{broker | dsrsm: dsrsm}, reply}
+    apply_metadata(broker, {:delete_segment, segment_id})
   end
 
   @doc "A consumer group's committed offsets for `topic` (empty if it never committed)."
@@ -890,6 +899,73 @@ defmodule Malachi.Broker do
   def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm, unreachable \\ []) do
     %{broker | dsrsm: DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable)}
   end
+
+  @doc """
+  Turns the command journal on, so `take_journal/1` can report what this broker applied locally.
+
+  Only a broker that re-seeds its cache from somewhere else needs it: with in-memory metadata the local
+  cache IS the truth and nothing ever replaces it, so journaling would only grow a list nobody reads.
+  """
+  @spec journal(t()) :: t()
+  def journal(%__MODULE__{} = broker), do: %{broker | journal: broker.journal || []}
+
+  @doc """
+  The control plane commands applied locally since the last call, **oldest first**, and a broker whose
+  journal is empty again. `[]` when journaling is off.
+
+  Taken immediately before `put_cache/3` and handed to `replay_journal/2` immediately after: the value
+  a re-seed installs was read before these commands, so installing it alone would undo them.
+  """
+  @spec take_journal(t()) :: {[Metadata.command()], t()}
+  def take_journal(%__MODULE__{journal: nil} = broker), do: {[], broker}
+  def take_journal(%__MODULE__{} = broker), do: {Enum.reverse(broker.journal), %{broker | journal: []}}
+
+  @doc """
+  Re-applies `commands` to the **local cache only**, in order, ignoring whatever each one answers.
+
+  They are already in the Raft log, so this is not a second write: it is how a cache re-seeded from a
+  read taken before them ends up agreeing with them again. A command the read already carries answers
+  an error (`:already_exists`, `:segment_exists`, `{:already_sealed, _}`) and leaves the state alone,
+  which is why the replies are dropped rather than surfaced.
+  """
+  @spec replay_journal(t(), [Metadata.command()]) :: t()
+  def replay_journal(%__MODULE__{} = broker, []), do: broker
+
+  def replay_journal(%__MODULE__{} = broker, commands) do
+    %{broker | dsrsm: Enum.reduce(commands, broker.dsrsm, &replay_command/2)}
+  end
+
+  defp replay_command(command, dsrsm) do
+    case DSRSM.vnode_for(dsrsm, Metadata.command_target_topic(command)) do
+      # An empty ring routes nowhere, and a command whose topic no longer routes anywhere has no vnode
+      # to be replayed into. Both leave the cache as the read left it.
+      {:error, :empty} ->
+        dsrsm
+
+      {:ok, _vnode_id} ->
+        {dsrsm, _reply} = DSRSM.update_vnode(dsrsm, Metadata.command_target_topic(command), &replay_apply(&1, command))
+        dsrsm
+    end
+  end
+
+  # `commit_offset` is last-write-wins per range in the machine, which is correct for the Raft log,
+  # where the order of application IS the order of truth. A replay inverts that order by construction:
+  # the read being replayed onto was taken BEFORE this command, and may already carry a higher position
+  # that another node committed meanwhile. Re-applying blind would move the group backwards, which is
+  # the duplicate delivery this replay exists to prevent, so the higher of the two wins per range.
+  #
+  # The cost is narrow and self-correcting: a deliberate backwards seek made inside the same window is
+  # held back by one refresh, after which the log's own value (the seek) is what the cache reads.
+  defp replay_apply(metadata, {:commit_offset, group, topic, offsets}) do
+    merged =
+      metadata
+      |> Metadata.committed_offsets(group, topic)
+      |> Map.merge(offsets, fn _range_id, read, journaled -> max(read, journaled) end)
+
+    Metadata.apply(metadata, {:commit_offset, group, topic, merged})
+  end
+
+  defp replay_apply(metadata, command), do: Metadata.apply(metadata, command)
 
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done
@@ -1161,19 +1237,18 @@ defmodule Malachi.Broker do
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
     case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
-      {dsrsm, :ok} ->
+      {applied, :ok} ->
         active = %{id: segment_id, start_offset: start_offset, bytes: 0, replica_set: replica_set}
 
         broker = %{
-          broker
-          | dsrsm: dsrsm,
-            segments: Map.put(broker.segments, range_id, active),
-            segment_seq: Map.put(broker.segment_seq, range_id, seq + 1)
+          applied
+          | segments: Map.put(applied.segments, range_id, active),
+            segment_seq: Map.put(applied.segment_seq, range_id, seq + 1)
         }
 
         {:ok, broker}
 
-      {dsrsm, {:error, reason}} when reason in [:segment_exists, :segment_overlap, :active_segment_exists] ->
+      {applied, {:error, reason}} when reason in [:segment_exists, :segment_overlap, :active_segment_exists] ->
         # Lost the registration race to another frontend: by id (`:segment_exists`), by offset
         # (`:segment_overlap`, this frontend derived a start below where the range already ends,
         # typically because a failover sealed the previous segment elsewhere), or because the range
@@ -1182,17 +1257,15 @@ defmodule Malachi.Broker do
         # three have the same remedy. The returned metadata may already carry the winner's segment:
         # adopt it and carry on; when it is still stale, surface the error and let the next produce
         # adopt after the periodic metadata refresh.
-        broker = %{broker | dsrsm: dsrsm}
-
-        case adopt_active_segment(broker, range_id) do
+        case adopt_active_segment(applied, range_id) do
           {:ok, broker, _segment} -> {:ok, broker}
           :none -> {:error, reason}
         end
 
-      {_dsrsm, {:error, reason}} ->
+      {_applied, {:error, reason}} ->
         {:error, reason}
 
-      {_dsrsm, other} ->
+      {_applied, other} ->
         {:error, {:unexpected_register_reply, other}}
     end
   end
@@ -1241,9 +1314,27 @@ defmodule Malachi.Broker do
   # Routes each control-plane command to the vnode owning its topic, which every such command names
   # directly or embeds in its range id (`{topic, seq}`) or segment id (`{range_id, seq}`). The routing
   # layer rejects a command whose target topic disagrees with where it was routed (`:range_topic_mismatch`).
+  # Returns `{broker, reply}`. The broker carries the new cache AND the journal entry, so a caller that
+  # discards the broker on an error discards the entry with it, which is right: a command that did not
+  # apply has nothing to replay.
   defp apply_metadata(broker, command) do
-    broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
+    {dsrsm, reply} = broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
+    {%{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}, reply}
   end
+
+  defp journal_put(nil, _command, _applied, _previous), do: nil
+
+  # A command the control plane refused, or never answered at all, comes back with the cache UNCHANGED:
+  # `Malachi.Cluster.ReplicatedMetadata.apply_command/3` returns the metadata it was given on an error,
+  # and the deterministic apply returns it unchanged on a refusal. Journaling such a command would have
+  # the replay put into the cache something the log may never have taken, which is a worse failure than
+  # the stale read the replay exists to repair: a `create_topic` that timed out would read as existing,
+  # and a `commit_offset` that timed out would advance a group past data it never durably committed.
+  #
+  # Matched by identity rather than compared: the unchanged paths return the very same term, so this
+  # costs nothing on a path that runs on every roll and every group ack.
+  defp journal_put(journal, _command, same, same), do: journal
+  defp journal_put(journal, command, _applied, _previous), do: [command | journal]
 
   # Query routing: a range/segment id embeds its topic, which is how a read is dispatched to the owning
   # vnode. The command path uses `Metadata.command_target_topic/1` instead (it takes a whole command).
@@ -1268,8 +1359,15 @@ defmodule Malachi.Broker do
   # The spread attribute for `range_id`: its topic policy's `spread_by` when the policy sets that key
   # (an explicit nil opts the topic out of spreading), overriding the global; otherwise the broker's
   # global `spread_by`. Mirrors the per-topic retention resolution (a set key wins, nil included).
+  #
+  # Two steps, because the two halves live in different places on purpose: which policy a topic points
+  # at is that topic's own state, in its vnode's metadata, and travels with it across a vnode split;
+  # what the policy SAYS is one administrative definition for the cluster.
   defp effective_spread_by(broker, range_id) do
-    case DSRSM.topic_policy(broker.dsrsm, topic_of_range(range_id)) do
+    broker.dsrsm
+    |> DSRSM.topic_policy_name(topic_of_range(range_id))
+    |> broker.policy_fun.()
+    |> case do
       %{spread_by: spread_by} -> spread_by
       _no_policy_spread_by -> broker.spread_by
     end

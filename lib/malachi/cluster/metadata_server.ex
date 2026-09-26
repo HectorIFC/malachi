@@ -16,6 +16,9 @@ defmodule Malachi.Cluster.MetadataServer do
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
 
+  # ra's own default, mirrored so the arities without a timeout keep behaving exactly as before.
+  @default_timeout 5_000
+
   @doc """
   Starts a Raft cluster named `cluster_name` running the metadata machine across `nodes` (default
   the local node), and returns a `server_id` for a **real member**: the local node when it is one,
@@ -61,19 +64,23 @@ defmodule Malachi.Cluster.MetadataServer do
 
   A failed read never reaches `query_fun`: an error or a timeout is returned as-is rather than
   projected over a stand-in state.
+
+  `timeout` bounds the wait and defaults to ra's 5s. The reconcile path passes a short one, because a
+  vnode that does not answer must cost milliseconds there, not five seconds.
   """
-  @spec query(server_id(), (Metadata.t() -> result)) :: {:ok, result} | {:error, term()}
+  @spec query(server_id(), (Metadata.t() -> result), timeout()) :: {:ok, result} | {:error, term()}
         when result: term()
-  def query(server_id, query_fun) do
-    with {:ok, metadata} <- RaCluster.query(server_id), do: {:ok, query_fun.(metadata)}
+  def query(server_id, query_fun, timeout \\ @default_timeout) do
+    with {:ok, metadata} <- RaCluster.query(server_id, timeout), do: {:ok, query_fun.(metadata)}
   end
 
   @doc """
-  Whether the cluster addressed by `server_id` is formed and reachable (a member answers `:ra.members`).
-  Used by the reconcile loop to decide if a vnode still needs bootstrapping.
+  Whether the cluster addressed by `server_id` is formed and reachable (a member answers `:ra.members`)
+  within `timeout`. Used by the reconcile to decide if a vnode still needs bootstrapping, which is why
+  it takes a bound: an unreachable placement node costs the whole timeout.
   """
-  @spec ready?(server_id()) :: boolean()
-  def ready?(server_id), do: RaCluster.ready?(server_id)
+  @spec ready?(server_id(), timeout()) :: boolean()
+  def ready?(server_id, timeout \\ @default_timeout), do: RaCluster.ready?(server_id, timeout)
 
   @doc """
   Whether `server_id` is currently the **leader** of its Raft cluster. `:ra.members` (answered by any

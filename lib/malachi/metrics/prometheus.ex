@@ -131,6 +131,13 @@ defmodule Malachi.Metrics.Prometheus do
         ]
       ),
       metric(
+        "malachi_broker_reconcile_degraded_total",
+        :counter,
+        "Ticks on which the broker's control plane reconcile did not complete (the node keeps serving " <>
+          "from the view it holds, which goes stale: a rising total means the control plane is not answering)",
+        for(%{reason: reason, count: count} <- ops.reconcile_degraded, do: {[reason: to_string(reason)], count})
+      ),
+      metric(
         "malachi_unexpected_messages_total",
         :counter,
         "Messages a long-lived server had no clause for and dropped (or answered unknown_call) instead of " <>
@@ -162,6 +169,9 @@ defmodule Malachi.Metrics.Prometheus do
     %{
       skips: [],
       expired: [],
+      orphans_left: [],
+      orphans_removed: 0,
+      unresolved_policies: [],
       failures: %{migrating: 0, segment_active: 0, other: 0},
       sweeps: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
     }
@@ -204,6 +214,27 @@ defmodule Malachi.Metrics.Prometheus do
         :counter,
         "Bytes the retention sweep expired, per topic",
         Enum.map(retention.expired, &{[topic: &1.topic], &1.bytes})
+      ),
+      metric(
+        "malachi_retention_orphan_directories_left_total",
+        :counter,
+        "Replica directories an expire left behind because the replica did not answer its delete, per topic; " <>
+          "the orphan sweeper reclaims them and counts that separately",
+        Enum.map(retention.orphans_left, &{[topic: &1.topic], &1.directories})
+      ),
+      metric(
+        "malachi_retention_orphan_directories_removed_total",
+        :counter,
+        "Replica directories the orphan sweeper reclaimed; read against " <>
+          "malachi_retention_orphan_directories_left_total to see whether it is keeping up",
+        [{[], retention.orphans_removed}]
+      ),
+      metric(
+        "malachi_retention_unresolved_policy_sweeps_total",
+        :counter,
+        "Sweeps that found a topic bound to a policy name they could not resolve and expired nothing " <>
+          "of it, per topic; a series that keeps moving is a binding an operator has to fix",
+        Enum.map(retention.unresolved_policies, &{[topic: &1.topic], &1.sweeps})
       ),
       metric(
         "malachi_retention_expire_failures_total",

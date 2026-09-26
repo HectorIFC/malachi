@@ -49,7 +49,18 @@ defmodule Malachi.UnexpectedMessage do
   alias Malachi.I18n
   alias Malachi.Telemetry
 
-  @servers [:replication, :membership, :broker, :scrubber, :retention, :heal, :skip_reporter, :vnode_coordinator]
+  @servers [
+    :replication,
+    :membership,
+    :broker,
+    :scrubber,
+    :retention,
+    :heal,
+    :skip_reporter,
+    :rebalance,
+    :orphan_sweeper,
+    :vnode_coordinator
+  ]
   @kinds [:cast, :info, :call]
 
   # How many distinct {kind, shape} pairs one server process logs. Tags are atoms, so the set is bounded
@@ -65,6 +76,8 @@ defmodule Malachi.UnexpectedMessage do
           | :retention
           | :heal
           | :skip_reporter
+          | :rebalance
+          | :orphan_sweeper
           | :vnode_coordinator
 
   @typedoc "How the message arrived."
