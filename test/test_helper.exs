@@ -46,5 +46,8 @@ end)
 # Malachi and its harnesses target Linux only, and `:linux` tests drive them with Linux tools (coreutils
 # `timeout`, util-linux). They run wherever the suite runs on Linux, CI included; on any other host they
 # are excluded rather than rewritten for it.
+#
+# `:parallel_probe` tests exist only to be run by `Malachi.ParallelRunTest`, in a second VM started while
+# this suite runs; they are never part of a normal run.
 linux_only = if :os.type() == {:unix, :linux}, do: [], else: [:linux]
-ExUnit.start(exclude: [:multinode | linux_only])
+ExUnit.start(exclude: [:multinode, :parallel_probe | linux_only])

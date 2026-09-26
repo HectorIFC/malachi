@@ -8,8 +8,6 @@ defmodule Malachi.LogProtocolTest do
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @port Application.compile_env(:malachi, :tcp_port, 4040)
-
   defp ok?(code), do: code == Wire.ok_code()
   # an error response carries the reason as a length-prefixed string
   defp reason(payload), do: Wire.decode_auth_resp(payload)
@@ -62,7 +60,7 @@ defmodule Malachi.LogProtocolTest do
 
   # Attempts an authentication and returns `{:ok, token}` / `{:error, reason}` (closing the socket).
   defp try_auth(username, password) do
-    {:ok, socket} = TCPHelper.connect(port: @port)
+    {:ok, socket} = TCPHelper.connect()
     result = TCPHelper.authenticate_wire(socket, username, password)
     :gen_tcp.close(socket)
     result
@@ -87,7 +85,7 @@ defmodule Malachi.LogProtocolTest do
   end
 
   defp with_session(username, password, fun) do
-    case TCPHelper.connect(port: @port) do
+    case TCPHelper.connect() do
       {:ok, socket} ->
         {:ok, _token} = TCPHelper.authenticate_wire(socket, username, password)
 

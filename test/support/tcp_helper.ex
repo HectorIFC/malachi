@@ -22,7 +22,7 @@ defmodule Malachi.Test.TCPHelper do
   ## Options
 
   - `:timeout` - Connection timeout in ms (default: 1000)
-  - `:port` - Server port (default: from application config)
+  - `:port` - Server port (default: the one the application's pool bound, `Malachi.TCPAcceptorPool.port/0`)
 
   ## Examples
 
@@ -32,7 +32,7 @@ defmodule Malachi.Test.TCPHelper do
   """
   def connect(opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 1000)
-    port = Keyword.get(opts, :port, Application.get_env(:malachi, :tcp_port, 4040))
+    port = Keyword.get_lazy(opts, :port, &Malachi.TCPAcceptorPool.port/0)
 
     :gen_tcp.connect(
       {127, 0, 0, 1},

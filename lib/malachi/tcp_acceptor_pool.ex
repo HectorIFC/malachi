@@ -6,18 +6,37 @@ defmodule Malachi.TCPAcceptorPool do
   if they are wrong: closes it, then starts one acceptor per online scheduler, each opening its own
   listen socket on the shared port (`reuseport`). Plain TCP or TLS is chosen from `:enable_tls`; the
   TLS options (cert/key files, protocol versions, ciphers, peer verification) are read from config.
+
+  Port 0 asks the operating system for a free port, which is what the test environment does so that two
+  test runs on one host never fight for a fixed one. The throwaway socket is where the port is actually
+  bound, so the pool reads the number back from it and hands that number, never 0, to every acceptor: the
+  acceptors all share one port, and one that restarts comes back on it. `port/1` answers that number.
   """
   use Supervisor
   require Logger
   alias Malachi.I18n
 
-  @doc "Starts the acceptor pool listening on `port`."
-  def start_link(port) do
-    Supervisor.start_link(__MODULE__, port, name: __MODULE__)
+  @doc """
+  Starts the acceptor pool listening on `port`, registered under the module name. `{port, name: name}`
+  registers it under `name` instead, which is how a test runs a pool beside the application's.
+  """
+  @spec start_link(:inet.port_number() | {:inet.port_number(), keyword()}) :: Supervisor.on_start()
+  def start_link({port, opts}) do
+    name = Keyword.get(opts, :name, __MODULE__)
+    Supervisor.start_link(__MODULE__, {port, name}, name: name)
   end
 
+  def start_link(port), do: start_link({port, []})
+
+  @doc """
+  The port the pool registered as `name` bound, which differs from the configured one when that was 0.
+  After the pool stops this is still the last port it bound; nil if it never started.
+  """
+  @spec port(atom()) :: :inet.port_number() | nil
+  def port(name \\ __MODULE__), do: :persistent_term.get({__MODULE__, name}, nil)
+
   @impl true
-  def init(port) do
+  def init({port, name}) do
     buffer_size = Application.get_env(:malachi, :tcp_buffer_size, 32_768)
     backlog = Application.get_env(:malachi, :tcp_backlog, 4096)
     send_timeout = Application.get_env(:malachi, :tcp_send_timeout, 30_000)
@@ -56,21 +75,26 @@ defmodule Malachi.TCPAcceptorPool do
 
     case listen_result do
       {:ok, test_socket} ->
-        # Close the test socket - each acceptor will create its own
+        # Read the bound port before closing the test socket (each acceptor then creates its own on it).
+        # A closed socket has no port to ask for, and with port 0 this is the only place the number exists.
+        {:ok, bound} = bound_port(transport, test_socket)
+
         case transport do
           :ssl -> :ssl.close(test_socket)
           :gen_tcp -> :gen_tcp.close(test_socket)
         end
 
+        :persistent_term.put({__MODULE__, name}, bound)
+
         num_acceptors = System.schedulers_online()
         transport_name = if enable_tls, do: "TLS", else: "TCP"
-        Logger.info(I18n.t(:tcp_server_started, port: port, acceptors: num_acceptors))
-        Logger.info(I18n.t(:transport_enabled, transport: transport_name, port: port))
+        Logger.info(I18n.t(:tcp_server_started, port: bound, acceptors: num_acceptors))
+        Logger.info(I18n.t(:transport_enabled, transport: transport_name, port: bound))
 
         children =
           for i <- 1..num_acceptors do
             Supervisor.child_spec(
-              {Malachi.TCPAcceptor, {port, opts, i, transport}},
+              {Malachi.TCPAcceptor, {bound, opts, i, transport}},
               id: {:acceptor, i}
             )
           end
@@ -78,8 +102,18 @@ defmodule Malachi.TCPAcceptorPool do
         Supervisor.init(children, strategy: :one_for_one)
 
       {:error, reason} ->
-        {:stop, reason}
+        # A supervisor's init may only answer `{:ok, spec}` or `:ignore`: `{:stop, reason}` is a bad
+        # return, which buried the reason (`:eaddrinuse`, say) inside `{:bad_return, ...}`. Exiting makes
+        # `start_link/1` answer `{:error, reason}` instead.
+        exit(reason)
     end
+  end
+
+  # `:inet.port/1` does not accept an `:ssl` socket; `:ssl.sockname/1` answers the same for it.
+  defp bound_port(:gen_tcp, socket), do: :inet.port(socket)
+
+  defp bound_port(:ssl, socket) do
+    with {:ok, {_address, port}} <- :ssl.sockname(socket), do: {:ok, port}
   end
 
   defp get_tls_options do

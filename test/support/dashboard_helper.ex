@@ -7,15 +7,13 @@ defmodule Malachi.Test.DashboardHelper do
   for the MQ wire protocol.
   """
 
-  @dashboard_port Application.compile_env(:malachi, :dashboard_port, 4041)
-
   @doc """
   Connects to the Malachi dashboard HTTP server.
 
   ## Options
 
   - `:timeout` - Connection timeout in ms (default: 1000)
-  - `:port` - Dashboard port (default: from application config)
+  - `:port` - Dashboard port (default: the one the application's dashboard bound, `Malachi.Dashboard.port/0`)
 
   ## Examples
 
@@ -24,7 +22,7 @@ defmodule Malachi.Test.DashboardHelper do
   """
   def connect(opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 1000)
-    port = Keyword.get(opts, :port, @dashboard_port)
+    port = Keyword.get_lazy(opts, :port, &Malachi.Dashboard.port/0)
 
     :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], timeout)
   end
@@ -106,9 +104,7 @@ defmodule Malachi.Test.DashboardHelper do
       {:error, reason} = DashboardHelper.login("admin", "wrong_password")
   """
   def login(username, password, opts \\ []) do
-    port = Keyword.get(opts, :port, @dashboard_port)
-
-    case connect(port: port) do
+    case connect(Keyword.take(opts, [:port])) do
       {:ok, socket} ->
         body = Jason.encode!(%{"username" => username, "password" => password})
 
@@ -132,7 +128,7 @@ defmodule Malachi.Test.DashboardHelper do
   Prometheus exposition, and returns the whole response once the server closes it. Takes `:port`.
   """
   def scrape_metrics(token, opts \\ []) do
-    {:ok, socket} = connect(port: Keyword.get(opts, :port, @dashboard_port))
+    {:ok, socket} = connect(Keyword.take(opts, [:port]))
 
     :ok =
       :gen_tcp.send(
