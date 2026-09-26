@@ -11,6 +11,11 @@ defmodule Malachi.TCPAcceptorPool do
   test runs on one host never fight for a fixed one. The throwaway socket is where the port is actually
   bound, so the pool reads the number back from it and hands that number, never 0, to every acceptor: the
   acceptors all share one port, and one that restarts comes back on it. `port/1` answers that number.
+
+  Between closing the throwaway socket and the acceptors binding, another process could take the port.
+  That window is the same one a fixed port always had, and what it can cause is a start that fails with
+  `:eaddrinuse`, never a silent one. Keeping the throwaway socket open instead would leave a `reuseport`
+  listener nobody accepts on, which the kernel would still hand connections to.
   """
   use Supervisor
   require Logger
