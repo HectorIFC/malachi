@@ -7,34 +7,19 @@ defmodule Malachi.Cluster.MembershipHaTest do
   @moduletag :multinode
 
   alias Malachi.Cluster.MembershipServer
+  alias Malachi.Test.Distribution
 
   @name Malachi.LogMembership
   # Tight timings so the detector converges quickly under test.
   @timings [protocol_period: 50, ack_timeout: 50, indirect_timeout: 50, suspicion_timeout: 300]
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
-    :ok
+    Distribution.ensure_started()
   end
 
   defp start_peer do
-    name = :"malachi_mempeer_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {peer, node, _name} = Distribution.start_peer("mempeer")
     {peer, node}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   # The member reference for a node: node-qualified so it resolves from any node (the bug the
@@ -70,7 +55,7 @@ defmodule Malachi.Cluster.MembershipHaTest do
 
     # kill one node abruptly; the survivors must detect it and drop it from their alive set
     [dead | survivors] = nodes
-    :ok = try_stop(Map.fetch!(peer_by_node, dead))
+    :ok = Distribution.stop_peer(Map.fetch!(peer_by_node, dead))
 
     expected = Enum.sort(refs -- [ref(dead)])
     assert eventually(fn -> Enum.all?(survivors, fn node -> alive(node) == expected end) end)

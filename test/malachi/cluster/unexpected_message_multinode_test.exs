@@ -11,6 +11,7 @@ defmodule Malachi.Cluster.UnexpectedMessageMultinodeTest do
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Test.Distribution
   alias Malachi.Test.UnknownMessages
 
   # Every peer registers its servers under the same names: a ref is `{name, node}`, so the node alone
@@ -20,24 +21,13 @@ defmodule Malachi.Cluster.UnexpectedMessageMultinodeTest do
   @event [:malachi, :process, :unexpected_message]
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
-    :ok
+    Distribution.ensure_started()
   end
 
   # A peer node without the Malachi application, running only what the test needs: logging, telemetry, a
   # replication server and a membership server.
   defp start_peer do
-    name = :"malachi_unexpected_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {_peer, node, name} = Distribution.start_peer("unexpected")
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:logger])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
     # The drops are asserted through telemetry on this node; their warnings would only be noise here.
@@ -83,12 +73,6 @@ defmodule Malachi.Cluster.UnexpectedMessageMultinodeTest do
   end
 
   defp whereis({name, node}), do: :erpc.call(node, Process, :whereis, [name])
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
-  end
 
   defp eventually(check, remaining_ms \\ 5_000) do
     cond do

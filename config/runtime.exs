@@ -93,8 +93,6 @@ cluster_strategy =
 
 config :malachi,
   config_env: config_env(),
-  tcp_port: String.to_integer(System.get_env("MALACHI_TCP_PORT") || "4040"),
-  dashboard_port: String.to_integer(System.get_env("MALACHI_DASHBOARD_PORT") || "4041"),
   locale: System.get_env("MALACHI_LOCALE") || "en_US",
   auth_timeout_ms: String.to_integer(System.get_env("MALACHI_AUTH_TIMEOUT_MS") || "10000"),
   tcp_recv_timeout: String.to_integer(System.get_env("MALACHI_TCP_RECV_TIMEOUT") || "30000"),
@@ -305,9 +303,13 @@ config :malachi,
 
 # Everything in this block is owned by config/test.exs when running tests. runtime.exs is evaluated after
 # the environment file, so setting any of it unconditionally would silently overwrite the test values,
-# which for the rate limits are deliberately permissive (integration tests make many connections).
+# which for the rate limits are deliberately permissive (integration tests make many connections), and
+# for the listener ports are 0 (a port the operating system picks, so two test runs on one host never
+# collide). A shell that exported MALACHI_TCP_PORT for a dev node must not pin `mix test` to it too.
 if config_env() != :test do
   config :malachi,
+    tcp_port: String.to_integer(System.get_env("MALACHI_TCP_PORT") || "4040"),
+    dashboard_port: String.to_integer(System.get_env("MALACHI_DASHBOARD_PORT") || "4041"),
     # Rate limiting configuration
     auth_rate_limit: parse_int.("MALACHI_AUTH_RATE_LIMIT", 10),
     auth_rate_window_ms: parse_int.("MALACHI_AUTH_RATE_WINDOW_MS", 60_000),

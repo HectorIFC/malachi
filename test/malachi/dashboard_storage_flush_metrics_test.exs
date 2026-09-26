@@ -23,7 +23,7 @@ defmodule Malachi.DashboardStorageFlushMetricsTest do
       Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     end)
 
-    {:ok, token} = DashboardHelper.login(@user, @password, port: port())
+    {:ok, token} = DashboardHelper.login(@user, @password)
     {:ok, token: token}
   end
 
@@ -48,7 +48,7 @@ defmodule Malachi.DashboardStorageFlushMetricsTest do
   end
 
   test "the flush series need the login like every other series" do
-    {:ok, socket} = DashboardHelper.connect(port: port())
+    {:ok, socket} = DashboardHelper.connect()
     {:ok, response} = DashboardHelper.request(socket, :GET, "/metrics", headers: %{"Accept" => "text/plain"})
     :gen_tcp.close(socket)
 
@@ -57,14 +57,10 @@ defmodule Malachi.DashboardStorageFlushMetricsTest do
 
   # The same request a harness sends: a bearer token and an Accept header asking for the exposition.
   defp scrape(token) do
-    response = DashboardHelper.scrape_metrics(token, port: port())
+    response = DashboardHelper.scrape_metrics(token)
     assert response =~ "HTTP/1.1 200 OK"
     response
   end
-
-  # The port the dashboard actually listens on, read at runtime so a run with MALACHI_DASHBOARD_PORT set
-  # (parallel worktrees) scrapes its own node.
-  defp port, do: Application.fetch_env!(:malachi, :dashboard_port)
 
   defp value(text, series) do
     value = DashboardHelper.metric_value(text, series)

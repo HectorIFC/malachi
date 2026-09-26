@@ -7,14 +7,13 @@ defmodule Malachi.LoadtestTest do
 
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
+  alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Wire
 
-  @port Application.compile_env(:malachi, :tcp_port, 4040)
-
   # Runs a load test quietly and returns its report, capturing the printed summary.
   defp run(opts) do
-    opts = Keyword.merge([port: @port, user: "admin", pass: "admin123", warmup: 0, duration: 1], opts)
+    opts = Keyword.merge([port: TCPAcceptorPool.port(), user: "admin", pass: "admin123", warmup: 0, duration: 1], opts)
     capture_io(fn -> Process.put(:report, Loadtest.run(opts)) end)
     Process.get(:report)
   end
@@ -160,7 +159,7 @@ defmodule Malachi.LoadtestTest do
       r = run(scenario: :produce, connections: 2, batch: 5, topic: t)
 
       assert r.meta.command =~ "--topic=#{t}"
-      assert r.meta.command =~ "--port=#{@port}"
+      assert r.meta.command =~ "--port=#{TCPAcceptorPool.port()}"
       assert r.meta.command =~ "--host=127.0.0.1"
     end
 
@@ -345,7 +344,7 @@ defmodule Malachi.LoadtestTest do
       # host), and the previous hand-built JSON had no escaping: one quote in any of them produced a
       # document no parser would take. Parsing the output is what pins that.
       opts = [
-        port: @port,
+        port: TCPAcceptorPool.port(),
         user: "admin",
         pass: "admin123",
         warmup: 0,
@@ -773,7 +772,15 @@ defmodule Malachi.LoadtestTest do
 
       error =
         assert_raise Loadtest.SetupError, fn ->
-          Loadtest.run(port: @port, user: user, pass: pass, scenario: :produce, connections: 1, duration: 1, topic: t)
+          Loadtest.run(
+            port: TCPAcceptorPool.port(),
+            user: user,
+            pass: pass,
+            scenario: :produce,
+            connections: 1,
+            duration: 1,
+            topic: t
+          )
         end
 
       assert error.message =~ t

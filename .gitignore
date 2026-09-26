@@ -35,6 +35,8 @@ malachi-*.tar
 /priv/dist_cert/
 # Environment files
 .env
+# A worktree's own ports, data directories and node name (scripts/worktree-env.sh)
+worktree.env
 .env.local
 .env.*.local
 

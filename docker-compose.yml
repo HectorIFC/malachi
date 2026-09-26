@@ -6,15 +6,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: malachi
     # Bound to loopback, and this file is why that matters rather than being a nicety: it ships
     # placeholder credentials that are readable in a public repository, and it turns TLS off. An
     # unqualified "4040:4040" publishes that combination on every interface the host has, so a laptop
     # on a cafe network hands out a plaintext broker whose password is on GitHub. Change the prefix
     # deliberately, with real credentials and real certificates, not by deleting it.
+    #
+    # Every host port in this file comes from the environment, with today's value as the default, so two
+    # stacks (two worktrees, each with its own COMPOSE_PROJECT_NAME) can run side by side. The variable is
+    # the port on the HOST only: inside the container the broker still listens on 4040 and 4041. There
+    # are no fixed container names either; compose names containers after the project.
     ports:
-      - "127.0.0.1:4040:4040"
-      - "127.0.0.1:4041:4041"
+      - "127.0.0.1:${MALACHI_TCP_PORT:-4040}:4040"
+      - "127.0.0.1:${MALACHI_DASHBOARD_PORT:-4041}:4041"
     environment:
       - MALACHI_TCP_PORT=4040
       - MALACHI_DASHBOARD_PORT=4041
@@ -81,7 +85,6 @@ services:
 
   producer:
     image: node:20-alpine
-    container_name: malachi-producer
     working_dir: /app
     volumes:
       - ./scripts:/app
@@ -107,14 +110,13 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
-    container_name: malachi-jaeger
     ports:
       # 16686 is the UI. 4318 is OTLP over HTTP, which is what the broker ships spans to; it stays on
       # the compose network and is published only so you can point another local process at it.
       # Loopback for both: Jaeger has no authentication of any kind, so a UI on 0.0.0.0 is every trace
       # this broker ever recorded, readable by anyone who can route to the host.
-      - "127.0.0.1:16686:16686"
-      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${OTLP_PORT:-4318}:4318"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     mem_limit: 512m
@@ -129,7 +131,6 @@ services:
     extends:
       file: deploy/prometheus/metrics-token.yml
       service: metrics-token
-    container_name: malachi-metrics-token
     environment:
       - MALACHI_TARGETS=malachi=http://malachi:4041
     volumes:
@@ -140,11 +141,10 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.54.1
-    container_name: malachi-prometheus
     # Loopback: Prometheus is unauthenticated too, and it holds the scrape target's credentials in its
     # own configuration.
     ports:
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus

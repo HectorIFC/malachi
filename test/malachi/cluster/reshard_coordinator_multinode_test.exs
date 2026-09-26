@@ -18,14 +18,10 @@ defmodule Malachi.Cluster.ReshardCoordinatorMultinodeTest do
   alias Malachi.Cluster.SplitCoordinator
   alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Metadata
+  alias Malachi.Test.Distribution
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
+    :ok = Distribution.ensure_started()
 
     {:ok, _} = Application.ensure_all_started(:ra)
     :ok

@@ -6,40 +6,15 @@ defmodule Malachi.TCPAcceptorTLSTest do
 
   import Malachi.Test.TeardownHelper
 
+  alias Malachi.Test.CertFixtures
   alias Malachi.Wire
 
-  # A throwaway self-signed server cert/key generated per run. The dist certs under priv/dist_cert are
-  # gitignored (a private key is never committed), so they are absent in CI; generating here keeps the test
-  # self-contained. openssl ships on the CI image and is what the project's own cert scripts use.
+  # A throwaway self-signed server cert/key generated per run (CertFixtures.server_cert!/1): the dist certs
+  # under priv/dist_cert are gitignored, so they are absent in CI.
   setup do
     dir = Path.join(System.tmp_dir!(), "malachi_tls_test_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    certfile = Path.join(dir, "cert.pem")
-    keyfile = Path.join(dir, "key.pem")
-
-    {_out, 0} =
-      System.cmd(
-        "openssl",
-        [
-          "req",
-          "-x509",
-          "-newkey",
-          "rsa:2048",
-          "-nodes",
-          "-keyout",
-          keyfile,
-          "-out",
-          certfile,
-          "-days",
-          "1",
-          "-subj",
-          "/CN=localhost"
-        ],
-        stderr_to_stdout: true
-      )
-
     on_exit(fn -> File.rm_rf!(dir) end)
-    {:ok, certfile: certfile, keyfile: keyfile}
+    {:ok, CertFixtures.server_cert!(dir)}
   end
 
   defp free_port do

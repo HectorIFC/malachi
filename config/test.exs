@@ -35,6 +35,11 @@ config :malachi,
   ]
 
 config :malachi,
+  # Both listeners bind a port the operating system picks, so two `mix test` runs on one host (two
+  # worktrees) never fight for 4040/4041. Tests ask the listener which port it got
+  # (`Malachi.TCPAcceptorPool.port/0`, `Malachi.Dashboard.port/0`), never the config, which stays 0.
+  tcp_port: 0,
+  dashboard_port: 0,
   # TLS configuration for tests (disabled by default)
   enable_tls: false,
   require_tls: false,

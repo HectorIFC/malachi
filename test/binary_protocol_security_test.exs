@@ -8,12 +8,10 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @port Application.compile_env(:malachi, :tcp_port, 4040)
-
   defp uniq, do: System.unique_integer([:positive])
 
   defp connect do
-    {:ok, socket} = TCPHelper.connect(port: @port)
+    {:ok, socket} = TCPHelper.connect()
     socket
   end
 
