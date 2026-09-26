@@ -1009,6 +1009,8 @@ defmodule Malachi.BrokerServerTest do
       state = %{
         broker: broker,
         metadata_refresh: fn -> :stale end,
+        reconcile_read_timeout: 1_000,
+        reconcile_generation: 7,
         bootstrap: %{
           orchestrator?: true,
           vnodes: [],
@@ -1028,6 +1030,10 @@ defmodule Malachi.BrokerServerTest do
       assert adopted.bootstrap.replicated.ring == ring1
       assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}, v1: {:v1, node()}}
       assert is_function(adopted.metadata_refresh, 0)
+
+      # And the generation moved, which is what makes a reconcile started against ring0 arrive stale
+      # and be dropped rather than reinstating the ring this cast just replaced (#178).
+      assert adopted.reconcile_generation == 8
     end
   end
 

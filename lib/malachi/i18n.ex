@@ -544,6 +544,27 @@ defmodule Malachi.I18n do
       "pt_BR" => "membro ra %{server} (%{machine}) voltou a suportar a versão efetiva %{effective}",
       "en_US" => "ra member %{server} (%{machine}) supports the effective version %{effective} again"
     },
+    # Malachi.BrokerServer: the control plane reconcile runs off the broker's loop, so its two ways of
+    # not finishing are the only place an operator hears about them. One key each: they are different
+    # failures and lead to different checks.
+    broker_reconcile_task_down: %{
+      "pt_BR" =>
+        "⚠️ O reconcile do control plane caiu (%{reason}); o nó segue servindo a visão que já tem, " <>
+          "que envelhece até o próximo tick conseguir ler",
+      "en_US" =>
+        "⚠️ The control plane reconcile crashed (%{reason}); the node keeps serving the view it already " <>
+          "holds, which goes stale until a later tick manages to read"
+    },
+    broker_reconcile_task_timeout: %{
+      "pt_BR" =>
+        "⚠️ O reconcile do control plane passou de %{timeout_ms}ms e foi encerrado; alguma chamada " <>
+          "remota não retornou (o bootstrap de um vnode não tem timeout próprio) e o nó segue " <>
+          "servindo a visão que já tem",
+      "en_US" =>
+        "⚠️ The control plane reconcile overran %{timeout_ms}ms and was killed; a remote call did not " <>
+          "return (a vnode bootstrap has no timeout of its own) and the node keeps serving the view it " <>
+          "already holds"
+    },
     ring_publish_refused_completing: %{
       "pt_BR" =>
         "⚠️ O store do anel recusou a publicação ao concluir um split interrompido do vnode %{vnode} " <>

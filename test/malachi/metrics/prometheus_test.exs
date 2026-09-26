@@ -57,6 +57,20 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ "malachi_tls_enabled 1\n"
   end
 
+  test "the degraded-reconcile series carries every reason, zeroes included" do
+    # A node that stops reconciling keeps serving the view it holds, correctly and increasingly stale,
+    # so this total is the only thing that says the control plane stopped answering. Every reason is
+    # exported even at zero: a series that appears only after the first degraded tick cannot be alerted
+    # on with `increase()` nor asserted to be zero.
+    out = render([])
+
+    assert out =~ "# TYPE malachi_broker_reconcile_degraded_total counter\n"
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="skipped"} 4)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="down"} 0)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="timeout"} 1)
+    assert out =~ ~s(malachi_broker_reconcile_degraded_total{reason="other"} 0)
+  end
+
   test "operation counters are emitted" do
     out = render([])
 
