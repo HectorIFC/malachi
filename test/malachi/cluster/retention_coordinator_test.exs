@@ -1,6 +1,7 @@
 defmodule Malachi.Cluster.RetentionCoordinatorTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
   import Malachi.Test.PollingHelper
 
   alias Malachi.BrokerServer
@@ -27,6 +28,7 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       metadata_source: fn -> with_sealed([{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}]) end,
       expire_segment: fn segment -> send(test_pid, {:expired, segment.id}) end,
       policy: %{max_age_ms: 5_000},
+      policies: fn -> {:ok, %{}} end,
       clock: fn -> 10_000 end,
       interval: 60_000
     ]
@@ -212,6 +214,55 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       assert RetentionCoordinator.run_now(server) == []
       assert_receive {:sweep_event, %{expired: 0, failed: 0}, %{}}
       refute_receive {:expire_event, _measurements, _metadata}
+    end
+  end
+
+  describe "policies the sweep could not read" do
+    test "a read failure skips the sweep entirely rather than expiring under the global limits" do
+      # The whole point: falling back to the global limits here deletes exactly the data a more
+      # permissive policy exists to keep, on every replica, with no way back. A skipped sweep costs
+      # one interval.
+      server = start(policies: fn -> {:error, :unreachable} end)
+
+      log = capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end)
+
+      assert log =~ "the policy store did not answer"
+      refute_receive {:expired, _id}, 100
+    end
+
+    test "it says so once, not on every pass, while the store stays down" do
+      server = start(policies: fn -> {:error, :unreachable} end)
+
+      assert capture_log(fn -> RetentionCoordinator.run_now(server) end) =~ "the policy store did not answer"
+      refute capture_log(fn -> RetentionCoordinator.run_now(server) end) =~ "the policy store did not answer"
+    end
+
+    test "a store that answers again resumes sweeping, and says so again if it fails later" do
+      answer = :counters.new(1, [])
+      :counters.put(answer, 1, 0)
+
+      policies = fn ->
+        case :counters.get(answer, 1) do
+          0 -> {:error, :unreachable}
+          _readable -> {:ok, %{}}
+        end
+      end
+
+      server = start(policies: policies)
+
+      assert capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end) =~
+               "the policy store did not answer"
+
+      :counters.put(answer, 1, 1)
+      assert RetentionCoordinator.run_now(server) == ["old"]
+
+      # The second outage is the half of the name the test used to leave unchecked. The warning is
+      # silenced after the first line and un-silenced by the sweep that recovered, so without that
+      # reset every later outage passes in silence and nothing here would notice.
+      :counters.put(answer, 1, 0)
+
+      assert capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end) =~
+               "the policy store did not answer"
     end
   end
 

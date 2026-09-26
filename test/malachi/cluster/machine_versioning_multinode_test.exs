@@ -1,6 +1,6 @@
 defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
   @moduledoc """
-  The seven production control-plane machines over real `ra` on three peers: each group reaches the
+  The eight production control-plane machines over real `ra` on three peers: each group reaches the
   current machine version on every member, applies its commands, refuses an unknown one with the
   versioned reply, and comes back from a full-cluster restart with the same state and the same
   effective version.
@@ -22,6 +22,7 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.PolicyMachine
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
@@ -42,7 +43,8 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
       {UserMachine, {:put_user, "before", "hash", [:produce]}, {:put_user, "after", "hash", [:produce]}},
       {LockoutMachine, {:unlock_user, "before"}, {:unlock_user, "after"}},
       {AclMachine, {:grant, "before", :produce, {:literal, "t"}}, {:grant, "after", :produce, {:literal, "t"}}},
-      {ClusterFlagsMachine, {:enable_flag, :before}, {:enable_flag, :after}}
+      {ClusterFlagsMachine, {:enable_flag, :before}, {:enable_flag, :after}},
+      {PolicyMachine, {:define_policy, "before", %{spread_by: "rack"}}, {:define_policy, "after", %{}}}
     ]
   end
 
@@ -102,6 +104,7 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
     end
 
     await_converged(clusters, nodes, current)
+
     before = Map.new(clusters, &{&1, RaPeers.local_state(hd(nodes), &1)})
 
     # Full-cluster restart: every member down before any comes back, so the logs replay from disk.

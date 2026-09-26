@@ -223,6 +223,80 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(server)
   end
 
+  test "a broker that loses the single control plane reports its view as incomplete" do
+    # The other half of the policy above. Readiness says the node can serve; this says whether what it
+    # is serving is current, and a caller that acts on the ABSENCE of something needs the second answer.
+    # `Malachi.Retention.OrphanSweeper` is that caller: a segment registered through another broker
+    # while this one cannot refresh is missing from the view while its replica is on this node's disk,
+    # so sweeping on this view would delete a live replica.
+    #
+    # The single cluster is the case that used to slip through. Its refresh reports no unreachable
+    # vnodes even when it fails, because the failure is the `nil` it returns instead, and the reconcile
+    # left the previous (empty) list in place. The sharded path never had the hole: it reports the
+    # vnodes it could not read by id.
+    cluster = :"bs_incomplete_#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "malachi_incomplete_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(dir) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: dir)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    {:ok, server} =
+      BrokerServer.start_link("unused", brokers: [repl], metadata_cluster: cluster, brokers_refresh_interval: 50)
+
+    {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    assert BrokerServer.metadata_ready?(server)
+    assert BrokerServer.unreachable_vnodes(server) == [], "a refresh that succeeded read every vnode"
+
+    # The assertion below is about a state CHANGE, which only happens once a failed reconcile has
+    # landed, so it is driven rather than waited for. A sleep would make the test read the previous
+    # value whenever the runner stalls longer than the window, which is the flake this avoids.
+    MetadataServer.delete(cluster)
+    reconcile!(server)
+
+    assert BrokerServer.metadata_ready?(server), "the node still serves what it knew"
+    assert BrokerServer.unreachable_vnodes(server) == [:vnode_0], "but it says the view is not current"
+
+    :ok = BrokerServer.stop(server)
+  end
+
+  test "a reconcile that crashes or overruns leaves the view reported as not current" do
+    # The reconcile runs in a task now (#238), so a pass can end without installing a view in two ways
+    # that did not exist when it ran on the loop: the task crashes, or it overruns its deadline and is
+    # killed. Neither refreshes the view, and the node has to say so, for the same reason the single
+    # cluster's nil answer does: Malachi.Retention.OrphanSweeper removes a directory that no segment in
+    # the view accounts for, and a view nothing refreshed is one that can be missing segments whose
+    # replicas are already on this disk.
+    cluster = :"bs_stale_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    {:ok, server} =
+      BrokerServer.start_link("unused", brokers: [start_replication()], metadata_cluster: cluster)
+
+    {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    reconcile!(server)
+    assert BrokerServer.unreachable_vnodes(server) == [], "a pass that read every vnode"
+
+    # The task crashed.
+    ref = fake_reconcile_task(server)
+    send(server, {:DOWN, ref, :process, self(), :killed})
+    _ = :sys.get_state(server)
+    assert BrokerServer.unreachable_vnodes(server) == [:vnode_0]
+
+    # And a pass that does install a view clears it again, so this is a state the node leaves.
+    reconcile!(server)
+    assert BrokerServer.unreachable_vnodes(server) == []
+
+    # The task overran its deadline and was killed.
+    ref = fake_reconcile_task(server)
+    send(server, {:reconcile_deadline, ref})
+    _ = :sys.get_state(server)
+    assert BrokerServer.unreachable_vnodes(server) == [:vnode_0]
+
+    assert BrokerServer.metadata_ready?(server), "readiness is monotone and does not move with this"
+
+    :ok = BrokerServer.stop(server)
+  end
+
   test "a sharded broker stays ready when a vnode it had already read stops answering" do
     # The case that distinguishes this policy from the previous one. A vnode that was never reachable
     # leaves the node unready under both, because there is no view of it to serve from. One that WAS
@@ -1040,6 +1114,21 @@ defmodule Malachi.BrokerServerRaTest do
   # the periodic reconcile moved off the loop (#178), because the tick only STARTS a task. The public
   # call runs the same pass on the loop and answers when its result has been applied.
   defp reconcile!(server), do: BrokerServer.reconcile_now(server)
+
+  # A reconcile task the server will accept a failure reply for, without running one: what these tests
+  # exercise is the two failure handlers, and a real task made to crash on command is more machinery
+  # than the contract needs. The function runs INSIDE the server, so the timer it creates belongs to the
+  # process that cancels it, and its message is one the server already has a clause for.
+  defp fake_reconcile_task(server) do
+    ref = make_ref()
+
+    :sys.replace_state(server, fn state ->
+      timer = Process.send_after(self(), {:reconcile_deadline, ref}, 60_000)
+      %{state | reconcile_task: %{ref: ref, pid: self(), generation: state.reconcile_generation, timer: timer}}
+    end)
+
+    ref
+  end
 
   defp drain_history(server, range_id, cursor \\ :start, accumulated \\ []) do
     case BrokerServer.stream_history(server, range_id, cursor, 3) do

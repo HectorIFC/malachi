@@ -19,10 +19,14 @@ defmodule Malachi.Cluster.AutoRebalancer do
     * `:stabilization` - consecutive identical, non-empty plans required before committing (default 3)
     * `:on_result`  - `(commit_result -> any)`, called with each commit result (default: logs)
     * `:name`       - optional registered name
+
+  The tick, the validated interval and the rule that an unknown message is counted and survived rather
+  than fatal all come from `Malachi.Cluster.PeriodicWorker`.
   """
 
   use GenServer
   require Logger
+  alias Malachi.Cluster.PeriodicWorker
   alias Malachi.I18n
 
   @default_interval 30_000
@@ -40,34 +44,38 @@ defmodule Malachi.Cluster.AutoRebalancer do
 
   @impl true
   def init(opts) do
-    state = %{
-      plan_fun: Keyword.fetch!(opts, :plan_fun),
-      commit_fun: Keyword.fetch!(opts, :commit_fun),
-      leader?: Keyword.fetch!(opts, :leader?),
-      interval: Keyword.get(opts, :interval, @default_interval),
-      # at least 1: a 0 would defeat the flap protection (commit on the very first non-empty plan)
-      stabilization: max(1, Keyword.get(opts, :stabilization, @default_stabilization)),
-      on_result: Keyword.get(opts, :on_result, &log_result/1),
-      last_plan: [],
-      stable_count: 0
-    }
+    state =
+      Map.merge(PeriodicWorker.new(opts, :rebalance, @default_interval, :auto_rebalance_interval_ms), %{
+        plan_fun: Keyword.fetch!(opts, :plan_fun),
+        commit_fun: Keyword.fetch!(opts, :commit_fun),
+        leader?: Keyword.fetch!(opts, :leader?),
+        # at least 1: a 0 would defeat the flap protection (commit on the very first non-empty plan)
+        stabilization: max(1, Keyword.get(opts, :stabilization, @default_stabilization)),
+        on_result: Keyword.get(opts, :on_result, &log_result/1),
+        last_plan: [],
+        stable_count: 0
+      })
 
-    schedule(state)
+    PeriodicWorker.schedule(state)
     {:ok, state}
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    state = reconcile(state)
-    schedule(state)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: PeriodicWorker.tick(state, &reconcile/1)
+
+  def handle_info(message, state), do: PeriodicWorker.unknown_info(state, message)
 
   @impl true
   def handle_call(:reconcile_now, _from, state) do
     state = reconcile(state)
     {:reply, {state.last_plan, state.stable_count}, state}
   end
+
+  def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
+
+  # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
+  @impl true
+  def handle_cast(message, state), do: PeriodicWorker.unknown_cast(state, message)
 
   # Only the lease holder drives; a non-leader (or a node that just lost the lease) resets its counter so
   # stabilization restarts cleanly if it becomes leader again.
@@ -96,8 +104,6 @@ defmodule Malachi.Cluster.AutoRebalancer do
       %{state | last_plan: plan, stable_count: count}
     end
   end
-
-  defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
 
   defp log_result({:ok, []}), do: :ok
 
