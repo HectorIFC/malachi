@@ -1524,19 +1524,38 @@ defmodule Malachi.Cluster.ReplicationServer do
     is_binary(name) and name not in ["", ".", ".."] and not String.contains?(name, "/")
   end
 
-  # Closes the log this directory holds, if it is open here, and removes the directory either way. The
-  # open case goes through `Log.delete/1` so the descriptors are closed before the files go; the closed
-  # case is the same best-effort removal `{:delete, segment_id}` does for a log that is not open.
+  # Closes the log this directory holds, if it is open here, and removes the directory either way,
+  # reporting the removal in both cases.
+  #
+  # The open case used to be `Log.delete/1`, which closes and then removes best effort and always answers
+  # `:ok`. That contract is right where it came from: `{:delete, segment_id}` runs after the control
+  # plane dropped the segment, and a file nothing lists any more is harmless, which is exactly the
+  # leftover `Malachi.Retention.OrphanSweeper` exists to reclaim later. It is wrong for the sweeper
+  # itself, whose entire answer is whether the directory is gone: a failed removal came back as `:ok`,
+  # the pass reported the directory under `removed`, and `malachi_retention_orphan_directories_removed`
+  # moved for a directory still on disk, which is the counter an operator reads against the one for
+  # directories left behind. So the close and the removal are split and both branches end in the same
+  # reporting removal.
+  #
+  # The caller forgets the log either way, including after a failed removal. The log is closed by then,
+  # so leaving it in `state.logs` would keep a handle nothing can use; the directory that survived is
+  # opened again from disk if anything writes to it, and the next sweep retries it through the branch
+  # below, where it is no longer open here.
   defp drop_directory(state, name) do
     case open_log_in(state, name) do
       {_segment_id, log} ->
-        Log.delete(log)
+        _ = Log.close(log)
+        remove_directory(state, name)
 
       nil ->
-        case File.rm_rf(Path.join(state.directory, name)) do
-          {:ok, _removed} -> :ok
-          {:error, reason, _path} -> {:error, reason}
-        end
+        remove_directory(state, name)
+    end
+  end
+
+  defp remove_directory(state, name) do
+    case File.rm_rf(Path.join(state.directory, name)) do
+      {:ok, _removed} -> :ok
+      {:error, reason, _path} -> {:error, reason}
     end
   end
 

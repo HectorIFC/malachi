@@ -645,6 +645,33 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert ReplicationServer.flush(name) == {:error, [{@segment, :enospc}]}
     end
 
+    test "delete_directory removes a directory whose log is open here and answers ok" do
+      {name, directory} = start_broker_at([])
+      assert {:ok, 0} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a"]))
+
+      assert ReplicationServer.delete_directory(name, Path.basename(storage_dir(directory, @segment))) == :ok
+      refute File.exists?(storage_dir(directory, @segment))
+    end
+
+    test "delete_directory reports a removal that failed, with the log open here" do
+      # The open branch went through Log.delete/1, which removes best effort and answers :ok whatever
+      # happened, so Malachi.Retention.OrphanSweeper counted a directory it had not reclaimed and the
+      # removed counter moved for one still on disk. The closed branch always reported the error, so the
+      # two halves of one function disagreed about what success means.
+      {name, directory} = start_broker_at([])
+      assert {:ok, 0} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a"]))
+
+      StorageFaults.make_unremovable!(directory)
+
+      assert ReplicationServer.delete_directory(name, Path.basename(storage_dir(directory, @segment))) ==
+               {:error, :eacces}
+
+      # rm_rf empties what it can reach before failing on the directory itself, so what survives is the
+      # entry rather than its contents. That is enough: the sweep sees it again and retries it.
+      assert File.dir?(storage_dir(directory, @segment))
+      assert Process.alive?(Process.whereis(name))
+    end
+
     test "a cold read of a segment this server cannot open answers the error and the server stays up" do
       {name, directory} = start_broker_at([])
       assert {:ok, 0} = ReplicationServer.replicate(name, @segment, [name], 0, records(["a"]))
