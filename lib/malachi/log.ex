@@ -404,7 +404,13 @@ defmodule Malachi.Log do
       # The sidecar and the per-segment seal marker go with the data file. A `.sealed` left behind
       # would make a later segment reusing that name come back sealed, and an orphan `.idx` would be
       # loaded by the next reader of a file that no longer matches it.
-      [".log", ".idx", ".sealed"]
+      #
+      # The data file goes LAST, and that order is the only thing that makes a failure here recoverable.
+      # `base_offsets_in/1` finds a segment through its `.log` and nothing else, so removing that first
+      # and then failing on a sidecar takes the segment out of every later pass's view while its
+      # leftovers stay on disk. While the `.log` is still there, a retried truncation finds the segment
+      # again and finishes the job.
+      [".sealed", ".idx", ".log"]
       |> Enum.map(&Path.join(log.directory, id <> &1))
       |> Enum.find_value(&removal_error/1)
       |> case do

@@ -379,6 +379,35 @@ defmodule Malachi.LogTest do
 
       assert {:error, _reason} = Log.truncate_to(log, 7)
     end
+
+    # A drop that fails partway must leave the segment DISCOVERABLE, because `base_offsets_in/1` finds a
+    # segment through its `.log` and nothing else. Remove that first and a failure on a sidecar takes the
+    # segment out of every later pass's view while its leftovers stay on disk, and a leftover `.sealed`
+    # makes a later segment that reuses the name come back sealed and refuse every append.
+    test "a drop interrupted by a sidecar leaves the data file, so a retry finishes it",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      blocker = Path.join(directory, id_for(9) <> ".idx")
+      File.rm(blocker)
+      File.mkdir_p!(Path.join(blocker, "nested"))
+
+      assert {:error, _reason} = Log.truncate_to(log, 7)
+
+      # The segment the drop could not finish is still there to be found, and so are the leftovers.
+      assert File.exists?(Path.join(directory, id_for(9) <> ".log"))
+      assert segment_ids(directory) == Enum.map([0, 3, 6, 9], &id_for/1)
+
+      # With the blocker gone, the next attempt sees segment 9 again and completes the drop.
+      File.rm_rf!(blocker)
+      {:ok, recovered} = Log.recover(directory, max_bytes: 120, index_interval: 32)
+
+      assert {:ok, truncated} = Log.truncate_to(recovered, 7)
+
+      assert segment_ids(directory) == Enum.map([0, 3, 6], &id_for/1)
+      refute File.exists?(Path.join(directory, id_for(9) <> ".sealed"))
+      assert truncated.next_offset == 7
+      :ok = Log.close(truncated)
+    end
   end
 
   describe "recovery" do
