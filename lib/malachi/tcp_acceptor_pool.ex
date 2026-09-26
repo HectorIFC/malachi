@@ -28,7 +28,13 @@ defmodule Malachi.TCPAcceptorPool do
   @spec start_link(:inet.port_number() | {:inet.port_number(), keyword()}) :: Supervisor.on_start()
   def start_link({port, opts}) do
     name = Keyword.get(opts, :name, __MODULE__)
-    Supervisor.start_link(__MODULE__, {port, name}, name: name)
+
+    # The port is recorded here, once the whole pool is up, and not in `init/1`: a pool whose acceptor
+    # fails to bind after the throwaway socket succeeded never started, and must not leave a port behind.
+    with {:ok, pool} <- Supervisor.start_link(__MODULE__, port, name: name) do
+      :persistent_term.put({__MODULE__, name}, acceptor_port(pool))
+      {:ok, pool}
+    end
   end
 
   def start_link(port), do: start_link({port, []})
@@ -41,7 +47,7 @@ defmodule Malachi.TCPAcceptorPool do
   def port(name \\ __MODULE__), do: :persistent_term.get({__MODULE__, name}, nil)
 
   @impl true
-  def init({port, name}) do
+  def init(port) do
     buffer_size = Application.get_env(:malachi, :tcp_buffer_size, 32_768)
     backlog = Application.get_env(:malachi, :tcp_backlog, 4096)
     send_timeout = Application.get_env(:malachi, :tcp_send_timeout, 30_000)
@@ -89,8 +95,6 @@ defmodule Malachi.TCPAcceptorPool do
           :gen_tcp -> :gen_tcp.close(test_socket)
         end
 
-        :persistent_term.put({__MODULE__, name}, bound)
-
         num_acceptors = System.schedulers_online()
         transport_name = if enable_tls, do: "TLS", else: "TCP"
         Logger.info(I18n.t(:tcp_server_started, port: bound, acceptors: num_acceptors))
@@ -112,6 +116,14 @@ defmodule Malachi.TCPAcceptorPool do
         # `start_link/1` answer `{:error, reason}` instead.
         exit(reason)
     end
+  end
+
+  # Every acceptor was handed the same bound port (see `init/1`); the first one's start arguments say which.
+  defp acceptor_port(pool) do
+    {:ok, %{start: {Malachi.TCPAcceptor, :start_link, [{bound, _opts, _id, _transport}]}}} =
+      :supervisor.get_childspec(pool, {:acceptor, 1})
+
+    bound
   end
 
   # `:inet.port/1` does not accept an `:ssl` socket; `:ssl.sockname/1` answers the same for it.
