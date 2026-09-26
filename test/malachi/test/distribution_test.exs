@@ -9,7 +9,9 @@ defmodule Malachi.Test.DistributionTest do
   # and exit status. `name_args` names the VM up front (`--name ...`), or leaves it undistributed.
   defp child_vm(expression, name_args) do
     elixir = System.find_executable("elixir") || flunk("elixir is required to start a child VM")
-    ebin = Path.dirname(:code.which(Distribution))
+    # The app's ebin, not `:code.which/1`: under `mix coveralls` the module is cover-compiled in memory
+    # and `:code.which/1` answers `:cover_compiled` rather than a path.
+    ebin = Application.app_dir(:malachi, "ebin")
     System.cmd(elixir, name_args ++ ["-pa", ebin, "-e", expression], stderr_to_stdout: true)
   end
 
@@ -84,7 +86,7 @@ defmodule Malachi.Test.DistributionTest do
       {peer, node, name} = Distribution.start_peer("dist_test")
 
       assert node == :"#{name}@127.0.0.1"
-      assert :erpc.call(node, :code, :which, [Distribution]) == :code.which(Distribution)
+      assert :erpc.call(node, :code, :ensure_loaded, [Distribution]) == {:module, Distribution}
       assert registered?(name)
 
       assert Distribution.stop_peer(peer) == :ok
