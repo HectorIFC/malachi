@@ -5,6 +5,7 @@ defmodule Malachi.BrokerTest do
   alias Malachi.Broker
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Placement
   alias Malachi.Log.Record
   alias Malachi.Metadata
@@ -1514,6 +1515,95 @@ defmodule Malachi.BrokerTest do
       # Retention is for vnodes that did not answer. One that answered and reported nothing is
       # authoritative, or a dropped topic would live in the cache forever.
       assert Broker.active_range_ids(Broker.put_cache(broker, emptied, []), "events") == []
+    end
+  end
+
+  describe "the command journal (what a re-seed must not undo)" do
+    test "journaling is off by default, and take_journal answers nothing rather than raising" do
+      {broker, _root_id} = broker_with_topic("events")
+
+      assert broker.journal == nil
+      assert Broker.take_journal(broker) == {[], broker}
+    end
+
+    test "a journaling broker reports the commands it applied, oldest first, once" do
+      {broker, _root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{{"events", 0} => 7})
+      {broker, _reply} = Broker.create_topic(broker, "orders", 4)
+
+      {commands, drained} = Broker.take_journal(broker)
+
+      assert [{:commit_offset, "billing", "events", _}, {:create_topic, "orders", 4}] = commands
+      assert Broker.take_journal(drained) == {[], drained}
+    end
+
+    test "replaying restores a write the re-seed installed over" do
+      # The shape #178 introduced: the read was taken before the command, so installing it alone
+      # undoes it. Replaying puts it back without a second trip through the log.
+      {broker, _root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+      stale = broker.dsrsm
+
+      {broker, _reply} = Broker.create_topic(broker, "orders", 4)
+      {commands, broker} = Broker.take_journal(broker)
+
+      reseeded = Broker.put_cache(broker, stale, [])
+      assert Broker.active_range_ids(reseeded, "orders") == []
+
+      assert Broker.active_range_ids(Broker.replay_journal(reseeded, commands), "orders") != []
+    end
+
+    test "a replayed commit never moves a group backwards" do
+      # The machine applies commit_offset last-write-wins, which is right for the log and wrong for a
+      # replay: the read being replayed onto was taken first and may already carry a higher position
+      # another node committed. Rolling a group back is redelivery, so the higher one wins.
+      {broker, root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 10})
+      {commands, broker} = Broker.take_journal(broker)
+
+      {ahead, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 900})
+      replayed = Broker.replay_journal(ahead, commands)
+
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => 900}
+    end
+
+    test "a command the control plane refused or never answered is not journaled" do
+      # `ReplicatedMetadata.apply_command/3` returns the cache it was given when the command errored, so
+      # a refusal and a transport failure look the same from here: nothing changed. Journaling either
+      # would have the replay put into the cache something the log may never have taken, which is the
+      # opposite direction of the staleness the replay exists to repair, and worse.
+      {:ok, ring} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+      never_committed = fn dsrsm, _topic, _command -> {dsrsm, {:error, :timeout}} end
+
+      {:ok, broker} = Broker.open(dsrsm: DSRSM.seed(ring, %{v0: Metadata.new()}), command_fun: never_committed)
+      broker = Broker.journal(broker)
+
+      assert {broker, {:error, :timeout}} = Broker.create_topic(broker, "orders", 4)
+      assert DSRSM.get_topic(broker.dsrsm, "orders") == nil
+
+      {journaled, drained} = Broker.take_journal(broker)
+
+      assert journaled == []
+      assert Broker.replay_journal(drained, journaled) == drained
+      assert DSRSM.get_topic(Broker.replay_journal(drained, journaled).dsrsm, "orders") == nil
+    end
+
+    test "replaying a command whose topic no longer routes anywhere leaves the cache alone" do
+      {broker, _root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+      {broker, _reply} = Broker.create_topic(broker, "orders", 4)
+      {commands, broker} = Broker.take_journal(broker)
+
+      # An empty ring routes nowhere, which is what a broker adopting a topology it has no vnode for
+      # holds for a moment.
+      empty_ring = %{broker.dsrsm | ring: HashRing.new(), vnodes: %{}}
+      emptied = %{broker | dsrsm: empty_ring}
+
+      assert Broker.replay_journal(emptied, commands) == emptied
     end
   end
 end

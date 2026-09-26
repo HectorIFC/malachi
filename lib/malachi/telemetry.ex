@@ -244,6 +244,22 @@ defmodule Malachi.Telemetry do
     )
   end
 
+  @doc """
+  The broker's control plane reconcile did not complete this tick, for `reason`:
+
+    * `:skipped` - the previous tick's reconcile was still running, so this one did not start one;
+    * `:down` - the reconcile task crashed;
+    * `:timeout` - the reconcile task overran its deadline and was killed.
+
+  All three leave the node serving from the view it already holds, which is correct but increasingly
+  stale, so a rising total is the signal that the control plane is not answering. Emitted from the
+  broker's own process.
+  """
+  @spec reconcile_degraded(:skipped | :down | :timeout) :: :ok
+  def reconcile_degraded(reason) do
+    :telemetry.execute([:malachi, :cluster, :reconcile_degraded], %{count: 1}, %{reason: reason})
+  end
+
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."
   @spec scrub_pass(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
   def scrub_pass(verified, damaged, repaired, unrepairable) do

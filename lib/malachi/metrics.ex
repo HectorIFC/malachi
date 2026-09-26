@@ -18,6 +18,9 @@ defmodule Malachi.Metrics do
   alias Malachi.UnexpectedMessage
 
   @metrics_table :malachi_metrics
+
+  # The closed label set of `record_reconcile_degraded/2`; see `Malachi.Telemetry.reconcile_degraded/1`.
+  @reconcile_degraded_reasons [:skipped, :down, :timeout]
   # The storage flush numbers live in :atomics reached through :persistent_term, not in ETS. Every
   # segment's owner flushes on its own, so tens of thousands of writers a second hit the same few
   # counters, and an ETS row serializes concurrent writers to one key while an :atomics add takes no lock
@@ -410,6 +413,27 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records `count` ticks on which the broker's control plane reconcile did not complete, by `reason`
+  (`:skipped`, `:down` or `:timeout`; anything else is counted as `:other`, so the exported label set
+  stays closed). See `Malachi.Telemetry.reconcile_degraded/1`.
+  """
+  def record_reconcile_degraded(reason, count \\ 1) do
+    key = {:reconcile_degraded, reconcile_degraded_bucket(reason)}
+    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
+    :ok
+  end
+
+  defp reconcile_degraded_bucket(reason) when reason in @reconcile_degraded_reasons, do: reason
+  defp reconcile_degraded_bucket(_reason), do: :other
+
+  # Every reason, zero included: a series that appears only after the first degraded tick cannot be
+  # alerted on with `increase()` nor asserted to be zero.
+  defp reconcile_degraded_counts do
+    for reason <- @reconcile_degraded_reasons ++ [:other],
+        do: %{reason: reason, count: get_counter({:reconcile_degraded, reason})}
+  end
+
+  @doc """
   Records one message a long-lived server had no clause for (see `Malachi.UnexpectedMessage`), by the
   server's label and the `kind` it arrived as. A label outside `Malachi.UnexpectedMessage.servers/0` is
   counted as `:other`, so the exported label set stays closed whatever a caller passes.
@@ -611,6 +635,7 @@ defmodule Malachi.Metrics do
         scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),
         orphaned_fences: get_counter(:orphaned_fences),
         fences_reconciled: get_counter(:fences_reconciled),
+        reconcile_degraded: reconcile_degraded_counts(),
         unexpected_messages: unexpected_message_counts()
       },
       storage_flush: storage_flush_summary(),

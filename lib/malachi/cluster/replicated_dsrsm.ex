@@ -22,6 +22,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   migrating topic (zero-window cutover) is a later step.
   """
 
+  alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
@@ -35,6 +36,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
         }
 
   defstruct ring: nil, vnodes: %{}
+
+  # ra's own default, so `snapshot/2` with no `:timeout` reads exactly as `snapshot/1` used to.
+  @default_timeout 5_000
 
   @doc "Builds an empty replicated DS-RSM. Options are forwarded to `HashRing.new/1`."
   @spec new(keyword()) :: t()
@@ -193,10 +197,16 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   contributed nothing, the cache replaced the real topics with that nothing, and every read of them
   succeeded with zero records. Re-snapshotting later fills the vnode in (the ra log is authoritative,
   so a refresh only ever moves the cache forward).
+
+  The vnodes are read **concurrently**, and `:timeout` (in ms, default ra's own 5s) bounds each read. Both
+  matter to a caller on a latency-sensitive path: read sequentially with the default, a snapshot of
+  `n` silent vnodes costs `5s x n`, which is what used to be paid inside the broker's own loop while
+  it was supposed to be serving clients (#178). A read that times out is just an unreachable vnode,
+  the case this function already reports, so bounding it adds no outcome a caller must learn.
   """
-  @spec snapshot(t()) :: {:ok, DSRSM.t(), [vnode_id()]}
-  def snapshot(%__MODULE__{} = state) do
-    read = Map.new(state.vnodes, fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id)} end)
+  @spec snapshot(t(), keyword()) :: {:ok, DSRSM.t(), [vnode_id()]}
+  def snapshot(%__MODULE__{} = state, opts \\ []) do
+    read = Map.new(read_vnodes(state.vnodes, Keyword.get(opts, :timeout, @default_timeout)))
 
     metadata_by_vnode = Map.new(read, fn {vnode_id, result} -> {vnode_id, metadata_or_empty(result)} end)
     unreachable = for {vnode_id, :unreachable} <- read, do: vnode_id
@@ -222,11 +232,24 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   # electing, not bootstrapped yet, or partitioned). A linearizable query runs on the (possibly remote)
   # leader, so use a named stdlib function rather than a module-local closure, which the leader node
   # may not have loaded.
-  defp vnode_metadata(server_id) do
-    case MetadataServer.query(server_id, &Function.identity/1) do
+  defp vnode_metadata(server_id, timeout) do
+    case MetadataServer.query(server_id, &Function.identity/1, timeout) do
       {:ok, metadata} -> {:ok, metadata}
       {:error, _reason} -> :unreachable
     end
+  end
+
+  # One bounded read per vnode, concurrently: the reads are independent, and a vnode that is going to
+  # cost the whole timeout must not hold the others behind it. A read that overran is reported as the
+  # unreachable vnode it is, which is a case this module already answers for.
+  defp read_vnodes(vnodes, timeout) do
+    vnodes
+    |> Map.to_list()
+    |> BoundedFanout.map(
+      timeout,
+      fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id, timeout)} end,
+      fn {vnode_id, _server_id} -> {vnode_id, :unreachable} end
+    )
   end
 
   # The placeholder keeps the cache shape total (every vnode on the ring has an entry). It is only a
