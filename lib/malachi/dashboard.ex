@@ -873,6 +873,14 @@ defmodule Malachi.Dashboard do
 
   # A short timeout, and a busy broker counts as not ready: a readiness check that blocks on the loop it
   # reports on would hang exactly when the node is under the pressure worth reporting.
+  #
+  # Readiness deliberately does NOT wait on the cluster feature flags. A node that has not read them is
+  # not yet sure what the cluster has committed to, and gating on that sounds right until you follow it
+  # through the release that introduces the flag store: the store cannot reach a quorum until enough
+  # nodes run a build that has its machine module, and a StatefulSet rolling update will not start the
+  # second pod until the first is Ready, so the rollout would stall on its first step. See
+  # `Malachi.Cluster.ClusterFlagsCache.read?/0`, which is the hook the first feature to need one will
+  # use, once the store is already formed cluster-wide and there is no bootstrap left to deadlock.
   defp broker_ready? do
     case Process.whereis(Malachi.LogBroker) do
       nil -> false

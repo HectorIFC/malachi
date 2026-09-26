@@ -1,7 +1,7 @@
 defmodule Malachi.Cluster.MachineVersion do
   @moduledoc """
   The one versioning rule shared by every control-plane `ra` state machine: metadata, lease, ring,
-  users, lockouts and ACLs.
+  users, lockouts, ACLs and cluster flags.
 
   ## Why a command needs a version
 
@@ -31,8 +31,10 @@ defmodule Malachi.Cluster.MachineVersion do
   Existing commands stay at the version they were introduced at forever: nothing takes a release
   cursor, so every command ever written is replayed on restart and must stay appliable.
 
-  The six machines share one version number. That keeps one pin meaningful for all of them, and
-  bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`.
+  The seven machines share one version number. That keeps one pin meaningful for all of them, and
+  bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`. Version 2
+  is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}`, so the other six moved to
+  2 with nothing but that no-op.
 
   ## Holding the version during an upgrade
 
@@ -63,7 +65,7 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  @code_version 1
+  @code_version 2
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

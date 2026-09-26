@@ -347,8 +347,12 @@ jobs:
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-latest
+    # The test environment, not dev, because `elixirc_paths(:test)` adds `test/support` and that is the
+    # only way its modules are ever type checked: a broken call there used to show up in an editor and
+    # nowhere else. Nothing in `lib` compiles differently between the two (no `Mix.env/0` and no
+    # `Application.compile_env/2` in it), so this analyses everything the dev run did, and more.
     env:
-      MIX_ENV: dev
+      MIX_ENV: test
 
     steps:
       - name: 📥 Checkout code
@@ -372,9 +376,12 @@ jobs:
             deps
             _build
             ~/.mix
-          key: ${{ runner.os }}-dialyzer-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+          # `dialyzer-test` rather than `dialyzer`: the key changes only with the toolchain and the lock
+          # file, and a cache entry is never overwritten once saved, so reusing the old prefix would keep
+          # restoring the dev-only entry and never save the test PLT, rebuilding it on every run.
+          key: ${{ runner.os }}-dialyzer-test-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-dialyzer-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+            ${{ runner.os }}-dialyzer-test-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - name: 🔨 Install dependencies
         run: |
