@@ -35,6 +35,7 @@ defmodule Malachi.BrokerServer do
 
   alias Malachi.Broker
   alias Malachi.Broker.Skip
+  alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
@@ -66,6 +67,16 @@ defmodule Malachi.BrokerServer do
   # timeout. A spurious resend is safe: the roll stays owed and a fence is idempotent, answering the same
   # numbers.
   @roll_fence_retry_ms 1_000
+  # What one control plane read may cost the reconcile. The rule is the one already written beside
+  # `safe_durable_end/3`: a remote call the reconcile makes must cost milliseconds, not ra's default
+  # five seconds. It bounds the boot reconcile (which runs on this loop, before the first client call)
+  # and each read the periodic reconcile task makes.
+  @default_reconcile_read_timeout 1_000
+  # How long the reconcile TASK may run before it is killed. Its reads are bounded by the above, but
+  # bootstrapping a vnode reaches `:ra.start_cluster`, which does an `rpc:call/4` with no timeout at
+  # all. Only one reconcile runs at a time, so a task wedged there would mean no reconcile ever runs
+  # again: this deadline is what keeps that from happening silently.
+  @default_reconcile_deadline 30_000
 
   # --- client API ---
 
@@ -80,6 +91,10 @@ defmodule Malachi.BrokerServer do
       set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
       currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
+    * `:reconcile_read_timeout` - ms one control plane read made by the reconcile may take before the
+      vnode counts as unreachable for that pass (default 1000). Deliberately far below ra's 5s.
+    * `:reconcile_deadline_ms` - ms the periodic reconcile task may run before it is killed and the
+      tick counted as degraded (default 30000). See `reconcile_now/2`.
     * `:fence_timeout` - ms a split's or a merge's store fence may take before the operation is
       refused (default 1000). The produce roll's fence is asynchronous and not bounded by this: see
       `fence_and_seal/2`.
@@ -182,6 +197,21 @@ defmodule Malachi.BrokerServer do
   """
   @spec metadata_ready?(GenServer.server(), timeout()) :: boolean()
   def metadata_ready?(server, timeout \\ 1_000), do: GenServer.call(server, :metadata_ready?, timeout)
+
+  @doc """
+  Runs one control plane reconcile **synchronously** and returns once its result has been applied.
+
+  The periodic reconcile runs off this server's loop (see the `:reconcile` clauses), so sending
+  `:reconcile` and waiting for the server to answer anything no longer proves the pass landed. This
+  is the barrier that does. It is bounded the same way the boot reconcile is, by
+  `:reconcile_read_timeout` per read, so it cannot hold the loop for ra's five seconds either.
+
+  Same shape as `Malachi.Cluster.LeaseReconciler.reconcile_now/1` and
+  `Malachi.Cluster.AutoRebalancer.reconcile_now/1`. A server with in-memory metadata has nothing to
+  reconcile and answers `:ok` at once.
+  """
+  @spec reconcile_now(GenServer.server(), timeout()) :: :ok
+  def reconcile_now(server, timeout \\ 10_000), do: GenServer.call(server, :reconcile_now, timeout)
 
   @doc "No-op: writes are already durable on return. Kept for API compatibility."
   @spec sync(GenServer.server()) :: :ok
@@ -320,6 +350,8 @@ defmodule Malachi.BrokerServer do
     {placement_policy, opts} = Keyword.pop(opts, :placement_policy)
     {refresh_interval, opts} = Keyword.pop(opts, :brokers_refresh_interval, @default_brokers_refresh_interval)
     {fence_timeout, opts} = Keyword.pop(opts, :fence_timeout, @default_fence_timeout)
+    {read_timeout, opts} = Keyword.pop(opts, :reconcile_read_timeout, @default_reconcile_read_timeout)
+    {reconcile_deadline, opts} = Keyword.pop(opts, :reconcile_deadline_ms, @default_reconcile_deadline)
     {metadata_cluster, opts} = Keyword.pop(opts, :metadata_cluster)
     {metadata_nodes, opts} = Keyword.pop(opts, :metadata_nodes, [node()])
     {metadata_vnodes, opts} = Keyword.pop(opts, :metadata_vnodes)
@@ -344,9 +376,19 @@ defmodule Malachi.BrokerServer do
       |> maybe_put(:spread_by, spread_by)
       |> maybe_put(:min_domains, min_domains)
       |> maybe_put(:placement_policy, placement_policy)
-      |> with_metadata_authority(metadata_cluster, metadata_nodes, metadata_vnodes, bootstrap_orchestrator)
+      |> with_metadata_authority(
+        metadata_cluster,
+        metadata_nodes,
+        metadata_vnodes,
+        bootstrap_orchestrator,
+        read_timeout
+      )
 
     {:ok, broker} = Broker.open(broker_opts)
+
+    # Only a replicated control plane re-seeds this cache from a read, so only it can undo a local
+    # write by installing one; in-memory metadata IS the truth and never replaces itself.
+    broker = if metadata_refresh, do: Broker.journal(broker), else: broker
 
     # With authoritative (ra-backed) metadata, the topics/ranges/segments survive a restart, but the
     # in-memory offsets and segment_seq maps do not: without recovery, every read of pre-restart data
@@ -362,9 +404,25 @@ defmodule Malachi.BrokerServer do
       broker_attributes: broker_attributes,
       refresh_interval: refresh_interval,
       fence_timeout: fence_timeout,
+      # What one control plane read may cost the reconcile, and how long the reconcile task may run
+      # before it is killed. See the attributes they default from.
+      reconcile_read_timeout: read_timeout,
+      reconcile_deadline: reconcile_deadline,
+      # The reconcile task currently in flight (`%{ref, pid, generation, timer}`), or nil. At most one
+      # runs at a time: a tick that finds one still running counts itself degraded and starts none, so
+      # a slow control plane cannot make the tasks pile up.
+      reconcile_task: nil,
+      # Bumped by `:adopt_topology`. A task carries the generation it was started with, and a result
+      # from an older one is dropped: applying it would reinstate the ring from before the split and
+      # keep it until the next tick managed to read.
+      reconcile_generation: 0,
+      # One slot for the ref of the last task a deadline gave up on. The task is killed, but its reply
+      # may already have been in the mailbox, and a reply with no clause is a counted drop rather than
+      # a crash (`Malachi.UnexpectedMessage`). One slot suffices: only one task is ever in flight.
+      abandoned_ref: nil,
       # Re-seeds the local metadata cache from the authoritative ra clusters (fills vnodes not yet ready
-      # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. See
-      # `reconcile_metadata/1`.
+      # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. Run by
+      # `run_reconcile/3` and applied by `apply_reconcile/2`.
       metadata_refresh: metadata_refresh,
       # The metadata vnodes this broker has read at least once since boot (see `seen_vnodes/3`). Empty
       # at boot even when the boot snapshot succeeded: the reconcile that follows `init` fills it, and
@@ -617,6 +675,10 @@ defmodule Malachi.BrokerServer do
     {:reply, :ok, drop_subscriber(state, topic, pid)}
   end
 
+  def handle_call(:reconcile_now, _from, state) do
+    {:reply, :ok, reconcile_synchronously(state)}
+  end
+
   def handle_call(message, _from, state) do
     {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
   end
@@ -628,10 +690,20 @@ defmodule Malachi.BrokerServer do
   def handle_cast({:adopt_topology, %RingTopology{} = topology}, state) do
     replicated = replicated_of(topology)
     broker = adopt_topology(state.broker, topology)
-    metadata_refresh = sharded_refresh(replicated)
+    metadata_refresh = sharded_refresh(replicated, state.reconcile_read_timeout)
     bootstrap = if state.bootstrap, do: %{state.bootstrap | replicated: replicated}, else: state.bootstrap
 
-    {:noreply, %{state | broker: broker, metadata_refresh: metadata_refresh, bootstrap: bootstrap}}
+    # A reconcile started before this cast read the PREVIOUS ring. Bumping the generation is what makes
+    # its result arrive stale and be dropped, instead of overwriting the ring this cast just installed
+    # and reverting the split for a tick.
+    {:noreply,
+     %{
+       state
+       | broker: broker,
+         metadata_refresh: metadata_refresh,
+         bootstrap: bootstrap,
+         reconcile_generation: state.reconcile_generation + 1
+     }}
   end
 
   def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
@@ -716,6 +788,57 @@ defmodule Malachi.BrokerServer do
     end
   end
 
+  # --- the reconcile task's replies ---
+  #
+  # All four sit ABOVE the generic `:DOWN` clause below, which matches ANY monitor ref and reads it as
+  # a subscriber's: a reconcile task's DOWN landing there would be absorbed without a trace. They are
+  # also above the `handle_info/2` catch-all, which counts an unmatched message instead of crashing,
+  # so a mistyped pattern here shows up as a drop rather than as a failure. Both are why each of these
+  # shapes has a test of its own.
+  #
+  # `ref` repeated between the message and the state is the match: Elixir unifies a variable that
+  # appears twice in one pattern, so these only fire for the task this server is currently waiting on.
+
+  # The task answered. Apply it only if the ring it read is still the current one: an `:adopt_topology`
+  # that landed while it ran bumped the generation, and installing what it read would revert the split.
+  def handle_info({ref, {:reconciled, generation, result}}, %{reconcile_task: %{ref: ref}} = state) do
+    state = finish_reconcile_task(state)
+
+    if generation == state.reconcile_generation,
+      do: {:noreply, apply_reconcile(state, result)},
+      else: {:noreply, state}
+  end
+
+  # A reply from the task a deadline already gave up on: it was killed, but its answer could have been
+  # in the mailbox when it went. Dropped on purpose, and named so it is not counted as a bug.
+  def handle_info({ref, _result}, %{abandoned_ref: ref} = state) do
+    {:noreply, %{state | abandoned_ref: nil}}
+  end
+
+  # The task crashed. The next tick is already scheduled (the tick schedules before it starts one), so
+  # there is nothing to retry here; the node keeps serving the view it holds until a later pass reads.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{reconcile_task: %{ref: ref}} = state) do
+    Logger.warning(I18n.t(:broker_reconcile_task_down, reason: inspect(reason)))
+    Telemetry.reconcile_degraded(:down)
+    {:noreply, finish_reconcile_task(state)}
+  end
+
+  # The task overran. Its reads are bounded, but bootstrapping a vnode reaches `:ra.start_cluster`,
+  # which does an `rpc:call/4` with no timeout, so a task can wedge there for good. Killing it is what
+  # keeps the mutual exclusion from freezing every later reconcile, silently.
+  def handle_info({:reconcile_deadline, ref}, %{reconcile_task: %{ref: ref, pid: pid}} = state) do
+    Logger.warning(I18n.t(:broker_reconcile_task_timeout, timeout_ms: state.reconcile_deadline))
+    Telemetry.reconcile_degraded(:timeout)
+    Process.demonitor(ref, [:flush])
+    _ = Task.Supervisor.terminate_child(Malachi.TaskSupervisor, pid)
+    {:noreply, %{state | reconcile_task: nil, abandoned_ref: ref}}
+  end
+
+  # A deadline whose task already finished: the timer was cancelled, but it may have fired first.
+  def handle_info({:reconcile_deadline, _ref}, state), do: {:noreply, state}
+
+  # --- end of the reconcile task's replies ---
+
   # A streaming subscriber's process died: drop it from every topic it was subscribed to.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     # a departing group member leaves its group for a fast rebalance: done in an unlinked task, since the
@@ -747,7 +870,8 @@ defmodule Malachi.BrokerServer do
   # Also where a roll whose fence went unanswered is sent again: a range that stops producing would
   # otherwise keep its roll owed, and its segment unsealed, for as long as nothing wrote to it.
   def handle_info(:reconcile, state) do
-    {:noreply, state |> reconcile_metadata() |> send_roll_fences()}
+    schedule_reconcile(state)
+    {:noreply, state |> start_reconcile_task() |> send_roll_fences()}
   end
 
   # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
@@ -815,8 +939,12 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  # Boot reconciles on the loop, before the first client call is served, so `metadata_ready?/2` and the
+  # per-topic gate are already answerable when it is. That is only affordable because the reads are
+  # bounded: unbounded, a node restarting next to one silent vnode sat here for ra's five seconds.
   def handle_continue(:reconcile, state) do
-    {:noreply, reconcile_metadata(state)}
+    schedule_reconcile(state)
+    {:noreply, reconcile_synchronously(state)}
   end
 
   @impl true
@@ -1109,11 +1237,64 @@ defmodule Malachi.BrokerServer do
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 
-  defp reconcile_metadata(state) do
-    schedule_reconcile(state)
-    bootstrap_missing_vnodes(state.bootstrap)
+  # The remote half of a reconcile, and the ONLY half that may run off this server's loop. It takes and
+  # returns plain data: handing it `state.broker` and applying what it gave back would discard every
+  # produce, seal and fence the loop handled while it ran.
+  defp run_reconcile(bootstrap, metadata_refresh, read_timeout) do
+    bootstrap_missing_vnodes(bootstrap, read_timeout)
+    metadata_refresh.()
+  end
 
-    case state.metadata_refresh.() do
+  # Starts the tick's reconcile off the loop. At most one at a time: a control plane slow enough that a
+  # pass outlives the tick would otherwise have its passes pile up, each with its own vnode bootstrap.
+  # The skipped tick is counted, because the cost of skipping it is a view that keeps ageing.
+  defp start_reconcile_task(%{metadata_refresh: nil} = state), do: state
+
+  defp start_reconcile_task(%{reconcile_task: running} = state) when not is_nil(running) do
+    Telemetry.reconcile_degraded(:skipped)
+    state
+  end
+
+  defp start_reconcile_task(state) do
+    generation = state.reconcile_generation
+    {bootstrap, refresh, read_timeout} = {state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout}
+
+    task =
+      Task.Supervisor.async_nolink(Malachi.TaskSupervisor, fn ->
+        {:reconciled, generation, run_reconcile(bootstrap, refresh, read_timeout)}
+      end)
+
+    timer = Process.send_after(self(), {:reconcile_deadline, task.ref}, state.reconcile_deadline)
+    %{state | reconcile_task: %{ref: task.ref, pid: task.pid, generation: generation, timer: timer}}
+  end
+
+  defp finish_reconcile_task(%{reconcile_task: %{ref: ref, timer: timer}} = state) do
+    Process.demonitor(ref, [:flush])
+    Process.cancel_timer(timer)
+    %{state | reconcile_task: nil}
+  end
+
+  # Boot and `reconcile_now/2`: the same pass, run on the loop and waited on. In-memory metadata has no
+  # control plane to read, so there is nothing to do and nothing to wait for.
+  defp reconcile_synchronously(%{metadata_refresh: nil} = state), do: state
+
+  defp reconcile_synchronously(state) do
+    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout)
+
+    # A task already in flight read the control plane BEFORE this pass did, so its result would install
+    # that older read over the one this pass is about to install. The journal cannot repair it either:
+    # this pass drains the journal, so by the time the task's result lands there is nothing left to put
+    # the difference back, and a topic created in between disappears. Bumping the generation is what
+    # makes that task arrive stale and be dropped, which is the right answer: this pass read later.
+    state
+    |> Map.update!(:reconcile_generation, &(&1 + 1))
+    |> apply_reconcile(result)
+  end
+
+  # The local half: pure with respect to the network, and applied to the CURRENT broker, whichever pass
+  # produced the data.
+  defp apply_reconcile(state, result) do
+    case result do
       nil ->
         state
 
@@ -1127,9 +1308,17 @@ defmodule Malachi.BrokerServer do
         # would make every read of them succeed with zero records for as long as it stayed silent.
         # `drop_stale_active_segments/1` right after the cache swap, so a segment sealed on ANOTHER node
         # stops being routed at here within one reconcile instead of only when the store refuses a batch.
+        # The read this installs was taken BEFORE the commands applied on this loop since the last
+        # pass, and a re-seed REPLACES a reachable vnode's metadata. Without the replay, a topic
+        # created, a range split or a group position committed while the task was reading is undone
+        # here and stays undone until a later pass happens to read it back, during which a produce is
+        # refused as :no_such_topic and a consumer is handed a position it already passed.
+        {journaled, broker} = Broker.take_journal(state.broker)
+
         broker =
-          state.broker
+          broker
           |> Broker.put_cache(dsrsm, unreachable)
+          |> Broker.replay_journal(journaled)
           |> Broker.drop_stale_active_segments()
 
         %{
@@ -1169,18 +1358,42 @@ defmodule Malachi.BrokerServer do
 
   # Bootstrap step: only the leader acts, and only on vnodes whose cluster is not yet ready. Starting a
   # vnode whose cluster already exists returns an error and is ignored (the name fences a double start).
-  defp bootstrap_missing_vnodes(nil), do: :ok
+  #
+  # `ready?/2` is bounded like every other read the reconcile makes. `MetadataServer.start/2` is NOT:
+  # it reaches `:ra.start_cluster`, whose `rpc:call/4` has no timeout at all. That is why the periodic
+  # pass runs off the loop behind a deadline, and why the boot pass, which does run on the loop, is the
+  # one place this can still cost more than its bound.
+  defp bootstrap_missing_vnodes(nil, _read_timeout), do: :ok
 
-  defp bootstrap_missing_vnodes(%{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}) do
+  defp bootstrap_missing_vnodes(%{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}, read_timeout) do
     if orchestrator?.() do
-      Enum.each(vnodes, fn {vnode_id, _token, nodes} ->
-        unless MetadataServer.ready?(ReplicatedDSRSM.server_for(replicated, vnode_id)) do
-          _ = MetadataServer.start(vnode_id, nodes)
-        end
-      end)
+      vnodes
+      |> not_ready(replicated, read_timeout)
+      |> Enum.each(fn {vnode_id, _token, nodes} -> _ = MetadataServer.start(vnode_id, nodes) end)
     end
 
     :ok
+  end
+
+  # The readiness checks are independent and each can cost the whole `read_timeout`, so they run
+  # concurrently. In sequence, a pass over n silent vnodes cost n times that before the metadata read
+  # even began, and this pass runs ON THIS LOOP at boot and in `reconcile_now/2`.
+  #
+  # The starts that follow stay sequential on purpose: each reaches `:ra.start_cluster`, whose
+  # `rpc:call/4` has no timeout, and firing n of those at once would multiply what a single wedged one
+  # already costs rather than bound it.
+  defp not_ready(vnodes, replicated, read_timeout) do
+    vnodes
+    |> BoundedFanout.map(
+      read_timeout,
+      fn {vnode_id, _token, _nodes} = vnode ->
+        if MetadataServer.ready?(ReplicatedDSRSM.server_for(replicated, vnode_id), read_timeout), do: nil, else: vnode
+      end,
+      # A check that overran its own bound says nothing about the cluster, and reading it as not ready
+      # is the harmless half: starting one that is already formed is refused by the name and ignored.
+      fn vnode -> vnode end
+    )
+    |> Enum.reject(&is_nil/1)
   end
 
   # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.
@@ -1549,28 +1762,34 @@ defmodule Malachi.BrokerServer do
   #     nodes}]`.
   #   * `:metadata_cluster`: a single ra cluster, the whole metadata in one Raft group (D-a/D1 HA).
   #   * neither, in-memory metadata (single node).
-  defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?) do
+  defp with_metadata_authority(opts, _cluster, _nodes, [_ | _] = vnodes, orchestrator?, read_timeout) do
     replicated = build_replicated(vnodes)
     # Publish the topic→vnode routing so consumer-group coordination is forwarded to the owning node
     # (the same HashRing the metadata is sharded by). Absent in single-node/in-memory → coordination
     # stays local.
     CoordinatorRouter.put_topology(replicated.ring, replicated.vnodes)
-    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(replicated)
+    # Bounded like every other read the reconcile makes: this one runs inside `init/1`, where an
+    # unbounded read of n silent vnodes used to cost 5s each before the supervisor saw the child start.
+    {:ok, cache, _unreachable} = ReplicatedDSRSM.snapshot(replicated, timeout: read_timeout)
 
     new_opts =
       opts
       |> Keyword.put(:dsrsm, cache)
       |> Keyword.put(:command_fun, sharded_command_fun(replicated))
 
-    refresh = sharded_refresh(replicated)
+    refresh = sharded_refresh(replicated, read_timeout)
     bootstrap = %{orchestrator?: orchestrator?, vnodes: vnodes, replicated: replicated}
     {new_opts, refresh, bootstrap}
   end
 
-  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes, _orchestrator?), do: {opts, nil, nil}
+  defp with_metadata_authority(opts, nil, _nodes, _no_vnodes, _orchestrator?, _read_timeout), do: {opts, nil, nil}
 
-  defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?) do
+  defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?, read_timeout) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
+    # Left at ra's default on purpose, unlike every read the reconcile makes. This one is matched on
+    # `{:ok, _}`, so bounding it would turn a control plane that is merely slow to elect at boot into a
+    # broker that refuses to start. The single cluster is also all or nothing: there is no partial view
+    # to fall back on here, which is exactly what makes waiting the right answer.
     {:ok, seed} = MetadataServer.query(server_id, &Function.identity/1)
 
     new_opts =
@@ -1578,7 +1797,7 @@ defmodule Malachi.BrokerServer do
       |> Keyword.put(:dsrsm, DSRSM.single(seed))
       |> Keyword.put(:command_fun, raft_command_fun(server_id))
 
-    {new_opts, single_cluster_refresh(server_id), nil}
+    {new_opts, single_cluster_refresh(server_id, read_timeout), nil}
   end
 
   # Builds the sharded control plane's ReplicatedDSRSM as routing-only: every vnode points at a real
@@ -1595,9 +1814,9 @@ defmodule Malachi.BrokerServer do
   # A refresh that re-reads the single ra cluster into a one-vnode DSRSM; nil if the cluster is
   # momentarily unreachable (a leader election), so the cache is simply left as-is that tick. The one
   # vnode is either read or not read, so the unreachable list is always empty: a failure is the `nil`.
-  defp single_cluster_refresh(server_id) do
+  defp single_cluster_refresh(server_id, read_timeout) do
     fn ->
-      case MetadataServer.query(server_id, &Function.identity/1) do
+      case MetadataServer.query(server_id, &Function.identity/1, read_timeout) do
         {:ok, metadata} -> {DSRSM.single(metadata), []}
         {:error, _reason} -> nil
       end
@@ -1607,9 +1826,9 @@ defmodule Malachi.BrokerServer do
   # The sharded equivalent. Unlike the single cluster it can be PARTLY readable, so it never answers
   # nil: it answers the vnodes it read plus the ids of the ones it did not, and the caller keeps its
   # own view of those rather than accepting the empty placeholder.
-  defp sharded_refresh(replicated) do
+  defp sharded_refresh(replicated, read_timeout) do
     fn ->
-      {:ok, dsrsm, unreachable} = ReplicatedDSRSM.snapshot(replicated)
+      {:ok, dsrsm, unreachable} = ReplicatedDSRSM.snapshot(replicated, timeout: read_timeout)
       {dsrsm, unreachable}
     end
   end

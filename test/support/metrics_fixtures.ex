@@ -57,6 +57,12 @@ defmodule Malachi.Test.MetricsFixtures do
         sealed_copies_trimmed: 1,
         sealed_copies_unsettled: 0,
         sealed_records_dropped: 1,
+        reconcile_degraded: [
+          %{reason: :skipped, count: 4},
+          %{reason: :down, count: 0},
+          %{reason: :timeout, count: 1},
+          %{reason: :other, count: 0}
+        ],
         unexpected_messages: [
           %{server: :replication, kind: :cast, count: 5},
           %{server: :membership, kind: :info, count: 0},

@@ -7,6 +7,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Metadata
+  alias Malachi.Test.SilentRaMember
 
   setup_all do
     :ok
@@ -83,6 +84,79 @@ defmodule Malachi.Cluster.ReplicatedDSRSMTest do
     # The empty metadata alone is indistinguishable from a vnode that genuinely holds no topics, and a
     # reader that installs it deletes live topics from its cache. The id is what makes them different.
     assert unreachable == [:rd_ghost]
+  end
+
+  test "snapshot reads the vnodes concurrently and bounds each read" do
+    # Three vnodes that answer nothing. Read sequentially with ra's default this costs 15s, which is
+    # the shape that used to sit inside the broker's loop (#178). Concurrent and bounded, it costs one
+    # timeout for all three, and every one of them is reported unreachable rather than empty.
+    suffix = System.unique_integer([:positive])
+    names = for i <- 0..2, do: :"rd_silent_#{i}_#{suffix}"
+
+    for name <- names do
+      {:ok, _pid} = SilentRaMember.start_link(name)
+      on_exit(fn -> SilentRaMember.stop(name) end)
+    end
+
+    state =
+      names
+      |> Enum.with_index()
+      |> Enum.reduce(ReplicatedDSRSM.new(ring_bits: 4), fn {name, index}, acc ->
+        {:ok, acc} = ReplicatedDSRSM.route_vnode(acc, name, index * 4, {name, node()})
+        acc
+      end)
+
+    {elapsed_us, {:ok, cache, unreachable}} =
+      :timer.tc(fn -> ReplicatedDSRSM.snapshot(state, timeout: 300) end)
+
+    assert Enum.sort(unreachable) == Enum.sort(names)
+    assert DSRSM.get_topic(cache, "anything") == nil
+
+    # One timeout for the set, not one per vnode. The bound is generous: the claim is that three reads
+    # overlapped, not that the scheduler hit 300ms exactly.
+    assert elapsed_us < 2_000_000, "three bounded reads took #{div(elapsed_us, 1000)}ms; they serialized"
+  end
+
+  test "snapshot with no timeout keeps ra's own default" do
+    # The call sites that do not pass one must not change behaviour, so the default is pinned here.
+    name = :"rd_default_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = SilentRaMember.start_link(name)
+    on_exit(fn -> SilentRaMember.stop(name) end)
+
+    {:ok, state} = ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(ring_bits: 4), name, 0, {name, node()})
+
+    {elapsed_us, {:ok, _cache, unreachable}} = :timer.tc(fn -> ReplicatedDSRSM.snapshot(state) end)
+
+    assert unreachable == [name]
+    assert elapsed_us >= 4_000_000, "gave up after #{div(elapsed_us, 1000)}ms, before ra's 5s default"
+  end
+
+  test "snapshot survives members that redirect to each other instead of answering" do
+    # `ra` follows a `{redirect, Leader}` reply by calling that leader with a FRESH full timeout, so two
+    # members that each name the other cost unbounded time without any single call ever timing out. The
+    # per-read bound cannot see that; the bound on the whole read is what ends it, and the vnode comes
+    # back as what it is, one that did not answer.
+    suffix = System.unique_integer([:positive])
+    a = :"rd_ping_#{suffix}"
+    b = :"rd_pong_#{suffix}"
+
+    {:ok, _pid} = SilentRaMember.start_redirecting(a, {b, node()}, 20)
+    on_exit(fn -> SilentRaMember.stop(a) end)
+    {:ok, _pid} = SilentRaMember.start_redirecting(b, {a, node()}, 20)
+    on_exit(fn -> SilentRaMember.stop(b) end)
+
+    {:ok, state} = ReplicatedDSRSM.route_vnode(ReplicatedDSRSM.new(ring_bits: 4), a, 0, {a, node()})
+
+    {elapsed_us, {:ok, _cache, unreachable}} =
+      :timer.tc(fn -> ReplicatedDSRSM.snapshot(state, timeout: 300) end)
+
+    assert unreachable == [a]
+    assert elapsed_us < 5_000_000, "the redirect loop ran for #{div(elapsed_us, 1000)}ms before it was cut"
+  end
+
+  test "snapshot of a ring with no vnodes reads nothing" do
+    assert {:ok, cache, []} = ReplicatedDSRSM.snapshot(ReplicatedDSRSM.new(ring_bits: 4), timeout: 50)
+    assert DSRSM.get_topic(cache, "anything") == nil
   end
 
   test "snapshot reports a vnode it did read as reachable" do

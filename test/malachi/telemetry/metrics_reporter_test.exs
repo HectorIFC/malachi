@@ -135,6 +135,26 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert Metrics.get_system_metrics().operations.sealed_copies_unsettled == before.sealed_copies_unsettled + 1
   end
 
+  test "a degraded reconcile lands on the counter for its reason" do
+    # The broker emits this from its own loop when a reconcile does not complete. It is the only signal
+    # that the node is serving from a view that is no longer being refreshed.
+    before = degraded_counts()
+
+    Telemetry.reconcile_degraded(:skipped)
+    Telemetry.reconcile_degraded(:timeout)
+
+    now = degraded_counts()
+
+    assert now.skipped == before.skipped + 1
+    assert now.timeout == before.timeout + 1
+    assert now.down == before.down
+  end
+
+  defp degraded_counts do
+    Metrics.get_system_metrics().operations.reconcile_degraded
+    |> Map.new(fn %{reason: reason, count: count} -> {reason, count} end)
+  end
+
   describe "storage flush" do
     # Flushes in (edge_lo, edge_hi]: the band between two exported edges, read off the cumulative buckets.
     defp flushes_between(edge_lo, edge_hi) do
