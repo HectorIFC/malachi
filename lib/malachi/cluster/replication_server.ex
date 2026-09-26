@@ -36,10 +36,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   ## Closing a segment
 
   `seal/4` is the write fence: it seals the segment's log durably and answers where it ended. Afterwards
-  every write entry point here refuses that segment with `{:error, {:sealed, end_offset}}`, across
-  restarts, while reads and repair (`follow/4`) keep working. That is what makes a control-plane sealed
-  length a consequence of closing the segment rather than a number measured beside a log that is still
-  growing.
+  every write entry point here refuses that segment, across restarts, while reads and repair
+  (`follow/4`) keep working. That is what makes a control-plane sealed length a consequence of closing
+  the segment rather than a number measured beside a log that is still growing. The caller-facing entry
+  points answer `{:error, {:sealed, end_offset}}`; the primary's `:replica_append` fan-out answers
+  `{:error, :sealed}` alone, for the reason given on `seal/4`.
 
   `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
   without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
@@ -386,11 +387,16 @@ defmodule Malachi.Cluster.ReplicationServer do
   @doc """
   Seals `segment_id` on this server and reports what it durably holds: `{:ok, end_offset, byte_size}`.
 
-  The write fence. After it returns, `replicate/5`, `replicate_async/7`, `append/5` and the primary's
-  `:replica_append` fan-out are all refused here with `{:error, {:sealed, end_offset}}`, and again after
-  a restart, so the segment's log can never grow past the offset reported. That is what lets a caller
-  RECORD the returned end as the sealed length instead of measuring one beside it: the length becomes a
-  consequence of closing the segment rather than a number racing it.
+  The write fence. After it returns, `replicate/5`, `replicate_async/7` and `append/5` are all refused
+  here with `{:error, {:sealed, end_offset}}`, and again after a restart, so the segment's log can never
+  grow past the offset reported. That is what lets a caller RECORD the returned end as the sealed length
+  instead of measuring one beside it: the length becomes a consequence of closing the segment rather
+  than a number racing it.
+
+  The primary's `:replica_append` fan-out is refused as well, but it answers `{:error, :sealed}` WITHOUT
+  the end offset. The primary discards an ack's error reason and only stops counting that replica toward
+  the quorum, so an offset nobody reads would be one more message shape to keep in step across a rolling
+  upgrade, for no reader.
 
   Idempotent and cheap on an already-fenced segment (no fsync, the same pair). `base_offset` seats a
   missing or empty log at the segment's base, so fencing a segment this server never stored succeeds at
@@ -405,6 +411,47 @@ defmodule Malachi.Cluster.ReplicationServer do
           {:ok, non_neg_integer(), non_neg_integer()} | {:error, term()}
   def seal(ref, segment_id, base_offset, timeout \\ 5_000) do
     GenServer.call(ref, {:seal, segment_id, base_offset}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Brings `segment_id` down to `end_offset` and fences it there: `{:ok, end_offset, byte_size, dropped}`.
+
+  The same fence as `seal/4`, for a copy whose disk disagrees with the control plane. A replica can
+  come back holding records past the length its segment was sealed at (an old primary that wrote
+  locally, lost quorum and rejoined after the seal landed on the others), and nothing else brings it
+  back: the fence only stops a copy GROWING after the seal reached this server, and the sealed-copy
+  integrity probe reports a copy that falls short, never one that runs past.
+
+  For a SEALED segment only, and the length is the caller's, never this server's. A sealed length is
+  immutable once the control plane records it (`Malachi.Metadata`), and the offsets above it already
+  belong to the successor segment, so the recorded number is the one that decides and the bytes above
+  it were never acknowledged to anyone. This server holds no control-plane state of its own and reads
+  none; `Malachi.Cluster.SealedOverrun` is what knows the number and passes it in.
+
+  Truncating comes first and fencing second, always. The reverse order leaves a copy fenced ABOVE the
+  recorded length, which is the same defect wearing a marker, and the marker is what later passes use
+  to skip a copy they have already settled.
+
+  An `end_offset` at or above what this server holds trims nothing and fences as `seal/4` does: a copy
+  that is SHORT of the recorded length is a different defect, repaired from a peer by
+  `Malachi.Cluster.SelfHealing`, and repair still works on a fenced segment (`follow/4`).
+
+  An `end_offset` below the segment's base offset answers `{:error, :below_base_offset}` without
+  opening the log and without failing the copy. Every storage error here takes the copy out of
+  service, and a coordinator that passed the wrong number must not cost a healthy replica.
+
+  `dropped` is how many records the truncation removed, and it is why this answers a four-tuple where
+  `seal/4` answers three. Settling a copy is overwhelmingly a no-op that only writes a marker, and one
+  that actually drops a record is the defect this exists for happening in production. A caller that
+  counted both the same way would bury the second in the first on the very first pass, which is the
+  one pass that touches every copy in the cluster.
+  """
+  @spec seal_at(term(), term(), non_neg_integer(), non_neg_integer(), timeout()) ::
+          {:ok, non_neg_integer(), non_neg_integer(), non_neg_integer()} | {:error, term()}
+  def seal_at(ref, segment_id, base_offset, end_offset, timeout \\ 5_000) do
+    GenServer.call(ref, {:seal_at, segment_id, base_offset, end_offset}, timeout)
   catch
     :exit, _reason -> {:error, :unreachable}
   end
@@ -707,7 +754,17 @@ defmodule Malachi.Cluster.ReplicationServer do
     # The sealed log goes back into the state (inside `run_log/4`) BEFORE the byte count is taken: the
     # count comes from the open log rather than from stat, and the copy that was in the state is the
     # pre-seal one, whose committed byte count predates the flush that sealing just did.
-    {reply, state} = seal_segment(state, segment_id, base_offset)
+    {reply, state} = seal_segment(state, segment_id, base_offset, :whole)
+    {:reply, without_dropped(reply), state}
+  end
+
+  def handle_call({:seal_at, _segment_id, base_offset, end_offset}, _from, state)
+      when end_offset < base_offset do
+    {:reply, {:error, :below_base_offset}, state}
+  end
+
+  def handle_call({:seal_at, segment_id, base_offset, end_offset}, _from, state) do
+    {reply, state} = seal_segment(state, segment_id, base_offset, end_offset)
     {:reply, reply, state}
   end
 
@@ -762,8 +819,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   # The asynchronous fence (`seal_async/5`): the same seal as the call, answered as a message.
   @impl true
   def handle_cast({:seal_async, segment_id, base_offset, notify}, state) do
-    {reply, state} = seal_segment(state, segment_id, base_offset)
-    notify_seal(notify, reply)
+    {reply, state} = seal_segment(state, segment_id, base_offset, :whole)
+    notify_seal(notify, without_dropped(reply))
     {:noreply, state}
   end
 
@@ -856,7 +913,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp follow_push(state, log, {segment_id, base, expected_first, records, source}) do
     cond do
       # Fenced here: ack an ERROR rather than stay silent, so the primary simply does not count this
-      # replica toward the quorum instead of waiting out the follow timeout for an ack that can never come.
+      # replica toward the quorum instead of waiting out the follow timeout for an ack that can never
+      # come. Bare `:sealed`, with no end offset, for the reason spelled out on `seal/4`.
       Log.sealed?(log) ->
         GenServer.cast(source, {:replica_ack, segment_id, state.ref, {:error, :sealed}})
         {:noreply, state}
@@ -1340,15 +1398,31 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  # The write fence behind both `seal/4` and `seal_async/5`, answering what the sealed log holds.
-  defp seal_segment(state, segment_id, base_offset) do
+  # The write fence behind `seal/4`, `seal_async/5` and `seal_at/5`, answering what the sealed log
+  # holds. `target` is `:whole` for the plain fence and an end offset for the one that first brings the
+  # copy down to a length the control plane recorded.
+  defp seal_segment(state, segment_id, base_offset, target) do
     with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
+         held = log.next_offset,
+         {:ok, state, log} <- run_log(state, segment_id, log, &trim_to(&1, target)),
          {:ok, state, log} <- run_log(state, segment_id, log, &Log.seal/1) do
-      {{:ok, log.next_offset, bytes_on_disk(state, segment_id)}, state}
+      {{:ok, log.next_offset, bytes_on_disk(state, segment_id), max(held - log.next_offset, 0)}, state}
     else
       {:error, reason, state} -> {{:error, reason}, state}
     end
   end
+
+  # `seal/4` and `seal_async/5` answer three elements and always would: the plain fence removes nothing,
+  # so a count there would be a constant zero every caller had to carry.
+  defp without_dropped({:ok, end_offset, byte_size, _dropped}), do: {:ok, end_offset, byte_size}
+  defp without_dropped({:error, _reason} = error), do: error
+
+  # Trimming is run through `run_log/4` like every other whole-log operation, so a copy whose device
+  # will not give the bytes up is failed here rather than half-truncated and left in service. A caller
+  # error is kept out of that path deliberately: `seal_at/5` rejects a target below the base offset
+  # before this is ever reached.
+  defp trim_to(log, :whole), do: {:ok, log}
+  defp trim_to(log, end_offset), do: Log.truncate_to(log, end_offset)
 
   defp notify_seal({pid, tag}, reply), do: send(pid, {:seal_result, tag, reply})
 

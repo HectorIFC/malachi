@@ -544,6 +544,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert ReplicationServer.durable_end(primary, @segment, 0) == error
       assert ReplicationServer.durable_stats(primary, @segment, 0) == error
       assert ReplicationServer.seal(primary, @segment, 0) == error
+      assert ReplicationServer.seal_at(primary, @segment, 0, 0) == error
 
       :ok = ReplicationServer.replicate_async(primary, @segment, [primary], 0, records(["b"]), self(), :tag)
       assert_receive {:replicate_result, :tag, ^error}
@@ -1246,6 +1247,111 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       stop_supervised!(server)
 
       assert {:error, :unreachable} = ReplicationServer.seal(server, @segment, 0, 100)
+    end
+  end
+
+  describe "seal_at/5 (the fence that brings a copy down to a recorded length)" do
+    test "a copy holding more than the recorded length is trimmed to it and fenced there" do
+      # The defect this exists for: an old primary wrote locally, lost quorum, and the segment was
+      # sealed at a shorter length on the replicas that answered. Nothing else brings this copy back,
+      # because the fence only stops a copy GROWING after the seal reached it.
+      server = start_broker()
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+
+      # The fourth element is the point: two records were DROPPED, which is the defect reaching disk, and
+      # the caller has to be able to tell that from a copy that only gained a marker.
+      assert {:ok, 3, bytes, 2} = ReplicationServer.seal_at(server, @segment, 0, 3)
+
+      assert bytes == segment_bytes(server, @segment)
+      assert read_values(server, @segment) == ["a", "b", "c"]
+      assert {:error, {:sealed, 3}} = ReplicationServer.replicate(server, @segment, [server], 0, records(["f"]))
+    end
+
+    test "the trimmed copy comes back trimmed and fenced after a restart" do
+      {server, directory} = start_broker_at([])
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      assert {:ok, 3, _bytes, 2} = ReplicationServer.seal_at(server, @segment, 0, 3)
+      stop_supervised!(server)
+
+      restarted = :"repl_restarted_#{System.unique_integer([:positive])}"
+      start_supervised!({ReplicationServer, [name: restarted, directory: directory]}, id: restarted)
+
+      assert read_values(restarted, @segment) == ["a", "b", "c"]
+      assert {:error, {:sealed, 3}} = ReplicationServer.append(restarted, @segment, [restarted], 0, records(["f"]))
+    end
+
+    test "sealing at a length twice answers the same pair the second time" do
+      server = start_broker()
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+
+      assert {:ok, 3, bytes, 2} = ReplicationServer.seal_at(server, @segment, 0, 3)
+
+      # Nothing left to drop the second time, and the copy is already where it belongs: an idempotent
+      # call has to report the work it did, not the work the first one did.
+      assert {:ok, 3, ^bytes, 0} = ReplicationServer.seal_at(server, @segment, 0, 3)
+      assert read_values(server, @segment) == ["a", "b", "c"]
+    end
+
+    test "a target at or above what this server holds trims nothing and fences like seal/4" do
+      server = start_broker()
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+
+      assert {:ok, 2, bytes, 0} = ReplicationServer.seal_at(server, @segment, 0, 9)
+
+      assert bytes == segment_bytes(server, @segment)
+      assert read_values(server, @segment) == ["a", "b"]
+      assert {:error, {:sealed, 2}} = ReplicationServer.replicate(server, @segment, [server], 0, records(["c"]))
+    end
+
+    # The risk this fence takes on: it closes every copy of a sealed segment, short ones included, and a
+    # short copy is repaired by refetching from a peer. Repair writes through `follow/4`, which has no
+    # fence check by design, and that is what keeps the two from fighting.
+    test "a copy fenced while short of the recorded length can still be repaired from a peer" do
+      source = start_broker()
+      target = start_broker()
+      {:ok, 2} = ReplicationServer.append(source, @segment, [source], 0, records(["a", "b", "c"]))
+      {:ok, 3, _bytes, 0} = ReplicationServer.seal_at(source, @segment, 0, 3)
+      {:ok, held} = ReplicationServer.read(source, @segment, 0, 10)
+
+      assert {:ok, 0, 0, 0} = ReplicationServer.seal_at(target, @segment, 0, 3)
+
+      assert {:ok, 2} = ReplicationServer.follow(target, @segment, 0, held)
+      assert read_values(target, @segment) == ["a", "b", "c"]
+    end
+
+    test "a target below the segment's base offset is refused, and the copy stays in service" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 102} = ReplicationServer.append(server, @segment, [server], 100, records(["a", "b", "c"]))
+      before = segment_bytes(server, @segment)
+
+      assert ReplicationServer.seal_at(server, @segment, 100, 99) == {:error, :below_base_offset}
+
+      # Not a storage failure: a coordinator that passed the wrong number must not cost a healthy copy.
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new()}
+      assert segment_bytes(server, @segment) == before
+      assert FaultySegmentStore.count(storage_dir(directory, @segment), :truncate_to) == 0
+    end
+
+    test "a truncation the device refuses fails the copy, as every storage error here does" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :truncate_to, {:error, :eio})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, {:storage, :eio}}
+        end)
+
+      assert log =~ "failed in storage"
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new([@segment])}
+      assert Process.alive?(Process.whereis(server))
+    end
+
+    test "a dead server answers :unreachable instead of exiting the caller" do
+      server = start_broker()
+      stop_supervised!(server)
+
+      assert {:error, :unreachable} = ReplicationServer.seal_at(server, @segment, 0, 3, 100)
     end
   end
 

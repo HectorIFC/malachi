@@ -207,6 +207,209 @@ defmodule Malachi.LogTest do
     end
   end
 
+  describe "truncate_to/2" do
+    # `open/1` seals at 120 bytes and each record here frames to 41, so segments start at 0, 3, 6 and 9.
+    defp filled(directory, range) do
+      {:ok, log} = open(directory)
+      Enum.reduce(range, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)
+    end
+
+    defp segment_ids(directory) do
+      directory |> Path.join("*.log") |> Path.wildcard() |> Enum.map(&Path.basename(&1, ".log")) |> Enum.sort()
+    end
+
+    defp id_for(base_offset), do: base_offset |> Integer.to_string() |> String.pad_leading(20, "0")
+
+    test "removes the segment files above the target and cuts the one that straddles it",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      assert segment_ids(directory) == Enum.map([0, 3, 6, 9], &id_for/1)
+
+      assert {:ok, truncated} = Log.truncate_to(log, 7)
+
+      assert segment_ids(directory) == Enum.map([0, 3, 6], &id_for/1)
+      assert truncated.next_offset == 7
+      assert truncated |> read_all() |> Enum.map(& &1.value) == for(i <- 0..6, do: "v#{i}")
+      :ok = Log.close(truncated)
+    end
+
+    test "a target on a segment boundary removes whole files and cuts none", %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      untouched = File.read!(Path.join(directory, id_for(3) <> ".log"))
+
+      assert {:ok, truncated} = Log.truncate_to(log, 6)
+
+      assert segment_ids(directory) == Enum.map([0, 3], &id_for/1)
+      assert truncated.next_offset == 6
+      assert File.read!(Path.join(directory, id_for(3) <> ".log")) == untouched
+      :ok = Log.close(truncated)
+    end
+
+    test "the sidecar and the per-segment seal marker go with the file they describe",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      assert File.exists?(Path.join(directory, id_for(6) <> ".sealed"))
+      assert File.exists?(Path.join(directory, id_for(6) <> ".idx"))
+
+      assert {:ok, truncated} = Log.truncate_to(log, 5)
+
+      refute File.exists?(Path.join(directory, id_for(6) <> ".log"))
+      refute File.exists?(Path.join(directory, id_for(6) <> ".sealed"))
+      refute File.exists?(Path.join(directory, id_for(6) <> ".idx"))
+      :ok = Log.close(truncated)
+    end
+
+    test "a target at the log's first record drops every file and leaves the log empty",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+
+      assert {:ok, truncated} = Log.truncate_to(log, 0)
+
+      assert segment_ids(directory) == []
+      assert truncated.next_offset == 0
+      assert read_all(truncated) == []
+      assert File.dir?(directory)
+
+      # Still a log, not a hole: it takes writes again from where it was emptied.
+      {:ok, truncated, 0, 0} = Log.append(truncated, [rec("again")])
+      {:ok, truncated} = Log.sync(truncated)
+      assert truncated |> read_all() |> Enum.map(& &1.value) == ["again"]
+      :ok = Log.close(truncated)
+    end
+
+    test "the truncated log recovers at the target and keeps appending from there", %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      {:ok, truncated} = Log.truncate_to(log, 7)
+      :ok = Log.close(truncated)
+
+      {:ok, recovered} = Log.recover(directory, max_bytes: 120, index_interval: 32)
+
+      assert recovered.next_offset == 7
+      assert {:ok, recovered, 7, 7} = Log.append(recovered, [rec("after")])
+      {:ok, recovered} = Log.sync(recovered)
+      assert recovered |> read_all() |> Enum.map(& &1.value) == for(i <- 0..6, do: "v#{i}") ++ ["after"]
+      :ok = Log.close(recovered)
+    end
+
+    test "a log sealed as a whole is truncated and comes back sealed", %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      {:ok, log} = Log.seal(log)
+
+      assert {:ok, truncated} = Log.truncate_to(log, 7)
+
+      assert Log.sealed?(truncated)
+      assert File.exists?(Log.seal_marker_path(directory))
+      assert truncated.next_offset == 7
+      assert truncated |> read_all() |> Enum.map(& &1.value) == for(i <- 0..6, do: "v#{i}")
+    end
+
+    test "buffered records are flushed before the cut is measured", %{tmp_dir: directory} do
+      log = filled(directory, 0..5)
+      {:ok, log, _first, _last} = Log.append(log, [rec("buffered")])
+
+      assert {:ok, truncated} = Log.truncate_to(log, 4)
+
+      assert truncated.next_offset == 4
+      assert truncated |> read_all() |> Enum.map(& &1.value) == for(i <- 0..3, do: "v#{i}")
+      :ok = Log.close(truncated)
+    end
+
+    test "a target at or above the log's own end changes nothing", %{tmp_dir: directory} do
+      log = filled(directory, 0..4)
+      before = segment_ids(directory)
+
+      assert {:ok, ^log} = Log.truncate_to(log, 5)
+      assert {:ok, ^log} = Log.truncate_to(log, 99)
+      assert segment_ids(directory) == before
+      :ok = Log.close(log)
+    end
+
+    test "a target below the log's first record is refused", %{tmp_dir: directory} do
+      {:ok, log} = Log.open(directory, base_offset: 100, max_bytes: 120, index_interval: 32)
+      log = Enum.reduce(100..104, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)
+      before = segment_ids(directory)
+
+      assert Log.truncate_to(log, 99) == {:error, :below_base_offset}
+      assert segment_ids(directory) == before
+      :ok = Log.close(log)
+    end
+
+    test "a log with no segment file at all refuses a target below where it is seated",
+         %{tmp_dir: directory} do
+      {:ok, log} = Log.open(directory, base_offset: 100)
+
+      assert Log.truncate_to(log, 99) == {:error, :below_base_offset}
+      assert {:ok, ^log} = Log.truncate_to(log, 100)
+    end
+
+    test "a cut that fails answers the store's error and leaves a log a later pass finishes",
+         %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory, max_bytes: 120, index_interval: 32)
+      log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)
+      FaultySegmentStore.fail(directory, :truncate_to, {:error, :eio})
+
+      assert Log.truncate_to(log, 7) == {:error, :eio}
+
+      # The files above the target are already gone, so the copy is closer to the target than it was
+      # and still readable. Retrying is what finishes it, which is why the pass is level-triggered.
+      FaultySegmentStore.clear(directory)
+      {:ok, partial} = Log.recover(directory, store: FaultySegmentStore, max_bytes: 120, index_interval: 32)
+      assert partial.next_offset == 9
+      assert {:ok, finished} = Log.truncate_to(partial, 7)
+      assert finished.next_offset == 7
+      :ok = Log.close(finished)
+    end
+
+    test "a cut whose segment cannot be reopened answers that error", %{tmp_dir: directory} do
+      {:ok, log} = faulty_log(directory, max_bytes: 120, index_interval: 32)
+      log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)
+      FaultySegmentStore.fail(directory, :recover, {:error, :eio})
+
+      assert Log.truncate_to(log, 7) == {:error, :eio}
+    end
+
+    test "a file that cannot be removed stops the truncation instead of half-reporting it",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      # A directory where the dropped segment's sidecar belongs: `File.rm/1` refuses it, and the error
+      # is the platform's, so only its shape is asserted.
+      blocker = Path.join(directory, id_for(9) <> ".idx")
+      File.rm(blocker)
+      File.mkdir_p!(Path.join(blocker, "nested"))
+
+      assert {:error, _reason} = Log.truncate_to(log, 7)
+    end
+
+    # A drop that fails partway must leave the segment DISCOVERABLE, because `base_offsets_in/1` finds a
+    # segment through its `.log` and nothing else. Remove that first and a failure on a sidecar takes the
+    # segment out of every later pass's view while its leftovers stay on disk, and a leftover `.sealed`
+    # makes a later segment that reuses the name come back sealed and refuse every append.
+    test "a drop interrupted by a sidecar leaves the data file, so a retry finishes it",
+         %{tmp_dir: directory} do
+      log = filled(directory, 0..9)
+      blocker = Path.join(directory, id_for(9) <> ".idx")
+      File.rm(blocker)
+      File.mkdir_p!(Path.join(blocker, "nested"))
+
+      assert {:error, _reason} = Log.truncate_to(log, 7)
+
+      # The segment the drop could not finish is still there to be found, and so are the leftovers.
+      assert File.exists?(Path.join(directory, id_for(9) <> ".log"))
+      assert segment_ids(directory) == Enum.map([0, 3, 6, 9], &id_for/1)
+
+      # With the blocker gone, the next attempt sees segment 9 again and completes the drop.
+      File.rm_rf!(blocker)
+      {:ok, recovered} = Log.recover(directory, max_bytes: 120, index_interval: 32)
+
+      assert {:ok, truncated} = Log.truncate_to(recovered, 7)
+
+      assert segment_ids(directory) == Enum.map([0, 3, 6], &id_for/1)
+      refute File.exists?(Path.join(directory, id_for(9) <> ".sealed"))
+      assert truncated.next_offset == 7
+      :ok = Log.close(truncated)
+    end
+  end
+
   describe "recovery" do
     test "recovers sealed + active segments and resumes appending", %{tmp_dir: directory} do
       {:ok, log} = open(directory)

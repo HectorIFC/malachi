@@ -939,6 +939,87 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
+  # A truncation walks every frame BELOW the cut, not just the ones above it. That is not waste: the
+  # walk is the only thing that can say where record `keep` starts, and having it verify the records
+  # that survive is the property this operation needs most, since it is the one that cannot be undone.
+  @impl true
+  def truncate_to(%__MODULE__{append_refusal: reason}, _end_offset) when reason != nil, do: {:error, reason}
+
+  def truncate_to(%__MODULE__{pending_count: pending_count}, _end_offset) when pending_count > 0,
+    do: {:error, :pending_records}
+
+  def truncate_to(%__MODULE__{segment: segment} = store, end_offset) when is_integer(end_offset) do
+    keep = end_offset - segment.base_offset
+
+    cond do
+      keep < 0 -> {:error, :below_base_offset}
+      end_offset >= store.next_offset -> {:ok, store}
+      true -> cut_to(store, keep)
+    end
+  end
+
+  defp cut_to(%__MODULE__{} = store, keep) do
+    with {:ok, cut_position, entries} <- scan_to(store.file_descriptor, store.index_interval, keep),
+         {:ok, _position} <- :file.position(store.file_descriptor, cut_position),
+         :ok <- :file.truncate(store.file_descriptor),
+         :ok <- :file.sync(store.file_descriptor) do
+      index = :array.from_list(entries)
+      %Segment{} = current_segment = store.segment
+
+      segment = %Segment{current_segment | byte_size: cut_position, record_count: keep}
+
+      # `preallocated_to` goes back to nil because the file no longer HAS a preallocated tail: the
+      # truncation gave every byte past the cut back at once, and leaving the claim standing would let
+      # a later `seal/1` or `close/1` truncate a file it did not size.
+      store = %{
+        store
+        | segment: segment,
+          write_position: cut_position,
+          next_offset: segment.base_offset + keep,
+          index: index,
+          last_indexed_position: last_indexed_position(index, store.index_interval),
+          preallocated_to: nil
+      }
+
+      # The sidecar is rewritten AFTER the data is durable, never before: an index describing records
+      # the file no longer has is the one ordering a reader cannot recover from, while an index that is
+      # merely stale is rejected entry by entry (`bad_index_entry?/3`) and rebuilt by the scrub.
+      with :ok <- persist_index(store), do: {:ok, store}
+    end
+  end
+
+  # Where record `keep` of this segment starts, plus the sparse index of everything below it.
+  defp scan_to(file_descriptor, index_interval, keep) do
+    on_frame = fn record, position, {count, cut, entries, last_indexed_position} ->
+      cond do
+        count < keep and position - last_indexed_position >= index_interval ->
+          {count + 1, cut, [{record.offset, position} | entries], position}
+
+        count < keep ->
+          {count + 1, cut, entries, last_indexed_position}
+
+        count == keep ->
+          {count + 1, position, entries, last_indexed_position}
+
+        true ->
+          {count + 1, cut, entries, last_indexed_position}
+      end
+    end
+
+    {valid_bytes, {count, cut, entries, _last_indexed_position}, halt} =
+      walk(file_descriptor, &Record.decode_one/1, on_frame, {0, nil, [], -index_interval})
+
+    cond do
+      # A device that would not give the bytes up says nothing about where the cut belongs, and
+      # truncating on a guess would delete records this copy holds and can still serve.
+      match?({:read_error, _reason}, halt) -> {:error, elem(halt, 1)}
+      count < keep -> {:error, :short_segment}
+      # No frame at `keep`: the file already ends at or below the cut, so its own end is the answer.
+      cut == nil -> {:ok, valid_bytes, Enum.reverse(entries)}
+      true -> {:ok, cut, Enum.reverse(entries)}
+    end
+  end
+
   @impl true
   def next_offset(%__MODULE__{next_offset: next_offset}), do: next_offset
 

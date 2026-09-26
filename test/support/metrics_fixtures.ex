@@ -53,6 +53,10 @@ defmodule Malachi.Test.MetricsFixtures do
         scrub_segments_unrepairable: 2,
         orphaned_fences: 3,
         fences_reconciled: 2,
+        sealed_copies_fenced: 9,
+        sealed_copies_trimmed: 1,
+        sealed_copies_unsettled: 0,
+        sealed_records_dropped: 1,
         reconcile_degraded: [
           %{reason: :skipped, count: 4},
           %{reason: :down, count: 0},

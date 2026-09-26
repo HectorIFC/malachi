@@ -114,6 +114,27 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert Metrics.get_system_metrics().operations.fences_reconciled == before.fences_reconciled + 2
   end
 
+  test "settling a sealed copy is counted by outcome, and only a trim counts records" do
+    # The two outcomes are different events: a copy that only gained a fence marker is routine, and a
+    # copy that gave up records was holding data its segment's seal excludes. Sharing a counter would
+    # bury the second in the first on the one pass that touches every copy in the cluster.
+    before = Metrics.get_system_metrics().operations
+
+    Telemetry.sealed_copies_settled(:fenced, 7, 0)
+
+    assert Metrics.get_system_metrics().operations.sealed_copies_fenced == before.sealed_copies_fenced + 7
+    assert Metrics.get_system_metrics().operations.sealed_records_dropped == before.sealed_records_dropped
+
+    Telemetry.sealed_copies_settled(:trimmed, 2, 3)
+
+    assert Metrics.get_system_metrics().operations.sealed_copies_trimmed == before.sealed_copies_trimmed + 2
+    assert Metrics.get_system_metrics().operations.sealed_records_dropped == before.sealed_records_dropped + 3
+
+    Telemetry.sealed_copies_settled(:failed, 1, 0)
+
+    assert Metrics.get_system_metrics().operations.sealed_copies_unsettled == before.sealed_copies_unsettled + 1
+  end
+
   test "a degraded reconcile lands on the counter for its reason" do
     # The broker emits this from its own loop when a reconcile does not complete. It is the only signal
     # that the node is serving from a view that is no longer being refreshed.
