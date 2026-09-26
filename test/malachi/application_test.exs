@@ -275,7 +275,7 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
-  describe "leading_vnodes/3" do
+  describe "leading_vnodes/4" do
     test "returns the vnodes this node both hosts and leads, preserving order" do
       this = :n1@h
 
@@ -286,21 +286,43 @@ defmodule Malachi.ApplicationTest do
         {:vn_d, 3, [:n1@h]}
       ]
 
+      hosts? = fn server_id -> server_id in [{:vn_a, this}, {:vn_c, this}, {:vn_d, this}] end
       # this node leads its local server for vn_a and vn_d only
       leader? = fn server_id -> server_id in [{:vn_a, this}, {:vn_d, this}] end
 
-      assert App.leading_vnodes(vnodes, this, leader?) == [:vn_a, :vn_d]
+      assert App.leading_vnodes(vnodes, this, hosts?, leader?) == [:vn_a, :vn_d]
+    end
+
+    test "defaults to this node and to live ra for both predicates" do
+      # no ra group exists for this name, so the live default answers "not hosted" and nothing is led
+      assert App.leading_vnodes([{:"vn_never_started_#{System.unique_integer([:positive])}", 0, [node()]}]) == []
     end
 
     test "excludes a vnode this node hosts but does not lead" do
       this = :n1@h
-      assert App.leading_vnodes([{:vn_a, 0, [:n1@h, :n2@h]}], this, fn _ -> false end) == []
+      assert App.leading_vnodes([{:vn_a, 0, [:n1@h, :n2@h]}], this, fn _ -> true end, fn _ -> false end) == []
     end
 
     test "never even queries leadership for a vnode this node does not host" do
       this = :n1@h
       leader? = fn _ -> flunk("must not query leadership for a non-hosted vnode") end
-      assert App.leading_vnodes([{:vn_b, 0, [:n2@h, :n3@h]}], this, leader?) == []
+      assert App.leading_vnodes([{:vn_b, 0, [:n2@h, :n3@h]}], this, fn _ -> false end, leader?) == []
+    end
+
+    test "includes a vnode this node hosts that the ring's recorded placement does not mention" do
+      # what a rebalance leaves behind: ra made this node a member, the ring still lists the old ones.
+      this = :n1@h
+      vnodes = [{:vn_b, 0, [:n2@h, :n3@h]}]
+
+      assert App.leading_vnodes(vnodes, this, fn _ -> true end, fn _ -> true end) == [:vn_b]
+    end
+
+    test "excludes a vnode the ring's recorded placement still lists this node in" do
+      # the other side of the same staleness: ra removed this node, the ring has not caught up.
+      this = :n1@h
+      leader? = fn _ -> flunk("must not query leadership for a non-hosted vnode") end
+
+      assert App.leading_vnodes([{:vn_a, 0, [:n1@h]}], this, fn _ -> false end, leader?) == []
     end
   end
 
@@ -482,16 +504,32 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
-  describe "local_vnode_servers/2" do
+  describe "local_vnode_servers/3" do
     test "lists every metadata vnode this node hosts, led or not, as a machine and local server id" do
       vnodes = [{:vn_a, 0, [:n1@h, :n2@h]}, {:vn_b, 1, [:n2@h, :n3@h]}, {:vn_c, 2, [:n3@h, :n1@h]}]
+      hosts? = fn {_vnode_id, host} -> host == :n1@h end
 
-      assert App.local_vnode_servers(vnodes, :n1@h) == [
+      assert App.local_vnode_servers(vnodes, :n1@h, hosts?) == [
                {Malachi.Cluster.MetadataMachine, {:vn_a, :n1@h}},
+               {Malachi.Cluster.MetadataMachine, {:vn_b, :n1@h}},
                {Malachi.Cluster.MetadataMachine, {:vn_c, :n1@h}}
              ]
 
-      assert App.local_vnode_servers(vnodes, :n9@h) == []
+      assert App.local_vnode_servers(vnodes, :n9@h, hosts?) == []
+    end
+
+    test "hosting comes from ra, not from the ring's recorded placement" do
+      # vn_b is not in the ring's placement for this node (a rebalance added it); vn_a is, but ra says no.
+      vnodes = [{:vn_a, 0, [:n1@h]}, {:vn_b, 1, [:n2@h]}]
+      hosts? = fn server_id -> server_id == {:vn_b, :n1@h} end
+
+      assert App.local_vnode_servers(vnodes, :n1@h, hosts?) == [
+               {Malachi.Cluster.MetadataMachine, {:vn_b, :n1@h}}
+             ]
+    end
+
+    test "an empty placement yields no members to watch" do
+      assert App.local_vnode_servers([], :n1@h, fn _ -> true end) == []
     end
   end
 
@@ -616,6 +654,148 @@ defmodule Malachi.ApplicationTest do
 
     test "ignores entries without an =" do
       assert App.parse_topology("n1@h=a,bogus,n2@h=b") == %{:n1@h => "a", :n2@h => "b"}
+    end
+  end
+end
+
+defmodule Malachi.ApplicationLivePlacementTest do
+  @moduledoc """
+  `Malachi.Application.current_vnodes/0`: the live placement the sharded control plane reconciles
+  against, and the reason the vnode coordinator manager no longer closes over the boot list.
+
+  `async: false`: these register the production membership name so the real seam is exercised, and the
+  timeout case has to be the only claimant of that name while it runs.
+  """
+  use ExUnit.Case, async: false
+
+  alias Malachi.Application, as: App
+  alias Malachi.Cluster.HashRing
+  alias Malachi.Cluster.MembershipServer
+  alias Malachi.Cluster.RingTopology
+
+  @membership Malachi.LogMembership
+
+  defmodule DeafServer do
+    @moduledoc "A server that never answers a call, so the caller's timeout is what decides."
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, :ok, opts)
+
+    @impl true
+    def init(:ok), do: {:ok, :ok}
+
+    @impl true
+    def handle_call(_message, _from, state), do: {:noreply, state}
+  end
+
+  defp topology(vnodes, placements) do
+    ring =
+      Enum.reduce(vnodes, HashRing.new(), fn {id, token}, ring ->
+        {:ok, ring} = HashRing.add_vnode(ring, id, token)
+        ring
+      end)
+
+    RingTopology.new(ring, placements)
+  end
+
+  defp start_membership(opts \\ []) do
+    {:ok, pid} = MembershipServer.start_link([name: @membership, self_ref: {@membership, node()}] ++ opts)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    pid
+  end
+
+  test "reads the vnodes the gossiped ring names, in token order" do
+    start_membership(topology: topology([{:vn_b, 900}, {:vn_a, 100}], %{vn_a: [:n1@h], vn_b: [:n2@h]}))
+
+    assert App.current_vnodes() == {:ok, [{:vn_a, 100, [:n1@h]}, {:vn_b, 900, [:n2@h]}]}
+  end
+
+  test "a ring change is visible to the very next read" do
+    membership = start_membership(topology: topology([{:vn_a, 100}], %{vn_a: [:n1@h]}))
+    assert {:ok, [{:vn_a, 100, [:n1@h]}]} = App.current_vnodes()
+
+    # what a split publishes: a higher version carrying the new vnode
+    grown = topology([{:vn_a, 100}, {:vn_new, 700}], %{vn_a: [:n1@h], vn_new: [:n2@h]})
+    :ok = MembershipServer.set_topology(membership, %{grown | version: 1})
+
+    assert {:ok, [{:vn_a, 100, [:n1@h]}, {:vn_new, 700, [:n2@h]}]} = App.current_vnodes()
+  end
+
+  test "a membership with no topology yet answers an empty placement, not an error" do
+    start_membership()
+
+    # {:ok, []} is "there is nothing to coordinate", which a caller may act on; :error is "I do not
+    # know", which it must not. Collapsing the two would stop every coordinator on a node mid-boot.
+    assert App.current_vnodes() == {:ok, []}
+  end
+
+  test "a membership that is not running is an error, never an empty placement" do
+    refute Process.whereis(@membership)
+
+    assert App.current_vnodes() == :error
+  end
+
+  test "a membership too busy to answer in time is an error, never an empty placement" do
+    {:ok, pid} = DeafServer.start_link(name: @membership)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert App.current_vnodes() == :error
+    # the caller survives the timeout instead of being taken down with the call
+    assert Process.alive?(self())
+  end
+
+  describe "current_ring/0" do
+    test "is the gossiped ring" do
+      start_membership(topology: topology([{:vn_a, 100}], %{vn_a: [:n1@h]}))
+
+      assert %HashRing{} = ring = App.current_ring()
+      assert {:ok, :vn_a} = HashRing.route(ring, "anything")
+    end
+
+    test "is nil with no topology, and nil when the topology cannot be read" do
+      start_membership()
+      assert App.current_ring() == nil
+
+      # the reshard coordinator refuses to split on a nil ring, which is the right answer for both
+      :ok = GenServer.stop(Malachi.LogMembership)
+      assert App.current_ring() == nil
+    end
+  end
+
+  describe "current_vnode_configs/0" do
+    test "is the live ring's vnodes and tokens, which is what a rebalancing plan moves" do
+      start_membership(topology: topology([{:vn_b, 900}, {:vn_a, 100}], %{vn_a: [:n1@h], vn_b: [:n2@h]}))
+
+      assert App.current_vnode_configs() == [{:vn_a, 100}, {:vn_b, 900}]
+    end
+
+    test "is empty when the ring cannot be read, so nothing moves" do
+      refute Process.whereis(@membership)
+
+      assert App.current_vnode_configs() == []
+    end
+  end
+
+  describe "vnode_coordinator_manager_opts/0" do
+    test "resolves the placement on every call instead of capturing one" do
+      membership = start_membership(topology: topology([{:vn_a, 100}], %{vn_a: [:n1@h]}))
+      opts = App.vnode_coordinator_manager_opts()
+
+      assert {:ok, [{:vn_a, 100, [:n1@h]}]} = opts[:placement].()
+
+      grown = topology([{:vn_a, 100}, {:vn_new, 700}], %{vn_a: [:n1@h], vn_new: [:n2@h]})
+      :ok = MembershipServer.set_topology(membership, %{grown | version: 1})
+
+      assert {:ok, [{:vn_a, 100, [:n1@h]}, {:vn_new, 700, [:n2@h]}]} = opts[:placement].()
+    end
+
+    test "derives both the led vnodes and the watched members from the placement it is given" do
+      opts = App.vnode_coordinator_manager_opts()
+
+      # no ra groups exist for these names here, so ra answers "not a member" and both derivations are
+      # empty: the point is that each takes the placement as an argument rather than a captured list.
+      assert opts[:leading].([{:vn_a, 100, [node()]}]) == []
+      assert opts[:version_servers].([{:vn_a, 100, [node()]}]) == []
     end
   end
 end

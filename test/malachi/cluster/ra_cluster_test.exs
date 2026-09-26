@@ -12,6 +12,7 @@ defmodule Malachi.Cluster.RaClusterTest do
   alias Malachi.Cluster.Ring
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Test.PollingHelper
   alias Malachi.Test.SilentRaMember
 
   defp start_cluster do
@@ -150,5 +151,45 @@ defmodule Malachi.Cluster.RaClusterTest do
 
     refute RaCluster.ready?(absent)
     refute RaCluster.leader?(absent)
+  end
+
+  test "leader?/2 honours the timeout it is given" do
+    {_name, server_id} = start_cluster()
+
+    assert RaCluster.leader?(server_id, 1_000)
+  end
+
+  describe "local_member?/1" do
+    test "answers true for a cluster this node hosts a member of" do
+      {_name, server_id} = start_cluster()
+
+      assert RaCluster.local_member?(server_id)
+    end
+
+    test "answers false for a cluster that was never started here, without raising" do
+      absent = {:"racluster_never_started_#{System.unique_integer([:positive])}", node()}
+
+      refute RaCluster.local_member?(absent)
+    end
+
+    test "answers false once the member is gone, though ra clears it on the member's own way out" do
+      {name, server_id} = start_cluster()
+      assert RaCluster.local_member?(server_id)
+
+      :ok = RaCluster.delete(name)
+
+      # `ra` clears the entry from the member process as it terminates, which is asynchronous to the
+      # deletion being committed. The lag is harmless to the caller: a vnode that still looks hosted
+      # for a moment is asked for leadership (the server is gone, so: no) and checked for a machine
+      # version (no counters, so: last status kept, no false alarm).
+      assert PollingHelper.wait_until(fn -> not RaCluster.local_member?(server_id) end, timeout: 2_000)
+    end
+
+    test "answers false for a member of the same cluster on another node" do
+      {name, _server_id} = start_cluster()
+
+      # the question is always "do *I* host it", so the node in the server id is what decides
+      refute RaCluster.local_member?({name, :"elsewhere@127.0.0.1"})
+    end
   end
 end

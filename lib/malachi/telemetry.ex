@@ -47,6 +47,15 @@ defmodule Malachi.Telemetry do
       records a copy held past its segment's sealed end, which is a defect that reached disk, so alert
       on it outside the first pass after an upgrade; `result: :failed` is a copy still divergent from
       what the control plane promises.
+    * `[:malachi, :cluster, :vnode_reconcile]`. `%{ring, hosted, leading, started, stopped}` /
+      `%{placement: :ok | :unreadable}` - one reconcile pass of `Malachi.Cluster.VnodeCoordinatorManager`
+      on a sharded control plane. `ring` is how many vnodes the live ring names, `hosted` how many of
+      them this node holds an `ra` member of, and `leading` how many of those it leads and therefore
+      runs coordinators for; `started` and `stopped` are what this pass changed. `placement: :unreadable`
+      means the pass could not read the placement and deliberately changed nothing: `ring`, `started` and
+      `stopped` are then 0, while `hosted` and `leading` describe the set still running from the last
+      good read. `started` or `stopped` staying non-zero pass after pass is a placement or a leadership
+      that flaps; `hosted` above `leading` is normal (a follower hosts without coordinating).
     * `[:malachi, :storage, :scrub]`. `%{verified, damaged, repaired, unrepairable}` / `%{}` - one
       background verification pass finished, with how many segments it covered. Steady progress
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
@@ -278,6 +287,27 @@ defmodule Malachi.Telemetry do
   @spec reconcile_degraded(:skipped | :down | :timeout) :: :ok
   def reconcile_degraded(reason) do
     :telemetry.execute([:malachi, :cluster, :reconcile_degraded], %{count: 1}, %{reason: reason})
+  end
+
+  @doc """
+  One reconcile pass of the vnode coordinator manager: the vnodes the live ring named, how many this
+  node hosts and leads, and how many coordinator trees the pass started and stopped. `placement` is
+  `:unreadable` when the pass kept its set because the placement could not be read.
+  """
+  @spec vnode_reconcile(
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          :ok | :unreadable
+        ) :: :ok
+  def vnode_reconcile(ring, hosted, leading, started, stopped, placement) do
+    :telemetry.execute(
+      [:malachi, :cluster, :vnode_reconcile],
+      %{ring: ring, hosted: hosted, leading: leading, started: started, stopped: stopped},
+      %{placement: placement}
+    )
   end
 
   @doc "One background scrub pass finished, with the segments it verified, found damaged and repaired."
