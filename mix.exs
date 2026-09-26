@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.14.3"
+  @version "0.14.4"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
