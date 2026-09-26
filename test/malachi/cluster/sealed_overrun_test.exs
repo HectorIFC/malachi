@@ -9,6 +9,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
 
   # `topics` is `[{topic_name, [{seq, replica_set, start_offset, seal_length}]}]`, a nil length leaving
   # the segment active. Same shape as `Malachi.Cluster.OrphanedFenceTest`'s, because the two policies
@@ -172,7 +173,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
     defp start_broker_at(opts) do
       name = :"overrun_#{System.unique_integer([:positive])}"
-      directory = Path.join(System.tmp_dir!(), "malachi_overrun_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("malachi_overrun")
 
       on_exit(fn ->
         FaultySegmentStore.clear(directory)

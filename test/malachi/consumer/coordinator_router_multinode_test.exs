@@ -15,6 +15,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
   alias Malachi.Consumer.CoordinatorRouterMultinodeFixtures, as: Fixtures
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Test.Distribution
+  alias Malachi.Test.TmpDir
 
   @coord Malachi.LogGroupCoordinator
 
@@ -30,7 +31,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     # the coordinator's ranges_fun is &Fixtures.ranges/1: make sure that module is loadable on the peer
     _ = :erpc.call(node, :code, :ensure_loaded, [Malachi.Consumer.CoordinatorRouterMultinodeFixtures])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
-    data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_router_#{name}_#{System.unique_integer([:positive])}"
+    data_dir = String.to_charlist(TmpDir.path("malachi_ra_router_#{name}"))
     {:ok, _} = :erpc.call(node, :ra, :start_in, [data_dir])
 
     {peer, node}

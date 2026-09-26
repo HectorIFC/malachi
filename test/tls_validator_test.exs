@@ -1,6 +1,7 @@
 defmodule Malachi.TLSValidatorTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.TmpDir
   alias Malachi.TLSValidator
 
   # ============================================================
@@ -47,10 +48,8 @@ defmodule Malachi.TLSValidatorTest do
   end
 
   defp write_temp_files(cert_pem, key_pem) do
-    dir = System.tmp_dir!()
-    suffix = :rand.uniform(1_000_000)
-    cert_path = Path.join(dir, "test_cert_#{suffix}.pem")
-    key_path = Path.join(dir, "test_key_#{suffix}.pem")
+    cert_path = TmpDir.path("test_cert") <> ".pem"
+    key_path = TmpDir.path("test_key") <> ".pem"
 
     File.write!(cert_path, cert_pem)
     File.write!(key_path, key_pem)
@@ -161,10 +160,8 @@ defmodule Malachi.TLSValidatorTest do
     end
 
     test "raises when cert file is empty in prod" do
-      dir = System.tmp_dir!()
-      suffix = :rand.uniform(1_000_000)
-      cert_path = Path.join(dir, "empty_cert_#{suffix}.pem")
-      key_path = Path.join(dir, "empty_key_#{suffix}.pem")
+      cert_path = TmpDir.path("empty_cert") <> ".pem"
+      key_path = TmpDir.path("empty_key") <> ".pem"
 
       File.write!(cert_path, "")
       File.write!(key_path, "")
@@ -184,10 +181,8 @@ defmodule Malachi.TLSValidatorTest do
     end
 
     test "raises when cert file is not PEM format in prod" do
-      dir = System.tmp_dir!()
-      suffix = :rand.uniform(1_000_000)
-      cert_path = Path.join(dir, "bad_cert_#{suffix}.pem")
-      key_path = Path.join(dir, "bad_key_#{suffix}.pem")
+      cert_path = TmpDir.path("bad_cert") <> ".pem"
+      key_path = TmpDir.path("bad_key") <> ".pem"
 
       # Write binary (DER-like) content
       File.write!(cert_path, <<0x30, 0x82, 0x01, 0x00>>)

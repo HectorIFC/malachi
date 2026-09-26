@@ -8,6 +8,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.MemberIncarnation
   alias Malachi.Cluster.Membership
+  alias Malachi.Test.TmpDir
 
   @moduletag :tmp_dir
 
@@ -153,7 +154,7 @@ defmodule Malachi.Cluster.MemberIncarnationTest do
 
     test "a node upgraded from a build without the file still outranks what its peers remember" do
       cap = :batch_format
-      dir = Path.join(System.tmp_dir!(), "inc#{System.unique_integer([:positive])}")
+      dir = TmpDir.path("inc")
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
 

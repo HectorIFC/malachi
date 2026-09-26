@@ -1,11 +1,15 @@
 defmodule Malachi.AuditLogIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.TmpDir
+
   @moduletag :isolated_audit_log
   # These tests need full control over AuditLog lifecycle
   # Run with: mix test test/audit_log_integration_test.exs
 
-  @test_log_file "/tmp/malachi_test_audit.log"
+  # Per test run, not a fixed name: two suites on one host (two worktrees) would otherwise write, read and
+  # delete the same file. A test file is compiled by the VM that runs it, so System.pid/0 is this run's.
+  @test_log_file Path.join(System.tmp_dir!(), "malachi_test_audit_#{System.pid()}.log")
 
   setup do
     # Clean up test log file
@@ -100,7 +104,7 @@ defmodule Malachi.AuditLogIntegrationTest do
       # AuditLog, whose terminate/2 does a final flush; if that process was in :file mode its flush
       # recreates the shared @test_log_file after setup's File.rm. Pointing this test at its own file
       # makes the assertion immune to that leftover (which lands in @test_log_file, not here).
-      stdout_file = "/tmp/malachi_test_audit_stdout_#{System.unique_integer([:positive])}.log"
+      stdout_file = TmpDir.path("malachi_test_audit_stdout") <> ".log"
       on_exit(fn -> File.rm(stdout_file) end)
 
       # Configure stdout output

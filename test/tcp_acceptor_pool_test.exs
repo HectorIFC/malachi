@@ -3,6 +3,7 @@ defmodule Malachi.TCPAcceptorPoolTest do
 
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.CertFixtures
+  alias Malachi.Test.TmpDir
 
   # Every pool started here is registered under its own name, so it runs beside the application's pool
   # (which holds the module name) and its bound port is recorded under that name, never over the
@@ -93,7 +94,7 @@ defmodule Malachi.TCPAcceptorPoolTest do
     end
 
     test "over TLS reads the bound port from the ssl socket" do
-      dir = Path.join(System.tmp_dir!(), "malachi_pool_tls_#{System.unique_integer([:positive])}")
+      dir = TmpDir.path("malachi_pool_tls")
       on_exit(fn -> File.rm_rf!(dir) end)
       %{certfile: certfile, keyfile: keyfile} = CertFixtures.server_cert!(dir)
 

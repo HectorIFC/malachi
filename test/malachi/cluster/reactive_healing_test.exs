@@ -14,11 +14,12 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.TmpDir
 
   # :temporary so GenServer.stop/1 permanently removes a broker (simulating a node death).
   defp start_replication do
     n = System.unique_integer([:positive])
-    directory = Path.join(System.tmp_dir!(), "malachi_rh_#{n}")
+    directory = TmpDir.path("malachi_rh")
     on_exit(fn -> File.rm_rf!(directory) end)
     spec = %{id: {:repl, n}, start: {ReplicationServer, :start_link, [[directory: directory]]}, restart: :temporary}
     start_supervised!(spec)
@@ -270,7 +271,7 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     # Registered names, so a replica keeps its identity across a restart (a pid would not) and the
     # replica set still points at it when it comes back holding less than the others.
     names = for index <- 1..3, do: :"rh_behind_#{index}_#{System.unique_integer([:positive])}"
-    directories = Map.new(names, &{&1, Path.join(System.tmp_dir!(), "malachi_behind_#{&1}")})
+    directories = Map.new(names, &{&1, TmpDir.path("malachi_behind_#{&1}")})
     on_exit(fn -> Enum.each(Map.values(directories), &File.rm_rf!/1) end)
 
     start_named = fn name ->

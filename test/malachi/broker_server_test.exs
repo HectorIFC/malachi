@@ -15,6 +15,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnfenceablePrimary
   alias Malachi.Test.UnknownMessages
 
@@ -25,7 +26,7 @@ defmodule Malachi.BrokerServerTest do
   # A primary that serves everything but the fence, so a FAILED fence can be told apart from a dead
   # primary (which would fail the produce too and make the two outcomes indistinguishable).
   defp start_unfenceable(id, opts \\ []) do
-    directory = Path.join(System.tmp_dir!(), "malachi_unfenceable_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_unfenceable")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({UnfenceablePrimary, [directory: directory] ++ opts}, id: id)
   end

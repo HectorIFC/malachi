@@ -15,6 +15,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
   alias Malachi.Storage.Layout
   alias Malachi.Test.Distribution
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
 
   # Every peer registers its replication server under the same name: a broker ref is `{name, node}`, so
   # the node alone tells them apart, as in a real cluster.
@@ -60,7 +61,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
     {follower, _follower_dir} = start_peer_broker()
 
     local_name = :"storage_failure_local_#{System.unique_integer([:positive])}"
-    local_dir = Path.join(System.tmp_dir!(), "#{local_name}_data")
+    local_dir = TmpDir.path("#{local_name}_data")
     on_exit(fn -> File.rm_rf!(local_dir) end)
     start_supervised!({ReplicationServer, [name: local_name, directory: local_dir]}, id: local_name)
     local = {local_name, node()}
@@ -133,7 +134,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
     {follower, _follower_dir} = start_peer_broker()
 
     local_name = :"storage_rot_local_#{System.unique_integer([:positive])}"
-    local_dir = Path.join(System.tmp_dir!(), "#{local_name}_data")
+    local_dir = TmpDir.path("#{local_name}_data")
     on_exit(fn -> File.rm_rf!(local_dir) end)
     start_supervised!({ReplicationServer, [name: local_name, directory: local_dir]}, id: local_name)
     local = {local_name, node()}

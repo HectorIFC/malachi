@@ -8,12 +8,13 @@ defmodule WorktreeEnvTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Test.DevCompose
+  alias Malachi.Test.TmpDir
 
   @script Path.expand("../../scripts/worktree-env.sh", __DIR__)
   @repo_root Path.expand("../..", __DIR__)
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "worktree-env-#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("worktree-env")
     main = Path.join(dir, "main")
     File.mkdir_p!(main)
     on_exit(fn -> File.rm_rf!(dir) end)

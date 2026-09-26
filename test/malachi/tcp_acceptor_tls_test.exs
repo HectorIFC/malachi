@@ -7,12 +7,13 @@ defmodule Malachi.TCPAcceptorTLSTest do
   import Malachi.Test.TeardownHelper
 
   alias Malachi.Test.CertFixtures
+  alias Malachi.Test.TmpDir
   alias Malachi.Wire
 
   # A throwaway self-signed server cert/key generated per run (CertFixtures.server_cert!/1): the dist certs
   # under priv/dist_cert are gitignored, so they are absent in CI.
   setup do
-    dir = Path.join(System.tmp_dir!(), "malachi_tls_test_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_tls_test")
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, CertFixtures.server_cert!(dir)}
   end

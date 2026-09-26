@@ -21,6 +21,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementMultinodeTest do
   alias Malachi.Cluster.VnodeCoordinatorManager, as: Manager
   alias Malachi.Test.Distribution
   alias Malachi.Test.RaPeers
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.VnodeCoordinatorProbe, as: Probe
 
   setup_all do
@@ -33,7 +34,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementMultinodeTest do
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:logger])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:ra])
-    data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_vcm_#{name}_#{System.unique_integer([:positive])}"
+    data_dir = String.to_charlist(TmpDir.path("malachi_ra_vcm_#{name}"))
     {:ok, _pid} = :erpc.call(node, :ra, :start_in, [data_dir])
     on_exit(fn -> File.rm_rf("#{data_dir}") end)
 

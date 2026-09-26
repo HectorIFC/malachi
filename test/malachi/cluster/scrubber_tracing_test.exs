@@ -12,6 +12,7 @@ defmodule Malachi.Cluster.ScrubberTracingTest do
   alias Malachi.Log.Record, as: LogRecord
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
+  alias Malachi.Test.TmpDir
 
   @span_fields Record.extract(:span, from_lib: "opentelemetry/include/otel_span.hrl")
   Record.defrecordp(:span, @span_fields)
@@ -35,7 +36,7 @@ defmodule Malachi.Cluster.ScrubberTracingTest do
 
   defp start_replica do
     name = :"scrub_trace_repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_scrub_trace_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_scrub_trace")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, [name: name, directory: directory]}, id: name)
     {{name, node()}, directory}

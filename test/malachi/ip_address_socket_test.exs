@@ -18,6 +18,7 @@ defmodule Malachi.IPAddressSocketTest do
   alias Malachi.Auth.LockoutManager
   alias Malachi.ConnectionLimiter
   alias Malachi.IPAddress
+  alias Malachi.Test.TmpDir
 
   # The loopback v6 address every case below connects from.
   @loopback6 {0, 0, 0, 0, 0, 0, 0, 1}
@@ -80,7 +81,7 @@ defmodule Malachi.IPAddressSocketTest do
 
   describe "from_socket/2 over TLS" do
     setup do
-      dir = Path.join(System.tmp_dir!(), "malachi_ip_address_tls_#{System.unique_integer([:positive])}")
+      dir = TmpDir.path("malachi_ip_address_tls")
       File.mkdir_p!(dir)
       certfile = Path.join(dir, "cert.pem")
       keyfile = Path.join(dir, "key.pem")

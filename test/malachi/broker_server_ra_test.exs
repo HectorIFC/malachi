@@ -17,6 +17,7 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Test.AliveMembersStub
   alias Malachi.Test.FaultySegmentStore
   alias Malachi.Test.SilentRaMember
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
   setup_all do
@@ -24,7 +25,7 @@ defmodule Malachi.BrokerServerRaTest do
   end
 
   defp start_replication do
-    directory = Path.join(System.tmp_dir!(), "malachi_ra_bs_repl_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_ra_bs_repl")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, directory: directory}, id: {:repl, System.unique_integer([:positive])})
   end
@@ -97,7 +98,7 @@ defmodule Malachi.BrokerServerRaTest do
     # so no horizon, so no read. Only a produce broke it.
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
-    directory = Path.join(System.tmp_dir!(), "malachi_cold_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_cold")
     on_exit(fn -> File.rm_rf!(directory) end)
 
     # A REGISTERED server, so its ref is {name, node} and survives the restart. An unregistered one is
@@ -130,7 +131,7 @@ defmodule Malachi.BrokerServerRaTest do
     # error, which must count as no answer (seated at zero, retried next tick), not crash the broker's init.
     cluster = :"bs_failed_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
-    directory = Path.join(System.tmp_dir!(), "malachi_failed_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_failed")
 
     on_exit(fn ->
       FaultySegmentStore.clear(directory)
@@ -171,7 +172,7 @@ defmodule Malachi.BrokerServerRaTest do
     on_exit(fn -> MetadataServer.delete(cluster) end)
 
     name = :"sub_repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_sub_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_sub")
     on_exit(fn -> File.rm_rf!(directory) end)
     {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
     on_exit(fn -> stop_quietly(repl) end)
@@ -199,7 +200,7 @@ defmodule Malachi.BrokerServerRaTest do
     # unready would pull a working node out of rotation. Every node sees the same outage at the same
     # moment, so that answer would empty the load balancer exactly when all of its backends still work.
     cluster = :"bs_ready_#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "malachi_ready_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_ready")
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, repl} = ReplicationServer.start_link(directory: dir)
     on_exit(fn -> stop_quietly(repl) end)
@@ -235,7 +236,7 @@ defmodule Malachi.BrokerServerRaTest do
     # left the previous (empty) list in place. The sharded path never had the hole: it reports the
     # vnodes it could not read by id.
     cluster = :"bs_incomplete_#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "malachi_incomplete_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_incomplete")
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, repl} = ReplicationServer.start_link(directory: dir)
     on_exit(fn -> stop_quietly(repl) end)
@@ -765,7 +766,7 @@ defmodule Malachi.BrokerServerRaTest do
     # The tick timer is only ever armed on the replicated path, so this shape does not arise on its own.
     # It arrives from outside: `:reconcile` used to be the documented way for a test to drive a pass, and
     # a stray one must be a no-op rather than start a task with nothing to read.
-    directory = Path.join(System.tmp_dir!(), "malachi_bs_tick_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_bs_tick")
     on_exit(fn -> File.rm_rf!(directory) end)
 
     {:ok, control} = BrokerServer.start_link(directory)
@@ -812,7 +813,7 @@ defmodule Malachi.BrokerServerRaTest do
   test "reconcile_now is a no-op on a broker with in-memory metadata" do
     # No control plane to read, so the barrier the tests use has nothing to wait for and must not
     # depend on one existing.
-    directory = Path.join(System.tmp_dir!(), "malachi_bs_inmem_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_bs_inmem")
     on_exit(fn -> File.rm_rf!(directory) end)
 
     {:ok, control} = BrokerServer.start_link(directory)
@@ -938,7 +939,7 @@ defmodule Malachi.BrokerServerRaTest do
     # A REGISTERED replication server, so both frontends address the same primary by `{name, node()}`
     # and place segments on a ref that compares equal on both sides.
     name = :"fence41_repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_fence41_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_fence41")
     on_exit(fn -> File.rm_rf!(directory) end)
     {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
     on_exit(fn -> stop_quietly(repl) end)
@@ -1031,7 +1032,7 @@ defmodule Malachi.BrokerServerRaTest do
     on_exit(fn -> MetadataServer.delete(cluster) end)
 
     name = :"orphan121_repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_orphan121_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_orphan121")
     on_exit(fn -> File.rm_rf!(directory) end)
     {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
     on_exit(fn -> stop_quietly(repl) end)

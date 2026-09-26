@@ -9,6 +9,7 @@ defmodule Malachi.Auth.UserServerHaTest do
 
   alias Malachi.Auth.UserServer
   alias Malachi.Test.Distribution
+  alias Malachi.Test.TmpDir
 
   setup_all do
     :ok = Distribution.ensure_started()
@@ -21,7 +22,7 @@ defmodule Malachi.Auth.UserServerHaTest do
   defp start_peer do
     {peer, node, name} = Distribution.start_peer("upeer")
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
-    data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_users_#{name}_#{System.unique_integer([:positive])}"
+    data_dir = String.to_charlist(TmpDir.path("malachi_ra_users_#{name}"))
     {:ok, _} = :erpc.call(node, :ra, :start_in, [data_dir])
 
     {peer, node}

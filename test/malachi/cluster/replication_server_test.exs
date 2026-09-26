@@ -7,6 +7,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
   alias Malachi.Test.StorageFaults
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
   @segment {{"events", 0}, 0}
@@ -16,7 +17,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   # Same, but hands back the data directory too, for the tests that have to look at the files.
   defp start_broker_at(opts) do
     name = :"repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl")
 
     on_exit(fn ->
       FaultySegmentStore.clear(directory)
@@ -272,7 +273,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     # up the server with an :already_exists MatchError (Log.open creating over existing files), which
     # crash-looped the whole replication server on a restarted node, exactly what the chaos harness
     # caught. With recover, the replica resumes at its durable end and keeps serving.
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_restart_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl_restart")
     on_exit(fn -> File.rm_rf!(directory) end)
     name = :"repl_restart_#{System.unique_integer([:positive])}"
 
@@ -293,7 +294,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     # handler only served segments already open in memory, and only the append path opened them,
     # so after a restart every pre-restart record answered :eof until some write touched its
     # segment. A read must recover from disk on its own.
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_cold_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl_cold")
     on_exit(fn -> File.rm_rf!(directory) end)
     name = :"repl_cold_#{System.unique_integer([:positive])}"
 
@@ -318,7 +319,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     # correctly so: that is what a preallocated tail IS. #149 argued that replication covers this,
     # because recovery resumes at the durable end it could prove and a push past it nacks. That was
     # derived from reading the code and had never been exercised.
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_zerotail_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl_zerotail")
     on_exit(fn -> File.rm_rf!(directory) end)
     name = :"repl_zerotail_#{System.unique_integer([:positive])}"
     {peer, _peer_directory} = {start_broker(), nil}
@@ -358,7 +359,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     # segment is opened, is what makes the damage visible immediately: the background scrub verifies
     # everything eventually, but on a slow cadence, so a node could otherwise serve short reads for
     # days without a word. async: false is not needed: the handler is scoped to this test's pid.
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_integrity_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl_integrity")
     on_exit(fn -> File.rm_rf!(directory) end)
     name = :"repl_integrity_#{System.unique_integer([:positive])}"
 
@@ -407,7 +408,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
   end
 
   test "stored_bytes reads the on-disk size without opening; durable_end recovers where end_offset cannot" do
-    directory = Path.join(System.tmp_dir!(), "malachi_repl_probe_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_repl_probe")
     on_exit(fn -> File.rm_rf!(directory) end)
     name = :"repl_probe_#{System.unique_integer([:positive])}"
 
@@ -993,7 +994,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
   test "a path-unsafe topic in a replicated segment id cannot escape the base directory" do
     name = :"repl_#{System.unique_integer([:positive])}"
-    base = Path.join(System.tmp_dir!(), "malachi_repl_pt_#{System.unique_integer([:positive])}")
+    base = TmpDir.path("malachi_repl_pt")
     # A topic carrying a single-level path traversal, as a compromised peer could send over replication.
     # The escape target lands next to `base` under the (writable) tmp dir, so without the fix it would be
     # created there; unique-suffix it to avoid colliding with other tests.
@@ -1186,7 +1187,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
 
     test "the fence survives a restart, before the log is ever opened" do
-      directory = Path.join(System.tmp_dir!(), "malachi_fence_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("malachi_fence")
       on_exit(fn -> File.rm_rf!(directory) end)
 
       first = :"repl_fence_a_#{System.unique_integer([:positive])}"
@@ -1400,7 +1401,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     test "sees a fence from the on-disk marker after a restart, with nothing open" do
       # The case the reconciling pass exists for: the node that fenced the segment restarted before
       # anything recorded the seal, so the only evidence left is the marker.
-      directory = Path.join(System.tmp_dir!(), "malachi_report_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("malachi_report")
       on_exit(fn -> File.rm_rf!(directory) end)
 
       first = :"repl_report_a_#{System.unique_integer([:positive])}"

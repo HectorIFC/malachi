@@ -5,6 +5,7 @@ defmodule Malachi.UnexpectedMessageTest do
 
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
   alias Malachi.UnexpectedMessage
 
@@ -187,7 +188,7 @@ defmodule Malachi.UnexpectedMessageTest do
   # process that holds every log on the node.
   test "a flood of one unknown shape is one log line and a count per message, and the server keeps serving" do
     name = :"unexpected_flood_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_unexpected_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_unexpected")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, [name: name, directory: directory]}, id: name)
     segment = {{"flood", 0}, 0}

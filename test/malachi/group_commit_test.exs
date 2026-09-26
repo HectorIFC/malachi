@@ -8,6 +8,7 @@ defmodule Malachi.GroupCommitTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
 
   defp start_broker(opts \\ []), do: elem(start_broker_at(opts), 0)
 
@@ -18,7 +19,7 @@ defmodule Malachi.GroupCommitTest do
   # what a `FaultySegmentStore` rule or count is scoped by.
   defp start_broker_at(opts) do
     tag = System.unique_integer([:positive])
-    base = Path.join(System.tmp_dir!(), "gc_test_#{tag}")
+    base = TmpDir.path("gc_test")
     File.rm_rf!(base)
     repl = :"gc_repl_#{tag}"
     repl_dir = Path.join(base, "repl")
@@ -137,7 +138,7 @@ defmodule Malachi.GroupCommitTest do
     # flush: every parked producer must get {:error, :flush_failed} (never an ack without a confirmed
     # fsync), and the broker must survive the pipeline's death instead of crashing on the flush call.
     tag = System.unique_integer([:positive])
-    base = Path.join(System.tmp_dir!(), "gc_dead_#{tag}")
+    base = TmpDir.path("gc_dead")
     File.rm_rf!(base)
     repl = :"gc_dead_repl_#{tag}"
     {:ok, repl_pid} = ReplicationServer.start_link(name: repl, directory: Path.join(base, "repl"))
