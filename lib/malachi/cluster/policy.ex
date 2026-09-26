@@ -42,7 +42,7 @@ defmodule Malachi.Cluster.Policy do
             optional(:max_age_ms) => non_neg_integer() | nil,
             optional(:max_bytes) => non_neg_integer() | nil
           },
-          optional(:spread_by) => term() | nil
+          optional(:spread_by) => String.t() | nil
         }
 
   @keys [:retention, :spread_by]
@@ -80,10 +80,14 @@ defmodule Malachi.Cluster.Policy do
       iex> Malachi.Cluster.Policy.valid?(%{retention: %{max_bytes: nil}})
       true
 
+      iex> Malachi.Cluster.Policy.valid?(%{spread_by: :rack})
+      false
+
   """
   @spec valid?(term()) :: boolean()
   def valid?(policy) when is_map(policy) do
-    known_keys?(policy, @keys) and valid_retention?(Map.get(policy, :retention, %{}))
+    known_keys?(policy, @keys) and valid_retention?(Map.get(policy, :retention, %{})) and
+      valid_spread_by?(Map.get(policy, :spread_by))
   end
 
   def valid?(_policy), do: false
@@ -94,6 +98,17 @@ defmodule Malachi.Cluster.Policy do
   end
 
   defp valid_retention?(_retention), do: false
+
+  # The spread attribute is a KEY into the broker attributes, which arrive from the environment through
+  # `Malachi.Application.parse_attributes/1` and are therefore keyed by string. An atom or a number
+  # matches no broker, `Malachi.Cluster.Placement` puts every broker in the single nil domain, and the
+  # result is a hard placement that answers `:insufficient_domains` or a soft one that quietly stops
+  # spreading. Checked here rather than at the placement boundary so the store never holds a definition
+  # that cannot do what it says, and checked now because nothing emits `{:define_policy, name, policy}`
+  # yet: once #194 opens a write path, tightening what an existing command accepts changes the result of
+  # a log replay and needs a new command at a new machine version.
+  defp valid_spread_by?(nil), do: true
+  defp valid_spread_by?(spread_by), do: valid_name?(spread_by)
 
   defp known_keys?(map, keys), do: map |> Map.keys() |> Enum.all?(&(&1 in keys))
 

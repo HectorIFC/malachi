@@ -37,6 +37,20 @@ defmodule Malachi.Cluster.PolicyTest do
       refute Policy.valid?(%{retention: %{maxbytes: 10}})
     end
 
+    test "the spread attribute is a key into the broker attributes, so it has to be a non-empty string" do
+      # Broker attributes arrive from the environment keyed by string, so an atom matches no broker at
+      # all: placement then puts every broker in the single nil domain, and a hard policy answers
+      # :insufficient_domains while a soft one quietly stops spreading. An empty key matches nothing for
+      # the same reason, which is why it is refused rather than treated as off. Off is nil.
+      assert Policy.valid?(%{spread_by: "rack"})
+      assert Policy.valid?(%{spread_by: nil})
+
+      refute Policy.valid?(%{spread_by: :rack})
+      refute Policy.valid?(%{spread_by: ""})
+      refute Policy.valid?(%{spread_by: 1})
+      refute Policy.valid?(%{spread_by: ["rack"]})
+    end
+
     test "anything that is not a map is not a policy" do
       refute Policy.valid?(:always)
       refute Policy.valid?(nil)
@@ -48,7 +62,10 @@ defmodule Malachi.Cluster.PolicyTest do
       check all(
               age <- StreamData.one_of([StreamData.constant(nil), StreamData.non_negative_integer()]),
               bytes <- StreamData.one_of([StreamData.constant(nil), StreamData.non_negative_integer()]),
-              spread <- StreamData.one_of([StreamData.constant(nil), StreamData.string(:alphanumeric)])
+              # min_length: 1, because an empty key is refused: it is a key into the broker attributes
+              # and matches no broker, which is a different thing from nil, which is spreading off.
+              spread <-
+                StreamData.one_of([StreamData.constant(nil), StreamData.string(:alphanumeric, min_length: 1)])
             ) do
         assert Policy.valid?(%{retention: %{max_age_ms: age, max_bytes: bytes}, spread_by: spread})
       end
