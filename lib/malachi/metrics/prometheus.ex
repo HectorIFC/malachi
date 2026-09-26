@@ -131,6 +131,23 @@ defmodule Malachi.Metrics.Prometheus do
         ]
       ),
       metric(
+        "malachi_cluster_sealed_copies_settled_total",
+        :counter,
+        "Copies of sealed segments brought to the length the control plane recorded (trimmed means the " <>
+          "copy held records past its segment's sealed end, which is a defect that reached disk)",
+        [
+          {[result: "fenced"], ops.sealed_copies_fenced},
+          {[result: "trimmed"], ops.sealed_copies_trimmed},
+          {[result: "failed"], ops.sealed_copies_unsettled}
+        ]
+      ),
+      metric(
+        "malachi_cluster_sealed_records_dropped_total",
+        :counter,
+        "Records dropped from copies that held them past their segment's sealed end",
+        [{[], ops.sealed_records_dropped}]
+      ),
+      metric(
         "malachi_broker_reconcile_degraded_total",
         :counter,
         "Ticks on which the broker's control plane reconcile did not complete (the node keeps serving " <>

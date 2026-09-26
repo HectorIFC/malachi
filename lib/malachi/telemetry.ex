@@ -41,6 +41,12 @@ defmodule Malachi.Telemetry do
       flat: that pair is the difference between a divergence that healed and a range that is stuck.
     * `[:malachi, :cluster, :fence_reconciled]`. `%{count}` / `%{}` - a heal pass finished the seal for
       `count` such segments, which is what unblocks their ranges.
+    * `[:malachi, :cluster, :sealed_copies_settled]`. `%{copies, records}` / `%{result}` - a heal pass
+      brought `copies` copies of sealed segments to the length the control plane recorded. `result:
+      :fenced` is the routine case and only writes a marker; `result: :trimmed` gave up `records`
+      records a copy held past its segment's sealed end, which is a defect that reached disk, so alert
+      on it outside the first pass after an upgrade; `result: :failed` is a copy still divergent from
+      what the control plane promises.
     * `[:malachi, :storage, :scrub]`. `%{verified, damaged, repaired, unrepairable}` / `%{}` - one
       background verification pass finished, with how many segments it covered. Steady progress
       with `damaged: 0` is what a healthy node looks like; no events at all means the scrub is not
@@ -165,6 +171,20 @@ defmodule Malachi.Telemetry do
   @spec fence_reconciled(non_neg_integer()) :: :ok
   def fence_reconciled(count) do
     :telemetry.execute([:malachi, :cluster, :fence_reconciled], %{count: count}, %{})
+  end
+
+  @doc """
+  A heal pass brought `copies` copies of sealed segments to the length the control plane recorded:
+  `:fenced` wrote only a marker, `:trimmed` also gave up `records` records held past the sealed end,
+  and `:failed` could not settle the copy at all. `records` is 0 for anything but `:trimmed`.
+  """
+  @spec sealed_copies_settled(:fenced | :trimmed | :failed, non_neg_integer(), non_neg_integer()) :: :ok
+  def sealed_copies_settled(result, copies, records) do
+    :telemetry.execute(
+      [:malachi, :cluster, :sealed_copies_settled],
+      %{copies: copies, records: records},
+      %{result: result}
+    )
   end
 
   @doc """

@@ -16,6 +16,7 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Telemetry
 
   @server :retention_multinode_repl
 
@@ -81,14 +82,29 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
 
     parent = self()
 
+    # A sweep event carries no topic, and a telemetry handler sees every event on the node, so this one
+    # has to say which sweeps are its own. `Malachi.Cluster.RetentionCoordinatorTest` is async and sweeps
+    # while this test runs; without the marker one of ITS sweeps satisfies the `assert_receive` below
+    # with `expired: 0` and this test fails for another test's work. The handler runs in the emitting
+    # process, so the marker is read straight out of the process that swept. Same device as that module's
+    # own `:retention_test_topic`, for the same reason.
+    marker = :"retention_multinode_#{System.unique_integer([:positive])}"
+    handler_id = "retention-multinode-#{marker}"
+
     :telemetry.attach_many(
-      "retention-multinode",
+      handler_id,
       [[:malachi, :retention, :skip], [:malachi, :retention, :sweep]],
-      fn event, measurements, metadata, _config -> send(parent, {event, measurements, metadata}) end,
+      fn
+        [:malachi, :retention, :sweep] = event, measurements, metadata, _config ->
+          if Process.get(:retention_multinode_marker) == marker, do: send(parent, {event, measurements, metadata})
+
+        event, measurements, metadata, _config ->
+          send(parent, {event, measurements, metadata})
+      end,
       nil
     )
 
-    on_exit(fn -> :telemetry.detach("retention-multinode") end)
+    on_exit(fn -> :telemetry.detach(handler_id) end)
 
     :ok = LogApi.create_topic(name, "events")
 
@@ -107,11 +123,22 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
     {:ok, coordinator} =
       RetentionCoordinator.start_link(
         metadata_source: fn -> BrokerServer.metadata(name) end,
-        expire_segment: &Malachi.Application.expire_segment(&1, name),
+        # Marks the sweeping process as this test's, which is what the handler above filters on. Set here
+        # because this is the one function the coordinator calls from inside its own sweep.
+        expire_segment: fn segment ->
+          Process.put(:retention_multinode_marker, marker)
+          Malachi.Application.expire_segment(segment, name)
+        end,
         policy: %{max_age_ms: 0},
         clock: fn -> System.system_time(:millisecond) + 60_000 end,
         interval: 3_600_000
       )
+
+    # The flake, made deterministic. A sweep from another process on this node, emitted BEFORE this
+    # test's own, which is exactly what the async retention tests do while this one runs. It carries no
+    # topic, so only the marker tells it apart, and `assert_receive` takes the OLDEST match: without the
+    # filter this event is the one it reads, and the test fails on another test's `expired: 0`.
+    Task.await(Task.async(fn -> Telemetry.retention_sweep(1, 0, 0) end))
 
     expired = RetentionCoordinator.run_now(coordinator)
     assert oldest.id in expired

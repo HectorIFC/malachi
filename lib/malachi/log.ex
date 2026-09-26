@@ -212,6 +212,34 @@ defmodule Malachi.Log do
   def seal_marker_path(directory), do: Path.join(directory, "SEALED")
 
   @doc """
+  Truncates the whole log so that `end_offset` becomes the offset after its last record: every segment
+  file that begins at or above it is removed, and the file that straddles it keeps only the records
+  below it. Idempotent, and a no-op when the log already ends at or below `end_offset`.
+
+  This is how a copy is brought back to the length the control plane recorded for its segment. It is
+  deliberately NOT the inverse of `seal/1`: sealing a log is a latch and truncating one is not, so a
+  caller that does both must truncate first and seal second, or it leaves a fenced copy still holding
+  records past the fence. `Malachi.Cluster.ReplicationServer.seal_at/5` is the only caller and does
+  exactly that.
+
+  Answers `{:error, :below_base_offset}` for an `end_offset` under the log's first record, which is a
+  caller asking about the wrong log rather than a log that needs emptying. Buffered records are flushed
+  first, as `seal/1` flushes: they are not durable, so nothing has acknowledged them, but a truncation
+  measured against a file that a pending write is about to extend would answer for the wrong bytes.
+  """
+  @spec truncate_to(t(), non_neg_integer()) :: {:ok, t()} | {:error, term()}
+  def truncate_to(%__MODULE__{} = log, end_offset) when is_integer(end_offset) do
+    base_offsets = base_offsets_in(log.directory)
+
+    cond do
+      end_offset >= log.next_offset -> {:ok, log}
+      base_offsets == [] -> {:error, :below_base_offset}
+      end_offset < hd(base_offsets) -> {:error, :below_base_offset}
+      true -> do_truncate_to(log, end_offset, base_offsets)
+    end
+  end
+
+  @doc """
   Reads up to `max_records` committed records from the segment containing `offset`.
   Returns `:eof` past the end of the log, or `{:error, :out_of_range}` below its start.
   """
@@ -350,6 +378,77 @@ defmodule Malachi.Log do
   end
 
   # --- internals ---
+
+  defp do_truncate_to(%__MODULE__{} = log, end_offset, base_offsets) do
+    {kept, dropped} = Enum.split_with(base_offsets, &(&1 < end_offset))
+
+    # Flush, then close, before a single file is touched. Closing is what gives the preallocated tail
+    # back (`c:Malachi.Storage.SegmentStore.close/1`), so the file the cut lands in is measured as its
+    # contents rather than as the room it was given.
+    with {:ok, log} <- sync(log),
+         :ok <- close(log),
+         :ok <- drop_segments(log, dropped),
+         :ok <- cut_last_segment(log, kept, end_offset),
+         # The removals are made durable here rather than inside the loop: a directory fsync persists
+         # every entry it has, so one at the end covers them all, and a crash before it simply leaves
+         # files a later pass removes again.
+         :ok <- Directory.sync(log.directory) do
+      recover(log.directory, [base_offset: end_offset, store: log.store] ++ log.segment_opts)
+    end
+  end
+
+  defp drop_segments(%__MODULE__{} = log, base_offsets) do
+    Enum.reduce_while(base_offsets, :ok, fn base_offset, :ok ->
+      id = segment_id_for(base_offset)
+
+      # The sidecar and the per-segment seal marker go with the data file. A `.sealed` left behind
+      # would make a later segment reusing that name come back sealed, and an orphan `.idx` would be
+      # loaded by the next reader of a file that no longer matches it.
+      #
+      # The data file goes LAST, and that order is the only thing that makes a failure here recoverable.
+      # `base_offsets_in/1` finds a segment through its `.log` and nothing else, so removing that first
+      # and then failing on a sidecar takes the segment out of every later pass's view while its
+      # leftovers stay on disk. While the `.log` is still there, a retried truncation finds the segment
+      # again and finishes the job.
+      [".sealed", ".idx", ".log"]
+      |> Enum.map(&Path.join(log.directory, id <> &1))
+      |> Enum.find_value(&removal_error/1)
+      |> case do
+        nil -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp removal_error(path) do
+    case File.rm(path) do
+      :ok -> nil
+      {:error, :enoent} -> nil
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp cut_last_segment(_log, [], _end_offset), do: :ok
+
+  defp cut_last_segment(%__MODULE__{} = log, kept, end_offset) do
+    base_offset = List.last(kept)
+    opts = [base_offset: base_offset] ++ log.segment_opts
+
+    # Recovered rather than kept from the handle above: the file this cut lands in is usually a SEALED
+    # one, which `recover/2` closes and does not hold open, and reopening it is also what re-verifies
+    # the records the cut is about to make permanent.
+    with {:ok, handle} <- log.store.recover(log.directory, segment_id_for(base_offset), opts) do
+      case log.store.truncate_to(handle, end_offset) do
+        {:ok, handle} ->
+          _ = log.store.close(handle)
+          :ok
+
+        {:error, _reason} = error ->
+          _ = log.store.close(handle)
+          error
+      end
+    end
+  end
 
   defp base_offsets_in(directory) do
     directory
