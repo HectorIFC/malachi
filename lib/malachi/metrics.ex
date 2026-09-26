@@ -234,6 +234,41 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  Records `count` replica directories an expire of `topic` left behind, because the replica holding them
+  did not answer its delete (from the retention orphan telemetry event). The counterpart of what the
+  orphan sweeper reclaims: the two together say whether the sweeper is keeping up.
+  """
+  @spec record_retention_orphan_left(String.t(), non_neg_integer()) :: :ok
+  def record_retention_orphan_left(topic, count) do
+    key = {:retention_orphan_left, topic}
+    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
+    :ok
+  end
+
+  @doc """
+  Records that a sweep found `topic` bound to a policy name it could not resolve, and expired nothing
+  of it. Counted per sweep, so a name that stays unresolved keeps the series moving: the disk it holds
+  is invisible otherwise, and the fix is a binding an operator has to make.
+  """
+  @spec record_retention_unresolved_policy(String.t(), non_neg_integer()) :: :ok
+  def record_retention_unresolved_policy(topic, count) do
+    key = {:retention_unresolved_policy, topic}
+    :ets.update_counter(@metrics_table, key, {2, count}, {key, 0})
+    :ok
+  end
+
+  @doc """
+  Records `count` replica directories the orphan sweeper reclaimed (from the retention orphan
+  telemetry event). Unlabeled: a reclaimed directory is named by the sweeper's log line, and the
+  segment it belonged to is exactly what the control plane no longer knows.
+  """
+  @spec record_retention_orphan_removed(non_neg_integer()) :: :ok
+  def record_retention_orphan_removed(count) do
+    :ets.update_counter(@metrics_table, :retention_orphan_removed, {2, count}, {:retention_orphan_removed, 0})
+    :ok
+  end
+
+  @doc """
   Records one retention sweep's duration (from the retention sweep telemetry event). The histogram exists
   from this server's first start, before the reporter that calls this is attached.
   """
@@ -246,12 +281,16 @@ defmodule Malachi.Metrics do
   @doc """
   The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `reader`,
   `group`, `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
-  refusals per reply (every known reply, zero included), and the sweep duration histogram in the shape
+  refusals per reply (every known reply, zero included), the replica directories expiries left behind per
+  topic, the ones the sweeper reclaimed, and the sweep duration histogram in the shape
   of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.
   """
   @spec retention_snapshot() :: %{
           skips: [map()],
           expired: [map()],
+          orphans_left: [map()],
+          orphans_removed: non_neg_integer(),
+          unresolved_policies: [map()],
           failures: %{atom() => non_neg_integer()},
           sweeps: map()
         }
@@ -267,9 +306,22 @@ defmodule Malachi.Metrics do
         %{topic: topic, segments: segments, bytes: bytes}
       end
 
+    orphans_left =
+      for [topic, directories] <- :ets.match(@metrics_table, {{:retention_orphan_left, :"$1"}, :"$2"}) do
+        %{topic: topic, directories: directories}
+      end
+
+    unresolved_policies =
+      for [topic, sweeps] <- :ets.match(@metrics_table, {{:retention_unresolved_policy, :"$1"}, :"$2"}) do
+        %{topic: topic, sweeps: sweeps}
+      end
+
     %{
       skips: Enum.sort(skips),
       expired: Enum.sort(expired),
+      orphans_left: Enum.sort(orphans_left),
+      orphans_removed: get_counter(:retention_orphan_removed),
+      unresolved_policies: Enum.sort(unresolved_policies),
       failures: Map.new(@retention_failure_replies, &{&1, get_counter({:retention_expire_failure, &1})}),
       sweeps: histogram_snapshot(:persistent_term.get(@retention_sweep_key, nil))
     }

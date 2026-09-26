@@ -270,14 +270,44 @@ defmodule Malachi.Cluster.ReplicationServer do
   Deletes `segment_id`'s stored data from this server (used by retention once the control plane has
   dropped the segment). Idempotent. Deleting an unknown or already-removed segment is `:ok`, and it
   also clears any on-disk files left after a restart when the log was not reopened.
+
+  A server that is down or on an unreachable node answers `{:error, :unreachable}` rather than exiting
+  the caller, like `read/4`: retention's periodic sweep must survive a replica that is not there. It
+  says so rather than answering `:ok` because the difference is a directory that stayed on that
+  replica's disk with no control-plane metadata left to name it, which is what
+  `Malachi.Retention.OrphanSweeper` exists to reclaim and what an operator watching the sweep needs to
+  see. The caller cannot retry it either: once the control plane has dropped the segment, no later
+  sweep returns that id.
   """
-  @spec delete(term(), term()) :: :ok
+  @spec delete(term(), term()) :: :ok | {:error, :unreachable}
   def delete(ref, segment_id) do
     GenServer.call(ref, {:delete, segment_id})
   catch
-    # An unreachable replica must not crash the caller (e.g. retention's periodic sweep): the files
-    # are left in place, harmless without control-plane metadata, and cleaned up on a later sweep.
-    :exit, _reason -> :ok
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Deletes one directory under this server's data directory by NAME, closing the log it holds if this
+  server has it open.
+
+  What `Malachi.Retention.OrphanSweeper` calls, and the reason it exists: the mapping from a segment id
+  to its directory is one-way (`Malachi.Storage.Layout`), so a directory the control plane no longer
+  names cannot be turned back into a segment id to pass to `delete/2`. Routing the removal through this
+  server anyway is what keeps one owner of the files: a directory that looks orphaned may still have an
+  open handle here, and removing it behind this server's back would leave that log writing into an
+  unlinked inode. The caller decides WHETHER a directory should go; this decides HOW.
+
+  `name` must be a single path segment. Anything with a separator or a parent reference is refused
+  rather than joined, because a name that escapes the data directory is not something to act on even
+  when it came from a listing of that directory.
+
+  Answers `:ok`, `{:error, :invalid_name}`, or `{:error, :unreachable}` when this server is not there.
+  """
+  @spec delete_directory(term(), String.t(), timeout()) :: :ok | {:error, term()}
+  def delete_directory(ref, name, timeout \\ 5_000) do
+    GenServer.call(ref, {:delete_directory, name}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc """
@@ -682,6 +712,14 @@ defmodule Malachi.Cluster.ReplicationServer do
       {nil, logs} ->
         _ = File.rm_rf(segment_directory(state.directory, segment_id))
         {:reply, :ok, %{state | logs: logs}}
+    end
+  end
+
+  def handle_call({:delete_directory, name}, _from, state) do
+    if safe_name?(name) do
+      {:reply, drop_directory(state, name), forget_directory(state, name)}
+    else
+      {:reply, {:error, :invalid_name}, state}
     end
   end
 
@@ -1553,4 +1591,68 @@ defmodule Malachi.Cluster.ReplicationServer do
   # The on-disk mapping lives in Malachi.Storage.Layout: the scrubber reads the same directories to
   # verify their checksums, and a second copy of this rule could drift from the writer's.
   defp segment_directory(base, segment_id), do: Layout.segment_directory(base, segment_id)
+
+  # A single path segment that is not a parent reference. Mirrors the defense in
+  # `Malachi.Storage.Layout`, at the other end of the same path.
+  defp safe_name?(name) do
+    is_binary(name) and name not in ["", ".", ".."] and not String.contains?(name, "/")
+  end
+
+  # Closes the log this directory holds, if it is open here, and removes the directory either way,
+  # reporting the removal in both cases.
+  #
+  # The open case used to be `Log.delete/1`, which closes and then removes best effort and always answers
+  # `:ok`. That contract is right where it came from: `{:delete, segment_id}` runs after the control
+  # plane dropped the segment, and a file nothing lists any more is harmless, which is exactly the
+  # leftover `Malachi.Retention.OrphanSweeper` exists to reclaim later. It is wrong for the sweeper
+  # itself, whose entire answer is whether the directory is gone: a failed removal came back as `:ok`,
+  # the pass reported the directory under `removed`, and `malachi_retention_orphan_directories_removed`
+  # moved for a directory still on disk, which is the counter an operator reads against the one for
+  # directories left behind. So the close and the removal are split and both branches end in the same
+  # reporting removal.
+  #
+  # The caller forgets the log either way, including after a failed removal. The log is closed by then,
+  # so leaving it in `state.logs` would keep a handle nothing can use; the directory that survived is
+  # opened again from disk if anything writes to it, and the next sweep retries it through the branch
+  # below, where it is no longer open here.
+  defp drop_directory(state, name) do
+    case open_log_in(state, name) do
+      {_segment_id, log} ->
+        _ = Log.close(log)
+        remove_directory(state, name)
+
+      nil ->
+        remove_directory(state, name)
+    end
+  end
+
+  defp remove_directory(state, name) do
+    case File.rm_rf(Path.join(state.directory, name)) do
+      {:ok, _removed} -> :ok
+      {:error, reason, _path} -> {:error, reason}
+    end
+  end
+
+  defp forget_directory(state, name) do
+    case open_log_in(state, name) do
+      {segment_id, _log} ->
+        %{
+          state
+          | logs: Map.delete(state.logs, segment_id),
+            failed: Map.delete(state.failed, segment_id),
+            lost_unflushed: Map.delete(state.lost_unflushed, segment_id)
+        }
+
+      nil ->
+        state
+    end
+  end
+
+  # `state.logs` is keyed by segment id and the directory mapping is one-way, so the only way to ask
+  # "which open log lives in this directory" is to map every open id forward and compare.
+  defp open_log_in(state, name) do
+    Enum.find(state.logs, fn {segment_id, _log} ->
+      Path.basename(segment_directory(state.directory, segment_id)) == name
+    end)
+  end
 end

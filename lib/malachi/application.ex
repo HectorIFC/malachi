@@ -41,10 +41,11 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.MetadataMachine
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.PolicyMachine
+  alias Malachi.Cluster.PolicyServer
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
-  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingBoot
@@ -61,6 +62,8 @@ defmodule Malachi.Application do
   alias Malachi.DataPlaneRouter
   alias Malachi.I18n
   alias Malachi.Metadata
+  alias Malachi.Retention.Expirer
+  alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
@@ -71,6 +74,8 @@ defmodule Malachi.Application do
   @log_lockouts Malachi.LogLockouts
   # The replicated per-topic ACL store's dedicated ra cluster name (see `acl_store_children/1`).
   @log_acls Malachi.LogAcls
+  # The replicated storage policy store's dedicated ra cluster name (see `policy_store_children/1`).
+  @log_policies Malachi.LogPolicies
   # The cluster feature flag store's dedicated ra cluster name (see `cluster_flags_children/1`).
   @log_flags Malachi.LogClusterFlags
 
@@ -119,6 +124,7 @@ defmodule Malachi.Application do
         ] ++
         lockout_store_children(configured_nodes()) ++
         acl_store_children(configured_nodes()) ++
+        policy_store_children(configured_nodes()) ++
         user_store_children(configured_nodes()) ++
         cluster_flags_children(configured_nodes()) ++
         [
@@ -221,6 +227,22 @@ defmodule Malachi.Application do
     [
       store_reconciler_child(Malachi.LogAclReconciler, AclMachine, @log_acls, nodes, fn ->
         AclServer.reconcile(@log_acls, nodes)
+      end)
+    ]
+  end
+
+  # The replicated storage policy store: forms the ra policy cluster across `nodes`, plus the reconciler
+  # that self-joins this node when clustered and watches the machine version in every mode. Mirrors
+  # `acl_store_children/1`. A policy is an administrative object of the CLUSTER, not per-vnode state;
+  # which topic points at which policy stays in that topic's metadata, so it travels with the topic
+  # across a vnode split while the definition stays put. Must precede the log stack, whose placement path
+  # resolves a topic's spread attribute against it on every segment creation.
+  defp policy_store_children(nodes) do
+    _ = PolicyServer.start(@log_policies, nodes)
+
+    [
+      store_reconciler_child(Malachi.LogPolicyReconciler, PolicyMachine, @log_policies, nodes, fn ->
+        PolicyServer.reconcile(@log_policies, nodes)
       end)
     ]
   end
@@ -365,14 +387,16 @@ defmodule Malachi.Application do
           replication_child(),
           skip_reporter_child(Malachi.LogBroker),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
-        ] ++ metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children()
+        ] ++
+          metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children() ++ orphan_sweeper_children()
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
         # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
         # the scrubber asks for its replication server.
         Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil) | scrubber_children(name, dir)]
+          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil)] ++
+            scrubber_children(name, dir) ++ orphan_sweeper_children(name, dir)
         end)
       end
 
@@ -666,9 +690,11 @@ defmodule Malachi.Application do
      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end}
   end
 
-  defp retention_children(cluster) do
-    if retention_configured?(), do: [retention_child(cluster)], else: []
-  end
+  # Started whatever the environment says. Retention used to be gated on the two global limits being set,
+  # which is not where a policy can be: with both unset, the default, no coordinator existed at all and a
+  # per-topic policy was inert. A sweep with no bound anywhere is a pure no-op (`Retention.expired/4`
+  # answers `[]` for a `nil` bound), so the gate only ever cost the policies it hid.
+  defp retention_children(cluster), do: [retention_child(cluster)]
 
   defp retention_child(cluster) do
     opts =
@@ -685,6 +711,7 @@ defmodule Malachi.Application do
       metadata_source: metadata_source,
       expire_segment: &expire_segment/1,
       policy: retention_policy(),
+      unresolved_policy_max_age_ms: Application.get_env(:malachi, :retention_unresolved_policy_max_age_ms),
       interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),
       leader?: leader?
     ]
@@ -719,17 +746,11 @@ defmodule Malachi.Application do
   defp coordinator_leader?(_cluster), do: membership_leader(Malachi.LogMembership)
 
   @doc false
-  # Removes an expired segment from the control plane through `broker`, then deletes its stored data on
-  # each replica, and answers what the control plane answered, which the retention coordinator turns
-  # into its sweep telemetry. Public (and documented false) only so it can be tested directly.
-  # Best-effort: the control-plane drop is idempotent and the storage delete tolerates a missing
-  # segment, so a replica that is momentarily unreachable just leaves harmless files to be retried.
+  # The retention coordinator's delete seam: `Malachi.Retention.Expirer.expire/3` against this node's
+  # broker. Public (and documented false) only so it can be tested directly. The rule about WHEN the
+  # stored bytes may go lives there, next to the reasoning for it.
   @spec expire_segment(Metadata.segment_meta(), GenServer.server()) :: term()
-  def expire_segment(segment, broker \\ Malachi.LogBroker) do
-    reply = BrokerServer.delete_segment(broker, segment.id)
-    Enum.each(segment.replica_set, fn replica -> ReplicationServer.delete(replica, segment.id) end)
-    reply
-  end
+  def expire_segment(segment, broker \\ Malachi.LogBroker), do: Expirer.expire(segment, broker)
 
   @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."
   @spec retention_policy() :: Malachi.Cluster.Retention.policy()
@@ -739,8 +760,6 @@ defmodule Malachi.Application do
       max_bytes: Application.get_env(:malachi, :retention_max_bytes)
     }
   end
-
-  defp retention_configured?, do: retention_policy() |> Map.values() |> Enum.any?(&(&1 != nil))
 
   defp membership_child(nodes, topology) do
     dir = log_data_dir()
@@ -910,6 +929,48 @@ defmodule Malachi.Application do
     )
   end
 
+  # The orphan sweep, beside the scrub and for the same reason: the data directory is a fact about this
+  # node, so this is not leader gated and there is one per directory the node writes to. Clustered: one
+  # over the node's named replication server.
+  defp orphan_sweeper_children do
+    orphan_sweeper_child(
+      Malachi.LogOrphanSweeper,
+      Malachi.LogBroker,
+      {Malachi.LogReplication, node()},
+      log_data_dir()
+    )
+  end
+
+  # Single-node: one per data-plane shard, over that shard's own directory and its broker's unnamed
+  # replication server, whose pid a broker restart replaces (hence the function, as in `scrubber_child/4`).
+  defp orphan_sweeper_children(broker_name, directory) do
+    orphan_sweeper_child(
+      :"#{broker_name}OrphanSweeper",
+      broker_name,
+      fn -> BrokerServer.replication_ref(broker_name) end,
+      directory
+    )
+  end
+
+  defp orphan_sweeper_child(name, broker_name, local_ref, directory) do
+    opts = [
+      name: name,
+      metadata_source: fn -> BrokerServer.metadata(broker_name) end,
+      metadata_ready?: fn -> BrokerServer.metadata_ready?(broker_name) end,
+      unreachable_vnodes: fn -> BrokerServer.unreachable_vnodes(broker_name) end,
+      local_ref: local_ref,
+      directory: directory,
+      mode: Application.get_env(:malachi, :retention_orphan_sweep, :delete),
+      interval: Application.get_env(:malachi, :retention_orphan_interval_ms, 300_000),
+      min_age_ms: Application.get_env(:malachi, :retention_orphan_min_age_ms, 600_000),
+      sightings: Application.get_env(:malachi, :retention_orphan_sightings, 2),
+      max_per_pass: Application.get_env(:malachi, :retention_orphan_max_per_pass, 50),
+      max_tracked: Application.get_env(:malachi, :retention_orphan_max_tracked, 10_000)
+    ]
+
+    [%{id: name, start: {OrphanSweeper, :start_link, [opts]}}]
+  end
+
   defp scrubber_child(name, metadata_source, local_ref, directory) do
     if Application.get_env(:malachi, :scrub_enabled, true) do
       opts = [
@@ -1062,11 +1123,9 @@ defmodule Malachi.Application do
 
   # Starts a vnode's coordinators under a per-vnode supervisor (so a coordinator that crashes is
   # restarted without the manager losing its handle), returning that supervisor's pid: the handle the
-  # manager stops the vnode by. Heal + the group coordinator always; retention only when a policy is set.
+  # manager stops the vnode by.
   defp start_vnode_coordinators(vnode_id) do
-    children =
-      [heal_vnode_child(vnode_id), group_coordinator_vnode_child(vnode_id)] ++
-        if retention_configured?(), do: [retention_vnode_child(vnode_id)], else: []
+    children = [heal_vnode_child(vnode_id), group_coordinator_vnode_child(vnode_id), retention_vnode_child(vnode_id)]
 
     spec = %{
       id: {Malachi.LogVnodeCoordinators, vnode_id},

@@ -252,9 +252,10 @@ MALACHI_RETENTION_MAX_BYTES=10737418240    # 10 GiB per range
 MALACHI_RETENTION_INTERVAL_MS=60000
 ```
 
-**Leave a limit unset to disable it.** With both unset, segments are kept forever and no retention
-coordinator starts at all. Do not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and
-it expires every sealed segment it can.
+**Leave a limit unset to disable it.** With both unset, segments are kept forever unless a topic's own
+storage policy says otherwise: the sweep runs either way, and with no bound anywhere it does nothing. Do
+not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and it expires every sealed
+segment it can.
 
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
@@ -305,8 +306,72 @@ line still names them. The sum over readers per topic stays exact. The skip repo
 way by `MALACHI_RETENTION_SKIP_LEDGER_MAX` (10000 skips remembered); a forgotten skip read again is
 counted again.
 
+### The orphan sweep
+
+A replica that does not answer its delete keeps the segment's directory, and no later sweep can ask for
+it again: a segment gone from the control plane never comes back. A separate worker per node reclaims
+those directories, and other leaks of the same shape (a catch-up that failed after creating the
+directory, a copy healing moved elsewhere).
+
+```bash
+MALACHI_RETENTION_ORPHAN_SWEEP=delete         # delete | report | off
+MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS=300000
+MALACHI_RETENTION_ORPHAN_MIN_AGE_MS=600000
+MALACHI_RETENTION_ORPHAN_SIGHTINGS=2
+MALACHI_RETENTION_ORPHAN_MAX_PER_PASS=50
+```
+
+It runs on **every node**, not only the one that sweeps retention: only a node can read its own disk.
+It acts only when this node has read every metadata vnode at least once since boot **and** every vnode
+answered the last refresh, and a directory is removed only after it has been unexplained on
+`SIGHTINGS` consecutive passes **and** is older than `MIN_AGE_MS`. That minimum has to stay above the
+worst registration lag: a replica creates a directory on the first push, which can happen before this
+node's metadata shows the registration.
+
+Both metadata conditions are needed, and the second is the one that is easy to leave out. A vnode that
+goes silent after being read keeps the view it had, so its old segments stay explained while segments
+registered on it since are missing, and their replicas still arrive here over the data plane. Without
+that condition a silence longer than the guards above ends with a live copy deleted.
+
+**The log data directory belongs to Malachi alone.** Do not nest `MALACHI_RA_DATA_DIR` inside it, and do
+not keep backups or hand-made copies there. The sweep only ever considers a directory whose name the
+storage layout could have written, so anything else is out of its reach by construction, but that is a
+check on the name and not a promise about what may share the directory.
+
+`report` does everything except the removal, which is how to see the list before trusting it on a
+cluster for the first time. `off` does not even list. A value that is none of the three **stops the
+node at boot** rather than falling back, because the fallback is the mode that deletes and a typo
+would have chosen it in silence.
+
+- **`malachi_retention_orphan_directories_left_total{topic}`**: directories an expire left behind
+  because the replica did not answer. It moves whether or not the sweep is on.
+- **`malachi_retention_orphan_directories_removed_total`**: directories the sweep reclaimed. Read
+  against the one above: a gap that keeps growing means the sweep is off, is being held back by a
+  guard, or is not keeping up with `MAX_PER_PASS`.
+
+### When a topic's policy cannot be read
+
+Retention resolves a topic's policy against the cluster's policy store on every sweep. Two cases stop
+it expiring, both on purpose, because expiring under the cluster-wide limits instead would delete
+exactly the data a more permissive policy exists to keep, on every replica, with no way back.
+
+- **The store did not answer.** The whole sweep is skipped and one line says so. Nothing else is
+  needed to notice: `malachi_retention_sweep_duration_seconds`'s `_count` stops advancing, which is
+  the signal this guide already tells you to alert on.
+- **The topic points at a policy name the store does not define**, because it was deleted or the
+  binding has a typo. That topic expires nothing, and
+  **`malachi_retention_unresolved_policy_sweeps_total{topic}`** names it on every sweep.
+
+The second case holds disk until someone fixes the binding. Bound how much with:
+
+```bash
+MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS=604800000   # 7 days; unset means keep everything
+```
+
+Unset by default on purpose: that bound is a retention decision, and the only person who can make it
+is the one who wrote the policy the binding points at.
+
 These names are reserved for later retention work and not emitted yet:
-`malachi_retention_orphan_directories_removed_total` (the orphan directory sweeper),
 `malachi_retention_segments_pinned{topic,group}` (consumer-aware retention) and
 `malachi_segment_rolls_total{reason}` (time-based rolls).
 
@@ -388,10 +453,11 @@ A service manager that restarts on failure will restart a refused node again and
 
 ### The control-plane machine version
 
-The control plane (topic metadata, the lease, the ring, users, lockouts and ACLs) lives in Raft groups
-whose state machines carry a version. A group moves to a new version only once **every** member runs code
-that supports it, and a command a release introduces is refused, the same way on every member, until then.
-So a cluster in the middle of a rolling upgrade cannot end up with members that disagree about its state.
+The control plane (topic metadata, the lease, the ring, users, lockouts, ACLs, cluster flags and storage
+policies) lives in Raft groups whose state machines carry a version. A group moves to a new version only
+once **every** member runs code that supports it, and a command a release introduces is refused, the same
+way on every member, until then. So a cluster in the middle of a rolling upgrade cannot end up with
+members that disagree about its state.
 
 The version switch happens on its own when the last node has been upgraded. From that moment, a node started
 on the previous build stops applying the control-plane log instead of diverging from it: it stays up, but it
@@ -407,12 +473,14 @@ To keep rolling back possible until you are satisfied with a release, hold the v
    a time. The groups switch to the new version once the last node is back, and the rollback floor moves up.
 
 The first release that versions these machines is version 1, and every earlier build counts as version 0.
-To be able to roll back from it to an earlier build, upgrade with `MALACHI_RA_MACHINE_VERSION=0` and
-finalize later.
 
-Version **2** adds the cluster flag store's `enable_flag` command, and the other six machines move with
-it at no cost. The same rule applies: to keep a rollback to a version-1 build possible while you roll out,
-upgrade with `MALACHI_RA_MACHINE_VERSION=1` and finalize afterwards.
+Version **2** adds the cluster flag store's `enable_flag` command. Version **3** adds the storage policy
+store's `define_policy` and `delete_policy`. Each time, the machines that gained nothing move with it at
+no cost, and a member on the older build refuses the new command until the whole group has moved.
+
+The same rule applies at every step: to keep a rollback to the previous build possible while you roll
+out, upgrade with `MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now, and finalize
+afterwards.
 
 A malformed value (anything but a non-negative integer) stops the node at boot. Silently dropping the pin would
 finalize the upgrade, so it is treated as an error. A pin above the version a build implements has no effect.
