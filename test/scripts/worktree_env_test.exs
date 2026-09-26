@@ -240,7 +240,8 @@ defmodule WorktreeEnvTest do
 
   test "this repository ignores worktree.env and everything under tmp/" do
     for path <- ["worktree.env", "tmp/data/log/segment"] do
-      assert {_out, 0} = System.cmd("git", ["check-ignore", "-q", path], cd: @repo_root), "#{path} is not ignored"
+      assert {_out, 0} = System.cmd("git", ["check-ignore", "-q", path], cd: @repo_root, env: @no_git_env),
+             "#{path} is not ignored"
     end
   end
 
