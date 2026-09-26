@@ -542,6 +542,37 @@ defmodule Malachi.BrokerServerRaTest do
     assert {:ok, _placements} = BrokerServer.produce(control, topic, [Record.new("v", key: "k")])
   end
 
+  test "a synchronous pass makes a task already in flight stale, so it cannot install its older read" do
+    # The journal repairs a result whose read came before a local write, but only while it still holds
+    # that write. A synchronous pass DRAINS it, so a task that started earlier would land afterwards
+    # with an older read and nothing left to put the difference back, and the write would disappear.
+    # The generation is what makes that task stale: this pass read later, so its read is the one to keep.
+    {live, silent, opts} = live_and_silent_vnodes(2_000, silent_at_boot: false, brokers_refresh_interval: 50)
+
+    {:ok, control} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(control) end)
+    _ = await_boot(control)
+
+    topic = topic_on(control, live, "afterpass_#{System.unique_integer([:positive])}")
+    start_silent(silent)
+
+    # Task T is reading. The write and the synchronous pass both happen while it is, and the pass takes
+    # a read timeout of its own, so T's result is certainly queued behind it.
+    ref = task_ref!(control)
+    {:ok, _root} = BrokerServer.create_topic(control, topic, 4)
+    :ok = BrokerServer.reconcile_now(control)
+    await_task_result!(control, ref)
+
+    # Asserted only once T is done, and deliberately not in between: T's result can be handled on either
+    # side of the call, and the write has to survive both orders. Handled first, the journal still holds
+    # the write and the replay restores it; handled after, T is stale and dropped. Without the bump the
+    # second order loses it, which is what this fails on.
+    assert BrokerServer.active_range_ids(control, topic) != [],
+           "a task that read before the synchronous pass installed its older view over it"
+
+    assert {:ok, _placements} = BrokerServer.produce(control, topic, [Record.new("v", key: "k")])
+  end
+
   test "a committed group position is not rolled back by the reconcile result" do
     # The same replacement, on the metadata a consumer group depends on. `committed_offsets/3` reads
     # the cache, and a position that goes backwards is redelivery: at ten million messages a day a

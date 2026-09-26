@@ -1279,7 +1279,16 @@ defmodule Malachi.BrokerServer do
   defp reconcile_synchronously(%{metadata_refresh: nil} = state), do: state
 
   defp reconcile_synchronously(state) do
-    apply_reconcile(state, run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout))
+    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout)
+
+    # A task already in flight read the control plane BEFORE this pass did, so its result would install
+    # that older read over the one this pass is about to install. The journal cannot repair it either:
+    # this pass drains the journal, so by the time the task's result lands there is nothing left to put
+    # the difference back, and a topic created in between disappears. Bumping the generation is what
+    # makes that task arrive stale and be dropped, which is the right answer: this pass read later.
+    state
+    |> Map.update!(:reconcile_generation, &(&1 + 1))
+    |> apply_reconcile(result)
   end
 
   # The local half: pure with respect to the network, and applied to the CURRENT broker, whichever pass
