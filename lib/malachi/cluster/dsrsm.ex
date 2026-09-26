@@ -222,10 +222,13 @@ defmodule Malachi.Cluster.DSRSM do
     query(dsrsm, topic_name, &Metadata.committed_offsets(&1, group, topic_name)) || %{}
   end
 
-  @doc "The storage policy governing `topic_name`, or `nil` if none/unknown (use the globals)."
-  @spec topic_policy(t(), Metadata.topic_name()) :: Metadata.policy() | nil
-  def topic_policy(%__MODULE__{} = dsrsm, topic_name) do
-    query(dsrsm, topic_name, &Metadata.topic_policy(&1, topic_name))
+  @doc """
+  The NAME of the storage policy `topic_name` points at, or `nil` if it points at none or the topic is
+  unknown. The definition behind the name is a cluster object (`Malachi.Cluster.PolicyStore`).
+  """
+  @spec topic_policy_name(t(), Metadata.topic_name()) :: Metadata.policy_name() | nil
+  def topic_policy_name(%__MODULE__{} = dsrsm, topic_name) do
+    query(dsrsm, topic_name, &Metadata.topic_policy_name(&1, topic_name))
   end
 
   @doc """

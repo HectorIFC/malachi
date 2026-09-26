@@ -313,7 +313,9 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
         for server <- UnexpectedMessage.servers() ++ [:other], kind <- UnexpectedMessage.kinds(), do: {server, kind}
 
       assert reported == expected
-      assert length(reported) == 24
+      # One entry per server label plus `other`, times the three kinds. The count is asserted so a new
+      # label has to be a deliberate change here rather than a silent widening of the exported series.
+      assert length(reported) == 30
     end
   end
 end

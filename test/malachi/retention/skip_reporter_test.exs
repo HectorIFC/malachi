@@ -170,15 +170,10 @@ defmodule Malachi.Retention.SkipReporterTest do
         start_supervised!({SkipReporter, name: name, max: 0, window_ms: -1}, id: name)
       end)
 
-    assert log =~
-             I18n.t(:retention_skip_setting_invalid, setting: :retention_skip_ledger_max, value: 0, default: 10_000)
+    assert log =~ I18n.t(:setting_invalid, setting: :retention_skip_ledger_max, value: 0, default: 10_000)
 
     assert log =~
-             I18n.t(:retention_skip_setting_invalid,
-               setting: :retention_skip_log_window_ms,
-               value: -1,
-               default: 600_000
-             )
+             I18n.t(:setting_invalid, setting: :retention_skip_log_window_ms, value: -1, default: 600_000)
 
     # It is serving, on the defaults.
     assert %{max: 10_000, window_ms: 600_000} = :sys.get_state(name).ledger

@@ -91,6 +91,58 @@ defmodule Malachi.ConfigTest do
     end
   end
 
+  describe "integer/3" do
+    test "absent or blank takes the default, whatever the default is" do
+      assert Config.integer("MALACHI_X", nil, 5) == 5
+      assert Config.integer("MALACHI_X", "", 5) == 5
+      assert Config.integer("MALACHI_X", "   ", 5) == 5
+      assert Config.integer("MALACHI_X", nil, nil) == nil
+    end
+
+    test "a whole number is the value, spaces and sign included" do
+      assert Config.integer("MALACHI_X", "0", 5) == 0
+      assert Config.integer("MALACHI_X", " 12 ", 5) == 12
+      assert Config.integer("MALACHI_X", "-3", 5) == -3
+    end
+
+    test "a value that is not the whole number stops the node instead of being truncated" do
+      # The two that read as correct and are not: the Elixir spelling of a large number, and a unit
+      # suffix. Integer.parse keeps the digits it can and drops the rest, which turns 600_000 into 600
+      # and 10m into 10. Whether that number is in range is not the question here, which is why
+      # checked/4 cannot catch it: 600 is a perfectly valid millisecond count.
+      for raw <- ["600_000", "10m", "1.5", "1,5", "ten", "0x10", "5 000"] do
+        assert_raise RuntimeError, ~r/MALACHI_X/, fn -> Config.integer("MALACHI_X", raw, 5) end
+      end
+    end
+
+    test "the message carries the variable name and what arrived, since that is what gets fixed" do
+      message =
+        assert_raise RuntimeError, fn -> Config.integer("MALACHI_RETENTION_MAX_AGE_MS", "7_776_000_000", 1) end
+
+      assert message.message =~ "MALACHI_RETENTION_MAX_AGE_MS"
+      assert message.message =~ "7_776_000_000"
+    end
+  end
+
+  describe "float/3" do
+    test "absent or blank takes the default" do
+      assert Config.float("MALACHI_X", nil, 0.7) == 0.7
+      assert Config.float("MALACHI_X", "  ", 0.7) == 0.7
+    end
+
+    test "a number is the value" do
+      assert Config.float("MALACHI_X", "0.5", 0.7) == 0.5
+      assert Config.float("MALACHI_X", " 1.0 ", 0.7) == 1.0
+    end
+
+    test "a decimal comma stops the node rather than becoming zero" do
+      # 0,5 parses as 0.0, and as a memory threshold that is an alarm that fires at once and never stops.
+      for raw <- ["0,5", "0.5x", "half", "50%"] do
+        assert_raise RuntimeError, ~r/MALACHI_X/, fn -> Config.float("MALACHI_X", raw, 0.7) end
+      end
+    end
+  end
+
   describe "ra_machine_version_pin/1" do
     test "absent or blank means no pin" do
       assert Config.ra_machine_version_pin(nil) == nil
@@ -115,5 +167,29 @@ defmodule Malachi.ConfigTest do
   test "ra switches a group's machine version only once every member supports it" do
     assert Application.get_env(:ra, :machine_upgrade_strategy) == :all
     assert :ra_system.default_config().machine_upgrade_strategy == :all
+  end
+
+  describe "retention_orphan_sweep/1" do
+    test "an absent or blank value is the documented default" do
+      assert Config.retention_orphan_sweep(nil) == :delete
+      assert Config.retention_orphan_sweep("") == :delete
+      assert Config.retention_orphan_sweep("   ") == :delete
+    end
+
+    test "the three modes are accepted whatever their case and whitespace" do
+      assert Config.retention_orphan_sweep("delete") == :delete
+      assert Config.retention_orphan_sweep("Report") == :report
+      assert Config.retention_orphan_sweep(" OFF ") == :off
+    end
+
+    test "anything else stops the node instead of selecting the mode that deletes" do
+      # The reason this raises where an interval falls back: an operator who typed a mode meant to
+      # choose one, and the value this used to fall back to was the one that removes directories.
+      for bad <- ["reprot", "none", "true", "0"] do
+        assert_raise RuntimeError, ~r/MALACHI_RETENTION_ORPHAN_SWEEP/, fn ->
+          Config.retention_orphan_sweep(bad)
+        end
+      end
+    end
   end
 end

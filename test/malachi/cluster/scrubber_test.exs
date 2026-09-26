@@ -720,6 +720,29 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert String.length(line) < 500
   end
 
+  test "a control plane that cannot answer skips the pass instead of taking the scrubber down" do
+    # Measured on the reshard drill: a sharded control plane comes back from a full-cluster restart
+    # healthy but unable to serve metadata (#136), and this worker died once per tick for as long as
+    # that lasted, losing its cycle position and its damaged set each time. The pass is worth less
+    # than the state the process carries between passes.
+    {replica, _directory} = start_replica()
+    gone = spawn(fn -> :ok end)
+    ref = Process.monitor(gone)
+    assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+
+    scrubber =
+      start_scrubber(
+        metadata_source: fn -> GenServer.call(gone, :metadata) end,
+        local_ref: replica,
+        directory: "/nonexistent"
+      )
+
+    log = capture_log(fn -> assert %{unrepairable: [{:metadata, _reason}]} = Scrubber.scrub_now(scrubber) end)
+
+    assert log =~ "skipped the pass"
+    assert Process.alive?(scrubber)
+  end
+
   test "a non-positive interval is refused and the default used, rather than busy-looping" do
     # The interval arrives from MALACHI_SCRUB_INTERVAL_MS, which parses any integer. Zero would scan
     # the disk as fast as the loop can go; a negative value would crash the first schedule. Neither
@@ -741,7 +764,7 @@ defmodule Malachi.Cluster.ScrubberTest do
           assert :sys.get_state(scrubber).interval == 60_000
         end)
 
-      assert log =~ "not a positive number of milliseconds"
+      assert log =~ "scrub_interval_ms does not accept the value"
     end
   end
 

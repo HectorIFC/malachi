@@ -199,6 +199,21 @@ defmodule Malachi.BrokerServer do
   def metadata_ready?(server, timeout \\ 1_000), do: GenServer.call(server, :metadata_ready?, timeout)
 
   @doc """
+  The metadata vnodes this broker's last refresh could not read.
+
+  Empty is the answer for a broker whose metadata is local (nothing to be unreachable), and for one
+  whose last refresh read every vnode.
+
+  This is not `metadata_ready?/2`, and a caller that acts on something being ABSENT from the metadata
+  needs this one instead. Readiness is monotone: once a vnode has been read, a later outage does not
+  unsee it, and the cache keeps that vnode's previous view rather than blanking it. That is right for
+  serving reads, and not enough before a destructive act, because segments registered on a silent
+  vnode SINCE that view are missing from the merge while their replicas sit on this node's disk.
+  """
+  @spec unreachable_vnodes(GenServer.server(), timeout()) :: [term()]
+  def unreachable_vnodes(server, timeout \\ 1_000), do: GenServer.call(server, :unreachable_vnodes, timeout)
+
+  @doc """
   Runs one control plane reconcile **synchronously** and returns once its result has been applied.
 
   The periodic reconcile runs off this server's loop (see the `:reconcile` clauses), so sending
@@ -430,6 +445,15 @@ defmodule Malachi.BrokerServer do
       # clusters were necessarily up. Meaningless without `metadata_refresh` (in-memory metadata is
       # already local truth), which is why `metadata_ready?/2` checks that first.
       seen_vnodes: MapSet.new(),
+      # The metadata vnodes the LAST refresh could not read, which is a different fact from
+      # `seen_vnodes` and answers a different question. `seen_vnodes` is monotone and says whether a
+      # vnode has ever been read, so a cache that is stale is not a cache that is blank. This one says
+      # whether the view being served right now is complete, which is what a caller must know before it
+      # acts on the ABSENCE of something from that view: `Malachi.Retention.OrphanSweeper` reads a
+      # directory on disk against the segments the metadata lists, and a vnode that did not answer
+      # keeps its previous view (`Malachi.Cluster.DSRSM.retain_vnodes/3`), so its segments registered
+      # since are missing from the merge while their replicas are on this node's disk.
+      unreachable_vnodes: [],
       # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
       # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
       # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
@@ -524,6 +548,8 @@ defmodule Malachi.BrokerServer do
   def handle_call(:metadata_ready?, _from, state) do
     {:reply, all_vnodes_seen?(state), state}
   end
+
+  def handle_call(:unreachable_vnodes, _from, state), do: {:reply, state.unreachable_vnodes, state}
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
     {:reply, Broker.read(state.broker, range_id, offset, max_records, &ReplicationServer.read/4), state}
@@ -817,10 +843,11 @@ defmodule Malachi.BrokerServer do
 
   # The task crashed. The next tick is already scheduled (the tick schedules before it starts one), so
   # there is nothing to retry here; the node keeps serving the view it holds until a later pass reads.
+  # It serves it as not current, because nothing refreshed it: see `mark_view_incomplete/1`.
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{reconcile_task: %{ref: ref}} = state) do
     Logger.warning(I18n.t(:broker_reconcile_task_down, reason: inspect(reason)))
     Telemetry.reconcile_degraded(:down)
-    {:noreply, finish_reconcile_task(state)}
+    {:noreply, state |> finish_reconcile_task() |> mark_view_incomplete()}
   end
 
   # The task overran. Its reads are bounded, but bootstrapping a vnode reaches `:ra.start_cluster`,
@@ -831,7 +858,7 @@ defmodule Malachi.BrokerServer do
     Telemetry.reconcile_degraded(:timeout)
     Process.demonitor(ref, [:flush])
     _ = Task.Supervisor.terminate_child(Malachi.TaskSupervisor, pid)
-    {:noreply, %{state | reconcile_task: nil, abandoned_ref: ref}}
+    {:noreply, mark_view_incomplete(%{state | reconcile_task: nil, abandoned_ref: ref})}
   end
 
   # A deadline whose task already finished: the timer was cancelled, but it may have fired first.
@@ -1296,7 +1323,9 @@ defmodule Malachi.BrokerServer do
   defp apply_reconcile(state, result) do
     case result do
       nil ->
-        state
+        # The single ra cluster answered nothing this tick. The sharded refresh reports its silent
+        # vnodes by id and never answers nil, so this is that report's equivalent for one vnode.
+        mark_view_incomplete(state)
 
       {dsrsm, unreachable} ->
         # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
@@ -1324,10 +1353,27 @@ defmodule Malachi.BrokerServer do
         %{
           state
           | broker: recover_range_state(broker),
-            seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
+            seen_vnodes: seen_vnodes(state, dsrsm, unreachable),
+            unreachable_vnodes: unreachable
         }
         |> wake_all_subscribers()
     end
+  end
+
+  # Every vnode reported unreachable, which is how a pass that installed no view says so.
+  #
+  # `seen_vnodes` is deliberately left alone: it is monotone, those vnodes HAVE been read, there is a
+  # view to serve, and `metadata_ready?/2` should keep saying this node can serve. What must not stay
+  # is an empty `unreachable_vnodes`, because a caller acting on the ABSENCE of something from the view
+  # (`Malachi.Retention.OrphanSweeper`, which removes a directory no segment accounts for) would be
+  # acting on a view nothing refreshed, with no way to tell.
+  #
+  # Three ways in, and they are the three ways a pass ends without a view: the single cluster answering
+  # nil, the task crashing, and the task overrunning its deadline. The tick skipped because a pass is
+  # still running is deliberately NOT one of them: that pass is still going to answer. The next pass
+  # that installs a view overwrites this with what it could not read, which is `[]` when it read all.
+  defp mark_view_incomplete(state) do
+    %{state | unreachable_vnodes: DSRSM.vnode_ids(state.broker.dsrsm)}
   end
 
   # A streaming subscriber is pushed to on subscribe, on its ack, and on a produce to its topic, and
@@ -1813,7 +1859,8 @@ defmodule Malachi.BrokerServer do
 
   # A refresh that re-reads the single ra cluster into a one-vnode DSRSM; nil if the cluster is
   # momentarily unreachable (a leader election), so the cache is simply left as-is that tick. The one
-  # vnode is either read or not read, so the unreachable list is always empty: a failure is the `nil`.
+  # vnode is either read or not read, so the unreachable list this returns is always empty: a failure
+  # is the `nil`, which `apply_reconcile/2` turns into every vnode being reported unreachable.
   defp single_cluster_refresh(server_id, read_timeout) do
     fn ->
       case MetadataServer.query(server_id, &Function.identity/1, read_timeout) do

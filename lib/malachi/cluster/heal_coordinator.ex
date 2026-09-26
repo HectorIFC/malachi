@@ -14,7 +14,9 @@ defmodule Malachi.Cluster.HealCoordinator do
     * `:apply_command` - `(Malachi.Metadata.command() -> any)`, applies a `:set_segment_replicas`
       command to the control plane;
     * `:replication_factor` - the target replica count;
-    * `:interval` - the healing period in ms (default 5000);
+    * `:interval` - the healing period in ms (default 5000). No environment variable sets it, which is
+      why the warning about a value that cannot be a period names the option rather than a setting an
+      operator could look for;
     * `:leader?` - `(-> boolean())`, whether this node should heal this pass (default always). Only the
       cluster's membership leader heals, so N nodes do not redo the same work (1C); a non-leader still
       ticks but skips the pass. `heal_now/1` is a manual trigger and always runs;
@@ -82,11 +84,11 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   alias Malachi.Cluster.Failover
   alias Malachi.Cluster.OrphanedFence
+  alias Malachi.Cluster.PeriodicWorker
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SelfHealing
   alias Malachi.I18n
   alias Malachi.Telemetry
-  alias Malachi.UnexpectedMessage
 
   @default_interval 5_000
 
@@ -105,56 +107,54 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   @impl true
   def init(opts) do
-    state = %{
-      live_brokers: Keyword.fetch!(opts, :live_brokers),
-      metadata_source: Keyword.fetch!(opts, :metadata_source),
-      apply_command: Keyword.fetch!(opts, :apply_command),
-      replication_factor: Keyword.fetch!(opts, :replication_factor),
-      interval: Keyword.get(opts, :interval, @default_interval),
-      leader?: Keyword.get(opts, :leader?, fn -> true end),
-      heal_opts: Keyword.get(opts, :heal_opts, []),
-      # `(-> {attribute_key, attributes} | nil)`: the current spread for rack/DC-aware re-replication,
-      # resolved per pass so it tracks live membership. Default: no spread.
-      spread: Keyword.get(opts, :spread, fn -> nil end),
-      # Two seams, not one, because the two calls differ in consequence: `:probe` measures and leaves
-      # the replica writable, `:fence` closes it. Injectable separately so a test can watch a pass
-      # measure without fencing, which is exactly the case that must hold below a majority.
-      probe: Keyword.get(opts, :probe, default_probe(Keyword.get(opts, :probe_timeout, 1_000))),
-      fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000))),
-      # The third seam. Read-only like `:probe`, batched per primary unlike either, and asked about
-      # every active segment rather than a failover candidate. See the moduledoc.
-      seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000))),
-      # The fourth seam, as cheap as `:seal_state` (a lookup, no disk) and batched per replica, because it is
-      # asked of every live replica of every active segment.
-      failed_state: Keyword.get(opts, :failed_state, default_failed_state(Keyword.get(opts, :probe_timeout, 1_000))),
-      discard_copy: Keyword.get(opts, :discard_copy, &ReplicationServer.delete/2),
-      # The unknown message shapes already logged (see `Malachi.UnexpectedMessage`).
-      unexpected_shapes: MapSet.new()
-    }
+    state =
+      Map.merge(PeriodicWorker.new(opts, :heal, @default_interval, :heal_coordinator_interval), %{
+        live_brokers: Keyword.fetch!(opts, :live_brokers),
+        metadata_source: Keyword.fetch!(opts, :metadata_source),
+        apply_command: Keyword.fetch!(opts, :apply_command),
+        replication_factor: Keyword.fetch!(opts, :replication_factor),
+        leader?: Keyword.get(opts, :leader?, fn -> true end),
+        heal_opts: Keyword.get(opts, :heal_opts, []),
+        # `(-> {attribute_key, attributes} | nil)`: the current spread for rack/DC-aware re-replication,
+        # resolved per pass so it tracks live membership. Default: no spread.
+        spread: Keyword.get(opts, :spread, fn -> nil end),
+        # Two seams, not one, because the two calls differ in consequence: `:probe` measures and leaves
+        # the replica writable, `:fence` closes it. Injectable separately so a test can watch a pass
+        # measure without fencing, which is exactly the case that must hold below a majority.
+        probe: Keyword.get(opts, :probe, default_probe(Keyword.get(opts, :probe_timeout, 1_000))),
+        fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000))),
+        # The third seam. Read-only like `:probe`, batched per primary unlike either, and asked about
+        # every active segment rather than a failover candidate. See the moduledoc.
+        seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000))),
+        # The fourth seam, as cheap as `:seal_state` (a lookup, no disk) and batched per replica, because it is
+        # asked of every live replica of every active segment.
+        failed_state: Keyword.get(opts, :failed_state, default_failed_state(Keyword.get(opts, :probe_timeout, 1_000))),
+        discard_copy: Keyword.get(opts, :discard_copy, &ReplicationServer.delete/2)
+      })
 
-    schedule(state)
+    PeriodicWorker.schedule(state)
     {:ok, state}
   end
 
   @impl true
   def handle_call(:heal_now, _from, state), do: {:reply, run(state), state}
 
-  def handle_call(message, _from, state) do
-    {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
-  end
+  def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
 
   # Nothing casts to this server; without this clause, `use GenServer` would stop it on the first cast.
   @impl true
-  def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}
+  def handle_cast(message, state), do: PeriodicWorker.unknown_cast(state, message)
 
   @impl true
-  def handle_info(:tick, state) do
-    if state.leader?.(), do: run(state)
-    schedule(state)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: PeriodicWorker.tick(state, &heal_if_leader/1)
 
-  def handle_info(message, state), do: {:noreply, drop_unexpected(state, :info, message)}
+  def handle_info(message, state), do: PeriodicWorker.unknown_info(state, message)
+
+  # The gate belongs to the tick alone: `heal_now/1` is a manual trigger and ignores it.
+  defp heal_if_leader(state) do
+    if state.leader?.(), do: run(state)
+    state
+  end
 
   # --- internals ---
 
@@ -393,11 +393,5 @@ defmodule Malachi.Cluster.HealCoordinator do
         {:error, _reason} -> :error
       end
     end
-  end
-
-  defp schedule(state), do: Process.send_after(self(), :tick, state.interval)
-
-  defp drop_unexpected(state, kind, message) do
-    %{state | unexpected_shapes: UnexpectedMessage.drop(state.unexpected_shapes, :heal, kind, message)}
   end
 end

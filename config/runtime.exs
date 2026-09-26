@@ -1,28 +1,10 @@
 import Config
 
-# Helper function to parse integers with defaults
-parse_int = fn val, default ->
-  if val do
-    case Integer.parse(val) do
-      {int, _} -> int
-      :error -> default
-    end
-  else
-    default
-  end
-end
-
-# Helper function to parse floats with defaults
-parse_float = fn val, default ->
-  if val do
-    case Float.parse(val) do
-      {float, _} -> float
-      :error -> default
-    end
-  else
-    default
-  end
-end
+# Reads a numeric setting from the environment, strictly: absent or blank takes the default and anything
+# that is not the whole value of a number stops the node at boot. See `Malachi.Config.integer/3` for why
+# a lenient parse is worse than either, and why this is not the rule `Malachi.Config.checked/4` follows.
+parse_int = fn var, default -> Malachi.Config.integer(var, System.get_env(var), default) end
+parse_float = fn var, default -> Malachi.Config.float(var, System.get_env(var), default) end
 
 # Helper function to parse TLS versions from comma-separated string
 parse_tls_versions = fn val, default ->
@@ -116,7 +98,7 @@ config :malachi,
   tcp_recv_timeout: String.to_integer(System.get_env("MALACHI_TCP_RECV_TIMEOUT") || "30000"),
   tcp_send_timeout: String.to_integer(System.get_env("MALACHI_TCP_SEND_TIMEOUT") || "30000"),
   # Largest request frame the binary protocol accepts (bytes); rejected at the length prefix.
-  max_frame_size: parse_int.(System.get_env("MALACHI_MAX_FRAME_SIZE"), 16_777_216),
+  max_frame_size: parse_int.("MALACHI_MAX_FRAME_SIZE", 16_777_216),
   enable_tls: enable_tls,
   require_tls: require_tls,
   tls_certfile: System.get_env("MALACHI_TLS_CERTFILE"),
@@ -155,7 +137,7 @@ config :malachi,
   # strategy-specific keys are read only for the selected strategy. :epmd reuses log_nodes.
   cluster_topology: %{
     strategy: cluster_strategy,
-    gossip_port: parse_int.(System.get_env("MALACHI_CLUSTER_GOSSIP_PORT"), 45_892),
+    gossip_port: parse_int.("MALACHI_CLUSTER_GOSSIP_PORT", 45_892),
     gossip_secret: System.get_env("MALACHI_CLUSTER_GOSSIP_SECRET"),
     gossip_multicast_addr: System.get_env("MALACHI_CLUSTER_GOSSIP_MULTICAST_ADDR"),
     kubernetes_selector: System.get_env("MALACHI_CLUSTER_KUBERNETES_SELECTOR"),
@@ -179,14 +161,14 @@ config :malachi,
   replication_group_commit: System.get_env("MALACHI_REPLICATION_GROUP_COMMIT") == "true",
   # The replicated path's flush period, decoupled from the rf=1 knob above so tuning a single node
   # never silently retunes every replica's fsync cadence. Default 10ms (the NorthGuard time trigger).
-  replication_group_commit_interval_ms: parse_int.(System.get_env("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS"), 10),
+  replication_group_commit_interval_ms: parse_int.("MALACHI_REPLICATION_GROUP_COMMIT_INTERVAL_MS", 10),
   # The replication server's minimum heap, in words. Each produce hands it a whole batch to encode and write,
   # and at the VM's default heap it collects garbage several times per batch; 256K words (2MB, once per node)
   # halves that, measured on Linux, and larger floors collected no less. 0 keeps the VM default, which the
   # test suite uses so the many servers it starts do not each reserve the floor. See
   # Malachi.Cluster.ReplicationServer.start_link/1.
   replication_min_heap_size:
-    parse_int.(System.get_env("MALACHI_REPLICATION_MIN_HEAP_WORDS"), if(config_env() == :test, do: 0, else: 256_000)),
+    parse_int.("MALACHI_REPLICATION_MIN_HEAP_WORDS", if(config_env() == :test, do: 0, else: 256_000)),
   # Background integrity verification of data at rest (the CRC scrub). Each node walks its own sealed
   # segments, re-checking every record's checksum, and repairs a damaged copy from an intact replica.
   # Corruption at rest is otherwise silent: a damaged copy serves short reads with no error at all.
@@ -197,40 +179,40 @@ config :malachi,
   # tick is one segment scan, measured at 24 to 86ms of a core for 64MB (the scan checks checksums
   # without deserializing records). Raise the interval on a busy or slow disk; lower it, or raise the
   # per-tick count, to verify a large dataset more often.
-  scrub_interval_ms: parse_int.(System.get_env("MALACHI_SCRUB_INTERVAL_MS"), 60_000),
-  scrub_segments_per_tick: parse_int.(System.get_env("MALACHI_SCRUB_SEGMENTS_PER_TICK"), 1),
+  scrub_interval_ms: parse_int.("MALACHI_SCRUB_INTERVAL_MS", 60_000),
+  scrub_segments_per_tick: parse_int.("MALACHI_SCRUB_SEGMENTS_PER_TICK", 1),
   # Internal roll of a segment's own log: when its file reaches this many bytes or this age, the store
   # seals that file (writing the sparse-index sidecar) and opens the next one inside the same segment
   # directory. Distinct from MALACHI_SEGMENT_MAX_BYTES below, which is the broker sealing a SEGMENT in
   # the control plane. Unset keeps the library defaults (1GB / 1h); the storage-chaos drill sets them
   # tiny so sidecars exist within a test window.
-  log_roll_max_bytes: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_BYTES"), nil),
-  log_roll_max_age_ms: parse_int.(System.get_env("MALACHI_LOG_ROLL_MAX_AGE_MS"), nil),
+  log_roll_max_bytes: parse_int.("MALACHI_LOG_ROLL_MAX_BYTES", nil),
+  log_roll_max_age_ms: parse_int.("MALACHI_LOG_ROLL_MAX_AGE_MS", nil),
   # Active-segment roll size (bytes): the broker seals the active segment once it reaches this many
   # encoded bytes. Unset => the library default (64MB). Smaller values seal faster, which shortens the
   # replication unit and is what the storage-chaos harness uses to exercise sealed-segment recovery
   # within its window; production setups normally leave this at the default.
-  segment_max_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_MAX_BYTES"), nil),
+  segment_max_bytes: parse_int.("MALACHI_SEGMENT_MAX_BYTES", nil),
   # How far a new segment file is sized at creation so appends stop extending it. 64MB by default,
   # matching the size a segment reaches before the broker rolls it. 0 turns it off, which is what a
   # copy-on-write filesystem wants and what a deployment whose flushes exceed ~170KB wants, since
   # above that the trade reverses. See Malachi.Application.segment_prealloc_bytes/0 and the measured
   # curve in Malachi.Storage.Preallocation.
-  segment_prealloc_bytes: parse_int.(System.get_env("MALACHI_SEGMENT_PREALLOC_BYTES"), 64 * 1024 * 1024),
+  segment_prealloc_bytes: parse_int.("MALACHI_SEGMENT_PREALLOC_BYTES", 64 * 1024 * 1024),
   # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
   # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
   # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.
-  data_shards: parse_int.(System.get_env("MALACHI_DATA_SHARDS"), 1),
+  data_shards: parse_int.("MALACHI_DATA_SHARDS", 1),
   # Eager-flush threshold (records): flush as soon as this many produce records are parked, so each fsync
   # and each reply stays bounded and a produce never waits long enough to time out, even on a slow disk.
-  group_commit_flush_max_records: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS"), 8_000),
+  group_commit_flush_max_records: parse_int.("MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS", 8_000),
   # Backpressure valve (records): past this many parked records the broker sheds new produces with an
   # `:overloaded` error instead of letting them queue until the caller times out and the connection drops.
-  group_commit_max_inflight: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_MAX_INFLIGHT"), 200_000),
+  group_commit_max_inflight: parse_int.("MALACHI_GROUP_COMMIT_MAX_INFLIGHT", 200_000),
   # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
   # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
   # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.
-  group_commit_interval_ms: parse_int.(System.get_env("MALACHI_GROUP_COMMIT_INTERVAL_MS"), 5),
+  group_commit_interval_ms: parse_int.("MALACHI_GROUP_COMMIT_INTERVAL_MS", 5),
   # Control-plane shards. 1 (default) => a single ra cluster holds all metadata. >1 (with a clustered
   # control plane) shards the metadata across that many vnodes, each its own ra cluster routed by
   # topic, so metadata mutations scale past one Raft group.
@@ -243,7 +225,7 @@ config :malachi,
   # which arc, and booting on the environment instead is exactly the corruption this store prevents.
   # The wait exists for the ordinary full-cluster restart, where the first node up has no quorum until a
   # second joins; raise it for clusters that stagger their boots more than a minute apart.
-  log_ring_boot_timeout_ms: parse_int.(System.get_env("MALACHI_LOG_RING_BOOT_TIMEOUT_MS"), 60_000),
+  log_ring_boot_timeout_ms: parse_int.("MALACHI_LOG_RING_BOOT_TIMEOUT_MS", 60_000),
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),
@@ -256,46 +238,68 @@ config :malachi,
   # A2 global load balancing: cap how unevenly vnodes spread over nodes (max extra replicas a node may
   # hold beyond the even share). Set => balanced placement (takes precedence over :log_spread_by, which
   # it does not combine with). Absent => plain HRW / rack-spread.
-  log_max_skew: parse_int.(System.get_env("MALACHI_LOG_MAX_SKEW"), nil),
+  log_max_skew: parse_int.("MALACHI_LOG_MAX_SKEW", nil),
   # Failure-domain hardening: the minimum distinct :log_spread_by values (racks/DCs) a segment's replica
   # set must span. With MALACHI_LOG_PLACEMENT_POLICY=hard, a segment that cannot reach it fails the
   # produce (fail-fast on an under-diversified, non-HA placement); soft (default) places best-effort.
-  log_min_domains: parse_int.(System.get_env("MALACHI_LOG_MIN_DOMAINS"), nil),
+  log_min_domains: parse_int.("MALACHI_LOG_MIN_DOMAINS", nil),
   log_placement_policy:
     (case System.get_env("MALACHI_LOG_PLACEMENT_POLICY") do
        "hard" -> :hard
        _soft_or_absent -> :soft
      end),
-  # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
-  # either to expire sealed segments older than an age and/or over a per-range byte budget.
-  retention_max_age_ms: parse_int.(System.get_env("MALACHI_RETENTION_MAX_AGE_MS"), nil),
-  retention_max_bytes: parse_int.(System.get_env("MALACHI_RETENTION_MAX_BYTES"), nil),
-  retention_interval_ms: parse_int.(System.get_env("MALACHI_RETENTION_INTERVAL_MS"), 60_000),
+  # Log retention. The coordinator always runs, so a topic's own storage policy can expire with neither
+  # of these set; with both unset and no policy bound anywhere, the sweep finds nothing and segments are
+  # kept forever. Set either to expire sealed segments older than an age and/or over a per-range byte
+  # budget.
+  retention_max_age_ms: parse_int.("MALACHI_RETENTION_MAX_AGE_MS", nil),
+  retention_max_bytes: parse_int.("MALACHI_RETENTION_MAX_BYTES", nil),
+  retention_interval_ms: parse_int.("MALACHI_RETENTION_INTERVAL_MS", 60_000),
   # Retention metrics. A consumer moved past data no longer stored is counted once per distinct skip: the
   # skip reporter beside each broker remembers up to MALACHI_RETENTION_SKIP_LEDGER_MAX skips (and as many
   # readers) and logs one reader at most once per MALACHI_RETENTION_SKIP_LOG_WINDOW_MS. The exported
   # skip series name the group for at most MALACHI_RETENTION_METRICS_MAX_GROUPS topic and group pairs
   # per node; the rest are folded into reader="other", which carries no name.
-  retention_skip_ledger_max: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LEDGER_MAX"), 10_000),
-  retention_skip_log_window_ms: parse_int.(System.get_env("MALACHI_RETENTION_SKIP_LOG_WINDOW_MS"), 600_000),
-  retention_metrics_max_groups: parse_int.(System.get_env("MALACHI_RETENTION_METRICS_MAX_GROUPS"), 1_000),
+  retention_skip_ledger_max: parse_int.("MALACHI_RETENTION_SKIP_LEDGER_MAX", 10_000),
+  retention_skip_log_window_ms: parse_int.("MALACHI_RETENTION_SKIP_LOG_WINDOW_MS", 600_000),
+  retention_metrics_max_groups: parse_int.("MALACHI_RETENTION_METRICS_MAX_GROUPS", 1_000),
+  # The orphan sweep: replica directories retention could not delete, because the replica did not answer.
+  # No later sweep can name them (a segment gone from the control plane never comes back), so a separate
+  # worker per node reclaims them. `delete` acts, `report` only lists what it would take, `off` does not
+  # even look. It is deliberately slower than the other workers and guarded: a directory must be older
+  # than MALACHI_RETENTION_ORPHAN_MIN_AGE_MS (longer than the worst registration lag, or a segment being
+  # registered looks orphaned), must be unexplained on MALACHI_RETENTION_ORPHAN_SIGHTINGS consecutive
+  # passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds the damage if
+  # the expected set is ever wrong.
+  retention_orphan_sweep: Malachi.Config.retention_orphan_sweep(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
+  # The backstop for a topic bound to a policy name this node cannot resolve. Unset means nothing of
+  # that topic expires, which is the safe side: the name exists because the administrator wanted
+  # something other than the global limits, and expiring under them would delete what the policy was
+  # there to keep. Set this to bound the disk such a topic can hold while the binding stays broken;
+  # malachi_retention_unresolved_policy_sweeps_total names the topic meanwhile.
+  retention_unresolved_policy_max_age_ms: parse_int.("MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS", nil),
+  retention_orphan_interval_ms: parse_int.("MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS", 300_000),
+  retention_orphan_min_age_ms: parse_int.("MALACHI_RETENTION_ORPHAN_MIN_AGE_MS", 600_000),
+  retention_orphan_sightings: parse_int.("MALACHI_RETENTION_ORPHAN_SIGHTINGS", 2),
+  retention_orphan_max_per_pass: parse_int.("MALACHI_RETENTION_ORPHAN_MAX_PER_PASS", 50),
+  retention_orphan_max_tracked: parse_int.("MALACHI_RETENTION_ORPHAN_MAX_TRACKED", 10_000),
   # Rebalancing lease (only used by a sharded control plane). The k8s-style timer triangle must satisfy
   # lease_duration_ms > lease_renew_deadline_ms > lease_retry_period_ms.
-  lease_duration_ms: parse_int.(System.get_env("MALACHI_LEASE_DURATION_MS"), 15_000),
-  lease_renew_deadline_ms: parse_int.(System.get_env("MALACHI_LEASE_RENEW_DEADLINE_MS"), 10_000),
-  lease_retry_period_ms: parse_int.(System.get_env("MALACHI_LEASE_RETRY_PERIOD_MS"), 2_000),
+  lease_duration_ms: parse_int.("MALACHI_LEASE_DURATION_MS", 15_000),
+  lease_renew_deadline_ms: parse_int.("MALACHI_LEASE_RENEW_DEADLINE_MS", 10_000),
+  lease_retry_period_ms: parse_int.("MALACHI_LEASE_RETRY_PERIOD_MS", 2_000),
   # How often each node reconciles itself into the lease cluster (self-join, so a staggered boot converges
   # to a fully-replicated lease). Idempotent once joined.
-  lease_reconcile_interval_ms: parse_int.(System.get_env("MALACHI_LEASE_RECONCILE_INTERVAL_MS"), 30_000),
+  lease_reconcile_interval_ms: parse_int.("MALACHI_LEASE_RECONCILE_INTERVAL_MS", 30_000),
   # Automatic rebalancing (sharded control plane only). Off by default: the operator drives the
   # RebalanceCoordinator. When on, the lease holder commits the plan once it stays the same for
   # `stabilization` reconciles (interval apart), so a transient membership flap does not move vnodes.
   # Graceful-shutdown drain window: after quiescing the acceptor (no new connections), wait this long for
   # in-flight requests to finish before closing connections. Keep k8s terminationGracePeriodSeconds above it.
-  shutdown_grace_ms: parse_int.(System.get_env("MALACHI_SHUTDOWN_GRACE_MS"), 5_000),
+  shutdown_grace_ms: parse_int.("MALACHI_SHUTDOWN_GRACE_MS", 5_000),
   auto_rebalance: System.get_env("MALACHI_AUTO_REBALANCE") == "true",
-  auto_rebalance_interval_ms: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_INTERVAL_MS"), 30_000),
-  auto_rebalance_stabilization: parse_int.(System.get_env("MALACHI_AUTO_REBALANCE_STABILIZATION"), 3)
+  auto_rebalance_interval_ms: parse_int.("MALACHI_AUTO_REBALANCE_INTERVAL_MS", 30_000),
+  auto_rebalance_stabilization: parse_int.("MALACHI_AUTO_REBALANCE_STABILIZATION", 3)
 
 # Everything in this block is owned by config/test.exs when running tests. runtime.exs is evaluated after
 # the environment file, so setting any of it unconditionally would silently overwrite the test values,
@@ -307,19 +311,19 @@ if config_env() != :test do
     tcp_port: String.to_integer(System.get_env("MALACHI_TCP_PORT") || "4040"),
     dashboard_port: String.to_integer(System.get_env("MALACHI_DASHBOARD_PORT") || "4041"),
     # Rate limiting configuration
-    auth_rate_limit: parse_int.(System.get_env("MALACHI_AUTH_RATE_LIMIT"), 10),
-    auth_rate_window_ms: parse_int.(System.get_env("MALACHI_AUTH_RATE_WINDOW_MS"), 60_000),
+    auth_rate_limit: parse_int.("MALACHI_AUTH_RATE_LIMIT", 10),
+    auth_rate_window_ms: parse_int.("MALACHI_AUTH_RATE_WINDOW_MS", 60_000),
     # Publish/subscribe limits are enforced but OPT-IN: 0 means no limit, so a deployment that does not
     # ask for a quota keeps the throughput it had. A shipped default of 1000/s would have capped every
     # broker far below what it can do.
-    publish_rate_limit: parse_int.(System.get_env("MALACHI_PUBLISH_RATE_LIMIT"), 0),
-    publish_rate_window_ms: parse_int.(System.get_env("MALACHI_PUBLISH_RATE_WINDOW_MS"), 1_000),
-    subscribe_rate_limit: parse_int.(System.get_env("MALACHI_SUBSCRIBE_RATE_LIMIT"), 0),
-    subscribe_rate_window_ms: parse_int.(System.get_env("MALACHI_SUBSCRIBE_RATE_WINDOW_MS"), 60_000),
-    rate_limit_cleanup_interval_ms: parse_int.(System.get_env("MALACHI_RATE_LIMIT_CLEANUP_INTERVAL"), 300_000),
+    publish_rate_limit: parse_int.("MALACHI_PUBLISH_RATE_LIMIT", 0),
+    publish_rate_window_ms: parse_int.("MALACHI_PUBLISH_RATE_WINDOW_MS", 1_000),
+    subscribe_rate_limit: parse_int.("MALACHI_SUBSCRIBE_RATE_LIMIT", 0),
+    subscribe_rate_window_ms: parse_int.("MALACHI_SUBSCRIBE_RATE_WINDOW_MS", 60_000),
+    rate_limit_cleanup_interval_ms: parse_int.("MALACHI_RATE_LIMIT_CLEANUP_INTERVAL", 300_000),
     # Connection limits
-    max_connections_per_ip: parse_int.(System.get_env("MALACHI_MAX_CONN_PER_IP"), 100),
-    max_total_connections: parse_int.(System.get_env("MALACHI_MAX_TOTAL_CONN"), 10_000)
+    max_connections_per_ip: parse_int.("MALACHI_MAX_CONN_PER_IP", 100),
+    max_total_connections: parse_int.("MALACHI_MAX_TOTAL_CONN", 10_000)
 
   # On-disk data directories, set only when the operator supplies one. Malachi.Config.data_dir/3 trims,
   # treats blank as absent, and rejects a relative path in production (it would resolve against the process
@@ -371,8 +375,8 @@ config :malachi,
        "true" -> true
        nil -> true
      end),
-  dashboard_auth_rate_limit: parse_int.(System.get_env("MALACHI_DASHBOARD_AUTH_RATE_LIMIT"), 10),
-  dashboard_auth_rate_window_ms: parse_int.(System.get_env("MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS"), 60_000),
+  dashboard_auth_rate_limit: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_LIMIT", 10),
+  dashboard_auth_rate_window_ms: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS", 60_000),
   # Whether the session cookie is marked Secure. Off by default because `Malachi.Dashboard` listens with
   # `:gen_tcp.listen` and has no TLS path, so the transport it actually serves is plain HTTP, and a browser
   # refuses to store a Secure cookie from a non-trustworthy origin. Turn it on when a TLS-terminating proxy
@@ -396,7 +400,7 @@ config :malachi,
        "true" -> true
        nil -> true
      end),
-  hsts_max_age: parse_int.(System.get_env("MALACHI_HSTS_MAX_AGE"), 31_536_000),
+  hsts_max_age: parse_int.("MALACHI_HSTS_MAX_AGE", 31_536_000),
   hsts_include_subdomains:
     (case System.get_env("MALACHI_HSTS_INCLUDE_SUBDOMAINS") do
        "false" -> false
@@ -413,7 +417,7 @@ config :malachi,
        _ -> :both
      end),
   audit_log_file: System.get_env("MALACHI_AUDIT_LOG_FILE") || "/var/log/malachi/audit.log",
-  audit_log_max_size_mb: parse_int.(System.get_env("MALACHI_AUDIT_LOG_MAX_SIZE_MB"), 1)
+  audit_log_max_size_mb: parse_int.("MALACHI_AUDIT_LOG_MAX_SIZE_MB", 1)
 
 # ============================================================
 # User Authentication Configuration
@@ -478,19 +482,19 @@ config :malachi,
   disable_default_users: disable_default_users,
 
   # Account lockout configuration
-  max_auth_attempts: parse_int.(System.get_env("MALACHI_MAX_AUTH_ATTEMPTS"), 5),
-  lockout_duration_ms: parse_int.(System.get_env("MALACHI_LOCKOUT_DURATION_MS"), 300_000),
+  max_auth_attempts: parse_int.("MALACHI_MAX_AUTH_ATTEMPTS", 5),
+  lockout_duration_ms: parse_int.("MALACHI_LOCKOUT_DURATION_MS", 300_000),
   progressive_lockout: System.get_env("MALACHI_PROGRESSIVE_LOCKOUT") != "false",
 
   # Session security configuration. The TTL is seconds, not milliseconds: a `session_timeout_ms` used to
   # sit alongside this one and was the only variant the README documented, but nothing ever read it, so
   # setting it silently left the TTL at the default. It is gone; this is the knob.
-  session_timeout_seconds: parse_int.(System.get_env("MALACHI_SESSION_TIMEOUT_SEC"), 3600),
+  session_timeout_seconds: parse_int.("MALACHI_SESSION_TIMEOUT_SEC", 3600),
   session_ip_binding: System.get_env("MALACHI_SESSION_IP_BINDING") != "false",
   session_ua_binding: System.get_env("MALACHI_SESSION_UA_BINDING") == "true",
 
   # Password requirements
-  min_password_length: parse_int.(System.get_env("MALACHI_MIN_PASSWORD_LEN"), 12),
+  min_password_length: parse_int.("MALACHI_MIN_PASSWORD_LEN", 12),
   require_strong_passwords: System.get_env("MALACHI_REQUIRE_STRONG_PASSWORDS") == "true",
 
   # Trusted proxy ranges (CIDR notation, comma-separated)
@@ -514,13 +518,13 @@ config :malachi,
 
 config :malachi,
   # Atom table monitoring
-  atom_check_interval_ms: parse_int.(System.get_env("MALACHI_ATOM_CHECK_INTERVAL"), 60_000),
-  atom_warning_threshold: parse_float.(System.get_env("MALACHI_ATOM_WARNING_THRESHOLD"), 0.7),
-  atom_critical_threshold: parse_float.(System.get_env("MALACHI_ATOM_CRITICAL_THRESHOLD"), 0.9),
+  atom_check_interval_ms: parse_int.("MALACHI_ATOM_CHECK_INTERVAL", 60_000),
+  atom_warning_threshold: parse_float.("MALACHI_ATOM_WARNING_THRESHOLD", 0.7),
+  atom_critical_threshold: parse_float.("MALACHI_ATOM_CRITICAL_THRESHOLD", 0.9),
 
   # Memory monitoring
-  memory_check_interval_ms: parse_int.(System.get_env("MALACHI_MEMORY_CHECK_INTERVAL"), 30_000),
-  gc_threshold_mb: parse_int.(System.get_env("MALACHI_GC_THRESHOLD_MB"), 500),
+  memory_check_interval_ms: parse_int.("MALACHI_MEMORY_CHECK_INTERVAL", 30_000),
+  gc_threshold_mb: parse_int.("MALACHI_GC_THRESHOLD_MB", 500),
   auto_gc_enabled: System.get_env("MALACHI_AUTO_GC") != "false"
 
 # ============================================================
