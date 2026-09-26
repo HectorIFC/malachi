@@ -1313,11 +1313,22 @@ defmodule Malachi.Broker do
   # apply has nothing to replay.
   defp apply_metadata(broker, command) do
     {dsrsm, reply} = broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
-    {%{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command)}, reply}
+    {%{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}, reply}
   end
 
-  defp journal_put(nil, _command), do: nil
-  defp journal_put(journal, command), do: [command | journal]
+  defp journal_put(nil, _command, _applied, _previous), do: nil
+
+  # A command the control plane refused, or never answered at all, comes back with the cache UNCHANGED:
+  # `Malachi.Cluster.ReplicatedMetadata.apply_command/3` returns the metadata it was given on an error,
+  # and the deterministic apply returns it unchanged on a refusal. Journaling such a command would have
+  # the replay put into the cache something the log may never have taken, which is a worse failure than
+  # the stale read the replay exists to repair: a `create_topic` that timed out would read as existing,
+  # and a `commit_offset` that timed out would advance a group past data it never durably committed.
+  #
+  # Matched by identity rather than compared: the unchanged paths return the very same term, so this
+  # costs nothing on a path that runs on every roll and every group ack.
+  defp journal_put(journal, _command, same, same), do: journal
+  defp journal_put(journal, command, _applied, _previous), do: [command | journal]
 
   # Query routing: a range/segment id embeds its topic, which is how a read is dispatched to the owning
   # vnode. The command path uses `Metadata.command_target_topic/1` instead (it takes a whole command).

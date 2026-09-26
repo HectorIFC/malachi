@@ -1561,6 +1561,27 @@ defmodule Malachi.BrokerTest do
       assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => 900}
     end
 
+    test "a command the control plane refused or never answered is not journaled" do
+      # `ReplicatedMetadata.apply_command/3` returns the cache it was given when the command errored, so
+      # a refusal and a transport failure look the same from here: nothing changed. Journaling either
+      # would have the replay put into the cache something the log may never have taken, which is the
+      # opposite direction of the staleness the replay exists to repair, and worse.
+      {:ok, ring} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+      never_committed = fn dsrsm, _topic, _command -> {dsrsm, {:error, :timeout}} end
+
+      {:ok, broker} = Broker.open(dsrsm: DSRSM.seed(ring, %{v0: Metadata.new()}), command_fun: never_committed)
+      broker = Broker.journal(broker)
+
+      assert {broker, {:error, :timeout}} = Broker.create_topic(broker, "orders", 4)
+      assert DSRSM.get_topic(broker.dsrsm, "orders") == nil
+
+      {journaled, drained} = Broker.take_journal(broker)
+
+      assert journaled == []
+      assert Broker.replay_journal(drained, journaled) == drained
+      assert DSRSM.get_topic(Broker.replay_journal(drained, journaled).dsrsm, "orders") == nil
+    end
+
     test "replaying a command whose topic no longer routes anywhere leaves the cache alone" do
       {broker, _root_id} = broker_with_topic("events")
       broker = Broker.journal(broker)
