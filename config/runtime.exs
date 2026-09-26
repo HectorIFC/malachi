@@ -250,8 +250,10 @@ config :malachi,
        "hard" -> :hard
        _soft_or_absent -> :soft
      end),
-  # Log retention. Both unset => segments are kept forever (no RetentionCoordinator started). Set
-  # either to expire sealed segments older than an age and/or over a per-range byte budget.
+  # Log retention. The coordinator always runs, so a topic's own storage policy can expire with neither
+  # of these set; with both unset and no policy bound anywhere, the sweep finds nothing and segments are
+  # kept forever. Set either to expire sealed segments older than an age and/or over a per-range byte
+  # budget.
   retention_max_age_ms: parse_int.("MALACHI_RETENTION_MAX_AGE_MS", nil),
   retention_max_bytes: parse_int.("MALACHI_RETENTION_MAX_BYTES", nil),
   retention_interval_ms: parse_int.("MALACHI_RETENTION_INTERVAL_MS", 60_000),
