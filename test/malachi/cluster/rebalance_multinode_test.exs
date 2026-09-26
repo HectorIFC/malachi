@@ -8,36 +8,22 @@ defmodule Malachi.Cluster.RebalanceMultinodeTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Rebalance
   alias Malachi.Metadata
+  alias Malachi.Test.Distribution
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
+    :ok = Distribution.ensure_started()
 
     {:ok, _} = Application.ensure_all_started(:ra)
     :ok
   end
 
   defp start_peer do
-    name = :"malachi_rebal_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {peer, node, name} = Distribution.start_peer("rebal")
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
     data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_rebal_#{name}_#{System.unique_integer([:positive])}"
     {:ok, _} = :erpc.call(node, :ra, :start_in, [data_dir])
 
     {peer, node}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   # After a membership/leadership change ra needs a moment; retry until the fun returns {:ok, _}.

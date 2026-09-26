@@ -14,27 +14,19 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.CoordinatorRouterMultinodeFixtures, as: Fixtures
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.Test.Distribution
 
   @coord Malachi.LogGroupCoordinator
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
+    :ok = Distribution.ensure_started()
 
     {:ok, _} = Application.ensure_all_started(:ra)
     :ok
   end
 
   defp start_peer do
-    name = :"malachi_router_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {peer, node, name} = Distribution.start_peer("router")
     # the coordinator's ranges_fun is &Fixtures.ranges/1: make sure that module is loadable on the peer
     _ = :erpc.call(node, :code, :ensure_loaded, [Malachi.Consumer.CoordinatorRouterMultinodeFixtures])
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
@@ -42,12 +34,6 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     {:ok, _} = :erpc.call(node, :ra, :start_in, [data_dir])
 
     {peer, node}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   # ra needs a moment after a membership/leadership change; retry until `fun` returns {:ok, _}.

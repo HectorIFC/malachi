@@ -16,27 +16,17 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.Distribution
 
   @server :retention_multinode_repl
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
-    :ok
+    Distribution.ensure_started()
   end
 
   # A peer node running one replication server, without the Malachi application. Returns its broker ref.
   defp start_peer_replica do
-    name = :"malachi_retention_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {_peer, node, name} = Distribution.start_peer("retention")
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:logger])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
 
@@ -48,12 +38,6 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
       :erpc.call(node, GenServer, :start, [ReplicationServer, [name: @server, directory: directory], [name: @server]])
 
     {@server, node}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   defp eventually(check, remaining_ms \\ 5_000) do

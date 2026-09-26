@@ -11,14 +11,10 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Metadata
+  alias Malachi.Test.Distribution
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
+    :ok = Distribution.ensure_started()
 
     {:ok, _} = Application.ensure_all_started(:ra)
     # the local node is itself a cluster member here, so ra must run locally too
@@ -26,22 +22,12 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
   end
 
   defp start_peer do
-    name = :"malachi_peer_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {peer, node, name} = Distribution.start_peer("peer")
     {:ok, _} = :erpc.call(node, :application, :ensure_all_started, [:ra])
     data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_rdsrsm_#{name}_#{System.unique_integer([:positive])}"
     {:ok, _} = :erpc.call(node, :ra, :start_in, [data_dir])
 
     {peer, node}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   # After an abrupt member loss, ra may need a moment to re-elect; retry until the command lands.
@@ -86,7 +72,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
     # kill one member of that vnode: its leader if the leader is a peer (exercising failover), else a
     # peer follower. Never the local node: it is running the test. Quorum (2/3) is kept either way.
     casualty = if leader_node in peer_nodes, do: leader_node, else: hd(peer_nodes)
-    :ok = try_stop(Map.fetch!(peer_by_node, casualty))
+    :ok = Distribution.stop_peer(Map.fetch!(peer_by_node, casualty))
 
     # the owning vnode still commits (its cluster kept quorum / re-elected), and its earlier metadata
     # is intact, while a topic on the other vnode is unaffected too
