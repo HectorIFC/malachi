@@ -2,14 +2,16 @@ defmodule Malachi.Cluster.BoundedFanout do
   @moduledoc """
   Runs one bounded remote call per item, concurrently, keeping every answer paired with its item.
 
-  Two callers need exactly this, for the same reason: the reconcile reads every metadata vnode
-  (`Malachi.Cluster.ReplicatedDSRSM.snapshot/2`) and, on the orchestrator, asks every vnode whether its
-  cluster is formed (`Malachi.BrokerServer`). Each call can cost its whole timeout, so run in sequence a
-  pass over `n` silent vnodes costs `n` times it. That is what used to be paid inside the broker's own
-  loop while it was supposed to be serving clients (#178), and holding the pattern here is what keeps
-  the next such pass from being written in sequence again.
+  Three callers need exactly this, for the same reason: the reconcile reads every metadata vnode
+  (`Malachi.Cluster.ReplicatedDSRSM.snapshot/2`), on the orchestrator it asks every vnode whether its
+  cluster is formed (`Malachi.BrokerServer`), and the orphan sweep asks the vnodes that own its
+  candidates, then every vnode about the ones their owner does not list
+  (`Malachi.Cluster.ReplicatedDSRSM.known_segments/3`). Each call can cost its whole timeout, so
+  run in sequence a pass over `n` silent vnodes costs `n` times it. That is what used to be paid
+  inside the broker's own loop while it was supposed to be serving clients (#178), and holding the
+  pattern here is what keeps the next such pass from being written in sequence again.
 
-  Two details are the reason this is a module rather than a line repeated twice:
+  Two details are the reason this is a module rather than a line repeated in each caller:
 
     * the answers are zipped back against the input, because the `:exit` result of a killed task does
       not carry the item it was working on, and a caller that cannot tell WHICH item failed cannot
@@ -36,10 +38,12 @@ defmodule Malachi.Cluster.BoundedFanout do
 
   A `fun` that RAISES is a different case and is deliberately not contained: the tasks are linked, so
   the exception propagates to the caller, exactly as it did when these passes were written as a loop.
-  That is the right shape for both callers. In the reconcile task it is caught as a crashed pass,
+  That is the right shape for every caller. In the reconcile task it is caught as a crashed pass,
   logged and counted; at boot it fails `init/1` and the supervisor restarts the broker, which is the
-  honest answer for a node that cannot complete its first pass. Containing it here would turn either
-  into a pass that quietly reports nothing.
+  honest answer for a node that cannot complete its first pass; in the orphan sweep it ends the task
+  the sweeper runs its question in, and the sweeper skips that pass. Containing it here would turn any
+  of them into a pass that quietly reports nothing, and for the sweep an empty answer is the one that
+  deletes.
   """
   @spec map([item], pos_integer(), (item -> result), (item -> result)) :: [result]
         when item: term(), result: term()

@@ -236,9 +236,15 @@ defmodule Malachi.Metadata do
   def routed_range_topics({:split_range, range_id}), do: topics([range_id_topic(range_id)])
   def routed_range_topics({:merge_ranges, a, b}), do: topics([range_id_topic(a), range_id_topic(b)])
   def routed_range_topics({:register_segment, range_id, _seg, _replicas, _off}), do: topics([range_id_topic(range_id)])
-  def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _at}), do: topics([segment_id_topic(segment_id)])
-  def routed_range_topics({:delete_segment, segment_id}), do: topics([segment_id_topic(segment_id)])
-  def routed_range_topics({:set_segment_replicas, segment_id, _replicas}), do: topics([segment_id_topic(segment_id)])
+
+  def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _at}),
+    do: topics([segment_routing_topic(segment_id)])
+
+  def routed_range_topics({:delete_segment, segment_id}), do: topics([segment_routing_topic(segment_id)])
+
+  def routed_range_topics({:set_segment_replicas, segment_id, _replicas}),
+    do: topics([segment_routing_topic(segment_id)])
+
   def routed_range_topics(_not_range_scoped), do: []
 
   defp topics(list), do: Enum.reject(list, &is_nil/1)
@@ -258,8 +264,20 @@ defmodule Malachi.Metadata do
   # runs on every command, and it must never crash on an id it does not recognize.
   defp range_id_topic({topic, _seq}), do: topic
   defp range_id_topic(_), do: nil
-  defp segment_id_topic({{topic, _range_seq}, _seg_seq}), do: topic
-  defp segment_id_topic(_), do: nil
+
+  @doc """
+  The topic a segment's metadata is routed by, or `nil` for an id that carries none.
+
+  The one place that decides which vnode owns a segment: every segment command is routed through it
+  (`command_target_topic/1`), and so is the orphan sweep's question to the owner
+  (`Malachi.Cluster.ReplicatedDSRSM.known_segments/3`). Today a topic's ranges and segments are
+  co-located on the topic's vnode, so this is the topic the id embeds. NorthGuard routes a range by the
+  hash of the range itself (see `Malachi.Cluster.DSRSM`); if that sharding lands here, it lands in this
+  function, and the sweep follows.
+  """
+  @spec segment_routing_topic(term()) :: topic_name() | nil
+  def segment_routing_topic({{topic, _range_seq}, _seg_seq}), do: topic
+  def segment_routing_topic(_), do: nil
 
   @doc """
   Applies a command, returning `{new_state, reply}`. Deterministic: the same command on the

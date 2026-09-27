@@ -75,6 +75,24 @@ defmodule Malachi.Cluster.MetadataServer do
   end
 
   @doc """
+  The vnode's segments, read linearizably and without copying the rest of its state.
+
+  Projected inside the leader with `{:maps, :with, [[:segments]]}`, a standard library function every
+  node has whatever Malachi version it runs: `Malachi.Cluster.RaCluster.project/3` explains why a
+  Malachi function must never be the one the leader applies. What a caller does with the map it gets
+  back (`Malachi.Retention.Orphans.known_among/2`) runs in the caller.
+  """
+  @spec segments(server_id(), timeout()) :: {:ok, %{Metadata.segment_id() => term()}} | {:error, term()}
+  def segments(server_id, timeout \\ @default_timeout) do
+    case RaCluster.project(server_id, {:maps, :with, [[:segments]]}, timeout) do
+      {:ok, %{segments: segments}} when is_map(segments) -> {:ok, segments}
+      # A state without segments is not an empty vnode, and reading it as one would explain nothing.
+      {:ok, other} -> {:error, {:unexpected_state, other}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
   Whether the cluster addressed by `server_id` is formed and reachable (a member answers `:ra.members`)
   within `timeout`. Used by the reconcile to decide if a vnode still needs bootstrapping, which is why
   it takes a bound: an unreachable placement node costs the whole timeout.

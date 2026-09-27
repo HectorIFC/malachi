@@ -319,19 +319,40 @@ MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS=300000
 MALACHI_RETENTION_ORPHAN_MIN_AGE_MS=600000
 MALACHI_RETENTION_ORPHAN_SIGHTINGS=2
 MALACHI_RETENTION_ORPHAN_MAX_PER_PASS=50
+MALACHI_RETENTION_ORPHAN_MAX_TRACKED=10000
 ```
 
 It runs on **every node**, not only the one that sweeps retention: only a node can read its own disk.
-It acts only when this node has read every metadata vnode at least once since boot **and** every vnode
-answered the last refresh, and a directory is removed only after it has been unexplained on
-`SIGHTINGS` consecutive passes **and** is older than `MIN_AGE_MS`. That minimum has to stay above the
-worst registration lag: a replica creates a directory on the first push, which can happen before this
-node's metadata shows the registration.
+Before a directory can go, the sweep asks the metadata vnode that **owns** its segment, routed by the
+segment's topic like any other command for it, and read linearizably. It does not use this node's
+cached copy of the metadata: that copy is refreshed by a reconcile that can fall behind without failing
+(a control plane slow enough that every refresh outlives its tick), and a view that aged in silence is
+missing exactly the segments whose replicas have just arrived here. A registration commits on its owner
+before any replica creates the directory, so the owner's answer has no lag.
 
-Both metadata conditions are needed, and the second is the one that is easy to leave out. A vnode that
-goes silent after being read keeps the view it had, so its old segments stay explained while segments
-registered on it since are missing, and their replicas still arrive here over the data plane. Without
-that condition a silence longer than the guards above ends with a live copy deleted.
+The pass is skipped whole when an owner does not answer, when the topology changed while it asked, when
+there is no ring yet, or when the whole question took longer than its deadline (15 seconds by default;
+ra follows a leader redirect with a fresh timeout, so the deadline is on the question, not each read).
+On a sharded cluster the topology comes from the durable ring store, which a vnode split writes its
+pending intent to before it moves anything, so a node whose gossip lags cannot ask only an owner the
+topic already left.
+
+A directory whose owner does not list its segment is asked of **every** vnode before it can go, because a
+broker routing by a stale ring can write a topic to a vnode that does not own it (see
+`docs/ARCHITECTURE.md`, "a vnode accepts metadata outside its arc"). So while any vnode is silent, a pass
+with a real orphan to decide is skipped, even when the silent vnode owns none of this node's directories.
+
+Some directories are held without counting a sighting: one whose segment id carries no topic (no owner
+to ask, held for good), one whose topic a vnode split is moving and that neither the old nor the new
+owner lists at the moment each is read, and one a vnode that does not own it still lists. The log names
+them when that set changes.
+
+On top of that answer, a directory is removed only after it has been unexplained on `SIGHTINGS`
+consecutive passes **and** is older than `MIN_AGE_MS`. Only the `MAX_TRACKED` oldest candidates are
+asked about in one pass, which bounds the work on this node and how many owners are asked; each owner
+answers with its whole segment map whatever the count. Candidates left out for a later pass are logged
+on every pass that leaves some out; a held pass is logged once, when holding starts; directories kept
+as undecided are named when that set changes.
 
 **The log data directory belongs to Malachi alone.** Do not nest `MALACHI_RA_DATA_DIR` inside it, and do
 not keep backups or hand-made copies there. The sweep only ever considers a directory whose name the
