@@ -63,11 +63,12 @@ command -v lsof >/dev/null 2>&1 || { echo "refusing: lsof is required to check t
 
 names=(MALACHI_TCP_PORT MALACHI_DASHBOARD_PORT JAEGER_UI_PORT OTLP_PORT PROMETHEUS_PORT)
 
-# Prints one line per port some process is listening on: the variable, the port, the command and its pid.
+# Given the five ports in the order of `names`, prints one line per port some process is listening on:
+# the variable, the port, the command and its pid.
 taken_ports() {
-  local i port holder
+  local ports=("$@") i port holder
   for i in "${!names[@]}"; do
-    port=$((base + i))
+    port=${ports[$i]}
     holder=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -Fpc 2>/dev/null |
       awk '/^p/ { pid = substr($0, 2) } /^c/ { print substr($0, 2) " (pid " pid ")"; exit }') || true
     if [ -n "$holder" ]; then
@@ -81,18 +82,32 @@ dashboard_port=$((base + 1))
 
 if [ -e "$env_file" ]; then
   # Kept, never rewritten: a session may already be running on these values. A port held now is most
-  # likely this worktree's own dev node, so it is reported, not refused.
+  # likely this worktree's own dev node, so it is reported, not refused. The ports checked are the ones
+  # the file holds, read as text (never sourced), not the ones this issue number would get: the file may
+  # have been written for another number, or edited.
   echo "kept existing $env_file"
-  taken=$(taken_ports)
+  kept=()
+  for name in "${names[@]}"; do
+    value=$(sed -n "s/^$name=\([0-9][0-9]*\)\$/\1/p" "$env_file")
+    case "$value" in
+      '' | *[!0-9]*) kept=(); break ;;
+      *) kept+=("$value") ;;
+    esac
+  done
+  if [ "${#kept[@]}" -ne "${#names[@]}" ]; then
+    echo "warning: its port lines are missing or not one plain number each; ports not checked"
+    exit 0
+  fi
+  taken=$(taken_ports "${kept[@]}")
   if [ -n "$taken" ]; then
     echo "warning: some of its ports are in use right now:"
     echo "$taken"
   fi
-  echo "dashboard: http://127.0.0.1:$(sed -n 's/^MALACHI_DASHBOARD_PORT=//p' "$env_file")"
+  echo "dashboard: http://127.0.0.1:${kept[1]}"
   exit 0
 fi
 
-taken=$(taken_ports)
+taken=$(taken_ports "$base" $((base + 1)) $((base + 2)) $((base + 3)) $((base + 4)))
 if [ -n "$taken" ]; then
   echo "refusing: ports for issue $issue are already in use; nothing was written" >&2
   echo "$taken" >&2

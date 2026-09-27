@@ -19,8 +19,10 @@ defmodule WorktreeEnvTest do
 
   setup do
     dir = TmpDir.path("worktree-env")
+    # Exclusive: a directory already there is a leftover, and building on it would test the leftover.
+    File.mkdir!(dir)
     main = Path.join(dir, "main")
-    File.mkdir_p!(main)
+    File.mkdir!(main)
     on_exit(fn -> File.rm_rf!(dir) end)
 
     git!(main, ["init", "-q"])
@@ -227,6 +229,29 @@ defmodule WorktreeEnvTest do
       assert output =~ "kept existing"
       assert output =~ "dashboard: http://127.0.0.1:22501"
       assert File.read!(env_file(ctx)) == before
+    end
+
+    test "is checked on the ports it holds, not the ones the issue number given now would get", ctx do
+      assert {_output, 0} = run(ctx, 250, ctx.worktree)
+
+      # 22501 is the kept file's dashboard port; issue 251 would have been given 22511.
+      assert {output, 0} = run(ctx, 251, ctx.worktree, taken: "22501")
+      assert output =~ "MALACHI_DASHBOARD_PORT=22501 is held by holder-cmd (pid 4242)"
+      assert output =~ "dashboard: http://127.0.0.1:22501"
+    end
+
+    test "with port lines that are not plain numbers is read as text, never run, and left unchecked", ctx do
+      marker = Path.join(ctx.dir, "ran")
+
+      File.write!(env_file(ctx), """
+      MALACHI_TCP_PORT=$(touch #{marker})
+      MALACHI_DASHBOARD_PORT=22501
+      """)
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree, taken: "22501")
+      assert output =~ "ports not checked"
+      refute output =~ "is held by"
+      refute File.exists?(marker)
     end
 
     test "is kept when one of its ports is in use, with a warning naming the holder", ctx do
