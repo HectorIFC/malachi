@@ -121,16 +121,16 @@ embarrassment.
 What a reviewer flags, and how severe it is, is written down in [`REVIEW.md`](REVIEW.md). The managed
 Code Review reads it on pull requests, and so does the local review below.
 
-If you work with Claude Code, the repository runs that review for you before you call the work done.
-A Stop hook (`scripts/auto-review-hook.sh`, registered in `.claude/settings.json`) notices when a turn
+If you work with Claude Code, the repository runs that review for you before you call the work done. A
+Stop hook (`scripts/auto-review-hook.sh`, registered in `.claude/settings.json`) notices when a turn
 ends with the branch carrying changes and asks Claude to run the `adversarial-review` skill: parallel
 reviewer subagents that see only the diff and `REVIEW.md`, then a verifier per finding that tries to
 refute it, and finally the surviving findings as numbered options for you to choose from. Nothing is
-changed before you choose. It asks once per diff: a turn that leaves the diff as it was (a question, your
-answer to the options) does not start the same review again, and a turn that changes it does. The diff
-counts as reviewed from the moment the review is asked for, so a review you interrupt does not come
-back by itself; ask for it ("review the branch") when you want it. To turn the automatic run off for a
-session, start Claude Code with `MALACHI_SKIP_AUTO_REVIEW=1`.
+changed before you choose. It asks once per content: a turn that changes no file (a question, your
+answer to the options, a commit of work already reviewed) does not start the same review again, and a
+turn that changes one does. The diff counts as reviewed from the moment the review is asked for, so a
+review you interrupt does not come back by itself; ask for it ("review the branch") when you want it.
+To turn the automatic run off for a session, start Claude Code with `MALACHI_SKIP_AUTO_REVIEW=1`.
 
 ## Getting help
 

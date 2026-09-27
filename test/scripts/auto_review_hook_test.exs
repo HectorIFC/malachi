@@ -116,6 +116,28 @@ defmodule AutoReviewHookTest do
       assert run(ctx) == {"", 0}
     end
 
+    test "committing reviewed work does not start the same review again", ctx do
+      # A commit moves new files from untracked to committed without changing a byte of them. The
+      # review already covered those bytes, so asking again would review the same code twice.
+      File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
+      File.write!(Path.join(ctx.repo, "new.ex"), "new\n")
+      assert %{"decision" => "block"} = blocked(run(ctx))
+
+      commit!(ctx.repo, "reviewed work")
+      assert run(ctx) == {"", 0}
+    end
+
+    test "the contributor's own index is left as it was", ctx do
+      File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
+      File.write!(Path.join(ctx.repo, "new.ex"), "new\n")
+      git!(ctx.repo, ["add", "a.ex"])
+
+      assert %{"decision" => "block"} = blocked(run(ctx))
+
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: ctx.repo, env: @no_git_env)
+      assert status == "M  a.ex\n?? new.ex\n"
+    end
+
     test "a change to a tracked file asks again", ctx do
       File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
       assert %{"decision" => "block"} = blocked(run(ctx))

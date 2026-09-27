@@ -13,10 +13,11 @@
 #   - the directory is not a git work tree;
 #   - the branch has no changes: nothing committed since it left origin/main, nothing modified, nothing
 #     untracked, apart from the files the prepare-commits skill generates;
-#   - the changes are exactly the ones it already asked to have reviewed. It keeps a fingerprint of the
-#     diff it last asked about in this worktree's own git directory, so a turn that changed nothing (an
-#     answer to the review's options, a question, a turn opened by a background task finishing) does
-#     not start the same review again. A turn that changes the diff does. The fingerprint is recorded
+#   - the changes are exactly the ones it already asked to have reviewed. It keeps a fingerprint (the
+#     base and the id of the tree the working tree would commit) in this worktree's own git directory,
+#     so a turn that changed no content (an answer to the review's options, a question, a turn opened by
+#     a background task finishing, a commit of reviewed work) does not start the same review again. A
+#     turn that changes content does. The fingerprint is recorded
 #     when the review is ASKED for, so a review that was interrupted does not come back by itself; ask
 #     for it by name.
 #
@@ -41,37 +42,36 @@ cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2> /dev/null || exit 0
 git rev-parse --is-inside-work-tree > /dev/null 2>&1 || exit 0
 
 # The branch's changes are everything since it left origin/main. Without that ref (a fresh clone of a
-# fork, no remote) only what is uncommitted counts.
-base=$(git merge-base HEAD origin/main 2> /dev/null) || base=HEAD
+# fork, no remote) only what is uncommitted counts. A repository with no commit yet has nothing to
+# compare against.
+git rev-parse --verify --quiet HEAD > /dev/null || exit 0
+base=$(git merge-base HEAD origin/main 2> /dev/null) || base=$(git rev-parse HEAD)
 
-# Excluded by exact name, never by pattern: the prepare-commits skill's own script and patches are
-# not work to review, and a wildcard would also hide a real file that happens to match.
+# What the review would look at is the tree the working tree would commit, so that is what is
+# fingerprinted: built in a private index, so the contributor's own index is never touched, and
+# started from a copy of it, so git reuses its stat cache instead of hashing every file again. A tree
+# id changes exactly when some content does. Committing reviewed work, which only moves files from
+# untracked to committed, leaves it as it was, and so does not start the same review again.
+index=$(mktemp "${TMPDIR:-/tmp}/malachi-auto-review-index.XXXXXX" 2> /dev/null) || exit 0
+trap 'rm -f "$index"' EXIT
+cp "$(git rev-parse --git-path index)" "$index" 2> /dev/null || GIT_INDEX_FILE="$index" git read-tree HEAD
+GIT_INDEX_FILE="$index" git add -A -- . 2> /dev/null || exit 0
+
+# Excluded by exact name, never by pattern: the prepare-commits skill's own script and patches are not
+# work to review, and a wildcard would also hide a real file that happens to match. Only an untracked
+# one is dropped; a file of that name already committed is the project's own. NUL-separated, which git
+# prints verbatim, since a C-quoted name is not a path.
 generated='^(commit_message\.sh|commit_[0-9]+\.patch)$'
-
-# NUL-separated, which git prints verbatim: in its line form it C-quotes a name with a non-ASCII byte, a
-# tab or a newline, and a quoted name is a path that does not exist, so its content would never reach
-# the fingerprint.
-untracked=()
 while IFS= read -r -d '' name; do
-  [[ "$name" =~ $generated ]] || untracked+=("$name")
+  [[ "$name" =~ $generated ]] && GIT_INDEX_FILE="$index" git rm -q --cached -- "$name" 2> /dev/null
 done < <(git ls-files -z --others --exclude-standard 2> /dev/null)
 
-tracked=$(git diff --name-only -z "$base" -- 2> /dev/null | tr -cd '\0' | wc -c)
-changed=$((tracked + ${#untracked[@]}))
+tree=$(GIT_INDEX_FILE="$index" git write-tree 2> /dev/null) || exit 0
+changed=$(git diff --name-only -z "$base" "$tree" -- 2> /dev/null | tr -cd '\0' | wc -c)
 
 [ "$changed" -gt 0 ] || exit 0
 
-# What the review would look at, as one hash: the diff since the base plus every untracked file's name
-# and content. git hash-object is used because it is there wherever git is.
-fingerprint=$(
-  {
-    git diff "$base" -- 2> /dev/null
-    # The ${var+...} form keeps an empty array from tripping `set -u` on bash before 4.4.
-    for name in ${untracked[@]+"${untracked[@]}"}; do
-      printf '%s\0%s\n' "$name" "$(git hash-object -- "$name" 2> /dev/null)"
-    done
-  } | git hash-object --stdin
-)
+fingerprint="$base $tree"
 
 # Kept in this worktree's own git directory. One that cannot be written (a read-only mount) keeps it in
 # a directory of this user's own under the temporary directory, named after the git directory, so the
