@@ -11,9 +11,10 @@ defmodule Malachi.BrokerServerStreamingTest do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.Log.Record
   alias Malachi.LogApi
+  alias Malachi.Test.TmpDir
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "malachi_stream_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_stream")
     repl = :"repl_#{System.unique_integer([:positive])}"
     start_supervised!({ReplicationServer, name: repl, directory: Path.join(dir, "repl")}, id: repl)
     {:ok, broker} = BrokerServer.start_link(Path.join(dir, "b"), brokers: [repl])

@@ -13,32 +13,23 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
+  alias Malachi.Test.Distribution
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
 
   # Every peer registers its replication server under the same name: a broker ref is `{name, node}`, so
   # the node alone tells them apart, as in a real cluster.
   @server :storage_failure_repl
 
   setup_all do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
-    :ok
+    Distribution.ensure_started()
   end
 
   # A peer node running one replication server over the fault-injecting store, without the Malachi
   # application: the server needs only logging, telemetry, and the store's rules table. Returns the broker
   # ref and the server's data directory.
   defp start_peer_broker do
-    name = :"malachi_storage_fail_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {_peer, node, name} = Distribution.start_peer("storage_fail")
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:logger])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
     # The failure is expected here and asserted on the calling node; its log line would only be noise.
@@ -53,12 +44,6 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
     {:ok, _pid} = :erpc.call(node, GenServer, :start, [ReplicationServer, opts, [name: @server]])
 
     {{@server, node}, directory}
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
@@ -76,7 +61,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
     {follower, _follower_dir} = start_peer_broker()
 
     local_name = :"storage_failure_local_#{System.unique_integer([:positive])}"
-    local_dir = Path.join(System.tmp_dir!(), "#{local_name}_data")
+    local_dir = TmpDir.path("#{local_name}_data")
     on_exit(fn -> File.rm_rf!(local_dir) end)
     start_supervised!({ReplicationServer, [name: local_name, directory: local_dir]}, id: local_name)
     local = {local_name, node()}
@@ -149,7 +134,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
     {follower, _follower_dir} = start_peer_broker()
 
     local_name = :"storage_rot_local_#{System.unique_integer([:positive])}"
-    local_dir = Path.join(System.tmp_dir!(), "#{local_name}_data")
+    local_dir = TmpDir.path("#{local_name}_data")
     on_exit(fn -> File.rm_rf!(local_dir) end)
     start_supervised!({ReplicationServer, [name: local_name, directory: local_dir]}, id: local_name)
     local = {local_name, node()}

@@ -5,11 +5,13 @@ defmodule CheckNoPipeToShellTest do
   # repository so a future script that reintroduces the pattern fails this test and not only CI.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.TmpDir
+
   @guard Path.expand("../../scripts/check-no-pipe-to-shell.sh", __DIR__)
   @repo_root Path.expand("../..", __DIR__)
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "pipe-guard-#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("pipe-guard")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
     %{dir: dir}
@@ -127,7 +129,7 @@ defmodule CheckNoPipeToShellTest do
   end
 
   test "fails loudly rather than scanning nothing when a target does not exist" do
-    assert {output, 1} = run([Path.join(System.tmp_dir!(), "no-such-script-#{System.unique_integer()}.sh")])
+    assert {output, 1} = run([TmpDir.path("no-such-script") <> ".sh"])
     assert output =~ "not a file"
   end
 

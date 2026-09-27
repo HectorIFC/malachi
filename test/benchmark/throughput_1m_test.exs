@@ -17,6 +17,7 @@ defmodule Malachi.Benchmark.Throughput1mTest do
   alias Malachi.Bench.E2ESample
   alias Malachi.Bench.FlushRegime
   alias Malachi.Test.BenchScript
+  alias Malachi.Test.TmpDir
 
   @moduletag :tmp_dir
   @moduletag timeout: 300_000
@@ -68,7 +69,7 @@ defmodule Malachi.Benchmark.Throughput1mTest do
     unless @shm_tmpfs?, do: @describetag(skip: "#{@shm} is not a tmpfs mount on this host (Linux only)")
 
     setup do
-      dir = Path.join(@shm, "malachi_throughput_1m_test_#{System.unique_integer([:positive])}")
+      dir = TmpDir.path("malachi_throughput_1m_test", @shm)
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
       %{shm_dir: dir}

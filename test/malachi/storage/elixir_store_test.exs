@@ -10,6 +10,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
   alias Malachi.Log.{Record, Segment}
   alias Malachi.Storage.ElixirStore
   alias Malachi.Test.StorageFaults
+  alias Malachi.Test.TmpDir
 
   @moduletag :tmp_dir
 
@@ -1154,7 +1155,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
               position_seed <- StreamData.positive_integer(),
               max_runs: 60
             ) do
-        directory = Path.join(System.tmp_dir!(), "malachi_verify_prop_#{System.unique_integer([:positive])}")
+        directory = TmpDir.path("malachi_verify_prop")
         on_exit(fn -> File.rm_rf!(directory) end)
 
         {:ok, store} = ElixirStore.open(directory, "segment-0")
@@ -1694,7 +1695,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
             records <- StreamData.list_of(record_gen(), min_length: 1, max_length: 50),
             max_runs: 50
           ) do
-      directory = Path.join(System.tmp_dir!(), "ng_prop_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("ng_prop")
       File.rm_rf!(directory)
       {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 64)
       {:ok, store, first, last} = ElixirStore.append(store, records)
@@ -1720,7 +1721,7 @@ defmodule Malachi.Storage.ElixirStoreTest do
             records <- StreamData.list_of(record_gen(), min_length: 1, max_length: 30),
             max_runs: 30
           ) do
-      directory = Path.join(System.tmp_dir!(), "ng_prop_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("ng_prop")
       File.rm_rf!(directory)
       {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 48)
       {:ok, store, _, _} = ElixirStore.append(store, records)

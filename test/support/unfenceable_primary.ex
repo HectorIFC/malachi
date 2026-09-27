@@ -21,6 +21,7 @@ defmodule Malachi.Test.UnfenceablePrimary do
   use GenServer
 
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Test.TmpDir
 
   @doc "Starts the proxy. `:directory` is where the inner replication server stores segments."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -37,7 +38,7 @@ defmodule Malachi.Test.UnfenceablePrimary do
   def init(opts) do
     directory =
       Keyword.get_lazy(opts, :directory, fn ->
-        Path.join(System.tmp_dir!(), "malachi_unfenceable_#{System.unique_integer([:positive])}")
+        TmpDir.path("malachi_unfenceable")
       end)
 
     {:ok, inner} = ReplicationServer.start_link(directory: directory)

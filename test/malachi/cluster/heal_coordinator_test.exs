@@ -7,13 +7,14 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
   defp start_broker, do: elem(start_broker_at([]), 0)
 
   # Same, with extra server options (a `:store`), and handing back the data directory a store rule names.
   defp start_broker_at(opts) do
-    directory = Path.join(System.tmp_dir!(), "malachi_healco_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_healco")
 
     on_exit(fn ->
       FaultySegmentStore.clear(directory)

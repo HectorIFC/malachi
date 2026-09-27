@@ -152,6 +152,11 @@ docker-compose up -d
 
 Access the dashboard at: http://localhost:4041
 
+Every host port the stack publishes can be moved, so two stacks (two checkouts) can run side by side:
+`MALACHI_TCP_PORT` (4040), `MALACHI_DASHBOARD_PORT` (4041), `JAEGER_UI_PORT` (16686), `OTLP_PORT` (4318)
+and `PROMETHEUS_PORT` (9090), each defaulting to the value in parentheses, plus a `COMPOSE_PROJECT_NAME`
+of its own. They change only the ports on your machine; inside the containers nothing moves.
+
 ### Build Locally (All Platforms)
 
 ```bash

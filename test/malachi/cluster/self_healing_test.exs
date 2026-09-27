@@ -7,6 +7,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
 
   defp start_broker do
     {ref, _directory, _id} = start_broker_with_directory()
@@ -14,7 +15,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
   end
 
   defp start_broker_with_directory do
-    directory = Path.join(System.tmp_dir!(), "malachi_heal_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_heal")
     on_exit(fn -> File.rm_rf!(directory) end)
     id = {:repl, System.unique_integer([:positive])}
     {start_supervised!({ReplicationServer, directory: directory}, id: id), directory, id}

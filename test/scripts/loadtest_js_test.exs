@@ -7,12 +7,12 @@ defmodule LoadtestJsTest do
   # Not async: the authentication counts would pick up other tests' connections.
   use ExUnit.Case, async: false
 
+  alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
 
   @moduletag :tmp_dir
 
   @script Path.expand("../../scripts/loadtest.js", __DIR__)
-  @port Application.compile_env(:malachi, :tcp_port, 4040)
 
   setup_all do
     # A missing runtime fails loudly instead of skipping: a skipped generator test reads as a passing one.
@@ -32,7 +32,7 @@ defmodule LoadtestJsTest do
   defp run_js(ctx, args, opts \\ []) do
     env = [
       {"MALACHI_HOST", "127.0.0.1"},
-      {"MALACHI_PORT", Integer.to_string(@port)},
+      {"MALACHI_PORT", Integer.to_string(TCPAcceptorPool.port())},
       {"MALACHI_USER", Keyword.get(opts, :user, "admin")},
       {"MALACHI_PASS", Keyword.get(opts, :pass, "admin123")}
     ]
@@ -158,7 +158,7 @@ defmodule LoadtestJsTest do
       elixir_report =
         ExUnit.CaptureIO.capture_io(fn ->
           Malachi.Loadtest.run(
-            port: @port,
+            port: TCPAcceptorPool.port(),
             user: "admin",
             pass: "admin123",
             scenario: :produce,

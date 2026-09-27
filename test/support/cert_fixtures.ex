@@ -25,4 +25,20 @@ defmodule Malachi.Test.CertFixtures do
   @doc "The raw PEM text of certificate `name`."
   @spec pem(String.t()) :: String.t()
   def pem(name), do: File.read!(Path.join(@certs_dir, "#{name}.pem"))
+
+  @doc """
+  Generates a throwaway self-signed server certificate and key (CN `localhost`, one day) under `dir`, and
+  returns their paths. Generated rather than committed because a private key is never checked in; openssl
+  ships on the CI image and is what the project's own cert scripts use.
+  """
+  @spec server_cert!(Path.t()) :: %{certfile: Path.t(), keyfile: Path.t()}
+  def server_cert!(dir) do
+    File.mkdir_p!(dir)
+    certfile = Path.join(dir, "cert.pem")
+    keyfile = Path.join(dir, "key.pem")
+
+    args = ~w(req -x509 -newkey rsa:2048 -nodes -keyout #{keyfile} -out #{certfile} -days 1 -subj /CN=localhost)
+    {_out, 0} = System.cmd("openssl", args, stderr_to_stdout: true)
+    %{certfile: certfile, keyfile: keyfile}
+  end
 end

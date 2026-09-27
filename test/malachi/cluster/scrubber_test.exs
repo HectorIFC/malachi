@@ -9,13 +9,14 @@ defmodule Malachi.Cluster.ScrubberTest do
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
   @segment {{"events", 0}, 0}
 
   defp start_replica do
     name = :"scrub_repl_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_scrub_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_scrub")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, [name: name, directory: directory]}, id: name)
     {{name, node()}, directory}
@@ -91,7 +92,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     # A replica whose store fails on demand, with this segment's copy already latched as failed.
     defp start_latched_replica(values) do
       name = :"scrub_faulty_#{System.unique_integer([:positive])}"
-      directory = Path.join(System.tmp_dir!(), "malachi_scrub_#{System.unique_integer([:positive])}")
+      directory = TmpDir.path("malachi_scrub")
 
       on_exit(fn ->
         FaultySegmentStore.clear(directory)

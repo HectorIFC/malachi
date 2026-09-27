@@ -5,6 +5,7 @@ defmodule Malachi.Loadtest.ConnTLSTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Loadtest.Conn
+  alias Malachi.Test.TmpDir
 
   @host ~c"localhost"
 
@@ -12,7 +13,7 @@ defmodule Malachi.Loadtest.ConnTLSTest do
   # gitignored, so generating here keeps the test self-contained. `cn` lets a case ask for a
   # certificate issued to a DIFFERENT host than the one it connects to.
   defp self_signed(cn \\ "localhost") do
-    dir = Path.join(System.tmp_dir!(), "malachi_conn_tls_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_conn_tls")
     File.mkdir_p!(dir)
     certfile = Path.join(dir, "cert.pem")
     keyfile = Path.join(dir, "key.pem")
@@ -48,7 +49,7 @@ defmodule Malachi.Loadtest.ConnTLSTest do
   # a legitimate private-CA deployment still connects. `cn` also lands in the SAN, which is what
   # hostname verification actually reads.
   defp ca_signed(cn \\ "localhost") do
-    dir = Path.join(System.tmp_dir!(), "malachi_conn_ca_#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("malachi_conn_ca")
     File.mkdir_p!(dir)
     path = &Path.join(dir, &1)
     openssl = &({_out, 0} = System.cmd("openssl", &1, stderr_to_stdout: true))

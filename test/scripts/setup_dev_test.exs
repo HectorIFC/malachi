@@ -10,6 +10,8 @@ defmodule SetupDevTest do
   # sudo, nothing written outside the temporary directory.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.TmpDir
+
   @script Path.expand("../../scripts/setup-dev.sh", __DIR__)
 
   # The pinned version lives in the script. Reading it back keeps these tests correct across a version bump
@@ -24,7 +26,7 @@ defmodule SetupDevTest do
   @minimal_tools ~w(bash sh env dirname uname mktemp awk gunzip gzip mkdir mv cp rm chmod head cut cat)
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "setup-dev-#{System.unique_integer([:positive])}")
+    dir = TmpDir.path("setup-dev")
     File.mkdir_p!(Path.join(dir, "scripts"))
     File.mkdir_p!(Path.join(dir, "stub-bin"))
     File.cp!(@script, Path.join([dir, "scripts", "setup-dev.sh"]))

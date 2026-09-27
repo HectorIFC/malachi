@@ -9,8 +9,6 @@ defmodule Malachi.DashboardSecurityTest do
 
   # These tests require dashboard authentication and rate limiting enabled in config/test.exs
 
-  @dashboard_port Application.compile_env(:malachi, :dashboard_port, 4041)
-
   setup do
     # Reset rate limiter BEFORE tests (not just on_exit)
     Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
@@ -42,7 +40,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "authentication" do
     test "GET / without token redirects to /login", %{} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
           :gen_tcp.send(socket, request)
@@ -80,7 +78,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET / with producer token (non-admin) returns 403", %{producer_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -103,7 +101,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET / with admin token returns 200", %{admin_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -127,7 +125,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET /metrics with producer token returns 200", %{producer_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET /metrics HTTP/1.1\r
@@ -150,7 +148,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET / with Bearer token fallback returns 200", %{admin_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -175,7 +173,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "login endpoint" do
     test "POST /login with valid credentials returns token and Set-Cookie" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
 
@@ -200,7 +198,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "POST /login with invalid credentials returns 403" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "wrong_password"})
 
@@ -221,7 +219,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET /login returns HTML login page" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = "GET /login HTTP/1.1\r\nHost: localhost\r\n\r\n"
           :gen_tcp.send(socket, request)
@@ -242,7 +240,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "malformed Content-Length" do
     test "non-numeric Content-Length does not crash the handler" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           # Before the fix, String.to_integer("abc") raised and killed the handler, so the socket closed
           # with no response. The server must instead answer (any HTTP status) without crashing.
@@ -261,7 +259,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "negative Content-Length does not crash the handler" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request =
             "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: -5\r\n\r\n"
@@ -289,7 +287,7 @@ defmodule Malachi.DashboardSecurityTest do
           else: Application.delete_env(:malachi, :dashboard_recv_timeout_ms)
       end)
 
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           # Connect and send nothing. Before the fix, recv(socket, 0) blocked forever and the client would
           # only see its own recv timeout ({:error, :timeout}); now the server closes the idle socket once
@@ -305,7 +303,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "security headers" do
     test "responses include security headers", %{admin_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -340,7 +338,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "CORS headers present on /metrics", %{admin_token: token} do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET /metrics HTTP/1.1\r
@@ -377,7 +375,7 @@ defmodule Malachi.DashboardSecurityTest do
         Application.put_env(:malachi, :dashboard_cors_origins, original_origins)
       end)
 
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           OPTIONS /metrics HTTP/1.1\r
@@ -745,7 +743,7 @@ defmodule Malachi.DashboardSecurityTest do
       # Make 25 failed login attempts (limit is 10, so 11th+ should definitely be blocked)
       results =
         for _i <- 1..25 do
-          case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+          case DashboardHelper.connect() do
             {:ok, socket} ->
               body = Jason.encode!(%{"username" => "nonexistent", "password" => "wrong"})
 
@@ -783,7 +781,7 @@ defmodule Malachi.DashboardSecurityTest do
   describe "audit logging" do
     test "successful dashboard access is logged", %{admin_token: token} do
       # Access dashboard
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -813,7 +811,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "failed authentication is logged" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET / HTTP/1.1\r
@@ -841,7 +839,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "logout" do
     test "GET /logout clears cookie and redirects to /login" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
           GET /logout HTTP/1.1\r
@@ -867,7 +865,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET /logout works without cookie" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = "GET /logout HTTP/1.1\r\nHost: localhost\r\n\r\n"
           :gen_tcp.send(socket, request)
@@ -888,7 +886,7 @@ defmodule Malachi.DashboardSecurityTest do
   describe "cookie authentication flow" do
     test "login sets cookie, cookie grants access to dashboard" do
       # Step 1: Login and capture Set-Cookie
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "admin_pass_123"})
 
@@ -906,7 +904,7 @@ defmodule Malachi.DashboardSecurityTest do
           assert token != nil
 
           # Step 2: Use cookie to access dashboard
-          case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+          case DashboardHelper.connect() do
             {:ok, socket2} ->
               request2 = """
               GET / HTTP/1.1\r
@@ -932,7 +930,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     test "GET /metrics without token returns 401 (non-HTML route)" do
-      case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+      case DashboardHelper.connect() do
         {:ok, socket} ->
           request = "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n"
           :gen_tcp.send(socket, request)
@@ -951,7 +949,7 @@ defmodule Malachi.DashboardSecurityTest do
 
     test "GET /health and /ready are public: 200 without a token even when auth is enabled" do
       for path <- ["/health", "/ready"] do
-        case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
+        case DashboardHelper.connect() do
           {:ok, socket} ->
             :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
             {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
@@ -969,7 +967,7 @@ defmodule Malachi.DashboardSecurityTest do
 
   describe "user management (P3-3)" do
     test "admin lists users (with permissions, no hashes)", %{admin_token: token} do
-      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, socket} = DashboardHelper.connect()
       {:ok, response} = DashboardHelper.authenticated_request(socket, :GET, "/users", token)
       :gen_tcp.close(socket)
 
@@ -985,7 +983,7 @@ defmodule Malachi.DashboardSecurityTest do
       username = "dashuser_#{System.unique_integer([:positive])}"
       on_exit(fn -> Malachi.Auth.remove_user(username) end)
 
-      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, socket} = DashboardHelper.connect()
       body = Jason.encode!(%{username: username, password: "Dash-Pass-123", permissions: ["consume"]})
       {:ok, response} = DashboardHelper.authenticated_request(socket, :POST, "/users", token, body: body)
       :gen_tcp.close(socket)
@@ -999,7 +997,7 @@ defmodule Malachi.DashboardSecurityTest do
       on_exit(fn -> Malachi.Auth.remove_user(username) end)
       :ok = Malachi.Auth.add_user(username, "Old-Pass-111", [:consume])
 
-      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, socket} = DashboardHelper.connect()
       body = Jason.encode!(%{password: "New-Pass-222"})
 
       {:ok, response} =
@@ -1016,7 +1014,7 @@ defmodule Malachi.DashboardSecurityTest do
       username = "dashdel_#{System.unique_integer([:positive])}"
       :ok = Malachi.Auth.add_user(username, "Del-Pass-1", [:consume])
 
-      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, socket} = DashboardHelper.connect()
       {:ok, response} = DashboardHelper.authenticated_request(socket, :DELETE, "/users/#{username}", token)
       :gen_tcp.close(socket)
 
@@ -1029,13 +1027,13 @@ defmodule Malachi.DashboardSecurityTest do
       on_exit(fn -> Malachi.Auth.remove_user(username) end)
       :ok = Malachi.Auth.add_user(username, "p", [:consume])
 
-      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, s1} = DashboardHelper.connect()
       dup = Jason.encode!(%{username: username, password: "p2", permissions: ["consume"]})
       {:ok, r1} = DashboardHelper.authenticated_request(s1, :POST, "/users", token, body: dup)
       :gen_tcp.close(s1)
       assert status_code(r1) == 409
 
-      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, s2} = DashboardHelper.connect()
       bad = Jason.encode!(%{username: "dashbad_x", password: "p", permissions: ["superuser"]})
       {:ok, r2} = DashboardHelper.authenticated_request(s2, :POST, "/users", token, body: bad)
       :gen_tcp.close(s2)
@@ -1045,13 +1043,13 @@ defmodule Malachi.DashboardSecurityTest do
 
     test "a non-admin is forbidden and an unauthenticated request is unauthorized", %{producer_token: token} do
       # non-admin token -> 403
-      {:ok, s1} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, s1} = DashboardHelper.connect()
       {:ok, r1} = DashboardHelper.authenticated_request(s1, :GET, "/users", token)
       :gen_tcp.close(s1)
       assert status_code(r1) == 403
 
       # no token -> 401
-      {:ok, s2} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, s2} = DashboardHelper.connect()
       {:ok, r2} = DashboardHelper.request(s2, :GET, "/users")
       :gen_tcp.close(s2)
       assert status_code(r2) == 401
@@ -1067,7 +1065,7 @@ defmodule Malachi.DashboardSecurityTest do
     end
 
     defp acl_req(method, path, token, body \\ nil) do
-      {:ok, socket} = DashboardHelper.connect(port: @dashboard_port)
+      {:ok, socket} = DashboardHelper.connect()
       opts = if body, do: [body: Jason.encode!(body)], else: []
       {:ok, response} = DashboardHelper.authenticated_request(socket, method, path, token, opts)
       :gen_tcp.close(socket)
@@ -1191,7 +1189,7 @@ defmodule Malachi.DashboardSecurityTest do
   # strict: the dashboard runs for this suite, so a connect or recv failure is a real failure, not a reason
   # to skip the assertions and report green.
   defp preflight_response(path, origin) do
-    {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000)
+    {:ok, socket} = DashboardHelper.connect()
     :gen_tcp.send(socket, "OPTIONS #{path} HTTP/1.1\r\nHost: localhost\r\nOrigin: #{origin}\r\n\r\n")
     {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
     :gen_tcp.close(socket)

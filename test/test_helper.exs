@@ -1,13 +1,9 @@
-# Start Erlang distribution BEFORE the app, with the same node name the multinode tests use. The app forms
-# an ra cluster for the replicated user store at boot; if a later test renamed the node
-# (`:net_kernel.start`), that cluster (formed under the old name) would be orphaned. Naming the node up
-# front keeps it stable. The multinode tests then see `:already_started` and do not rename it.
-_ = System.cmd("epmd", ["-daemon"])
-
-case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-  {:ok, _pid} -> :ok
-  {:error, {:already_started, _pid}} -> :ok
-end
+# Name the node once, before any test runs, so no test renames it later: the multinode tests' own
+# `Distribution.ensure_started/0` then leaves the name alone. Note that `mix test` (no `--no-start`) has
+# already started the application by the time this file runs, so this comes after the app's boot, not
+# before it. The name is derived from the OS pid, so a second `mix test` on the same host (another
+# worktree) does not fight this one for it in epmd.
+:ok = Malachi.Test.Distribution.ensure_started()
 
 # Record every message a long-lived server drops (Malachi.UnexpectedMessage) from here on, the application's
 # own servers included, so the run can fail on any drop no test asked for (see the check at the end).
@@ -50,5 +46,8 @@ end)
 # Malachi and its harnesses target Linux only, and `:linux` tests drive them with Linux tools (coreutils
 # `timeout`, util-linux). They run wherever the suite runs on Linux, CI included; on any other host they
 # are excluded rather than rewritten for it.
+#
+# `:parallel_probe` tests exist only to be run by `Malachi.ParallelRunTest`, in a second VM started while
+# this suite runs; they are never part of a normal run.
 linux_only = if :os.type() == {:unix, :linux}, do: [], else: [:linux]
-ExUnit.start(exclude: [:multinode | linux_only])
+ExUnit.start(exclude: [:multinode, :parallel_probe | linux_only])

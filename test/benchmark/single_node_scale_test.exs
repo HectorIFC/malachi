@@ -11,6 +11,7 @@ defmodule Malachi.Benchmark.SingleNodeScaleTest do
 
   alias Malachi.Bench.FlushRegime
   alias Malachi.Test.BenchScript
+  alias Malachi.Test.TmpDir
 
   @moduletag :tmp_dir
   @moduletag timeout: 300_000
@@ -104,7 +105,7 @@ defmodule Malachi.Benchmark.SingleNodeScaleTest do
     unless @shm_tmpfs?, do: @describetag(skip: "#{@shm} is not a tmpfs mount on this host (Linux only)")
 
     test "the run is refused", %{tools: tools} do
-      dir = Path.join(@shm, "malachi_scale_test_#{System.unique_integer([:positive])}")
+      dir = TmpDir.path("malachi_scale_test", @shm)
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
 

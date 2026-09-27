@@ -5,9 +5,11 @@ defmodule Malachi.Test.RaPeers do
 
   A peer's machine version pin (`Malachi.Cluster.MachineVersion`) is set before `ra` starts, which is
   how these tests give one member different "code" from the others while every node loads the same
-  code path. The test node must already be distributed (run with `elixir --name ... -S mix test`, or
-  call `ensure_distribution/0`).
+  code path. The test node must already be distributed (`Malachi.Test.Distribution.ensure_started/0`,
+  which `ensure_distribution/0` calls).
   """
+
+  alias Malachi.Test.Distribution
 
   @system :default
 
@@ -16,13 +18,7 @@ defmodule Malachi.Test.RaPeers do
   @doc "Makes the test node distributed and starts `ra` on it."
   @spec ensure_distribution() :: :ok
   def ensure_distribution do
-    _ = System.cmd("epmd", ["-daemon"])
-
-    case :net_kernel.start([:"malachi_primary@127.0.0.1", :longnames]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-    end
-
+    :ok = Distribution.ensure_started()
     {:ok, _apps} = Application.ensure_all_started(:ra)
     :ok
   end
@@ -30,7 +26,7 @@ defmodule Malachi.Test.RaPeers do
   @doc "Starts a fresh peer with its own data directory, pinned to `pin` (nil means no pin)."
   @spec start(non_neg_integer() | nil) :: t()
   def start(pin) do
-    name = :"malachi_mv_#{System.unique_integer([:positive])}"
+    name = Distribution.peer_name("mv")
     data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_mv_#{name}"
     boot(name, data_dir, pin)
   end

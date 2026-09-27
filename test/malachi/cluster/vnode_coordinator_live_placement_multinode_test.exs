@@ -19,7 +19,9 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementMultinodeTest do
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.VnodeCoordinatorManager, as: Manager
+  alias Malachi.Test.Distribution
   alias Malachi.Test.RaPeers
+  alias Malachi.Test.TmpDir
   alias Malachi.Test.VnodeCoordinatorProbe, as: Probe
 
   setup_all do
@@ -28,25 +30,15 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementMultinodeTest do
   end
 
   defp start_peer do
-    name = :"malachi_vcm_#{System.unique_integer([:positive])}"
-    {:ok, peer, node} = :peer.start_link(%{name: name, host: ~c"127.0.0.1", longnames: true})
-    on_exit(fn -> try_stop(peer) end)
-
-    :ok = :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    {_peer, node, name} = Distribution.start_peer("vcm")
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:logger])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
     {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:ra])
-    data_dir = ~c"#{System.tmp_dir!()}/malachi_ra_vcm_#{name}_#{System.unique_integer([:positive])}"
+    data_dir = String.to_charlist(TmpDir.path("malachi_ra_vcm_#{name}"))
     {:ok, _pid} = :erpc.call(node, :ra, :start_in, [data_dir])
     on_exit(fn -> File.rm_rf("#{data_dir}") end)
 
     node
-  end
-
-  defp try_stop(peer) do
-    :peer.stop(peer)
-  catch
-    _kind, _reason -> :ok
   end
 
   # The ring as the cluster published it: one vnode, placed on the two nodes that formed it.

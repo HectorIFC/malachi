@@ -7,6 +7,7 @@ defmodule Malachi.DataPlaneRouterTest do
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Log.Record
+  alias Malachi.Test.TmpDir
 
   setup do
     original = Application.get_env(:malachi, :data_shards)
@@ -108,7 +109,7 @@ defmodule Malachi.DataPlaneRouterTest do
 
   defp start_independent_broker do
     tag = System.unique_integer([:positive])
-    dir = Path.join(System.tmp_dir!(), "dpr_test_#{tag}")
+    dir = TmpDir.path("dpr_test")
     File.rm_rf!(dir)
     {:ok, broker} = BrokerServer.start_link(dir, name: :"dpr_broker_#{tag}")
 

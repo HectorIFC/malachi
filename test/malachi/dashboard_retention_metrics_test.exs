@@ -23,7 +23,7 @@ defmodule Malachi.DashboardRetentionMetricsTest do
       Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     end)
 
-    {:ok, token} = DashboardHelper.login(@user, @password, port: port())
+    {:ok, token} = DashboardHelper.login(@user, @password)
     {:ok, token: token}
   end
 
@@ -69,7 +69,7 @@ defmodule Malachi.DashboardRetentionMetricsTest do
   end
 
   test "the retention series need the login like every other series" do
-    {:ok, socket} = DashboardHelper.connect(port: port())
+    {:ok, socket} = DashboardHelper.connect()
     {:ok, response} = DashboardHelper.request(socket, :GET, "/metrics", headers: %{"Accept" => "text/plain"})
     :gen_tcp.close(socket)
 
@@ -77,7 +77,7 @@ defmodule Malachi.DashboardRetentionMetricsTest do
   end
 
   defp scrape(token) do
-    response = DashboardHelper.scrape_metrics(token, port: port())
+    response = DashboardHelper.scrape_metrics(token)
     assert response =~ "HTTP/1.1 200 OK"
     response
   end
@@ -87,8 +87,4 @@ defmodule Malachi.DashboardRetentionMetricsTest do
     assert value, "#{series} is missing from the scrape"
     value
   end
-
-  # The port the dashboard actually listens on, read at runtime so a run with MALACHI_DASHBOARD_PORT set
-  # (parallel worktrees) scrapes its own node.
-  defp port, do: Application.fetch_env!(:malachi, :dashboard_port)
 end

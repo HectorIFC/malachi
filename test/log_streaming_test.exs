@@ -10,8 +10,6 @@ defmodule Malachi.LogStreamingTest do
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @port Application.compile_env(:malachi, :tcp_port, 4040)
-
   defp ok?(code), do: code == Wire.ok_code()
   defp reason(payload), do: Wire.decode_auth_resp(payload)
   defp values(records), do: Enum.map(records, & &1.value)
@@ -26,7 +24,7 @@ defmodule Malachi.LogStreamingTest do
   end
 
   defp with_session(username, password, fun) do
-    case TCPHelper.connect(port: @port) do
+    case TCPHelper.connect() do
       {:ok, socket} ->
         {:ok, _token} = TCPHelper.authenticate_wire(socket, username, password)
 

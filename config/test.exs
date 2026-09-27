@@ -21,10 +21,11 @@ config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_expo
 # Isolate the NorthGuard log broker's on-disk data per test run. The default dir is fixed and would
 # persist between runs; with in-memory (single-node) metadata resetting each run, a topic name reused
 # from a prior run would collide with a leftover segment on disk (Log.ensure_active :already_exists).
+# The OS pid keeps two runs started in the same nanosecond on one host (two worktrees) apart.
 config :malachi,
-  log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.system_time(:nanosecond)}"),
+  log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.pid()}_#{System.system_time(:nanosecond)}"),
   # The app now starts ra unconditionally (the replicated user store); isolate its on-disk data per run.
-  ra_data_dir: Path.join(System.tmp_dir!(), "malachi_ra_test_#{System.system_time(:nanosecond)}"),
+  ra_data_dir: Path.join(System.tmp_dir!(), "malachi_ra_test_#{System.pid()}_#{System.system_time(:nanosecond)}"),
   # Deterministic credentials the test suite authenticates with. Test-only, never shipped to prod (the base
   # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.
   default_users: [
@@ -35,6 +36,11 @@ config :malachi,
   ]
 
 config :malachi,
+  # Both listeners bind a port the operating system picks, so two `mix test` runs on one host (two
+  # worktrees) never fight for 4040/4041. Tests ask the listener which port it got
+  # (`Malachi.TCPAcceptorPool.port/0`, `Malachi.Dashboard.port/0`), never the config, which stays 0.
+  tcp_port: 0,
+  dashboard_port: 0,
   # TLS configuration for tests (disabled by default)
   enable_tls: false,
   require_tls: false,

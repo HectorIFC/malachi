@@ -21,17 +21,35 @@ defmodule Malachi.Dashboard do
   alias Malachi.Metrics.Prometheus
   alias Malachi.RateLimiter
 
-  @doc "Starts the dashboard HTTP server listening on `port` (registered under the module name)."
-  def start_link(port) do
-    GenServer.start_link(__MODULE__, port, name: __MODULE__)
+  @doc """
+  Starts the dashboard HTTP server listening on `port`, registered under the module name.
+  `{port, name: name}` registers it under `name` instead, which is how a test runs one beside the
+  application's. Port 0 asks the operating system for a free port; `port/1` answers which.
+  """
+  @spec start_link(:inet.port_number() | {:inet.port_number(), keyword()}) :: GenServer.on_start()
+  def start_link({port, opts}) do
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, {port, name}, name: name)
   end
 
+  def start_link(port), do: start_link({port, []})
+
+  @doc """
+  The port the dashboard registered as `name` bound, which differs from the configured one when that was
+  0. After the dashboard stops this is still the last port it bound; nil if it never started. Read from
+  `:persistent_term` rather than asked of the server, which spends its life blocked in `accept`.
+  """
+  @spec port(atom()) :: :inet.port_number() | nil
+  def port(name \\ __MODULE__), do: :persistent_term.get({__MODULE__, name}, nil)
+
   @impl true
-  def init(port) do
+  def init({port, name}) do
     opts = [:binary, packet: :http, active: false, reuseaddr: true]
 
     case :gen_tcp.listen(port, opts) do
       {:ok, socket} ->
+        {:ok, port} = :inet.port(socket)
+        :persistent_term.put({__MODULE__, name}, port)
         Logger.info(I18n.t(:dashboard_started, port: port))
         # Stating the cookie policy at boot is part of the fix rather than decoration: the failure it
         # guards against is a login that answers 200 and does nothing, which is invisible from the outside.

@@ -4,11 +4,12 @@ defmodule Malachi.Cluster.CatchupTest do
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Test.TmpDir
 
   @segment {{"events", 0}, 0}
 
   defp start_broker do
-    directory = Path.join(System.tmp_dir!(), "malachi_catchup_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_catchup")
     on_exit(fn -> File.rm_rf!(directory) end)
     start_supervised!({ReplicationServer, directory: directory}, id: {:repl, System.unique_integer([:positive])})
   end

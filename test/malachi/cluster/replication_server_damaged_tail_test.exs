@@ -14,6 +14,7 @@ defmodule Malachi.Cluster.ReplicationServerDamagedTailTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Storage.Layout
+  alias Malachi.Test.TmpDir
 
   @segment {{"events", 0}, 0}
 
@@ -26,7 +27,7 @@ defmodule Malachi.Cluster.ReplicationServerDamagedTailTest do
   # stopped, so the restart recovers the segment with rot after the second record.
   defp rotted_copy do
     name = :"damaged_#{System.unique_integer([:positive])}"
-    directory = Path.join(System.tmp_dir!(), "malachi_damaged_#{System.unique_integer([:positive])}")
+    directory = TmpDir.path("malachi_damaged")
     on_exit(fn -> File.rm_rf!(directory) end)
 
     start_server(name, directory)
