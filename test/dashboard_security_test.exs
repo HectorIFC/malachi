@@ -330,6 +330,18 @@ defmodule Malachi.DashboardSecurityTest do
       assert raw_request(["Host: localhost", padded_line(10_001), cookie], "/metrics") == ""
     end
 
+    test "a repeated name adds its bytes on every line, not only the value kept" do
+      # 41 lines is under the count, and only one cookie survives in the map, but the 40 lines carry about
+      # 36 KB: the total counts what was read, not what was kept.
+      lines = ["Host: localhost" | List.duplicate("Cookie: " <> String.duplicate("a", 900), 40)]
+      assert status_code(raw_request(lines)) == 431
+    end
+
+    test "a 10000 byte request line is read and a 10001 byte one closes the connection" do
+      assert status_code(raw_request_line(10_000)) > 0
+      assert raw_request_line(10_001) == ""
+    end
+
     test "32768 bytes of names and values are served and one more is refused" do
       # "host" + "localhost" is 13 bytes and each "x-tN" name is 4, so the values carry the rest.
       assert status_code(raw_request(total_lines(32_768))) == 200
@@ -386,8 +398,11 @@ defmodule Malachi.DashboardSecurityTest do
       :gen_tcp.close(socket)
     end
 
-    test "a malformed header line ends the parse and the request is routed with the headers before it" do
-      assert status_code(raw_request(["Host: localhost", "NoColonHere"])) == 200
+    test "a malformed header line ends the parse and the request is routed with the headers before it",
+         %{admin_token: token} do
+      # /metrics needs the cookie, so a 200 shows the header read before the malformed line was kept.
+      lines = ["Host: localhost", "Cookie: malachi_token=#{token}", "NoColonHere"]
+      assert status_code(raw_request(lines, "/metrics")) == 200
     end
   end
 
@@ -417,6 +432,8 @@ defmodule Malachi.DashboardSecurityTest do
 
       assert status_code(raw_request(["Host: localhost", padded_line(512)], "/health", port)) == 200
       assert raw_request(["Host: localhost", padded_line(513)], "/health", port) == ""
+      assert status_code(raw_request_line(512, port)) > 0
+      assert raw_request_line(513, port) == ""
 
       # 13 bytes for the Host header and 3 for each "x-a" style name leave 1002 bytes for three values.
       assert status_code(raw_request(small_total_lines(1_024), "/health", port)) == 200
@@ -1394,6 +1411,16 @@ defmodule Malachi.DashboardSecurityTest do
     {:ok, socket} = DashboardHelper.connect(port: port)
     head = Enum.map_join(lines, &(&1 <> "\r\n"))
     :ok = :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\n#{head}\r\n")
+    response = read_until_closed(socket, "")
+    :gen_tcp.close(socket)
+    response
+  end
+
+  # A GET whose request line, CRLF included, is exactly `length` bytes long.
+  defp raw_request_line(length, port \\ Malachi.Dashboard.port()) do
+    {:ok, socket} = DashboardHelper.connect(port: port)
+    target = "/" <> String.duplicate("a", length - byte_size("GET / HTTP/1.1\r\n"))
+    :ok = :gen_tcp.send(socket, "GET #{target} HTTP/1.1\r\nHost: localhost\r\n\r\n")
     response = read_until_closed(socket, "")
     :gen_tcp.close(socket)
     response
