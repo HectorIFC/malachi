@@ -78,12 +78,15 @@ defmodule Malachi.DashboardApiRateLimitTest do
     end
 
     test "a limit of zero turns the API bucket off" do
-      limit_api(0)
+      # Spent first, so a zero that silently fell back to some default budget would still answer 429.
+      limit_api(1)
       token = session(@admin)
+      assert status(get(token, "/metrics")) == 200
+      assert status(get(token, "/metrics")) == 429
 
-      statuses = for _ <- 1..20, do: status(get(token, "/metrics"))
+      limit_api(0)
 
-      refute 429 in statuses
+      assert status(get(token, "/metrics")) == 200
     end
 
     test "a request refused for lack of permission still spends the session's budget" do
