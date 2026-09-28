@@ -491,6 +491,52 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "retry_after_ms of the token bucket" do
+    # A blocked caller is told when its next token arrives. The bucket refills continuously, one token every
+    # window_ms / limit, so that is the wait; the time left in the whole window is not.
+    property "waiting exactly the advertised time earns a token, and one millisecond less does not" do
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              elapsed_seed <- integer(0..1_000_000)
+            ) do
+        # Blocked means nothing has refilled since the last token was spent: fewer than one token's worth.
+        one_token_ms = div(window_ms + limit - 1, limit)
+        elapsed = rem(elapsed_seed, one_token_ms)
+
+        assert RateLimiter.tokens_refilled(elapsed, limit, window_ms) == 0
+        retry = RateLimiter.next_token_in(elapsed, limit, window_ms)
+
+        assert retry >= 1
+        assert RateLimiter.tokens_refilled(elapsed + retry, limit, window_ms) >= 1
+        assert RateLimiter.tokens_refilled(elapsed + retry - 1, limit, window_ms) == 0
+      end
+    end
+
+    property "refilling counts whole tokens exactly, with no floating point drift" do
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              elapsed <- integer(0..240_000)
+            ) do
+        expected = if elapsed >= window_ms, do: limit, else: div(elapsed * limit, window_ms)
+        assert RateLimiter.tokens_refilled(elapsed, limit, window_ms) == expected
+      end
+    end
+
+    test "a blocked caller on a wide bucket is told about the next token, not the end of the window" do
+      identifier = "retry_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      # Spent to the last token just now: at 300 a minute the next one is 200 ms away.
+      :ets.insert(:malachi_rate_limits, {{identifier, :auth}, {0, now, now, 60_000}})
+
+      assert {:error, :rate_limit_exceeded, retry} =
+               RateLimiter.check_limit(identifier, :auth, %{limit: 300, window_ms: 60_000})
+
+      assert retry in 1..200
+    end
+  end
+
   describe "check_limit_in_caller/3" do
     test "admits exactly the limit and then blocks" do
       config = %{limit: 5, window_ms: 60_000}

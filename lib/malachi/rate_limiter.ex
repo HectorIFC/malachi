@@ -179,6 +179,23 @@ defmodule Malachi.RateLimiter do
   end
 
   @doc false
+  # Whole tokens a bucket earns back after `elapsed_ms` of idleness: the full limit once a window has
+  # passed, else the tokens accrued at `limit / window_ms` per millisecond, truncated. Integer arithmetic,
+  # so `next_token_in/3` can promise a wait the check will honour to the millisecond.
+  @spec tokens_refilled(non_neg_integer(), pos_integer(), pos_integer()) :: non_neg_integer()
+  def tokens_refilled(elapsed_ms, limit, window_ms) when elapsed_ms >= window_ms, do: limit
+  def tokens_refilled(elapsed_ms, limit, window_ms), do: div(elapsed_ms * limit, window_ms)
+
+  @doc false
+  # How long a caller with an empty bucket, last refilled `elapsed_ms` ago, waits for its next token. The
+  # bucket refills continuously, so this is the time to one token (`window_ms / limit`, rounded up), not
+  # the time left in the window: at 300 a minute that is 200 ms, not a minute.
+  @spec next_token_in(non_neg_integer(), pos_integer(), pos_integer()) :: pos_integer()
+  def next_token_in(elapsed_ms, limit, window_ms) do
+    max(1, div(window_ms + limit - 1, limit) - elapsed_ms)
+  end
+
+  @doc false
   # The start of the sharded window that is current right now, read from the same clock the check reads.
   # Tests measure "did this run stay inside one window" with it, so they measure what the limiter counts.
   @spec current_window_start(pos_integer()) :: integer()
@@ -455,7 +472,7 @@ defmodule Malachi.RateLimiter do
 
       [{^key, {count, last_refill, window_start, _window_ms}}] ->
         # Calculate tokens to add based on time passed
-        refill_amount = calculate_refill(now, last_refill, window_ms, limit)
+        refill_amount = tokens_refilled(now - last_refill, limit, window_ms)
         new_count = min(limit, count + refill_amount)
         new_window_start = if refill_amount > 0, do: now, else: window_start
 
@@ -464,24 +481,11 @@ defmodule Malachi.RateLimiter do
           :ets.insert(@table, {key, {new_count - 1, now, new_window_start, window_ms}})
           :ok
         else
-          # Rate limit exceeded
+          # Rate limit exceeded: the bucket is empty and nothing has refilled since `last_refill`, so the
+          # next token is `next_token_in/3` away.
           increment_blocked_counter(identifier, action)
-          retry_after_ms = max(0, window_start + window_ms - now)
-          {:error, :rate_limit_exceeded, retry_after_ms}
+          {:error, :rate_limit_exceeded, next_token_in(now - last_refill, limit, window_ms)}
         end
-    end
-  end
-
-  defp calculate_refill(now, last_refill, window_ms, limit) do
-    elapsed = now - last_refill
-
-    if elapsed >= window_ms do
-      # Full window passed, reset to max
-      limit
-    else
-      # Partial refill based on time
-      tokens_per_ms = limit / window_ms
-      trunc(elapsed * tokens_per_ms)
     end
   end
 

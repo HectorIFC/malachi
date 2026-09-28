@@ -238,9 +238,12 @@ seconds, and a JSON body:
 {
   "s": "err",
   "reason": "rate_limit_exceeded",
-  "retry_after_ms": 58432
+  "retry_after_ms": 6000
 }
 ```
+
+`retry_after_ms` is the time until the bucket's next token, not the time left in its window. The bucket
+refills continuously, so at the default 10 a minute a limited login waits 6 seconds.
 
 ### Flow
 
