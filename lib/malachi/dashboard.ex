@@ -113,18 +113,28 @@ defmodule Malachi.Dashboard do
   @default_max_header_line_size 10_000
   @default_max_header_size 32_768
 
+  # The line limit also sizes the driver buffer, which is allocated whole on the first read of a partial
+  # line, so it is a memory cost per connection rather than only a ceiling. It is capped here: past 2^31 the
+  # socket options wrap (buffer 1, and at 2^32 packet_size 0, which is no line limit at all).
+  @max_header_line_size_ceiling 1_048_576
+
   defp header_limits do
     %{
-      count: positive_setting(:dashboard_max_header_count, @default_max_header_count),
-      line: positive_setting(:dashboard_max_header_line_size, @default_max_header_line_size),
-      total: positive_setting(:dashboard_max_header_size, @default_max_header_size)
+      count: setting(:dashboard_max_header_count, @default_max_header_count, &(&1 > 0)),
+      line:
+        setting(
+          :dashboard_max_header_line_size,
+          @default_max_header_line_size,
+          &(&1 > 0 and &1 <= @max_header_line_size_ceiling)
+        ),
+      total: setting(:dashboard_max_header_size, @default_max_header_size, &(&1 > 0))
     }
   end
 
-  defp positive_setting(key, default) do
+  defp setting(key, default, valid?) do
     :malachi
     |> Application.get_env(key, default)
-    |> Config.checked(key, default, &(is_integer(&1) and &1 > 0))
+    |> Config.checked(key, default, &(is_integer(&1) and valid?.(&1)))
   end
 
   defp handle_http(socket, limits) do

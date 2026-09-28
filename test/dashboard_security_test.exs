@@ -432,6 +432,19 @@ defmodule Malachi.DashboardSecurityTest do
       assert status_code(raw_request(header_lines(50), "/health", port)) == 200
       assert status_code(raw_request(header_lines(51), "/health", port)) == 431
     end
+
+    test "a line limit is accepted up to 1048576 and a larger one falls back to the default" do
+      Application.put_env(:malachi, :dashboard_max_header_line_size, 1_048_576)
+      port = start_dashboard()
+      assert status_code(raw_request(["Host: localhost", padded_line(20_000)], "/health", port)) == 200
+
+      Application.put_env(:malachi, :dashboard_max_header_line_size, 1_048_577)
+      {port, log} = with_log(fn -> start_dashboard() end)
+      assert log =~ "dashboard_max_header_line_size"
+
+      assert status_code(raw_request(["Host: localhost", padded_line(10_000)], "/health", port)) == 200
+      assert raw_request(["Host: localhost", padded_line(10_001)], "/health", port) == ""
+    end
   end
 
   describe "security headers" do
