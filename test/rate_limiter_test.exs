@@ -491,6 +491,155 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "action_config(:dashboard_api)" do
+    setup do
+      original =
+        for key <- [:dashboard_api_rate_limit, :dashboard_api_rate_window_ms],
+            into: %{},
+            do: {key, Application.fetch_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- original do
+          case value do
+            {:ok, v} -> Application.put_env(:malachi, key, v)
+            :error -> Application.delete_env(:malachi, key)
+          end
+        end
+      end)
+
+      :ok
+    end
+
+    test "is on by default, unlike the opt-in throughput quotas" do
+      Application.delete_env(:malachi, :dashboard_api_rate_limit)
+      Application.delete_env(:malachi, :dashboard_api_rate_window_ms)
+
+      assert RateLimiter.action_config(:dashboard_api) == %{limit: 300, window_ms: 60_000}
+    end
+
+    test "reads back the configured limit and window" do
+      Application.put_env(:malachi, :dashboard_api_rate_limit, 42)
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 10_000)
+
+      assert RateLimiter.action_config(:dashboard_api) == %{limit: 42, window_ms: 10_000}
+    end
+
+    test "a zero, negative or non-integer limit or window turns it off" do
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 60_000)
+
+      for bad <- [0, -1, "300", nil] do
+        Application.put_env(:malachi, :dashboard_api_rate_limit, bad)
+        assert RateLimiter.action_config(:dashboard_api) == nil, "expected limit #{inspect(bad)} to read as off"
+      end
+
+      Application.put_env(:malachi, :dashboard_api_rate_limit, 300)
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 0)
+      assert RateLimiter.action_config(:dashboard_api) == nil
+    end
+  end
+
+  describe "retry_after_ms of the token bucket" do
+    # A blocked caller is told when its next token arrives. The bucket refills continuously, one token every
+    # window_ms / limit, so that is the wait; the time left in the whole window is not.
+    property "waiting exactly the advertised time earns a token, and one millisecond less does not" do
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              elapsed_seed <- integer(0..1_000_000)
+            ) do
+        # Blocked means nothing has refilled since the last token was spent: fewer than one token's worth.
+        one_token_ms = div(window_ms + limit - 1, limit)
+        elapsed = rem(elapsed_seed, one_token_ms)
+
+        assert RateLimiter.tokens_refilled(elapsed, limit, window_ms) == 0
+        retry = RateLimiter.next_token_in(elapsed, limit, window_ms)
+
+        assert retry >= 1
+        assert RateLimiter.tokens_refilled(elapsed + retry, limit, window_ms) >= 1
+        assert RateLimiter.tokens_refilled(elapsed + retry - 1, limit, window_ms) == 0
+      end
+    end
+
+    property "refilling counts whole tokens exactly, with no floating point drift" do
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              elapsed <- integer(0..240_000)
+            ) do
+        expected = if elapsed >= window_ms, do: limit, else: div(elapsed * limit, window_ms)
+        assert RateLimiter.tokens_refilled(elapsed, limit, window_ms) == expected
+      end
+    end
+
+    property "a client that never gets ahead of the rate is never refused, however unevenly it spaces requests" do
+      # The bucket is continuous: time that has not yet added up to a whole token must carry over to the
+      # next request, not be thrown away when a request is admitted. A client alternating 150 and 350 ms
+      # against 300 a minute (one token every 200 ms) used to lose the 150 ms each time and drain.
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              gaps <- list_of(integer(0..10_000), min_length: 1, max_length: 200)
+            ) do
+        one_token_ms = div(window_ms + limit - 1, limit)
+        times = gaps |> Enum.scan(&(&1 + &2))
+        # Starting from an empty bucket at 0, request i (from 1) is never ahead of the rate when a whole
+        # token's time has passed for each request so far.
+        on_pace? = times |> Enum.with_index(1) |> Enum.all?(fn {t, i} -> t >= i * one_token_ms end)
+
+        if on_pace? do
+          Enum.reduce(times, {0, 0}, fn now, state ->
+            assert {:ok, next} = RateLimiter.take_bucket_token(state, now, limit, window_ms),
+                   "refused at #{now} ms with state #{inspect(state)}"
+
+            next
+          end)
+        end
+      end
+    end
+
+    test "the uneven client of 150 and 350 ms against 300 a minute keeps being served" do
+      times = 1..600 |> Enum.scan(0, fn i, t -> t + if(rem(i, 2) == 1, do: 150, else: 350) end)
+
+      refused =
+        times
+        |> Enum.reduce({{299, 0}, 0}, fn now, {state, refused} ->
+          case RateLimiter.take_bucket_token(state, now, 300, 60_000) do
+            {:ok, next} -> {next, refused}
+            {:error, _retry} -> {state, refused + 1}
+          end
+        end)
+        |> elem(1)
+
+      assert refused == 0
+    end
+
+    test "a limit of zero or less refuses every request and never crashes the limiter" do
+      pid = Process.whereis(RateLimiter)
+
+      for limit <- [0, -1] do
+        identifier = "no_budget_#{limit}_#{:rand.uniform(1_000_000)}"
+        config = %{limit: limit, window_ms: 60_000}
+
+        assert {:error, :rate_limit_exceeded, 60_000} = RateLimiter.check_limit(identifier, :auth, config)
+        assert {:error, :rate_limit_exceeded, 60_000} = RateLimiter.check_limit(identifier, :auth, config)
+      end
+
+      assert Process.whereis(RateLimiter) == pid, "the limiter restarted"
+    end
+
+    test "a blocked caller on a wide bucket is told about the next token, not the end of the window" do
+      identifier = "retry_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      # Spent to the last token just now: at 300 a minute the next one is 200 ms away.
+      :ets.insert(:malachi_rate_limits, {{identifier, :auth}, {0, now, now, 60_000}})
+
+      assert {:error, :rate_limit_exceeded, retry} =
+               RateLimiter.check_limit(identifier, :auth, %{limit: 300, window_ms: 60_000})
+
+      assert retry in 1..200
+    end
+  end
+
   describe "check_limit_in_caller/3" do
     test "admits exactly the limit and then blocks" do
       config = %{limit: 5, window_ms: 60_000}
@@ -1001,6 +1150,42 @@ defmodule Malachi.RateLimiterTest do
       run_cleanup()
 
       assert [{^key, 42}] = :ets.lookup(@table, key)
+    end
+
+    test "reaps a session scoped blocked counter together with its bucket" do
+      # A :dashboard_api identifier is the digest of one session's token. Once the bucket is idle long enough
+      # to be reaped the session is long gone, and its blocked counter would otherwise stay forever.
+      identifier = "session_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      :ets.insert(@table, {{identifier, :dashboard_api}, {0, now - 3_600_000 - 60_000, now, 60_000}})
+      :ets.insert(@table, {{:blocked, identifier, :dashboard_api}, 3})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, {identifier, :dashboard_api}) == []
+      assert :ets.lookup(@table, {:blocked, identifier, :dashboard_api}) == []
+    end
+
+    test "reaps a session scoped blocked counter whose bucket is already gone" do
+      identifier = "orphan_session_#{:rand.uniform(1_000_000)}"
+      key = {:blocked, identifier, :dashboard_api}
+      :ets.insert(@table, {key, 3})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == []
+    end
+
+    test "keeps a session scoped blocked counter while its bucket is live" do
+      identifier = "live_session_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      :ets.insert(@table, {{identifier, :dashboard_api}, {0, now, now, 60_000}})
+      key = {:blocked, identifier, :dashboard_api}
+      :ets.insert(@table, {key, 3})
+
+      run_cleanup()
+
+      assert [{^key, 3}] = :ets.lookup(@table, key)
     end
 
     test "a live window survives cleanup, so a spent quota is not silently refunded" do

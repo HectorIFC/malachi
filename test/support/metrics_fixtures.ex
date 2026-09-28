@@ -22,7 +22,13 @@ defmodule Malachi.Test.MetricsFixtures do
       memory: %{total_mb: 40.0, processes_mb: 10.0, ets_mb: 2.0, atom_mb: 1.0, binary_mb: 0.5},
       io: %{input_bytes: 1000, output_bytes: 2000},
       atom_table: %{atom_count: 20_000, atom_limit: 1_048_576},
-      rate_limiting: %{auth_blocked: 5, publish_blocked: 0, subscribe_blocked: 1, connection_blocks: 3},
+      rate_limiting: %{
+        auth_blocked: 5,
+        publish_blocked: 0,
+        subscribe_blocked: 1,
+        dashboard_api_blocked: 2,
+        connection_blocks: 3
+      },
       security: %{
         failed_auth_attempts: 7,
         account_lockouts: 2,

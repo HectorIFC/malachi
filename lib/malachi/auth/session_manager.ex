@@ -135,45 +135,71 @@ defmodule Malachi.Auth.SessionManager do
     reach it, so alert thresholds should be set against that broader meaning.
   """
   def validate_session(token, client_ip, user_agent \\ "") do
+    case classify_session(token, client_ip, user_agent) do
+      {:expired, session_data, mismatches} ->
+        :ets.delete(@table_sessions, token)
+
+        # Expiry is reported ahead of the binding, so a stolen token replayed from a foreign IP after it
+        # expired would otherwise leave no theft signal at all. Record the mismatch, but still answer
+        # :session_expired: that is the accurate reason, and it keeps a legitimate client whose IP moved
+        # (NAT, mobile) from being told it looks like an attacker.
+        maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
+
+        Malachi.AuditLog.log_event(
+          :session_expired,
+          %{username: session_data.username},
+          "validate_session",
+          :expired,
+          %{token_prefix: String.slice(token, 0, 8)}
+        )
+
+        {:error, :session_expired}
+
+      {:mismatch, session_data, mismatches} ->
+        maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
+        {:error, :session_hijack_attempt}
+
+      {:valid, session_data} ->
+        # Updates last activity
+        updated_session = %{session_data | last_activity: System.system_time(:second)}
+        :ets.insert(@table_sessions, {token, updated_session})
+        {:ok, session_data}
+
+      :unknown ->
+        {:error, :invalid_session}
+    end
+  end
+
+  @doc """
+  What `validate_session/3` would decide about `token`, without any of its effects: nothing is deleted,
+  logged, audited or touched.
+
+  This exists so a caller can decide whether a validation is worth paying for before it happens. The
+  dashboard charges a token that does not validate to the client address first, so a replayed stolen
+  token cannot write more hijack events than the address's login budget allows.
+
+  ## Returns
+
+  - `{:valid, session_data}` - `validate_session/3` would accept it
+  - `{:expired, session_data, mismatches}` - expired; `mismatches` is the binding verdict, possibly `[]`
+  - `{:mismatch, session_data, mismatches}` - live, but presented with a binding that does not match
+  - `:unknown` - no such session
+  """
+  @spec classify_session(String.t(), term(), String.t()) ::
+          {:valid, map()} | {:expired, map(), [:ip | :user_agent]} | {:mismatch, map(), [:ip | :user_agent]} | :unknown
+  def classify_session(token, client_ip, user_agent \\ "") do
     case :ets.lookup(@table_sessions, token) do
       [{^token, session_data}] ->
-        now = System.system_time(:second)
         mismatches = binding_mismatches(session_data, client_ip, user_agent)
-        binding_ok? = mismatches == []
 
         cond do
-          session_data.expires_at < now ->
-            :ets.delete(@table_sessions, token)
-
-            # This branch runs before the binding one, so a stolen token replayed from a foreign IP after
-            # it expired would otherwise leave no theft signal at all. Record the mismatch, but still
-            # answer :session_expired: that is the accurate reason, and it keeps a legitimate client whose
-            # IP moved (NAT, mobile) from being told it looks like an attacker.
-            maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
-
-            Malachi.AuditLog.log_event(
-              :session_expired,
-              %{username: session_data.username},
-              "validate_session",
-              :expired,
-              %{token_prefix: String.slice(token, 0, 8)}
-            )
-
-            {:error, :session_expired}
-
-          not binding_ok? ->
-            maybe_log_hijack_attempt(mismatches, session_data, token, client_ip)
-            {:error, :session_hijack_attempt}
-
-          true ->
-            # Updates last activity
-            updated_session = %{session_data | last_activity: now}
-            :ets.insert(@table_sessions, {token, updated_session})
-            {:ok, session_data}
+          session_data.expires_at < System.system_time(:second) -> {:expired, session_data, mismatches}
+          mismatches != [] -> {:mismatch, session_data, mismatches}
+          true -> {:valid, session_data}
         end
 
       [] ->
-        {:error, :invalid_session}
+        :unknown
     end
   end
 

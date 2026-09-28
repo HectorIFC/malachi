@@ -19,6 +19,7 @@ defmodule Malachi.AuditLog do
   - `:dashboard_access` - Dashboard HTTP endpoint accessed
   - `:dashboard_login_success` - Successful dashboard login
   - `:dashboard_auth_failure` - Failed dashboard authentication
+  - `:dashboard_api_rate_limited` - An authenticated dashboard session spent its request budget
 
   ## Event Structure
 

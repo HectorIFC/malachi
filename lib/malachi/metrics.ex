@@ -599,6 +599,7 @@ defmodule Malachi.Metrics do
         auth_blocked: get_counter({:rate_limit_blocked, :auth}),
         publish_blocked: get_counter({:rate_limit_blocked, :publish}),
         subscribe_blocked: get_counter({:rate_limit_blocked, :subscribe}),
+        dashboard_api_blocked: get_counter({:rate_limit_blocked, :dashboard_api}),
         connection_blocks: get_counter(:connection_limit_blocked)
       },
       security: %{
