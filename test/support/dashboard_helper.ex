@@ -43,9 +43,17 @@ defmodule Malachi.Test.DashboardHelper do
       {:ok, response} = DashboardHelper.request(socket, :POST, "/login", body: body)
   """
   def request(socket, method, path, opts \\ []) do
+    :ok = send_request(socket, method, path, opts)
+    :gen_tcp.recv(socket, 0, Keyword.get(opts, :recv_timeout, 2000))
+  end
+
+  @doc """
+  Sends an HTTP request without reading the response, for a caller that reads it some other way (see
+  `recv_framed/2`). Takes the `:headers` and `:body` options of `request/4`.
+  """
+  def send_request(socket, method, path, opts \\ []) do
     extra_headers = Keyword.get(opts, :headers, %{})
     body = Keyword.get(opts, :body, nil)
-    recv_timeout = Keyword.get(opts, :recv_timeout, 2000)
 
     headers =
       Map.merge(%{"Host" => "localhost"}, extra_headers)
@@ -66,7 +74,6 @@ defmodule Malachi.Test.DashboardHelper do
     request_str = "#{method} #{path} HTTP/1.1\r\n#{header_lines}\r\n#{body || ""}"
 
     :gen_tcp.send(socket, request_str)
-    :gen_tcp.recv(socket, 0, recv_timeout)
   end
 
   @doc """
@@ -140,6 +147,76 @@ defmodule Malachi.Test.DashboardHelper do
     response = read_until_closed(socket, "")
     :gen_tcp.close(socket)
     response
+  end
+
+  @doc """
+  Reads one response by its framing instead of by a single `recv`: the head up to the blank line, then
+  exactly the `Content-Length` bytes of body, then everything else that arrives before the server closes
+  the socket, returned as `trailing`. A correctly framed response has an empty `trailing`: any byte there
+  would be read as the start of the next response on a reused connection.
+
+  Returns `{:ok, %{status: integer, headers: [{lowercase_name, value}], body: binary | nil, trailing:
+  binary}}`, with every header in the order sent, so a repeated one shows up twice. A response without a
+  `Content-Length` (the SSE stream) comes back with `body: nil` and is not drained, since it never closes
+  on its own. `{:error, {reason, bytes_read}}` when the socket fails or closes before the frame is whole.
+  """
+  def recv_framed(socket, timeout \\ 2000) do
+    with {:ok, head, rest} <- recv_head(socket, "", timeout) do
+      [status_line | header_lines] = String.split(head, "\r\n")
+      [_version, code | _reason] = String.split(status_line, " ", parts: 3)
+
+      headers =
+        Enum.map(header_lines, fn line ->
+          [name, value] = String.split(line, ":", parts: 2)
+          {String.downcase(name), String.trim(value)}
+        end)
+
+      response = %{status: String.to_integer(code), headers: headers}
+
+      case List.keyfind(headers, "content-length", 0) do
+        nil ->
+          {:ok, Map.merge(response, %{body: nil, trailing: ""})}
+
+        {_name, length} ->
+          with {:ok, body, extra} <- recv_body(socket, rest, String.to_integer(length), timeout),
+               {:ok, trailing} <- drain(socket, extra, timeout) do
+            {:ok, Map.merge(response, %{body: body, trailing: trailing})}
+          end
+      end
+    end
+  end
+
+  defp recv_head(socket, acc, timeout) do
+    case :binary.split(acc, "\r\n\r\n") do
+      [head, rest] ->
+        {:ok, head, rest}
+
+      [_incomplete] ->
+        case :gen_tcp.recv(socket, 0, timeout) do
+          {:ok, data} -> recv_head(socket, acc <> data, timeout)
+          {:error, reason} -> {:error, {reason, acc}}
+        end
+    end
+  end
+
+  defp recv_body(_socket, acc, length, _timeout) when byte_size(acc) >= length do
+    <<body::binary-size(length), extra::binary>> = acc
+    {:ok, body, extra}
+  end
+
+  defp recv_body(socket, acc, length, timeout) do
+    case :gen_tcp.recv(socket, length - byte_size(acc), timeout) do
+      {:ok, data} -> recv_body(socket, acc <> data, length, timeout)
+      {:error, reason} -> {:error, {reason, acc}}
+    end
+  end
+
+  defp drain(socket, acc, timeout) do
+    case :gen_tcp.recv(socket, 0, timeout) do
+      {:ok, data} -> drain(socket, acc <> data, timeout)
+      {:error, :closed} -> {:ok, acc}
+      {:error, reason} -> {:error, {reason, acc}}
+    end
   end
 
   @doc """

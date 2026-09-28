@@ -391,25 +391,14 @@ defmodule Malachi.Dashboard do
 
   defp send_login_success(socket, token, headers) do
     warn_on_proto_mismatch(headers)
-    response_body = Jason.encode!(%{"s" => "ok", "token" => token})
+    body = Jason.encode!(%{"s" => "ok", "token" => token})
 
-    cookie_header =
-      "Set-Cookie: malachi_token=#{token}; HttpOnly; Path=/; SameSite=Strict#{secure_cookie_flag()}"
+    headers = [
+      {"Content-Type", "application/json"},
+      {"Set-Cookie", "malachi_token=#{token}; HttpOnly; Path=/; SameSite=Strict#{secure_cookie_flag()}"}
+    ]
 
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: application/json\r
-    #{cookie_header}\r
-    Content-Length: #{byte_size(response_body)}\r
-    \r
-    #{response_body}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/login")
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    send_response(socket, "200 OK", headers, body, "/login")
   end
 
   # The three error responses below carry the request path and Origin so a cross-origin caller can actually
@@ -418,57 +407,24 @@ defmodule Malachi.Dashboard do
   defp send_auth_required(socket, path, request_origin) do
     body = Jason.encode!(%{"s" => "err", "reason" => "authentication_required"})
 
-    response = """
-    HTTP/1.1 401 Unauthorized\r
-    WWW-Authenticate: Bearer realm="Malachi Dashboard"\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(body)}\r
-    \r
-    #{body}
-    """
+    headers = [
+      {"WWW-Authenticate", ~s(Bearer realm="Malachi Dashboard")},
+      {"Content-Type", "application/json"}
+    ]
 
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, path, request_origin)
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    send_response(socket, "401 Unauthorized", headers, body, path, request_origin)
   end
 
   defp send_forbidden(socket, reason, path \\ "/forbidden", request_origin \\ nil) do
     body = Jason.encode!(%{"s" => "err", "reason" => to_string(reason)})
-
-    response = """
-    HTTP/1.1 403 Forbidden\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(body)}\r
-    \r
-    #{body}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, path, request_origin)
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    send_response(socket, "403 Forbidden", [{"Content-Type", "application/json"}], body, path, request_origin)
   end
 
   defp send_rate_limited(socket, retry_after_ms, path \\ "/rate_limited", request_origin \\ nil) do
     body = Jason.encode!(%{"s" => "err", "reason" => "rate_limit_exceeded", "retry_after_ms" => retry_after_ms})
 
-    response = """
-    HTTP/1.1 429 Too Many Requests\r
-    Content-Type: application/json\r
-    Retry-After: #{div(retry_after_ms, 1000)}\r
-    Content-Length: #{byte_size(body)}\r
-    \r
-    #{body}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, path, request_origin)
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    headers = [{"Content-Type", "application/json"}, {"Retry-After", div(retry_after_ms, 1000)}]
+    send_response(socket, "429 Too Many Requests", headers, body, path, request_origin)
   end
 
   # The preflight answers from the same builder the real responses use, so it can never advertise a
@@ -535,24 +491,13 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp serve_login_page(socket) do
-    html = login_page_html()
+  # The two HTML pages, the login form and the dashboard, are never cached.
+  @html_headers [
+    {"Content-Type", "text/html; charset=utf-8"},
+    {"Cache-Control", "no-store, no-cache, must-revalidate"}
+  ]
 
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: text/html; charset=utf-8\r
-    Content-Length: #{byte_size(html)}\r
-    Cache-Control: no-store, no-cache, must-revalidate\r
-    \r
-    #{html}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/login")
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
-  end
+  defp serve_login_page(socket), do: send_response(socket, "200 OK", @html_headers, login_page_html(), "/login")
 
   # --- admin user management: REST CRUD over the replicated user store. The auth stage already gated
   # these to the :admin permission (has_required_permission?), so the handlers run only for admins. Passwords
@@ -698,17 +643,17 @@ defmodule Malachi.Dashboard do
   end
 
   defp send_json(socket, status, body_map) do
-    body = Jason.encode!(body_map)
+    send_response(socket, status, [{"Content-Type", "application/json"}], Jason.encode!(body_map), "/users")
+  end
 
-    response = """
-    HTTP/1.1 #{status}\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(body)}\r
-    \r
-    #{body}
-    """
+  # Every response that carries a body is framed here, so the Content-Length a client reads is the size of
+  # exactly the bytes that follow the blank line. Callers never pass Content-Length: this function owns it.
+  # The security headers go on the head alone, so the body is sent as built and never rewritten.
+  defp send_response(socket, status, headers, body, route, request_origin \\ nil) do
+    header_lines = Enum.map_join(headers, fn {name, value} -> "#{name}: #{value}\r\n" end)
+    head = "HTTP/1.1 #{status}\r\n#{header_lines}Content-Length: #{byte_size(body)}\r\n\r\n"
 
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/users"))
+    :gen_tcp.send(socket, [SecurityHeaders.add_security_headers(head, route, request_origin), body])
     :gen_tcp.close(socket)
   end
 
@@ -775,24 +720,7 @@ defmodule Malachi.Dashboard do
 
   defp handle_route(socket, _, _headers, _client_ip, _session), do: serve_404(socket)
 
-  defp serve_html(socket) do
-    html = dashboard_html()
-
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: text/html; charset=utf-8\r
-    Content-Length: #{byte_size(html)}\r
-    Cache-Control: no-store, no-cache, must-revalidate\r
-    \r
-    #{html}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/")
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
-  end
+  defp serve_html(socket), do: send_response(socket, "200 OK", @html_headers, dashboard_html(), "/")
 
   # The light payload served by both /metrics (one-shot) and /stream (per-tick): the BEAM/security system
   # snapshot plus a per-topic log-stack summary (counts/bytes/groups). The per-range/segment drill-down is
@@ -827,17 +755,8 @@ defmodule Malachi.Dashboard do
       |> Prometheus.export(topics_overview(), Metrics.storage_flush_histogram(), Metrics.retention_snapshot())
       |> IO.iodata_to_binary()
 
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: #{Prometheus.content_type()}\r
-    Content-Length: #{byte_size(text)}\r
-    Cache-Control: no-cache\r
-    \r
-    #{text}
-    """
-
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, "/metrics", request_origin))
-    :gen_tcp.close(socket)
+    headers = [{"Content-Type", Prometheus.content_type()}, {"Cache-Control", "no-cache"}]
+    send_response(socket, "200 OK", headers, text, "/metrics", request_origin)
   end
 
   # On-demand drill-down for one topic (its ranges and segments), read from `?name=`. 404 for an unknown
@@ -862,19 +781,8 @@ defmodule Malachi.Dashboard do
   end
 
   defp serve_json(socket, route, data, request_origin \\ nil) do
-    json = Jason.encode!(data)
-
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(json)}\r
-    Cache-Control: no-cache\r
-    \r
-    #{json}
-    """
-
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route, request_origin))
-    :gen_tcp.close(socket)
+    headers = [{"Content-Type", "application/json"}, {"Cache-Control", "no-cache"}]
+    send_response(socket, "200 OK", headers, Jason.encode!(data), route, request_origin)
   end
 
   # Liveness: the HTTP server answered, so the node is up. Always 200, unauthenticated (probes).
@@ -909,20 +817,9 @@ defmodule Malachi.Dashboard do
   end
 
   defp serve_status(socket, route, code, status) do
-    json = Jason.encode!(%{status: status})
     reason = if code == 200, do: "OK", else: "Service Unavailable"
-
-    response = """
-    HTTP/1.1 #{code} #{reason}\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(json)}\r
-    Cache-Control: no-store\r
-    \r
-    #{json}
-    """
-
-    :gen_tcp.send(socket, SecurityHeaders.add_security_headers(response, route))
-    :gen_tcp.close(socket)
+    headers = [{"Content-Type", "application/json"}, {"Cache-Control", "no-store"}]
+    send_response(socket, "#{code} #{reason}", headers, Jason.encode!(%{status: status}), route)
   end
 
   defp serve_sse(socket, request_origin) do
@@ -986,22 +883,7 @@ defmodule Malachi.Dashboard do
       }
     }
 
-    json = Jason.encode!(rate_limits)
-
-    response = """
-    HTTP/1.1 200 OK\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(json)}\r
-    Cache-Control: no-cache\r
-    \r
-    #{json}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/rate_limits")
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    serve_json(socket, "/rate_limits", rate_limits)
   end
 
   defp serve_logout(socket, headers) do
@@ -1032,20 +914,7 @@ defmodule Malachi.Dashboard do
 
   defp serve_404(socket) do
     body = Jason.encode!(%{"s" => "err", "reason" => "not_found"})
-
-    response = """
-    HTTP/1.1 404 Not Found\r
-    Content-Type: application/json\r
-    Content-Length: #{byte_size(body)}\r
-    \r
-    #{body}
-    """
-
-    response_with_headers =
-      SecurityHeaders.add_security_headers(response, "/404")
-
-    :gen_tcp.send(socket, response_with_headers)
-    :gen_tcp.close(socket)
+    send_response(socket, "404 Not Found", [{"Content-Type", "application/json"}], body, "/404")
   end
 
   # Convert list of {identifier, count} tuples to JSON-encodable list of maps
