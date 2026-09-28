@@ -2,7 +2,7 @@ defmodule Malachi.DashboardRetentionMetricsTest do
   # The whole path an operator scrapes: retention telemetry folded in by the default reporter, exported
   # through an authenticated `GET /metrics`. The unit tests cover each piece; this is what catches a
   # reporter that was never attached, or an endpoint that never asks `Malachi.Metrics` for the retention
-  # snapshot. async: false: node-global counters and the dashboard's shared rate limit bucket.
+  # snapshot. async: false: node-global counters.
   use ExUnit.Case, async: false
 
   alias Malachi.Broker.Skip
@@ -14,16 +14,16 @@ defmodule Malachi.DashboardRetentionMetricsTest do
   @password "retention_pass_123"
 
   setup do
-    Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     _ = Malachi.Auth.remove_user(@user)
     :ok = Malachi.Auth.add_user(@user, @password, [:admin])
 
     on_exit(fn ->
       _ = Malachi.Auth.remove_user(@user)
-      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     end)
 
-    {:ok, token} = DashboardHelper.login(@user, @password)
+    # A session minted directly, not through POST /login: a scrape is authenticated work and spends only
+    # its own session's budget, so nothing here touches the login bucket or needs it reset.
+    {:ok, token} = Malachi.Auth.authenticate(@user, @password, {127, 0, 0, 1})
     {:ok, token: token}
   end
 

@@ -183,6 +183,22 @@ defmodule Malachi.Dashboard do
             send_auth_required(socket, path, extract_origin(headers))
           end
 
+        # A valid session that spent its own budget. Counted and audited apart from login throttling, so a
+        # busy console never reads as a brute force attempt, and recorded under the session digest (never
+        # the token) with the user it belongs to, so an operator can tell whose console it was.
+        {:error, :api_rate_limit_exceeded, retry_after_ms, session_digest, username} ->
+          Metrics.increment_rate_limit_blocked(:dashboard_api)
+
+          AuditLog.log_event(
+            :dashboard_api_rate_limited,
+            %{username: username, ip: client_ip},
+            "http_#{request.method}_#{request.path}",
+            :rate_limited,
+            %{path: request.path, session: session_digest, retry_after_ms: retry_after_ms}
+          )
+
+          send_rate_limited(socket, retry_after_ms, path, extract_origin(headers))
+
         {:error, :rate_limit_exceeded, retry_after_ms} ->
           Metrics.increment_dashboard_auth_blocked()
 
@@ -280,33 +296,66 @@ defmodule Malachi.Dashboard do
     end
   end
 
+  # Two buckets, split by what the request has proven. A token that validates is an operator at work: it
+  # spends its session's own `:dashboard_api` budget, so neither the address it comes from (a NAT shared
+  # with other operators, or with someone guessing passwords) nor the login budget has any say. A token
+  # that does not validate is spent from the address's `:dashboard_auth` bucket, the one logins use, and
+  # it is charged BEFORE it is validated: validation is what writes the expiry and hijack audit events,
+  # so a stolen token replayed from the wrong client can write no more of them than the address's login
+  # budget allows. `Auth.session_valid?/3` makes that decision without any of those effects.
   defp validate_token_with_rate_limit(token, client_ip, path, user_agent) do
-    # Check rate limit before validating token (prevent brute force)
-    rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
-    rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
+    if Auth.session_valid?(token, client_ip, user_agent) do
+      token |> Auth.validate_token(client_ip, user_agent) |> admit_session(token, path)
+    else
+      case check_login_bucket(client_ip) do
+        :ok -> token |> Auth.validate_token(client_ip, user_agent) |> admit_session(token, path)
+        {:error, :rate_limit_exceeded, retry_after_ms} -> {:error, :rate_limit_exceeded, retry_after_ms}
+      end
+    end
+  end
 
-    case RateLimiter.check_limit(client_ip, :dashboard_auth, %{
-           limit: rate_limit,
-           window_ms: rate_window
-         }) do
+  # A request refused for lack of permission still spends the session's budget: it is authenticated work,
+  # and a loop probing routes it cannot reach is a loop all the same. A session that stopped validating
+  # between the check above and the validation (it expired in the gap) is answered with the reason, once.
+  defp admit_session({:ok, session_data}, token, path) do
+    case check_api_bucket(token) do
       :ok ->
-        # Validate token
-        case Auth.validate_token(token, client_ip, user_agent) do
-          {:ok, session_data} ->
-            # Check permissions based on path
-            if has_required_permission?(session_data.permissions, path) do
-              {:ok, session_data}
-            else
-              {:error, :insufficient_permissions}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        if has_required_permission?(session_data.permissions, path),
+          do: {:ok, session_data},
+          else: {:error, :insufficient_permissions}
 
       {:error, :rate_limit_exceeded, retry_after_ms} ->
-        {:error, :rate_limit_exceeded, retry_after_ms}
+        {:error, :api_rate_limit_exceeded, retry_after_ms, session_digest(token), session_data.username}
     end
+  end
+
+  defp admit_session({:error, reason}, _token, _path), do: {:error, reason}
+
+  # The login bucket's limit, read in one place for the two checks that spend it and for /rate_limits.
+  # Unlike `:dashboard_api` it has no off switch: a limit of 0 does not disable brute force protection.
+  defp login_bucket_config do
+    %{
+      limit: Application.get_env(:malachi, :dashboard_auth_rate_limit, 10),
+      window_ms: Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
+    }
+  end
+
+  defp check_login_bucket(client_ip), do: RateLimiter.check_limit(client_ip, :dashboard_auth, login_bucket_config())
+
+  defp check_api_bucket(token) do
+    case RateLimiter.action_config(:dashboard_api) do
+      nil -> :ok
+      config -> RateLimiter.check_limit(session_digest(token), :dashboard_api, config)
+    end
+  end
+
+  # What the API bucket is keyed by: a digest of the session token, never the token. The limiter's table is
+  # public, and its blocked identifiers are printed by /rate_limits to any authenticated user, so a raw
+  # token there would hand a live session to whoever reads it. 128 bits of SHA-256 cannot be reversed or
+  # collide in practice, and it is what the `:dashboard_api_rate_limited` audit event records, so the two
+  # can be matched.
+  defp session_digest(token) do
+    :sha256 |> :crypto.hash(token) |> binary_part(0, 16) |> Base.url_encode64(padding: false)
   end
 
   defp has_required_permission?(permissions, path) do
@@ -443,14 +492,7 @@ defmodule Malachi.Dashboard do
   defp handle_login(socket, headers, client_ip) do
     case read_json_body(socket, headers) do
       {:ok, %{"username" => username, "password" => password}} ->
-        # Rate limit check
-        rate_limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
-        rate_window = Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
-
-        case RateLimiter.check_limit(client_ip, :dashboard_auth, %{
-               limit: rate_limit,
-               window_ms: rate_window
-             }) do
+        case check_login_bucket(client_ip) do
           :ok ->
             # Authenticate
             case Auth.authenticate(username, password, client_ip, extract_user_agent(headers)) do
@@ -869,6 +911,8 @@ defmodule Malachi.Dashboard do
       enabled: Application.get_env(:malachi, :rate_limit_enabled, true),
       top_blocked: %{
         auth: format_top_blocked(RateLimiter.get_top_blocked(:auth, 20)),
+        dashboard_auth: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_auth, 20)),
+        dashboard_api: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_api, 20)),
         publish: format_top_blocked(RateLimiter.get_top_blocked(:publish, 20)),
         subscribe: format_top_blocked(RateLimiter.get_top_blocked(:subscribe, 20)),
         channel_publish: format_top_blocked(RateLimiter.get_top_blocked(:channel_publish, 20)),
@@ -881,8 +925,10 @@ defmodule Malachi.Dashboard do
         },
         # Read through the limiter so the dashboard cannot disagree with what is actually enforced;
         # an unconfigured action reports a null limit rather than a default nobody applies.
+        dashboard_auth: login_bucket_config(),
         publish: action_config_json(:publish),
-        subscribe: action_config_json(:subscribe)
+        subscribe: action_config_json(:subscribe),
+        dashboard_api: action_config_json(:dashboard_api)
       }
     }
 

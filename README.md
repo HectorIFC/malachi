@@ -517,6 +517,8 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/
 | `MALACHI_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission for HTML/SSE |
 | `MALACHI_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Max auth attempts per window |
 | `MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS` | `60000` | Rate limit window (1 minute) |
+| `MALACHI_DASHBOARD_API_RATE_LIMIT` | `300` | Max authenticated requests per window, per session (`0` = no limit) |
+| `MALACHI_DASHBOARD_API_RATE_WINDOW_MS` | `60000` | Dashboard API rate limit window (1 minute) |
 | `MALACHI_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS for `/metrics` and `/stream` |
 | `MALACHI_DASHBOARD_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
 | `MALACHI_DASHBOARD_SECURE_COOKIE` | `false` | Mark the session cookie `Secure`. Set it only behind a TLS-terminating proxy: the dashboard listener itself serves plain HTTP, and a browser refuses to store a `Secure` cookie from a plain-HTTP origin, which makes login fail with no error. |
@@ -616,7 +618,7 @@ All events are logged in JSON format with full context:
 
 - **Authentication**: `auth_success`, `auth_failure`, `auth_lockout`
 - **Sessions**: `session_created`, `session_revoked`, `session_expired`, `session_hijack_attempt`
-- **Dashboard**: `dashboard_access`, `dashboard_login_success`, `dashboard_auth_failure`
+- **Dashboard**: `dashboard_access`, `dashboard_login_success`, `dashboard_auth_failure`, `dashboard_api_rate_limited`
 - **Administrative**: `account_unlocked`, `config_validation_failed`
 
 ### Example Audit Log Entry
@@ -706,7 +708,11 @@ docker run \
 Dashboard authentication is rate-limited to prevent brute-force attacks:
 - Default: 10 attempts per 60 seconds per IP
 - Failed attempts trigger account lockout (configurable)
-- Rate limits apply to both `/login` endpoint and Bearer token validation
+- The limit applies to the `/login` endpoint and to tokens (cookie or Bearer) that do not validate
+
+Requests with a valid session spend a separate budget, 300 per 60 seconds per session by default, so
+operators behind one address do not share a limit and a busy console never locks anyone out of logging
+in. See [Rate Limiting](docs/RATE_LIMITING.md).
 
 ### Security Metrics
 
