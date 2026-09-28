@@ -13,6 +13,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.AuditLog
   alias Malachi.Auth
   alias Malachi.BrokerServer
+  alias Malachi.Config
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.I18n
   alias Malachi.IPAddress
@@ -44,7 +45,20 @@ defmodule Malachi.Dashboard do
 
   @impl true
   def init({port, name}) do
-    opts = [:binary, packet: :http, active: false, reuseaddr: true]
+    limits = header_limits()
+
+    # packet_size bounds every line the :http decoder returns, the request line included, before it reaches
+    # this process. The bound is exact only while the driver's buffer is larger than it; with a buffer at or
+    # below packet_size the cut-off drifts by a byte or so, hence the buffer is pinned one byte above. A line
+    # past it makes the driver close the connection itself ({:error, :emsgsize}), so it gets no 431.
+    opts = [
+      :binary,
+      packet: :http,
+      packet_size: limits.line,
+      buffer: limits.line + 1,
+      active: false,
+      reuseaddr: true
+    ]
 
     case :gen_tcp.listen(port, opts) do
       {:ok, socket} ->
@@ -62,7 +76,7 @@ defmodule Malachi.Dashboard do
         )
 
         send(self(), :accept)
-        {:ok, %{socket: socket, port: port}}
+        {:ok, %{socket: socket, port: port, limits: limits}}
 
       {:error, reason} ->
         {:stop, reason}
@@ -70,10 +84,10 @@ defmodule Malachi.Dashboard do
   end
 
   @impl true
-  def handle_info(:accept, %{socket: socket} = state) do
+  def handle_info(:accept, %{socket: socket, limits: limits} = state) do
     case :gen_tcp.accept(socket) do
       {:ok, client} ->
-        spawn(fn -> handle_http(client) end)
+        spawn(fn -> handle_http(client, limits) end)
         send(self(), :accept)
         {:noreply, state}
 
@@ -83,42 +97,88 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  # Per-read timeout for the request line and headers. Without it, :gen_tcp.recv/2 blocks forever, so a
-  # client that connects and sends nothing (or dribbles headers one byte at a time) pins a process and a
-  # socket indefinitely (slowloris). Configurable so it can be tuned (and driven low in tests).
+  # Deadline for the request line and the whole header block together. Without it, :gen_tcp.recv/2 blocks
+  # forever, so a client that connects and sends nothing pins a process and a socket indefinitely
+  # (slowloris); and a per-read timeout alone would let a client that sends one header just inside it hold
+  # the connection for as many reads as it is allowed headers. Configurable so it can be tuned (and driven
+  # low in tests).
   defp recv_timeout do
     Application.get_env(:malachi, :dashboard_recv_timeout_ms, 5_000)
   end
 
-  defp handle_http(socket) do
+  # Header limits, Bandit's defaults for the count and the line. A line is bounded at the socket (see
+  # init/1); the total is what keeps fifty maximal lines, half a megabyte per connection, from being
+  # acceptable. Read once at start, so a bad value is reported once rather than on every request.
+  @default_max_header_count 50
+  @default_max_header_line_size 10_000
+  @default_max_header_size 32_768
+
+  # The line limit also sizes the driver buffer, which is allocated whole on the first read of a partial
+  # line, so it is a memory cost per connection rather than only a ceiling. It is capped here: past 2^31 the
+  # socket options wrap (buffer 1, and at 2^32 packet_size 0, which is no line limit at all).
+  @max_header_line_size_ceiling 1_048_576
+
+  defp header_limits do
+    %{
+      count: setting(:dashboard_max_header_count, @default_max_header_count, &(&1 > 0)),
+      line:
+        setting(
+          :dashboard_max_header_line_size,
+          @default_max_header_line_size,
+          &(&1 > 0 and &1 <= @max_header_line_size_ceiling)
+        ),
+      total: setting(:dashboard_max_header_size, @default_max_header_size, &(&1 > 0))
+    }
+  end
+
+  defp setting(key, default, valid?) do
+    :malachi
+    |> Application.get_env(key, default)
+    |> Config.checked(key, default, &(is_integer(&1) and valid?.(&1)))
+  end
+
+  defp handle_http(socket, limits) do
     # The client address is canonicalized here, at the edge, so everything downstream (the auth rate
     # limiter, Auth.authenticate/4, Auth.validate_token/3 and every audit event) sees the same binary
     # form the TCP acceptor produces. Reading it through IPAddress.from_socket/2 also drops a hard
     # match that raised a MatchError whenever a client closed the socket between the accept and here.
     client_ip = IPAddress.from_socket(socket, :gen_tcp)
+    deadline = System.monotonic_time(:millisecond) + recv_timeout()
 
-    case :gen_tcp.recv(socket, 0, recv_timeout()) do
-      {:ok, {:http_request, method, {:abs_path, path}, _version}} ->
-        headers = parse_headers(socket, %{})
-        path_string = to_string(path)
-        handle_route_with_auth(socket, %{method: method, path: path_string}, headers, client_ip)
+    with {:ok, {:http_request, method, target, _version}} <- :gen_tcp.recv(socket, 0, remaining(deadline)),
+         {:ok, path} <- request_path(target) do
+      case parse_headers(socket, limits, deadline, {%{}, 0, 0}) do
+        {:ok, headers} ->
+          handle_route_with_auth(socket, %{method: method, path: path}, headers, client_ip)
 
-      {:ok, {:http_request, method, :*, _version}} ->
-        headers = parse_headers(socket, %{})
-        handle_route_with_auth(socket, %{method: method, path: "*"}, headers, client_ip)
+        {:error, :too_large} ->
+          send_json(socket, "431 Request Header Fields Too Large", %{
+            "s" => "err",
+            "reason" => "header_fields_too_large"
+          })
 
-      {:ok, _other} ->
-        :gen_tcp.close(socket)
-
-      {:error, _} ->
-        :gen_tcp.close(socket)
+        {:error, :closed} ->
+          :gen_tcp.close(socket)
+      end
+    else
+      _ -> :gen_tcp.close(socket)
     end
   end
 
-  defp parse_headers(socket, headers_map) do
-    case :gen_tcp.recv(socket, 0, recv_timeout()) do
+  defp request_path({:abs_path, path}), do: {:ok, to_string(path)}
+  defp request_path(:*), do: {:ok, "*"}
+  defp request_path(_other), do: :error
+
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  # Reads header lines until the blank line, counting lines (a repeated name counts each time) and the bytes
+  # of names and values against `limits`. Past either limit the request is refused rather than routed with
+  # the headers read so far. A read that times out against the deadline, a line longer than the socket
+  # allows (the driver has already closed the connection) or a closed socket ends the request unanswered.
+  defp parse_headers(socket, limits, deadline, {headers_map, count, bytes}) do
+    case :gen_tcp.recv(socket, 0, remaining(deadline)) do
       {:ok, :http_eoh} ->
-        headers_map
+        {:ok, headers_map}
 
       {:ok, {:http_header, _, header_name, _, value}} ->
         # The decoder returns a well-known header name as an atom (`:Cookie`, `:"User-Agent"`, and note the
@@ -131,10 +191,21 @@ defmodule Malachi.Dashboard do
             charlist when is_list(charlist) -> charlist |> to_string() |> String.downcase()
           end
 
-        parse_headers(socket, Map.put(headers_map, key, to_string(value)))
+        value = to_string(value)
+        count = count + 1
+        bytes = bytes + byte_size(key) + byte_size(value)
 
-      _ ->
-        headers_map
+        if count > limits.count or bytes > limits.total do
+          {:error, :too_large}
+        else
+          parse_headers(socket, limits, deadline, {Map.put(headers_map, key, value), count, bytes})
+        end
+
+      {:ok, {:http_error, _}} ->
+        {:ok, headers_map}
+
+      {:error, _} ->
+        {:error, :closed}
     end
   end
 

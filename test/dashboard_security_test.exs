@@ -301,6 +301,169 @@ defmodule Malachi.DashboardSecurityTest do
     end
   end
 
+  describe "header bounds" do
+    # Before the bound, parse_headers/2 recursed on every header line until the blank line, so the only limit
+    # on how many headers a request could carry was the receive timeout, and a line longer than the socket
+    # buffer ended the parse early and routed the request with whatever headers had been read so far.
+
+    test "fifty header lines are served and the fifty-first is refused with 431" do
+      assert status_code(raw_request(header_lines(50))) == 200
+
+      response = raw_request(header_lines(51))
+      assert status_code(response) == 431
+      assert response =~ "431 Request Header Fields Too Large"
+      assert {:ok, %{"reason" => "header_fields_too_large"}} = json_body(response)
+    end
+
+    test "a repeated name counts once per line" do
+      lines = ["Host: localhost" | List.duplicate("Cookie: a=b", 50)]
+      assert status_code(raw_request(lines)) == 431
+    end
+
+    test "a 10000 byte line is read whole and a 10001 byte one closes the connection", %{admin_token: token} do
+      # The padding goes first, so the cookie after it only authenticates the request if the long line was
+      # read rather than ending the parse. The line length counts the name, the separator and the CRLF. Past
+      # it the socket driver closes the connection itself, so there is no answer to read.
+      cookie = "Cookie: malachi_token=#{token}"
+
+      assert status_code(raw_request(["Host: localhost", padded_line(10_000), cookie], "/metrics")) == 200
+      assert raw_request(["Host: localhost", padded_line(10_001), cookie], "/metrics") == ""
+    end
+
+    test "a repeated name adds its bytes on every line, not only the value kept" do
+      # 41 lines is under the count, and only one cookie survives in the map, but the 40 lines carry about
+      # 36 KB: the total counts what was read, not what was kept.
+      lines = ["Host: localhost" | List.duplicate("Cookie: " <> String.duplicate("a", 900), 40)]
+      assert status_code(raw_request(lines)) == 431
+    end
+
+    test "a 10000 byte request line is read and a 10001 byte one closes the connection" do
+      assert status_code(raw_request_line(10_000)) > 0
+      assert raw_request_line(10_001) == ""
+    end
+
+    test "32768 bytes of names and values are served and one more is refused" do
+      # "host" + "localhost" is 13 bytes and each "x-tN" name is 4, so the values carry the rest.
+      assert status_code(raw_request(total_lines(32_768))) == 200
+      assert status_code(raw_request(total_lines(32_769))) == 431
+    end
+
+    test "a client that keeps sending headers is cut off at the deadline" do
+      put_recv_timeout(300)
+      {:ok, socket} = DashboardHelper.connect()
+      :ok = :gen_tcp.send(socket, "GET /health HTTP/1.1\r\nHost: localhost\r\n")
+
+      # Each header lands well inside the per-read timeout, so only a deadline over the whole block ends this.
+      dribbler =
+        spawn(fn ->
+          for i <- 1..30 do
+            Process.sleep(100)
+            :gen_tcp.send(socket, "X-D#{i}: v\r\n")
+          end
+        end)
+
+      started = System.monotonic_time(:millisecond)
+      assert {:error, reason} = :gen_tcp.recv(socket, 0, 2_000)
+      assert reason in [:closed, :econnreset]
+      assert System.monotonic_time(:millisecond) - started < 1_500
+
+      Process.exit(dribbler, :kill)
+      :gen_tcp.close(socket)
+    end
+
+    test "a request whose headers stop arriving is closed, not routed with the headers read so far" do
+      put_recv_timeout(300)
+      {:ok, socket} = DashboardHelper.connect()
+      :ok = :gen_tcp.send(socket, "GET /health HTTP/1.1\r\nHost: localhost\r\n")
+
+      assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2_000)
+      :gen_tcp.close(socket)
+    end
+  end
+
+  describe "request line forms" do
+    # Characterization of the shapes the bounded parse still dispatches exactly as before it.
+
+    test "an asterisk-form request is parsed and answered" do
+      {:ok, socket} = DashboardHelper.connect()
+      :ok = :gen_tcp.send(socket, "OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      assert status_code(read_until_closed(socket, "")) > 0
+      :gen_tcp.close(socket)
+    end
+
+    test "an absolute-form request is closed unanswered" do
+      {:ok, socket} = DashboardHelper.connect()
+      :ok = :gen_tcp.send(socket, "GET http://localhost/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      assert read_until_closed(socket, "") == ""
+      :gen_tcp.close(socket)
+    end
+
+    test "a malformed header line ends the parse and the request is routed with the headers before it",
+         %{admin_token: token} do
+      # /metrics needs the cookie, so a 200 shows the header read before the malformed line was kept.
+      lines = ["Host: localhost", "Cookie: malachi_token=#{token}", "NoColonHere"]
+      assert status_code(raw_request(lines, "/metrics")) == 200
+    end
+  end
+
+  describe "configured header bounds" do
+    setup do
+      keys = [:dashboard_max_header_count, :dashboard_max_header_line_size, :dashboard_max_header_size]
+      originals = Map.new(keys, &{&1, Application.fetch_env(:malachi, &1)})
+
+      on_exit(fn ->
+        Enum.each(originals, fn
+          {key, {:ok, value}} -> Application.put_env(:malachi, key, value)
+          {key, :error} -> Application.delete_env(:malachi, key)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "each configured limit is served at its value and refused one past it" do
+      Application.put_env(:malachi, :dashboard_max_header_count, 5)
+      Application.put_env(:malachi, :dashboard_max_header_line_size, 512)
+      Application.put_env(:malachi, :dashboard_max_header_size, 1_024)
+      port = start_dashboard()
+
+      assert status_code(raw_request(header_lines(5), "/health", port)) == 200
+      assert status_code(raw_request(header_lines(6), "/health", port)) == 431
+
+      assert status_code(raw_request(["Host: localhost", padded_line(512)], "/health", port)) == 200
+      assert raw_request(["Host: localhost", padded_line(513)], "/health", port) == ""
+      assert status_code(raw_request_line(512, port)) > 0
+      assert raw_request_line(513, port) == ""
+
+      # 13 bytes for the Host header and 3 for each "x-a" style name leave 1002 bytes for three values.
+      assert status_code(raw_request(small_total_lines(1_024), "/health", port)) == 200
+      assert status_code(raw_request(small_total_lines(1_025), "/health", port)) == 431
+    end
+
+    test "a limit that is not a positive integer falls back to its default and says so" do
+      Application.put_env(:malachi, :dashboard_max_header_count, 0)
+
+      {port, log} = with_log(fn -> start_dashboard() end)
+      assert log =~ "dashboard_max_header_count"
+
+      assert status_code(raw_request(header_lines(50), "/health", port)) == 200
+      assert status_code(raw_request(header_lines(51), "/health", port)) == 431
+    end
+
+    test "a line limit is accepted up to 1048576 and a larger one falls back to the default" do
+      Application.put_env(:malachi, :dashboard_max_header_line_size, 1_048_576)
+      port = start_dashboard()
+      assert status_code(raw_request(["Host: localhost", padded_line(20_000)], "/health", port)) == 200
+
+      Application.put_env(:malachi, :dashboard_max_header_line_size, 1_048_577)
+      {port, log} = with_log(fn -> start_dashboard() end)
+      assert log =~ "dashboard_max_header_line_size"
+
+      assert status_code(raw_request(["Host: localhost", padded_line(10_000)], "/health", port)) == 200
+      assert raw_request(["Host: localhost", padded_line(10_001)], "/health", port) == ""
+    end
+  end
+
   describe "security headers" do
     test "responses include security headers", %{admin_token: token} do
       case DashboardHelper.connect() do
@@ -1240,6 +1403,76 @@ defmodule Malachi.DashboardSecurityTest do
 
     :gen_tcp.close(socket)
     response
+  end
+
+  # Sends a request made of `lines` (header lines without their CRLF) and reads the answer until the
+  # server closes the connection.
+  defp raw_request(lines, path \\ "/health", port \\ Malachi.Dashboard.port()) do
+    {:ok, socket} = DashboardHelper.connect(port: port)
+    head = Enum.map_join(lines, &(&1 <> "\r\n"))
+    :ok = :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\n#{head}\r\n")
+    response = read_until_closed(socket, "")
+    :gen_tcp.close(socket)
+    response
+  end
+
+  # A GET whose request line, CRLF included, is exactly `length` bytes long.
+  defp raw_request_line(length, port \\ Malachi.Dashboard.port()) do
+    {:ok, socket} = DashboardHelper.connect(port: port)
+    target = "/" <> String.duplicate("a", length - byte_size("GET / HTTP/1.1\r\n"))
+    :ok = :gen_tcp.send(socket, "GET #{target} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    response = read_until_closed(socket, "")
+    :gen_tcp.close(socket)
+    response
+  end
+
+  defp read_until_closed(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 3_000) do
+      {:ok, data} -> read_until_closed(socket, acc <> data)
+      {:error, _} -> acc
+    end
+  end
+
+  # `count` header lines in all, the Host header among them.
+  defp header_lines(count), do: ["Host: localhost" | Enum.map(2..count//1, &"X-H#{&1}: v")]
+
+  # One "X-Pad" header line exactly `length` bytes long, CRLF included.
+  defp padded_line(length), do: "X-Pad: " <> String.duplicate("a", length - byte_size("X-Pad: ") - 2)
+
+  # Host plus four "X-TN" headers whose names and values add up to `total` bytes.
+  defp total_lines(total), do: ["Host: localhost" | split_values(["X-T1", "X-T2", "X-T3", "X-T4"], total - 13 - 16)]
+
+  # Host plus three "X-A" style headers whose names and values add up to `total` bytes.
+  defp small_total_lines(total), do: ["Host: localhost" | split_values(["X-A", "X-B", "X-C"], total - 13 - 9)]
+
+  defp split_values(names, value_bytes) do
+    share = div(value_bytes, length(names))
+    extra = value_bytes - share * length(names)
+
+    names
+    |> Enum.with_index()
+    |> Enum.map(fn {name, index} ->
+      size = if index == 0, do: share + extra, else: share
+      "#{name}: " <> String.duplicate("v", size)
+    end)
+  end
+
+  defp start_dashboard do
+    name = :"header_bounds_dashboard_#{System.unique_integer([:positive])}"
+    start_supervised!({Malachi.Dashboard, {0, name: name}}, id: name)
+    Malachi.Dashboard.port(name)
+  end
+
+  defp put_recv_timeout(ms) do
+    original = Application.fetch_env(:malachi, :dashboard_recv_timeout_ms)
+    Application.put_env(:malachi, :dashboard_recv_timeout_ms, ms)
+
+    on_exit(fn ->
+      case original do
+        {:ok, value} -> Application.put_env(:malachi, :dashboard_recv_timeout_ms, value)
+        :error -> Application.delete_env(:malachi, :dashboard_recv_timeout_ms)
+      end
+    end)
   end
 
   # Extracts the numeric status from an HTTP response, and its JSON body.

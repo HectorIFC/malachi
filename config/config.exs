@@ -7,6 +7,13 @@ config :malachi,
   # Largest request frame the binary protocol will accept (bytes). A declared length beyond this is
   # rejected at the length prefix, before the body is buffered, bounding per-connection memory.
   max_frame_size: 16_777_216,
+  # Largest request header block the dashboard will read: header lines, bytes in one line (request line
+  # and CRLF included) and bytes across names and values. Past the count or the total it answers 431, and
+  # past the line the socket closes, instead of holding the headers, bounding per-connection memory the way
+  # max_frame_size does for the protocol.
+  dashboard_max_header_count: 50,
+  dashboard_max_header_line_size: 10_000,
+  dashboard_max_header_size: 32_768,
   auth_timeout_ms: 10_000,
   # No default users are shipped in the base config: credentials must never be hard-coded in source. The
   # dev/test convenience defaults live in config/dev.exs and config/test.exs (never shipped to prod); prod

@@ -397,6 +397,10 @@ config :malachi,
   dashboard_csp:
     System.get_env("MALACHI_DASHBOARD_CSP") ||
       "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+  # Header limits; see config/config.exs for what happens past each.
+  dashboard_max_header_count: parse_int.("MALACHI_DASHBOARD_MAX_HEADER_COUNT", 50),
+  dashboard_max_header_line_size: parse_int.("MALACHI_DASHBOARD_MAX_HEADER_LINE_SIZE", 10_000),
+  dashboard_max_header_size: parse_int.("MALACHI_DASHBOARD_MAX_HEADER_SIZE", 32_768),
   hsts_enabled:
     (case System.get_env("MALACHI_HSTS_ENABLED") do
        "false" -> false
