@@ -21,9 +21,11 @@ defmodule Malachi.Cluster.RingServer do
 
   ## Cost
 
-  Read once per boot; written twice per vnode split (the intent, then the completed ring). Routing on
-  the hot path never comes here: it reads the gossiped topology held in memory. So this store adds a
-  boot-time dependency, not a request-path one.
+  Read once per boot, and twice per orphan-sweep pass on every node of a sharded cluster that has a
+  candidate to decide (`Malachi.Application.durable_orphan_authority/1`, every five minutes by default);
+  written twice per vnode split (the intent, then the completed ring). Routing on the hot path never
+  comes here: it reads the gossiped topology held in memory. So this store adds a boot-time dependency
+  and a slow periodic reader, not a request-path one.
   """
 
   alias Malachi.Cluster.RaCluster
@@ -82,10 +84,13 @@ defmodule Malachi.Cluster.RingServer do
 
   Boot must keep those three apart: only the middle one licenses seeding from `MALACHI_LOG_VNODES`.
   Treating the third as the second is exactly the bug this store exists to fix.
+
+  `timeout` bounds the read, ra's own five seconds by default; a caller on a periodic path that must
+  skip rather than wait passes a short one.
   """
-  @spec topology(server_id()) :: {:ok, RingTopology.t()} | {:ok, :none} | {:error, term()}
-  def topology(server_id) do
-    case RaCluster.query(server_id) do
+  @spec topology(server_id(), timeout()) :: {:ok, RingTopology.t()} | {:ok, :none} | {:error, term()}
+  def topology(server_id, timeout \\ 5_000) do
+    case RaCluster.query(server_id, timeout) do
       {:ok, %Ring{} = ring} ->
         case Ring.topology(ring) do
           {:ok, topology} -> {:ok, topology}

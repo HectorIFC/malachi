@@ -266,11 +266,11 @@ config :malachi,
   # The orphan sweep: replica directories retention could not delete, because the replica did not answer.
   # No later sweep can name them (a segment gone from the control plane never comes back), so a separate
   # worker per node reclaims them. `delete` acts, `report` only lists what it would take, `off` does not
-  # even look. It is deliberately slower than the other workers and guarded: a directory must be older
-  # than MALACHI_RETENTION_ORPHAN_MIN_AGE_MS (longer than the worst registration lag, or a segment being
-  # registered looks orphaned), must be unexplained on MALACHI_RETENTION_ORPHAN_SIGHTINGS consecutive
-  # passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds the damage if
-  # the expected set is ever wrong.
+  # even look. It is deliberately slower than the other workers and guarded: the vnode owning a
+  # directory's segment has to say it does not list it, the directory must be older than
+  # MALACHI_RETENTION_ORPHAN_MIN_AGE_MS, must be unexplained on MALACHI_RETENTION_ORPHAN_SIGHTINGS
+  # consecutive passes, and at most MALACHI_RETENTION_ORPHAN_MAX_PER_PASS go in one pass, which bounds
+  # the damage if an answer is ever wrong.
   retention_orphan_sweep: Malachi.Config.retention_orphan_sweep(System.get_env("MALACHI_RETENTION_ORPHAN_SWEEP")),
   # The backstop for a topic bound to a policy name this node cannot resolve. Unset means nothing of
   # that topic expires, which is the safe side: the name exists because the administrator wanted

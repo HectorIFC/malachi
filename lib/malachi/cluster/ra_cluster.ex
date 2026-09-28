@@ -118,8 +118,23 @@ defmodule Malachi.Cluster.RaCluster do
   "this cluster did not answer" (see `Malachi.Cluster.ReplicatedDSRSM.snapshot/2`).
   """
   @spec query(server_id(), timeout()) :: {:ok, term()} | {:error, term()}
-  def query(server_id, timeout \\ @default_timeout) do
-    case :ra.consistent_query(server_id, {Function, :identity, []}, timeout) do
+  def query(server_id, timeout \\ @default_timeout), do: project(server_id, {Function, :identity, []}, timeout)
+
+  @doc """
+  A linearizable read that returns `apply(m, f, a ++ [state])` computed **inside the leader**.
+
+  For a caller that needs one part of a large state and should not copy the rest across the network.
+  The price is what makes this dangerous: ra 3.1 applies the `{M, F, A}` in the leader's server
+  process without a `catch` (`ra_machine:apply_fun/3`), so a function that raises, or that is missing
+  from the leader's code during a rolling upgrade or a rolled back build, takes that server down and
+  forces an election. Only pass a total function from the standard library, which every node has
+  whatever Malachi version it runs, such as `{:maps, :with, [keys]}`. Anything that has to run Malachi
+  code belongs in the caller, over what this returns.
+  """
+  @spec project(server_id(), {module(), atom(), [term()]}, timeout()) :: {:ok, term()} | {:error, term()}
+  def project(server_id, {module, function, args} = mfa, timeout \\ @default_timeout)
+      when is_atom(module) and is_atom(function) and is_list(args) do
+    case :ra.consistent_query(server_id, mfa, timeout) do
       {:ok, state, _leader} -> {:ok, state}
       {:error, reason} -> {:error, reason}
       {:timeout, _server} -> {:error, :timeout}
