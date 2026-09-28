@@ -320,6 +320,21 @@ defmodule Malachi.Cluster.DSRSMTest do
                DSRSM.command(dsrsm, "events", {:seal_segment, seg_id, 1, 10, 0})
     end
 
+    test "a registration whose segment id names another topic's range is rejected", %{
+      dsrsm: dsrsm,
+      events_root: events_root,
+      orders_root: orders_root
+    } do
+      # Routed by "events" into events' range, but the segment id is orders'. The range alone matches, so
+      # only the segment id's routing topic catches it; registered, it would sit where the owner of its
+      # routing topic (the vnode the orphan sweep asks) is not.
+      assert {^dsrsm, {:error, :range_topic_mismatch}} =
+               DSRSM.command(dsrsm, "events", {:register_segment, events_root, {orders_root, 0}, [:b1], 0})
+
+      assert {_dsrsm, :ok} =
+               DSRSM.command(dsrsm, "events", {:register_segment, events_root, {events_root, 0}, [:b1], 0})
+    end
+
     test "the matching pair still succeeds", %{dsrsm: dsrsm, orders_root: orders_root} do
       assert {_dsrsm, {:ok, _left, _right}} =
                DSRSM.command(dsrsm, "orders", {:split_range, orders_root})

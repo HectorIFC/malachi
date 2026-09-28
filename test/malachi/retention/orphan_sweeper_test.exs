@@ -4,8 +4,10 @@ defmodule Malachi.Retention.OrphanSweeperTest do
   import ExUnit.CaptureLog
 
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.I18n
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Storage.Layout
   alias Malachi.Test.UnknownMessages
@@ -24,9 +26,7 @@ defmodule Malachi.Retention.OrphanSweeperTest do
 
   defp start_sweeper(context, opts) do
     defaults = [
-      metadata_source: fn -> Metadata.new() end,
-      metadata_ready?: fn -> true end,
-      unreachable_vnodes: fn -> [] end,
+      authority: authority(Metadata.new()),
       local_ref: context.replication,
       directory: context.directory,
       on_result: fn _result -> :ok end,
@@ -67,7 +67,7 @@ defmodule Malachi.Retention.OrphanSweeperTest do
       name = Path.basename(Layout.segment_directory(context.directory, segment_id))
       orphan!(context.directory, name)
 
-      sweeper = start_sweeper(context, metadata_source: fn -> metadata end)
+      sweeper = start_sweeper(context, authority: authority(metadata))
 
       assert %{removed: [], held: []} = OrphanSweeper.sweep_now(sweeper)
       assert File.exists?(Path.join(context.directory, name))
@@ -94,22 +94,11 @@ defmodule Malachi.Retention.OrphanSweeperTest do
   end
 
   describe "the guards" do
-    test "does nothing at all while the metadata is not ready", context do
+    test "does nothing while an owning vnode does not answer", context do
+      # A vnode that did not answer knows nothing the sweep can act on, and a partial answer is not an
+      # answer: the directory of a segment registered on the silent vnode would look orphaned.
       orphan!(context.directory, "gone-r0-s1")
-      sweeper = start_sweeper(context, metadata_ready?: fn -> false end)
-
-      assert %{skipped: :metadata_not_ready, removed: [], scanned: 0} = OrphanSweeper.sweep_now(sweeper)
-      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
-    end
-
-    test "does nothing while a vnode did not answer the last refresh", context do
-      # The guard that readiness cannot give. A vnode that goes silent AFTER being read keeps the view
-      # it had, so its old segments stay explained while ones registered on it since are missing from
-      # the merge. Their replicas still land here over the data plane, which is a different channel
-      # from the ra query this node cannot make, so without this the sweep deletes a live copy once
-      # the silence outlasts the minimum age.
-      orphan!(context.directory, "gone-r0-s1")
-      sweeper = start_sweeper(context, unreachable_vnodes: fn -> [:vnode_2] end)
+      sweeper = start_sweeper(context, authority: fn _names -> {:error, {:vnodes_unreachable, [:vnode_2]}} end)
 
       assert %{skipped: {:vnodes_unreachable, [:vnode_2]}, removed: [], scanned: 0} =
                OrphanSweeper.sweep_now(sweeper)
@@ -117,17 +106,94 @@ defmodule Malachi.Retention.OrphanSweeperTest do
       assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
     end
 
-    test "a broker that cannot say which vnodes answered skips the pass", context do
+    test "does nothing when the topology changed while it asked", context do
+      # The answers may have come from owners the ring no longer routes to.
       orphan!(context.directory, "gone-r0-s1")
-      gone = spawn(fn -> :ok end)
-      ref = Process.monitor(gone)
-      assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+      sweeper = start_sweeper(context, authority: fn _names -> {:error, {:topology_changed, 3, 4}} end)
 
-      sweeper = start_sweeper(context, unreachable_vnodes: fn -> GenServer.call(gone, :unreachable) end)
-
-      assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
-      assert Process.alive?(sweeper)
+      assert %{skipped: {:topology_changed, 3, 4}, removed: []} = OrphanSweeper.sweep_now(sweeper)
       assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "does nothing without a ring to route by", context do
+      orphan!(context.directory, "gone-r0-s1")
+      sweeper = start_sweeper(context, authority: fn _names -> {:error, :no_topology} end)
+
+      assert %{skipped: :no_topology, removed: []} = OrphanSweeper.sweep_now(sweeper)
+      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "any other refusal from the authority skips the pass as unreachable", context do
+      orphan!(context.directory, "gone-r0-s1")
+      sweeper = start_sweeper(context, authority: fn _names -> {:error, :topology_unavailable} end)
+
+      assert %{skipped: {:unreachable, :topology_unavailable}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "keeps an undecided directory, and reports it held", context do
+      # A segment id without a topic has no owner to route to, and a pending split may be moving the
+      # topic between the two owners' reads. Undecided is not the same as unlisted.
+      orphan!(context.directory, "gone-r0-s1")
+
+      sweeper =
+        start_sweeper(context, authority: fn names -> {:ok, %{known: MapSet.new(), undecided: MapSet.new(names)}} end)
+
+      assert %{removed: [], held: ["gone-r0-s1"]} = OrphanSweeper.sweep_now(sweeper)
+      assert %{removed: [], held: ["gone-r0-s1"]} = OrphanSweeper.sweep_now(sweeper)
+      assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+    end
+
+    test "asks only about candidates, oldest first, at most max_tracked of them", context do
+      for n <- 1..3, do: orphan!(context.directory, "gone-r0-s#{n}")
+      test_pid = self()
+
+      sweeper =
+        start_sweeper(context,
+          max_tracked: 2,
+          authority: fn names ->
+            send(test_pid, {:asked, names})
+            {:ok, %{known: MapSet.new(), undecided: MapSet.new()}}
+          end
+        )
+
+      assert %{removed: removed} = OrphanSweeper.sweep_now(sweeper)
+      assert_received {:asked, asked}
+      assert length(asked) == 2
+      assert Enum.sort(removed) == Enum.sort(asked)
+      # Exactly one question per pass: the answer the pass acts on is one answer.
+      refute_received {:asked, _names}
+    end
+
+    test "says when candidates were left for a later pass", context do
+      # The cap postpones the overflow, which only delays a removal; the line is what says it waits.
+      for n <- 1..3, do: orphan!(context.directory, "gone-r0-s#{n}")
+      sweeper = start_sweeper(context, max_tracked: 2)
+
+      assert capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~
+               I18n.t(:retention_orphan_tracking_capped, limit: 2)
+
+      roomy = start_sweeper(context, max_tracked: 5)
+
+      refute capture_log(fn -> OrphanSweeper.sweep_now(roomy) end) =~
+               I18n.t(:retention_orphan_tracking_capped, limit: 5)
+    end
+
+    test "a disk with nothing old enough asks nobody", context do
+      orphan!(context.directory, "gone-r0-s1")
+      test_pid = self()
+
+      sweeper =
+        start_sweeper(context,
+          min_age_ms: 60_000,
+          authority: fn names ->
+            send(test_pid, {:asked, names})
+            {:error, :should_not_be_asked}
+          end
+        )
+
+      assert %{skipped: nil, removed: []} = OrphanSweeper.sweep_now(sweeper)
+      refute_received {:asked, _names}
     end
 
     test "does not even list in :off mode", context do
@@ -273,18 +339,37 @@ defmodule Malachi.Retention.OrphanSweeperTest do
     assert eventually(fn -> not File.exists?(Path.join(context.directory, "gone-r0-s1")) end)
   end
 
-  test "the line about waiting for metadata is logged once, not every pass", context do
-    sweeper = start_sweeper(context, on_result: :default, metadata_ready?: fn -> false end)
+  test "the line about an unanswered pass is logged once, and again after an answer", context do
+    orphan!(context.directory, "gone-r0-s1")
+    answer = :counters.new(1, [])
+    silent = {:error, {:vnodes_unreachable, [:vnode_2]}}
+    empty = {:ok, %{known: MapSet.new(), undecided: MapSet.new()}}
 
-    first = capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end)
-    assert first =~ "waiting for metadata"
+    sweeper =
+      start_sweeper(context,
+        on_result: :default,
+        sightings: 5,
+        authority: fn _names -> if :counters.get(answer, 1) == 0, do: silent, else: empty end
+      )
 
-    # A node that boots with a silent vnode would otherwise say the same thing every interval for as
-    # long as that vnode stays silent.
-    refute capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ "waiting for metadata"
+    holding =
+      I18n.t(:retention_orphan_authority_unavailable,
+        directory: context.directory,
+        reason: inspect({:vnodes_unreachable, [:vnode_2]})
+      )
+
+    assert capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ holding
+
+    # A node whose owners stay silent would otherwise say the same thing every interval.
+    refute capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ holding
+
+    :counters.put(answer, 1, 1)
+    OrphanSweeper.sweep_now(sweeper)
+    :counters.put(answer, 1, 0)
+    assert capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ holding
   end
 
-  test "a broker that cannot answer skips the pass instead of taking the sweeper down", context do
+  test "an authority that cannot answer skips the pass instead of taking the sweeper down", context do
     # Measured on the reshard drill: a sharded control plane comes back from a full-cluster restart
     # healthy but unable to serve metadata (#136), and the scrubber died once per tick for as long as
     # that lasted. A worker that cannot read the state authorizing it to act must not act, and must
@@ -294,24 +379,60 @@ defmodule Malachi.Retention.OrphanSweeperTest do
     ref = Process.monitor(gone)
     assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
 
-    sweeper = start_sweeper(context, metadata_ready?: fn -> GenServer.call(gone, :metadata_ready?) end)
+    sweeper = start_sweeper(context, authority: fn _names -> GenServer.call(gone, :topology) end)
 
     assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
     assert Process.alive?(sweeper)
     assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
   end
 
-  test "a broker that answers ready and then stops answering also skips the pass", context do
+  test "an answer that never comes ends the pass at the deadline, and the sweeper lives on", context do
+    # ra follows a leader redirect with a fresh timeout, so during an election no single read times out
+    # while the pass keeps waiting. The deadline is on the whole question.
     orphan!(context.directory, "gone-r0-s1")
-    gone = spawn(fn -> :ok end)
-    ref = Process.monitor(gone)
-    assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+    sweeper = start_sweeper(context, authority_deadline_ms: 100, authority: fn _names -> Process.sleep(:infinity) end)
 
-    sweeper = start_sweeper(context, metadata_source: fn -> GenServer.call(gone, :metadata) end)
+    {elapsed_us, result} = :timer.tc(fn -> OrphanSweeper.sweep_now(sweeper) end)
 
-    assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+    assert %{skipped: {:unreachable, :deadline}, removed: []} = result
+    assert elapsed_us < 2_000_000, "the pass waited #{div(elapsed_us, 1000)}ms past a 100ms deadline"
     assert Process.alive?(sweeper)
     assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+  end
+
+  test "an authority that raises skips the pass instead of taking the sweeper down", context do
+    orphan!(context.directory, "gone-r0-s1")
+    sweeper = start_sweeper(context, authority: fn _names -> raise "the control plane answered nonsense" end)
+
+    capture_log(fn ->
+      assert %{skipped: {:unreachable, _reason}, removed: []} = OrphanSweeper.sweep_now(sweeper)
+    end)
+
+    assert Process.alive?(sweeper)
+    assert File.exists?(Path.join(context.directory, "gone-r0-s1"))
+  end
+
+  test "the directories held as undecided are named when that set changes, not every pass", context do
+    orphan!(context.directory, "gone-r0-s1")
+    orphan!(context.directory, "gone-r0-s2")
+    held = :counters.new(1, [])
+
+    sweeper =
+      start_sweeper(context,
+        authority: fn names ->
+          undecided = if :counters.get(held, 1) == 0, do: ["gone-r0-s1"], else: names
+          {:ok, %{known: MapSet.new(), undecided: MapSet.new(undecided)}}
+        end,
+        sightings: 5
+      )
+
+    line = &I18n.t(:retention_orphan_undecided, count: length(&1), directories: inspect(&1))
+
+    assert capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ line.(["gone-r0-s1"])
+    refute capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ "gone-r0-s1"
+
+    :counters.put(held, 1, 1)
+    assert capture_log(fn -> OrphanSweeper.sweep_now(sweeper) end) =~ line.(["gone-r0-s1", "gone-r0-s2"])
   end
 
   test "a data directory it cannot read is reported, not guessed at", context do
@@ -353,6 +474,14 @@ defmodule Malachi.Retention.OrphanSweeperTest do
       remaining_ms <= 0 -> false
       true -> Process.sleep(10) && eventually(check, remaining_ms - 10)
     end
+  end
+
+  # What the single-node wiring asks: the broker's own metadata, which is the truth when there is no
+  # control plane. The clustered authorities are exercised against real vnodes in the ra tests.
+  defp authority(%Metadata{} = metadata) do
+    &Orphans.explain(&1, fn ids ->
+      {:ok, %{known: Orphans.known_among(metadata.segments, ids), unroutable: [], migrating: [], misplaced: []}}
+    end)
   end
 
   defp with_segment do
