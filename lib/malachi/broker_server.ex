@@ -456,7 +456,9 @@ defmodule Malachi.BrokerServer do
       unreachable_vnodes: [],
       # Sharded control plane only: `%{orchestrator?: (-> boolean), vnodes: [{id, token, nodes}],
       # replicated: ReplicatedDSRSM.t()}`. The reconcile loop uses it to bootstrap missing vnodes while
-      # this node is the leader (see `bootstrap_missing_vnodes/1`). `nil` otherwise.
+      # this node is the leader (see `bootstrap_missing_vnodes/2`). `nil` otherwise. Both `vnodes` and
+      # `replicated` follow the ring this node adopted last (see `adopt_bootstrap/3`), not the one it
+      # booted with.
       bootstrap: bootstrap,
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
@@ -711,13 +713,14 @@ defmodule Malachi.BrokerServer do
 
   @impl true
   # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
-  # (cache ring + write router) and the refresh source, so the periodic reconcile re-seeds against the new
-  # topology instead of reverting to the boot ring. Fired async (a cast), so it never blocks membership.
+  # (cache ring + write router), the refresh source and the bootstrap pass, so the periodic reconcile
+  # re-seeds against the new topology instead of reverting to the boot ring, and bootstraps the vnodes
+  # of the new ring instead of the boot list. Fired async (a cast), so it never blocks membership.
   def handle_cast({:adopt_topology, %RingTopology{} = topology}, state) do
     replicated = replicated_of(topology)
     broker = adopt_topology(state.broker, topology)
     metadata_refresh = sharded_refresh(replicated, state.reconcile_read_timeout)
-    bootstrap = if state.bootstrap, do: %{state.bootstrap | replicated: replicated}, else: state.bootstrap
+    bootstrap = adopt_bootstrap(state.bootstrap, topology, replicated)
 
     # A reconcile started before this cast read the PREVIOUS ring. Bumping the generation is what makes
     # its result arrive stale and be dropped, instead of overwriting the ring this cast just installed
@@ -1848,7 +1851,7 @@ defmodule Malachi.BrokerServer do
 
   # Builds the sharded control plane's ReplicatedDSRSM as routing-only: every vnode points at a real
   # placement member (the first) without starting its cluster. The reconcile loop starts the clusters
-  # on the current leader (see `bootstrap_missing_vnodes/1`), so exactly one node bootstraps each vnode
+  # on the current leader (see `bootstrap_missing_vnodes/2`), so exactly one node bootstraps each vnode
   # and the role fails over with leadership.
   defp build_replicated(vnodes) do
     Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
@@ -1915,6 +1918,21 @@ defmodule Malachi.BrokerServer do
   # The ReplicatedDSRSM (routing view) for a topology: its ring plus the vnode→server map.
   defp replicated_of(%RingTopology{ring: ring} = topology) do
     %ReplicatedDSRSM{ring: ring, vnodes: RingTopology.servers(topology)}
+  end
+
+  # The bootstrap pass for an adopted `topology`. Every field of it that comes from the ring is rebuilt
+  # here, together, and nowhere else: a pass that kept the boot list while the routing view moved on
+  # never bootstrapped a vnode a split added, and kept bootstrapping one that had left (#242), where the
+  # readiness check then asked the new routing view for a vnode it no longer has. `orchestrator?` is the
+  # one field that does not come from the ring, so it is kept.
+  #
+  # The `nodes` of each vnode are the ring's recorded placement. That is good enough to seed a cluster
+  # that does not exist yet, which is all this pass does with them: a vnode a split added is formed on
+  # exactly those nodes. It is not the truth about membership once a rebalance has moved members (#243).
+  defp adopt_bootstrap(nil, _topology, _replicated), do: nil
+
+  defp adopt_bootstrap(bootstrap, topology, replicated) do
+    %{bootstrap | vnodes: RingTopology.vnode_placement(topology), replicated: replicated}
   end
 
   # A command function over a single-vnode DSRSM whose lone vnode is an authoritative ra cluster:
