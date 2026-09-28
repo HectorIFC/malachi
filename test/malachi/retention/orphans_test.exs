@@ -11,66 +11,176 @@ defmodule Malachi.Retention.OrphansTest do
   @keyspace_bits 4
   @opts [min_age_ms: 0, sightings: 1, max_per_pass: 100, max_tracked: 1_000]
 
-  describe "expected/2" do
-    test "names the directory of every segment, whatever this node's replica set says" do
-      metadata = with_segments([{1, [:a]}, {2, [:b]}])
-
-      assert Orphans.expected(metadata, @directory) ==
-               MapSet.new(["t-r0-s1", "t-r0-s2"])
+  describe "candidate_ids/1" do
+    test "reads a readable name back into its segment id" do
+      assert Orphans.candidate_ids("t-r0-s1") == [{{"t", 0}, 1}]
     end
 
-    test "is empty for metadata with no segments" do
-      assert Orphans.expected(Metadata.new(), @directory) == MapSet.new()
+    test "reads a topic that itself looks like a suffix from the last -r" do
+      # `a-r0-s0-r1-s2` is segment 2 of range 1 of topic `a-r0-s0`. `a` with range 0 and segment
+      # `0-r1-s2` is not a reading: the segment is not a number. So there is exactly one readable reading.
+      assert Orphans.candidate_ids("a-r0-s0-r1-s2") == [{{"a-r0-s0", 1}, 2}]
+      assert Orphans.candidate_ids("x-r1-s2-r3-s4") == [{{"x-r1-s2", 3}, 4}]
+    end
+
+    test "drops a reading the layout would have spelled differently" do
+      # A leading zero parses, but the layout writes `t-r0-s1`, so `t-r0-s01` is no name it wrote.
+      assert Orphans.candidate_ids("t-r0-s01") == []
+    end
+
+    test "decodes the Base64 form of an id whose topic is not path-safe" do
+      id = {{"a/b", 0}, 3}
+      assert Orphans.candidate_ids(Path.basename(Layout.segment_directory(@directory, id))) == [id]
+    end
+
+    test "decodes an id that is not a broker id at all" do
+      id = {:segment, 7}
+      assert Orphans.candidate_ids(Path.basename(Layout.segment_directory(@directory, id))) == [id]
+    end
+
+    test "is empty for what an operator leaves in a data directory" do
+      for name <- ["ra", "lost+found", "backup", ".snapshots", "segments.old", "gone", "-r0-s1"] do
+        assert Orphans.candidate_ids(name) == [], name
+      end
+    end
+
+    test "the Base64 spelling of an id the layout writes readably has no reading" do
+      # What makes the round trip exact rather than a plausibility check: this decodes to a real segment
+      # id, but the layout would have written that id as t-r0-s1, so this name it never wrote.
+      encoded = Base.url_encode64(:erlang.term_to_binary({{"t", 0}, 1}), padding: false)
+      assert Orphans.candidate_ids(encoded) == []
     end
   end
 
-  describe "review/4" do
-    test "an unexplained directory is a candidate and a listed one is not" do
-      review = Orphans.review(MapSet.new(["kept-r0-s0"]), [{"kept-r0-s0", 10}, {"gone-r0-s1", 10}], %{}, @opts)
+  describe "candidates/2" do
+    test "keeps only names old enough, with a reading, and not reserved" do
+      entries = [
+        {"old-r0-s1", 1_000},
+        {"new-r0-s2", 999},
+        {"malachi.format", 5_000},
+        {"shard_0", 5_000},
+        {"lost+found", 5_000},
+        {"shard_0-r0-s1", 5_000}
+      ]
+
+      assert {names, 0} = Orphans.candidates(entries, min_age_ms: 1_000, max_tracked: 10)
+      assert Enum.sort(names) == ["old-r0-s1", "shard_0-r0-s1"]
+    end
+
+    test "the oldest come first and the rest wait for a later pass, counted" do
+      entries = [{"a-r0-s1", 10}, {"b-r0-s1", 30}, {"c-r0-s1", 20}, {"lost+found", 99}]
+
+      # The count is of ELIGIBLE names left out, so the operator is told only about real candidates.
+      assert Orphans.candidates(entries, min_age_ms: 0, max_tracked: 2) == {["b-r0-s1", "c-r0-s1"], 1}
+    end
+  end
+
+  describe "explain/2" do
+    test "a name is known when any of its readings is" do
+      lookup = fn ids ->
+        {:ok,
+         %{known: MapSet.new(Enum.filter(ids, &(&1 == {{"t", 0}, 1}))), unroutable: [], migrating: [], misplaced: []}}
+      end
+
+      assert {:ok, %{known: known, undecided: undecided}} = Orphans.explain(["t-r0-s1", "t-r0-s2"], lookup)
+      assert known == MapSet.new(["t-r0-s1"])
+      assert undecided == MapSet.new()
+    end
+
+    test "a name no owner could be asked about is undecided, not unknown" do
+      name = Path.basename(Layout.segment_directory(@directory, {:segment, 7}))
+      lookup = fn ids -> {:ok, %{known: MapSet.new(), unroutable: ids, migrating: [], misplaced: []}} end
+
+      assert {:ok, %{known: known, undecided: undecided}} = Orphans.explain([name], lookup)
+      assert known == MapSet.new()
+      assert undecided == MapSet.new([name])
+    end
+
+    test "a name a pending split is moving, listed by neither owner, is undecided, not unknown" do
+      lookup = fn ids -> {:ok, %{known: MapSet.new(), unroutable: [], migrating: ids, misplaced: []}} end
+
+      assert {:ok, %{known: known, undecided: undecided}} = Orphans.explain(["t-r0-s1"], lookup)
+      assert known == MapSet.new()
+      assert undecided == MapSet.new(["t-r0-s1"])
+    end
+
+    test "a name listed only by a vnode that does not own it is undecided, not unknown" do
+      lookup = fn ids -> {:ok, %{known: MapSet.new(), unroutable: [], migrating: [], misplaced: ids}} end
+
+      assert {:ok, %{known: known, undecided: undecided}} = Orphans.explain(["t-r0-s1"], lookup)
+      assert known == MapSet.new()
+      assert undecided == MapSet.new(["t-r0-s1"])
+    end
+
+    test "a known reading wins over an undecided one" do
+      lookup = fn ids -> {:ok, %{known: MapSet.new(ids), unroutable: ids, migrating: ids, misplaced: []}} end
+
+      assert {:ok, %{known: known, undecided: undecided}} = Orphans.explain(["t-r0-s1"], lookup)
+      assert known == MapSet.new(["t-r0-s1"])
+      assert undecided == MapSet.new()
+    end
+
+    test "every reading of every name is asked about, once" do
+      test_pid = self()
+
+      lookup = fn ids ->
+        send(test_pid, {:ids, ids})
+        {:ok, %{known: MapSet.new(), unroutable: [], migrating: [], misplaced: []}}
+      end
+
+      {:ok, _explained} = Orphans.explain(["t-r0-s1", "t-r0-s1", "u-r2-s3"], lookup)
+      assert_received {:ids, ids}
+      assert Enum.sort(ids) == [{{"t", 0}, 1}, {{"u", 2}, 3}]
+    end
+
+    test "an error from the lookup is returned as-is" do
+      assert Orphans.explain(["t-r0-s1"], fn _ids -> {:error, :no_topology} end) == {:error, :no_topology}
+    end
+  end
+
+  test "known_among/2 keeps the ids the segment map lists" do
+    segments = %{{{"t", 0}, 1} => :meta}
+    assert Orphans.known_among(segments, [{{"t", 0}, 1}, {{"t", 0}, 2}]) == MapSet.new([{{"t", 0}, 1}])
+  end
+
+  describe "review/3" do
+    test "every unexplained name is a candidate" do
+      review = Orphans.review(["gone-r0-s1"], %{}, @opts)
 
       assert review.ready == ["gone-r0-s1"]
       assert review.held == []
     end
 
-    test "a directory younger than the minimum age is not even a candidate" do
-      opts = Keyword.put(@opts, :min_age_ms, 1_000)
-      review = Orphans.review(MapSet.new(), [{"new-r0-s0", 999}, {"old-r0-s1", 1_000}], %{}, opts)
-
-      assert review.ready == ["old-r0-s1"]
-      assert Map.keys(review.sightings) == ["old-r0-s1"]
-    end
-
     test "a candidate is held until it has been unexplained for the required passes" do
       opts = Keyword.put(@opts, :sightings, 3)
-      entries = [{"gone-r0-s1", 10}]
 
-      first = Orphans.review(MapSet.new(), entries, %{}, opts)
+      first = Orphans.review(["gone-r0-s1"], %{}, opts)
       assert first.ready == [] and first.held == ["gone-r0-s1"]
 
-      second = Orphans.review(MapSet.new(), entries, first.sightings, opts)
+      second = Orphans.review(["gone-r0-s1"], first.sightings, opts)
       assert second.ready == [] and second.held == ["gone-r0-s1"]
 
-      third = Orphans.review(MapSet.new(), entries, second.sightings, opts)
+      third = Orphans.review(["gone-r0-s1"], second.sightings, opts)
       assert third.ready == ["gone-r0-s1"]
     end
 
-    test "a directory the metadata explains again forgets its sightings" do
+    test "a directory explained again forgets its sightings" do
       opts = Keyword.put(@opts, :sightings, 2)
 
-      counted = Orphans.review(MapSet.new(), [{"gone-r0-s1", 10}], %{}, opts)
+      counted = Orphans.review(["gone-r0-s1"], %{}, opts)
       assert counted.sightings == %{"gone-r0-s1" => 1}
 
-      # The next pass sees it listed: nothing is carried, so a later disappearance starts from one.
-      explained = Orphans.review(MapSet.new(["gone-r0-s1"]), [{"gone-r0-s1", 10}], counted.sightings, opts)
+      # The next pass finds it explained: nothing is carried, so a later disappearance starts from one.
+      explained = Orphans.review([], counted.sightings, opts)
       assert explained.sightings == %{}
 
-      again = Orphans.review(MapSet.new(), [{"gone-r0-s1", 10}], explained.sightings, opts)
+      again = Orphans.review(["gone-r0-s1"], explained.sightings, opts)
       assert again.ready == [] and again.sightings == %{"gone-r0-s1" => 1}
     end
 
     test "at most max_per_pass are ready at once, deterministically" do
-      entries = for n <- 1..10, do: {"d#{n}-r0-s0", 10}
-      review = Orphans.review(MapSet.new(), entries, %{}, Keyword.put(@opts, :max_per_pass, 3))
+      names = for n <- 1..10, do: "d#{n}-r0-s0"
+      review = Orphans.review(names, %{}, Keyword.put(@opts, :max_per_pass, 3))
 
       assert review.ready == ["d1-r0-s0", "d10-r0-s0", "d2-r0-s0"]
       # The rest are still reported: a candidate that vanished from the report would be a leak nobody sees.
@@ -78,55 +188,11 @@ defmodule Malachi.Retention.OrphansTest do
     end
 
     test "tracking past the cap is reported, and only delays a removal" do
-      entries = for n <- 1..5, do: {"d#{n}-r0-s0", 10}
-      review = Orphans.review(MapSet.new(), entries, %{}, Keyword.put(@opts, :max_tracked, 2))
+      names = for n <- 1..5, do: "d#{n}-r0-s0"
+      review = Orphans.review(names, %{}, Keyword.put(@opts, :max_tracked, 2))
 
       assert review.capped?
       assert map_size(review.sightings) == 2
-    end
-
-    test "the data directory's own files are never candidates" do
-      entries = [{"malachi.format", 10}, {"malachi.format.tmp", 10}, {"shard_0", 10}, {"shard_12", 10}]
-      review = Orphans.review(MapSet.new(), entries, %{}, @opts)
-
-      assert review.ready == []
-      assert review.held == []
-    end
-
-    test "a name that only looks like a shard is still a candidate" do
-      review = Orphans.review(MapSet.new(), [{"shard_x-r0-s0", 10}, {"shard_0-r0-s1", 10}], %{}, @opts)
-
-      assert review.ready == ["shard_0-r0-s1", "shard_x-r0-s0"]
-    end
-
-    test "a name the layout could not have written is never a candidate" do
-      # What an operator can leave under a data directory the sweep does not own. Some of these are not
-      # valid Base64 at all and some are, decoding to bytes that are no term: both mean the same thing
-      # here. The removal is an rm_rf, so a name no segment could carry is refused before any guard.
-      names = ["ra", "lost+found", "backup", ".snapshots", "segments.old", "gone"]
-      review = Orphans.review(MapSet.new(), for(name <- names, do: {name, 10_000}), %{}, @opts)
-
-      assert review.ready == []
-      assert review.held == []
-      assert review.sightings == %{}
-    end
-
-    test "the encoded form the layout falls back to is still a candidate" do
-      # A segment id whose topic is not path-safe never gets the readable name, and such an id arrives
-      # over replication from another node, so its directory has to stay sweepable.
-      name = Path.basename(Layout.segment_directory(@directory, {{"a/b", 0}, 3}))
-
-      refute Regex.match?(~r/-r\d+-s\d+\z/, name)
-      assert Orphans.review(MapSet.new(), [{name, 10_000}], %{}, @opts).ready == [name]
-    end
-
-    test "the Base64 spelling of an id the layout writes readably is not a candidate" do
-      # What makes the round trip exact rather than a plausibility check: this decodes to a real segment
-      # id, but the layout would have written that id as t-r0-s1, so this name it never wrote.
-      encoded = Base.url_encode64(:erlang.term_to_binary({{"t", 0}, 1}), padding: false)
-
-      assert Path.basename(Layout.segment_directory(@directory, {{"t", 0}, 1})) == "t-r0-s1"
-      assert Orphans.review(MapSet.new(), [{encoded, 10_000}], %{}, @opts).ready == []
     end
   end
 
@@ -139,16 +205,59 @@ defmodule Malachi.Retention.OrphansTest do
             max_runs: 200
           ) do
       metadata = run(ops)
-      expected = Orphans.expected(metadata, @directory)
-      entries = for name <- Enum.uniq(MapSet.to_list(expected) ++ extra), do: {name, 10_000}
+      listed = for {id, _segment} <- metadata.segments, into: MapSet.new(), do: layout_name(id)
+      entries = for name <- Enum.uniq(MapSet.to_list(listed) ++ extra), do: {name, 10_000}
 
-      review = Orphans.review(expected, entries, %{}, @opts)
+      {names, 0} = Orphans.candidates(entries, min_age_ms: 0, max_tracked: 1_000)
+
+      lookup = fn ids ->
+        {:ok, %{known: Orphans.known_among(metadata.segments, ids), unroutable: [], migrating: [], misplaced: []}}
+      end
+
+      {:ok, %{known: known, undecided: undecided}} = Orphans.explain(names, lookup)
+      unexplained = Enum.reject(names, &(MapSet.member?(known, &1) or MapSet.member?(undecided, &1)))
+
+      review = Orphans.review(unexplained, %{}, @opts)
 
       for selected <- review.ready ++ review.held do
-        refute MapSet.member?(expected, selected)
+        refute MapSet.member?(listed, selected)
       end
     end
   end
+
+  # What the rule above rests on: whatever id a segment has, its own directory name reads back to it.
+  # If a reading were ever missing, the owner would be asked about the wrong id and a live directory
+  # would look orphaned. Topics are drawn to include `-r<n>-s<m>` inside them and characters outside the
+  # layout's allowlist, and ids that are not broker ids at all.
+  property "every segment's directory name reads back to that segment's id" do
+    check all(id <- segment_id(), max_runs: 500) do
+      assert id in Orphans.candidate_ids(layout_name(id))
+    end
+  end
+
+  defp segment_id do
+    topic =
+      StreamData.one_of([
+        StreamData.string(:alphanumeric, min_length: 1),
+        StreamData.map(
+          StreamData.tuple(
+            {StreamData.string(:alphanumeric, min_length: 1), StreamData.integer(0..99), StreamData.integer(0..99)}
+          ),
+          fn {prefix, r, s} -> "#{prefix}-r#{r}-s#{s}" end
+        ),
+        StreamData.string(:printable, min_length: 1)
+      ])
+
+    StreamData.one_of([
+      StreamData.map(
+        StreamData.tuple({topic, StreamData.non_negative_integer(), StreamData.non_negative_integer()}),
+        fn {t, r, s} -> {{t, r}, s} end
+      ),
+      StreamData.map(StreamData.integer(), &{:segment, &1})
+    ])
+  end
+
+  defp layout_name(id), do: Path.basename(Layout.segment_directory(@directory, id))
 
   # An extra directory is generated in the readable form, so the property keeps exercising names that CAN
   # be selected. A name the layout could not have written is refused before the guards, which is its own
@@ -200,24 +309,9 @@ defmodule Malachi.Retention.OrphansTest do
   defp pick([], _picker), do: nil
   defp pick(ids, picker), do: Enum.at(Enum.sort(ids), rem(picker, length(ids)))
 
-  # A range holds one active segment at a time, so each one is sealed before the next is registered.
-  defp with_segments(segments) do
-    base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", @keyspace_bits}), 0)
-
-    segments
-    |> Enum.with_index()
-    |> Enum.reduce(base, fn {{seq, replicas}, index}, metadata ->
-      segment_id = {{"t", 0}, seq}
-
-      metadata
-      |> command({:register_segment, {"t", 0}, segment_id, replicas, index})
-      |> command({:seal_segment, segment_id, 1, 10, 1_000})
-    end)
-  end
-
-  # Guards the fixture above against a silent change in the naming: the expected set is only meaningful
-  # if it is the same mapping the writer uses.
-  test "the expected names are the ones the layout writes" do
+  # Guards the readings above against a silent change in the naming: they are only meaningful if they
+  # are the same mapping the writer uses.
+  test "the names read here are the ones the layout writes" do
     assert Layout.segment_directory(@directory, {{"t", 0}, 1}) == "/data/t-r0-s1"
   end
 end

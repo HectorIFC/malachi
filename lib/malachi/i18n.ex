@@ -765,13 +765,21 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ varredura de órfãos não conseguiu remover %{failures}; a próxima passada tenta de novo",
       "en_US" => "⚠️ the orphan sweep could not remove %{failures}; the next pass tries again"
     },
-    retention_orphan_waiting_for_metadata: %{
+    retention_orphan_undecided: %{
       "pt_BR" =>
-        "varredura de órfãos em %{directory} aguardando os metadados: enquanto algum vnode não foi lido, " <>
-          "um diretório vivo pareceria órfão",
+        "varredura de órfãos mantém %{count} diretórios que ninguém pôde confirmar (sem dono para perguntar, " <>
+          "split em curso ou gravados num vnode que não é o dono): %{directories}",
       "en_US" =>
-        "the orphan sweep of %{directory} is waiting for metadata: while a vnode has not been read, a " <>
-          "live directory would look orphaned"
+        "the orphan sweep keeps %{count} directories nobody could vouch for (no owner to ask, a split in " <>
+          "flight, or written to a vnode that does not own them): %{directories}"
+    },
+    retention_orphan_authority_unavailable: %{
+      "pt_BR" =>
+        "varredura de órfãos em %{directory} parada: não obteve uma resposta completa do control plane " <>
+          "(%{reason}); sem ela um diretório vivo pareceria órfão",
+      "en_US" =>
+        "the orphan sweep of %{directory} is holding: it did not get a complete answer from the control " <>
+          "plane (%{reason}); without one a live directory would look orphaned"
     },
     retention_orphan_tracking_capped: %{
       "pt_BR" =>

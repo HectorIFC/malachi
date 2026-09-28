@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/auto-review-hook.sh",
+            "timeout": 30,
+            "statusMessage": "Checking whether the branch needs an adversarial review"
+          }
+        ]
+      }
+    ]
+  }
+}
