@@ -46,6 +46,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Rebalance
   alias Malachi.Cluster.RebalanceCoordinator
+  alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReshardCoordinator
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Cluster.RingBoot
@@ -63,6 +64,7 @@ defmodule Malachi.Application do
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Retention.Expirer
+  alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
   alias Malachi.Storage.FormatMarker
@@ -388,7 +390,8 @@ defmodule Malachi.Application do
           skip_reporter_child(Malachi.LogBroker),
           log_broker_child(cluster, nodes, Malachi.LogBroker, log_data_dir(), vnodes)
         ] ++
-          metadata_version_watcher_children(cluster, vnodes) ++ scrubber_children() ++ orphan_sweeper_children()
+          metadata_version_watcher_children(cluster, vnodes) ++
+          scrubber_children() ++ orphan_sweeper_children(cluster, nodes, vnodes)
       else
         # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
         # own name and isolated data dir. With one shard this is exactly the historical single child.
@@ -1011,13 +1014,20 @@ defmodule Malachi.Application do
     )
   end
 
-  # The orphan sweep, beside the scrub and for the same reason: the data directory is a fact about this
-  # node, so this is not leader gated and there is one per directory the node writes to. Clustered: one
-  # over the node's named replication server.
-  defp orphan_sweeper_children do
+  @doc """
+  The clustered node's orphan sweep, beside the scrub and for the same reason: the data directory is a
+  fact about this node, so it is not leader gated. One sweeper over the node's named replication
+  server, whose authority is `orphan_authority/3`: the vnodes that own the segments, never this node's
+  cached copy of the metadata.
+
+  Public so a test can hold the wiring to that, since a sweeper handed a cache-backed authority here
+  would reopen #249 with every other test still green.
+  """
+  @spec orphan_sweeper_children(atom(), [node()], term()) :: [Supervisor.child_spec()]
+  def orphan_sweeper_children(cluster, nodes, vnodes) do
     orphan_sweeper_child(
       Malachi.LogOrphanSweeper,
-      Malachi.LogBroker,
+      orphan_authority(cluster, nodes, vnodes),
       {Malachi.LogReplication, node()},
       log_data_dir()
     )
@@ -1025,21 +1035,20 @@ defmodule Malachi.Application do
 
   # Single-node: one per data-plane shard, over that shard's own directory and its broker's unnamed
   # replication server, whose pid a broker restart replaces (hence the function, as in `scrubber_child/4`).
+  # The metadata is the broker's own, in memory, and it IS the truth: there is no control plane to ask.
   defp orphan_sweeper_children(broker_name, directory) do
     orphan_sweeper_child(
       :"#{broker_name}OrphanSweeper",
-      broker_name,
+      local_orphan_authority(broker_name),
       fn -> BrokerServer.replication_ref(broker_name) end,
       directory
     )
   end
 
-  defp orphan_sweeper_child(name, broker_name, local_ref, directory) do
+  defp orphan_sweeper_child(name, authority, local_ref, directory) do
     opts = [
       name: name,
-      metadata_source: fn -> BrokerServer.metadata(broker_name) end,
-      metadata_ready?: fn -> BrokerServer.metadata_ready?(broker_name) end,
-      unreachable_vnodes: fn -> BrokerServer.unreachable_vnodes(broker_name) end,
+      authority: authority,
       local_ref: local_ref,
       directory: directory,
       mode: Application.get_env(:malachi, :retention_orphan_sweep, :delete),
@@ -1051,6 +1060,87 @@ defmodule Malachi.Application do
     ]
 
     [%{id: name, start: {OrphanSweeper, :start_link, [opts]}}]
+  end
+
+  # How long each owning vnode gets to answer the sweep, per node of its placement and per hop of a
+  # leader redirect, and how long the ring store gets for each of its two reads, per hop too. The same
+  # bound as a reconcile read. It is not the bound on a pass: a vnode's placement nodes are tried one
+  # after another and ra follows a redirect with a fresh timeout, so a pass during an election can take
+  # several of these. The sweeper puts the whole question under its own deadline
+  # (`Malachi.Retention.OrphanSweeper`, `:authority_deadline_ms`), and a pass that runs out is a pass
+  # skipped, not a pass waited on.
+  @orphan_owner_timeout_ms 1_000
+
+  @doc """
+  What `Malachi.Retention.OrphanSweeper` asks before it removes anything: which directory names the
+  control plane accounts for, asked of the vnodes that OWN those segments and never of this node's
+  cached copy of the metadata (#249).
+
+    * sharded (`vnodes` given): `durable_orphan_authority/1` over this cluster's durable ring store;
+    * a single `ra` cluster (`cluster` without `vnodes`): that cluster, as the one owner of every topic;
+
+  Without a cluster there is no control plane to ask, and the single-node wiring uses
+  `local_orphan_authority/1` instead.
+  """
+  @spec orphan_authority(atom(), [node()], term()) :: ([String.t()] -> term())
+  def orphan_authority(cluster, nodes, nil) do
+    topology = single_cluster_topology(cluster, nodes)
+    &Orphans.explain(&1, fn ids -> ReplicatedDSRSM.known_segments(topology, ids, @orphan_owner_timeout_ms) end)
+  end
+
+  def orphan_authority(_cluster, nodes, _vnodes),
+    do: durable_orphan_authority({@log_ring, RaCluster.member_node(nodes)})
+
+  @doc """
+  The sharded control plane's authority for the orphan sweep: segments routed to their owners by the
+  topology of record in the durable ring store at `ring_server_id`, read linearizably before and after
+  the owners are asked (`Malachi.Cluster.ReplicatedDSRSM.known_segments_stable/3`).
+
+  The store, and not this node's gossiped copy of the topology, because a split writes its pending
+  intent to the store BEFORE it moves any topic and only then gossips it (`Malachi.Cluster.VnodeSplit`,
+  `Malachi.Cluster.TopologyPublisher`). A node whose gossip has not caught up would otherwise ask only
+  the old owner of a topic that has already left it, twice, and both reads would agree. Gossip remains
+  what routing uses; the destructive decision reads the record.
+  """
+  @spec durable_orphan_authority(RingServer.server_id()) :: ([String.t()] -> term())
+  def durable_orphan_authority(ring_server_id) do
+    read_topology = fn -> topology_of_record(ring_server_id) end
+
+    &Orphans.explain(&1, fn ids ->
+      ReplicatedDSRSM.known_segments_stable(read_topology, ids, @orphan_owner_timeout_ms)
+    end)
+  end
+
+  defp topology_of_record(ring_server_id) do
+    case RingServer.topology(ring_server_id, @orphan_owner_timeout_ms) do
+      {:ok, :none} -> {:ok, nil}
+      {:ok, %RingTopology{} = topology} -> {:ok, topology}
+      {:error, reason} -> {:error, {:topology_unavailable, reason}}
+    end
+  end
+
+  # A single `ra` cluster owns every topic, which is a ring with one vnode on it. Built once: it never
+  # changes, since an unsharded control plane has no split to move a topic.
+  defp single_cluster_topology(cluster, nodes) do
+    {:ok, ring} = HashRing.add_vnode(HashRing.new(), cluster, 0)
+    RingTopology.new(ring, %{cluster => nodes})
+  end
+
+  @doc """
+  The orphan sweep's authority on a single node, where there is no control plane: the broker's own
+  metadata, which is in memory and IS the truth, so a segment it does not list is not anywhere.
+  """
+  @spec local_orphan_authority(GenServer.server()) :: ([String.t()] -> term())
+  def local_orphan_authority(broker_name) do
+    &Orphans.explain(&1, fn ids ->
+      {:ok,
+       %{
+         known: Orphans.known_among(BrokerServer.metadata(broker_name).segments, ids),
+         unroutable: [],
+         migrating: [],
+         misplaced: []
+       }}
+    end)
   end
 
   defp scrubber_child(name, metadata_source, local_ref, directory) do
