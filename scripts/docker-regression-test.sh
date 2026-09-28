@@ -95,6 +95,18 @@ run_test "Metrics endpoint returns JSON" "curl -sf -H 'Authorization: Bearer ${T
 # Test 3: SSE stream endpoint (with auth)
 run_test "SSE stream endpoint available" "timeout 2 curl -sf -H 'Authorization: Bearer ${TOKEN}' http://localhost:${DASHBOARD_PORT}/stream | head -1"
 
+# Test 3.5: Static assets shipped in the image, and nothing else from priv. Not through run_test, which
+# discards output: the check names what failed (a 404, the content type, the body, an extra priv entry).
+echo -n "Testing: Static assets shipped in the image... "
+if ASSETS_RESULT=$("$(dirname "$0")/docker-static-assets-check.sh" "$CONTAINER_NAME" "http://localhost:${DASHBOARD_PORT}" 2>&1); then
+    echo -e "${GREEN}PASS${NC}"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$ASSETS_RESULT"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
 # Test 4: TCP port listening
 run_test "TCP server listening" "nc -zv localhost ${TCP_PORT}"
 
