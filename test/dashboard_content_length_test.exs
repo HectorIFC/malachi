@@ -17,7 +17,14 @@ defmodule Malachi.DashboardContentLengthTest do
     :ok = Malachi.Auth.add_user(@admin, @password, [:admin])
     {:ok, token} = Malachi.Auth.authenticate(@admin, @password, {127, 0, 0, 1})
 
+    # The cookie rows below expect no Secure attribute. config/runtime.exs reads the policy from
+    # MALACHI_DASHBOARD_SECURE_COOKIE even under test, so it is pinned here rather than inherited from the
+    # shell that runs the suite.
+    secure_cookie = Application.get_env(:malachi, :dashboard_secure_cookie)
+    Application.put_env(:malachi, :dashboard_secure_cookie, false)
+
     on_exit(fn ->
+      Application.put_env(:malachi, :dashboard_secure_cookie, secure_cookie)
       _ = Malachi.Auth.remove_user(@admin)
       Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
     end)
@@ -25,30 +32,44 @@ defmodule Malachi.DashboardContentLengthTest do
     {:ok, token: token}
   end
 
-  # {label, method, path, credentials, extra request headers, request body, expected status}. The label
-  # names the sender under test, so a failure points at the function to look at.
+  @json %{"content-type" => "application/json"}
+  @json_no_cache Map.put(@json, "cache-control", "no-cache")
+  @html %{"content-type" => "text/html; charset=utf-8", "cache-control" => "no-store, no-cache, must-revalidate"}
+  @to_login %{"location" => "/login", "cache-control" => "no-store"}
+
+  # {label, method, path, credentials, extra request headers, request body, expected status, expected
+  # response headers}. The label names the sender under test, so a failure points at the function to look
+  # at. The expected headers are the ones each sender sets itself, which moved from a heredoc into a list
+  # when the framing moved into one helper: a header value is matched exactly, {:wraps, prefix, suffix}
+  # matches its start and end around a value that changes per request (the session token), and :integer
+  # asks for a non-negative integer. The cookies expect the Secure policy off, which setup pins.
   @framed [
-    {"serve_login_page", :GET, "/login", :none, %{}, nil, 200},
-    {"send_login_success", :POST, "/login", :none, %{}, :valid_login, 200},
-    {"send_forbidden, wrong password", :POST, "/login", :none, %{}, :wrong_login, 403},
-    {"send_forbidden, invalid token", :GET, "/metrics", :bogus_bearer, %{}, nil, 403},
-    {"send_auth_required", :GET, "/metrics", :none, %{}, nil, 401},
-    {"serve_html", :GET, "/", :cookie, %{}, nil, 200},
-    {"serve_json", :GET, "/metrics", :cookie, %{}, nil, 200},
-    {"serve_prometheus", :GET, "/metrics", :cookie, %{"Accept" => "text/plain"}, nil, 200},
-    {"serve_status, liveness", :GET, "/health", :none, %{}, nil, 200},
-    {"serve_status, readiness", :GET, "/ready", :none, %{}, nil, 200},
-    {"serve_rate_limits", :GET, "/rate_limits", :cookie, %{}, nil, 200},
-    {"send_json", :GET, "/users", :cookie, %{}, nil, 200},
-    {"serve_404", :GET, "/no-such-route", :cookie, %{}, nil, 404},
+    {"serve_login_page", :GET, "/login", :none, %{}, nil, 200, @html},
+    {"send_login_success", :POST, "/login", :none, %{}, :valid_login, 200,
+     Map.put(@json, "set-cookie", {:wraps, "malachi_token=", "; HttpOnly; Path=/; SameSite=Strict"})},
+    {"send_forbidden, wrong password", :POST, "/login", :none, %{}, :wrong_login, 403, @json},
+    {"send_forbidden, invalid token", :GET, "/metrics", :bogus_bearer, %{}, nil, 403, @json},
+    {"send_auth_required", :GET, "/metrics", :none, %{}, nil, 401,
+     Map.put(@json, "www-authenticate", ~s(Bearer realm="Malachi Dashboard"))},
+    {"serve_html", :GET, "/", :cookie, %{}, nil, 200, @html},
+    {"serve_json", :GET, "/metrics", :cookie, %{}, nil, 200, @json_no_cache},
+    {"serve_prometheus", :GET, "/metrics", :cookie, %{"Accept" => "text/plain"}, nil, 200,
+     %{"content-type" => Malachi.Metrics.Prometheus.content_type(), "cache-control" => "no-cache"}},
+    {"serve_status, liveness", :GET, "/health", :none, %{}, nil, 200, Map.put(@json, "cache-control", "no-store")},
+    {"serve_status, readiness", :GET, "/ready", :none, %{}, nil, 200, Map.put(@json, "cache-control", "no-store")},
+    {"serve_rate_limits", :GET, "/rate_limits", :cookie, %{}, nil, 200, @json_no_cache},
+    {"send_json", :GET, "/users", :cookie, %{}, nil, 200, @json},
+    {"serve_404", :GET, "/no-such-route", :cookie, %{}, nil, 404, @json},
     # The senders below were already framed correctly; they stay here so none of them regresses.
-    {"redirect to login", :GET, "/", :none, %{}, nil, 302},
-    {"cookie clearing redirect", :GET, "/logout", :none, %{}, nil, 302},
-    {"CORS preflight", :OPTIONS, "/metrics", :none, %{"Origin" => "https://app.example"}, nil, 204},
-    {"serve_logo", :GET, "/logo.svg", :none, %{}, nil, 200}
+    {"redirect to login", :GET, "/", :none, %{}, nil, 302, @to_login},
+    {"cookie clearing redirect", :GET, "/logout", :none, %{}, nil, 302,
+     Map.put(@to_login, "set-cookie", "malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0")},
+    {"CORS preflight", :OPTIONS, "/metrics", :none, %{"Origin" => "https://app.example"}, nil, 204, %{}},
+    {"serve_logo", :GET, "/logo.svg", :none, %{}, nil, 200,
+     %{"content-type" => "image/svg+xml; charset=utf-8", "cache-control" => "public, max-age=86400"}}
   ]
 
-  for {label, method, path, credentials, headers, body, status} <- @framed do
+  for {label, method, path, credentials, headers, body, status, expected_headers} <- @framed do
     test "#{method} #{path} (#{label}) sends exactly the Content-Length it declares", %{token: token} do
       response =
         request(
@@ -61,6 +82,7 @@ defmodule Malachi.DashboardContentLengthTest do
         )
 
       assert_framed(response, unquote(status))
+      assert_headers(response, unquote(Macro.escape(expected_headers)))
     end
   end
 
@@ -86,6 +108,7 @@ defmodule Malachi.DashboardContentLengthTest do
       end)
 
     assert rate_limited, "expected the dashboard auth rate limit to trip within #{limit * 2} requests"
+    assert_headers(rate_limited, Map.put(@json, "retry-after", :integer))
   end
 
   defp request(method, path, credentials, headers, body, token) do
@@ -119,4 +142,21 @@ defmodule Malachi.DashboardContentLengthTest do
     assert response.trailing == "",
            "#{byte_size(response.trailing)} byte(s) after the declared body: #{inspect(response.trailing)}"
   end
+
+  defp assert_headers(response, expected) do
+    for {name, expectation} <- expected do
+      values = for {^name, value} <- response.headers, do: value
+      assert [value] = values, "expected exactly one #{name} header, got #{inspect(values)}"
+      assert header_matches?(value, expectation), "#{name}: #{inspect(value)} does not match #{inspect(expectation)}"
+    end
+  end
+
+  defp header_matches?(value, :integer), do: match?({n, ""} when n >= 0, Integer.parse(value))
+
+  defp header_matches?(value, {:wraps, prefix, suffix}) do
+    byte_size(value) > byte_size(prefix) + byte_size(suffix) and String.starts_with?(value, prefix) and
+      String.ends_with?(value, suffix)
+  end
+
+  defp header_matches?(value, exact), do: value == exact
 end
