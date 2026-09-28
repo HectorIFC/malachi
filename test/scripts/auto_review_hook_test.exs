@@ -197,11 +197,11 @@ defmodule AutoReviewHookTest do
       File.write!(Path.join(ctx.repo, "一.ex"), "one\n")
       File.write!(Path.join(ctx.repo, "丁.ex"), "one\n")
 
-      assert %{"reason" => reason} = blocked(run(ctx, env: [{"LC_ALL", "en_US.UTF-8"}]))
+      assert %{"reason" => reason} = blocked(run(ctx, locale: "en_US.UTF-8"))
       assert reason =~ "2 changed file(s)"
 
       File.write!(Path.join(ctx.repo, "丁.ex"), "two\n")
-      assert %{"decision" => "block"} = blocked(run(ctx, env: [{"LC_ALL", "en_US.UTF-8"}]))
+      assert %{"decision" => "block"} = blocked(run(ctx, locale: "en_US.UTF-8"))
     end
 
     test "pointing a symlink somewhere else asks again, even at the same content", ctx do
@@ -278,16 +278,16 @@ defmodule AutoReviewHookTest do
     test "an unreadable file is seen whatever language git speaks", ctx do
       # The one message read back from git is matched in English; git is made to speak it. (Where git
       # has no translation installed this passes either way; with one, it guards the C locale.)
-      german = [{"LC_ALL", "de_DE.UTF-8"}]
+      german = "de_DE.UTF-8"
       File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
-      assert %{"decision" => "block"} = blocked(run(ctx, env: german))
+      assert %{"decision" => "block"} = blocked(run(ctx, locale: german))
 
       secret = Path.join(ctx.repo, "secret.ex")
       File.write!(secret, "secret\n")
       File.chmod!(secret, 0o000)
       on_exit(fn -> File.chmod(secret, 0o644) end)
 
-      assert %{"reason" => reason} = blocked(run(ctx, env: german))
+      assert %{"reason" => reason} = blocked(run(ctx, locale: german))
       assert reason =~ "2 changed file(s)"
     end
 
@@ -458,7 +458,24 @@ defmodule AutoReviewHookTest do
       |> Map.merge(Map.new(Keyword.get(opts, :env, [])))
       |> Enum.to_list()
 
-    System.cmd("bash", ["-c", ~s(bash "$0" < "$1"), @script, input_file], env: env, stderr_to_stdout: true)
+    case Keyword.fetch(opts, :locale) do
+      :error -> System.cmd("bash", ["-c", ~s(bash "$0" < "$1"), @script, input_file], env: env, stderr_to_stdout: true)
+      {:ok, locale} -> run_in_locale(ctx, input_file, env, locale)
+    end
+  end
+
+  # A locale the machine does not have installed (a CI runner has no de_DE) makes bash warn about it on
+  # stderr, and a warning ahead of the JSON is not the hook's output. So the locale reaches only the
+  # hook's own bash, not the wrapper, whose warning would land in the output; the hook's stderr goes to a
+  # file; and anything written there other than that warning still fails the test.
+  defp run_in_locale(ctx, input_file, env, locale) do
+    errors = Path.join(ctx.dir, "stderr-#{System.unique_integer([:positive])}")
+    command = ~s(LC_ALL="$2" bash "$0" < "$1" 2> "$3")
+    result = System.cmd("bash", ["-c", command, @script, input_file, locale, errors], env: env, stderr_to_stdout: true)
+
+    unexpected = errors |> File.read!() |> String.split("\n", trim: true) |> Enum.reject(&(&1 =~ "setlocale"))
+    assert unexpected == [], "the hook wrote to stderr: #{inspect(unexpected)}"
+    result
   end
 
   defp blocked({output, 0}), do: Jason.decode!(output)
