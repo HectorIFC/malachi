@@ -93,7 +93,8 @@ defmodule Malachi.Retention.Orphans do
   # Written by `Malachi.DataPlaneRouter.shards/1` when a single node runs more than one data-plane shard.
   @shard_name ~r/\A shard_ \d+ \z/x
   # The tail of `Layout.segment_directory/2`'s readable form, from one `-r` to the end of the name. It is
-  # tried at every `-r` in the name, because the topic before it may contain `-r` too.
+  # tried at every `-r` in the name, but only the last can match: the tail holds digits after its `-r`,
+  # never another `-r`, so a topic that itself contains `-r<n>-s<m>` still gives one readable reading.
   @readable_tail ~r/\A -r (\d+) -s (\d+) \z/x
   # Only the basename of the round trip is compared, so any base does.
   @any_base "/"
@@ -102,8 +103,8 @@ defmodule Malachi.Retention.Orphans do
   Every segment id `Malachi.Storage.Layout.segment_directory/2` would turn into exactly `name`, and
   nothing else: each reading is kept only when it encodes back to `name`.
 
-  Empty for a name the layout could not have written. More than one for a readable name whose topic
-  itself contains `-r<n>-s<m>`, and possibly one more when the same characters also decode as Base64.
+  Empty for a name the layout could not have written. At most one readable reading (the tail from the
+  last `-r`), plus possibly one more when the same characters also decode as Base64.
   """
   @spec candidate_ids(String.t()) :: [Metadata.segment_id()]
   def candidate_ids(name) when is_binary(name) do

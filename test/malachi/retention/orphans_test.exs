@@ -16,9 +16,9 @@ defmodule Malachi.Retention.OrphansTest do
       assert Orphans.candidate_ids("t-r0-s1") == [{{"t", 0}, 1}]
     end
 
-    test "gives every reading of a topic that itself looks like a suffix" do
+    test "reads a topic that itself looks like a suffix from the last -r" do
       # `a-r0-s0-r1-s2` is segment 2 of range 1 of topic `a-r0-s0`. `a` with range 0 and segment
-      # `0-r1-s2` is not a reading: the segment is not a number. Both readings that ARE numbers are kept.
+      # `0-r1-s2` is not a reading: the segment is not a number. So there is exactly one readable reading.
       assert Orphans.candidate_ids("a-r0-s0-r1-s2") == [{{"a-r0-s0", 1}, 2}]
       assert Orphans.candidate_ids("x-r1-s2-r3-s4") == [{{"x-r1-s2", 3}, 4}]
     end
