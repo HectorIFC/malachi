@@ -483,6 +483,14 @@ defmodule Malachi.RateLimiter do
   # need to agree within one node, which is the scope the quota is enforced in anyway.
   defp window_clock_ms, do: System.monotonic_time(:millisecond)
 
+  # A limit of zero or less admits nothing. It is checked here, ahead of the bucket, because nothing
+  # below may divide by it: an auth limit has no off switch, so 0 is a configuration an operator can set,
+  # and a crash in this process would take the table, every bucket and every blocked count with it.
+  defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) when limit <= 0 do
+    increment_blocked_counter(identifier, action)
+    {:error, :rate_limit_exceeded, max(window_ms, 1)}
+  end
+
   defp do_check_limit(identifier, action, %{limit: limit, window_ms: window_ms}) do
     now = System.monotonic_time(:millisecond)
     key = {identifier, action}

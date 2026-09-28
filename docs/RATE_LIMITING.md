@@ -95,6 +95,8 @@ MALACHI_AUTH_RATE_WINDOW_MS=60000       # Window duration (60 seconds)
 MALACHI_DASHBOARD_AUTH_RATE_LIMIT=10        # Max attempts per window
 MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS=60000 # Window duration (60 seconds)
 
+# The two auth limits above have no off switch: a limit of 0 (or less) refuses every attempt.
+
 # Dashboard API rate limits, authenticated HTTP requests (per session) - ENFORCED
 MALACHI_DASHBOARD_API_RATE_LIMIT=300        # Max requests per window; 0 = no limit
 MALACHI_DASHBOARD_API_RATE_WINDOW_MS=60000  # Window duration (60 seconds)

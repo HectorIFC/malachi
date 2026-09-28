@@ -571,6 +571,20 @@ defmodule Malachi.RateLimiterTest do
       end
     end
 
+    test "a limit of zero or less refuses every request and never crashes the limiter" do
+      pid = Process.whereis(RateLimiter)
+
+      for limit <- [0, -1] do
+        identifier = "no_budget_#{limit}_#{:rand.uniform(1_000_000)}"
+        config = %{limit: limit, window_ms: 60_000}
+
+        assert {:error, :rate_limit_exceeded, 60_000} = RateLimiter.check_limit(identifier, :auth, config)
+        assert {:error, :rate_limit_exceeded, 60_000} = RateLimiter.check_limit(identifier, :auth, config)
+      end
+
+      assert Process.whereis(RateLimiter) == pid, "the limiter restarted"
+    end
+
     test "a blocked caller on a wide bucket is told about the next token, not the end of the window" do
       identifier = "retry_#{:rand.uniform(1_000_000)}"
       now = System.monotonic_time(:millisecond)
