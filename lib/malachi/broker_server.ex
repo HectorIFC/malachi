@@ -1877,14 +1877,20 @@ defmodule Malachi.BrokerServer do
   end
 
   # The bootstrap pass for an adopted `topology`. Every field of it that comes from the ring is rebuilt
-  # here, together, and nowhere else: a pass that kept the boot list while the routing view moved on
-  # never bootstrapped a vnode a split added, and kept bootstrapping one that had left (#242), where the
-  # readiness check then asked the new routing view for a vnode it no longer has. `orchestrator?` is the
+  # here, together, and nowhere else. A pass that kept the boot list while the routing view moved on
+  # never bootstrapped a vnode a split added, and for a vnode that had left the ring its readiness check
+  # asked the new routing view for a server it no longer has: a KeyError that killed the pass, on this
+  # loop at boot and in `reconcile_now/2`, and in the task on every tick (#242). `orchestrator?` is the
   # one field that does not come from the ring, so it is kept.
   #
-  # The `nodes` of each vnode are the ring's recorded placement. That is good enough to seed a cluster
-  # that does not exist yet, which is all this pass does with them: a vnode a split added is formed on
-  # exactly those nodes. It is not the truth about membership once a rebalance has moved members (#243).
+  # The `nodes` of each vnode are the ring's recorded placement, and the pass starts a cluster over them
+  # for ANY vnode whose first recorded member did not answer in time, not only for one that was never
+  # formed. For a vnode a split added they are the nodes the split formed it on, but they are not the
+  # truth about membership once a rebalance has moved members (#243). And `MetadataServer.start/2`
+  # resumes only this node's own member: a remote member that is registered but stopped is started by
+  # `:ra.start_cluster` under a fresh uid, the amnesia `Malachi.Cluster.RaResume` describes. That
+  # exposure is the same for every vnode on this list, boot and split alike; adopting the ring only
+  # stops a split vnode from waiting for this node to restart before it is on the list.
   defp adopt_bootstrap(nil, _topology, _replicated), do: nil
 
   defp adopt_bootstrap(bootstrap, topology, replicated) do

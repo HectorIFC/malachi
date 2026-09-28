@@ -696,9 +696,11 @@ defmodule Malachi.BrokerServerRaTest do
   end
 
   test "a vnode that left the ring is no longer bootstrapped" do
-    # The reverse of #242: the boot list kept a vnode the adopted ring no longer has, so the orchestrator
-    # re-formed it on every pass. The orchestrator is held off until the ring without it is adopted,
-    # because left on, boot itself would form both.
+    # The reverse of #242: the boot list kept a vnode the adopted ring no longer has, and the readiness
+    # check asked the adopted routing view for it, which raised a KeyError and took the broker down with
+    # it (this pass runs on the loop in `reconcile_now/2`). With the list following the ring, the pass
+    # completes and leaves that vnode alone. The orchestrator is held off until the ring without it is
+    # adopted, because left on, boot itself would form both.
     suffix = System.unique_integer([:positive])
     kept = :"bs_left_kept_#{suffix}"
     left = :"bs_left_gone_#{suffix}"
@@ -725,7 +727,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert MetadataServer.ready?({kept, node()})
 
     refute MetadataServer.ready?({left, node()}, 500),
-           "a vnode the adopted ring no longer has was bootstrapped from the boot list"
+           "a vnode the adopted ring no longer has was still bootstrapped"
   end
 
   test "a reconcile that crashes is logged and counted, and does not take the broker with it" do
