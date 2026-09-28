@@ -225,8 +225,9 @@ defmodule Malachi.Metadata do
   command carrying a `range_id`/`segment_id` can be pointed at a co-located topic's range, so only these
   can mismatch the topic they were routed by (`:range_topic_mismatch`, in `Malachi.Cluster.DSRSM`). A
   command that names its topic directly (create/seal/delete/commit) targets exactly that topic and is not
-  guarded. `merge_ranges` carries **two** ids, so it yields two topics and both must match where it was
-  routed. An id of an unrecognized shape drops out (no topic to check) rather than raising.
+  guarded. `merge_ranges` carries **two** range ids and `register_segment` a range id and a segment id,
+  so each yields two topics and both must match where it was routed. An id of an unrecognized shape
+  drops out (no topic to check) rather than raising.
 
   Distinct from the private `command_topic/2`, which resolves a range's **stored** topic from the state
   for the migration fence: that one needs the range to exist; this reads the id itself, catching a
@@ -235,7 +236,11 @@ defmodule Malachi.Metadata do
   @spec routed_range_topics(command()) :: [topic_name()]
   def routed_range_topics({:split_range, range_id}), do: topics([range_id_topic(range_id)])
   def routed_range_topics({:merge_ranges, a, b}), do: topics([range_id_topic(a), range_id_topic(b)])
-  def routed_range_topics({:register_segment, range_id, _seg, _replicas, _off}), do: topics([range_id_topic(range_id)])
+  # Both ids: the range the segment joins, and the segment's own routing topic, so a segment id that
+  # names another range's topic is refused at routing rather than registered where the owner of its
+  # routing topic (the vnode the orphan sweep asks) would never find it.
+  def routed_range_topics({:register_segment, range_id, segment_id, _replicas, _off}),
+    do: topics([range_id_topic(range_id), segment_routing_topic(segment_id)])
 
   def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _at}),
     do: topics([segment_routing_topic(segment_id)])
@@ -268,9 +273,11 @@ defmodule Malachi.Metadata do
   @doc """
   The topic a segment's metadata is routed by, or `nil` for an id that carries none.
 
-  The one place that decides which vnode owns a segment: every segment command is routed through it
-  (`command_target_topic/1`), and so is the orphan sweep's question to the owner
-  (`Malachi.Cluster.ReplicatedDSRSM.known_segments/3`). Today a topic's ranges and segments are
+  The one place that decides which vnode owns a segment. The seal, delete and replica commands are
+  routed through it (`command_target_topic/1`). `register_segment` is routed by the range it joins, and
+  the routing guard refuses one whose segment id this function sends to another topic
+  (`routed_range_topics/1`), so a registration lands where this function points. The orphan sweep asks
+  the owner through it too (`Malachi.Cluster.ReplicatedDSRSM.known_segments/3`). Today a topic's ranges and segments are
   co-located on the topic's vnode, so this is the topic the id embeds. NorthGuard routes a range by the
   hash of the range itself (see `Malachi.Cluster.DSRSM`); if that sharding lands here, it lands in this
   function, and the sweep follows.
