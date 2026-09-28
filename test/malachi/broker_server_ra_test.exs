@@ -8,9 +8,11 @@ defmodule Malachi.BrokerServerRaTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
@@ -333,6 +335,22 @@ defmodule Malachi.BrokerServerRaTest do
   # window, which passed in isolation and failed behind fifteen other tests.
   defp await_boot(server), do: BrokerServer.metadata(server)
 
+  # A ring as gossip would deliver it after a change: version 1, each vnode at `token` and placed on
+  # this node alone.
+  defp ring_topology(vnodes) do
+    ring =
+      Enum.reduce(vnodes, HashRing.new(), fn {vnode_id, token}, ring ->
+        {:ok, ring} = HashRing.add_vnode(ring, vnode_id, token)
+        ring
+      end)
+
+    %RingTopology{
+      version: 1,
+      ring: ring,
+      placements: Map.new(vnodes, fn {vnode_id, _token} -> {vnode_id, [node()]} end)
+    }
+  end
+
   # A topic name that routes to `vnode` on this broker's ring. Names split between the vnodes by hash,
   # and a name on the SILENT vnode would block the write itself, which is a different problem.
   defp topic_on(control, vnode, prefix) do
@@ -642,6 +660,74 @@ defmodule Malachi.BrokerServerRaTest do
 
     assert elapsed_us < 2_500_000,
            "one pass over three silent vnodes took #{div(elapsed_us, 1000)}ms; the readiness checks are in sequence"
+  end
+
+  test "a vnode adopted after boot is bootstrapped by the orchestrator" do
+    # ISSUE #242. The bootstrap pass used to walk the vnode list the broker booted with, and a ring change
+    # adopted from gossip only replaced the routing view. So a vnode created by a split was routed to and
+    # never bootstrapped here, until this node restarted.
+    suffix = System.unique_integer([:positive])
+    booted = :"bs_adopt_boot_#{suffix}"
+    adopted = :"bs_adopt_new_#{suffix}"
+    on_exit(fn -> Enum.each([booted, adopted], &MetadataServer.delete/1) end)
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{booted, 0, [node()]}],
+        brokers_refresh_interval: 60_000
+      )
+
+    on_exit(fn -> stop_quietly(control) end)
+    _ = await_boot(control)
+    refute MetadataServer.ready?({adopted, node()}, 200)
+
+    GenServer.cast(control, {:adopt_topology, ring_topology([{booted, 0}, {adopted, div(Integer.pow(2, 32), 2)}])})
+    :ok = BrokerServer.reconcile_now(control)
+
+    assert MetadataServer.ready?({adopted, node()}),
+           "the adopted vnode was never bootstrapped: the pass still walks the boot list"
+
+    # And the vnode this node now routes to takes a write, which is what routing to it without a cluster
+    # behind it could not do.
+    name = topic_on(control, adopted, "adopted")
+    assert {:ok, _root} = BrokerServer.create_topic(control, name, 4)
+    assert {:ok, %{name: ^name}} = MetadataServer.query({adopted, node()}, &Metadata.get_topic(&1, name))
+  end
+
+  test "a vnode that left the ring is no longer bootstrapped" do
+    # The reverse of #242: the boot list kept a vnode the adopted ring no longer has, and the readiness
+    # check asked the adopted routing view for it, which raised a KeyError and took the broker down with
+    # it (this pass runs on the loop in `reconcile_now/2`). With the list following the ring, the pass
+    # completes and leaves that vnode alone. The orchestrator is held off until the ring without it is
+    # adopted, because left on, boot itself would form both.
+    suffix = System.unique_integer([:positive])
+    kept = :"bs_left_kept_#{suffix}"
+    left = :"bs_left_gone_#{suffix}"
+    on_exit(fn -> Enum.each([kept, left], &MetadataServer.delete/1) end)
+    half = div(Integer.pow(2, 32), 2)
+    gate = :counters.new(1, [])
+
+    {:ok, control} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{kept, 0, [node()]}, {left, half, [node()]}],
+        bootstrap_orchestrator: fn -> :counters.get(gate, 1) == 1 end,
+        reconcile_read_timeout: 200,
+        brokers_refresh_interval: 60_000
+      )
+
+    on_exit(fn -> stop_quietly(control) end)
+    _ = await_boot(control)
+
+    GenServer.cast(control, {:adopt_topology, ring_topology([{kept, 0}])})
+    :counters.put(gate, 1, 1)
+    :ok = BrokerServer.reconcile_now(control)
+
+    assert MetadataServer.ready?({kept, node()})
+
+    refute MetadataServer.ready?({left, node()}, 500),
+           "a vnode the adopted ring no longer has was still bootstrapped"
   end
 
   test "a reconcile that crashes is logged and counted, and does not take the broker with it" do
