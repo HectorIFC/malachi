@@ -646,8 +646,11 @@ defmodule Malachi.Dashboard do
     send_response(socket, status, [{"Content-Type", "application/json"}], Jason.encode!(body_map), "/users")
   end
 
-  # Every response that carries a body is framed here, so the Content-Length a client reads is the size of
-  # exactly the bytes that follow the blank line. Callers never pass Content-Length: this function owns it.
+  # Apart from the two senders named below, every response with a non-empty body is framed here, so the
+  # Content-Length a client reads is the size of exactly the bytes that follow the blank line. Callers never
+  # pass Content-Length: this function owns it. The two are serve_logo/1, which frames its own static file
+  # and sends no security headers, and serve_sse/2, which sends a security-headed head with no
+  # Content-Length and then an event stream that the closing connection ends.
   # The security headers go on the head alone, so the body is sent as built and never rewritten.
   defp send_response(socket, status, headers, body, route, request_origin \\ nil) do
     header_lines = Enum.map_join(headers, fn {name, value} -> "#{name}: #{value}\r\n" end)
