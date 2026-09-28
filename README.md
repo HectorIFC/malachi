@@ -521,6 +521,9 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/
 | `MALACHI_DASHBOARD_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
 | `MALACHI_DASHBOARD_SECURE_COOKIE` | `false` | Mark the session cookie `Secure`. Set it only behind a TLS-terminating proxy: the dashboard listener itself serves plain HTTP, and a browser refuses to store a `Secure` cookie from a plain-HTTP origin, which makes login fail with no error. |
 | `MALACHI_DASHBOARD_CSP` | (default) | Custom Content-Security-Policy |
+| `MALACHI_DASHBOARD_MAX_HEADER_COUNT` | `50` | Max header lines in one request; past it the dashboard answers 431 |
+| `MALACHI_DASHBOARD_MAX_HEADER_LINE_SIZE` | `10000` | Max bytes in one request or header line, CRLF included; past it the connection is closed without an answer |
+| `MALACHI_DASHBOARD_MAX_HEADER_SIZE` | `32768` | Max bytes across all header names and values; past it the dashboard answers 431. The three header limits are read when the dashboard starts, and zero or a negative value falls back to its default with a warning |
 | `MALACHI_HSTS_ENABLED` | `true` | Enable HTTP Strict Transport Security |
 | `MALACHI_HSTS_MAX_AGE` | `31536000` | HSTS max-age (1 year) |
 
