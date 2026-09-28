@@ -377,6 +377,9 @@ config :malachi,
      end),
   dashboard_auth_rate_limit: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_LIMIT", 10),
   dashboard_auth_rate_window_ms: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS", 60_000),
+  # Authenticated dashboard requests, per session. 0 turns the limit off; the login bucket above has no off switch.
+  dashboard_api_rate_limit: parse_int.("MALACHI_DASHBOARD_API_RATE_LIMIT", 300),
+  dashboard_api_rate_window_ms: parse_int.("MALACHI_DASHBOARD_API_RATE_WINDOW_MS", 60_000),
   # Whether the session cookie is marked Secure. Off by default because `Malachi.Dashboard` listens with
   # `:gen_tcp.listen` and has no TLS path, so the transport it actually serves is plain HTTP, and a browser
   # refuses to store a Secure cookie from a non-trustworthy origin. Turn it on when a TLS-terminating proxy

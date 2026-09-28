@@ -131,6 +131,16 @@ defmodule Malachi.Auth do
   end
 
   @doc """
+  Whether `validate_token/3` would accept `token` from this client, answered without any of its effects
+  (no audit event, no hijack warning, no expired session deleted, no activity recorded). A caller uses it
+  to decide what a validation will cost before paying for it.
+  """
+  @spec session_valid?(String.t(), term(), String.t()) :: boolean()
+  def session_valid?(token, client_ip, user_agent) do
+    match?({:valid, _session_data}, SessionManager.classify_session(token, client_ip, user_agent))
+  end
+
+  @doc """
   Validates a session token without IP binding (legacy compatibility).
   """
   def validate_token(token) when is_binary(token) do
