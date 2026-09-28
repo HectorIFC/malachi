@@ -26,9 +26,21 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Metadata
 
   @type vnode_id :: atom()
+
+  @typedoc """
+  What `known_segments/3` found: the ids an owner lists, the ids that carry no topic to route by, the ids
+  a pending split is moving that neither owner listed, and the ids no owner lists but another vnode does.
+  """
+  @type found :: %{
+          known: MapSet.t(),
+          unroutable: [Metadata.segment_id()],
+          migrating: [Metadata.segment_id()],
+          misplaced: [Metadata.segment_id()]
+        }
 
   @type t :: %__MODULE__{
           ring: HashRing.t(),
@@ -214,6 +226,94 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     {:ok, DSRSM.seed(state.ring, metadata_by_vnode), unreachable}
   end
 
+  @doc """
+  Which of `segment_ids` the vnodes that OWN them list, with every other vnode asked only about the ids
+  their owner did not list.
+
+  The question a caller about to act on an ABSENCE has, answered where the answer lives. Each id is
+  routed by `Malachi.Metadata.segment_routing_topic/1`, the function every segment command is routed
+  by, so the sweep asks exactly the vnode the segment was written to; and each owning vnode is read
+  linearizably (`MetadataServer.segments/2`), so a segment registered a moment ago is already there:
+  registration commits before any replica creates its directory. Asking the owner rather than a copy
+  of everyone's metadata is NorthGuard's shape: the only global state is which vnodes exist, and a
+  vnode's leader answers for the metadata it owns (the meetup transcript, 502-508 and 609-613). Only the
+  owners can make an id known; the wider question below can only keep an id, and it departs from that
+  shape for a reason `docs/ARCHITECTURE.md` records ("a vnode accepts metadata outside its arc").
+
+  Malachi co-locates a topic's ranges and segments on the topic's vnode, while NorthGuard routes a
+  range by the hash of the range itself (520-522); that difference predates this function and lives in
+  `Malachi.Metadata.segment_routing_topic/1` alone, so the sweep follows it if it ever changes.
+
+  While a split is pending, a topic's metadata can already sit on the new vnode while the ring still
+  routes it to the old one, so each id is also routed under the ring the split will install, and asked
+  of that owner too. An id counts as known when either owner lists it. One that the split is moving and
+  that NEITHER owner lists is returned as `migrating`, not as unknown: the two owners are read at two
+  moments, and a topic copied to the new vnode and then extracted from the old one between those two
+  reads is listed by neither, although it never stopped existing.
+
+  An id its owner does not list, and that no split is moving, is then asked of every vnode on the ring
+  before it can count as unknown. A vnode only stores what was routed to it, but a broker routing
+  by a ring gossip had not yet updated can write a new topic to a vnode the recorded ring no longer
+  sends it to, and nothing moves it afterwards. Its segments are real, and one that another vnode lists
+  is returned as `misplaced`, never as unknown. The wider question costs only the ids that were about
+  to be declared absent, which on a healthy cluster are the real orphans alone.
+
+  An id that does not carry a topic cannot be routed and is returned as `unroutable`, never as unknown:
+  the caller must treat it as explained. A vnode that does not answer within `timeout` on any node of
+  its placement fails the whole call, because a vnode that did not answer knows nothing the caller can
+  act on. Returns `{:error, :no_topology}` when there is no ring to route by.
+  """
+  @spec known_segments(RingTopology.t() | nil, [Metadata.segment_id()], pos_integer()) ::
+          {:ok, found()} | {:error, :no_topology | {:vnodes_unreachable, [vnode_id()]}}
+  def known_segments(%RingTopology{ring: %HashRing{sorted: [_ | _]}} = topology, segment_ids, timeout) do
+    rings = owner_rings(topology)
+    placements = owner_placements(topology)
+    {routable, unroutable} = Enum.split_with(segment_ids, &is_binary(Metadata.segment_routing_topic(&1)))
+
+    by_owner =
+      for id <- routable,
+          ring <- rings,
+          {:ok, vnode_id} <- [HashRing.route(ring, Metadata.segment_routing_topic(id))],
+          reduce: %{} do
+        acc -> Map.update(acc, vnode_id, [id], &[id | &1])
+      end
+
+    with {:ok, known} <- ask_vnodes(by_owner, placements, timeout) do
+      migrating = for id <- routable, moving?(topology, id), not MapSet.member?(known, id), do: id
+      absent = for id <- routable, not MapSet.member?(known, id), not moving?(topology, id), do: id
+
+      with {:ok, misplaced} <- ask_everyone(absent, placements, timeout) do
+        {:ok, %{known: known, unroutable: unroutable, migrating: migrating, misplaced: MapSet.to_list(misplaced)}}
+      end
+    end
+  end
+
+  def known_segments(_no_ring, _segment_ids, _timeout), do: {:error, :no_topology}
+
+  @doc """
+  `known_segments/3` over the topology `read_topology` returns, read again once the owners answered.
+
+  The answers are only worth something if they came from the owners the ring still routes to. A
+  topology that moved while the owners were being asked (a split advanced, a pending one appeared) is
+  refused as `{:topology_changed, before, after}` rather than trusted, and the caller asks again on its
+  next pass. `read_topology` answers `{:ok, topology_or_nil}` or `{:error, reason}`, which is returned.
+  """
+  @spec known_segments_stable(
+          (-> {:ok, RingTopology.t() | nil} | {:error, term()}),
+          [Metadata.segment_id()],
+          pos_integer()
+        ) ::
+          {:ok, found()} | {:error, term()}
+  def known_segments_stable(read_topology, segment_ids, timeout) when is_function(read_topology, 0) do
+    with {:ok, before} <- read_topology.(),
+         {:ok, found} <- known_segments(before, segment_ids, timeout),
+         {:ok, now} <- read_topology.() do
+      if version(before) == version(now),
+        do: {:ok, found},
+        else: {:error, {:topology_changed, version(before), version(now)}}
+    end
+  end
+
   @doc "The ids of the vnodes."
   @spec vnode_ids(t()) :: [vnode_id()]
   def vnode_ids(%__MODULE__{} = state), do: HashRing.vnode_ids(state.ring)
@@ -250,6 +350,78 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
       fn {vnode_id, server_id} -> {vnode_id, vnode_metadata(server_id, timeout)} end,
       fn {vnode_id, _server_id} -> {vnode_id, :unreachable} end
     )
+  end
+
+  # The ring routing uses now, plus the one a pending split will install. `HashRing.add_vnode/3` refuses a
+  # token already on the ring, which is what a split that already advanced looks like, and then the
+  # current ring is the only one.
+  defp owner_rings(%RingTopology{ring: ring, pending: %{new_vnode: new_vnode, token: token}}) do
+    case HashRing.add_vnode(ring, new_vnode, token) do
+      {:ok, advanced} -> [ring, advanced]
+      {:error, _already_placed} -> [ring]
+    end
+  end
+
+  defp owner_rings(%RingTopology{ring: ring}), do: [ring]
+
+  # One bounded read per vnode, concurrently, of which of `ids` each lists. A vnode that does not answer
+  # fails the whole question: what it would have said is exactly what the caller cannot do without.
+  defp ask_vnodes(by_vnode, _placements, _timeout) when map_size(by_vnode) == 0, do: {:ok, MapSet.new()}
+
+  defp ask_vnodes(by_vnode, placements, timeout) do
+    answers =
+      by_vnode
+      |> Map.to_list()
+      |> BoundedFanout.map(
+        timeout * max_placement(placements),
+        fn {vnode_id, ids} -> {vnode_id, known_on(Map.get(placements, vnode_id, []), vnode_id, ids, timeout)} end,
+        fn {vnode_id, _ids} -> {vnode_id, :unreachable} end
+      )
+
+    case for({vnode_id, :unreachable} <- answers, do: vnode_id) do
+      [] -> {:ok, for({_vnode_id, {:ok, known}} <- answers, id <- known, into: MapSet.new(), do: id)}
+      silent -> {:error, {:vnodes_unreachable, Enum.sort(silent)}}
+    end
+  end
+
+  # The ids no owner listed, asked of every vnode the topology places. Nothing to ask costs nothing.
+  defp ask_everyone([], _placements, _timeout), do: {:ok, MapSet.new()}
+
+  defp ask_everyone(ids, placements, timeout),
+    do: ask_vnodes(Map.new(Map.keys(placements), &{&1, ids}), placements, timeout)
+
+  # Whether a pending split is moving this id: the ring it will install sends it to the new vnode.
+  defp moving?(%RingTopology{pending: %{new_vnode: new_vnode}} = topology, id) do
+    case owner_rings(topology) do
+      [_current, advanced] -> HashRing.route(advanced, Metadata.segment_routing_topic(id)) == {:ok, new_vnode}
+      [_current] -> false
+    end
+  end
+
+  defp moving?(%RingTopology{}, _id), do: false
+
+  defp owner_placements(%RingTopology{placements: placements, pending: %{new_vnode: new_vnode, nodes: nodes}}),
+    do: Map.put_new(placements, new_vnode, nodes)
+
+  defp owner_placements(%RingTopology{placements: placements}), do: placements
+
+  defp version(%RingTopology{version: version}), do: version
+  defp version(nil), do: nil
+
+  # Every node of a placement may have to be tried, so the fan-out's bound covers all of them.
+  defp max_placement(placements),
+    do: placements |> Map.values() |> Enum.map(&length/1) |> Enum.max(fn -> 1 end) |> max(1)
+
+  # A placement is where the vnode was put, not necessarily where its members are now (a rebalance moves
+  # them), so each node is tried in turn and the first answer wins. A vnode with no placement at all has
+  # nowhere to be asked and is as silent as one that does not answer.
+  defp known_on(nodes, vnode_id, ids, timeout) do
+    Enum.reduce_while(nodes, :unreachable, fn node, :unreachable ->
+      case MetadataServer.segments({vnode_id, node}, timeout) do
+        {:ok, segments} -> {:halt, {:ok, for(id <- ids, Map.has_key?(segments, id), into: MapSet.new(), do: id)}}
+        {:error, _reason} -> {:cont, :unreachable}
+      end
+    end)
   end
 
   # The placeholder keeps the cache shape total (every vnode on the ring has an entry). It is only a
@@ -295,8 +467,8 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   # Find the source's topics that now route to the new vnode, **fence** them (seal-first, so no write can
   # race the copy), then re-snapshot the now-stable source and migrate each from that snapshot. The re-read
-  # after fencing captures any write that landed before the fence. `&Function.identity/1` (not a closure)
-  # so the query runs on the leader.
+  # after fencing captures any write that landed before the fence. The read is linearizable, and the
+  # whole state comes back: `MetadataServer.query/3` applies its function here, in the caller.
   defp migrate_from(source_server, new_server, new_ring, new_vnode_id) do
     with {:ok, metadata} <- MetadataServer.query(source_server, &Function.identity/1) do
       displaced =

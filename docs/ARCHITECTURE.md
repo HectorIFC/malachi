@@ -90,13 +90,15 @@ Metadata (topics, ranges, segments) lives in a **directory of sharded replicated
 - A **vnode** is a Raft group (an `ra` cluster) holding one shard of the metadata.
 - A **coordinator** is the vnode's leader; it carries the business logic: sealing or deleting a topic,
   splitting or merging a range, choosing segment replica sets, and healing under-replicated segments.
-- vnodes sit on a hash ring (consistent hashing) keyed by topic name, and by range id for ranges and
-  segments. A vnode's position on the ring is stable even as its Raft replicas join and leave, and a vnode
-  can **split**, breaking its state into two Raft groups.
+- vnodes sit on a hash ring (consistent hashing) keyed by topic name. NorthGuard also places a range by
+  the hash of the range itself; Malachi keeps a topic's ranges and segments on the topic's vnode for now
+  (`Malachi.Cluster.DSRSM`, and `Malachi.Metadata.segment_routing_topic/1`, the one function that decides
+  a segment's owner). A vnode's position on the ring is stable even as its Raft replicas join and leave,
+  and a vnode can **split**, breaking its state into two Raft groups.
 
 ```mermaid
 flowchart TB
-  subgraph ring["Hash ring (metadata sharded by topic / range id)"]
+  subgraph ring["Hash ring (metadata sharded by topic)"]
     V1["vnode A (a Raft group)"]
     V2["vnode B (a Raft group)"]
     V3["vnode C (a Raft group)"]
@@ -116,6 +118,22 @@ node holds a member of and leads. `Malachi.Cluster.VnodeCoordinatorManager` re-r
 seconds, so a vnode this node gains after boot, whether a rebalance added it as a member or a split
 created it, starts coordinating without the node restarting. A ring it cannot read leaves the
 coordinators it already runs alone, because stopping them all is worse than waiting for the next read.
+
+### Known divergence: a vnode accepts metadata outside its arc
+
+In NorthGuard the vnode that owns a region of the ring is the one responsible for its metadata. Malachi
+does not yet enforce that on write: a vnode applies whatever command reaches it, without checking the
+command's topic against its own arc. A broker whose gossiped ring lags behind a vnode split can
+therefore create a topic, and register its segments, on the vnode that owned the arc before the split.
+Nothing moves that metadata afterwards, so a reader routing by the current ring does not find it.
+
+The destructive consumer is guarded against it rather than the cause being fixed. Before the orphan
+sweep (`Malachi.Retention.OrphanSweeper`) removes a directory whose segment the owner does not list, it
+asks every vnode on the ring (`Malachi.Cluster.ReplicatedDSRSM.known_segments/3`); a segment another
+vnode lists is held, never removed. That read can only prevent a removal, never cause one, and it costs
+liveness: while any vnode is silent, a pass with a real orphan to decide is skipped. The fix in
+NorthGuard's shape is for the owning vnode to refuse a command whose topic its arc does not cover; until
+that exists, this read is what keeps a misrouted topic's acknowledged data on disk.
 
 The metadata state machine is `Malachi.Cluster.MetadataMachine` (`@behaviour :ra_machine`). It is a pure
 function of its input: it never reads the wall clock, configuration, or `node()`. Anything time- or
