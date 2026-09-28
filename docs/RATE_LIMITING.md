@@ -4,12 +4,13 @@ Rate limiting and connection control system for Malachi.
 
 ## Enforcement status
 
-All four actions are enforced:
+All five actions are enforced:
 
 | action | keyed by | applied at | default |
 |---|---|---|---|
 | `:auth` | client IP | the TCP auth handshake | 10 per 60s |
-| `:dashboard_auth` | client IP | the dashboard HTTP login/session path | 10 per 60s |
+| `:dashboard_auth` | client IP | dashboard `POST /login`, and dashboard tokens that do not validate | 10 per 60s |
+| `:dashboard_api` | session (a SHA-256 digest of its token) | every authenticated dashboard request, `/stream` once when it opens | 300 per 60s (`0` turns it off) |
 | `:publish` | authenticated username | the `produce` frame | **off** (limit `0`) |
 | `:subscribe` | authenticated username | the `subscribe` frame | **off** (limit `0`) |
 
@@ -59,9 +60,10 @@ zero, which was indistinguishable from "nobody hit the limit".
 ### Rate Limiting
 
 - **Token Bucket Algorithm**: Efficient, memory-optimized rate limiting
-- **Per-Action Limits**: Separate limits per action (`:auth`, `:dashboard_auth`, `:publish`, `:subscribe`)
-- **Per-IP or per-user tracking**: the auth limits are keyed by IP, the publish/subscribe quotas by
-  authenticated username (see Enforcement status)
+- **Per-Action Limits**: Separate limits per action (`:auth`, `:dashboard_auth`, `:dashboard_api`,
+  `:publish`, `:subscribe`)
+- **Per-IP, per-session or per-user tracking**: the auth limits are keyed by IP, the dashboard API limit by
+  session, the publish/subscribe quotas by authenticated username (see Enforcement status)
 - **Automatic Token Refill**: Time-based token replenishment
 - **Periodic Cleanup**: Automatic removal of expired buckets every 5 minutes
 - **Real-time Metrics**: Track blocked requests per action
@@ -92,6 +94,10 @@ MALACHI_AUTH_RATE_WINDOW_MS=60000       # Window duration (60 seconds)
 # Dashboard authentication rate limits, HTTP path (per IP) - ENFORCED
 MALACHI_DASHBOARD_AUTH_RATE_LIMIT=10        # Max attempts per window
 MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS=60000 # Window duration (60 seconds)
+
+# Dashboard API rate limits, authenticated HTTP requests (per session) - ENFORCED
+MALACHI_DASHBOARD_API_RATE_LIMIT=300        # Max requests per window; 0 = no limit
+MALACHI_DASHBOARD_API_RATE_WINDOW_MS=60000  # Window duration (60 seconds)
 
 # Publish rate limits (per authenticated user, per node) - ENFORCED, OFF BY DEFAULT
 MALACHI_PUBLISH_RATE_LIMIT=0            # Max produce REQUESTS per window; 0 = no limit (the default)
@@ -238,19 +244,27 @@ seconds, and a JSON body:
 {
   "s": "err",
   "reason": "rate_limit_exceeded",
-  "retry_after_ms": 6000
+  "retry_after_ms": 200
 }
 ```
 
-`retry_after_ms` is the time until the bucket's next token, not the time left in its window. The bucket
-refills continuously, so at the default 10 a minute a limited login waits 6 seconds.
+The answer is the same whichever bucket ran out: in both cases the right move is to wait. `retry_after_ms`
+is the time until the bucket's next token, not the time left in its window. The buckets refill
+continuously, so at 300 a minute a limited console waits 200 ms, and a limited login waits 6 seconds.
+
+The page served at `/` treats any failure of its `/stream` connection as a lost session and returns to the
+login form, so a session that has spent its API budget and then reopens the stream is sent to log in
+again.
 
 ### Flow
 
 1. **Connection** → ConnectionLimiter checks per-IP + global limits
 2. **TCP authentication** → RateLimiter checks the `:auth` limit by IP
-3. **Dashboard authentication** → RateLimiter checks the `:dashboard_auth` limit by IP before validating the
-   login or the session token
+3. **Dashboard** → a `POST /login` spends the `:dashboard_auth` limit by IP before the password is checked.
+   A session token is first checked without side effects: one that validates spends its session's
+   `:dashboard_api` budget and never the address's; one that does not validate spends the address's
+   `:dashboard_auth` budget **before** it is validated, so the expiry and hijack audit events that
+   validation writes are capped by the login budget
 4. **Publish/Subscribe** → RateLimiter checks the `:publish` / `:subscribe` limit by authenticated
    username, after the permission check, on the `produce` and `subscribe` frames. Skipped entirely when
    the action is unconfigured, which is the default
@@ -313,6 +327,7 @@ System metrics include rate limiting section:
       "auth_blocked": 1523,
       "publish_blocked": 0,
       "subscribe_blocked": 0,
+      "dashboard_api_blocked": 0,
       "connection_blocks": 45
     }
   }
@@ -325,7 +340,16 @@ deployment a zero means "no quota is set" rather than "nobody hit it": `config.p
 `/rate_limits` is what tells the two apart.
 
 `rate_limiting.auth_blocked` counts only the TCP `:auth` blocks; dashboard `:dashboard_auth` blocks are
-counted separately and exposed under `system.dashboard.auth_blocked`.
+counted separately and exposed under `system.dashboard.auth_blocked`, and in Prometheus as
+`malachi_dashboard_auth_total{outcome="blocked"}`. That is why `malachi_rate_limit_blocked_total` has an
+`action="dashboard_api"` series and no `action="dashboard_auth"` one: a second series for the same event
+would count it twice in a `sum by (action)`.
+
+`rate_limiting.dashboard_api_blocked` counts authenticated dashboard requests refused because their
+session spent its budget. Each one is also audited as `dashboard_api_rate_limited`, with the user and the
+session digest that `/rate_limits` lists under `top_blocked.dashboard_api`; the token itself is never
+stored. A session's blocked counter is reaped with its bucket, unlike the per-IP ones, which are kept as
+history.
 
 ## Testing
 

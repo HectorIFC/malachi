@@ -251,6 +251,9 @@ defmodule Malachi.DashboardTest do
 
           assert String.contains?(response, "enabled")
           assert String.contains?(response, "top_blocked")
+          # Both dashboard buckets are reported, the login one by address and the API one by session digest.
+          assert String.contains?(response, "dashboard_auth")
+          assert String.contains?(response, "dashboard_api")
 
           :gen_tcp.close(socket)
 

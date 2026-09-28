@@ -19,13 +19,22 @@ defmodule Malachi.RateLimiter do
   ## Actions
 
   - `:auth` - TCP authentication attempts (tracked by IP)
-  - `:dashboard_auth` - Dashboard login attempts (tracked by IP)
+  - `:dashboard_auth` - Dashboard logins, and dashboard tokens that do not validate (tracked by IP)
+  - `:dashboard_api` - Authenticated dashboard requests (tracked by session, under a digest of its token)
   - `:publish` - Produce requests (tracked by authenticated username)
   - `:subscribe` - Subscribe requests (tracked by authenticated username)
 
-  All four are **enforced**, per node. `:publish` and `:subscribe` are off by default (limit `0`); an
-  operator opts in by configuring a limit. Enforcement is per node, not a cluster-wide quota, and a
-  produce costs one token per request, not per record.
+  All five are **enforced**, per node. `:publish` and `:subscribe` are off by default (limit `0`); an
+  operator opts in by configuring a limit. `:dashboard_api` is on by default (300 per minute per session)
+  and a limit of `0` turns it off. Enforcement is per node, not a cluster-wide quota, and a produce costs
+  one token per request, not per record.
+
+  `:dashboard_api` is keyed by session rather than by user. The NorthGuard material this project follows
+  says nothing about operator consoles or quotas; a per principal key is what the Kafka lineage would
+  suggest, but that governs produce and consume clients. This limit protects an operator surface, and
+  keying it by user would put two operators sharing one account back into the bucket this action exists to
+  split them out of. Its blocked counters are reaped with their bucket by the periodic cleanup, because
+  a session identifier outlives its session only as garbage.
 
   ## Two doors, on purpose
 
@@ -75,6 +84,8 @@ defmodule Malachi.RateLimiter do
   - `publish_rate_window_ms` - Publish window duration (default: 1000)
   - `subscribe_rate_limit` - Max subscribe requests per window (default: 0, meaning no limit)
   - `subscribe_rate_window_ms` - Subscribe window duration (default: 60000)
+  - `dashboard_api_rate_limit` - Authenticated dashboard requests per window, per session (default: 300)
+  - `dashboard_api_rate_window_ms` - Dashboard API window duration (default: 60000)
   - `rate_limit_cleanup_interval_ms` - Cleanup interval (default: 300000)
   """
 
@@ -90,6 +101,10 @@ defmodule Malachi.RateLimiter do
   # A sharded window counter is measured against the window width stored on the entry itself instead
   # (see `cleanup_expired_buckets/0`).
   @bucket_ttl 3_600_000
+
+  # Actions whose identifier names something short lived (a session), not an address or a user. Their
+  # blocked counters are reaped with their bucket; every other action keeps them as forensic history.
+  @session_scoped_actions [:dashboard_api]
 
   # ============================================================
   # PUBLIC API
@@ -151,21 +166,29 @@ defmodule Malachi.RateLimiter do
   end
 
   @doc """
-  The configured limit for an opt-in action, or `nil` when that action is not limited.
+  The configured limit for an action that can be switched off, or `nil` when that action is not limited.
 
   `:publish` and `:subscribe` are off unless an operator configures a positive limit and window, so a
-  limit of `0` (the default) means "no limit" and reads back as `nil`. This is the single reader of
-  those config keys: the enforcement path and the dashboard both go through it so they cannot diverge.
+  limit of `0` (the default) means "no limit" and reads back as `nil`. `:dashboard_api` follows the same
+  rule but ships on, at 300 requests per 60 seconds. This is the single reader of those config keys: the
+  enforcement path and the dashboard both go through it so they cannot diverge.
 
   ## Examples
 
       action_config(:publish)
       #=> nil                              # unconfigured, the default
       #=> %{limit: 1000, window_ms: 1000}  # MALACHI_PUBLISH_RATE_LIMIT=1000
+
+      action_config(:dashboard_api)
+      #=> %{limit: 300, window_ms: 60000}  # the default
   """
-  @spec action_config(:publish | :subscribe) :: %{limit: pos_integer(), window_ms: pos_integer()} | nil
-  def action_config(:publish), do: build_action_config(:publish_rate_limit, :publish_rate_window_ms)
-  def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, :subscribe_rate_window_ms)
+  @spec action_config(:publish | :subscribe | :dashboard_api) ::
+          %{limit: pos_integer(), window_ms: pos_integer()} | nil
+  def action_config(:publish), do: build_action_config(:publish_rate_limit, 0, :publish_rate_window_ms, 0)
+  def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, 0, :subscribe_rate_window_ms, 0)
+
+  def action_config(:dashboard_api),
+    do: build_action_config(:dashboard_api_rate_limit, 300, :dashboard_api_rate_window_ms, 60_000)
 
   @doc false
   # The window a timestamp falls in, as `{window_start, elapsed_in_window}`. The one place the window
@@ -360,9 +383,9 @@ defmodule Malachi.RateLimiter do
 
   # A limit is in force only when both the limit and its window are positive integers; anything else
   # (0, a negative, a non-integer from a malformed env var) reads as "not limited".
-  defp build_action_config(limit_key, window_key) do
-    limit = cfg(limit_key, 0)
-    window_ms = cfg(window_key, 0)
+  defp build_action_config(limit_key, default_limit, window_key, default_window_ms) do
+    limit = cfg(limit_key, default_limit)
+    window_ms = cfg(window_key, default_window_ms)
 
     if positive_integer?(limit) and positive_integer?(window_ms) do
       %{limit: limit, window_ms: window_ms}
@@ -513,9 +536,10 @@ defmodule Malachi.RateLimiter do
     expired_count =
       :ets.foldl(
         fn
-          {{_identifier, _action} = key, {_count, last_refill, _window_start, window_ms}}, acc ->
+          {{identifier, action} = key, {_count, last_refill, _window_start, window_ms}}, acc ->
             if now - last_refill > bucket_ttl(window_ms) do
               :ets.delete(@table, key)
+              if action in @session_scoped_actions, do: :ets.delete(@table, {:blocked, identifier, action})
               acc + 1
             else
               acc
@@ -531,7 +555,17 @@ defmodule Malachi.RateLimiter do
               acc
             end
 
-          # Skip blocked counter entries
+          # A session scoped blocked counter whose bucket is gone (reaped earlier in this fold, by a pass
+          # before this one, or never recreated after a reset) names a dead session: reap it.
+          {{:blocked, identifier, action} = key, _count}, acc when action in @session_scoped_actions ->
+            if :ets.member(@table, {identifier, action}) do
+              acc
+            else
+              :ets.delete(@table, key)
+              acc + 1
+            end
+
+          # Every other blocked counter is kept: it is the forensic record that a limit fired.
           {{:blocked, _identifier, _action}, _count}, acc ->
             acc
         end,

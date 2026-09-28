@@ -491,6 +491,53 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "action_config(:dashboard_api)" do
+    setup do
+      original =
+        for key <- [:dashboard_api_rate_limit, :dashboard_api_rate_window_ms],
+            into: %{},
+            do: {key, Application.fetch_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- original do
+          case value do
+            {:ok, v} -> Application.put_env(:malachi, key, v)
+            :error -> Application.delete_env(:malachi, key)
+          end
+        end
+      end)
+
+      :ok
+    end
+
+    test "is on by default, unlike the opt-in throughput quotas" do
+      Application.delete_env(:malachi, :dashboard_api_rate_limit)
+      Application.delete_env(:malachi, :dashboard_api_rate_window_ms)
+
+      assert RateLimiter.action_config(:dashboard_api) == %{limit: 300, window_ms: 60_000}
+    end
+
+    test "reads back the configured limit and window" do
+      Application.put_env(:malachi, :dashboard_api_rate_limit, 42)
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 10_000)
+
+      assert RateLimiter.action_config(:dashboard_api) == %{limit: 42, window_ms: 10_000}
+    end
+
+    test "a zero, negative or non-integer limit or window turns it off" do
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 60_000)
+
+      for bad <- [0, -1, "300", nil] do
+        Application.put_env(:malachi, :dashboard_api_rate_limit, bad)
+        assert RateLimiter.action_config(:dashboard_api) == nil, "expected limit #{inspect(bad)} to read as off"
+      end
+
+      Application.put_env(:malachi, :dashboard_api_rate_limit, 300)
+      Application.put_env(:malachi, :dashboard_api_rate_window_ms, 0)
+      assert RateLimiter.action_config(:dashboard_api) == nil
+    end
+  end
+
   describe "retry_after_ms of the token bucket" do
     # A blocked caller is told when its next token arrives. The bucket refills continuously, one token every
     # window_ms / limit, so that is the wait; the time left in the whole window is not.
@@ -1047,6 +1094,42 @@ defmodule Malachi.RateLimiterTest do
       run_cleanup()
 
       assert [{^key, 42}] = :ets.lookup(@table, key)
+    end
+
+    test "reaps a session scoped blocked counter together with its bucket" do
+      # A :dashboard_api identifier is the digest of one session's token. Once the bucket is idle long enough
+      # to be reaped the session is long gone, and its blocked counter would otherwise stay forever.
+      identifier = "session_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      :ets.insert(@table, {{identifier, :dashboard_api}, {0, now - 3_600_000 - 60_000, now, 60_000}})
+      :ets.insert(@table, {{:blocked, identifier, :dashboard_api}, 3})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, {identifier, :dashboard_api}) == []
+      assert :ets.lookup(@table, {:blocked, identifier, :dashboard_api}) == []
+    end
+
+    test "reaps a session scoped blocked counter whose bucket is already gone" do
+      identifier = "orphan_session_#{:rand.uniform(1_000_000)}"
+      key = {:blocked, identifier, :dashboard_api}
+      :ets.insert(@table, {key, 3})
+
+      run_cleanup()
+
+      assert :ets.lookup(@table, key) == []
+    end
+
+    test "keeps a session scoped blocked counter while its bucket is live" do
+      identifier = "live_session_#{:rand.uniform(1_000_000)}"
+      now = System.monotonic_time(:millisecond)
+      :ets.insert(@table, {{identifier, :dashboard_api}, {0, now, now, 60_000}})
+      key = {:blocked, identifier, :dashboard_api}
+      :ets.insert(@table, {key, 3})
+
+      run_cleanup()
+
+      assert [{^key, 3}] = :ets.lookup(@table, key)
     end
 
     test "a live window survives cleanup, so a spent quota is not silently refunded" do
