@@ -571,6 +571,48 @@ defmodule Malachi.RateLimiterTest do
       end
     end
 
+    property "a client that never gets ahead of the rate is never refused, however unevenly it spaces requests" do
+      # The bucket is continuous: time that has not yet added up to a whole token must carry over to the
+      # next request, not be thrown away when a request is admitted. A client alternating 150 and 350 ms
+      # against 300 a minute (one token every 200 ms) used to lose the 150 ms each time and drain.
+      check all(
+              limit <- integer(1..1_000),
+              window_ms <- integer(1..120_000),
+              gaps <- list_of(integer(0..10_000), min_length: 1, max_length: 200)
+            ) do
+        one_token_ms = div(window_ms + limit - 1, limit)
+        times = gaps |> Enum.scan(&(&1 + &2))
+        # Starting from an empty bucket at 0, request i (from 1) is never ahead of the rate when a whole
+        # token's time has passed for each request so far.
+        on_pace? = times |> Enum.with_index(1) |> Enum.all?(fn {t, i} -> t >= i * one_token_ms end)
+
+        if on_pace? do
+          Enum.reduce(times, {0, 0}, fn now, state ->
+            assert {:ok, next} = RateLimiter.take_bucket_token(state, now, limit, window_ms),
+                   "refused at #{now} ms with state #{inspect(state)}"
+
+            next
+          end)
+        end
+      end
+    end
+
+    test "the uneven client of 150 and 350 ms against 300 a minute keeps being served" do
+      times = 1..600 |> Enum.scan(0, fn i, t -> t + if(rem(i, 2) == 1, do: 150, else: 350) end)
+
+      refused =
+        times
+        |> Enum.reduce({{299, 0}, 0}, fn now, {state, refused} ->
+          case RateLimiter.take_bucket_token(state, now, 300, 60_000) do
+            {:ok, next} -> {next, refused}
+            {:error, _retry} -> {state, refused + 1}
+          end
+        end)
+        |> elem(1)
+
+      assert refused == 0
+    end
+
     test "a limit of zero or less refuses every request and never crashes the limiter" do
       pid = Process.whereis(RateLimiter)
 

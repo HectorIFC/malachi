@@ -210,6 +210,30 @@ defmodule Malachi.RateLimiter do
   def tokens_refilled(elapsed_ms, limit, window_ms), do: div(elapsed_ms * limit, window_ms)
 
   @doc false
+  # One check against a token bucket, as a pure function of its state `{count, last_refill}` and the clock:
+  # `{:ok, next_state}` when a token was taken, `{:error, retry_after_ms}` when none was left.
+  #
+  # `last_refill` advances only by the time the whole tokens earned stand for, so a fraction of a token
+  # carries over to the next check instead of being dropped when a request is admitted. Dropping it made a
+  # client that spaced its requests unevenly (150 ms, then 350 ms, against one token every 200 ms) lose the
+  # short gaps and drain a bucket it never outpaced. A full bucket holds no fraction, so filling it resets
+  # the clock to `now`. The time a token stands for is rounded up, which errs toward admitting less.
+  @spec take_bucket_token({integer(), integer()}, integer(), pos_integer(), pos_integer()) ::
+          {:ok, {non_neg_integer(), integer()}} | {:error, pos_integer()}
+  def take_bucket_token({count, last_refill}, now, limit, window_ms) do
+    elapsed_ms = now - last_refill
+    earned = tokens_refilled(elapsed_ms, limit, window_ms)
+    available = min(limit, count + earned)
+
+    refilled_at =
+      if available == limit, do: now, else: last_refill + div(earned * window_ms + limit - 1, limit)
+
+    if available > 0,
+      do: {:ok, {available - 1, refilled_at}},
+      else: {:error, next_token_in(elapsed_ms, limit, window_ms)}
+  end
+
+  @doc false
   # How long a caller with an empty bucket, last refilled `elapsed_ms` ago, waits for its next token. The
   # bucket refills continuously, so this is the time to one token (`window_ms / limit`, rounded up), not
   # the time left in the window: at 300 a minute that is 200 ms, not a minute.
@@ -502,20 +526,15 @@ defmodule Malachi.RateLimiter do
         :ok
 
       [{^key, {count, last_refill, window_start, _window_ms}}] ->
-        # Calculate tokens to add based on time passed
-        refill_amount = tokens_refilled(now - last_refill, limit, window_ms)
-        new_count = min(limit, count + refill_amount)
-        new_window_start = if refill_amount > 0, do: now, else: window_start
+        case take_bucket_token({count, last_refill}, now, limit, window_ms) do
+          {:ok, {new_count, refilled_at}} ->
+            new_window_start = if refilled_at != last_refill, do: now, else: window_start
+            :ets.insert(@table, {key, {new_count, refilled_at, new_window_start, window_ms}})
+            :ok
 
-        if new_count > 0 do
-          # Allow request and consume token
-          :ets.insert(@table, {key, {new_count - 1, now, new_window_start, window_ms}})
-          :ok
-        else
-          # Rate limit exceeded: the bucket is empty and nothing has refilled since `last_refill`, so the
-          # next token is `next_token_in/3` away.
-          increment_blocked_counter(identifier, action)
-          {:error, :rate_limit_exceeded, next_token_in(now - last_refill, limit, window_ms)}
+          {:error, retry_after_ms} ->
+            increment_blocked_counter(identifier, action)
+            {:error, :rate_limit_exceeded, retry_after_ms}
         end
     end
   end

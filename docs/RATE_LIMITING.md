@@ -253,6 +253,8 @@ seconds, and a JSON body:
 The answer is the same whichever bucket ran out: in both cases the right move is to wait. `retry_after_ms`
 is the time until the bucket's next token, not the time left in its window. The buckets refill
 continuously, so at 300 a minute a limited console waits 200 ms, and a limited login waits 6 seconds.
+Time short of a whole token carries over to the next request, so a client that never gets ahead of the
+rate is never refused, however unevenly it spaces its requests.
 
 The page served at `/` treats any failure of its `/stream` connection as a lost session and returns to the
 login form, so a session that has spent its API budget and then reopens the stream is sent to log in
