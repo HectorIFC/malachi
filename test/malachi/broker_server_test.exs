@@ -1014,7 +1014,7 @@ defmodule Malachi.BrokerServerTest do
         reconcile_generation: 7,
         bootstrap: %{
           orchestrator?: true,
-          vnodes: [],
+          vnodes: [{:v0, 0, [node()]}],
           replicated: %ReplicatedDSRSM{ring: ring0, vnodes: %{v0: {:v0, node()}}}
         }
       }
@@ -1035,6 +1035,64 @@ defmodule Malachi.BrokerServerTest do
       # And the generation moved, which is what makes a reconcile started against ring0 arrive stale
       # and be dropped rather than reinstating the ring this cast just replaced (#178).
       assert adopted.reconcile_generation == 8
+
+      # The bootstrap pass walks the adopted ring, not the list the broker booted with: v1, created by the
+      # split, is bootstrapped by the node that now routes to it (#242).
+      assert adopted.bootstrap.vnodes == RingTopology.vnode_placement(topology)
+      assert adopted.bootstrap.vnodes == [{:v0, 0, [node()]}, {:v1, div(Integer.pow(2, 32), 2), [node()]}]
+      assert adopted.bootstrap.orchestrator? == true
+    end
+
+    test "handle_cast adopt_topology drops a vnode that left the ring from the bootstrap pass" do
+      {:ok, ring0} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+      {:ok, ring0} = HashRing.add_vnode(ring0, :v1, div(Integer.pow(2, 32), 2))
+
+      {:ok, broker} =
+        Broker.open(
+          dsrsm: DSRSM.seed(ring0, %{v0: Metadata.new(), v1: Metadata.new()}),
+          command_fun: fn d, _t, _c -> {d, :ok} end
+        )
+
+      state = %{
+        broker: broker,
+        metadata_refresh: fn -> :stale end,
+        reconcile_read_timeout: 1_000,
+        reconcile_generation: 0,
+        bootstrap: %{
+          orchestrator?: true,
+          vnodes: [{:v0, 0, [node()]}, {:v1, div(Integer.pow(2, 32), 2), [node()]}],
+          replicated: %ReplicatedDSRSM{ring: ring0, vnodes: %{v0: {:v0, node()}, v1: {:v1, node()}}}
+        }
+      }
+
+      {:ok, ring1} = HashRing.remove_vnode(ring0, :v1)
+      topology = %RingTopology{version: 1, ring: ring1, placements: %{v0: [node()]}}
+
+      {:noreply, adopted} = BrokerServer.handle_cast({:adopt_topology, topology}, state)
+
+      assert adopted.bootstrap.vnodes == [{:v0, 0, [node()]}]
+      assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}}
+    end
+
+    test "handle_cast adopt_topology leaves a broker without a sharded bootstrap without one" do
+      {:ok, ring0} = HashRing.add_vnode(HashRing.new(), :v0, 0)
+
+      {:ok, broker} =
+        Broker.open(dsrsm: DSRSM.seed(ring0, %{v0: Metadata.new()}), command_fun: fn d, _t, _c -> {d, :ok} end)
+
+      state = %{
+        broker: broker,
+        metadata_refresh: fn -> :stale end,
+        reconcile_read_timeout: 1_000,
+        reconcile_generation: 0,
+        bootstrap: nil
+      }
+
+      topology = %RingTopology{version: 1, ring: ring0, placements: %{v0: [node()]}}
+
+      {:noreply, adopted} = BrokerServer.handle_cast({:adopt_topology, topology}, state)
+
+      assert adopted.bootstrap == nil
     end
   end
 
