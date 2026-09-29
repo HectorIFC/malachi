@@ -573,7 +573,12 @@ defmodule Malachi.Wire do
   end
 
   defp put_value(nil), do: <<0::8>>
-  defp put_value(value) when is_integer(value) and value >= 0, do: <<1::8, value::64>>
+  # At most 2^64 - 1: a larger integer would be cut to its low 64 bits without an error, and read back as a
+  # smaller bound than the one that applies. A policy cannot hold one (`Malachi.Cluster.Policy`), and the
+  # global limits are refused at boot (`Malachi.Config.retention_bound/2`), so reaching this is a bug.
+  defp put_value(value) when is_integer(value) and value >= 0 and value <= 0xFFFF_FFFF_FFFF_FFFF,
+    do: <<1::8, value::64>>
+
   defp put_value(value) when is_binary(value), do: <<2::8, byte_size(value)::32, value::binary>>
 
   defp take_fields(<<count::16, rest::binary>>), do: take_fields(rest, count, [])

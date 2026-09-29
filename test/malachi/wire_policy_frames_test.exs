@@ -100,6 +100,16 @@ defmodule Malachi.WirePolicyFramesTest do
       assert_raise FunctionClauseError, fn -> Wire.decode_list_policies_req(<<0>>) end
     end
 
+    test "an integer the 64 bits cannot hold is refused, never truncated to a smaller bound" do
+      # 2^64 would otherwise encode as 0: a zero budget read back for a bound that never expires anything.
+      assert_raise FunctionClauseError, fn ->
+        Wire.encode_define_policy_req("p", [{"retention.max_bytes", 0x1_0000_0000_0000_0000}])
+      end
+
+      assert Wire.encode_define_policy_req("p", [{"retention.max_bytes", 0xFFFF_FFFF_FFFF_FFFF}]) ==
+               <<1, 1::32, "p", 1::16, 1, 19::32, "retention.max_bytes", 1, 0xFFFF_FFFF_FFFF_FFFF::64>>
+    end
+
     test "an unknown resolution or origin code" do
       bad_resolution = <<1, 1::32, "t", 0, 7, 0, 0::16>>
       assert_raise ArgumentError, fn -> Wire.decode_topic_policy_resp(bad_resolution) end

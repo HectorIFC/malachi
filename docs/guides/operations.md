@@ -255,7 +255,8 @@ MALACHI_RETENTION_INTERVAL_MS=60000
 **Leave a limit unset to disable it.** With both unset, segments are kept forever unless a topic's own
 storage policy says otherwise: the sweep runs either way, and with no bound anywhere it does nothing. Do
 not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and it expires every sealed
-segment it can.
+segment it can. A bound must be a whole number from 0 through 2^64 - 1: a negative one, or one past
+that, stops the node at boot.
 
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
