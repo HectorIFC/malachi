@@ -9,6 +9,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.Loadtest.Conn
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
+  alias Malachi.Test.SubscribeResetStub
   alias Malachi.Wire
 
   # Runs a load test quietly and returns its report, capturing the printed summary.
@@ -598,6 +599,63 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
       assert r.ops > 0, "after reconnecting the worker should complete produces"
     end
+
+    # Issue #218: a stream worker whose subscribe send failed returned its connection and ended with
+    # nothing recorded, so a run that lost its streams this way reported no drop at all.
+    test "a stream worker whose subscribe send fails counts the drop and resubscribes" do
+      {r, stderr} = stream_on_reset_stub(:reconnect)
+
+      assert r.dropped == 1, "the failed subscribe send was not counted as a drop"
+      assert r.reconnects == 1, "the worker should reconnect and resubscribe, not end"
+      assert r.errors == 0, "a transport failure is a drop, not a server error"
+      assert r.error_reasons == %{}
+      assert r.ops == 0
+      assert stderr =~ "1 connection(s) dropped"
+      refute stderr =~ "per-op latency"
+    end
+
+    test "a stream worker that cannot reconnect after a failed subscribe send gives up without crashing" do
+      {r, _stderr} = stream_on_reset_stub(:give_up)
+
+      assert r.dropped == 1, "the failed subscribe send was not counted as a drop"
+      assert r.reconnects == 0
+      assert r.errors == 0
+    end
+
+    test "a stream connection lost after its subscribe went out counts the drop and resubscribes" do
+      # The recv that fails here is not the one at the deadline, whose timeout ends the stream uncounted.
+      for how <- [:close, :reset] do
+        {r, _stderr} = stream_on_reset_stub({:mid_stream, how}, 1)
+
+        assert r.dropped == 1, "#{how}: the lost stream connection was not counted as a drop"
+        assert r.reconnects == 1, "#{how}: the worker should reconnect and resubscribe, not end"
+        assert r.errors == 0, "#{how}: a transport failure is a drop, not a server error"
+      end
+    end
+  end
+
+  # A stream run against Malachi.Test.SubscribeResetStub, returning the report and what the run printed on
+  # stderr. The connections open one at a time, which is what the stub's ordering relies on.
+  defp stream_on_reset_stub(mode, connections \\ 2) do
+    SubscribeResetStub.with_stub(mode, fn port ->
+      stderr =
+        capture_io(:stderr, fn ->
+          report =
+            run(
+              port: port,
+              host: "127.0.0.1",
+              scenario: :stream,
+              connections: connections,
+              connect_concurrency: 1,
+              prepopulate: 0,
+              topic: "subscribe_reset"
+            )
+
+          Process.put(:stub_report, report)
+        end)
+
+      {Process.get(:stub_report), stderr}
+    end)
   end
 
   describe "error reasons" do

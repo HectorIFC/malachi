@@ -611,7 +611,19 @@ defmodule Malachi.Loadtest do
 
     case Conn.send_frame(conn, Wire.subscribe_key(), 2, payload) do
       :ok -> stream_recv(conn, ctx, s, m)
-      {:error, _} -> conn
+      # A send error is a broken socket, the same as a recv error in stream_recv/4: count the drop and
+      # resubscribe, instead of ending the worker with nothing recorded.
+      {:error, _} -> resubscribe(conn, ctx, s, m)
+    end
+  end
+
+  # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe. A server that
+  # authenticates and then drops every subscribe keeps this reconnecting until the deadline, one backoff
+  # apart and each counted in `dropped`: the retry cap in after_drop/1 only bounds failed connects.
+  defp resubscribe(dead_conn, ctx, s, m) do
+    case after_drop(m) do
+      {:ok, conn} -> stream_loop(conn, ctx, s, m)
+      :give_up -> dead_conn
     end
   end
 
@@ -633,10 +645,7 @@ defmodule Malachi.Loadtest do
 
         # The connection dropped: reconnect and re-subscribe within the window.
         {:error, _reason} ->
-          case after_drop(m) do
-            {:ok, conn} -> stream_loop(conn, ctx, s, m)
-            :give_up -> conn
-          end
+          resubscribe(conn, ctx, s, m)
       end
     end
   end
@@ -646,6 +655,10 @@ defmodule Malachi.Loadtest do
     n = length(records)
     if mono_ms() >= m.warmup_end and n > 0, do: record_push(m, n)
     ack = Wire.encode_stream_ack_req(ctx.topic, s.group, s.member, next_cursor, n)
+    # Unchecked on purpose. The socket has no send_timeout (Conn.socket_opts/0), so a send on a live socket
+    # blocks until the kernel takes the bytes and an error only comes back once the socket is already gone.
+    # The stream_recv/4 right below then fails on the same socket and takes the drop path, so a failed ack
+    # costs one wasted round trip and a live socket cannot lose credit this way.
     _ = Conn.send_frame(conn, Wire.stream_ack_key(), 3, ack)
     stream_recv(conn, ctx, s, m)
   end
@@ -1112,7 +1125,7 @@ defmodule Malachi.Loadtest do
   defp warn_if_empty(%{ops: 0} = r) do
     cause =
       if r.dropped > 0 do
-        "#{r.dropped} connection(s) dropped under load (the server likely timed out the produce call)"
+        "#{r.dropped} connection(s) dropped (the server closed them or timed out a request)"
       else
         "per-op latency likely exceeds warmup + duration"
       end
