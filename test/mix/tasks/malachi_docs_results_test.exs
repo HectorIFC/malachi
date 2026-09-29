@@ -79,7 +79,8 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       for {file, guide} <- [
             {"loadtest-node-results.md", "running-the-node-loadtest.md"},
             {"loadtest-elixir-results.md", "running-the-elixir-loadtest.md"},
-            {"chaos-results.md", "running-chaos-drills.md"}
+            {"chaos-results.md", "running-chaos-drills.md"},
+            {"chaos-upgrade-results.md", "running-chaos-drills.md"}
           ] do
         body = page(context, file)
         assert body =~ "No run has been recorded yet"
@@ -516,6 +517,64 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       refute body =~ "Post-chaos produce"
     end
 
+    test "the rolling upgrade drill has a page of its own, read from its own result", context do
+      publish(
+        context,
+        "chaos-upgrade.json",
+        chaos_result(%{
+          "certification" => "UPGRADE AND ROLLBACK CERTIFICATION",
+          "events" => ["p1: rolling every node from OLD to NEW (pin 3)"]
+        })
+      )
+
+      run(context)
+      body = page(context, "chaos-upgrade-results.md")
+
+      assert body =~ "# Rolling upgrade certification results"
+      assert body =~ "**UPGRADE AND ROLLBACK CERTIFICATION passed** at replication factor 3"
+      assert body =~ "- p1: rolling every node from OLD to NEW (pin 3)"
+      assert body =~ "scripts/docker-upgrade-chaos.sh"
+      # The node-fault page is not fed by it.
+      assert page(context, "chaos-results.md") =~ "No run has been recorded yet"
+    end
+
+    test "a drill's own details are rendered, so the page names the release the upgrade rolled from", context do
+      # The pre-upgrade checklist (operations.md) sends an operator here to see which pair was certified.
+      publish(
+        context,
+        "chaos-upgrade.json",
+        chaos_result(%{
+          "details" => %{
+            "old_ref" => "v0.16.4",
+            "old_version" => "0.16.4",
+            "old_patch" => "",
+            "negative_control" => nil,
+            "vnodes" => 1,
+            "acked_writes_by_phase" => %{"phase2" => 9447, "phase1" => 14_289}
+          }
+        })
+      )
+
+      run(context)
+      body = page(context, "chaos-upgrade-results.md")
+
+      assert body =~ "## Run details"
+      assert body =~ "| `old_ref` | `v0.16.4` |"
+      assert body =~ "| `old_version` | `0.16.4` |"
+      assert body =~ "| `vnodes` | 1 |"
+      assert body =~ "| `acked_writes_by_phase` | phase1: 14289, phase2: 9447 |"
+      # Recorded as empty, rendered as absent rather than as a blank the run did not measure.
+      refute body =~ "old_patch"
+      refute body =~ "negative_control"
+    end
+
+    test "a drill that records no details gets no details section", context do
+      publish(context, "chaos-node.json", chaos_result(%{"details" => %{}}))
+      run(context)
+
+      refute page(context, "chaos-results.md") =~ "## Run details"
+    end
+
     test "a drill that injected nothing says so instead of leaving an empty list", context do
       publish(context, "chaos-node.json", chaos_result(%{"events" => []}))
       run(context)
@@ -559,7 +618,12 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
   test "each written page is announced", context do
     run(context)
 
-    for file <- ["loadtest-node-results.md", "loadtest-elixir-results.md", "chaos-results.md"] do
+    for file <- [
+          "loadtest-node-results.md",
+          "loadtest-elixir-results.md",
+          "chaos-results.md",
+          "chaos-upgrade-results.md"
+        ] do
       assert_received {:mix_shell, :info, [message]} when is_binary(message)
       assert message =~ file
     end

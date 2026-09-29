@@ -242,6 +242,15 @@ crash-loop and never go healthy while the other two keep serving quorum writes, 
 env back must bring it home to 3/3. The same closing invariants apply: no acknowledged write lost,
 full reconvergence, clean produce+fetch after the chaos.
 
+Every drill's closing reconvergence check also compares the control plane across members: every Raft
+group must hold the same state on every node at equal applied indexes, since members that diverged
+still answer health checks.
+
+`scripts/docker-upgrade-chaos.sh` certifies the procedure in
+[Upgrades and the rollback floor](#upgrades-and-the-rollback-floor): a cluster rolled from the release
+before this code to this code under the machine version pin, back again, then forward, finalized, with a canary
+feature switched on and a rollback that must be refused with exit 78.
+
 ## Retention
 
 Segments are reclaimed by age or total size:
@@ -623,6 +632,13 @@ The checks that catch the common mistakes:
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
       before the first upgrade, and make your service manager stop restarting on exit status 78.
+- [ ] **The upgrade you are about to make was certified.** Releases are tagged on every merge and are not
+      held back for it, so check it yourself: the
+      [Rolling upgrade certification results](../generated/chaos-upgrade-results.md) page shows the last
+      nightly run, which rolls a cluster from the newest release whose code differs from main's to main's code and back under
+      load, following the procedure in [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor).
+      Its record names both releases and the commit it measured. For another pair, run the workflow by hand
+      with `old_ref` (see [Running the chaos drills](running-chaos-drills.md#rolling-upgrade-and-rollback)).
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
 - [ ] **Your service manager treats exit 78 differently from an ordinary failure.** Exit 78 means the

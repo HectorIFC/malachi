@@ -148,6 +148,7 @@ defmodule Malachi.MixProject do
       "docs/generated/loadtest-node-results.md": [title: "Node.js load test results"],
       "docs/generated/loadtest-elixir-results.md": [title: "Elixir load test results"],
       "docs/generated/chaos-results.md": [title: "Chaos certification results"],
+      "docs/generated/chaos-upgrade-results.md": [title: "Rolling upgrade certification results"],
       # External link (ExDoc :url extra -> URLNode): the benchmark dashboard is a standalone static page
       # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
       # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
@@ -203,7 +204,8 @@ defmodule Malachi.MixProject do
       ],
       "Chaos Engineering": [
         "docs/guides/running-chaos-drills.md",
-        "docs/generated/chaos-results.md"
+        "docs/generated/chaos-results.md",
+        "docs/generated/chaos-upgrade-results.md"
       ],
       Development: ["docs/HOOKS.md"]
     ]

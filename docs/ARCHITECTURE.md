@@ -304,6 +304,12 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   fail-fast bad config is pushed to one node and rolled back (the node must crash-loop without ever
   going healthy, the surviving two must keep serving quorum writes, and the rollback must restore
   3/3), on top of the acked-durability and reconvergence invariants.
+- **Rolling-upgrade certification** (the "deploy the build, roll back the build" operations): delivered as
+  `scripts/docker-upgrade-chaos.sh`. The cluster is rolled node by node from the release before this code to
+  this tree and back under traffic, then forward again with a canary feature switched on and a rollback that
+  must be refused. The canary (a capability, a metadata command at the next machine version, an unknown
+  replication message, a new data format) is a patch applied only to the drill's image, so the gates of
+  the bridge release are certified before any real feature depends on them.
 - **`Concuerror`** for systematic interleaving exploration: **attempted and blocked by the tool**,
   with the spike kept as the reproducible record (`scripts/concuerror-setup.sh`,
   `scripts/concuerror.sh`, `test/concuerror/replicate_race.ex`). What the spike established, in

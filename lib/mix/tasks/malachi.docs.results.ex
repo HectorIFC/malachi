@@ -56,6 +56,14 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       title: "Chaos certification results",
       generator: "`scripts/docker-chaos-test.sh`, the node-fault certification drill",
       how_to: {"../guides/running-chaos-drills.md", "Running the chaos drills"}
+    },
+    %{
+      kind: :chaos,
+      source: "chaos-upgrade.json",
+      output: "chaos-upgrade-results.md",
+      title: "Rolling upgrade certification results",
+      generator: "`scripts/docker-upgrade-chaos.sh`, the rolling upgrade and rollback drill",
+      how_to: {"../guides/running-chaos-drills.md", "Running the chaos drills"}
     }
   ]
 
@@ -382,10 +390,29 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       "## Invariants",
       table(chaos_invariant_rows(result)),
       failures_section(result),
+      details_section(result),
       "## Reproduce",
       table(meta_rows(result["meta"]))
     ])
   end
+
+  # What a drill records about its own run beyond the shared fields, such as which release the upgrade drill
+  # rolled from and back to, which is what an operator checks before an upgrade. Rendered as recorded, keys
+  # sorted since a decoded JSON object keeps no order; a drill that records none gets no section.
+  defp details_section(%{"details" => details}) when is_map(details) and map_size(details) > 0 do
+    rows = for {key, value} <- Enum.sort(details), do: {code(key), detail(value)}
+    "## Run details\n\n" <> table(rows)
+  end
+
+  defp details_section(_result), do: ""
+
+  defp detail(value) when is_map(value) do
+    value |> Enum.sort() |> Enum.map_join(", ", fn {key, inner} -> "#{key}: #{detail(inner)}" end)
+  end
+
+  defp detail(value) when value in [nil, ""], do: nil
+  defp detail(value) when is_binary(value), do: code(value)
+  defp detail(value), do: to_string(value)
 
   defp chaos_headline(%{"verdict" => "passed"} = result) do
     faults = length(result["events"] || [])
