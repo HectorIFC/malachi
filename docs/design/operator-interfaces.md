@@ -1214,7 +1214,11 @@ Three smaller mechanisms are adopted with it:
   belongs outside `assets/`. A precompressed `.br` or `.gz` variant produced at build time carries its own ETag and
   `Vary: Accept-Encoding`, and the server never compresses at runtime.
 - **The asset set is fixed at startup.** A file that was not there when the node booted answers
-  404 until the next restart, which is what a release does anyway.
+  404 until the next restart, which is what a release does anyway, and so does one changed, removed
+  or swapped for a symbolic link since then (the file or any directory between it and the root): the
+  server checks each file's identity and its path before sending it. The check cannot see a rewrite
+  that keeps the size and the modification time, or a swap racing the send, so a bundle is replaced
+  by a restart, never by writing into it while the node runs.
 - **Capability negotiation instead of version sniffing.** Redpanda exposes an endpoint that probes
   the upstream at runtime and returns which operations are supported, and the console maps that into
   named features. Malachi already has the server half of this landing as #193, node capability

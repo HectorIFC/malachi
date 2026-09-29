@@ -9,12 +9,14 @@ defmodule Malachi.Console.RouterTest do
   alias Malachi.Console.Router
   alias Malachi.Console.Static
   alias Malachi.Test.ConsoleFixture
+  alias Malachi.Test.TmpDir
 
   @script "/assets/app-3f2aB9x1.js"
 
   setup do
-    manifest = Assets.build(ConsoleFixture.bundle!())
-    %{manifest: manifest, opts: Router.init(%{manifest: manifest, max_header_bytes: 32_768})}
+    dir = ConsoleFixture.bundle!()
+    manifest = Assets.build(dir)
+    %{dir: dir, manifest: manifest, opts: Router.init(%{manifest: manifest, max_header_bytes: 32_768})}
   end
 
   defp call(opts, path, headers \\ []), do: request(opts, "GET", path, headers)
@@ -167,6 +169,94 @@ defmodule Malachi.Console.RouterTest do
         assert conn.status == 404, path
         assert get_resp_header(conn, "cache-control") == ["no-store"], path
       end
+    end
+  end
+
+  describe "files changed after startup" do
+    test "a file rewritten since startup is refused, not served under the old ETag", ctx do
+      File.write!(Path.join(ctx.dir, "favicon.ico"), "A DIFFERENT ICON")
+
+      conn = call(ctx.opts, "/favicon.ico")
+      assert conn.status == 404
+      refute conn.resp_body =~ "DIFFERENT"
+    end
+
+    test "a file replaced by a link to one outside the root is refused", ctx do
+      outside = Path.join(TmpDir.path("console_planted"), "secret")
+      File.mkdir_p!(Path.dirname(outside))
+      File.write!(outside, "PLANTED")
+      on_exit(fn -> File.rm_rf!(Path.dirname(outside)) end)
+
+      target = Path.join(ctx.dir, "favicon.ico")
+      File.rm!(target)
+      File.ln_s!(outside, target)
+
+      conn = call(ctx.opts, "/favicon.ico")
+      assert conn.status == 404
+      refute conn.resp_body =~ "PLANTED"
+    end
+
+    test "the assets directory swapped for a link to a copy elsewhere is refused", ctx do
+      elsewhere = TmpDir.path("console_swapped")
+      File.cp_r!(Path.join(ctx.dir, "assets"), elsewhere)
+      on_exit(fn -> File.rm_rf!(elsewhere) end)
+
+      File.rm_rf!(Path.join(ctx.dir, "assets"))
+      File.ln_s!(elsewhere, Path.join(ctx.dir, "assets"))
+
+      assert call(ctx.opts, @script).status == 404
+    end
+
+    test "a file moved out of the root and linked back is refused, though it keeps its inode", ctx do
+      # rename(2) keeps the file's inode and modification time, so a stat through the link would still
+      # match; the lstat the check uses sees the link, with an identity of its own.
+      outside = TmpDir.path("console_moved")
+      File.mkdir_p!(outside)
+      on_exit(fn -> File.rm_rf!(outside) end)
+
+      File.rename!(Path.join(ctx.dir, "favicon.ico"), Path.join(outside, "favicon.ico"))
+      File.ln_s!(Path.join(outside, "favicon.ico"), Path.join(ctx.dir, "favicon.ico"))
+
+      assert call(ctx.opts, "/favicon.ico").status == 404
+    end
+
+    test "the assets directory moved out and linked back is refused", ctx do
+      # The file's own lstat reaches the original through the linked directory, identity intact; only
+      # the check on the directory levels above it catches this.
+      outside = TmpDir.path("console_moved_dir")
+      on_exit(fn -> File.rm_rf!(outside) end)
+
+      File.rename!(Path.join(ctx.dir, "assets"), outside)
+      File.ln_s!(outside, Path.join(ctx.dir, "assets"))
+
+      assert call(ctx.opts, @script).status == 404
+    end
+
+    test "a static root reached through a link is served as usual", ctx do
+      link = TmpDir.path("console_root_link")
+      File.ln_s!(ctx.dir, link)
+      on_exit(fn -> File.rm(link) end)
+      opts = Router.init(%{manifest: Assets.build(link), max_header_bytes: 32_768})
+
+      assert call(opts, @script).status == 200
+      assert call(opts, "/").status == 200
+    end
+
+    test "a file removed since startup is a 404, not a crash", ctx do
+      File.rm!(Path.join(ctx.dir, "favicon.ico"))
+      assert call(ctx.opts, "/favicon.ico").status == 404
+    end
+
+    test "a changed file never answers 304 on its old ETag", ctx do
+      tag = etag(ctx.manifest, "favicon.ico")
+      File.write!(Path.join(ctx.dir, "favicon.ico"), "A DIFFERENT ICON")
+
+      assert call(ctx.opts, "/favicon.ico", [{"if-none-match", tag}]).status == 404
+    end
+
+    test "the index fallback is checked the same way", ctx do
+      File.write!(Path.join(ctx.dir, "index.html"), "<!doctype html><title>other</title>")
+      assert call(ctx.opts, "/topics").status == 404
     end
   end
 

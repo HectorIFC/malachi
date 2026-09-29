@@ -34,7 +34,13 @@ answers `503` as described below.
   `assets/` whose last name segment looks like a build hash (eight or more letters, digits or
   underscores with a digit, as Vite writes them) are cached for a year as immutable; `index.html` and
   everything else are revalidated on every use, which costs a `304`. A stable file that must change in
-  place belongs outside `assets/`, or under a name that cannot pass for a hash. A new bundle is picked up at restart.
+  place belongs outside `assets/`, or under a name that cannot pass for a hash. A new bundle is picked
+  up at restart. Until then a file changed or removed while the node runs, or swapped for a symbolic
+  link (the file or a directory above it), answers `404` rather than new bytes under the old ETag. The
+  check looks for links on every level below the root and compares each file's device, inode, size and
+  modification time before sending it, so it does not see a rewrite that keeps the size and the
+  modification time, nor a swap made between the check and the send. Replace a bundle by restarting the
+  node, not by writing into it.
 - **Limits.** The header limits and read deadline are the dashboard's (`MALACHI_DASHBOARD_MAX_HEADER_*`),
   and an idle keep alive connection is closed after that deadline.
 - **Sessions.** Nothing the console serves today needs a login. A login on the dashboard sets the

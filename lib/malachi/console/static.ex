@@ -24,6 +24,13 @@ defmodule Malachi.Console.Static do
   miss is 404: a missing script must not come back as HTML with a 200, which a browser would try to
   execute and report as an opaque syntax error.
 
+  Before anything is sent, the file is checked against what was recorded at startup
+  (`Malachi.Console.Assets.unchanged?/1`): a file or a directory above it replaced by a symbolic link,
+  a file rewritten with another size or a newer modification time, and a file removed all answer 404
+  rather than bytes the ETag does not describe or a file outside the static root. It is a check before
+  the send, so a rewrite that keeps the size and the modification time, or a swap made between the
+  check and the send, is not caught.
+
   Range requests are not supported and no `Accept-Ranges` is sent, which RFC 9110 permits.
   """
 
@@ -81,6 +88,14 @@ defmodule Malachi.Console.Static do
   defp respond(conn, entry) do
     {coding, variant} = choose(entry.variants, get_req_header(conn, "accept-encoding"))
 
+    # The manifest was built at startup; a file changed or swapped for a link since then is not the
+    # file that ETag describes, and may not even be inside the static root any more.
+    if Assets.unchanged?(variant),
+      do: send_variant(conn, entry, coding, variant),
+      else: plain(conn, :not_found)
+  end
+
+  defp send_variant(conn, entry, coding, variant) do
     conn =
       conn
       |> put_resp_header("etag", variant.etag)

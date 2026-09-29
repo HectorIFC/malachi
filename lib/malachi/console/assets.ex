@@ -22,6 +22,11 @@ defmodule Malachi.Console.Assets do
   left out of its file. With no readable `index.html` the bundle is `:absent` and the endpoint answers
   503. Nothing in a bundle can stop the endpoint, let alone the node, from starting.
 
+  Each representation also records the identity of its file and the directories between it and the
+  static root (`unchanged?/1`), so a file changed, removed or swapped for a symbolic link after
+  startup, or one below a directory swapped for a link, is refused at request time instead of served.
+  `unchanged?/1` says what that check cannot see.
+
   The manifest is handed to the plug as its options (`plug: {Malachi.Console.Router, opts}`), so no
   global state is involved. The price is memory: plug options are copied into every connection
   process, so each open connection holds its own copy of the manifest (large binaries excepted, which
@@ -34,7 +39,13 @@ defmodule Malachi.Console.Assets do
   alias Malachi.I18n
 
   @typedoc "One servable representation of a file: where its bytes are, its ETag and its size."
-  @type variant :: %{path: Path.t(), etag: String.t(), size: non_neg_integer()}
+  @type variant :: %{
+          path: Path.t(),
+          etag: String.t(),
+          size: non_neg_integer(),
+          identity: {non_neg_integer(), non_neg_integer(), non_neg_integer(), integer()},
+          ancestors: [Path.t()]
+        }
 
   @typedoc """
   One file: its content type, how browsers may cache it, and its representations, keyed by content
@@ -86,6 +97,44 @@ defmodule Malachi.Console.Assets do
         Logger.warning(I18n.t(:console_bundle_absent, dir: dir))
         :absent
     end
+  end
+
+  @doc """
+  Whether the file behind `variant` still looks like the one hashed at startup. Nothing below the
+  static root may be a symbolic link, the file or any directory between it and the root, checked
+  with `lstat` so no link is followed; and the file must have the same device, inode, size and
+  modification time. A file or directory swapped for a link (even a link to the very file that was
+  moved out of the root, which keeps its inode), a file rewritten with a different size or a newer
+  modification time, and a file removed all answer false, and the caller refuses to serve it.
+
+  This is a check made before the send, not a guarantee about it. It cannot see a rewrite in place
+  that keeps the size and keeps or restores the modification time (within the same second, or with
+  `touch -r`), nor a swap that happens between this check and the moment the file is opened to be
+  sent.
+  """
+  @spec unchanged?(variant()) :: boolean()
+  def unchanged?(%{path: path, identity: identity, ancestors: ancestors}) do
+    Enum.all?(ancestors, &directory?/1) and
+      case File.lstat(path, time: :posix) do
+        {:ok, %File.Stat{type: :regular} = stat} -> identity(stat) == identity
+        _link_or_missing -> false
+      end
+  end
+
+  defp identity(%File.Stat{major_device: device, inode: inode, size: size, mtime: mtime}),
+    do: {device, inode, size, mtime}
+
+  # Every directory between the static root and the file, root excluded: assets/app.js under /r has
+  # [/r/assets]. The root itself may legitimately be reached through a link (a release directory).
+  defp ancestors(dir, relative) do
+    relative
+    |> Path.split()
+    |> Enum.drop(-1)
+    |> Enum.scan(dir, &Path.join(&2, &1))
+  end
+
+  defp directory?(path) do
+    match?({:ok, %File.Stat{type: :directory}}, File.lstat(path))
   end
 
   @doc "The coding names a variant can carry, most preferred first."
@@ -151,11 +200,11 @@ defmodule Malachi.Console.Assets do
   # A file whose own bytes cannot be read is left out of the manifest; a precompressed variant that
   # cannot be read is left out of its file, which is then served uncompressed.
   defp entry(path, dir, present) do
-    with {:ok, identity} <- variant(Path.join(dir, path)) do
+    with {:ok, identity} <- variant(dir, path) do
       variants =
         for {coding, ext} <- @codings,
             MapSet.member?(present, path <> ext),
-            {:ok, variant} <- [variant(Path.join(dir, path <> ext))],
+            {:ok, variant} <- [variant(dir, path <> ext)],
             into: %{"identity" => identity} do
           {coding, variant}
         end
@@ -172,10 +221,19 @@ defmodule Malachi.Console.Assets do
   # The file listing and the reads are separate moments, so a file can be unreadable (its mode, its
   # owner) or gone (a bundle being replaced) by the time it is hashed. That costs the file, logged,
   # never the endpoint and never the node.
-  defp variant(absolute) do
-    with {:ok, %File.Stat{size: size}} <- File.stat(absolute),
+  defp variant(dir, relative) do
+    absolute = Path.join(dir, relative)
+
+    with {:ok, %File.Stat{size: size} = stat} <- File.lstat(absolute, time: :posix),
          {:ok, digest} <- sha256(absolute) do
-      {:ok, %{path: absolute, etag: ~s("#{Base.url_encode64(digest, padding: false)}"), size: size}}
+      {:ok,
+       %{
+         path: absolute,
+         etag: ~s("#{Base.url_encode64(digest, padding: false)}"),
+         size: size,
+         identity: identity(stat),
+         ancestors: ancestors(dir, relative)
+       }}
     else
       {:error, reason} ->
         Logger.warning(I18n.t(:console_asset_unreadable, path: absolute, reason: inspect(reason)))

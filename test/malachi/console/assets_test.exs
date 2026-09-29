@@ -170,6 +170,14 @@ defmodule Malachi.Console.AssetsTest do
     end
   end
 
+  test "unchanged?/1 holds for a file left alone and not for one rewritten", %{manifest: manifest} do
+    variant = manifest.files["favicon.ico"].variants["identity"]
+    assert Assets.unchanged?(variant)
+
+    File.write!(variant.path, "A DIFFERENT ICON")
+    refute Assets.unchanged?(variant)
+  end
+
   test "codings/0 lists brotli before gzip" do
     assert Assets.codings() == ["br", "gzip"]
   end
