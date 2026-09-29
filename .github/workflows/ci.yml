@@ -115,6 +115,16 @@ jobs:
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
+      # A fresh checkout has none of the gitignored material a developer's priv holds (dist_cert, cert,
+      # plts), so without these decoys a Dockerfile that went back to copying priv as a whole would still
+      # build an image whose priv holds only static, and the static assets check below would pass. They are
+      # placeholders, not keys: the check fails if either reaches the image.
+      - name: 🪤 Plant decoy development material under priv
+        run: |
+          mkdir -p priv/dist_cert priv/cert
+          echo "decoy, must never reach the image" > priv/dist_cert/decoy.key
+          echo "decoy, must never reach the image" > priv/cert/decoy.key
+
       - name: 🔨 Build Docker image
         uses: docker/build-push-action@v5
         with:
@@ -191,6 +201,15 @@ jobs:
             fi
             sleep 1
           done
+
+          # The image must ship priv/static and nothing else from priv (#226): without it every asset
+          # answers 404, and a copy of priv as a whole would carry the decoys planted before the build.
+          echo "🖼️ Checking static assets..."
+          if ! scripts/docker-static-assets-check.sh malachi-test http://localhost:4041; then
+            echo "📋 Container logs:"
+            docker logs malachi-test
+            exit 1
+          fi
 
           # Check if the application process is running
           echo "🔍 Checking application process..."
