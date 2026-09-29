@@ -136,6 +136,18 @@ defmodule Malachi.LoadtestTest do
       assert r.errors == 0
       assert r.records > 0, "stream should receive pushed records"
     end
+
+    test "a healthy stream run reports no drop, whether it drains a backlog or stays idle" do
+      # The last recv of every stream waits for exactly the time left in the window, so its timeout is the
+      # deadline. Counting it as a lost connection made every stream run report one drop per connection.
+      for {label, prepopulate} <- [backlog: 200, idle: 0] do
+        r = run(scenario: :stream, connections: 2, prepopulate: prepopulate, window: 50, max: 50, topic: topic("calm"))
+
+        assert r.dropped == 0, "#{label}: the deadline was counted as a dropped connection"
+        assert r.reconnects == 0, "#{label}"
+        assert r.errors == 0, "#{label}"
+      end
+    end
   end
 
   describe "control-plane scenarios" do

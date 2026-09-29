@@ -625,6 +625,12 @@ defmodule Malachi.Loadtest do
         {:ok, body, conn} ->
           handle_push(conn, ctx, s, m, Wire.decode_response(body))
 
+        # The recv waited for exactly the time left in the window, so a timeout is the deadline and not a
+        # lost connection: the stream ends here with nothing counted. Counting it made every stream run that
+        # went quiet before the end report one drop per connection.
+        {:error, :timeout} ->
+          conn
+
         # The connection dropped: reconnect and re-subscribe within the window.
         {:error, _reason} ->
           case after_drop(m) do
