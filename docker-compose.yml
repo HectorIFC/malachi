@@ -14,14 +14,16 @@ services:
     #
     # Every host port in this file comes from the environment, with today's value as the default, so two
     # stacks (two worktrees, each with its own COMPOSE_PROJECT_NAME) can run side by side. The variable is
-    # the port on the HOST only: inside the container the broker still listens on 4040 and 4041. There
+    # the port on the HOST only: inside the container the broker still listens on 4040, 4041 and 4042. There
     # are no fixed container names either; compose names containers after the project.
     ports:
       - "127.0.0.1:${MALACHI_TCP_PORT:-4040}:4040"
       - "127.0.0.1:${MALACHI_DASHBOARD_PORT:-4041}:4041"
+      - "127.0.0.1:${MALACHI_CONSOLE_PORT:-4042}:4042"
     environment:
       - MALACHI_TCP_PORT=4040
       - MALACHI_DASHBOARD_PORT=4041
+      - MALACHI_CONSOLE_PORT=4042
       - MALACHI_LOCALE=en_US
       # These defaults used to be admin123 / producer123 / consumer123 / app123, every one of which is
       # on the list Malachi.Auth.ConfigValidator refuses to boot with (the image runs the prod release,
