@@ -25,8 +25,12 @@ defmodule Malachi.Cluster.HealCoordinator do
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
   (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
   `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died or that have a copy that
-  failed in storage, so writing rolls to a fresh segment), and applies all resulting commands. `heal_now/1` runs
-  one pass synchronously and returns the combined result, for tests and manual triggers.
+  failed in storage, so writing rolls to a fresh segment), and hands the resulting commands to the control
+  plane, seals first, stopping at the first one the broker does not answer. The rest wait for the next pass,
+  which plans them again, except a failover seal whose reason is gone by then (see `apply_commands/2`'s
+  comment, and #269). `heal_now/1` runs one pass
+  synchronously and returns the combined result, for tests and manual triggers; its `applied` is what the pass
+  planned, as in `Malachi.Cluster.SelfHealing`, not what reached the control plane.
 
   Failover needs to know what each surviving replica holds, which no pure function can answer, so this
   pass does the probing, in two steps whose order carries the safety. `Failover.candidates/3` names the
@@ -172,7 +176,10 @@ defmodule Malachi.Cluster.HealCoordinator do
   end
 
   @impl true
-  def handle_call(:heal_now, _from, state), do: {:reply, run(state), state}
+  def handle_call(:heal_now, _from, state) do
+    {result, state} = run(state)
+    {:reply, result, state}
+  end
 
   def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
 
@@ -187,16 +194,29 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   # The gate belongs to the tick alone: `heal_now/1` is a manual trigger and ignores it.
   defp heal_if_leader(state) do
-    if state.leader?.(), do: run(state)
-    state
+    if state.leader?.(), do: state |> run() |> elem(1), else: state
   end
 
   # --- internals ---
 
+  # A pass that could not read the metadata is a pass that did not happen: reported once per cause
+  # (`PeriodicWorker.skip/3`), not crashed, as the scrubber does (see `PeriodicWorker.ask/1`). A broker busy
+  # for longer than the call's timeout while other nodes restart is the ordinary case, and a crash would say
+  # nothing an operator could act on. Only the node-wide coordinator's source can exit (a call to the
+  # broker): a vnode's answers an empty metadata when its group cannot be read
+  # (`Malachi.Application.vnode_metadata_source/1`), and that pass finds nothing to do.
   defp run(state) do
-    live = state.live_brokers.()
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} ->
+        run(state, metadata)
 
+      {:error, reason} ->
+        {%{applied: [], failed: [], repaired: []}, PeriodicWorker.skip(state, :heal_metadata_unavailable, reason)}
+    end
+  end
+
+  defp run(state, metadata) do
+    live = state.live_brokers.()
     now_ms = System.system_time(:millisecond)
 
     # Asked first, because both halves below act on it: a failed copy of an active segment is a failover
@@ -208,7 +228,7 @@ defmodule Malachi.Cluster.HealCoordinator do
     orphans = OrphanedFence.plan(metadata, probe_fences(state, metadata, live), now_ms)
 
     applied = healed.applied ++ seals ++ orphans
-    Enum.each(applied, state.apply_command)
+    state = apply_commands(state, seals ++ orphans ++ healed.applied)
 
     discard_replaced_copies(state, replaced_copies(healed.applied, failed))
     report_orphans(orphans, state)
@@ -220,7 +240,37 @@ defmodule Malachi.Cluster.HealCoordinator do
       Logger.warning(I18n.t(:heal_repair_failed, count: length(healed.failed), failures: inspect(healed.failed)))
     end
 
-    %{applied: applied, failed: healed.failed, repaired: healed.repaired}
+    {%{applied: applied, failed: healed.failed, repaired: healed.repaired}, state}
+  end
+
+  # Handed to the broker one at a time, and stopped at the first that does not answer: a broker busy past the
+  # call's timeout is the ordinary case `run/1` describes, and every command after it would wait on the same
+  # broker. A command that timed out may still have landed, which is why what follows re-reads the control
+  # plane rather than trusting this list.
+  #
+  # Seals are handed over first (`run/2`), because this pass has already fenced their replicas. A heal command
+  # or an orphan seal that did not land is planned again by the next pass, but a failover seal is planned only
+  # while its reason lasts: its primary dead, or a copy latched as failed in storage. One that did not land,
+  # whose reason is gone by the next pass (the primary back, or the primary's failed copy unlatched by a
+  # restart of its replication server), leaves the segment active with fenced followers and an unfenced
+  # primary, which neither `Malachi.Cluster.Failover` nor `Malachi.Cluster.OrphanedFence` (it asks only the
+  # primary) plans again. Going first keeps a slow heal
+  # command from being what holds one back, and nothing more: the first command that does not answer stops
+  # every command after it, so a failover seal can still be left behind by its own call, by an earlier seal,
+  # or by the head move `Malachi.Cluster.Failover.plan/5` pairs with each seal of a segment before it (#269).
+  defp apply_commands(state, commands) do
+    unanswered =
+      Enum.find_value(commands, fn command ->
+        case PeriodicWorker.ask(fn -> state.apply_command.(command) end) do
+          {:ok, _reply} -> nil
+          {:error, reason} -> {:error, reason}
+        end
+      end)
+
+    case unanswered do
+      nil -> PeriodicWorker.resume(state)
+      {:error, reason} -> PeriodicWorker.skip(state, :heal_commands_unapplied, reason)
+    end
   end
 
   # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).
@@ -249,8 +299,18 @@ defmodule Malachi.Cluster.HealCoordinator do
   # round trip only on the passes that found something, which is the rare case.
   defp report_orphans([], _state), do: :ok
 
+  # A re-read that exits (only the node-wide coordinator's source can, see `run/1`) reports nothing: a seal
+  # that did not land is found again by the next pass, and one that did is left uncounted, which undercounts
+  # `fence_reconciled` rather than inverting it. A vnode's source answers an empty metadata instead, so there
+  # every orphan of that pass is reported as unrecorded, landed or not.
   defp report_orphans(orphans, state) do
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> report_orphans_landed(orphans, metadata)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp report_orphans_landed(orphans, metadata) do
     {landed, pending} = Enum.split_with(orphans, &sealed_now?(metadata, &1))
 
     if landed != [] do
@@ -339,9 +399,18 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp discard_replaced_copies(_state, []), do: :ok
 
   # Re-read like `report_orphans/2`, and for a sharper reason: a copy deleted while the control plane still
-  # lists it answers reads with nothing, where the latched copy answered with an error.
+  # lists it answers reads with nothing, where the latched copy answered with an error. A re-read that exits
+  # discards nothing, and neither does a vnode's empty answer (`left_the_set?/3` finds no segment). Such a
+  # copy is not found again: once its heal command landed the replica is out of the segment's set, and no
+  # later pass probes it, so it stays latched on its broker until retention deletes the segment.
   defp discard_replaced_copies(state, replaced) do
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> discard_replaced_copies(state, replaced, metadata)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp discard_replaced_copies(state, replaced, metadata) do
     discarded = Enum.filter(replaced, fn {segment_id, replica} -> left_the_set?(metadata, segment_id, replica) end)
 
     Enum.each(discarded, fn {segment_id, replica} -> state.discard_copy.(replica, segment_id) end)

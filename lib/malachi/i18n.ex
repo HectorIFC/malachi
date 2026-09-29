@@ -581,6 +581,20 @@ defmodule Malachi.I18n do
       "en_US" =>
         "the vnode placement could not be read (%{reason}); keeping the coordinators this node already runs until it can be read again"
     },
+    heal_metadata_unavailable: %{
+      "pt_BR" => "passada de heal pulada: não foi possível ler a metadata (%{reason})",
+      "en_US" => "heal pass skipped: the metadata could not be read (%{reason})"
+    },
+    heal_commands_unapplied: %{
+      "pt_BR" =>
+        "passada de heal não conseguiu entregar seus comandos ao broker (%{reason}); os não entregues esperam a próxima passada, e um selo de failover entre eles pode não ser planejado de novo (#269)",
+      "en_US" =>
+        "heal pass could not hand its commands to the broker (%{reason}); the ones not handed over wait for the next pass, and a failover seal among them may not be planned again (#269)"
+    },
+    retention_metadata_unavailable: %{
+      "pt_BR" => "varredura de retenção pulada: não foi possível ler a metadata (%{reason})",
+      "en_US" => "retention sweep skipped: the metadata could not be read (%{reason})"
+    },
     vnode_member_resumed: %{
       "pt_BR" => "membro deste nó no vnode %{vnode} retomado a partir do log persistido",
       "en_US" => "resumed this node's member of vnode %{vnode} from its persisted log"

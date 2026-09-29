@@ -35,12 +35,9 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   use GenServer
 
-  require Logger
-
   alias Malachi.Cluster.PeriodicWorker
   alias Malachi.Cluster.PolicyStore
   alias Malachi.Cluster.Retention
-  alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Telemetry
 
@@ -67,10 +64,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
         policies: Keyword.get(opts, :policies, &PolicyStore.fetch_all/0),
         unresolved_policy_max_age_ms: Keyword.get(opts, :unresolved_policy_max_age_ms),
         clock: Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end),
-        leader?: Keyword.get(opts, :leader?, fn -> true end),
-        # Whether the last pass already said the policies could not be read, so a store that stays
-        # down says it once rather than every interval.
-        skipping?: false
+        leader?: Keyword.get(opts, :leader?, fn -> true end)
       })
 
     PeriodicWorker.schedule(state)
@@ -102,25 +96,30 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   defp run(state) do
     case state.policies.() do
       {:ok, policies} -> sweep(state, policies)
-      {:error, reason} -> skip(state, reason)
+      {:error, reason} -> skip(state, :retention_policies_unreadable, reason)
     end
   end
 
   # A sweep that could not read the policies is a sweep that does not happen. It emits no sweep event
   # on purpose: `malachi_retention_sweep_duration_seconds`'s count is what an operator alerts on to
   # know a sweep is running at all, and a skipped sweep is exactly the thing that alert exists to
-  # surface. Logged on the transition, so a store that stays down says it once rather than every minute.
-  defp skip(state, reason) do
-    unless state.skipping? do
-      Logger.warning(I18n.t(:retention_policies_unreadable, reason: inspect(reason)))
-    end
-
-    {[], %{state | skipping?: true}}
-  end
+  # surface. Logged once per cause (`PeriodicWorker.skip/3`), so a store that stays down says it once
+  # rather than every minute.
+  #
+  # A metadata read the broker cannot answer in time skips the sweep the same way, as the scrubber does (see
+  # `PeriodicWorker.ask/1`): a broker busy while other nodes restart is the ordinary case, and the exit would
+  # take this coordinator down with it.
+  defp skip(state, message, reason), do: {[], PeriodicWorker.skip(state, message, reason)}
 
   defp sweep(state, policies) do
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> sweep(state, policies, metadata)
+      {:error, reason} -> skip(state, :retention_metadata_unavailable, reason)
+    end
+  end
+
+  defp sweep(state, policies, metadata) do
     started = System.monotonic_time()
-    metadata = state.metadata_source.()
     now_ms = state.clock.()
     expired_ids = Retention.expired(metadata, now_ms, state.policy, policies, state.unresolved_policy_max_age_ms)
 
@@ -130,7 +129,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
     duration_us = System.convert_time_unit(System.monotonic_time() - started, :native, :microsecond)
     Telemetry.retention_sweep(duration_us, Enum.count(labels, &(&1 == :ok)), Enum.count(labels, &failed?/1))
-    {expired_ids, %{state | skipping?: false}}
+    {expired_ids, PeriodicWorker.resume(state)}
   end
 
   defp expire(state, segment) do
