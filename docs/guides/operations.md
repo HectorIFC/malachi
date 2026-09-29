@@ -31,8 +31,10 @@ answers `503` as described below.
 - **Plain HTTP only, for now.** TLS for the console is #70. Put it behind a TLS-terminating proxy, like
   the dashboard, when it is reached from anywhere but the host.
 - **Caching.** Every file is hashed at startup and served with that hash as its ETag. Files under
-  `assets/` carry a content hash in their name and are cached for a year as immutable; `index.html` and
-  everything else are revalidated on every use, which costs a `304`. A new bundle is picked up at restart.
+  `assets/` whose last name segment looks like a build hash (eight or more letters, digits or
+  underscores with a digit, as Vite writes them) are cached for a year as immutable; `index.html` and
+  everything else are revalidated on every use, which costs a `304`. A stable file that must change in
+  place belongs outside `assets/`, or under a name that cannot pass for a hash. A new bundle is picked up at restart.
 - **Limits.** The header limits and read deadline are the dashboard's (`MALACHI_DASHBOARD_MAX_HEADER_*`),
   and an idle keep alive connection is closed after that deadline.
 - **Sessions.** Nothing the console serves today needs a login. A login on the dashboard sets the

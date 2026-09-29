@@ -1196,10 +1196,12 @@ Three smaller mechanisms are adopted with it:
 - **Every asset is hashed once at startup and the SHA-256 of its content is its ETag**, so a 304
   costs nothing and every node of a cluster answers with the same validator. Redpanda serves
   everything with `public, max-age=900, must-revalidate`; Malachi departs from that because a Vite
-  build already puts a content hash in every filename under `assets/`. Those files are served with
-  `Cache-Control: public, max-age=31536000, immutable`, and everything else, `index.html` first,
+  build already puts a content hash in every filename under `assets/`. A file there whose last name
+  segment looks like such a hash (eight or more letters, digits or underscores with a digit) is served
+  with `Cache-Control: public, max-age=31536000, immutable`, and everything else, `index.html` first,
   with `no-cache`, so a new release is picked up on the next navigation and never fifteen minutes
-  later. A precompressed `.br` or `.gz` variant produced at build time carries its own ETag and
+  later. A name that only passes for a hash is treated as one, so a stable file that changes in place
+  belongs outside `assets/`. A precompressed `.br` or `.gz` variant produced at build time carries its own ETag and
   `Vary: Accept-Encoding`, and the server never compresses at runtime.
 - **The asset set is fixed at startup.** A file that was not there when the node booted answers
   404 until the next restart, which is what a release does anyway.

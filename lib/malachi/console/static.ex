@@ -13,8 +13,8 @@ defmodule Malachi.Console.Static do
       that precompressed variant and the client gives it a q above zero (explicitly, or through `*`),
       the highest q winning and brotli breaking a tie; otherwise the uncompressed bytes. Compression
       never happens at request time;
-    * `ETag` (the SHA-256 of that representation), `Cache-Control` (immutable for `assets/`, `no-cache`
-      otherwise) and `Vary: Accept-Encoding` when the file has a variant;
+    * `ETag` (the SHA-256 of that representation), `Cache-Control` (immutable for a name under `assets/`
+      whose last segment looks like a build hash, `no-cache` otherwise) and `Vary: Accept-Encoding` when the file has a variant;
     * 304 with those same headers and no body when `If-None-Match` matches, compared weakly as RFC 9110
       section 13.1.2 requires: a list, `*`, and `W/` validators all count.
 

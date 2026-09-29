@@ -43,7 +43,7 @@ defmodule Malachi.Console.EndpointTest do
     test "two responses on one socket, each exactly as long as it declares", %{dir: dir} do
       {:ok, socket} = dir |> start!() |> HttpClient.connect()
 
-      assert {:ok, first} = HttpClient.request(socket, "GET", "/assets/app-3f2a.js")
+      assert {:ok, first} = HttpClient.request(socket, "GET", "/assets/app-3f2aB9x1.js")
       assert {:ok, second} = HttpClient.request(socket, "GET", "/")
 
       assert first.status == 200 and second.status == 200
@@ -60,7 +60,7 @@ defmodule Malachi.Console.EndpointTest do
       :ok =
         HttpClient.send_raw(socket, [
           HttpClient.encode("GET", "/favicon.ico"),
-          HttpClient.encode("GET", "/assets/app-3f2a.js")
+          HttpClient.encode("GET", "/assets/app-3f2aB9x1.js")
         ])
 
       assert {:ok, first, rest} = HttpClient.recv(socket)
@@ -72,7 +72,7 @@ defmodule Malachi.Console.EndpointTest do
     test "a HEAD response declares the length and sends no body, and the socket stays usable", %{dir: dir} do
       {:ok, socket} = dir |> start!() |> HttpClient.connect()
 
-      assert {:ok, head} = HttpClient.request(socket, "HEAD", "/assets/app-3f2a.js")
+      assert {:ok, head} = HttpClient.request(socket, "HEAD", "/assets/app-3f2aB9x1.js")
       assert head.body == ""
       assert declared_length(head) == byte_size(ConsoleFixture.script_body())
 
@@ -110,10 +110,10 @@ defmodule Malachi.Console.EndpointTest do
     test "a response slower than the deadline is not cut off: the deadline covers headers only", %{dir: dir} do
       Application.put_env(:malachi, :dashboard_recv_timeout_ms, 200)
       big = :binary.copy("x", 8 * 1024 * 1024)
-      File.write!(Path.join(dir, "assets/big-1a2b.js"), big)
+      File.write!(Path.join(dir, "assets/big-1a2bC4d5.js"), big)
       {:ok, socket} = dir |> start!() |> HttpClient.connect()
 
-      :ok = HttpClient.send_raw(socket, HttpClient.encode("GET", "/assets/big-1a2b.js"))
+      :ok = HttpClient.send_raw(socket, HttpClient.encode("GET", "/assets/big-1a2bC4d5.js"))
       # A reader slower than the deadline: the server blocks on a full socket buffer meanwhile.
       Process.sleep(600)
 
@@ -369,7 +369,7 @@ defmodule Malachi.Console.EndpointTest do
       buckets = :ets.tab2list(:malachi_rate_limits)
       sessions = :ets.info(:malachi_sessions, :size)
 
-      for path <- ["/", "/assets/app-3f2a.js", "/missing.png"] do
+      for path <- ["/", "/assets/app-3f2aB9x1.js", "/missing.png"] do
         HttpClient.get(port, path, [{"Cookie", "malachi_token=#{token}"}, {"Authorization", "Bearer #{token}"}])
       end
 

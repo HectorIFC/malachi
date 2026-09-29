@@ -10,7 +10,7 @@ defmodule Malachi.Console.RouterTest do
   alias Malachi.Console.Static
   alias Malachi.Test.ConsoleFixture
 
-  @script "/assets/app-3f2a.js"
+  @script "/assets/app-3f2aB9x1.js"
 
   setup do
     manifest = Assets.build(ConsoleFixture.bundle!())
@@ -33,7 +33,7 @@ defmodule Malachi.Console.RouterTest do
       assert conn.status == 200
       assert conn.resp_body == ConsoleFixture.script_body()
       assert get_resp_header(conn, "content-type") == ["text/javascript"]
-      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2a.js")]
+      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2aB9x1.js")]
       assert get_resp_header(conn, "cache-control") == ["public, max-age=31536000, immutable"]
       assert get_resp_header(conn, "vary") == ["Accept-Encoding"]
       assert get_resp_header(conn, "content-encoding") == []
@@ -51,7 +51,7 @@ defmodule Malachi.Console.RouterTest do
       conn = request(ctx.opts, "HEAD", @script)
 
       assert conn.status == 200
-      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2a.js")]
+      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2aB9x1.js")]
     end
 
     test "every answer carries the dashboard's security headers and no CORS", ctx do
@@ -67,7 +67,7 @@ defmodule Malachi.Console.RouterTest do
 
   describe "conditional requests" do
     test "a matching If-None-Match gets 304 with the validators and no body", ctx do
-      tag = etag(ctx.manifest, "assets/app-3f2a.js")
+      tag = etag(ctx.manifest, "assets/app-3f2aB9x1.js")
       conn = call(ctx.opts, @script, [{"if-none-match", tag}])
 
       assert conn.status == 304
@@ -78,7 +78,7 @@ defmodule Malachi.Console.RouterTest do
     end
 
     test "a list, a weak validator and * all match", ctx do
-      tag = etag(ctx.manifest, "assets/app-3f2a.js")
+      tag = etag(ctx.manifest, "assets/app-3f2aB9x1.js")
 
       for value <- [~s("other", #{tag}), "W/" <> tag, "*"] do
         assert call(ctx.opts, @script, [{"if-none-match", value}]).status == 304, value
@@ -95,7 +95,7 @@ defmodule Malachi.Console.RouterTest do
     end
 
     test "a validator for the gzip variant does not match the brotli one", ctx do
-      gzip_tag = etag(ctx.manifest, "assets/app-3f2a.js", "gzip")
+      gzip_tag = etag(ctx.manifest, "assets/app-3f2aB9x1.js", "gzip")
       conn = call(ctx.opts, @script, [{"accept-encoding", "br"}, {"if-none-match", gzip_tag}])
 
       assert conn.status == 200
@@ -109,7 +109,7 @@ defmodule Malachi.Console.RouterTest do
 
       assert conn.resp_body == "BROTLI"
       assert get_resp_header(conn, "content-encoding") == ["br"]
-      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2a.js", "br")]
+      assert get_resp_header(conn, "etag") == [etag(ctx.manifest, "assets/app-3f2aB9x1.js", "br")]
     end
 
     test "a higher q wins over the preference order", ctx do
@@ -131,7 +131,7 @@ defmodule Malachi.Console.RouterTest do
     end
 
     test "a coding with no variant falls back to what exists", ctx do
-      conn = call(ctx.opts, "/assets/app-3f2a.css", [{"accept-encoding", "br, gzip"}])
+      conn = call(ctx.opts, "/assets/app-3f2aB9x1.css", [{"accept-encoding", "br, gzip"}])
       assert conn.resp_body == "CSSGZIP"
     end
 
@@ -175,7 +175,7 @@ defmodule Malachi.Console.RouterTest do
       for path <- [
             "/assets/%2e%2e/index.html",
             "/%2e%2e/%2e%2e/etc/passwd",
-            "/assets%2Fapp-3f2a.js",
+            "/assets%2Fapp-3f2aB9x1.js",
             "/assets/a%5Cb",
             "/a%00b",
             "/./index.html"
@@ -190,8 +190,8 @@ defmodule Malachi.Console.RouterTest do
             "/.hidden/secret.js",
             "/linked.txt",
             "/assets/linked/secret.txt",
-            "/assets/app-3f2a.js.br",
-            "/assets/app-3f2a.js.gz"
+            "/assets/app-3f2aB9x1.js.br",
+            "/assets/app-3f2aB9x1.js.gz"
           ] do
         conn = call(ctx.opts, path)
         assert conn.status in [400, 404], path

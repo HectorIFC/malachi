@@ -48,10 +48,13 @@ defmodule Malachi.Console.Assets do
 
   @type t :: %{files: %{required(String.t()) => entry()}, index: entry()} | :absent
 
-  # Files under assets/ carry a content hash in their name (a Vite build puts it there), so a new
-  # release never reuses a name for different bytes and a browser may keep them for a year without
-  # asking. Everything else, index.html first, keeps its name across releases and is revalidated on
-  # every use, which a matching ETag turns into a 304.
+  # A file under assets/ whose name ends in a build hash, as Vite writes it (app-B9x1C4d5.js), never
+  # has different bytes under the same name, so a browser may keep it for a year without asking.
+  # Everything else, index.html first and any name the rule below does not recognize as hashed even
+  # under assets/, keeps its name across releases and is revalidated on every use, which a matching
+  # ETag turns into a 304. A name the rule
+  # does not recognize costs a 304; one it recognized wrongly would cost a year of stale bytes, so the
+  # rule leans that way.
   @immutable "public, max-age=31536000, immutable"
   @revalidate "no-cache"
 
@@ -129,6 +132,22 @@ defmodule Malachi.Console.Assets do
     end)
   end
 
+  # Under assets/, and the last segment of the name before its extension looks like a build hash: it
+  # follows a dash or dot, has at least eight letters, digits or underscores and no dash, and holds at
+  # least one digit. Most of Vite's 8 character base64url hashes fit; one with no digit (about a
+  # quarter) or with a dash in it (about one in eight) revalidates instead, which costs a 304. Words
+  # never fit on their own: -manifest has no digit, and in roboto-latin-400 or icon-arrow-2x the last
+  # segment is too short. A name that merely looks hashed, such as polyfill-2024abcd, cannot be told
+  # apart and is treated as hashed.
+  defp immutable?("assets/" <> _ = path) do
+    case Regex.run(~r/[-.]([A-Za-z0-9_]{8,})\.[A-Za-z0-9]+$/, Path.basename(path)) do
+      [_, hash] -> String.match?(hash, ~r/\d/)
+      nil -> false
+    end
+  end
+
+  defp immutable?(_path), do: false
+
   # A file whose own bytes cannot be read is left out of the manifest; a precompressed variant that
   # cannot be read is left out of its file, which is then served uncompressed.
   defp entry(path, dir, present) do
@@ -144,7 +163,7 @@ defmodule Malachi.Console.Assets do
       {:ok,
        %{
          content_type: MIME.from_path(path),
-         cache_control: if(String.starts_with?(path, "assets/"), do: @immutable, else: @revalidate),
+         cache_control: if(immutable?(path), do: @immutable, else: @revalidate),
          variants: variants
        }}
     end
