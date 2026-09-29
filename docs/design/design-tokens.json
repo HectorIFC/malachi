@@ -1,0 +1,171 @@
+{
+  "$schema": "./design-tokens.schema.json",
+  "$description": "The single source of truth for Malachi's interface colors. Authored in OKLCH. Generates assets/src/styles/tokens.css, tui/src/theme/generated.rs, lib/malachi/ui/tokens.ex and docs/design/tokens.snapshot.json. Nothing hand mirrors a palette. See docs/design/operator-interfaces.md section 4.",
+  "$meta": {
+    "version": "1.0.0",
+    "profile": "DTCG-shaped, privately pinned. The DTCG Design Tokens Format Module is a preview draft that states it must not be implemented, so this file follows its shape for interoperability and pins its own schema for conformance.",
+    "generator": "style-dictionary with four custom formats",
+    "gates": [
+      "Regenerate and fail CI on `git diff --exit-code`.",
+      "Fail on any raw color literal in assets/src or tui/src outside generated files: #hex, oklch(, rgb(, hsl(, Color::Rgb, Color::Indexed, named Color::.",
+      "Cross language contract test: the web parses tokens.css, Rust deserialises tokens.snapshot.json, both assert field by field in both directions so a missing and an extra token each fail.",
+      "Contrast: every declared foreground on background pair in both themes, including muted-foreground on muted and every state on both background and card. Plus a deuteranopia distinguishability check across chart.1 to chart.5."
+    ]
+  },
+
+  "$platforms": {
+    "web": "CSS custom properties on :root and .dark, exposed through @theme inline.",
+    "tui": "Rust consts. Three tiers per theme: TRUECOLOR, ANSI256, ANSI16. The 256 tier is quantised perceptually at generate time. The 16 tier is hand declared below and is never computed, because a nearest neighbour search collapses state.damaged onto state.fenced.",
+    "elixir": "Module attributes, for any server rendered fallback page."
+  },
+
+  "color": {
+    "$type": "color",
+
+    "base": {
+      "$description": "The shadcn semantic set, adopted unchanged. primary is deliberately NOT the brand accent: it is bound to the default button, selected states and badges, and a saturated primary fights the state colors that carry the real meaning.",
+      "background":            { "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.161 0.004 265)" },
+      "foreground":            { "light": "oklch(0.210 0.006 265)", "dark": "oklch(0.962 0.002 265)" },
+      "card":                  { "light": "oklch(1.000 0.000 0)",   "dark": "oklch(0.208 0.005 265)" },
+      "card-foreground":       { "light": "oklch(0.210 0.006 265)", "dark": "oklch(0.962 0.002 265)" },
+      "popover":               { "light": "oklch(1.000 0.000 0)",   "dark": "oklch(0.234 0.006 265)" },
+      "popover-foreground":    { "light": "oklch(0.210 0.006 265)", "dark": "oklch(0.962 0.002 265)" },
+      "primary":               { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.925 0.003 265)" },
+      "primary-foreground":    { "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.208 0.005 265)" },
+      "secondary":             { "light": "oklch(0.958 0.003 265)", "dark": "oklch(0.271 0.006 265)" },
+      "secondary-foreground":  { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.962 0.002 265)" },
+      "muted":                 { "light": "oklch(0.958 0.003 265)", "dark": "oklch(0.271 0.006 265)" },
+      "muted-foreground":      { "light": "oklch(0.551 0.013 265)", "dark": "oklch(0.712 0.012 265)" },
+      "accent":                { "light": "oklch(0.958 0.003 265)", "dark": "oklch(0.271 0.006 265)" },
+      "accent-foreground":     { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.962 0.002 265)" },
+      "destructive":           { "light": "oklch(0.577 0.222 27.3)", "dark": "oklch(0.665 0.201 25.4)" },
+      "destructive-foreground":{ "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.985 0.002 265)" },
+      "border":                { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
+      "input":                 { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
+      "ring":                  { "light": "oklch(0.709 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
+    },
+
+    "brand": {
+      "$description": "Amber, carried over from benchmark/dashboard/index.html so the console is continuous with the one page in this project that was designed on purpose. Used for the focused accent and the logo, never for a state.",
+      "accent":       { "light": "oklch(0.769 0.157 70.1)", "dark": "oklch(0.769 0.157 70.1)" },
+      "accent-soft":  { "light": "oklch(0.769 0.157 70.1 / 0.14)", "dark": "oklch(0.769 0.157 70.1 / 0.16)" }
+    },
+
+    "state": {
+      "$description": "Malachi's own vocabulary. Capped at what the control plane can actually distinguish. A vocabulary larger than the state machine becomes a lie in the docs and in the translation catalog.",
+      "active":  { "light": "oklch(0.627 0.165 149.2)", "dark": "oklch(0.696 0.170 149.2)", "$description": "Taking writes: an active segment, a serving range, an alive node." },
+      "sealed":  { "light": "oklch(0.546 0.129 244.3)", "dark": "oklch(0.685 0.130 244.3)", "$description": "Sealed and settled. Calm, not celebratory." },
+      "fenced":  { "light": "oklch(0.705 0.155 70.7)",  "dark": "oklch(0.769 0.157 70.7)",  "$description": "Write fenced. Neither healthy nor broken." },
+      "damaged": { "light": "oklch(0.577 0.222 27.3)",  "dark": "oklch(0.665 0.201 25.4)",  "$description": "Rot, torn tail, bad CRC, bad magic." },
+      "behind":  { "light": "oklch(0.732 0.152 90.1)",  "dark": "oklch(0.828 0.152 90.1)",  "$description": "A copy short of the sealed length, or a consumer behind." },
+      "ahead":   { "light": "oklch(0.559 0.230 302.7)", "dark": "oklch(0.671 0.207 302.7)", "$description": "A copy past the sealed length (#175). Rare and serious, and deliberately not red, so it does not read as ordinary damage." },
+      "blocked": { "light": "oklch(0.458 0.199 19.8)",  "dark": "oklch(0.553 0.207 19.8)",  "$description": "A range that cannot take writes (#91)." },
+      "unknown": { "light": "oklch(0.551 0.013 265)",   "dark": "oklch(0.600 0.013 265)",   "$description": "The control plane cannot currently answer. Not an error." }
+    },
+
+    "severity": {
+      "$description": "Signals roll up through these. The health score arithmetic is published: ok counts 1, warning 0.5, error 0, worst child wins at every level.",
+      "ok":      { "$value": "{color.state.active}" },
+      "info":    { "$value": "{color.state.sealed}" },
+      "warning": { "$value": "{color.state.fenced}" },
+      "error":   { "$value": "{color.state.damaged}" }
+    },
+
+    "chart": {
+      "$description": "Time series only. Never reused for a state. Checked for deuteranopia distinguishability by the generator.",
+      "1": { "light": "oklch(0.646 0.222 41.1)",  "dark": "oklch(0.488 0.243 264.4)" },
+      "2": { "light": "oklch(0.600 0.118 184.7)", "dark": "oklch(0.696 0.170 162.5)" },
+      "3": { "light": "oklch(0.398 0.070 227.4)", "dark": "oklch(0.769 0.188 70.1)" },
+      "4": { "light": "oklch(0.828 0.189 84.4)",  "dark": "oklch(0.627 0.265 303.9)" },
+      "5": { "light": "oklch(0.769 0.188 70.1)",  "dark": "oklch(0.645 0.246 16.4)" }
+    },
+
+    "sidebar": {
+      "background":          { "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.208 0.005 265)" },
+      "foreground":          { "light": "oklch(0.210 0.006 265)", "dark": "oklch(0.962 0.002 265)" },
+      "primary":             { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.488 0.243 264.4)" },
+      "primary-foreground":  { "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.985 0.002 265)" },
+      "accent":              { "light": "oklch(0.958 0.003 265)", "dark": "oklch(0.271 0.006 265)" },
+      "accent-foreground":   { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.962 0.002 265)" },
+      "border":              { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
+      "ring":                { "light": "oklch(0.709 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
+    }
+  },
+
+  "$ansi16": {
+    "$description": "Hand declared, never computed. A naive nearest neighbour collapses state.damaged and state.fenced onto the same red, which is exactly the distinction an operator needs at 3 a.m. Values are ANSI SGR color numbers; ratatui's named Color variants are emitted for them.",
+    "color.state.active":  { "code": 10, "ratatui": "Color::LightGreen" },
+    "color.state.sealed":  { "code": 4,  "ratatui": "Color::Blue" },
+    "color.state.fenced":  { "code": 3,  "ratatui": "Color::Yellow" },
+    "color.state.damaged": { "code": 9,  "ratatui": "Color::LightRed" },
+    "color.state.behind":  { "code": 11, "ratatui": "Color::LightYellow" },
+    "color.state.ahead":   { "code": 13, "ratatui": "Color::LightMagenta" },
+    "color.state.blocked": { "code": 1,  "ratatui": "Color::Red" },
+    "color.state.unknown": { "code": 8,  "ratatui": "Color::DarkGray" },
+    "color.base.foreground": { "code": 7, "ratatui": "Color::White" },
+    "color.base.muted-foreground": { "code": 8, "ratatui": "Color::DarkGray" },
+    "color.base.border":   { "code": 8,  "ratatui": "Color::DarkGray" },
+    "color.brand.accent":  { "code": 3,  "ratatui": "Color::Yellow" },
+    "color.chart.1": { "code": 12, "ratatui": "Color::LightBlue" },
+    "color.chart.2": { "code": 14, "ratatui": "Color::LightCyan" },
+    "color.chart.3": { "code": 13, "ratatui": "Color::LightMagenta" },
+    "color.chart.4": { "code": 11, "ratatui": "Color::LightYellow" },
+    "color.chart.5": { "code": 10, "ratatui": "Color::LightGreen" }
+  },
+
+  "$terminal": {
+    "$description": "Terminal only concerns. See operator-interfaces.md section 8.4.",
+    "background": "default",
+    "$backgroundNote": "The sentinel `default` emits no color and inherits the terminal's own background, as k9s does. A TUI that paints its own dark background inside a configured light terminal reads as broken and destroys transparency setups. An explicit theme_background override exists for operators who want the painted background.",
+    "modifiers": {
+      "$description": "Because a 16 color terminal cannot carry eight distinct states by hue alone, and because meaning is never encoded in color alone (WCAG 1.4.1).",
+      "selected": "REVERSED",
+      "header": "BOLD",
+      "muted": "DIM",
+      "link": "UNDERLINED",
+      "damaged": "BOLD"
+    },
+    "glyphs": {
+      "$description": "Colour depth and glyph richness are two orthogonal degradation axes with separate config keys, as btop separates truecolor from graph_symbol. Nerd Font glyphs are opt in, off by default, and versioned, because codepoints moved between Nerd Fonts v2 and v3 and there is no reliable way to detect glyph coverage.",
+      "mode": ["nerd", "unicode", "ascii"],
+      "default": "unicode",
+      "nerdFontsVersion": ["2", "3", ""]
+    },
+    "detection": {
+      "$description": "The terminfo.dev order, applied exactly. COLORTERM is the only positive truecolor signal; TERM=xterm-256color means an indexed palette, not 24 bit.",
+      "order": [
+        "explicit application flag",
+        "NO_COLOR present and non empty",
+        "TERM=dumb",
+        "stdout is not a tty",
+        "COLORTERM is truecolor or 24bit",
+        "TERM patterns",
+        "OSC probes, parallel, 100 to 200 ms timeout, degrade on no reply",
+        "ANSI 16"
+      ],
+      "overrides": {
+        "color_mode": ["auto", "truecolor", "256", "16", "none"],
+        "theme": ["light", "dark", "auto"],
+        "glyphs": ["nerd", "unicode", "ascii"]
+      }
+    }
+  },
+
+  "density": {
+    "$type": "dimension",
+    "$description": "Row heights. WCAG 2.5.8 sets the floor for a pointer target at 24 by 24 CSS pixels, so the compact tier is only permitted on rows that carry no inline target.",
+    "row": {
+      "comfortable": { "$value": "40px", "$description": "Rows that carry buttons." },
+      "default":     { "$value": "32px", "$description": "The default. Matches Carbon's small row." },
+      "compact":     { "$value": "24px", "$description": "Only where there are no inline targets." }
+    }
+  },
+
+  "motion": {
+    "$type": "duration",
+    "$description": "Nothing above 150 ms, and only on a state the operator caused. Data surfaces do not move by default. prefers-reduced-motion is honored. Explicitly forbidden: full page spinners, number roll ups, slide in on a tail, and shimmer on a refetch.",
+    "instant": { "$value": "0ms" },
+    "fast":    { "$value": "100ms" },
+    "base":    { "$value": "150ms" }
+  }
+}
