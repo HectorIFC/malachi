@@ -16,6 +16,9 @@ RUN mix local.hex --force && \
 COPY config config
 COPY lib lib
 COPY rel rel
+# Only priv/static, never priv as a whole: a local checkout keeps gitignored development keys
+# (priv/dist_cert, priv/cert) and dialyzer PLTs under priv, and none of them belong in the image.
+COPY priv/static priv/static
 
 RUN mix compile && \
     mix release
