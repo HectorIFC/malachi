@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.16.5"
+  @version "0.17.0"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -126,6 +126,7 @@ defmodule Malachi.MixProject do
       "docs/guides/streaming-with-backpressure.md": [title: "Streaming with backpressure"],
       "docs/guides/authentication.md": [title: "Authentication"],
       "docs/guides/per-topic-acls.md": [title: "Per-topic ACLs"],
+      "docs/guides/per-topic-retention.md": [title: "Per-topic retention"],
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
@@ -169,6 +170,7 @@ defmodule Malachi.MixProject do
         "docs/guides/streaming-with-backpressure.md",
         "docs/guides/authentication.md",
         "docs/guides/per-topic-acls.md",
+        "docs/guides/per-topic-retention.md",
         "docs/guides/clustering-and-resharding.md",
         "docs/guides/operations.md",
         "README.md"

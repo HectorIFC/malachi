@@ -297,6 +297,37 @@ class MalachiClient {
     return wire.decodeListAclsResp(body);
   }
 
+  // Storage policies. `fields` are [name, value] pairs: a value is null (the rule is off), a
+  // non-negative integer or a string; a field left out inherits the cluster's global value.
+  async definePolicy(name, fields) {
+    await this._request(wire.API.definePolicy, wire.encodeDefinePolicyReq(name, fields));
+    return true;
+  }
+
+  // Refused with "policy_in_use: <topics>" while a topic is bound to it, unless `force` is set.
+  async deletePolicy(name, { force = false } = {}) {
+    await this._request(wire.API.deletePolicy, wire.encodeDeletePolicyReq(name, force));
+    return true;
+  }
+
+  // Resolves with `[[name, fields], ...]`, sorted by name.
+  async listPolicies() {
+    const body = await this._request(wire.API.listPolicies, wire.encodeListPoliciesReq());
+    return wire.decodeListPoliciesResp(body);
+  }
+
+  // A null name detaches the topic. Refused with "no_such_policy" for a name nothing defines.
+  async bindTopicPolicy(topic, name) {
+    await this._request(wire.API.bindTopicPolicy, wire.encodeBindTopicPolicyReq(topic, name));
+    return true;
+  }
+
+  // Resolves with `{ topic, policy, resolution, definition, effective: [[name, value, origin], ...] }`.
+  async getTopicPolicy(topic) {
+    const body = await this._request(wire.API.getTopicPolicy, wire.encodeGetTopicPolicyReq(topic));
+    return wire.decodeTopicPolicyResp(body);
+  }
+
   // Tears the connection down at once, where close() ends it gracefully: a connect or authentication still
   // in flight is abandoned, and a pending request rejects (the 'close' that follows runs _onClose) instead
   // of holding its timer, and with it the process, until it times out.

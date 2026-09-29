@@ -5,6 +5,8 @@ defmodule Malachi.Cluster.RetentionTest do
   alias Malachi.Cluster.Retention
   alias Malachi.Metadata
 
+  doctest Retention
+
   @range {"t", 0}
 
   # Builds metadata with topic "t" and the given sealed segments.
@@ -176,6 +178,85 @@ defmodule Malachi.Cluster.RetentionTest do
 
       assert unresolved == Enum.sort(unresolved), "the order a caller gets must not depend on hashing"
       assert unresolved == names
+    end
+  end
+
+  describe "effective/4 (what a topic's retention is, and where each bound comes from)" do
+    test "a topic with no policy takes every bound from the global policy" do
+      assert Retention.effective(nil, %{}, %{max_age_ms: 5_000}, 99) == %{
+               resolution: :none,
+               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}}
+             }
+    end
+
+    test "a resolved policy wins the bounds it sets and inherits the rest, nil and 0 included" do
+      policies = %{"p" => %{retention: %{max_age_ms: nil, max_bytes: 0}}}
+
+      assert Retention.effective("p", policies, %{max_age_ms: 5_000, max_bytes: 10}, nil) == %{
+               resolution: :resolved,
+               retention: %{max_age_ms: {nil, :policy}, max_bytes: {0, :policy}}
+             }
+
+      partial = %{"p" => %{retention: %{max_bytes: 7}}}
+
+      assert Retention.effective("p", partial, %{max_age_ms: 5_000}, nil).retention ==
+               %{max_age_ms: {5_000, :global}, max_bytes: {7, :policy}}
+    end
+
+    test "a resolved policy that says nothing about retention inherits every bound" do
+      policies = %{"p" => %{spread_by: "rack"}}
+
+      assert Retention.effective("p", policies, %{max_age_ms: 5_000}, 1) == %{
+               resolution: :resolved,
+               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}}
+             }
+    end
+
+    test "an unresolved name holds everything except the operator's backstop age" do
+      assert Retention.effective("ghost", %{}, %{max_age_ms: 5_000, max_bytes: 10}, 42) == %{
+               resolution: :unresolved,
+               retention: %{max_age_ms: {42, :unresolved_backstop}, max_bytes: {nil, :unresolved_backstop}}
+             }
+    end
+
+    property "what effective/4 reports is exactly what the sweep applies" do
+      # Parity, not a second implementation: the bounds read back for a topic, applied as the global
+      # policy of the same topic without a binding, expire the same segments the sweep expires with the
+      # binding. A read-back that drifted from the sweep would tell an operator a limit the data never
+      # sees.
+      check all(
+              segments <- sealed_segments(),
+              global <- retention_bounds(),
+              bound <- member_of([nil, "p", "ghost"]),
+              policy <- one_of([constant(%{}), map(retention_bounds(), &%{retention: &1})]),
+              backstop <- one_of([constant(nil), integer(0..20_000)]),
+              now <- integer(0..20_000)
+            ) do
+        base = with_sealed(segments)
+        policies = %{"p" => policy}
+
+        bound_metadata =
+          if bound, do: elem(Metadata.apply(base, {:set_topic_policy, "t", bound}), 0), else: base
+
+        reported = Retention.effective(bound, policies, global, backstop).retention
+        as_global = Map.new(reported, fn {key, {value, _origin}} -> {key, value} end)
+
+        assert expired(bound_metadata, now, global, policies, backstop) == expired(base, now, as_global)
+      end
+    end
+
+    defp sealed_segments do
+      gen all(specs <- list_of({integer(1..300), integer(0..20_000)}, max_length: 8)) do
+        specs |> Enum.with_index() |> Enum.map(fn {{bytes, at}, i} -> {"s#{i}", i, bytes, at} end)
+      end
+    end
+
+    defp retention_bounds do
+      bound = one_of([constant(nil), integer(0..2_000)])
+
+      gen all(age <- bound, bytes <- bound, keys <- list_of(member_of([:max_age_ms, :max_bytes]), max_length: 2)) do
+        Map.take(%{max_age_ms: age, max_bytes: bytes}, keys)
+      end
     end
   end
 

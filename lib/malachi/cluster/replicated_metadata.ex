@@ -16,6 +16,7 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   `ra` must already be running (e.g. `:ra.start_in/1`), as with `Malachi.Cluster.MetadataServer`.
   """
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Metadata
 
@@ -53,13 +54,87 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   @spec apply_command(MetadataServer.server_id(), Metadata.t(), Metadata.command()) ::
           {Metadata.t(), term()}
   def apply_command(server_id, metadata, command) do
-    case MetadataServer.command(server_id, command) do
-      # Deterministic apply ⇒ the cache tracks the replicated state (a rejected command leaves
-      # both unchanged).
-      {:ok, reply} -> {elem(Metadata.apply(metadata, command), 0), reply}
-      {:error, reason} -> {metadata, {:error, reason}}
+    case submit(server_id, command) do
+      {:ok, reply} ->
+        if MachineVersion.refusal?(reply),
+          do: {metadata, reply},
+          else: {elem(Metadata.apply(metadata, command), 0), reply}
+
+      {:error, reason} ->
+        {metadata, {:error, reason}}
     end
   end
+
+  # How long a command may wait for its commit. The broker runs these inside its own loop, so every
+  # produce and fetch of the shard waits behind the call. The data path's commands keep ra's default,
+  # which the produce path's own timeouts are sized around. An operator's binding has nobody waiting on
+  # it but the operator, and must not hold the loop when the topic's vnode has lost quorum or is
+  # electing; `Malachi.Policies.bind/3` turns the timeout into an answer.
+  #
+  # For the binding it is a deadline on the whole command, not ra's timeout: ra follows a redirect with a
+  # fresh full timeout (`ra_server_proc:statem_call/3`), so a member that queues the call through an
+  # election and then redirects would hold the loop for one timeout per hop.
+  @admin_command_deadline_ms 2_000
+
+  defp submit(server_id, {:bind_topic_policy, _topic, _name} = command),
+    do:
+      run_within(
+        fn -> MetadataServer.command(server_id, command, @admin_command_deadline_ms) end,
+        @admin_command_deadline_ms
+      )
+
+  defp submit(server_id, command), do: MetadataServer.command(server_id, command)
+
+  @doc false
+  # Runs `fun` in a monitored, unlinked process and answers what it returned, or `{:error, :timeout}` when
+  # it has not returned within `deadline_ms`, or `{:error, {:command_crashed, reason}}`. Public only so the
+  # deadline can be tested with a function other than a Raft command.
+  #
+  # A process still running at the deadline is killed, and the answer is given only after its DOWN
+  # arrives. The kill is asynchronous, so the process may still send its result after `Process.exit/2`
+  # returns; signals between two processes arrive in the order they were sent, so once the DOWN is here
+  # any result it sent is already in this mailbox and is dropped, and nothing reaches the caller's
+  # message handlers afterwards. A timed out command is ambiguous the way any Raft timeout is: it may
+  # still commit.
+  @spec run_within((-> result), pos_integer()) :: result | {:error, :timeout | {:command_crashed, term()}}
+        when result: term()
+  def run_within(fun, deadline_ms) do
+    caller = self()
+    tag = make_ref()
+    {pid, monitor} = spawn_monitor(fn -> send(caller, {tag, fun.()}) end)
+
+    receive do
+      {^tag, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        {:error, {:command_crashed, reason}}
+    after
+      deadline_ms ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+        end
+
+        receive do
+          {^tag, _late} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, :timeout}
+    end
+  end
+
+  # Why a refusal is not re-applied here. The cache tracks the replicated state because both apply the
+  # same deterministic `Malachi.Metadata.apply/2`, so a command the metadata refuses (an existing topic,
+  # an unknown range) leaves both unchanged. The machine version gate is the exception: it runs inside
+  # the ra machine only (`Malachi.Cluster.MachineVersion.apply/5`), in front of `Metadata.apply/2`. A
+  # command introduced above the group's effective version is refused there while `Metadata.apply/2`
+  # would accept it, so re-applying it would put into the cache what the log refused, and a caller
+  # that journals the cache change would replay it after the next refresh.
 
   @doc "The local metadata view, for reads (routing, segment lookup)."
   @spec metadata(t()) :: Metadata.t()

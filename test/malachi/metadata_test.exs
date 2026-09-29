@@ -456,6 +456,65 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "bind_topic_policy (the binding an operator emits, machine version 4)" do
+    test "binds a policy NAME to a topic, and nil detaches" do
+      {state, _root} = create_topic()
+
+      {state, :ok} = apply!(state, {:bind_topic_policy, "events", "durable"})
+      assert Metadata.topic_policy_name(state, "events") == "durable"
+
+      {state, :ok} = apply!(state, {:bind_topic_policy, "events", nil})
+      assert Metadata.topic_policy_name(state, "events") == nil
+    end
+
+    test "refuses an unknown topic or a name that cannot name a policy, leaving the state alone" do
+      {state, _root} = create_topic()
+      assert {^state, {:error, :no_such_topic}} = Metadata.apply(state, {:bind_topic_policy, "nope", "durable"})
+      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:bind_topic_policy, "events", ""})
+      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:bind_topic_policy, "events", :durable})
+    end
+
+    test "routes by its topic and is fenced while that topic migrates" do
+      assert Metadata.command_target_topic({:bind_topic_policy, "events", "durable"}) == "events"
+      assert Metadata.routed_range_topics({:bind_topic_policy, "events", "durable"}) == []
+
+      {state, _root} = create_topic()
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+      assert {^state, {:error, :migrating}} = Metadata.apply(state, {:bind_topic_policy, "events", "durable"})
+    end
+
+    test "the binding travels with the topic across a vnode split, with no new export format" do
+      {state, _root} = create_topic()
+      {state, :ok} = apply!(state, {:bind_topic_policy, "events", "durable"})
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+      assert export.export_format == 0
+      assert Metadata.topic_policy_name(Metadata.insert_topic(Metadata.new(), export), "events") == "durable"
+    end
+
+    test "is introduced at version 4, and the legacy binding stays at 0 with nothing emitting it" do
+      table = Metadata.command_versions()
+      assert table[{:bind_topic_policy, 3}] == 4
+      assert table[{:set_topic_policy, 3}] == 0
+    end
+
+    test "topics_bound_to/2 names the topics bound to a policy, sorted past the 32 keys a map keeps in order" do
+      names = for i <- 0..39, do: "t#{String.pad_leading(to_string(i), 2, "0")}"
+
+      state =
+        Enum.reduce(names, Metadata.new(), fn topic, state ->
+          {state, {:ok, _root}} = Metadata.apply(state, {:create_topic, topic, 4})
+          policy = if rem(String.to_integer(String.trim_leading(topic, "t")), 2) == 0, do: "even", else: "odd"
+          {state, :ok} = Metadata.apply(state, {:bind_topic_policy, topic, policy})
+          state
+        end)
+
+      even = Metadata.topics_bound_to(state, "even")
+      assert even == Enum.take_every(names, 2)
+      assert Metadata.topics_bound_to(state, "ghost") == []
+    end
+  end
+
   describe "unknown commands" do
     test "an unrecognized command is rejected, not crashed (replica safety)" do
       {state, _root_id} = create_topic()

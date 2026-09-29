@@ -252,8 +252,10 @@ config :malachi,
   # of these set; with both unset and no policy bound anywhere, the sweep finds nothing and segments are
   # kept forever. Set either to expire sealed segments older than an age and/or over a per-range byte
   # budget.
-  retention_max_age_ms: parse_int.("MALACHI_RETENTION_MAX_AGE_MS", nil),
-  retention_max_bytes: parse_int.("MALACHI_RETENTION_MAX_BYTES", nil),
+  retention_max_age_ms:
+    Malachi.Config.retention_bound("MALACHI_RETENTION_MAX_AGE_MS", System.get_env("MALACHI_RETENTION_MAX_AGE_MS")),
+  retention_max_bytes:
+    Malachi.Config.retention_bound("MALACHI_RETENTION_MAX_BYTES", System.get_env("MALACHI_RETENTION_MAX_BYTES")),
   retention_interval_ms: parse_int.("MALACHI_RETENTION_INTERVAL_MS", 60_000),
   # Retention metrics. A consumer moved past data no longer stored is counted once per distinct skip: the
   # skip reporter beside each broker remembers up to MALACHI_RETENTION_SKIP_LEDGER_MAX skips (and as many
@@ -277,7 +279,11 @@ config :malachi,
   # something other than the global limits, and expiring under them would delete what the policy was
   # there to keep. Set this to bound the disk such a topic can hold while the binding stays broken;
   # malachi_retention_unresolved_policy_sweeps_total names the topic meanwhile.
-  retention_unresolved_policy_max_age_ms: parse_int.("MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS", nil),
+  retention_unresolved_policy_max_age_ms:
+    Malachi.Config.retention_bound(
+      "MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS",
+      System.get_env("MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS")
+    ),
   retention_orphan_interval_ms: parse_int.("MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS", 300_000),
   retention_orphan_min_age_ms: parse_int.("MALACHI_RETENTION_ORPHAN_MIN_AGE_MS", 600_000),
   retention_orphan_sightings: parse_int.("MALACHI_RETENTION_ORPHAN_SIGHTINGS", 2),

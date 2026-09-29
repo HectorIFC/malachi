@@ -67,6 +67,11 @@ defmodule Malachi.BrokerServer do
   # timeout. A spurious resend is safe: the roll stays owed and a fence is idempotent, answering the same
   # numbers.
   @roll_fence_retry_ms 1_000
+
+  # A binding waits for its commit for at most 2 s inside this loop (`Malachi.Cluster.ReplicatedMetadata`),
+  # so the caller waits a little longer than that plus a busy mailbox, and never less: a caller that gave
+  # up first would exit while the answer it was waiting for is still on its way.
+  @bind_call_timeout_ms 4_000
   # What one control plane read may cost the reconcile. The rule is the one already written beside
   # `safe_durable_end/3`: a remote call the reconcile makes must cost milliseconds, not ra's default
   # five seconds. It bounds the boot reconcile (which runs on this loop, before the first client call)
@@ -133,6 +138,24 @@ defmodule Malachi.BrokerServer do
   @spec create_topic(GenServer.server(), Malachi.Metadata.topic_name(), pos_integer()) :: term()
   def create_topic(server, name, keyspace_bits),
     do: GenServer.call(server, {:create_topic, name, keyspace_bits})
+
+  @doc "Binds `topic` to a policy name, or detaches it with `nil` (`Malachi.Broker.bind_topic_policy/3`)."
+  @spec bind_topic_policy(GenServer.server(), Malachi.Metadata.topic_name(), Malachi.Metadata.policy_name() | nil) ::
+          :ok | {:error, term()}
+  def bind_topic_policy(server, topic, policy_name),
+    do: GenServer.call(server, {:bind_topic_policy, topic, policy_name}, @bind_call_timeout_ms)
+
+  @doc """
+  The policy name `topic` is bound to (`nil` for none), `{:error, :no_such_topic}`, or
+  `{:error, :metadata_unavailable}` while this node has not yet heard from the topic's vnode.
+  """
+  @spec topic_policy_name(GenServer.server(), Malachi.Metadata.topic_name()) ::
+          {:ok, Malachi.Metadata.policy_name() | nil} | {:error, :no_such_topic | :metadata_unavailable}
+  def topic_policy_name(server, topic), do: GenServer.call(server, {:topic_policy_name, topic})
+
+  @doc "The topics bound to the policy `name`, sorted."
+  @spec topics_bound_to(GenServer.server(), Malachi.Metadata.policy_name()) :: [Malachi.Metadata.topic_name()]
+  def topics_bound_to(server, name), do: GenServer.call(server, {:topics_bound_to, name})
 
   @doc "Routes, replicates and commits records; returns `{:ok, placements}` or an error."
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
@@ -490,6 +513,25 @@ defmodule Malachi.BrokerServer do
   def handle_call({:create_topic, name, keyspace_bits}, _from, state) do
     {broker, reply} = Broker.create_topic(state.broker, name, keyspace_bits)
     {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:bind_topic_policy, topic, policy_name}, _from, state) do
+    {broker, reply} = Broker.bind_topic_policy(state.broker, topic, policy_name)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  # Gated like consume: before the topic's vnode has answered, the cache holds an empty placeholder for
+  # it, which would report an existing topic as missing, or bound to nothing.
+  def handle_call({:topic_policy_name, topic}, _from, state) do
+    if topic_metadata_ready?(state, topic) do
+      {:reply, Broker.topic_policy_name(state.broker, topic), state}
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
+    end
+  end
+
+  def handle_call({:topics_bound_to, name}, _from, state) do
+    {:reply, Broker.topics_bound_to(state.broker, name), state}
   end
 
   def handle_call({:produce, topic, records, ctx}, from, state) do
