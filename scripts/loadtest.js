@@ -26,7 +26,7 @@
  */
 
 const { performance } = require('perf_hooks');
-const { MalachiClient, isMigrating, isNotOwner } = require('./lib/client');
+const { MalachiClient, isMigrating, isNotOwner, isTransport } = require('./lib/client');
 const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
 const os = require('os');
 const path = require('path');
@@ -40,6 +40,11 @@ const SCENARIOS = ['produce', 'fetch', 'stream', 'mixed'];
 const CONNECT_STRATEGIES = ['bounded', 'stagger', 'all-at-once'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A dropped stream connection reconnects with a short backoff, capped so a server that is down does not
+// spin the worker. The same values as @max_reconnect_tries and @reconnect_backoff_ms in the Elixir generator.
+const MAX_RECONNECT_TRIES = 10;
+const RECONNECT_BACKOFF_MS = 20;
 
 // A compact HDR-style log-linear histogram for accurate tail percentiles (P99.9 / P99.99) with bounded
 // memory and no sampling error, unlike a reservoir (which under-represents the deep tail). Values are
@@ -131,6 +136,12 @@ class Stats {
     this.bytes = 0;
     this.hist = new Histogram();
     this.saturated = false; // set by openLoop when in-flight hits the cap (server can't sustain the rate)
+    // Stream connections dropped, and the reconnects that followed, counted as the Elixir generator counts
+    // them but only within the measured window: a warmup's drops are discarded with the rest of its Stats,
+    // where the Elixir generator counts drops in any window. Only the stream driver counts these; the other
+    // drivers still count a transport failure in `errors`.
+    this.dropped = 0;
+    this.reconnects = 0;
   }
 
   record(latencyMs, records, bytes) {
@@ -143,6 +154,14 @@ class Stats {
     if (latencyMs < this.min) this.min = latencyMs;
     if (latencyMs > this.max) this.max = latencyMs;
     this.hist.record(Math.round(latencyMs * 1000)); // ms -> us
+  }
+
+  drop() {
+    this.dropped += 1;
+  }
+
+  reconnect() {
+    this.reconnects += 1;
   }
 
   error(err) {
@@ -170,9 +189,12 @@ class Stats {
 
 const cfg = config({ username: 'app', password: 'app123' });
 
+function newClient() {
+  return new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000 });
+}
+
 function connect() {
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000 });
-  return client.connect(cfg.username, cfg.password);
+  return newClient().connect(cfg.username, cfg.password);
 }
 
 // Opens `count` connections under opts.connectStrategy (see CONNECT_STRATEGIES). bounded is a pool of
@@ -327,38 +349,108 @@ async function streamDriver(clients, opts, durationMs, stats) {
   // A fresh group per invocation so each run reads the backlog from the start: a warmup pass commits (acks)
   // its way to the end of the backlog, so sharing a group with the measured run would leave it nothing.
   const run = streamRun++;
+  const deadline = performance.now() + durationMs;
   await Promise.all(
-    clients.map(
-      (client, index) =>
-        new Promise((resolve) => {
-          const group = `loadtest-${run}-${index}`;
-          const timer = setTimeout(resolve, durationMs);
-          const stop = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-          client
-            .subscribe(opts.topic, {
-              group,
-              window: opts.window,
-              max: opts.max,
-              onRecords: ({ records, cursor }) => {
-                if (records.length === 0) return;
-                stats.record(0, records.length, recordBytes(records));
-                client.streamAck(opts.topic, group, null, cursor, records.length);
-              },
-              onError: (err) => {
-                stats.error(err);
-                stop();
-              },
-            })
-            .catch((err) => {
-              stats.error(err);
-              stop();
-            });
-        })
-    )
+    clients.map((_, index) => streamWorker(clients, index, `loadtest-${run}-${index}`, opts, deadline, stats))
   );
+}
+
+// One stream connection until the deadline, mirroring stream_loop/4 and resubscribe/4 in the Elixir
+// generator. A subscription the server refused ends the worker, counted in `errors` under its reason. A
+// transport failure, whether the subscribe could not be sent or the connection dropped mid-stream, counts
+// a drop and resubscribes on a fresh connection, which replaces the dead one in `clients` so the caller's
+// final close reaches it.
+async function streamWorker(clients, index, group, opts, deadline, stats) {
+  for (;;) {
+    const outcome = await subscribeUntil(clients[index], group, opts, deadline, stats);
+    if (outcome !== 'dropped') return;
+    const client = await afterDrop(stats, deadline);
+    if (client === null) return;
+    clients[index].close();
+    clients[index] = client;
+  }
+}
+
+// Subscribes and resolves with how the subscription ended: 'deadline', 'refused' or 'dropped'. Whatever
+// happens after the first of these is ignored, pushes included, so nothing is counted past the deadline
+// even while the subscription stays open until the run closes its clients.
+function subscribeUntil(client, group, opts, deadline, stats) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const end = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    const failed = (err) => {
+      if (settled) return;
+      if (isTransport(err)) return end('dropped');
+      stats.error(err);
+      return end('refused');
+    };
+    const timer = setTimeout(() => end('deadline'), Math.max(0, deadline - performance.now()));
+
+    client
+      .subscribe(opts.topic, {
+        group,
+        window: opts.window,
+        max: opts.max,
+        onRecords: ({ records, cursor }) => {
+          // The workers' deadline timers are armed at different moments and can fire about a millisecond
+          // apart, so a push can reach a worker that has already settled while another has not. The guard
+          // keeps that push out of the count. No test pins it: it needs a push landing inside that
+          // millisecond, which no stub can place deterministically.
+          if (settled || records.length === 0) return;
+          stats.record(0, records.length, recordBytes(records));
+          client.streamAck(opts.topic, group, null, cursor, records.length);
+        },
+        onError: failed,
+      })
+      .catch(failed);
+  });
+}
+
+// A stream connection dropped: count it and reconnect, mirroring after_drop/1 in the Elixir generator.
+// Resolves with a fresh authenticated client, or null once the retry cap or the deadline is reached.
+async function afterDrop(stats, deadline) {
+  stats.drop();
+  for (let tries = 0; tries < MAX_RECONNECT_TRIES && performance.now() < deadline; tries++) {
+    await sleep(RECONNECT_BACKOFF_MS);
+    const client = await connectBefore(deadline);
+    if (client !== null) {
+      stats.reconnect();
+      return client;
+    }
+  }
+  return null;
+}
+
+// Connects and authenticates, resolving with the client, or with null when that fails or the deadline comes
+// first. A connect still in flight at the deadline is destroyed rather than awaited: the socket has no
+// connect timeout and the authentication waits up to 30s, and the rates divide by the time the run took,
+// so waiting on it would stretch the window past --duration. A connect that fails is destroyed too: an
+// authentication that was refused or timed out can leave its socket open, and since the run ends without
+// process.exit, an open socket nobody closes would keep the process alive after the report.
+function connectBefore(deadline) {
+  const client = newClient();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      client.destroy();
+      resolve(null);
+    }, Math.max(0, deadline - performance.now()));
+    client.connect(cfg.username, cfg.password).then(
+      () => {
+        clearTimeout(timer);
+        resolve(client);
+      },
+      () => {
+        clearTimeout(timer);
+        client.destroy();
+        resolve(null);
+      }
+    );
+  });
 }
 
 // Appends `count` records up front so fetch/stream/mixed have a backlog to read.
@@ -544,6 +636,10 @@ function report(scenario, opts, elapsedMs, stats) {
           mb_per_s: Number((stats.bytes / 1e6 / secs).toFixed(3)),
           errors: stats.errors,
           error_reasons: stats.errorReasons,
+          // Counted only by the stream driver: elsewhere a transport failure is still one of `errors`, so a
+          // number here would claim a zero this generator never measured.
+          dropped: streaming ? stats.dropped : null,
+          reconnects: streaming ? stats.reconnects : null,
           latency_ms: streaming
             ? null
             : {
@@ -587,6 +683,7 @@ function report(scenario, opts, elapsedMs, stats) {
     .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
     .map(([reason, n]) => `${reason}=${n}`);
   if (reasons.length > 0) console.log(`   reasons:     ${colors.red(reasons.join('  '))}`);
+  if (streaming) console.log(`   dropped:     ${stats.dropped}  (reconnects ${stats.reconnects})`);
   if (openLoopMode && stats.saturated) {
     console.log(colors.red(`   saturated:   server could not sustain ${opts.rate} rps (in-flight hit ${opts.maxInflight})`));
   }
