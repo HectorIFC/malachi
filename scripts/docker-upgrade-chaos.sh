@@ -6,7 +6,8 @@
 # Two images. OLD is a release, built from its own tree (git archive of OLD_REF; by default the newest release
 # whose code differs from this tree's, see resolve_old_ref). NEW is the working tree with
 # test/support/upgrade_canary.patch applied, so it has what no release has yet: a capability and a cluster
-# flag (upgrade_canary), a metadata command at the next machine version ({:canary_note, topic, note} at 4), a
+# flag (upgrade_canary), a metadata command at the next machine version ({:canary_note, topic, note} at NEW's
+# @code_version, read from the patched tree), a
 # replication cast older builds do not know, and a data format (2) its flag raises the marker to. Every node
 # keeps its volume across every swap.
 #
@@ -19,7 +20,7 @@
 #   so that phase 2 has to bring up a vnode created by a split on the OLD build (#242).
 # Phase 2, roll back before the flip: every node goes back to OLD, still under load. This must succeed.
 # Phase 3, roll forward, finalize, flip, and a rollback that must be refused: every node goes to NEW under
-#   the pin, then the pin is removed node by node, which moves the control plane to version 4, where the
+#   the pin, then the pin is removed node by node, which moves the control plane to NEW's version, where the
 #   canary command applies. The flag is switched on, which raises every data directory to format 2. Node 3 is
 #   then started on OLD: it must exit 78 with the format marker's refusal (#189), its data directory (segment
 #   files and control-plane state) must be byte for byte what it was, and the other two must keep serving.
@@ -165,6 +166,11 @@ prepare_contexts() {
     tar --null -T - -cf - | tar -xf - -C "$NEW_CTX" || abort_run "could not copy the working tree"
 
   apply_to "$NEW_CTX" "$UPGRADE_CANARY_PATCH" "upgrade canary" "NEW"
+  # The machine version the canary command is introduced at, which the control plane reaches once the pin
+  # is removed: read from NEW's own tree, as OLD_PIN is from OLD's, so a release that raises the version
+  # needs only the patch to follow it.
+  NEW_VERSION=$(sed -n 's/^  @code_version \([0-9][0-9]*\)$/\1/p' "$NEW_CTX/lib/malachi/cluster/machine_version.ex")
+  [ -n "$NEW_VERSION" ] || usage_error "cannot read the machine version of the canary tree"
   [ -n "$NEW_PATCH" ] && apply_to "$NEW_CTX" "$NEW_PATCH" "NEW_PATCH" "NEW"
   [ -n "$OLD_PATCH" ] && apply_to "$OLD_CTX" "$OLD_PATCH" "OLD_PATCH" "OLD"
   echo "OLD is $OLD_REF (release $OLD_VERSION, machine version $OLD_PIN: $OLD_RULE); NEW is the working tree with the canary"
@@ -328,7 +334,7 @@ mixed_cluster_checks() {
   reply=$(echo "$out" | sed -n 's/^reply: //p' | tail -1)
   note=$(echo "$out" | sed -n 's/^canary_note: //p' | tail -1)
   if echo "$reply" | grep -qF -e "{:error, {:unknown_command, {:canary_note, 3}, $OLD_PIN}}" \
-    -e "{:error, {:unsupported_command, {:canary_note, 3}, 4, $OLD_PIN}}"; then
+    -e "{:error, {:unsupported_command, {:canary_note, 3}, $NEW_VERSION, $OLD_PIN}}"; then
     echo "the canary command is refused at machine version $OLD_PIN"
   else
     fail "the canary command was not refused at machine version $OLD_PIN: $(echo "$out" | tail -2 | tr '\n' ' ')"
@@ -501,14 +507,14 @@ swap 1 "$NEW_IMAGE" "p3: node 1 to NEW"
 event "p3: finalizing: the pin removed node by node"
 export MALACHI_RA_MACHINE_VERSION=
 for n in 3 2 1; do roll_node "malachi$n" "p3: node $n without the pin"; done
-if await_value 4 30 effective_version 1; then
-  echo "the control plane moved to machine version 4"
+if await_value "$NEW_VERSION" 30 effective_version 1; then
+  echo "the control plane moved to machine version $NEW_VERSION"
 else
-  fail "the control plane did not move to machine version 4 after the pin was removed (at '$(effective_version 1)')"
+  fail "the control plane did not move to machine version $NEW_VERSION after the pin was removed (at '$(effective_version 1)')"
 fi
 reply=$(canary_note 1 2)
-echo "$reply" | grep -q "^:ok$" && echo "the canary command applies at machine version 4" ||
-  fail "the canary command did not apply at machine version 4: $(echo "$reply" | tail -2 | tr '\n' ' ')"
+echo "$reply" | grep -q "^:ok$" && echo "the canary command applies at machine version $NEW_VERSION" ||
+  fail "the canary command did not apply at machine version $NEW_VERSION: $(echo "$reply" | tail -2 | tr '\n' ' ')"
 check_control_plane all
 
 event "p3: switching the canary flag on"

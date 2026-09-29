@@ -86,8 +86,8 @@ defmodule UpgradeCanaryPatchTest do
     patch = File.read!(@patch)
 
     assert patch =~ "+  @capabilities [:upgrade_canary]"
-    assert patch =~ "+  @code_version 4"
-    assert patch =~ "+      {:canary_note, 3} => 4"
+    assert patch =~ "+  @code_version 5"
+    assert patch =~ "+      {:canary_note, 3} => 5"
     assert patch =~ "+  @supported_format 2"
     assert patch =~ "FormatMarker.raise_to(log_data_dir(), 2)"
     added = patch |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "+"))

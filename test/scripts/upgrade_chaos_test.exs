@@ -38,7 +38,7 @@ defmodule UpgradeChaosTest do
     write!(root, "lib/malachi/cluster/machine_version.ex", "defmodule M do\n  @code_version 3\nend\n")
     write!(root, "lib/canary.txt", "released\n")
     write!(root, ".gitignore", "/tmp/\n")
-    write!(root, "test/support/canary.patch", patch("lib/canary.txt", "released", "canary"))
+    write!(root, "test/support/canary.patch", patch("lib/canary.txt", "released", "canary") <> version_patch(4))
 
     git!(root, ["init", "-q"])
     git!(root, ["config", "user.email", "drill@example.com"])
@@ -278,6 +278,30 @@ defmodule UpgradeChaosTest do
       assert output =~ "OLD_REF=v0.14.1 is release 0.14.1; an unsharded run needs 0.14.2 or later"
     end
 
+    test "refuses an OLD whose machine version it cannot read", ctx do
+      git!(ctx.root, ["checkout", "-q", "v0.13.0"])
+      File.write!(Path.join(ctx.root, "mix.exs"), ~s(defmodule P do\n  @version "0.16.3"\nend\n))
+      File.write!(Path.join(ctx.root, "lib/malachi/cluster/machine_version.ex"), "defmodule M do\nend\n")
+      git!(ctx.root, ["commit", "-q", "-am", "0.16.3"])
+      git!(ctx.root, ["tag", "v0.16.3"])
+      git!(ctx.root, ["checkout", "-q", "-"])
+
+      assert {output, 2} = run_drill(ctx, [{"OLD_REF", "v0.16.3"}])
+      assert output =~ "cannot read the machine version of v0.16.3"
+    end
+
+    test "refuses a canary tree whose machine version it cannot read", ctx do
+      # A patch that computes the version rather than stating it: the drill cannot know what the control
+      # plane should reach, so it stops rather than certify against an empty number.
+      File.write!(
+        Path.join(ctx.root, "test/support/canary.patch"),
+        patch("lib/canary.txt", "released", "canary") <> version_patch("Version.current()")
+      )
+
+      assert {output, 2} = run_drill(ctx)
+      assert output =~ "cannot read the machine version of the canary tree"
+    end
+
     test "accepts an unsharded release between the two floors", ctx do
       git!(ctx.root, ["checkout", "-q", "v0.13.0"])
       File.write!(Path.join(ctx.root, "mix.exs"), ~s(defmodule P do\n  @version "0.14.2"\nend\n))
@@ -425,6 +449,19 @@ defmodule UpgradeChaosTest do
       assert output =~ "FAIL: node 3's data directory changed across the refused start"
     end
 
+    test "takes the canary's machine version from NEW's own tree, not a number of its own", ctx do
+      # The next release that raises the machine version moves the canary with it: only the patch changes.
+      File.write!(
+        Path.join(ctx.root, "test/support/canary.patch"),
+        patch("lib/canary.txt", "released", "canary") <> version_patch(7)
+      )
+
+      assert {output, 0} = run_drill(ctx, [{"STUB_EFFECTIVE", "7"}])
+      assert output =~ "the canary command is refused at machine version 3"
+      assert output =~ "the control plane moved to machine version 7"
+      assert output =~ "the canary command applies at machine version 7"
+    end
+
     test "fails when the finalized control plane stays below version 4", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_EFFECTIVE", "3"}])
       assert output =~ "FAIL: the control plane did not move to machine version 4 after the pin was removed (at '3')"
@@ -554,6 +591,20 @@ defmodule UpgradeChaosTest do
     output
   end
 
+  # Raises NEW's machine version the way the real canary patch does, which is where the drill reads it.
+  defp version_patch(version) do
+    """
+    diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
+    --- a/lib/malachi/cluster/machine_version.ex
+    +++ b/lib/malachi/cluster/machine_version.ex
+    @@ -1,3 +1,3 @@
+     defmodule M do
+    -  @code_version 3
+    +  @code_version #{version}
+     end
+    """
+  end
+
   defp patch(path, from, to) do
     """
     diff --git a/#{path} b/#{path}
@@ -572,7 +623,9 @@ defmodule UpgradeChaosTest do
   #                       old_leader: an OLD leader, which does not know it, refuses it
   #   STUB_UNKNOWN_CASTS  what an OLD node's /metrics counts (default 7)
   #   STUB_CONTROL_PLANE  diverged: the checker's control-plane mode reports a divergence
-  #   STUB_EFFECTIVE      the effective machine version after the pin is removed (default 4)
+  #   STUB_EFFECTIVE      the effective machine version after the pin is removed (default 4); also the
+  #                       version the phase 1 refusal names the canary as introduced at, so a test that
+  #                       raises NEW's version in its patch sets this to the same number
   #   STUB_FORMAT         the format the markers report after the flip (default 2)
   #   STUB_REFUSAL        healthy: OLD starts on the directory; flag: it exits 78 for the flag, not the marker
   #   STUB_MD5_CHANGES    1: the data directory's digest differs after the refused start
@@ -666,10 +719,10 @@ defmodule UpgradeChaosTest do
               case "${STUB_MIXED_CANARY:-}" in
                 applied) reply=":ok" ;;
                 old_leader) reply="{:error, {:unknown_command, {:canary_note, 3}, 3}}" ;;
-                *) reply="{:error, {:unsupported_command, {:canary_note, 3}, 4, 3}}" ;;
+                *) reply="{:error, {:unsupported_command, {:canary_note, 3}, ${STUB_EFFECTIVE:-4}, 3}}" ;;
               esac
             elif [ "${STUB_FINAL_CANARY:-}" = refused ]; then
-              reply="{:error, {:unsupported_command, {:canary_note, 3}, 4, 3}}"
+              reply="{:error, {:unsupported_command, {:canary_note, 3}, ${STUB_EFFECTIVE:-4}, 3}}"
             else
               reply=":ok"
             fi
