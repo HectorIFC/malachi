@@ -302,6 +302,7 @@ const POLICY_FIELDS = {
   spread_by: 'attribute',
 };
 
+const U64_MAX = 2n ** 64n - 1n;
 const RESOLUTIONS = ['none', 'resolved', 'unresolved'];
 const ORIGINS = ['global', 'policy', 'unresolved_backstop'];
 
@@ -311,7 +312,13 @@ function putValue(value) {
     const bytes = Buffer.from(value, 'utf8');
     return Buffer.concat([Buffer.from([2]), u32(bytes.length), bytes]);
   }
-  if ((typeof value === 'number' && Number.isInteger(value) && value >= 0) || (typeof value === 'bigint' && value >= 0n)) {
+  // A number is taken only while it is exact: past 2^53 it has already been rounded, and sending it
+  // would set a different bound than the caller wrote. Larger bounds travel as a BigInt, up to the
+  // 2^64 - 1 the wire carries.
+  if (
+    (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) ||
+    (typeof value === 'bigint' && value >= 0n && value <= U64_MAX)
+  ) {
     return Buffer.concat([Buffer.from([1]), u64(value)]);
   }
   throw new Error(`a policy value is null, a non-negative integer or a string, got: ${value}`);

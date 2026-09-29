@@ -54,6 +54,13 @@ for (const c of cases) {
 assert.throws(() => wire.decodeListPoliciesResp(Buffer.from('0000000000', 'hex')), /trailing bytes/);
 assert.throws(() => wire.decodeTopicPolicyResp(Buffer.from('0100000001740007', 'hex')), /unknown code 7/);
 assert.throws(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', -1]]), /non-negative integer/);
+// A number past 2^53 has already lost precision, so it is refused rather than sent rounded, and a BigInt
+// past 2^64 - 1 is refused with the same message rather than the runtime's own range error.
+assert.throws(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', 2 ** 60]]), /non-negative integer/);
+assert.throws(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', 1.5]]), /non-negative integer/);
+assert.throws(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', 2n ** 64n]]), /non-negative integer/);
+assert.doesNotThrow(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', Number.MAX_SAFE_INTEGER]]));
+assert.doesNotThrow(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', 2n ** 64n - 1n]]));
 
 // A budget past 2^53 is carried exactly, as a BigInt.
 const huge = 2n ** 60n;
