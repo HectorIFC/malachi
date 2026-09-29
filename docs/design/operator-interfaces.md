@@ -1146,8 +1146,15 @@ Required corrections to the current stream:
   client reads the stream through `fetch` with a Bearer header (section 11), which sees the status
   and can re-authenticate. **Once the stream is established, an error is an event on it, never a
   change of status**, since the 200 has already been sent and the client keeps the connection.
-- The opaque cursor is the `id:` value on a topic tail. The cursor contract, compare but do not
-  subtract, is exactly the `Last-Event-ID` contract, so resumption is correct by construction.
+- Records on a topic tail carry the topic's opaque cursor, whose contract, compare but do not
+  subtract, is the `Last-Event-ID` contract. Resumption is still not automatic here: the stream
+  multiplexes several tails with the overview deltas, so one tail's cursor says nothing about the
+  others, and the client reads it through `fetch` (section 11), which sends nothing back on its own.
+  The requirement is that a reconnect lets the server resume every subscribed tail without skipping a
+  record that is still stored or replaying one; history retention removed in the meantime arrives as
+  a gap event, below. How it does, what `id:` carries and what the client keeps and sends back, is
+  settled with the stream itself in #230: either the client keeps each tail's cursor and sends them
+  all, or the stream carries a replay id the server maps back to every tail's position.
 - A single sampler broadcasting through `:pg` or a `Registry`, replacing today's per connection
   `GenServer.call` into `Malachi.LogBroker` on every tick. That call is on the hot produce and
   consume path, so today every open tab taxes the data plane once a second, and it does so hardest
