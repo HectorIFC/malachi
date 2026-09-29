@@ -769,6 +769,10 @@ operation:
 | 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit (a **member** ack also heartbeats) |
 | 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
+The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21) require the
+`:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
+[per-topic retention](docs/guides/per-topic-retention.md) guides.
+
 Records on the wire carry **no offset**: position travels only in the opaque cursor, and permissions
 (`:produce`/`:consume`) are enforced per operation against the authenticated session.
 

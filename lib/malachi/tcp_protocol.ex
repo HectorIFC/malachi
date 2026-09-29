@@ -16,11 +16,13 @@ defmodule Malachi.TCPProtocol do
 
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
+  alias Malachi.Cluster.Policy
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
   alias Malachi.Metrics
+  alias Malachi.Policies
   alias Malachi.RateLimiter
   alias Malachi.Wire
 
@@ -116,6 +118,18 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.grant_acl_key() -> grant_acl(correlation_id, payload, session)
       api_key == Wire.revoke_acl_key() -> revoke_acl(correlation_id, payload, session)
       api_key == Wire.list_acls_key() -> list_acls(correlation_id, payload, session)
+      true -> dispatch_policy(api_key, correlation_id, payload, session)
+    end
+  end
+
+  # Admin storage policy operations (#194), each gated by the :admin permission inside.
+  defp dispatch_policy(api_key, correlation_id, payload, session) do
+    cond do
+      api_key == Wire.define_policy_key() -> define_policy(correlation_id, payload, session)
+      api_key == Wire.delete_policy_key() -> delete_policy(correlation_id, payload, session)
+      api_key == Wire.list_policies_key() -> list_policies(correlation_id, payload, session)
+      api_key == Wire.bind_topic_policy_key() -> bind_topic_policy(correlation_id, payload, session)
+      api_key == Wire.get_topic_policy_key() -> get_topic_policy(correlation_id, payload, session)
       true -> Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
@@ -279,6 +293,72 @@ defmodule Malachi.TCPProtocol do
       Wire.encode_ok(correlation_id, Wire.encode_list_acls_resp(Malachi.Auth.list_acls(username)))
     end)
   end
+
+  # --- admin storage policies: thin adapters over Malachi.Policies, which validates, audits and renders
+  # every refusal (`Malachi.Policies.reason_string/1`), gated by the :admin permission. ---
+
+  defp define_policy(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {name, fields} = Wire.decode_define_policy_req(payload)
+      policy_reply(correlation_id, Policies.define(name, fields, session.username), <<>>)
+    end)
+  end
+
+  defp delete_policy(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {name, force} = Wire.decode_delete_policy_req(payload)
+      policy_reply(correlation_id, Policies.delete(name, session.username, force: force), <<>>)
+    end)
+  end
+
+  defp list_policies(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      :ok = Wire.decode_list_policies_req(payload)
+
+      case Policies.list() do
+        {:ok, policies} ->
+          listed =
+            policies |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(fn {name, policy} -> {name, Policy.to_pairs(policy)} end)
+
+          Wire.encode_ok(correlation_id, Wire.encode_list_policies_resp(listed))
+
+        error ->
+          policy_reply(correlation_id, error, <<>>)
+      end
+    end)
+  end
+
+  defp bind_topic_policy(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {topic, name} = Wire.decode_bind_topic_policy_req(payload)
+      policy_reply(correlation_id, Policies.bind(topic, name, session.username), <<>>)
+    end)
+  end
+
+  defp get_topic_policy(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      case Policies.topic_policy(Wire.decode_get_topic_policy_req(payload)) do
+        {:ok, topic_policy} ->
+          resp = %{
+            topic: topic_policy.topic,
+            policy: topic_policy.policy,
+            resolution: topic_policy.resolution,
+            definition: topic_policy.definition && Policy.to_pairs(topic_policy.definition),
+            effective: Policies.effective_pairs(topic_policy)
+          }
+
+          Wire.encode_ok(correlation_id, Wire.encode_topic_policy_resp(resp))
+
+        error ->
+          policy_reply(correlation_id, error, <<>>)
+      end
+    end)
+  end
+
+  defp policy_reply(correlation_id, :ok, ok_payload), do: Wire.encode_ok(correlation_id, ok_payload)
+
+  defp policy_reply(correlation_id, {:error, reason}, _ok_payload),
+    do: Wire.encode_error(correlation_id, Policies.reason_string(reason))
 
   # Parses the wire operation string and runs `fun` with the operation atom, or answers :invalid_operation.
   defp apply_acl(correlation_id, operation, fun) do

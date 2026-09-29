@@ -216,6 +216,28 @@ defmodule Malachi.Cluster.DSRSMTest do
     end
   end
 
+  describe "topics_bound_to/2 across shards" do
+    test "collects the topics bound to a policy from every vnode, sorted" do
+      dsrsm = with_vnodes([{:a, 4}, {:b, 8}, {:c, 12}, {:d, 15}])
+
+      dsrsm =
+        Enum.reduce(0..19, dsrsm, fn index, dsrsm ->
+          topic = "topic-#{String.pad_leading(to_string(index), 2, "0")}"
+          {dsrsm, {:ok, _root}} = DSRSM.command(dsrsm, topic, {:create_topic, topic, 4})
+          policy = if rem(index, 3) == 0, do: "p", else: "q"
+          {dsrsm, :ok} = DSRSM.command(dsrsm, topic, {:bind_topic_policy, topic, policy})
+          dsrsm
+        end)
+
+      owners = for index <- 0..19, do: elem(DSRSM.vnode_for(dsrsm, "topic-#{index}"), 1)
+      assert length(Enum.uniq(owners)) > 1, "the topics must spread over several vnodes for this to test anything"
+
+      expected = for index <- 0..19, rem(index, 3) == 0, do: "topic-#{String.pad_leading(to_string(index), 2, "0")}"
+      assert DSRSM.topics_bound_to(dsrsm, "p") == expected
+      assert DSRSM.topics_bound_to(dsrsm, "ghost") == []
+    end
+  end
+
   describe "determinism" do
     test "the same command sequence yields identical state" do
       build = fn ->

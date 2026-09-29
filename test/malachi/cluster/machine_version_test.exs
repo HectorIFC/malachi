@@ -10,6 +10,8 @@ defmodule Malachi.Cluster.MachineVersionTest do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Test.StuckRaMember
 
+  doctest MachineVersion
+
   @table %{{:old, 2} => 0, {:current, 1} => 1, {:future, 2} => 2}
 
   defp meta(effective), do: %{machine_version: effective, index: 1, term: 1, system_time: 0}

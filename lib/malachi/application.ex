@@ -1133,6 +1133,61 @@ defmodule Malachi.Application do
     end)
   end
 
+  @doc """
+  The topics bound to the storage policy `name`, asked of whoever owns the truth about them, for
+  `Malachi.Policies.delete/3`.
+
+    * Clustered: the vnodes themselves, routed by the topology of record in the durable ring store
+      (`Malachi.Cluster.ReplicatedDSRSM.topics_bound_to_stable/3`), or the one metadata cluster when
+      the control plane is not sharded. Never this node's cached copy of the metadata, for the reason
+      the orphan sweep gives (#249): it misses a vnode this node has not reached and a bind made
+      through another node since its last refresh.
+    * Single node: every data-plane broker's own metadata, which is in memory and IS the truth.
+  """
+  @spec bound_topics(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def bound_topics(name) do
+    case Application.get_env(:malachi, :log_cluster) do
+      nil -> local_bound_topics(name)
+      cluster -> clustered_bound_topics(cluster, configured_nodes(), name)
+    end
+  end
+
+  # Every shard must answer: one that does not may hold the binding.
+  defp local_bound_topics(name) do
+    0..(DataPlaneRouter.shard_count() - 1)
+    |> Enum.map(&DataPlaneRouter.shard_name/1)
+    |> Enum.reduce_while({:ok, []}, fn shard, {:ok, acc} ->
+      case shard_bound_topics(shard, name) do
+        {:ok, topics} -> {:cont, {:ok, topics ++ acc}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, topics} -> {:ok, topics |> Enum.sort() |> Enum.dedup()}
+      error -> error
+    end
+  end
+
+  defp shard_bound_topics(shard, name) do
+    {:ok, BrokerServer.topics_bound_to(shard, name)}
+  catch
+    :exit, _reason -> {:error, {:shard_unavailable, shard}}
+  end
+
+  # An unsharded control plane has no topology of record; its one cluster owns every topic.
+  defp clustered_bound_topics(cluster, nodes, name) do
+    ring_server_id = {@log_ring, RaCluster.member_node(nodes)}
+
+    read_topology = fn ->
+      case topology_of_record(ring_server_id) do
+        {:ok, nil} -> {:ok, single_cluster_topology(cluster, nodes)}
+        other -> other
+      end
+    end
+
+    ReplicatedDSRSM.topics_bound_to_stable(read_topology, name, @orphan_owner_timeout_ms)
+  end
+
   defp topology_of_record(ring_server_id) do
     case RingServer.topology(ring_server_id, @orphan_owner_timeout_ms) do
       {:ok, :none} -> {:ok, nil}

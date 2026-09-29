@@ -65,6 +65,16 @@ defmodule Malachi.BrokerServerTest do
     end
   end
 
+  # Answers the parked waiter of `topic` through its own timeout path, now, instead of waiting for its
+  # timer. A test that asserts a waiter is still parked after a produce used to give it a short timer and
+  # race it: on a loaded runner the produce outlasted the timer and the waiter was gone before the
+  # assertion. With a long timer and this, what is tested (the timeout answers, empty, with its skips)
+  # does not depend on how long the produce took.
+  defp fire_longpoll_timeout(server, topic) do
+    [waiter] = Enum.filter(:sys.get_state(server).waiters, &(&1.topic == topic))
+    send(server, {:longpoll_timeout, waiter.ref})
+  end
+
   describe "long-poll consume" do
     test "consume returns immediately when wait_ms is 0", %{tmp_dir: directory} do
       {server, _root} = with_topic(directory)
@@ -93,14 +103,16 @@ defmodule Malachi.BrokerServerTest do
       {:ok, _} = BrokerServer.create_topic(server, "events", 4)
       {:ok, _} = BrokerServer.create_topic(server, "other", 4)
 
-      events_task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 300) end)
-      other_task = Task.async(fn -> BrokerServer.consume(server, "other", %{}, 100, 300) end)
+      events_task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
+      other_task = Task.async(fn -> BrokerServer.consume(server, "other", %{}, 100, 5_000) end)
       wait_for_park(server, 2)
 
       {:ok, _} = BrokerServer.produce(server, "events", [record("a", "k0")])
 
       # the events waiter wakes with data; the other waiter is untouched and times out empty
       assert {[%{value: "a"}], _, []} = Task.await(events_task)
+      assert [%{topic: "other"}] = :sys.get_state(server).waiters
+      fire_longpoll_timeout(server, "other")
       assert {[], _, []} = Task.await(other_task, 1_000)
     end
   end
@@ -190,12 +202,13 @@ defmodule Malachi.BrokerServerTest do
           if Malachi.Keyspace.within?(position, right.key_start, right.key_end), do: key
         end)
 
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{}, 100, 300, [left_id]) end)
+      task = Task.async(fn -> BrokerServer.consume(server, topic, %{}, 100, 5_000, [left_id]) end)
       wait_for_park(server)
       {:ok, _placements} = BrokerServer.produce(server, topic, [record("v", key)])
 
-      # Still parked after the produce's wake pass, then answered empty by its own timer.
+      # Still parked after the produce's wake pass, then answered empty by its own timeout.
       assert length(:sys.get_state(server).waiters) == 1
+      fire_longpoll_timeout(server, topic)
       assert {[], %{}, []} = Task.await(task, 1_000)
     end
 
@@ -217,9 +230,10 @@ defmodule Malachi.BrokerServerTest do
       {server, topic, left_id} = child_with_expired_ancestor(directory)
 
       # Scoped to one child, so the page is exactly one range's worth of progress.
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 200, [left_id]) end)
+      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 5_000, [left_id]) end)
       wait_for_park(server)
       assert [%{positions: %{^left_id => {1, 0}}, skips: [%Skip{offsets: 3}]}] = :sys.get_state(server).waiters
+      fire_longpoll_timeout(server, topic)
 
       assert {[], %{^left_id => {1, 0}}, [%Skip{source: :ancestor, offsets: 3}]} = Task.await(task, 1_000)
     end
@@ -1144,6 +1158,34 @@ defmodule Malachi.BrokerServerTest do
         assert {:ok, _placements} = BrokerServer.produce(server, "events", [record("b", "k1")])
         assert [%{name: "events"}] = BrokerServer.topics_overview(server)
       end)
+    end
+  end
+
+  describe "topic policy binding" do
+    test "binds through the topic's vnode, reads the name back, and lists the topics bound to a policy", %{
+      tmp_dir: tmp_dir
+    } do
+      {server, _root} = with_topic(tmp_dir)
+      {:ok, _root} = BrokerServer.create_topic(server, "audit", 4)
+
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
+      assert BrokerServer.topic_policy_name(server, "ghost") == {:error, :no_such_topic}
+      assert :ok = BrokerServer.bind_topic_policy(server, "events", "durable")
+      assert :ok = BrokerServer.bind_topic_policy(server, "audit", "durable")
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, "durable"}
+      assert BrokerServer.topics_bound_to(server, "durable") == ["audit", "events"]
+
+      assert :ok = BrokerServer.bind_topic_policy(server, "events", nil)
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
+      assert BrokerServer.topics_bound_to(server, "durable") == ["audit"]
+    end
+
+    test "answers the control plane's refusal and leaves the binding alone", %{tmp_dir: tmp_dir} do
+      {server, _root} = with_topic(tmp_dir)
+
+      assert {:error, :no_such_topic} = BrokerServer.bind_topic_policy(server, "ghost", "durable")
+      assert {:error, :invalid_policy} = BrokerServer.bind_topic_policy(server, "events", "")
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
     end
   end
 end

@@ -242,6 +242,22 @@ defmodule Malachi.I18n do
       "pt_BR" => "✅ Sistema de auditoria iniciado (retenção: %{retention_days} dias)",
       "en_US" => "✅ Audit log system started (retention: %{retention_days} days)"
     },
+    policy_defined: %{
+      "pt_BR" => "📜 Política de armazenamento %{policy} definida por %{actor}",
+      "en_US" => "📜 Storage policy %{policy} defined by %{actor}"
+    },
+    policy_deleted: %{
+      "pt_BR" => "🗑️ Política de armazenamento %{policy} removida por %{actor}",
+      "en_US" => "🗑️ Storage policy %{policy} deleted by %{actor}"
+    },
+    topic_policy_bound: %{
+      "pt_BR" => "🔗 Tópico %{topic} vinculado à política %{policy} por %{actor}",
+      "en_US" => "🔗 Topic %{topic} bound to policy %{policy} by %{actor}"
+    },
+    topic_policy_unbound: %{
+      "pt_BR" => "🔗 Tópico %{topic} desvinculado da sua política por %{actor}",
+      "en_US" => "🔗 Topic %{topic} detached from its policy by %{actor}"
+    },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",
       "en_US" => "📝 Audit event logged: %{event_type}"

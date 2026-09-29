@@ -36,6 +36,7 @@ defmodule Malachi.Broker do
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.Policy
   alias Malachi.Cluster.PolicyStore
   alias Malachi.Keyspace
   alias Malachi.Log.Record
@@ -203,6 +204,29 @@ defmodule Malachi.Broker do
   def create_topic(%__MODULE__{} = broker, name, keyspace_bits) do
     apply_metadata(broker, {:create_topic, name, keyspace_bits})
   end
+
+  @doc """
+  Binds `topic` to the storage policy NAME `policy_name`, or detaches it with `nil`, through the topic's
+  own vnode (`{:bind_topic_policy, topic, name}`, machine version 4). Whether a definition backs the
+  name is the caller's check (`Malachi.Policies.bind/3`): the vnode cannot read the policy store.
+  """
+  @spec bind_topic_policy(t(), Metadata.topic_name(), Metadata.policy_name() | nil) :: {t(), term()}
+  def bind_topic_policy(%__MODULE__{} = broker, topic, policy_name) do
+    apply_metadata(broker, {:bind_topic_policy, topic, policy_name})
+  end
+
+  @doc "The policy NAME `topic` is bound to (`nil` for none), or `{:error, :no_such_topic}`."
+  @spec topic_policy_name(t(), Metadata.topic_name()) :: {:ok, Metadata.policy_name() | nil} | {:error, :no_such_topic}
+  def topic_policy_name(%__MODULE__{} = broker, topic) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
+      nil -> {:error, :no_such_topic}
+      _topic -> {:ok, DSRSM.topic_policy_name(broker.dsrsm, topic)}
+    end
+  end
+
+  @doc "The topics bound to the policy `name`, sorted, across every vnode this broker sees."
+  @spec topics_bound_to(t(), Metadata.policy_name()) :: [Metadata.topic_name()]
+  def topics_bound_to(%__MODULE__{} = broker, name), do: DSRSM.topics_bound_to(broker.dsrsm, name)
 
   @doc """
   Routes each record to the active range that owns its key and replicates the batch to that
@@ -1367,10 +1391,8 @@ defmodule Malachi.Broker do
     broker.dsrsm
     |> DSRSM.topic_policy_name(topic_of_range(range_id))
     |> broker.policy_fun.()
-    |> case do
-      %{spread_by: spread_by} -> spread_by
-      _no_policy_spread_by -> broker.spread_by
-    end
+    |> Policy.effective_spread_by(broker.spread_by)
+    |> elem(0)
   end
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)

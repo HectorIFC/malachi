@@ -1,0 +1,95 @@
+# Per-topic retention
+
+[Operations](operations.md) sets one retention for the whole cluster, from the environment. A **storage
+policy** overrides it for the topics you choose, at runtime, without a restart.
+
+## Policies and bindings
+
+A policy is a named, cluster-wide definition. It can set:
+
+| field | type | meaning |
+|---|---|---|
+| `retention.max_age_ms` | non-negative integer | a sealed segment older than this expires |
+| `retention.max_bytes` | non-negative integer | per range, the oldest sealed segments expire until the range fits |
+| `spread_by` | broker attribute key | the failure domain new segments of the topic are spread across |
+
+A topic is **bound** to a policy by name. One policy can serve any number of topics, and changing it
+changes all of them at once. Definitions live in their own `ra` cluster; which policy a topic uses is the
+topic's own state, and travels with it when a vnode split moves it.
+
+## Inherit, off, and zero are three different things
+
+Each field of a policy is in one of three states, and every surface keeps them apart:
+
+- **Left out**: the topic inherits the cluster's global value (`MALACHI_RETENTION_MAX_AGE_MS`,
+  `MALACHI_RETENTION_MAX_BYTES`, `MALACHI_LOG_SPREAD_BY`).
+- **Off** (`null`, `--off`): that rule does not apply to the policy's topics, whatever the global says.
+- **Zero** is a real budget. `retention.max_bytes=0` expires every sealed segment the rule can see.
+
+## Managing policies
+
+Four surfaces, all going through the same checks and the same audit trail:
+
+```bash
+# mix task, over Erlang distribution
+mix malachi.policy define short --set retention.max_age_ms=3600000 --off retention.max_bytes
+mix malachi.policy bind clicks short
+mix malachi.policy get clicks
+mix malachi.policy list
+mix malachi.policy unbind clicks
+mix malachi.policy delete short
+
+# node script, over the binary protocol
+node policy.js define short --set retention.max_age_ms=3600000
+node policy.js bind clicks short
+```
+
+On the dashboard: `GET /policies`, `PUT /policies/:name` with `{"fields": {"retention.max_age_ms": 3600000}}`,
+`DELETE /policies/:name` (add `?force=true`, see below), and `GET`, `PUT` (`{"policy": "short"}`) and
+`DELETE` on `/topics/:name/policy`. Every route needs the `admin` permission and spends the session's own
+request budget. On the wire, api keys 17 to 21 (`define_policy`, `delete_policy`, `list_policies`,
+`bind_topic_policy`, `get_topic_policy`), also `admin` only.
+
+Each change is written to the audit log (`policy_defined`, `policy_deleted`, `topic_policy_bound`) with
+the user who made it, or `cli@<node>` for the mix task.
+
+## Reading back what a topic actually keeps
+
+`get` answers the question an operator actually has: what applies to this topic, and why.
+
+```
+topic	clicks
+policy	short
+retention.max_age_ms	3600000	(policy)
+retention.max_bytes	off	(policy)
+spread_by	rack	(global)
+```
+
+Each value comes from the same function the retention sweep applies, so what `get` prints is what the
+data sees. The origin is `policy`, `global`, or `unresolved_backstop` (below).
+
+## A binding to a name nothing defines
+
+A topic bound to a name the store does not hold **expires nothing**: the name exists because someone
+wanted something other than the default, and the usual something is to keep data longer. So:
+
+- `bind` refuses a name the store does not define (`no_such_policy`).
+- `delete` refuses a policy a topic is still bound to (`policy_in_use: <topics>`), and `--force` (or
+  `?force=true`, or the wire's force byte) deletes it anyway.
+
+The delete asks every vnode which topics are bound to the policy, and when one of them does not answer, or
+a vnode split is moving topics between them, it is refused (`bindings_unavailable`) rather than
+allowed: retry it. Both checks are still made before the change is submitted, so a bind racing a delete
+can leave a topic bound to a name that is gone. `get` then shows `(undefined: this topic holds its data)`, the topic is
+counted in `malachi_retention_unresolved_policy_sweeps_total{topic}`, and the only bound that applies to
+it is `MALACHI_RETENTION_UNRESOLVED_POLICY_MAX_AGE_MS` (see [Operations](operations.md)).
+
+## During a rolling upgrade
+
+Binding a topic needs control-plane machine version 4; defining and deleting policies needs 3. Until
+every node runs a release that implements version 4 and the version pin is lifted, a bind is refused on
+every node alike, and each surface says to finish the rolling upgrade. Policies can be defined ahead of
+time and bound once the upgrade is finalized.
+
+A field added to policies by a later release is refused the same way (`unsupported_policy_field`) until
+the cluster reaches the version that introduced it.
