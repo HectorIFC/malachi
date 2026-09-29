@@ -150,7 +150,11 @@ anyone can check out.
 ## Reading the output
 
 `errors` is the first number to look at: a throughput figure taken from a run with errors is a
-measurement of the failure, not of the server. `--warmup` excludes the opening seconds from the
+measurement of the failure, not of the server. A stream run also reports `dropped` and `reconnects`: a
+stream connection that is lost is counted there rather than in `errors`, and reconnected and
+resubscribed within the window as the Elixir generator does, so a stream run with no errors can still
+have been losing connections. Outside the stream scenario those two fields are null, since a lost
+connection there is counted in `errors` instead, once for every request that fails on it. `--warmup` excludes the opening seconds from the
 statistics, which matters because the first connections pay for topic creation and JIT warmup.
 
 `--self-test` validates the latency histogram against a brute-force reference without a server, if
