@@ -28,6 +28,16 @@ class MalachiError extends Error {
   }
 }
 
+// A failure of the connection itself (closed, reset, unreadable, or never there), as opposed to a refusal
+// the server answered with. Flagged so a caller can tell a dropped connection from a server error without
+// matching on messages: the load generator counts the first as a drop and reconnects, the second as an
+// error under its reason.
+function transportError(reason) {
+  const err = new MalachiError(reason);
+  err.transport = true;
+  return err;
+}
+
 // The server answers :not_owner when a member request is routed to a coordinator that no longer leads the
 // topic's vnode (a transient failover window). It is retryable: the server re-resolves the current leader
 // on the next attempt, so the member CLIs back off and retry rather than failing.
@@ -40,6 +50,10 @@ function isNotOwner(err) {
 // once the split completes and the ring moves), so the CLIs back off and retry against the new location.
 function isMigrating(err) {
   return err instanceof MalachiError && err.message === 'migrating';
+}
+
+function isTransport(err) {
+  return err instanceof MalachiError && err.transport === true;
 }
 
 class MalachiClient {
@@ -81,14 +95,17 @@ class MalachiClient {
     });
   }
 
+  // Clear the socket reference as well, so a request or subscribe issued after the close rejects as
+  // 'not connected' instead of writing to a destroyed socket and waiting on an answer that never comes.
   _onClose() {
-    this._failAll(new MalachiError('connection closed by server'));
+    this.socket = null;
+    this._failAll(transportError('connection closed by server'));
   }
 
   // A post-connect socket error surfaces the real reason to in-flight work. The 'close' that always follows
   // then runs _onClose, which is a no-op because _failAll already drained the maps.
   _onError(err) {
-    this._failAll(new MalachiError(err.message));
+    this._failAll(transportError(err.message));
   }
 
   // Fails every pending request and notifies every subscription, then clears both maps. Idempotent: a second
@@ -125,7 +142,7 @@ class MalachiClient {
       const socket = this.socket;
       this.socket = null;
       if (socket) socket.destroy();
-      this._failAll(new MalachiError(err.message));
+      this._failAll(transportError(err.message));
     }
   }
 
@@ -156,7 +173,7 @@ class MalachiClient {
 
   // Sends one request and resolves with the ok payload (or rejects with the server's reason).
   _request(apiKey, payload, timeout = this.timeout) {
-    if (!this.socket || this.closed) return Promise.reject(new MalachiError('not connected'));
+    if (!this.socket || this.closed) return Promise.reject(transportError('not connected'));
     const correlationId = this._nextId();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -222,7 +239,7 @@ class MalachiClient {
   // the client still sees only records + an opaque cursor. Without it, a whole-group subscription.
   async subscribe(topic, { group, member = null, window = 100, max = 100, onRecords, onError } = {}) {
     if (typeof onRecords !== 'function') throw new TypeError('subscribe requires an onRecords callback');
-    if (!this.socket || this.closed) throw new MalachiError('not connected');
+    if (!this.socket || this.closed) throw transportError('not connected');
     const correlationId = this._nextId();
     this.subscriptions.set(correlationId, { onRecords, onError });
     const payload = wire.encodeSubscribeReq(topic, group, member, window, max);
@@ -234,7 +251,7 @@ class MalachiClient {
   // `member` set it also heartbeats the coordinator and refreshes the member's ranges; an ack with a
   // null cursor and count 0 is a pure heartbeat that closes the idle-member liveness gap.
   streamAck(topic, group, member, cursor, count) {
-    if (!this.socket || this.closed) throw new MalachiError('not connected');
+    if (!this.socket || this.closed) throw transportError('not connected');
     const payload = wire.encodeStreamAckReq(topic, group, member, cursor, count);
     this.socket.write(wire.encodeRequest(wire.API.streamAck, this._nextId(), payload));
   }
@@ -280,6 +297,13 @@ class MalachiClient {
     return wire.decodeListAclsResp(body);
   }
 
+  // Tears the connection down at once, where close() ends it gracefully: a connect or authentication still
+  // in flight is abandoned, and a pending request rejects (the 'close' that follows runs _onClose) instead
+  // of holding its timer, and with it the process, until it times out.
+  destroy() {
+    if (this.socket) this.socket.destroy();
+  }
+
   close() {
     this.closed = true;
     if (this.socket) {
@@ -290,4 +314,4 @@ class MalachiClient {
   }
 }
 
-module.exports = { MalachiClient, MalachiError, isNotOwner, isMigrating };
+module.exports = { MalachiClient, MalachiError, isNotOwner, isMigrating, isTransport };

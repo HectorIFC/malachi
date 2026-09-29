@@ -9,6 +9,7 @@ defmodule LoadtestJsTest do
 
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
+  alias Malachi.Test.SubscribeResetStub
 
   @moduletag :tmp_dir
 
@@ -28,11 +29,12 @@ defmodule LoadtestJsTest do
 
   # `stderr: true` folds the generator's error output into the returned string, for the cases that are
   # about what it refuses. The default keeps stderr out, so a run's JSON is the whole of stdout.
-  # `user:` and `pass:` run it as someone other than admin.
+  # `user:` and `pass:` run it as someone other than admin; `port:` points it at a server other than the
+  # test one.
   defp run_js(ctx, args, opts \\ []) do
     env = [
       {"MALACHI_HOST", "127.0.0.1"},
-      {"MALACHI_PORT", Integer.to_string(TCPAcceptorPool.port())},
+      {"MALACHI_PORT", Integer.to_string(Keyword.get_lazy(opts, :port, &TCPAcceptorPool.port/0))},
       {"MALACHI_USER", Keyword.get(opts, :user, "admin")},
       {"MALACHI_PASS", Keyword.get(opts, :pass, "admin123")}
     ]
@@ -221,6 +223,103 @@ defmodule LoadtestJsTest do
     Malachi.Auth.add_user(user, pass, permissions)
     on_exit(fn -> Malachi.Auth.remove_user(user) end)
     {user, pass}
+  end
+
+  describe "dropped stream connections" do
+    # Issue #218, mirrored from the Elixir generator: a stream connection lost before or after its
+    # subscribe went out used to end the worker, counted in `errors` or (when the socket had already
+    # closed) not at all, where the Elixir generator counts a drop and resubscribes.
+
+    test "a stream worker whose subscribe send fails counts the drop and resubscribes", ctx do
+      report = stream_on_reset_stub(ctx, :reconnect)
+
+      assert report["dropped"] == 1, "the failed subscribe was not counted as a drop"
+      assert report["reconnects"] == 1, "the worker should reconnect and resubscribe, not end"
+      assert report["errors"] == 0, "a transport failure is a drop, not a server error"
+      assert report["error_reasons"] == %{}
+    end
+
+    test "a stream worker that cannot reconnect after a failed subscribe gives up without crashing", ctx do
+      report = stream_on_reset_stub(ctx, :give_up)
+
+      assert report["dropped"] == 1, "the failed subscribe was not counted as a drop"
+      assert report["reconnects"] == 0
+      assert report["errors"] == 0
+    end
+
+    test "a stream connection lost after its subscribe went out counts the drop and resubscribes", ctx do
+      # A FIN reaches the client as 'close' and a reset as 'error', so both of the client's paths for a
+      # connection lost on a live subscription are covered.
+      for how <- [:close, :reset] do
+        report = stream_on_reset_stub(ctx, {:mid_stream, how}, 1)
+
+        assert report["dropped"] == 1, "#{how}: the lost stream connection was not counted as a drop"
+        assert report["reconnects"] == 1, "#{how}: the worker should reconnect and resubscribe, not end"
+        assert report["errors"] == 0, "#{how}: a transport failure is a drop, not a server error"
+      end
+    end
+
+    test "a reconnect that hangs at the deadline is abandoned instead of stretching the run", ctx do
+      # The rates divide by the time the run took, so waiting out a stalled authentication (30s) would report
+      # a fraction of the real rate and count pushes that arrived after the window.
+      report = stream_on_reset_stub(ctx, :stall_reconnect)
+
+      assert report["dropped"] == 1
+      assert report["reconnects"] == 0
+      assert report["duration_s"] < 1.5, "the run waited on the stalled reconnect past its 1s window"
+    end
+
+    # Without the fix this never finishes on its own: the refused reconnects keep sockets open, the process
+    # outlives its report, and run_js waits on it until the test times out.
+    @tag timeout: 30_000
+    test "a reconnect whose authentication is refused leaves no socket holding the process open", ctx do
+      report = stream_on_reset_stub(ctx, :refuse_reconnect_auth)
+
+      assert report["dropped"] == 1
+      assert report["reconnects"] == 0
+      assert report["errors"] == 0, "a refused reconnect is not a stream error"
+    end
+
+    test "a refused subscription stays an error under its reason, not a drop", ctx do
+      {user, pass} = add_user([:produce])
+      args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 0 --topic) ++ [topic()]
+
+      assert {output, 0} = run_js(ctx, args, user: user, pass: pass)
+      report = Jason.decode!(output)
+
+      assert report["errors"] == 2, "each worker subscribed once and each refusal counts once"
+      assert report["error_reasons"] == %{"permission_denied" => 2}
+      assert report["dropped"] == 0
+      assert report["reconnects"] == 0
+    end
+
+    test "a healthy stream run that stays idle reports no drop", ctx do
+      args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 0 --topic) ++ [topic()]
+
+      assert {output, 0} = run_js(ctx, args)
+      assert %{"dropped" => 0, "reconnects" => 0, "errors" => 0} = Jason.decode!(output)
+    end
+
+    test "outside the stream scenario the two counters are null, since only the stream driver counts them", ctx do
+      args = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
+
+      assert {output, 0} = run_js(ctx, args)
+      assert %{"dropped" => nil, "reconnects" => nil} = Jason.decode!(output)
+    end
+  end
+
+  # A stream run against Malachi.Test.SubscribeResetStub, returning the decoded report. The connections open
+  # one at a time and nothing is prepopulated, which is what the stub's ordering relies on: this generator
+  # prepopulates on a connection of its own, which would take the stub's second place.
+  defp stream_on_reset_stub(ctx, mode, connections \\ 2) do
+    args =
+      ~w(--scenario stream --json --connections #{connections} --connect-strategy bounded --connect-concurrency 1) ++
+        ~w(--duration 1 --warmup 0 --prepopulate 0 --topic subscribe_reset)
+
+    SubscribeResetStub.with_stub(mode, fn port ->
+      assert {output, 0} = run_js(ctx, args, port: port)
+      Jason.decode!(output)
+    end)
   end
 
   describe "connections across the warmup" do
