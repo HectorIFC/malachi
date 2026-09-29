@@ -47,6 +47,85 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
     manager
   end
 
+  describe "resuming this node's vnode members" do
+    import ExUnit.CaptureLog
+
+    defp next_message do
+      receive do
+        message -> message
+      after
+        1_000 -> flunk("no message from the manager")
+      end
+    end
+
+    # A stopped local member reads as not hosted, so nothing about leadership or coordinators can see it:
+    # the resume has to come first on every pass.
+    defp start_resuming(outcomes_agent) do
+      test_pid = self()
+
+      {:ok, manager} =
+        Manager.start_link(
+          placement: fn -> {:ok, [:placement]} end,
+          resume: fn placement ->
+            send(test_pid, {:resume, placement})
+            Agent.get(outcomes_agent, & &1)
+          end,
+          leading: fn _placement ->
+            send(test_pid, :leading)
+            []
+          end,
+          spawn: fn _vnode_id -> spawn(fn -> :ok end) end,
+          stop: fn _pid -> :ok end,
+          interval: 60_000
+        )
+
+      manager
+    end
+
+    test "resumes before it works out which vnodes this node leads, on every pass" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+
+      # Taken in arrival order, not matched anywhere in the mailbox as `assert_receive` would: both seams
+      # send from the manager, so the order they arrive in is the order they ran in.
+      assert next_message() == {:resume, [:placement]}
+      assert next_message() == :leading
+      Manager.reconcile_now(manager)
+      assert next_message() == {:resume, [:placement]}
+      assert next_message() == :leading
+    end
+
+    test "logs every member it brought back" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      # The first pass runs on its own right after start; the answers change only once it is done.
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> [{:vn_a, :ok}] end)
+
+      log = capture_log([level: :info], fn -> Manager.reconcile_now(manager) end)
+      assert log =~ "resumed this node's member of vnode :vn_a"
+    end
+
+    test "logs a member that cannot be resumed once while it keeps failing, and again after it recovers" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      # The first pass runs on its own right after start; the answers change only once it is done.
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+
+      first = capture_log(fn -> Manager.reconcile_now(manager) end)
+      assert first =~ "could not resume this node's member of vnode :vn_a: :corrupt"
+
+      again = capture_log(fn -> Manager.reconcile_now(manager) end)
+      refute again =~ "could not resume"
+
+      Agent.update(outcomes, fn _ -> [] end)
+      Manager.reconcile_now(manager)
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "could not resume this node's member"
+    end
+  end
+
   test "starts a coordinator handle for each led vnode on startup" do
     {:ok, leading} = Agent.start_link(fn -> {:ok, [:a, :b]} end)
     manager = start_manager(leading)

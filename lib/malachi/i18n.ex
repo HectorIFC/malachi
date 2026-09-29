@@ -581,6 +581,14 @@ defmodule Malachi.I18n do
       "en_US" =>
         "the vnode placement could not be read (%{reason}); keeping the coordinators this node already runs until it can be read again"
     },
+    vnode_member_resumed: %{
+      "pt_BR" => "membro deste nó no vnode %{vnode} retomado a partir do log persistido",
+      "en_US" => "resumed this node's member of vnode %{vnode} from its persisted log"
+    },
+    vnode_member_resume_failed: %{
+      "pt_BR" => "não foi possível retomar o membro deste nó no vnode %{vnode}: %{reason}",
+      "en_US" => "could not resume this node's member of vnode %{vnode}: %{reason}"
+    },
     vnode_placement_recovered: %{
       "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó",
       "en_US" => "the vnode placement is readable again; reconciling this node's coordinators"
