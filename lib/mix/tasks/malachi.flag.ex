@@ -27,6 +27,7 @@ defmodule Mix.Tasks.Malachi.Flag do
 
   alias Malachi.CLI.Options
   alias Malachi.CLI.Rpc
+  alias Malachi.Cluster.MachineVersion
 
   @switches [node: :string, cookie: :string, list: :boolean]
 
@@ -112,10 +113,8 @@ defmodule Mix.Tasks.Malachi.Flag do
       "Upgrade them, or take them out of MALACHI_LOG_NODES, then run this again"
   end
 
-  defp flag_error({:unsupported_command, _key, introduced, effective}) do
-    "the control plane is still at machine version #{effective} and this command needs #{introduced}; " <>
-      "finish the rolling upgrade (see the operations guide on the machine version pin)"
-  end
+  defp flag_error({:unsupported_command, _key, introduced, effective}),
+    do: MachineVersion.upgrade_pending_message(introduced, effective)
 
   defp flag_error(:timeout), do: "the flag store did not answer in time (is a quorum of nodes up?)"
   defp flag_error(reason), do: inspect(reason)
