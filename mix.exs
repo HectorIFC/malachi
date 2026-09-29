@@ -316,6 +316,13 @@ defmodule Malachi.MixProject do
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
       # MALACHI_CLUSTER_STRATEGY (gossip/kubernetes/epmd). Absent => single-node, no distribution.
       {:libcluster, "~> 3.5"},
+      # HTTP server for the operator console (Malachi.Console.Endpoint). The legacy dashboard parses
+      # HTTP by hand on :gen_tcp and closes the socket after every response; a bundled single page
+      # application needs keep alive, conditional requests and content negotiation, which Bandit and
+      # Plug provide with bounded, configurable parsing. Pinned to patch level because this is the
+      # first dependency that parses bytes straight off an untrusted socket.
+      {:bandit, "~> 1.12.5"},
+      {:plug, "~> 1.20.3"},
 
       # Development and test dependencies - PINNED to patch-level
       # 1.7.19 fixes the Credo.Code.Token sigil-token crash under Elixir 1.20 (1.7.15 crashed on ~r//).
