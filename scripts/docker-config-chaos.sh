@@ -37,18 +37,6 @@ CHECKER_WINDOW_S="${CHECKER_WINDOW_S:-210}"
 CHAOS_TOPIC=chaos_acked
 source "$(dirname "$0")/chaos_lib.sh"
 
-acked_count() { wc -l < "$WORK/acked.log" 2>/dev/null | tr -d ' '; }
-
-# Requires the acked count to have grown past $1 (availability held through the step named $2).
-require_progress() {
-  now=$(acked_count)
-  if [ "${now:-0}" -gt "$1" ]; then
-    echo "acks kept flowing through $2 ($1 -> $now)"
-  else
-    fail "no produce was acknowledged through $2 (stuck at ${now:-0})"
-  fi
-}
-
 build_images
 start_cluster
 start_checker "$CHECKER_WINDOW_S"
@@ -57,10 +45,7 @@ sleep 10
 event "h: rolling config deploy (group commit interval 2 -> 5)"
 export MALACHI_GROUP_COMMIT_INTERVAL_MS=5
 for node in malachi3 malachi2 malachi1; do
-  before=$(acked_count)
-  $COMPOSE up -d "$node" >/dev/null 2>&1
-  wait_healthy || fail "cluster did not reconverge after deploying to $node"
-  require_progress "$before" "the $node deploy"
+  roll_node "$node" "the $node deploy"
 done
 
 for n in 1 2 3; do
