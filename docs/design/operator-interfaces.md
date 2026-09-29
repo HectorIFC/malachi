@@ -1008,8 +1008,9 @@ Detection order, following `terminfo.dev`:
 8. ANSI 16
 
 Every auto detected axis has an explicit override, as btop does, because auto detection will be wrong
-for someone: `color_mode: auto|truecolor|256|16|none`, `theme: light|dark|auto`, and
-`glyphs: nerd|unicode|ascii`.
+for someone: `color_mode: auto|truecolor|256|16|none`, `theme: light|dark|auto`,
+`glyphs: nerd|unicode|ascii`, and `theme_background: off|on` for an operator who wants the theme's
+background painted rather than inherited.
 
 **Colour depth and glyph richness are two orthogonal axes** with separate keys. Conflating them is
 the most common design error in this category. Nerd Font glyphs are opt in, off by default, and
@@ -1018,7 +1019,13 @@ detect glyph coverage.
 
 The background token defaults to the sentinel `default`, emitting no colour and inheriting the
 terminal's own background, which is k9s's choice. A TUI that paints its own dark background inside a
-configured light terminal reads as broken and destroys transparency setups.
+configured light terminal reads as broken and destroys transparency setups. The base foreground is
+the same sentinel for the same reason: a fixed white foreground over an inherited light background
+is unreadable, while the terminal's own foreground is chosen to contrast with its own background.
+The two are inherited together or painted together: with `theme_background: on` both come from the
+same theme, the theme's `background` and `foreground` tokens in truecolor and 256 colours, and in 16
+colours ANSI 0 behind ANSI 15 for the dark theme and ANSI 15 behind ANSI 0 for the light one, because
+an inherited foreground over a painted background can be dark on dark.
 
 ### 8.5 Widget mapping
 
@@ -1134,8 +1141,11 @@ Required corrections to the current stream:
 
 - `id:` on every event, `retry:` set explicitly, and a `:` comment heartbeat every 15 to 30 seconds.
 - Deltas, not a whole snapshot every second.
-- **An error is a 200 response carrying an error event, never a non 200 status**, because an
-  `EventSource` that receives a non 200 goes to `CLOSED` and never reconnects.
+- **Before the stream is established, a refusal keeps its HTTP status**: a missing or invalid
+  token is a 401 and a missing permission a 403, both `application/problem+json`, because the
+  client reads the stream through `fetch` with a Bearer header (section 11), which sees the status
+  and can re-authenticate. **Once the stream is established, an error is an event on it, never a
+  change of status**, since the 200 has already been sent and the client keeps the connection.
 - The opaque cursor is the `id:` value on a topic tail. The cursor contract, compare but do not
   subtract, is exactly the `Last-Event-ID` contract, so resumption is correct by construction.
 - A single sampler broadcasting through `:pg` or a `Registry`, replacing today's per connection

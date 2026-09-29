@@ -93,7 +93,7 @@
   },
 
   "$ansi16": {
-    "$description": "Hand declared, never computed. A naive nearest neighbour collapses state.damaged and state.fenced onto the same red, which is exactly the distinction an operator needs at 3 a.m. Values are ANSI SGR color numbers; ratatui's named Color variants are emitted for them.",
+    "$description": "Hand declared, never computed. A naive nearest neighbour collapses state.damaged and state.fenced onto the same red, which is exactly the distinction an operator needs at 3 a.m. Values are ANSI SGR color numbers; ratatui's named Color variants are emitted for them. The sentinel `default` emits no color and inherits the terminal's own, as $terminal.background does, so the base foreground contrasts with an inherited background. When theme_background paints the background, both are painted from the same theme instead, as $terminal.painted16 declares for 16 colours (operator-interfaces.md section 8.4).",
     "color.state.active":  { "code": 10, "ratatui": "Color::LightGreen" },
     "color.state.sealed":  { "code": 4,  "ratatui": "Color::Blue" },
     "color.state.fenced":  { "code": 3,  "ratatui": "Color::Yellow" },
@@ -102,7 +102,7 @@
     "color.state.ahead":   { "code": 13, "ratatui": "Color::LightMagenta" },
     "color.state.blocked": { "code": 1,  "ratatui": "Color::Red" },
     "color.state.unknown": { "code": 8,  "ratatui": "Color::DarkGray" },
-    "color.base.foreground": { "code": 7, "ratatui": "Color::White" },
+    "color.base.foreground": { "code": "default", "ratatui": "Color::Reset" },
     "color.base.muted-foreground": { "code": 8, "ratatui": "Color::DarkGray" },
     "color.base.border":   { "code": 8,  "ratatui": "Color::DarkGray" },
     "color.brand.accent":  { "code": 3,  "ratatui": "Color::Yellow" },
@@ -116,7 +116,12 @@
   "$terminal": {
     "$description": "Terminal only concerns. See operator-interfaces.md section 8.4.",
     "background": "default",
-    "$backgroundNote": "The sentinel `default` emits no color and inherits the terminal's own background, as k9s does. A TUI that paints its own dark background inside a configured light terminal reads as broken and destroys transparency setups. An explicit theme_background override exists for operators who want the painted background.",
+    "painted16": {
+      "$description": "The pair theme_background paints in 16 colours. Background and foreground always come from the same row, never one inherited and one painted.",
+      "dark":  { "background": { "code": 0,  "ratatui": "Color::Black" }, "foreground": { "code": 15, "ratatui": "Color::White" } },
+      "light": { "background": { "code": 15, "ratatui": "Color::White" }, "foreground": { "code": 0,  "ratatui": "Color::Black" } }
+    },
+    "$backgroundNote": "The sentinel `default` emits no color and inherits the terminal's own background, as k9s does. A TUI that paints its own dark background inside a configured light terminal reads as broken and destroys transparency setups. An explicit theme_background override exists for operators who want the painted background; it paints the base foreground from the same theme, so the two never come from different sources.",
     "modifiers": {
       "$description": "Because a 16 color terminal cannot carry eight distinct states by hue alone, and because meaning is never encoded in color alone (WCAG 1.4.1).",
       "selected": "REVERSED",
@@ -146,7 +151,8 @@
       "overrides": {
         "color_mode": ["auto", "truecolor", "256", "16", "none"],
         "theme": ["light", "dark", "auto"],
-        "glyphs": ["nerd", "unicode", "ascii"]
+        "glyphs": ["nerd", "unicode", "ascii"],
+        "theme_background": ["off", "on"]
       }
     }
   },
