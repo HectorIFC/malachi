@@ -1193,8 +1193,16 @@ Three smaller mechanisms are adopted with it:
 - **The SPA is bootstrapped by byte replacing markers in `index.html`**, not by a configuration fetch
   before first render. Redpanda substitutes a features marker once at boot and a base path marker per
   request, the latter so a reverse proxy prefix works without rebuilding.
-- **Every asset is hashed once at startup and the hash is its ETag**, served with
-  `Cache-Control: public, max-age=900, must-revalidate`, so a 304 costs nothing.
+- **Every asset is hashed once at startup and the SHA-256 of its content is its ETag**, so a 304
+  costs nothing and every node of a cluster answers with the same validator. Redpanda serves
+  everything with `public, max-age=900, must-revalidate`; Malachi departs from that because a Vite
+  build already puts a content hash in every filename under `assets/`. Those files are served with
+  `Cache-Control: public, max-age=31536000, immutable`, and everything else, `index.html` first,
+  with `no-cache`, so a new release is picked up on the next navigation and never fifteen minutes
+  later. A precompressed `.br` or `.gz` variant produced at build time carries its own ETag and
+  `Vary: Accept-Encoding`, and the server never compresses at runtime.
+- **The asset set is fixed at startup.** A file that was not there when the node booted answers
+  404 until the next restart, which is what a release does anyway.
 - **Capability negotiation instead of version sniffing.** Redpanda exposes an endpoint that probes
   the upstream at runtime and returns which operations are supported, and the console maps that into
   named features. Malachi already has the server half of this landing as #193, node capability
@@ -1216,7 +1224,7 @@ different ranges are not comparable.
 | Transport | The console gets TLS. Today it is plain HTTP (#70), which also caps the browser at HTTP/1.1 and its six connections per origin |
 | Auth | `Authorization: Bearer` as the single primary mechanism for all three clients, with SSE consumed through `fetch` rather than the native `EventSource`, which cannot set a header. The cookie remains a browser login convenience |
 | CSRF | A required custom header on every state changing method, since a cross site form cannot send one. `SameSite=Strict` alone is not the only brake wanted |
-| Static serving | `Plug.Static` restricted by `:only`, never a catch all over `priv/` |
+| Static serving | Only from the manifest built at startup, looked up by exact path, never a catch all over `priv/`. `Plug.Static` was measured against this contract and rejected: it serves brotli to `br;q=0`, matches `If-None-Match` only byte for byte, sets one `Cache-Control` for every file, and follows symlinks below its `:only` prefix |
 | Sobelow | Adding Plug wakes `Config.CSP`, `Config.HTTPS`, `XSS.SendResp` and `Traversal.SendDownload`, and `.sobelow-conf` sets `exit: "high"`. The first pull request will break CI for reasons unrelated to the feature unless this is handled first |
 
 Two pre existing defects must be fixed before the console lands, in their own commits:
