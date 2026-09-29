@@ -133,6 +133,7 @@ defmodule Malachi.Metadata do
           | {:commit_offset, group(), topic_name(), offsets()}
           | {:define_policy, policy_name(), policy()}
           | {:set_topic_policy, topic_name(), policy_name() | nil}
+          | {:bind_topic_policy, topic_name(), policy_name() | nil}
           | {:extract_topic, topic_name()}
           | {:insert_topic, topic_export()}
           | {:begin_migration, topic_name()}
@@ -177,6 +178,9 @@ defmodule Malachi.Metadata do
       {:commit_offset, 4} => 0,
       {:define_policy, 3} => 0,
       {:set_topic_policy, 3} => 0,
+      # The binding an operator emits (#194). A new shape rather than the legacy one above, whose rule was
+      # relaxed at version 0 on the promise that nothing emits it.
+      {:bind_topic_policy, 3} => 4,
       {:extract_topic, 2} => 0,
       {:insert_topic, 2} => 0,
       {:begin_migration, 2} => 0,
@@ -215,6 +219,7 @@ defmodule Malachi.Metadata do
   def command_target_topic({:seal_topic, name}), do: name
   def command_target_topic({:delete_topic, name}), do: name
   def command_target_topic({:set_topic_policy, name, _policy}), do: name
+  def command_target_topic({:bind_topic_policy, name, _policy}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
   def command_target_topic(command), do: List.first(routed_range_topics(command))
 
@@ -315,6 +320,7 @@ defmodule Malachi.Metadata do
   defp command_topic(_state, {:seal_topic, name}), do: name
   defp command_topic(_state, {:delete_topic, name}), do: name
   defp command_topic(_state, {:set_topic_policy, name, _policy}), do: name
+  defp command_topic(_state, {:bind_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
   defp command_topic(state, {:split_range, range_id}), do: range_topic(state, range_id)
   defp command_topic(state, {:merge_ranges, range_id_a, _range_id_b}), do: range_topic(state, range_id_a)
@@ -480,7 +486,10 @@ defmodule Malachi.Metadata do
     # is normally a reason not to do it. It is safe here and only here: nothing in `lib/` emits
     # `:define_policy` yet (the commands exist and nothing reaches them, which is what #185 is about),
     # so no log in the field contains one. Once a caller exists, this rule can only be widened.
-    if Policy.valid_name?(name) and Policy.valid?(policy) do
+    #
+    # Pinned to the fields of version 3, the rule as #190 left it: `Policy.valid?/1` follows the field
+    # table as it grows, and letting this legacy command follow it would widen it at version 0.
+    if Policy.valid_name?(name) and Policy.valid?(policy, 3) do
       {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
     else
       {state, {:error, :invalid_policy}}
@@ -490,34 +499,26 @@ defmodule Malachi.Metadata do
   # Binds a topic to a policy NAME. The name is not checked against a definition here, and cannot be:
   # the definitions are an administrative object of the cluster (`Malachi.Cluster.PolicyStore`), and a
   # `ra` state machine may only read its own replicated state, so a vnode has no way to know which names
-  # exist. A topic bound to a name nobody defined resolves to no policy and uses the global defaults,
-  # which is what a topic with no policy does; refusing the binding here would instead make every
-  # binding fail, since the vnode's own (deprecated) definitions are empty.
-  #
+  # exist. A topic bound to a name nobody defined holds its data (`Malachi.Cluster.Retention.effective/4`).
   # Whoever offers this to an operator checks the name against the store first, so a typo is caught
-  # where it can be reported rather than becoming a silent fallback (#194).
+  # where it can be reported (`Malachi.Policies.bind/3`).
   #
-  # This relaxed what the command accepts while leaving it at machine version 0, which the versioning
-  # rule would normally forbid: a member on older code refuses a name it cannot find while a newer one
-  # stores it, and the two replicas then hold different states with no error anywhere. It is admissible
-  # here on one invariant, which is narrow and worth stating because it is not obvious from this file:
-  # NOTHING in `lib/` emits `:set_topic_policy`. No log written by any release can contain one, so
-  # there is no entry whose replay could differ between versions. `Malachi.SetTopicPolicyGuardTest`
-  # fails the build the day that stops being true, and whoever adds the first caller owes this command
-  # a new shape at a new machine version before the caller ships.
-  defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}) do
-    cond do
-      not Map.has_key?(state.topics, topic) ->
-        {state, {:error, :no_such_topic}}
+  # Two shapes apply the same rule. `:bind_topic_policy`, introduced at version 4, is the one an operator
+  # emits: a member on older code refuses it only because the group's effective version is below 4, which
+  # every member decides alike.
+  #
+  # `:set_topic_policy` is the legacy shape. #190 relaxed it to accept a name absent from the vnode's own
+  # definitions while leaving it at machine version 0, which the versioning rule would normally forbid: a
+  # member on older code refuses such a name while a newer one stores it, and the two replicas then hold
+  # different states with no error anywhere. It stays admissible on one invariant, narrow and worth
+  # stating because it is not obvious from this file: NOTHING in `lib/` emits `:set_topic_policy`. No log
+  # written by any release can contain one, so there is no entry whose replay could differ between
+  # versions. `Malachi.SetTopicPolicyGuardTest` fails the build the day that stops being true.
+  defp do_apply(%__MODULE__{} = state, {:bind_topic_policy, topic, policy_name}),
+    do: bind_policy(state, topic, policy_name)
 
-      policy_name != nil and not Policy.valid_name?(policy_name) ->
-        {state, {:error, :invalid_policy}}
-
-      true ->
-        topics = Map.update!(state.topics, topic, fn topic -> %{topic | policy: policy_name} end)
-        {%{state | topics: topics}, :ok}
-    end
-  end
+  defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}),
+    do: bind_policy(state, topic, policy_name)
 
   # Vnode-split migration (driven through each vnode's Raft log): `:extract_topic` removes a topic's full
   # metadata from the source vnode and returns it as an `export` (the reply), `:insert_topic` restores that
@@ -764,6 +765,32 @@ defmodule Malachi.Metadata do
   """
   @spec get_policy(t(), policy_name()) :: policy() | nil
   def get_policy(%__MODULE__{} = state, name), do: Map.get(state.policies, name)
+
+  defp bind_policy(state, topic, policy_name) do
+    cond do
+      not Map.has_key?(state.topics, topic) ->
+        {state, {:error, :no_such_topic}}
+
+      policy_name != nil and not Policy.valid_name?(policy_name) ->
+        {state, {:error, :invalid_policy}}
+
+      true ->
+        topics = Map.update!(state.topics, topic, fn topic -> %{topic | policy: policy_name} end)
+        {%{state | topics: topics}, :ok}
+    end
+  end
+
+  @doc """
+  The topics bound to the policy `name`, sorted.
+
+  What an administrator deleting a policy needs to see first: every topic here would stop expiring once
+  the name no longer resolves. Sorted explicitly, because `state.topics` iterates in hash order above 32
+  keys.
+  """
+  @spec topics_bound_to(t(), policy_name()) :: [topic_name()]
+  def topics_bound_to(%__MODULE__{} = state, name) do
+    state.topics |> Map.values() |> Enum.filter(&(&1.policy == name)) |> Enum.map(& &1.name) |> Enum.sort()
+  end
 
   @doc """
   The NAME of the policy `topic` points at, or `nil` if it points at none or the topic is unknown.

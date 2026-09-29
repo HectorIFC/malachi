@@ -42,23 +42,26 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     {LockoutMachine, LockoutRegistry, :clock},
     {AclMachine, AclRegistry, :no_clock},
     {ClusterFlagsMachine, ClusterFlags, :no_clock},
-    {PolicyMachine, PolicyRegistry, :no_clock}
+    {PolicyMachine, PolicyRegistry, :version}
   ]
 
   defp meta(effective, now \\ 1_700_000_000_000),
     do: %{machine_version: effective, index: 1, term: 1, system_time: now}
 
-  defp pure_apply(pure, :clock, state, command, now), do: pure.apply(state, command, now)
-  defp pure_apply(pure, :no_clock, state, command, _now), do: pure.apply(state, command)
+  defp pure_apply(pure, :clock, state, command, now, _effective), do: pure.apply(state, command, now)
+  defp pure_apply(pure, :no_clock, state, command, _now, _effective), do: pure.apply(state, command)
+  # The policy store validates a definition against the group's effective version (`Malachi.Cluster.Policy`).
+  defp pure_apply(pure, :version, state, command, _now, effective), do: pure.apply(state, command, effective)
 
   for {machine, pure, _clock} <- @machines do
     describe "#{inspect(machine)}" do
       test "declares the shared machine version and maps every version to itself" do
         assert unquote(machine).version() == MachineVersion.version()
         # Version 2 is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version
-        # 3 where `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`; each time
-        # the other seven moved with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 3
+        # 3 where `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, 4 where
+        # `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`; each time the others moved
+        # with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 4
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -106,7 +109,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     check all(
             {machine, pure, clock} <- StreamData.member_of(@machines),
             commands <- StreamData.list_of(command(pure), max_length: 25),
-            effective <- StreamData.integer(0..2),
+            effective <- StreamData.integer(0..MachineVersion.code_version()),
             now <- StreamData.integer(1_700_000_000_000..1_700_000_100_000),
             max_runs: 300
           ) do
@@ -115,7 +118,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
 
         case Map.fetch(pure.command_versions(), MachineVersion.command_key(command)) do
           {:ok, introduced} when introduced <= effective ->
-            assert {next, reply} == pure_apply(pure, clock, state, command, now)
+            assert {next, reply} == pure_apply(pure, clock, state, command, now, effective)
 
           # Reached since `{:enable_flag, 2}` was introduced at version 2: a command introduced above the
           # group's effective version is refused, not applied, and identically on every member.
@@ -178,7 +181,11 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       StreamData.tuple({StreamData.constant(:begin_migration), topic}),
       StreamData.tuple({StreamData.constant(:end_migration), topic}),
       StreamData.tuple({StreamData.constant(:extract_topic), topic}),
-      StreamData.tuple({StreamData.constant(:commit_offset), StreamData.constant("g"), topic, StreamData.constant(%{})})
+      StreamData.tuple(
+        {StreamData.constant(:commit_offset), StreamData.constant("g"), topic, StreamData.constant(%{})}
+      ),
+      # Introduced at version 4, so the property sees it refused below that and applied at it.
+      StreamData.tuple({StreamData.constant(:bind_topic_policy), topic, StreamData.member_of(["p", nil])})
     ])
   end
 

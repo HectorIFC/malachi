@@ -34,8 +34,9 @@ defmodule Malachi.Cluster.MachineVersion do
   The eight machines share one version number. That keeps one pin meaningful for all of them, and
   bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`. Version 2
   is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version 3 is where
-  `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, so each time the other
-  seven moved with nothing but that no-op.
+  `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, and version 4 is where
+  `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, so each time the others moved with
+  nothing but that no-op.
 
   ## Holding the version during an upgrade
 
@@ -66,10 +67,10 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  # 3 introduces the storage policy store (`Malachi.Cluster.PolicyRegistry`): its commands are refused
-  # until every member of that group runs code that implements them. 2 is the cluster flags' and is
-  # already released, which is why the policy commands take the next version rather than sharing it.
-  @code_version 3
+  # 4 introduces `{:bind_topic_policy, topic, name}` in `Malachi.Metadata`, the binding an operator
+  # emits (#194). 3 introduced the storage policy store (`Malachi.Cluster.PolicyRegistry`) and 2 the
+  # cluster flags; both are released, which is why the binding takes the next version.
+  @code_version 4
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}
@@ -179,6 +180,49 @@ defmodule Malachi.Cluster.MachineVersion do
 
   def command_key(command) when is_atom(command), do: {command, 0}
   def command_key(_command), do: {:invalid, 0}
+
+  @doc """
+  Whether `reply` is one of the refusals `apply/5` answers before the command reaches the state
+  module: an unknown shape, a shape above the effective version, or an export format above it. The
+  state is unchanged by any of them, on every member.
+
+  ## Examples
+
+      iex> Malachi.Cluster.MachineVersion.refusal?({:error, {:unsupported_command, {:bind_topic_policy, 3}, 4, 3}})
+      true
+
+      iex> Malachi.Cluster.MachineVersion.refusal?({:error, {:unknown_command, {:probe, 2}, 4}})
+      true
+
+      iex> Malachi.Cluster.MachineVersion.refusal?({:error, {:unsupported_export_format, 5, 4}})
+      true
+
+      iex> Malachi.Cluster.MachineVersion.refusal?({:error, :already_exists})
+      false
+
+  """
+  @spec refusal?(term()) :: boolean()
+  def refusal?({:error, {:unknown_command, _key, _effective}}), do: true
+  def refusal?({:error, {:unsupported_command, _key, _introduced, _effective}}), do: true
+  def refusal?({:error, {:unsupported_export_format, _format, _effective}}), do: true
+  def refusal?(_reply), do: false
+
+  @doc """
+  What an operator is told when the control plane refused a command, or a policy field, because the
+  group's effective version is below the one that introduced it. One text for every surface that can
+  meet the refusal (`mix malachi.flag`, `Malachi.Policies`).
+
+  ## Examples
+
+      iex> Malachi.Cluster.MachineVersion.upgrade_pending_message(4, 3)
+      "the control plane is still at machine version 3 and this needs 4; finish the rolling upgrade (see the operations guide on the machine version pin)"
+
+  """
+  @spec upgrade_pending_message(non_neg_integer(), non_neg_integer()) :: String.t()
+  def upgrade_pending_message(introduced, effective) do
+    "the control plane is still at machine version #{effective} and this needs #{introduced}; " <>
+      "finish the rolling upgrade (see the operations guide on the machine version pin)"
+  end
 
   @doc """
   Checks whether the local member `server_id` of a `machine` cluster can still apply its log, given

@@ -1,0 +1,196 @@
+{
+  "about": "Golden frames for the storage policy api keys 17 to 21 (#194), read by test/malachi/wire_policy_frames_test.exs and by scripts/lib/wire.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "define_policy_req",
+      "hex": "010000000764757261626c6500030100000014726574656e74696f6e2e6d61785f6167655f6d730100000000240c84000100000013726574656e74696f6e2e6d61785f627974657301000000000000000001000000097370726561645f627900",
+      "name": "define a policy with a bound, a zero budget and a rule turned off",
+      "value": {
+        "fields": [
+          [
+            "retention.max_age_ms",
+            604800000
+          ],
+          [
+            "retention.max_bytes",
+            0
+          ],
+          [
+            "spread_by",
+            null
+          ]
+        ],
+        "name": "durable"
+      }
+    },
+    {
+      "codec": "define_policy_req",
+      "hex": "0100000005706c61696e0000",
+      "name": "define a policy that inherits every global value",
+      "value": {
+        "fields": [],
+        "name": "plain"
+      }
+    },
+    {
+      "codec": "define_policy_req",
+      "hex": "01000000067261636b6564000101000000097370726561645f627902000000047261636b",
+      "name": "define a policy with a string attribute",
+      "value": {
+        "fields": [
+          [
+            "spread_by",
+            "rack"
+          ]
+        ],
+        "name": "racked"
+      }
+    },
+    {
+      "codec": "delete_policy_req",
+      "hex": "010000000764757261626c6500",
+      "name": "delete without force",
+      "value": {
+        "force": false,
+        "name": "durable"
+      }
+    },
+    {
+      "codec": "delete_policy_req",
+      "hex": "010000000764757261626c6501",
+      "name": "delete with force",
+      "value": {
+        "force": true,
+        "name": "durable"
+      }
+    },
+    {
+      "codec": "list_policies_req",
+      "hex": "",
+      "name": "list request",
+      "value": null
+    },
+    {
+      "codec": "list_policies_resp",
+      "hex": "00000003010000000161000001000000016200020100000013726574656e74696f6e2e6d61785f627974657301000000000000000001000000097370726561645f627902000000047261636b01000000016300010100000015726574656e74696f6e2e6d61785f7265636f7264730100000000000003e8",
+      "name": "list response, including a field this client may not know",
+      "value": [
+        [
+          "a",
+          []
+        ],
+        [
+          "b",
+          [
+            [
+              "retention.max_bytes",
+              0
+            ],
+            [
+              "spread_by",
+              "rack"
+            ]
+          ]
+        ],
+        [
+          "c",
+          [
+            [
+              "retention.max_records",
+              1000
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "codec": "bind_topic_policy_req",
+      "hex": "01000000066576656e7473010000000764757261626c65",
+      "name": "bind a topic",
+      "value": {
+        "name": "durable",
+        "topic": "events"
+      }
+    },
+    {
+      "codec": "bind_topic_policy_req",
+      "hex": "01000000066576656e747300",
+      "name": "detach a topic",
+      "value": {
+        "name": null,
+        "topic": "events"
+      }
+    },
+    {
+      "codec": "get_topic_policy_req",
+      "hex": "01000000066576656e7473",
+      "name": "get request",
+      "value": "events"
+    },
+    {
+      "codec": "topic_policy_resp",
+      "hex": "01000000066576656e7473010000000764757261626c65010100020100000013726574656e74696f6e2e6d61785f627974657301000000000000000001000000097370726561645f62790000030100000014726574656e74696f6e2e6d61785f6167655f6d730100000000240c8400000100000013726574656e74696f6e2e6d61785f62797465730100000000000000000101000000097370726561645f62790001",
+      "name": "get response for a resolved policy",
+      "value": {
+        "definition": [
+          [
+            "retention.max_bytes",
+            0
+          ],
+          [
+            "spread_by",
+            null
+          ]
+        ],
+        "effective": [
+          [
+            "retention.max_age_ms",
+            604800000,
+            "global"
+          ],
+          [
+            "retention.max_bytes",
+            0,
+            "policy"
+          ],
+          [
+            "spread_by",
+            null,
+            "policy"
+          ]
+        ],
+        "policy": "durable",
+        "resolution": "resolved",
+        "topic": "events"
+      }
+    },
+    {
+      "codec": "topic_policy_resp",
+      "hex": "01000000066576656e7473010000000567686f7374020000030100000014726574656e74696f6e2e6d61785f6167655f6d7300020100000013726574656e74696f6e2e6d61785f6279746573000201000000097370726561645f627902000000047261636b00",
+      "name": "get response for a name nothing defines",
+      "value": {
+        "definition": null,
+        "effective": [
+          [
+            "retention.max_age_ms",
+            null,
+            "unresolved_backstop"
+          ],
+          [
+            "retention.max_bytes",
+            null,
+            "unresolved_backstop"
+          ],
+          [
+            "spread_by",
+            "rack",
+            "global"
+          ]
+        ],
+        "policy": "ghost",
+        "resolution": "unresolved",
+        "topic": "events"
+      }
+    }
+  ]
+}

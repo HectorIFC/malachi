@@ -13,6 +13,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.AuditLog
   alias Malachi.Auth
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.Policy
   alias Malachi.Config
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.I18n
@@ -20,6 +21,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.Metrics.Prometheus
+  alias Malachi.Policies
   alias Malachi.RateLimiter
 
   @doc """
@@ -713,6 +715,113 @@ defmodule Malachi.Dashboard do
     end
   end
 
+  # --- storage policies: thin adapters over Malachi.Policies, which validates, audits and names every
+  # refusal. A policy's fields travel as a JSON object keyed by the flat field name: a key left out
+  # inherits the global value, `null` turns that rule off, and 0 is a real budget. ---
+
+  # A path segment is percent-decoded (leniently: a malformed escape stays as typed); an empty one is not
+  # a name.
+  defp with_path_name(socket, segment, fun) do
+    case URI.decode(segment) do
+      "" -> serve_404(socket)
+      name -> fun.(name)
+    end
+  end
+
+  # Who changed it, for the audit log: the session's user, or "dashboard" with authentication disabled.
+  defp actor(%{username: username}), do: username
+  defp actor(_no_session), do: "dashboard"
+
+  defp handle_list_policies(socket) do
+    case Policies.list() do
+      {:ok, policies} ->
+        listed =
+          policies
+          |> Enum.sort_by(&elem(&1, 0))
+          |> Enum.map(fn {name, policy} -> %{"name" => name, "fields" => Map.new(Policy.to_pairs(policy))} end)
+
+        send_json(socket, "200 OK", %{"s" => "ok", "policies" => listed})
+
+      error ->
+        respond_policy_result(socket, error, "200 OK")
+    end
+  end
+
+  defp handle_policy(socket, :PUT, name, _request, headers, actor) do
+    case read_json_body(socket, headers) do
+      {:ok, %{"fields" => fields}} when is_map(fields) ->
+        respond_policy_result(socket, Policies.define(name, Enum.to_list(fields), actor), "200 OK")
+
+      _malformed ->
+        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    end
+  end
+
+  defp handle_policy(socket, :DELETE, name, request, _headers, actor) do
+    force = URI.decode_query(request.query)["force"] == "true"
+    respond_policy_result(socket, Policies.delete(name, actor, force: force), "200 OK")
+  end
+
+  defp handle_topic_policy(socket, :GET, topic, _headers, _actor) do
+    case Policies.topic_policy(topic) do
+      {:ok, topic_policy} ->
+        send_json(socket, "200 OK", %{
+          "s" => "ok",
+          "topic" => topic_policy.topic,
+          "policy" => topic_policy.policy,
+          "resolution" => Atom.to_string(topic_policy.resolution),
+          "definition" => topic_policy.definition && Map.new(Policy.to_pairs(topic_policy.definition)),
+          "effective" =>
+            Enum.map(Policies.effective_pairs(topic_policy), fn {field, value, origin} ->
+              %{"field" => field, "value" => value, "origin" => Atom.to_string(origin)}
+            end)
+        })
+
+      error ->
+        respond_policy_result(socket, error, "200 OK")
+    end
+  end
+
+  defp handle_topic_policy(socket, :PUT, topic, headers, actor) do
+    case read_json_body(socket, headers) do
+      {:ok, %{"policy" => name}} when is_binary(name) ->
+        respond_policy_result(socket, Policies.bind(topic, name, actor), "200 OK")
+
+      _malformed ->
+        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    end
+  end
+
+  defp handle_topic_policy(socket, :DELETE, topic, _headers, actor),
+    do: respond_policy_result(socket, Policies.bind(topic, nil, actor), "200 OK")
+
+  defp respond_policy_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
+
+  defp respond_policy_result(socket, {:error, reason}, _ok_status),
+    do: send_json(socket, policy_status(reason), %{"s" => "err", "reason" => Policies.reason_string(reason)})
+
+  @doc false
+  # The HTTP status of a policy refusal. A refusal the operator can act on by changing the request is 400;
+  # one about the state of the cluster (in use, an upgrade not finished) is 409; a topic or policy that
+  # does not exist is 404; and a control plane that did not answer, or a topic mid-migration, is 503: the
+  # same request can succeed later. Public only so every branch is tested, including the ones a running
+  # test node cannot reach (an unfinished upgrade).
+  @spec policy_status(Policies.reason()) :: String.t()
+  def policy_status(reason) when reason in [:no_such_policy, :no_such_topic], do: "404 Not Found"
+  def policy_status({:policy_in_use, _topics}), do: "409 Conflict"
+  def policy_status({:unsupported_command, _key, _introduced, _effective}), do: "409 Conflict"
+  def policy_status({:unsupported_policy_field, _name, _since, _effective}), do: "409 Conflict"
+
+  def policy_status(reason)
+      when reason in [:invalid_policy_name, :invalid_topic, :invalid_policy],
+      do: "400 Bad Request"
+
+  def policy_status({field_reason, _name})
+      when field_reason in [:unknown_policy_field, :invalid_policy_field, :duplicate_policy_field],
+      do: "400 Bad Request"
+
+  def policy_status(_unavailable), do: "503 Service Unavailable"
+
   defp respond_user_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
 
   defp respond_user_result(socket, {:error, reason}, _ok_status) do
@@ -833,6 +942,27 @@ defmodule Malachi.Dashboard do
 
   defp handle_route(socket, %{method: :DELETE, path: "/users/" <> rest}, headers, _client_ip, _session),
     do: route_acl(socket, rest, &handle_revoke_acl(socket, &1, headers), fn -> handle_delete_user(socket, rest) end)
+
+  # Storage policies (#194), admin-gated by has_required_permission?: /policies lists, /policies/:name
+  # defines (PUT) or deletes (DELETE, `?force=true` for a policy topics are bound to), and
+  # /topics/:name/policy reads a topic's effective retention (GET), binds it (PUT) or detaches it (DELETE).
+  defp handle_route(socket, %{method: :GET, path: "/policies"}, _headers, _client_ip, _session),
+    do: handle_list_policies(socket)
+
+  defp handle_route(socket, %{method: method, path: "/policies/" <> name} = request, headers, _client_ip, session)
+       when method in [:PUT, :DELETE],
+       do: with_path_name(socket, name, &handle_policy(socket, method, &1, request, headers, actor(session)))
+
+  defp handle_route(socket, %{method: method, path: "/topics/" <> rest}, headers, _client_ip, session)
+       when method in [:GET, :PUT, :DELETE] do
+    case String.split(rest, "/") do
+      [topic, "policy"] ->
+        with_path_name(socket, topic, &handle_topic_policy(socket, method, &1, headers, actor(session)))
+
+      _other ->
+        serve_404(socket)
+    end
+  end
 
   defp handle_route(socket, _, _headers, _client_ip, _session), do: serve_404(socket)
 

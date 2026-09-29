@@ -255,10 +255,15 @@ MALACHI_RETENTION_INTERVAL_MS=60000
 **Leave a limit unset to disable it.** With both unset, segments are kept forever unless a topic's own
 storage policy says otherwise: the sweep runs either way, and with no bound anywhere it does nothing. Do
 not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and it expires every sealed
-segment it can.
+segment it can. A bound must be a whole number from 0 through 2^64 - 1: a negative one, or one past
+that, stops the node at boot.
 
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
+
+These are the cluster's defaults. A topic bound to a storage policy takes the bounds the policy sets and
+inherits the rest; see [Per-topic retention](per-topic-retention.md) for `mix malachi.policy`, the wire
+keys and the dashboard routes, and `mix malachi.policy get <topic>` to see which value applies and why.
 
 ### Retention metrics
 
@@ -379,8 +384,8 @@ exactly the data a more permissive policy exists to keep, on every replica, with
 - **The store did not answer.** The whole sweep is skipped and one line says so. Nothing else is
   needed to notice: `malachi_retention_sweep_duration_seconds`'s `_count` stops advancing, which is
   the signal this guide already tells you to alert on.
-- **The topic points at a policy name the store does not define**, because it was deleted or the
-  binding has a typo. That topic expires nothing, and
+- **The topic points at a policy name the store does not define**, because it was deleted with
+  `--force` or a bind raced a delete (both refused without it). That topic expires nothing, and
   **`malachi_retention_unresolved_policy_sweeps_total{topic}`** names it on every sweep.
 
 The second case holds disk until someone fixes the binding. Bound how much with:
@@ -496,7 +501,9 @@ To keep rolling back possible until you are satisfied with a release, hold the v
 The first release that versions these machines is version 1, and every earlier build counts as version 0.
 
 Version **2** adds the cluster flag store's `enable_flag` command. Version **3** adds the storage policy
-store's `define_policy` and `delete_policy`. Each time, the machines that gained nothing move with it at
+store's `define_policy` and `delete_policy`. Version **4** adds the metadata command that binds a topic to
+a storage policy (`bind_topic_policy`), so `mix malachi.policy bind` is refused, with a message saying to
+finish the rolling upgrade, until every node runs a release with version 4 and the pin is lifted. Each time, the machines that gained nothing move with it at
 no cost, and a member on the older build refuses the new command until the whole group has moved.
 
 The same rule applies at every step: to keep a rollback to the previous build possible while you roll

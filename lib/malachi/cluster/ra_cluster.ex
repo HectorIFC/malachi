@@ -95,10 +95,13 @@ defmodule Malachi.Cluster.RaCluster do
   Submits `command` through the Raft log and returns `{:ok, machine_reply}`, or `{:error, reason}`
   when the cluster is unreachable. The caller distinguishes a refusal (a machine reply that is itself
   an error) from a failure to reach consensus.
+
+  `timeout` bounds the wait for the commit (ra's own default is 5 s). A caller running inside a loop
+  that serves clients passes a shorter one. A timeout is ambiguous: the command may still commit.
   """
-  @spec command(server_id(), term()) :: {:ok, term()} | {:error, term()}
-  def command(server_id, command) do
-    case :ra.process_command(server_id, command) do
+  @spec command(server_id(), term(), timeout()) :: {:ok, term()} | {:error, term()}
+  def command(server_id, command, timeout \\ @default_timeout) do
+    case :ra.process_command(server_id, command, timeout) do
       {:ok, reply, _leader} -> {:ok, reply}
       {:error, reason} -> {:error, reason}
       {:timeout, _server} -> {:error, :timeout}

@@ -124,6 +124,27 @@ defmodule Malachi.ConfigTest do
     end
   end
 
+  describe "retention_bound/2" do
+    test "absent or blank is no bound, and a bound is a whole number from 0 through 2^64 - 1" do
+      assert Config.retention_bound("MALACHI_X", nil) == nil
+      assert Config.retention_bound("MALACHI_X", " ") == nil
+      assert Config.retention_bound("MALACHI_X", "0") == 0
+      assert Config.retention_bound("MALACHI_X", "18446744073709551615") == 0xFFFF_FFFF_FFFF_FFFF
+    end
+
+    test "a bound the wire could not carry, or a negative one, stops the node" do
+      # 2^64 would be read back through get_topic_policy as 0, a zero budget, while the sweep holds the
+      # real value; a negative age expires everything sealed.
+      for raw <- ["18446744073709551616", "-1"] do
+        message = assert_raise RuntimeError, fn -> Config.retention_bound("MALACHI_RETENTION_MAX_BYTES", raw) end
+        assert message.message =~ "MALACHI_RETENTION_MAX_BYTES"
+        assert message.message =~ raw
+      end
+
+      assert_raise RuntimeError, ~r/MALACHI_X/, fn -> Config.retention_bound("MALACHI_X", "10GB") end
+    end
+  end
+
   describe "float/3" do
     test "absent or blank takes the default" do
       assert Config.float("MALACHI_X", nil, 0.7) == 0.7

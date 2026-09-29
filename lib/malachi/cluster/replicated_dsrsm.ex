@@ -314,6 +314,73 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     end
   end
 
+  @doc """
+  The topics bound to the storage policy `name`, sorted, asked of every vnode `topology` places.
+
+  What `Malachi.Policies.delete/3` must know before it removes a policy: a topic bound to a name nothing
+  defines holds its data, so a delete that missed a binding is a retention decision nobody made. The
+  answer comes from the vnodes themselves, read linearizably, and never from a node's cached copy of
+  their metadata, which misses a vnode it has not reached yet and a bind made through another node since
+  its last refresh. The same shape as `known_segments/3`, the other question asked before a destructive
+  act, with two differences that both follow from a binding living on its topic's record:
+
+    * every vnode is asked, not only the owner of some id, because the question is about every topic,
+      and a topic written to a vnode that does not own it by the ring is still bound;
+    * a pending split is refused as `{:error, :split_in_progress}`, because a topic between its two
+      owners can be listed by neither (extracted from the source, not yet inserted in the destination)
+      and there is no id to recognise it by, as `known_segments/3` does with `moving?`.
+
+  A vnode that does not answer within `timeout` on any node of its placement fails the whole call, as
+  `{:error, {:vnodes_unreachable, ids}}`: what it would have said is exactly what the caller cannot do
+  without.
+  """
+  @spec topics_bound_to(RingTopology.t() | nil, Metadata.policy_name(), pos_integer()) ::
+          {:ok, [Metadata.topic_name()]}
+          | {:error, :no_topology | :split_in_progress | {:vnodes_unreachable, [vnode_id()]}}
+  def topics_bound_to(%RingTopology{pending: %{}}, _name, _timeout), do: {:error, :split_in_progress}
+
+  def topics_bound_to(%RingTopology{ring: %HashRing{sorted: [_ | _]}, placements: placements}, name, timeout) do
+    answers =
+      placements
+      |> Map.keys()
+      |> BoundedFanout.map(
+        timeout * max_placement(placements),
+        fn vnode_id -> {vnode_id, topics_on(Map.get(placements, vnode_id, []), vnode_id, timeout)} end,
+        fn vnode_id -> {vnode_id, :unreachable} end
+      )
+
+    case for({vnode_id, :unreachable} <- answers, do: vnode_id) do
+      [] ->
+        bound = for {_vnode_id, {:ok, topics}} <- answers, {topic, %{policy: ^name}} <- topics, do: topic
+        {:ok, bound |> Enum.sort() |> Enum.dedup()}
+
+      silent ->
+        {:error, {:vnodes_unreachable, Enum.sort(silent)}}
+    end
+  end
+
+  def topics_bound_to(_no_ring, _name, _timeout), do: {:error, :no_topology}
+
+  @doc """
+  `topics_bound_to/3` over the topology `read_topology` returns, read again once the vnodes answered,
+  refused as `{:topology_changed, before, after}` when it moved in between, for the reason
+  `known_segments_stable/3` gives.
+  """
+  @spec topics_bound_to_stable(
+          (-> {:ok, RingTopology.t() | nil} | {:error, term()}),
+          Metadata.policy_name(),
+          pos_integer()
+        ) :: {:ok, [Metadata.topic_name()]} | {:error, term()}
+  def topics_bound_to_stable(read_topology, name, timeout) when is_function(read_topology, 0) do
+    with {:ok, before} <- read_topology.(),
+         {:ok, bound} <- topics_bound_to(before, name, timeout),
+         {:ok, now} <- read_topology.() do
+      if version(before) == version(now),
+        do: {:ok, bound},
+        else: {:error, {:topology_changed, version(before), version(now)}}
+    end
+  end
+
   @doc "The ids of the vnodes."
   @spec vnode_ids(t()) :: [vnode_id()]
   def vnode_ids(%__MODULE__{} = state), do: HashRing.vnode_ids(state.ring)
@@ -419,6 +486,16 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
     Enum.reduce_while(nodes, :unreachable, fn node, :unreachable ->
       case MetadataServer.segments({vnode_id, node}, timeout) do
         {:ok, segments} -> {:halt, {:ok, for(id <- ids, Map.has_key?(segments, id), into: MapSet.new(), do: id)}}
+        {:error, _reason} -> {:cont, :unreachable}
+      end
+    end)
+  end
+
+  # The vnode's topic records from the first node of its placement that answers, as in `known_on/4`.
+  defp topics_on(nodes, vnode_id, timeout) do
+    Enum.reduce_while(nodes, :unreachable, fn node, :unreachable ->
+      case MetadataServer.topics({vnode_id, node}, timeout) do
+        {:ok, topics} -> {:halt, {:ok, topics}}
         {:error, _reason} -> {:cont, :unreachable}
       end
     end)

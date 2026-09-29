@@ -20,6 +20,9 @@ defmodule Malachi.AuditLog do
   - `:dashboard_login_success` - Successful dashboard login
   - `:dashboard_auth_failure` - Failed dashboard authentication
   - `:dashboard_api_rate_limited` - An authenticated dashboard session spent its request budget
+  - `:policy_defined` - An administrator defined or replaced a storage policy (`Malachi.Policies`)
+  - `:policy_deleted` - An administrator deleted a storage policy
+  - `:topic_policy_bound` - An administrator bound a topic to a storage policy, or detached it
 
   ## Event Structure
 

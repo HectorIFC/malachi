@@ -126,6 +126,7 @@ A connection **authenticates first** (in `tcp_acceptor.ex`), which creates a ses
 | 7 | leave_group | `:consume` |
 | 8-11 | create_user / delete_user / change_password / list_users | `:admin` |
 | 14-16 | grant_acl / revoke_acl / list_acls | `:admin` |
+| 17-21 | define_policy / delete_policy / list_policies / bind_topic_policy / get_topic_policy | `:admin` |
 
 Permissions are `:produce`, `:consume`, `:admin`. Access is enforced per topic through
 `with_topic_permission/…` and `with_permission/…`; per-topic ACLs are managed with grant/revoke and stored

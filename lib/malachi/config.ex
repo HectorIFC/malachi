@@ -165,6 +165,30 @@ defmodule Malachi.Config do
   def integer(var, raw, default), do: parsed(var, raw, default, &Integer.parse/1, "a whole number")
 
   @doc """
+  A retention bound from `raw`: `nil` when the variable is absent or blank (the rule is off), otherwise a
+  whole number from 0 through 2^64 - 1. Anything else stops the node, for the reason `integer/3` gives
+  and two more. A negative age or byte budget expires everything the rule can see. A bound above
+  2^64 - 1 is stored whole but travels in 64 bits (`Malachi.Wire`), so `get_topic_policy` would report
+  it truncated, 2^64 as a zero budget, while the sweep applies the real value.
+
+  ## Examples
+
+      iex> Malachi.Config.retention_bound("MALACHI_RETENTION_MAX_BYTES", nil)
+      nil
+
+      iex> Malachi.Config.retention_bound("MALACHI_RETENTION_MAX_BYTES", "10737418240")
+      10737418240
+  """
+  @spec retention_bound(String.t(), String.t() | nil) :: non_neg_integer() | nil
+  def retention_bound(var, raw) do
+    case integer(var, raw, nil) do
+      nil -> nil
+      bound when bound in 0..0xFFFF_FFFF_FFFF_FFFF -> bound
+      _out_of_range -> raise "#{var} must be a whole number from 0 through 18446744073709551615, got: #{inspect(raw)}"
+    end
+  end
+
+  @doc """
   The number in `raw` as a float, or `default` when the variable is absent or blank. Anything else
   raises, for the reason given in `integer/3`.
 
