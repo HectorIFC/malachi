@@ -111,7 +111,7 @@ defmodule Malachi.Test.SubscribeResetStub do
         end
 
       {:error, _closed} ->
-        :ok
+        release(sock)
     end
   end
 
@@ -124,9 +124,14 @@ defmodule Malachi.Test.SubscribeResetStub do
         refuse_auth(sock)
 
       {:error, _closed} ->
-        :ok
+        release(sock)
     end
   end
+
+  # A passive socket whose peer closed keeps its port until it is closed or its owner exits, and the owner
+  # here lives for the whole test. Closing it once the client has gone keeps the stub's own ports from
+  # counting against a test that measures the ports a client leaves open.
+  defp release(sock), do: :gen_tcp.close(sock)
 
   defp lose(sock, :close), do: :gen_tcp.close(sock)
 
