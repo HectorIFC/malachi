@@ -20,21 +20,27 @@ blocks it.
 
 ## 1. Pin down the diff
 
+The repository's own script does it, the same one `pr-agent-review` uses, so the two reviews can never
+disagree about what the diff is. Run it from this checkout, into a scratch directory
+(`$CLAUDE_JOB_DIR/tmp/adversarial-review` in a background job, otherwise `mktemp -d`):
+
 ```
-base=$(/usr/bin/git merge-base HEAD origin/main 2>/dev/null || /usr/bin/git rev-parse HEAD)
-/usr/bin/git diff --stat "$base"
-/usr/bin/git ls-files --others --exclude-standard
+S=$(mktemp -d)                  # or S="$CLAUDE_JOB_DIR/tmp/adversarial-review" in a background job
+"$(/usr/bin/git rev-parse --show-toplevel)/scripts/pin-diff.sh" pin "$S"; rc=$?
 ```
 
-The review covers everything the branch changes: its commits since `origin/main`, what is modified and
-what is untracked. Leave out only the files the `prepare-commits` skill generates (`commit_message.sh`,
-`commit_<n>.patch`, `commit_message*.txt`), by exact name.
+It covers everything the branch changes: its commits since `origin/main`, what is modified and what is
+untracked, leaving out only the files the `prepare-commits` skill generates (`commit_message.sh`,
+`commit_<n>.patch`, `commit_message.txt`, `commit_message_<n>.txt`), by exact name and only while
+untracked. It writes `$S/diff.patch` (the full diff, untracked files included as new files),
+`$S/files.txt` (the changed files) and `$S/base.txt` (the commit it compared against).
 
-Nothing to review is an answer: say so in one line and stop.
+`rc` 3 means nothing to review, which is an answer: say so in one line and stop. Any `rc` other than 0
+or 3 means the pin failed (1 when git could not read a file, 2 on a usage error) and the files it wrote
+are incomplete: report the script's message and stop rather than review a diff that is missing files.
 
-Write the full diff (`git diff "$base"`, plus the content of every untracked file) to a scratch file
-(`$CLAUDE_JOB_DIR/tmp` in a background job, otherwise `mktemp -d`), so every subagent reads the same
-bytes rather than a diff taken at a different moment.
+Every subagent reads `$S/diff.patch`, so they all read the same bytes rather than a diff taken at a
+different moment.
 
 ## 2. Review in parallel, one dimension per subagent
 
