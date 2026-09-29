@@ -4,7 +4,11 @@ defmodule Malachi.LogProtocolTest do
   # against the live Malachi.LogBroker.
   use ExUnit.Case, async: false
 
+  alias Malachi.BrokerServer
+  alias Malachi.Cluster.PolicyStore
+  alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Log.Record
+  alias Malachi.Metadata
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -375,6 +379,146 @@ defmodule Malachi.LogProtocolTest do
         assert reason(payload) == "invalid_operation"
       end)
     end
+  end
+
+  describe "admin storage policies (api keys 17 to 21)" do
+    setup do
+      suffix = System.unique_integer([:positive])
+      name = "wirepolicy_#{suffix}"
+      on_exit(fn -> PolicyStore.delete(name) end)
+      %{name: name, kept: "wire-kept-#{suffix}", short: "wire-short-#{suffix}"}
+    end
+
+    test "an admin sets a 1 s policy on one topic and only that topic's sealed segments expire", ctx do
+      with_session("admin", "admin123", fn socket ->
+        for topic <- [ctx.short, ctx.kept], do: assert({0, _} = create_topic(socket, topic))
+
+        fields = [{"retention.max_age_ms", 1_000}]
+
+        assert {0, _} =
+                 TCPHelper.request(socket, Wire.define_policy_key(), 1, Wire.encode_define_policy_req(ctx.name, fields))
+
+        assert {0, _} =
+                 TCPHelper.request(
+                   socket,
+                   Wire.bind_topic_policy_key(),
+                   2,
+                   Wire.encode_bind_topic_policy_req(ctx.short, ctx.name)
+                 )
+
+        assert {0, payload} =
+                 TCPHelper.request(socket, Wire.get_topic_policy_key(), 3, Wire.encode_get_topic_policy_req(ctx.short))
+
+        read_back = Wire.decode_topic_policy_resp(payload)
+        assert %{policy: policy, resolution: :resolved, definition: [{"retention.max_age_ms", 1_000}]} = read_back
+        assert policy == ctx.name
+        assert {"retention.max_age_ms", 1_000, :policy} in read_back.effective
+
+        assert {0, payload} = TCPHelper.request(socket, Wire.list_policies_key(), 4, <<>>)
+        assert {ctx.name, fields} in Wire.decode_list_policies_resp(payload)
+      end)
+
+      # The production sweep, over the live control plane's bindings and the live policy store that the
+      # wire just wrote. Only the sealed segments are synthesized: the application's broker rolls a
+      # segment at 64 MB, and a two-second-old sealed segment per topic is what the rule is about.
+      now = System.system_time(:millisecond)
+      parent = self()
+
+      {:ok, coordinator} =
+        RetentionCoordinator.start_link(
+          metadata_source: fn ->
+            with_old_sealed_segments(BrokerServer.metadata(Malachi.LogBroker), [ctx.short, ctx.kept], now)
+          end,
+          expire_segment: fn segment -> send(parent, {:expired, segment.id}) && :ok end,
+          policy: %{max_age_ms: nil, max_bytes: nil},
+          clock: fn -> now end,
+          interval: 3_600_000
+        )
+
+      on_exit(fn -> if Process.alive?(coordinator), do: GenServer.stop(coordinator) end)
+
+      assert RetentionCoordinator.run_now(coordinator) == [{{ctx.short, 0}, :old}]
+      assert_received {:expired, {{short, 0}, :old}} when short == ctx.short
+    end
+
+    test "a policy store that cannot be read is an error on list and on get, never an empty answer", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.kept)
+        server_id = {PolicyStore.cluster_name(), node()}
+        :ok = :ra.stop_server(:default, server_id)
+
+        try do
+          assert {1, _reason} = TCPHelper.request(socket, Wire.list_policies_key(), 1, <<>>)
+
+          assert {1, _reason} =
+                   TCPHelper.request(socket, Wire.get_topic_policy_key(), 2, Wire.encode_get_topic_policy_req(ctx.kept))
+        after
+          :ok = :ra.restart_server(:default, server_id)
+        end
+      end)
+    end
+
+    test "a session without :admin is refused on every policy key", ctx do
+      with_session("producer", "producer123", fn socket ->
+        requests = [
+          {Wire.define_policy_key(), Wire.encode_define_policy_req(ctx.name, [])},
+          {Wire.delete_policy_key(), Wire.encode_delete_policy_req(ctx.name, false)},
+          {Wire.list_policies_key(), <<>>},
+          {Wire.bind_topic_policy_key(), Wire.encode_bind_topic_policy_req("t", ctx.name)},
+          {Wire.get_topic_policy_key(), Wire.encode_get_topic_policy_req("t")}
+        ]
+
+        for {key, payload} <- requests do
+          assert {code, reason_payload} = TCPHelper.request(socket, key, 1, payload)
+          refute ok?(code)
+          assert reason(reason_payload) == "permission_denied"
+        end
+      end)
+    end
+
+    test "refusals come back by name: unknown field, undefined policy, policy in use, unknown topic", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.kept)
+
+        unknown = Wire.encode_define_policy_req(ctx.name, [{"retention.ms", 1}])
+        assert {1, payload} = TCPHelper.request(socket, Wire.define_policy_key(), 1, unknown)
+        assert reason(payload) == "unknown_policy_field: retention.ms"
+
+        undefined = Wire.encode_bind_topic_policy_req(ctx.kept, ctx.name)
+        assert {1, payload} = TCPHelper.request(socket, Wire.bind_topic_policy_key(), 2, undefined)
+        assert reason(payload) == "no_such_policy"
+
+        assert {0, _} =
+                 TCPHelper.request(socket, Wire.define_policy_key(), 3, Wire.encode_define_policy_req(ctx.name, []))
+
+        assert {0, _} = TCPHelper.request(socket, Wire.bind_topic_policy_key(), 4, undefined)
+
+        assert {1, payload} =
+                 TCPHelper.request(socket, Wire.delete_policy_key(), 5, Wire.encode_delete_policy_req(ctx.name, false))
+
+        assert reason(payload) == "policy_in_use: " <> ctx.kept
+
+        assert {0, _} =
+                 TCPHelper.request(socket, Wire.delete_policy_key(), 6, Wire.encode_delete_policy_req(ctx.name, true))
+
+        ghost = Wire.encode_get_topic_policy_req("ghost-" <> ctx.kept)
+        assert {1, payload} = TCPHelper.request(socket, Wire.get_topic_policy_key(), 7, ghost)
+        assert reason(payload) == "no_such_topic"
+
+        assert {1, payload} = TCPHelper.request(socket, Wire.define_policy_key(), 8, <<9>>)
+        assert reason(payload) == "malformed_request"
+      end)
+    end
+  end
+
+  # Each topic gets one sealed segment, sealed two seconds before `now`, on top of the live metadata.
+  defp with_old_sealed_segments(metadata, topics, now) do
+    Enum.reduce(topics, metadata, fn topic, metadata ->
+      range = {topic, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, range, {range, :old}, [node()], 0})
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, {range, :old}, 1, 10, now - 2_000})
+      metadata
+    end)
   end
 
   defp grant_acl(socket, username, operation, pattern) do

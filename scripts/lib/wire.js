@@ -31,6 +31,12 @@ const API = {
   grantAcl: 14,
   revokeAcl: 15,
   listAcls: 16,
+  // admin storage policies (require the admin permission, #194)
+  definePolicy: 17,
+  deletePolicy: 18,
+  listPolicies: 19,
+  bindTopicPolicy: 20,
+  getTopicPolicy: 21,
 };
 
 const OK = 0;
@@ -275,6 +281,126 @@ function decodeListAclsResp(payload) {
   return acls;
 }
 
+// ---- admin storage policies ----
+//
+// A policy travels as a counted list of self-describing fields: <count:u16> then, per field,
+// putStr(name) and a value tagged with its own type:
+//
+//   <0:u8>                    null (the rule is off)
+//   <1:u8><integer:u64>       a non-negative integer bound
+//   <2:u8><len:u32><bytes>    a string
+//
+// A field left out inherits the cluster's global value, so "inherit", "off" (null) and 0 stay distinct.
+// Fields are [name, value] pairs, in the order given. The server refuses an unknown field by name.
+
+// The settable fields and how the CLI parses each one: a mirror of Malachi.Cluster.Policy.fields/0, kept
+// in step by test/scripts/policy_js_test.exs. A field this table lacks is still sent (as an integer when it
+// is all digits, else as a string) and the server answers it by name.
+const POLICY_FIELDS = {
+  'retention.max_age_ms': 'bound',
+  'retention.max_bytes': 'bound',
+  spread_by: 'attribute',
+};
+
+const RESOLUTIONS = ['none', 'resolved', 'unresolved'];
+const ORIGINS = ['global', 'policy', 'unresolved_backstop'];
+
+function putValue(value) {
+  if (value === null || value === undefined) return Buffer.from([0]);
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([Buffer.from([2]), u32(bytes.length), bytes]);
+  }
+  if ((typeof value === 'number' && Number.isInteger(value) && value >= 0) || (typeof value === 'bigint' && value >= 0n)) {
+    return Buffer.concat([Buffer.from([1]), u64(value)]);
+  }
+  throw new Error(`a policy value is null, a non-negative integer or a string, got: ${value}`);
+}
+
+function putFields(fields) {
+  return Buffer.concat([u16(fields.length), ...fields.map(([name, value]) => Buffer.concat([putStr(name), putValue(value)]))]);
+}
+
+// Integers past 2^53 come back as BigInt, so a large byte budget is never rounded.
+function readValue(r) {
+  const tag = r.bytes(1).readUInt8(0);
+  if (tag === 0) return null;
+  if (tag === 1) {
+    const v = r.u64();
+    return v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v;
+  }
+  if (tag === 2) return r.bytes(r.u32()).toString('utf8');
+  throw new Error(`unknown policy value tag ${tag}`);
+}
+
+function readFields(r) {
+  const count = r.u16();
+  const fields = [];
+  for (let i = 0; i < count; i++) fields.push([r.str(), readValue(r)]);
+  return fields;
+}
+
+function expectEnd(r) {
+  if (r.pos !== r.buf.length) throw new Error(`${r.buf.length - r.pos} trailing bytes`);
+}
+
+function codeOf(table, code) {
+  if (code >= table.length) throw new Error(`unknown code ${code}`);
+  return table[code];
+}
+
+function encodeDefinePolicyReq(name, fields) {
+  return Buffer.concat([putStr(name), putFields(fields)]);
+}
+
+function encodeDeletePolicyReq(name, force) {
+  return Buffer.concat([putStr(name), Buffer.from([force ? 1 : 0])]);
+}
+
+function encodeListPoliciesReq() {
+  return Buffer.alloc(0);
+}
+
+// list_policies response: <count:u32> then (putStr(name), fields)*. Returns [[name, fields], ...].
+function decodeListPoliciesResp(payload) {
+  const r = new Reader(payload);
+  const count = r.u32();
+  const policies = [];
+  for (let i = 0; i < count; i++) policies.push([r.str(), readFields(r)]);
+  expectEnd(r);
+  return policies;
+}
+
+// A null name detaches the topic from its policy.
+function encodeBindTopicPolicyReq(topic, name) {
+  return Buffer.concat([putStr(topic), putStr(name)]);
+}
+
+function encodeGetTopicPolicyReq(topic) {
+  return putStr(topic);
+}
+
+// get_topic_policy response: putStr(topic), putStr(policy), resolution:u8, has_definition:u8, [fields],
+// <count:u16> then (putStr(name), value, origin:u8)*.
+function decodeTopicPolicyResp(payload) {
+  const r = new Reader(payload);
+  const topic = r.str();
+  const policy = r.str();
+  const resolution = codeOf(RESOLUTIONS, r.bytes(1).readUInt8(0));
+  const hasDefinition = r.bytes(1).readUInt8(0);
+  if (hasDefinition > 1) throw new Error(`bad definition flag ${hasDefinition}`);
+  const definition = hasDefinition === 1 ? readFields(r) : null;
+  const count = r.u16();
+  const effective = [];
+  for (let i = 0; i < count; i++) {
+    const name = r.str();
+    const value = readValue(r);
+    effective.push([name, value, codeOf(ORIGINS, r.bytes(1).readUInt8(0))]);
+  }
+  expectEnd(r);
+  return { topic, policy, resolution, definition, effective };
+}
+
 module.exports = {
   API,
   OK,
@@ -301,6 +427,14 @@ module.exports = {
   encodeAclReq,
   encodeListAclsReq,
   decodeListAclsResp,
+  POLICY_FIELDS,
+  encodeDefinePolicyReq,
+  encodeDeletePolicyReq,
+  encodeListPoliciesReq,
+  decodeListPoliciesResp,
+  encodeBindTopicPolicyReq,
+  encodeGetTopicPolicyReq,
+  decodeTopicPolicyResp,
 };
 
 // Self-test: `node scripts/lib/wire.js`. No server needed. Guards the frame-length cap against

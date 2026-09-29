@@ -23,7 +23,7 @@ defmodule Malachi.Wire do
 
   This framing is the compatibility contract with every client: the Node CLI, the Elixir client, and any
   future SDK. Two things are **stable** and must stay so: the byte layout of each frame above, and the
-  `api_key` numbers (currently 0..16, `@auth` through `@list_acls`). Clients are compiled against them, so
+  `api_key` numbers (currently 0..21, `@auth` through `@get_topic_policy`). Clients are compiled against them, so
   a running cluster and its clients agree on the wire only as long as both hold.
 
   A change is **breaking** (every deployed client must update in lockstep, so it cannot ship in a normal
@@ -65,12 +65,20 @@ defmodule Malachi.Wire do
   @grant_acl 14
   @revoke_acl 15
   @list_acls 16
+  # admin storage policies (#194): define/delete/list named policies, bind a topic to one, and read back a
+  # topic's effective retention. Fields travel as a counted list of self-describing `{name, value}` pairs
+  # (see "Policy fields" below), so a field added later (#199, #200, #201, #206) needs no new key.
+  @define_policy 17
+  @delete_policy 18
+  @list_policies 19
+  @bind_topic_policy 20
+  @get_topic_policy 21
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..16
+  @type api_key :: 0..21
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -91,6 +99,11 @@ defmodule Malachi.Wire do
   def grant_acl_key, do: @grant_acl
   def revoke_acl_key, do: @revoke_acl
   def list_acls_key, do: @list_acls
+  def define_policy_key, do: @define_policy
+  def delete_policy_key, do: @delete_policy
+  def list_policies_key, do: @list_policies
+  def bind_topic_policy_key, do: @bind_topic_policy
+  def get_topic_policy_key, do: @get_topic_policy
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -363,6 +376,142 @@ defmodule Malachi.Wire do
     acls
   end
 
+  # ---- admin storage policies ----
+  #
+  # Policy fields: <<count::16, field*>>, field = <<put_str(name), value>>, and a value says its own type:
+  #
+  #     <<0::8>>                          nil (the rule is off)
+  #     <<1::8, integer::64>>             a non-negative integer bound
+  #     <<2::8, len::32, bytes::binary>>  a string
+  #
+  # A field left out of the list is absent from the policy: it inherits the global value. So "inherit",
+  # "off" and `0` stay three different things. Self-describing values mean a decoder never needs the field
+  # table: an older client still parses a response carrying a field it has never heard of, and the server
+  # refuses an unknown field BY NAME (`Malachi.Cluster.Policy.from_pairs/2`) instead of failing to parse.
+
+  @typedoc "A policy field as the wire carries it."
+  @type policy_value :: non_neg_integer() | String.t() | nil
+
+  @doc "define_policy (17): `<<put_str(name), fields>>`."
+  @spec encode_define_policy_req(String.t(), [{String.t(), policy_value()}]) :: binary()
+  def encode_define_policy_req(name, fields), do: <<put_str(name)::binary, put_fields(fields)::binary>>
+
+  @spec decode_define_policy_req(binary()) :: {String.t() | nil, [{String.t(), policy_value()}]}
+  def decode_define_policy_req(payload) do
+    {name, rest} = take_str(payload)
+    {fields, <<>>} = take_fields(rest)
+    {name, fields}
+  end
+
+  @doc "delete_policy (18): `<<put_str(name), force::8>>`, force 1 deletes a policy topics are bound to."
+  @spec encode_delete_policy_req(String.t(), boolean()) :: binary()
+  def encode_delete_policy_req(name, force), do: <<put_str(name)::binary, if(force, do: 1, else: 0)::8>>
+
+  @spec decode_delete_policy_req(binary()) :: {String.t() | nil, boolean()}
+  def decode_delete_policy_req(payload) do
+    {name, <<force::8>>} = take_str(payload)
+    true = force in [0, 1]
+    {name, force == 1}
+  end
+
+  @doc "list_policies (19) takes an empty request."
+  @spec decode_list_policies_req(binary()) :: :ok
+  def decode_list_policies_req(<<>>), do: :ok
+
+  @doc "list_policies response: `<<count::32, (put_str(name), fields)*>>`, in the order given."
+  @spec encode_list_policies_resp([{String.t(), [{String.t(), policy_value()}]}]) :: binary()
+  def encode_list_policies_resp(policies) do
+    body = for {name, fields} <- policies, into: <<>>, do: <<put_str(name)::binary, put_fields(fields)::binary>>
+    <<length(policies)::32, body::binary>>
+  end
+
+  @spec decode_list_policies_resp(binary()) :: [{String.t(), [{String.t(), policy_value()}]}]
+  def decode_list_policies_resp(<<count::32, rest::binary>>) do
+    {policies, <<>>} = take_policies(rest, count, [])
+    policies
+  end
+
+  @doc "bind_topic_policy (20): `<<put_str(topic), put_str(name)>>`, a nil name detaches the topic."
+  @spec encode_bind_topic_policy_req(String.t(), String.t() | nil) :: binary()
+  def encode_bind_topic_policy_req(topic, name), do: <<put_str(topic)::binary, put_str(name)::binary>>
+
+  @spec decode_bind_topic_policy_req(binary()) :: {String.t() | nil, String.t() | nil}
+  def decode_bind_topic_policy_req(payload) do
+    {topic, rest} = take_str(payload)
+    {name, <<>>} = take_str(rest)
+    {topic, name}
+  end
+
+  @doc "get_topic_policy (21): `put_str(topic)`."
+  @spec encode_get_topic_policy_req(String.t()) :: binary()
+  def encode_get_topic_policy_req(topic), do: put_str(topic)
+
+  @spec decode_get_topic_policy_req(binary()) :: String.t() | nil
+  def decode_get_topic_policy_req(payload) do
+    {topic, <<>>} = take_str(payload)
+    topic
+  end
+
+  @resolutions %{none: 0, resolved: 1, unresolved: 2}
+  @origins %{global: 0, policy: 1, unresolved_backstop: 2}
+
+  @typedoc "A topic's policy as get_topic_policy answers it."
+  @type topic_policy_resp :: %{
+          topic: String.t(),
+          policy: String.t() | nil,
+          resolution: :none | :resolved | :unresolved,
+          definition: [{String.t(), policy_value()}] | nil,
+          effective: [{String.t(), policy_value(), :global | :policy | :unresolved_backstop}]
+        }
+
+  @doc """
+  get_topic_policy response: `<<put_str(topic), put_str(policy), resolution::8, has_definition::8,
+  fields?, count::16, (put_str(name), value, origin::8)*>>`. Resolution is 0 none, 1 resolved, 2
+  unresolved; origin is 0 global, 1 policy, 2 unresolved_backstop. The definition's fields follow only when
+  `has_definition` is 1.
+  """
+  @spec encode_topic_policy_resp(topic_policy_resp()) :: binary()
+  def encode_topic_policy_resp(%{topic: topic, policy: policy, resolution: resolution} = resp) do
+    definition =
+      case resp.definition do
+        nil -> <<0::8>>
+        fields -> <<1::8, put_fields(fields)::binary>>
+      end
+
+    effective =
+      for {name, value, origin} <- resp.effective, into: <<>> do
+        <<put_str(name)::binary, put_value(value)::binary, Map.fetch!(@origins, origin)::8>>
+      end
+
+    <<put_str(topic)::binary, put_str(policy)::binary, Map.fetch!(@resolutions, resolution)::8, definition::binary,
+      length(resp.effective)::16, effective::binary>>
+  end
+
+  @spec decode_topic_policy_resp(binary()) :: topic_policy_resp()
+  def decode_topic_policy_resp(payload) do
+    {topic, rest} = take_str(payload)
+    {policy, <<resolution::8, rest::binary>>} = take_str(rest)
+
+    {definition, <<count::16, rest::binary>>} =
+      case rest do
+        <<0::8, rest::binary>> -> {nil, rest}
+        <<1::8, rest::binary>> -> take_fields(rest)
+      end
+
+    {effective, <<>>} = take_effective(rest, count, [])
+
+    %{
+      topic: topic,
+      policy: policy,
+      resolution: key_of(@resolutions, resolution),
+      definition: definition,
+      effective: effective
+    }
+  end
+
+  defp key_of(map, code),
+    do: Enum.find_value(map, fn {key, value} -> if value == code, do: key end) || raise(ArgumentError)
+
   # ---- wire record (no offset; key/value/headers/timestamp only) ----
 
   @doc "Encodes a record for the wire (no offset: the client never sees one)."
@@ -416,6 +565,44 @@ defmodule Malachi.Wire do
     {operation, rest} = take_str(rest)
     {resource, rest} = take_str(rest)
     take_acls(rest, n - 1, [%{operation: operation, resource: resource} | acc])
+  end
+
+  defp put_fields(fields) do
+    body = for {name, value} <- fields, into: <<>>, do: <<put_str(name)::binary, put_value(value)::binary>>
+    <<length(fields)::16, body::binary>>
+  end
+
+  defp put_value(nil), do: <<0::8>>
+  defp put_value(value) when is_integer(value) and value >= 0, do: <<1::8, value::64>>
+  defp put_value(value) when is_binary(value), do: <<2::8, byte_size(value)::32, value::binary>>
+
+  defp take_fields(<<count::16, rest::binary>>), do: take_fields(rest, count, [])
+  defp take_fields(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_fields(rest, n, acc) do
+    {name, rest} = take_str(rest)
+    {value, rest} = take_value(rest)
+    take_fields(rest, n - 1, [{name, value} | acc])
+  end
+
+  defp take_value(<<0::8, rest::binary>>), do: {nil, rest}
+  defp take_value(<<1::8, value::64, rest::binary>>), do: {value, rest}
+  defp take_value(<<2::8, len::32, value::binary-size(len), rest::binary>>), do: {value, rest}
+
+  defp take_policies(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_policies(rest, n, acc) do
+    {name, rest} = take_str(rest)
+    {fields, rest} = take_fields(rest)
+    take_policies(rest, n - 1, [{name, fields} | acc])
+  end
+
+  defp take_effective(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_effective(rest, n, acc) do
+    {name, rest} = take_str(rest)
+    {value, <<origin::8, rest::binary>>} = take_value(rest)
+    take_effective(rest, n - 1, [{name, value, key_of(@origins, origin)} | acc])
   end
 
   defp encode_records(records), do: records |> Enum.map(&encode_record/1) |> IO.iodata_to_binary()
