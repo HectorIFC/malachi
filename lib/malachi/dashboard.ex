@@ -13,8 +13,8 @@ defmodule Malachi.Dashboard do
   alias Malachi.AuditLog
   alias Malachi.Auth
   alias Malachi.BrokerServer
-  alias Malachi.Config
   alias Malachi.Dashboard.SecurityHeaders
+  alias Malachi.HTTP.Limits
   alias Malachi.I18n
   alias Malachi.IPAddress
   alias Malachi.Metadata
@@ -45,7 +45,7 @@ defmodule Malachi.Dashboard do
 
   @impl true
   def init({port, name}) do
-    limits = header_limits()
+    limits = Limits.headers()
 
     # packet_size bounds every line the :http decoder returns, the request line included, before it reaches
     # this process. The bound is exact only while the driver's buffer is larger than it; with a buffer at or
@@ -97,53 +97,13 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  # Deadline for the request line and the whole header block together. Without it, :gen_tcp.recv/2 blocks
-  # forever, so a client that connects and sends nothing pins a process and a socket indefinitely
-  # (slowloris); and a per-read timeout alone would let a client that sends one header just inside it hold
-  # the connection for as many reads as it is allowed headers. Configurable so it can be tuned (and driven
-  # low in tests).
-  defp recv_timeout do
-    Application.get_env(:malachi, :dashboard_recv_timeout_ms, 5_000)
-  end
-
-  # Header limits, Bandit's defaults for the count and the line. A line is bounded at the socket (see
-  # init/1); the total is what keeps fifty maximal lines, half a megabyte per connection, from being
-  # acceptable. Read once at start, so a bad value is reported once rather than on every request.
-  @default_max_header_count 50
-  @default_max_header_line_size 10_000
-  @default_max_header_size 32_768
-
-  # The line limit also sizes the driver buffer, which is allocated whole on the first read of a partial
-  # line, so it is a memory cost per connection rather than only a ceiling. It is capped here: past 2^31 the
-  # socket options wrap (buffer 1, and at 2^32 packet_size 0, which is no line limit at all).
-  @max_header_line_size_ceiling 1_048_576
-
-  defp header_limits do
-    %{
-      count: setting(:dashboard_max_header_count, @default_max_header_count, &(&1 > 0)),
-      line:
-        setting(
-          :dashboard_max_header_line_size,
-          @default_max_header_line_size,
-          &(&1 > 0 and &1 <= @max_header_line_size_ceiling)
-        ),
-      total: setting(:dashboard_max_header_size, @default_max_header_size, &(&1 > 0))
-    }
-  end
-
-  defp setting(key, default, valid?) do
-    :malachi
-    |> Application.get_env(key, default)
-    |> Config.checked(key, default, &(is_integer(&1) and valid?.(&1)))
-  end
-
   defp handle_http(socket, limits) do
     # The client address is canonicalized here, at the edge, so everything downstream (the auth rate
     # limiter, Auth.authenticate/4, Auth.validate_token/3 and every audit event) sees the same binary
     # form the TCP acceptor produces. Reading it through IPAddress.from_socket/2 also drops a hard
     # match that raised a MatchError whenever a client closed the socket between the accept and here.
     client_ip = IPAddress.from_socket(socket, :gen_tcp)
-    deadline = System.monotonic_time(:millisecond) + recv_timeout()
+    deadline = System.monotonic_time(:millisecond) + Limits.recv_timeout_ms()
 
     with {:ok, {:http_request, method, target, _version}} <- :gen_tcp.recv(socket, 0, remaining(deadline)),
          {:ok, path} <- request_path(target) do
