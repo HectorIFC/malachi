@@ -9,7 +9,14 @@
 # dashboard serves the logo byte for byte as it is in the repository, and that the release's priv
 # directory holds nothing but static.
 #
-# Exits 0 when every check passes, 1 on the first failed check, 2 on a usage error.
+# Exits 0 when every check passes, 1 on the first failed check, 2 on a usage error: a wrong number of
+# arguments or an empty one, a timeout that is not a whole number of seconds from 1 to 99999 written
+# without leading zeros, or no coreutils timeout on PATH.
+#
+# Both calls are bounded, so a dashboard that accepts a connection and never answers, or a container
+# that does not respond to exec, fails the check instead of holding the CI job until its own limit:
+# STATIC_ASSETS_HTTP_TIMEOUT (seconds, default 10) caps the whole logo request and
+# STATIC_ASSETS_EXEC_TIMEOUT (seconds, default 15) caps the priv listing. Requires coreutils timeout.
 set -euo pipefail
 
 if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
@@ -19,6 +26,30 @@ fi
 
 container="$1"
 dashboard_url="${2%/}"
+http_timeout="${STATIC_ASSETS_HTTP_TIMEOUT:-10}"
+exec_timeout="${STATIC_ASSETS_EXEC_TIMEOUT:-15}"
+
+# Both curl and timeout read 0 as no limit at all, so 0 is refused along with anything not a number.
+# Leading zeros are refused rather than normalized, which would bring in bash's octal reading, and the
+# five digit cap keeps the value inside what curl accepts: a longer one it rejects outright, which
+# would surface as an unreachable dashboard.
+require_positive_seconds() {
+  case "$2" in
+    '' | *[!0-9]* | 0* | ??????*)
+      echo "$1 must be a whole number of seconds from 1 to 99999 without leading zeros, got '$2'" >&2
+      exit 2
+      ;;
+  esac
+}
+require_positive_seconds STATIC_ASSETS_HTTP_TIMEOUT "$http_timeout"
+require_positive_seconds STATIC_ASSETS_EXEC_TIMEOUT "$exec_timeout"
+
+# Checked up front: missing, the exec below would fail as if the container were at fault.
+if ! command -v timeout > /dev/null 2>&1; then
+  echo "this check requires coreutils timeout, which is not on PATH" >&2
+  exit 2
+fi
+
 expected_logo="$(cd "$(dirname "$0")/.." && pwd)/priv/static/logo.svg"
 
 fail() {
@@ -29,8 +60,12 @@ fail() {
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-response="$(curl -sS -o "$body" -w '%{http_code} %{content_type}' "$dashboard_url/logo.svg")" ||
-  fail "could not reach $dashboard_url/logo.svg"
+curl_status=0
+response="$(curl -sS --connect-timeout "$http_timeout" --max-time "$http_timeout" -o "$body" \
+  -w '%{http_code} %{content_type}' "$dashboard_url/logo.svg")" || curl_status=$?
+# 28 is curl's operation timeout.
+[ "$curl_status" -ne 28 ] || fail "GET /logo.svg did not complete within ${http_timeout}s"
+[ "$curl_status" -eq 0 ] || fail "could not reach $dashboard_url/logo.svg"
 status="${response%% *}"
 content_type="${response#* }"
 
@@ -44,8 +79,13 @@ esac
 cmp -s "$body" "$expected_logo" || fail "GET /logo.svg body differs from $expected_logo"
 echo "logo served: 200, $content_type, identical to the repository copy"
 
-listing="$(docker exec "$container" sh -c 'ls -1A /app/lib/malachi-*/priv')" ||
-  fail "could not list the release priv directory in container $container"
+exec_status=0
+listing="$(timeout "$exec_timeout" docker exec "$container" sh -c 'ls -1A /app/lib/malachi-*/priv')" ||
+  exec_status=$?
+# 124 is what timeout exits with when it had to stop the command.
+[ "$exec_status" -ne 124 ] ||
+  fail "listing the release priv directory in container $container did not finish within ${exec_timeout}s"
+[ "$exec_status" -eq 0 ] || fail "could not list the release priv directory in container $container"
 
 [ "$listing" = "static" ] ||
   fail "release priv directory holds '$(printf '%s' "$listing" | tr '\n' ' ')', expected only static"

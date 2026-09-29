@@ -14,7 +14,7 @@ broker correctly. Two scripts back it, both driven by `make`.
 
 - Docker installed and running
 - `make`
-- `curl` and `nc` (netcat)
+- `curl`, `nc` (netcat) and `timeout` (GNU coreutils; `brew install coreutils` on macOS)
 - `python3` (the scripts parse the login token with it)
 
 ## Quick start
@@ -92,11 +92,21 @@ Run against a started container, it asserts that the image ships `priv/static` a
   checkout means gitignored development keys (`priv/dist_cert`, `priv/cert`) and dialyzer PLTs, and fails
   this.
 
-It exits 1 naming the check that failed, and 2 on a usage error. The Docker smoke test in CI (the
-`docker` job of `ci.yml`) runs it after planting decoy files under `priv/dist_cert` and `priv/cert`,
-since a fresh checkout has neither and the second check would otherwise pass against a copy of `priv`
-as a whole. `docker-regression-test.sh` runs it as test 3.5 and prints its reason on a failure.
-`test/scripts/docker_static_assets_check_test.exs` covers each way it can fail without Docker.
+Both calls are bounded, so a dashboard that stalls or a container that does not answer `exec` fails the
+check instead of holding the run: `STATIC_ASSETS_HTTP_TIMEOUT` caps the logo request (seconds, default
+10) and `STATIC_ASSETS_EXEC_TIMEOUT` caps the `priv` listing (default 15).
+
+Each must be a whole number of seconds from 1 to 99999, written without leading zeros: both tools
+read 0 as no limit at all, and curl rejects a much longer value outright. It exits 1 naming the check
+that failed, and 2 on a usage error (a wrong number of arguments or an empty one, a timeout outside
+that rule, or no coreutils `timeout` on `PATH`).
+
+The Docker smoke test in CI (the `docker` job of `ci.yml`) runs it after planting decoy files under
+`priv/dist_cert` and `priv/cert`, since a fresh checkout has neither and the second check would
+otherwise pass against a copy of `priv` as a whole. `docker-regression-test.sh` runs it as test 3.5
+and prints its reason on a failure. `test/scripts/docker_static_assets_check_test.exs` covers each
+way it can fail without Docker; it needs coreutils `timeout`, so like the other `:linux` tests it runs
+on Linux (CI included) and is excluded elsewhere.
 
 ## Manual validation
 
