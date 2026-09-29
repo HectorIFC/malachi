@@ -1,0 +1,195 @@
+diff --git a/lib/malachi/application.ex b/lib/malachi/application.ex
+index bf4b4bc..67b2114 100644
+--- a/lib/malachi/application.ex
++++ b/lib/malachi/application.ex
+@@ -281,7 +281,7 @@ defmodule Malachi.Application do
+ 
+     reconcile = fn ->
+       if length(nodes) > 1, do: ClusterFlagsServer.reconcile(@log_flags, nodes)
+-      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1))
++      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1), adopt: &adopt_upgrade_canary/1)
+     end
+ 
+     opts = [
+@@ -293,6 +293,11 @@ defmodule Malachi.Application do
+     %{id: Malachi.LogClusterFlagsReconciler, start: {LeaseReconciler, :start_link, [opts]}}
+   end
+ 
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): switching the canary flag on raises the data
++  # directory to format 2, so that an older build refuses to start on it (issue #189).
++  defp adopt_upgrade_canary(:upgrade_canary), do: :ok = FormatMarker.raise_to(log_data_dir(), 2)
++  defp adopt_upgrade_canary(_flag), do: :ok
++
+   @doc """
+   Switches the cluster feature flag named `name` on, from this running node. The entry point
+   `mix malachi.flag` reaches over RPC.
+diff --git a/lib/malachi/broker.ex b/lib/malachi/broker.ex
+index 749f078..f5088ca 100644
+--- a/lib/malachi/broker.ex
++++ b/lib/malachi/broker.ex
+@@ -204,6 +204,13 @@ defmodule Malachi.Broker do
+     apply_metadata(broker, {:create_topic, name, keyspace_bits})
+   end
+ 
++  @doc """
++  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
++  control plane, a command introduced at machine version 4.
++  """
++  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
++  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
++
+   @doc """
+   Routes each record to the active range that owns its key and replicates the batch to that
+   range's active segment via `replicate_fun`. Returns `{broker, {:ok, placements}}`, or
+diff --git a/lib/malachi/broker_server.ex b/lib/malachi/broker_server.ex
+index e2426a3..c3557f7 100644
+--- a/lib/malachi/broker_server.ex
++++ b/lib/malachi/broker_server.ex
+@@ -492,6 +492,12 @@ defmodule Malachi.BrokerServer do
+     {:reply, reply, %{state | broker: broker}}
+   end
+ 
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): the drill's entry point for the canary command.
++  def handle_call({:canary_note, topic, note}, _from, state) do
++    {broker, reply} = Broker.canary_note(state.broker, topic, note)
++    {:reply, reply, %{state | broker: broker}}
++  end
++
+   def handle_call({:produce, topic, records, ctx}, from, state) do
+     # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
+     # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
+diff --git a/lib/malachi/cluster/capabilities.ex b/lib/malachi/cluster/capabilities.ex
+index 68ca555..6f4ab02 100644
+--- a/lib/malachi/cluster/capabilities.ex
++++ b/lib/malachi/cluster/capabilities.ex
+@@ -65,7 +65,9 @@ defmodule Malachi.Cluster.Capabilities do
+   # the first entry arrives with the first feature that needs a cluster-wide gate (#202). A name is
+   # added here only by the release that can genuinely do the thing, because advertising is a promise
+   # the rest of the cluster acts on.
+-  @capabilities []
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
++  # scripts/docker-upgrade-chaos.sh, never into a release.
++  @capabilities [:upgrade_canary]
+ 
+   @typedoc "A capability, which is also the name of the flag that requires it."
+   @type capability :: atom()
+diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
+index ae0a77c..8ab8ec3 100644
+--- a/lib/malachi/cluster/machine_version.ex
++++ b/lib/malachi/cluster/machine_version.ex
+@@ -69,7 +69,10 @@ defmodule Malachi.Cluster.MachineVersion do
+   # 3 introduces the storage policy store (`Malachi.Cluster.PolicyRegistry`): its commands are refused
+   # until every member of that group runs code that implements them. 2 is the cluster flags' and is
+   # already released, which is why the policy commands take the next version rather than sharing it.
+-  @code_version 3
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 4 introduces
++  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
++  @code_version 4
+ 
+   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
+   @type command_key :: {atom(), non_neg_integer()}
+diff --git a/lib/malachi/cluster/replication_server.ex b/lib/malachi/cluster/replication_server.ex
+index 8eaeef6..d226504 100644
+--- a/lib/malachi/cluster/replication_server.ex
++++ b/lib/malachi/cluster/replication_server.ex
+@@ -570,6 +570,8 @@ defmodule Malachi.Cluster.ReplicationServer do
+       unexpected_shapes: MapSet.new()
+     }
+ 
++    # UPGRADE CANARY (test/support/upgrade_canary.patch): see handle_info(:upgrade_canary, _).
++    Process.send_after(self(), :upgrade_canary, 1_000)
+     {:ok, state}
+   end
+ 
+@@ -904,6 +906,10 @@ defmodule Malachi.Cluster.ReplicationServer do
+     {:noreply, state}
+   end
+ 
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): the canary cast is understood here and ignored;
++  # an older node has no such clause and must drop it through the catch-all below.
++  def handle_cast({:replica_canary, _nil}, state), do: {:noreply, state}
++
+   # A push or an ack in a shape this build does not know, which is what a newer primary sends an older
+   # follower during a rolling upgrade. Dropping it costs that one batch its ack (the primary waits out its
+   # replication timeout for it); crashing would cost every log on this node (see "Storage failures").
+@@ -992,6 +998,16 @@ defmodule Malachi.Cluster.ReplicationServer do
+     {:noreply, state}
+   end
+ 
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): once a second, to the replication server of every
++  # connected node, a cast no released build knows, and deliberately not gated on any flag. Sent whatever
++  # this server replicates, so an older node receives it however segments were placed. It exists to prove
++  # that an older replication server drops an unknown message and keeps replicating (issue #187).
++  def handle_info(:upgrade_canary, state) do
++    for peer <- Node.list(), do: GenServer.cast({Malachi.LogReplication, peer}, {:replica_canary, nil})
++    Process.send_after(self(), :upgrade_canary, 1_000)
++    {:noreply, state}
++  end
++
+   # A parked batch whose quorum never closed within the follow timeout: give its caller the same
+   # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
+   def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
+diff --git a/lib/malachi/metadata.ex b/lib/malachi/metadata.ex
+index 1a2ab6a..7c7e89b 100644
+--- a/lib/malachi/metadata.ex
++++ b/lib/malachi/metadata.ex
+@@ -180,7 +180,10 @@ defmodule Malachi.Metadata do
+       {:extract_topic, 2} => 0,
+       {:insert_topic, 2} => 0,
+       {:begin_migration, 2} => 0,
+-      {:end_migration, 2} => 0
++      {:end_migration, 2} => 0,
++      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
++      # scripts/docker-upgrade-chaos.sh, never into a release.
++      {:canary_note, 3} => 4
+     }
+   end
+ 
+@@ -216,6 +219,7 @@ defmodule Malachi.Metadata do
+   def command_target_topic({:delete_topic, name}), do: name
+   def command_target_topic({:set_topic_policy, name, _policy}), do: name
+   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
++  def command_target_topic({:canary_note, topic, _note}), do: topic
+   def command_target_topic(command), do: List.first(routed_range_topics(command))
+ 
+   @doc """
+@@ -549,6 +553,17 @@ defmodule Malachi.Metadata do
+   # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
+   # not-yet-effective command before it gets here, so an older replica never skips a command that a
+   # newer one applies.
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
++  # scripts/docker-upgrade-chaos.sh, never into a release. A note written into the topic's own
++  # metadata, the part of the state every build keeps, so a member that applied it and one that did not
++  # hold different topic maps at the same index.
++  defp do_apply(%__MODULE__{} = state, {:canary_note, topic, note}) do
++    case Map.fetch(state.topics, topic) do
++      {:ok, meta} -> {%{state | topics: Map.put(state.topics, topic, Map.put(meta, :canary_note, note))}, :ok}
++      :error -> {state, {:error, :no_such_topic}}
++    end
++  end
++
+   defp do_apply(%__MODULE__{} = state, _unknown_command), do: {state, {:error, :unknown_command}}
+ 
+   # Retiring a range requires its write head to be closed FIRST, and this is the only place that
+diff --git a/lib/malachi/storage/format_marker.ex b/lib/malachi/storage/format_marker.ex
+index 8f27d72..250e17e 100644
+--- a/lib/malachi/storage/format_marker.ex
++++ b/lib/malachi/storage/format_marker.ex
+@@ -65,11 +65,14 @@ defmodule Malachi.Storage.FormatMarker do
+   # `raise_to/3`, called when the flag flips, moves a directory above it.
+   @baseline_format 1
+   # The highest level this release can read.
+-  @supported_format 1
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
++  # scripts/docker-upgrade-chaos.sh, never into a release. Format 2 is what the
++  # canary flag raises the marker to, so that an older build refuses the directory.
++  @supported_format 2
+ 
+   # The oldest release that understands each format. The bridge release is the first that reads the
+   # marker at all, so it is the floor for format 1 as far as the marker can express one.
+-  @first_release %{1 => "0.12.0"}
++  @first_release %{1 => "0.12.0", 2 => "upgrade-canary"}
+ 
+   @required_keys ["format", "written_by", "requires"]
+ 
