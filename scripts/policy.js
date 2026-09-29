@@ -50,9 +50,11 @@ function parse(argv) {
     if (a === '--force') {
       force = true;
     } else if (a === '--off') {
-      fields.push([argv[++i], null]);
+      fields.push([operand(argv, i, a), null]);
+      i++;
     } else if (a === '--set') {
-      const assignment = argv[++i] || '';
+      const assignment = operand(argv, i, a);
+      i++;
       const at = assignment.indexOf('=');
       if (at <= 0) throw new Error(`--set takes <field>=<value>, got: ${assignment}`);
       const name = assignment.slice(0, at);
@@ -64,6 +66,14 @@ function parse(argv) {
     }
   }
   return { positional, fields, force };
+}
+
+// The token after an option that takes one. Missing, or another option in its place (`--off --force`
+// would otherwise swallow the force flag as a field name), is refused rather than consumed.
+function operand(argv, i, option) {
+  const next = argv[i + 1];
+  if (next === undefined || next.startsWith('--')) throw new Error(`${option} needs a value`);
+  return next;
 }
 
 function parseValue(name, raw) {

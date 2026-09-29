@@ -77,6 +77,15 @@ defmodule PolicyJsTest do
       assert PolicyStore.get(ctx.name) == nil
     end
 
+    test "an option that expects a field refuses a missing one, or another option in its place", ctx do
+      for args <- [["--off"], ["--off", "--force"], ["--set"], ["--set", "--force"]] do
+        assert {out, 1} = run_js(ctx, ["define", ctx.name | args])
+        assert out =~ "#{hd(args)} needs a value", "#{inspect(args)}: #{out}"
+      end
+
+      assert PolicyStore.get(ctx.name) == nil
+    end
+
     test "a bad value is refused before connecting, and a non-admin is refused by the server", ctx do
       assert {out, 1} = run_js(ctx, ["define", ctx.name, "--set", "retention.max_bytes=1k"])
       assert out =~ "invalid value in --set retention.max_bytes=1k"
