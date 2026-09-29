@@ -634,6 +634,63 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "a dropped connection is closed when a replacement takes over" do
+    # Every connection is authenticated and then closed by the server on its first operation, so each worker
+    # drops and reconnects about once per backoff for the whole run. A dropped connection that is replaced
+    # without being closed keeps its port until the worker exits, so the ports one worker holds climb with
+    # every drop; closed, they stay at one or two.
+    for {label, opts} <- [
+          closed_loop: [scenario: :produce, pipeline: 1],
+          pipelined: [scenario: :produce, pipeline: 4],
+          stream: [scenario: :stream]
+        ] do
+      test "in the #{label} loop" do
+        {r, held} =
+          max_ports_per_process(fn ->
+            with_scripted_server(&close_after_setup/2, fn port ->
+              run(
+                [port: port, host: "127.0.0.1", connections: 1, prepopulate: 0, topic: "closed_drops"] ++ unquote(opts)
+              )
+            end)
+          end)
+
+        assert r.reconnects >= 5, "the server did not drop the connection often enough for this to show anything"
+        assert held <= 3, "one process held #{held} ports at once: dropped connections were left open"
+      end
+    end
+  end
+
+  # Acks auth and create_topic, and closes the connection on any other request.
+  defp close_after_setup(api_key, _n) do
+    if api_key in [Wire.auth_key(), Wire.create_topic_key()], do: :ok, else: :close
+  end
+
+  # Runs `fun` and returns its result with the most TCP ports any one process owned at the same time while it
+  # ran, sampled every 10 ms. A closed port leaves the table at once, so only ports still open count.
+  defp max_ports_per_process(fun) do
+    sampler = spawn_link(fn -> sample_ports(0) end)
+    result = fun.()
+    send(sampler, {:stop, self()})
+    receive(do: ({:max_ports, held} -> {result, held}))
+  end
+
+  defp sample_ports(max) do
+    receive do
+      {:stop, from} -> send(from, {:max_ports, max})
+    after
+      10 ->
+        held =
+          for port <- :erlang.ports(),
+              :erlang.port_info(port, :name) == {:name, ~c"tcp_inet"},
+              {:connected, owner} <- [:erlang.port_info(port, :connected)],
+              reduce: %{} do
+            acc -> Map.update(acc, owner, 1, &(&1 + 1))
+          end
+
+        sample_ports(Enum.max([max | Map.values(held)]))
+    end
+  end
+
   # A stream run against Malachi.Test.SubscribeResetStub, returning the report and what the run printed on
   # stderr. The connections open one at a time, which is what the stub's ordering relies on.
   defp stream_on_reset_stub(mode, connections \\ 2) do

@@ -521,7 +521,7 @@ defmodule Malachi.Loadtest do
         # Transport error: the connection dropped. Reconnect and keep going within the window.
         :halt ->
           case after_drop(m) do
-            {:ok, conn} -> closed_loop(conn, ctx, m, corr + 1)
+            {:ok, new_conn} -> closed_loop(replace(conn, new_conn), ctx, m, corr + 1)
             :give_up -> conn
           end
 
@@ -554,7 +554,7 @@ defmodule Malachi.Loadtest do
   # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe.
   defp reconnect_pipelined(dead_conn, ctx, m) do
     case after_drop(m) do
-      {:ok, conn} -> pipelined(conn, ctx, m)
+      {:ok, conn} -> pipelined(replace(dead_conn, conn), ctx, m)
       :give_up -> dead_conn
     end
   end
@@ -622,7 +622,7 @@ defmodule Malachi.Loadtest do
   # apart and each counted in `dropped`: the retry cap in after_drop/1 only bounds failed connects.
   defp resubscribe(dead_conn, ctx, s, m) do
     case after_drop(m) do
-      {:ok, conn} -> stream_loop(conn, ctx, s, m)
+      {:ok, conn} -> stream_loop(replace(dead_conn, conn), ctx, s, m)
       :give_up -> dead_conn
     end
   end
@@ -816,6 +816,20 @@ defmodule Malachi.Loadtest do
       :give_up ->
         :give_up
     end
+  end
+
+  # Closes a dropped connection once its replacement is up and hands the replacement on. A transport error
+  # does not always free the port: with exit_on_close the socket is released but the port stays in the
+  # table until its owner exits, so a worker that reconnects all run long would pile up one per drop. The
+  # dead connection is kept until then because on :give_up it is what the worker's final Conn.close gets.
+  # The close can wait in one case: over TLS, a connection dropped because it stopped answering (a 15 s
+  # recv timeout) is still open, and :ssl.close/1 sends close_notify and waits up to 5 s for the peer, twice
+  # that if its send queue is full. A zero timeout does not help: once the connection is up, OTP uses its
+  # own 5 s. That wait follows 15 s the worker already spent idle on the same connection, so it is accepted
+  # rather than worked around.
+  defp replace(dead_conn, new_conn) do
+    Conn.close(dead_conn)
+    new_conn
   end
 
   defp reconnect(m, tries) do
