@@ -436,6 +436,19 @@ defmodule Malachi.BrokerServerRaTest do
            "topics on the live vnode must still be served"
   end
 
+  test "a topic's policy binding is not read from a vnode this node has not heard from" do
+    # Before the vnode answers, the cache holds an empty placeholder for it, which would report a topic
+    # that exists as missing (#194 read-back).
+    {_live, _silent, opts} = live_and_silent_vnodes(200)
+    {:ok, control} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(control) end)
+
+    results = for i <- 0..19, do: BrokerServer.topic_policy_name(control, "bind_t#{i}")
+
+    assert Enum.any?(results, &(&1 == {:error, :metadata_unavailable})), "topics on the silent vnode are refused"
+    assert Enum.any?(results, &(&1 == {:error, :no_such_topic})), "topics on the live vnode are answered"
+  end
+
   test "boot does not wait out the control plane either" do
     # `init/1` snapshots the vnodes and `handle_continue` reconciles once more before the first client
     # call is served, both on this loop. Read sequentially at ra's default that was 5s per silent vnode

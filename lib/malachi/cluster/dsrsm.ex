@@ -232,6 +232,16 @@ defmodule Malachi.Cluster.DSRSM do
   end
 
   @doc """
+  The topics bound to the policy `name` on every vnode, sorted. Reads each vnode's topics where they are
+  rather than building `merged_metadata/1`, which copies every range and segment to answer a question
+  about one field of the topic records.
+  """
+  @spec topics_bound_to(t(), Metadata.policy_name()) :: [Metadata.topic_name()]
+  def topics_bound_to(%__MODULE__{vnodes: vnodes}, name) do
+    vnodes |> Map.values() |> Enum.flat_map(&Metadata.topics_bound_to(&1, name)) |> Enum.sort()
+  end
+
+  @doc """
   The union of every vnode's `Metadata`: a single flat view for whole-cluster consumers (retention,
   healing) that iterate all segments. Topics/ranges/segments/offsets are disjoint across vnodes (each
   topic lives on one vnode), so the union is unambiguous; with one vnode it is that vnode's metadata.

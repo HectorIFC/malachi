@@ -46,8 +46,8 @@ defmodule Malachi.Cluster.MetadataServer do
   end
 
   @doc "Submits a `Malachi.Metadata` command through the Raft log; returns the machine reply."
-  @spec command(server_id(), Metadata.command()) :: {:ok, term()} | {:error, term()}
-  def command(server_id, command), do: RaCluster.command(server_id, command)
+  @spec command(server_id(), Metadata.command(), timeout()) :: {:ok, term()} | {:error, term()}
+  def command(server_id, command, timeout \\ @default_timeout), do: RaCluster.command(server_id, command, timeout)
 
   @doc """
   Reads the replicated `Metadata` state with a linearizable (consistent) read and returns
@@ -87,6 +87,23 @@ defmodule Malachi.Cluster.MetadataServer do
     case RaCluster.project(server_id, {:maps, :with, [[:segments]]}, timeout) do
       {:ok, %{segments: segments}} when is_map(segments) -> {:ok, segments}
       # A state without segments is not an empty vnode, and reading it as one would explain nothing.
+      {:ok, other} -> {:error, {:unexpected_state, other}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  The vnode's topic records, read linearizably and without copying the rest of its state.
+
+  Projected inside the leader with `{:maps, :with, [[:topics]]}`, for the reason `segments/2` gives: a
+  Malachi function must never be the one the leader applies. Which of them are bound to a policy is
+  decided in the caller (`Malachi.Cluster.ReplicatedDSRSM.topics_bound_to/3`).
+  """
+  @spec topics(server_id(), timeout()) :: {:ok, %{Metadata.topic_name() => term()}} | {:error, term()}
+  def topics(server_id, timeout \\ @default_timeout) do
+    case RaCluster.project(server_id, {:maps, :with, [[:topics]]}, timeout) do
+      {:ok, %{topics: topics}} when is_map(topics) -> {:ok, topics}
+      # A state without topics is not an empty vnode, and reading it as one would clear a policy's delete.
       {:ok, other} -> {:error, {:unexpected_state, other}}
       {:error, _reason} = error -> error
     end

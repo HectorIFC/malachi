@@ -1146,4 +1146,32 @@ defmodule Malachi.BrokerServerTest do
       end)
     end
   end
+
+  describe "topic policy binding" do
+    test "binds through the topic's vnode, reads the name back, and lists the topics bound to a policy", %{
+      tmp_dir: tmp_dir
+    } do
+      {server, _root} = with_topic(tmp_dir)
+      {:ok, _root} = BrokerServer.create_topic(server, "audit", 4)
+
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
+      assert BrokerServer.topic_policy_name(server, "ghost") == {:error, :no_such_topic}
+      assert :ok = BrokerServer.bind_topic_policy(server, "events", "durable")
+      assert :ok = BrokerServer.bind_topic_policy(server, "audit", "durable")
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, "durable"}
+      assert BrokerServer.topics_bound_to(server, "durable") == ["audit", "events"]
+
+      assert :ok = BrokerServer.bind_topic_policy(server, "events", nil)
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
+      assert BrokerServer.topics_bound_to(server, "durable") == ["audit"]
+    end
+
+    test "answers the control plane's refusal and leaves the binding alone", %{tmp_dir: tmp_dir} do
+      {server, _root} = with_topic(tmp_dir)
+
+      assert {:error, :no_such_topic} = BrokerServer.bind_topic_policy(server, "ghost", "durable")
+      assert {:error, :invalid_policy} = BrokerServer.bind_topic_policy(server, "events", "")
+      assert BrokerServer.topic_policy_name(server, "events") == {:ok, nil}
+    end
+  end
 end
