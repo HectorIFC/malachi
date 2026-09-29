@@ -26,8 +26,9 @@ fi
 
 container="$1"
 dashboard_url="${2%/}"
-http_timeout="${STATIC_ASSETS_HTTP_TIMEOUT:-10}"
-exec_timeout="${STATIC_ASSETS_EXEC_TIMEOUT:-15}"
+# The default applies only when a variable is unset: set but empty is a mistake, refused below.
+http_timeout="${STATIC_ASSETS_HTTP_TIMEOUT-10}"
+exec_timeout="${STATIC_ASSETS_EXEC_TIMEOUT-15}"
 
 # Both curl and timeout read 0 as no limit at all, so 0 is refused along with anything not a number.
 # Leading zeros are refused rather than normalized, which would bring in bash's octal reading, and the

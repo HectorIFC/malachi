@@ -94,7 +94,8 @@ Run against a started container, it asserts that the image ships `priv/static` a
 
 Both calls are bounded, so a dashboard that stalls or a container that does not answer `exec` fails the
 check instead of holding the run: `STATIC_ASSETS_HTTP_TIMEOUT` caps the logo request (seconds, default
-10) and `STATIC_ASSETS_EXEC_TIMEOUT` caps the `priv` listing (default 15).
+10) and `STATIC_ASSETS_EXEC_TIMEOUT` caps the `priv` listing (default 15). A default applies only
+when the variable is unset; one set but empty is refused like any other invalid value.
 
 Each must be a whole number of seconds from 1 to 99999, written without leading zeros: both tools
 read 0 as no limit at all, and curl rejects a much longer value outright. It exits 1 naming the check

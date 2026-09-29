@@ -221,6 +221,23 @@ defmodule DockerStaticAssetsCheckTest do
     assert {_out, 0} = run_against(ctx, url, env)
   end
 
+  test "refuses a timeout that is set but empty rather than falling back to the default", ctx do
+    # Set inside the shell: System.cmd reads an empty env value as "unset the variable", which would
+    # test the default instead.
+    for var <- ~w(STATIC_ASSETS_HTTP_TIMEOUT STATIC_ASSETS_EXEC_TIMEOUT) do
+      path = "#{ctx.stub_bin}:#{System.get_env("PATH")}"
+      command = ~s(export "$1="; exec bash "$2" malachi-test http://127.0.0.1:1)
+
+      assert {out, 2} =
+               System.cmd("bash", ["-c", command, "bash", var, @script],
+                 env: [{"PATH", path}],
+                 stderr_to_stdout: true
+               )
+
+      assert out =~ "#{var} must be a whole number of seconds from 1 to 99999 without leading zeros, got ''"
+    end
+  end
+
   test "refuses a timeout that is not a whole number of seconds", ctx do
     for var <- ~w(STATIC_ASSETS_HTTP_TIMEOUT STATIC_ASSETS_EXEC_TIMEOUT), value <- ["abc", "1.5", "-3"] do
       assert {out, 2} = run(ctx, ["malachi-test", "http://127.0.0.1:1"], [{var, value}])
