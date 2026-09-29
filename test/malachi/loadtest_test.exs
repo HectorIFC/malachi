@@ -660,6 +660,17 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  test "a reconnect whose authentication is refused is closed, not left open" do
+    # The first worker's connection is reset before its subscribe, and every reconnect after that is
+    # authenticated with a refusal on a socket the server keeps open. A refused connection that is dropped
+    # without being closed stays open until the worker exits, one per attempt, up to the retry cap.
+    {{r, _stderr}, held} = max_ports_per_process(fn -> stream_on_reset_stub(:refuse_reconnect_auth) end)
+
+    assert r.dropped == 1
+    assert r.reconnects == 0, "every reconnect was meant to be refused"
+    assert held <= 3, "one process held #{held} ports at once: refused reconnects were left open"
+  end
+
   # Acks auth and create_topic, and closes the connection on any other request.
   defp close_after_setup(api_key, _n) do
     if api_key in [Wire.auth_key(), Wire.create_topic_key()], do: :ok, else: :close

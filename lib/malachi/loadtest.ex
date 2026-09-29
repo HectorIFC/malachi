@@ -312,8 +312,20 @@ defmodule Malachi.Loadtest do
   defp topic_for(%{topic: base, topics: 1}, _index), do: base
   defp topic_for(%{topic: base, topics: n}, index), do: "#{base}_#{rem(index, n)}"
 
+  # A connection whose authentication fails is closed before the error goes back: nothing else holds it,
+  # and a reconnect retries up to @max_reconnect_tries times per drop, so each refused attempt left open
+  # would keep its socket (or at least its port) until the worker exits.
   defp connect_auth(conn_opts) do
-    with {:ok, conn} <- Conn.connect(conn_opts), do: Conn.authenticate(conn, conn_opts)
+    with {:ok, conn} <- Conn.connect(conn_opts) do
+      case Conn.authenticate(conn, conn_opts) do
+        {:ok, conn} ->
+          {:ok, conn}
+
+        {:error, _} = refused ->
+          Conn.close(conn)
+          refused
+      end
+    end
   end
 
   # Opens worker `index`'s connection under the configured strategy (see the moduledoc). Mid-run
