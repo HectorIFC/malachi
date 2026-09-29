@@ -91,17 +91,71 @@ defmodule Malachi.Cluster.Rebalance do
 
   @doc """
   Removes `leaving_node` from vnode `vnode_id`'s ra cluster: removes it from the consensus (routing
-  through `current_members`), then stops its server. **Idempotent**. A non-member counts as `:ok`.
+  through `current_members`), and once the group has **committed** that, deletes its server.
+  **Idempotent**. A non-member counts as `:ok`. Within one call, a leave that took longer to commit than
+  ra's call timeout is heard as a non-member, and that member is stopped rather than deleted (see the
+  comment on `not_member` below). A leave still uncommitted when the retries run out answers an error and
+  touches nothing; the planner then never lists that member again, since it plans from the group's live
+  membership, so it stays registered on its node, which only resumes it when its group cannot answer.
+
+  Deleted, not stopped: a stopped server stays registered on its node, and a node that comes back resumes
+  its registered vnode members (`Malachi.Application.resume_local_vnodes/3`). Once the group has let the
+  member go, its log describes a membership the group no longer has, and deleting it is what keeps a
+  restart of that node from bringing it back.
+
+  Only after the commit (`:ra.leave_and_delete_server/3`, which waits for consensus), never on the
+  append that `:ra.remove_member` answers on: until the leave commits, the leaving member may hold the
+  only other copy of an entry the group acknowledged, with the member the rebalance just added still
+  catching up, and deleting its log then would leave that entry on the leader's disk alone.
   """
-  @spec ra_remove_member(atom(), node(), [node()]) :: :ok | {:error, term()}
-  def ra_remove_member(vnode_id, leaving_node, current_members) do
+  @spec ra_remove_member(atom(), node(), [node()], keyword()) :: :ok | {:error, term()}
+  def ra_remove_member(vnode_id, leaving_node, current_members, opts \\ []) do
+    leave = Keyword.get(opts, :leave, &:ra.leave_and_delete_server/3)
+    stop = Keyword.get(opts, :stop, &:ra.stop_server/2)
     server_ids = Enum.map(current_members, &{vnode_id, &1})
 
-    with :ok <- leave_consensus(server_ids, {vnode_id, leaving_node}) do
-      _ = safe_erpc(leaving_node, :ra, :stop_server, [@system, {vnode_id, leaving_node}])
-      :ok
-    end
+    change_membership(fn -> leave_then_delete(leave, stop, server_ids, {vnode_id, leaving_node}) end)
   end
+
+  # Once the leave has committed, ra deletes the member through rpcs to its node, and a node that is down, or
+  # goes down in between, fails them: that is the ordinary case of replacing a dead node's replica. The leave
+  # itself never answers a badrpc nor exits, so each of these can only mean the group has already let the
+  # member go, and the removal stands. What stays behind is a member registered on its node that its group
+  # no longer counts. `Malachi.Application.resume_local_vnodes/3` asks the group before resuming it, so it
+  # stays down whenever the group has a leader that answers within that tick's poll. When none does (the
+  # whole group restarting, or an election under way), it is resumed as a follower whose log is behind the
+  # members that removed it: it cannot win an election against them, and the group does not count it.
+  # Reporting it as a failure would stop the rest of the plan at the first dead node, and let the delete's
+  # exit take the rebalancing coordinator down with it.
+  #
+  # `not_member` is how this call hears about its own leave when that leave took longer to commit than ra's
+  # call timeout: ra resends it, the leader refuses the resend while the change is pending, and once it has
+  # committed answers that `target` is not a member. ra then deleted nothing, and the member keeps running.
+  # It is stopped here, not deleted: `not_member` comes from whichever server believes it leads, and ra has
+  # no check-quorum, so an old leader cut off from its group answers it from an old membership, about a
+  # member the group has since added. Stopping is safe either way, since a member its group counts is
+  # resumed by its own node (`Malachi.Application.resume_local_vnodes/3`); deleting on that answer would
+  # destroy a live member's log.
+  defp leave_then_delete(leave, stop, server_ids, target) do
+    case leave.(@system, server_ids, target) do
+      {:error, :not_member} -> stop_removed(stop, target)
+      other -> after_committed_leave(other)
+    end
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp stop_removed(stop, target) do
+    _ = stop.(@system, target)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp after_committed_leave({:badrpc, _reason}), do: :ok
+  defp after_committed_leave({:error, {:badrpc, _reason}}), do: :ok
+  defp after_committed_leave({:error, reason}) when reason in [:system_not_started, :not_found], do: :ok
+  defp after_committed_leave(other), do: other
 
   defp start_member(vnode_id, new_node, server_ids) do
     case safe_erpc(new_node, :ra, :start_server, [@system, vnode_id, {vnode_id, new_node}, @machine, server_ids]) do
@@ -120,10 +174,6 @@ defmodule Malachi.Cluster.Rebalance do
     change_membership(fn -> :ra.add_member(server_ids, new_server) end)
   end
 
-  defp leave_consensus(server_ids, target) do
-    change_membership(fn -> :ra.remove_member(server_ids, target) end)
-  end
-
   # Runs a membership change (add/remove), treating already-done as :ok (idempotent) and retrying while
   # a prior change is still settling (ra allows one membership change at a time, so add-then-remove on the
   # same vnode - or a repeated op - would otherwise get :cluster_change_not_permitted).
@@ -131,6 +181,14 @@ defmodule Malachi.Cluster.Rebalance do
     case op.() do
       {:ok, _reply, _leader} ->
         :ok
+
+      # `:ra.leave_and_delete_server/3` answers bare atoms: the leave committed and the server is gone,
+      # or the leave did not commit in time (and nothing was deleted).
+      :ok ->
+        :ok
+
+      :timeout ->
+        {:error, :timeout}
 
       {:error, benign} when benign in [:already_member, :not_member] ->
         :ok
