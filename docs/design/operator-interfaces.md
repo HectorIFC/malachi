@@ -380,7 +380,7 @@ transparency setups. k9s uses this sentinel for the same reason.
   `font-variant-numeric: tabular-nums`.
 - Numeric columns and their headers are right aligned; everything else is left aligned. This is
   Kpow's published rule and it stops an id reading as a quantity.
-- One density control, a three value switch (comfortable, compact, dense) writing a single token
+- One density control, a three value switch (comfortable, default, compact) writing a single token
   block, because a ten column segment table and a two column signal list want different row heights.
 
 ### 4.5 Component inventory
