@@ -36,11 +36,16 @@ config :malachi,
   ]
 
 config :malachi,
-  # Both listeners bind a port the operating system picks, so two `mix test` runs on one host (two
-  # worktrees) never fight for 4040/4041. Tests ask the listener which port it got
-  # (`Malachi.TCPAcceptorPool.port/0`, `Malachi.Dashboard.port/0`), never the config, which stays 0.
+  # Every listener binds a port the operating system picks, so two `mix test` runs on one host (two
+  # worktrees) never fight for 4040/4041/4042. Tests ask the listener which port it got
+  # (`Malachi.TCPAcceptorPool.port/0`, `Malachi.Dashboard.port/0`, `Malachi.Console.Endpoint.port/0`),
+  # never the config, which stays 0.
   tcp_port: 0,
   dashboard_port: 0,
+  console_port: 0,
+  # The application's console serves no bundle in tests, whatever a developer built into
+  # priv/static/console: tests that need one build a fixture and start an endpoint over it.
+  console_static_dir: "/nonexistent/malachi-console-bundle",
   # TLS configuration for tests (disabled by default)
   enable_tls: false,
   require_tls: false,

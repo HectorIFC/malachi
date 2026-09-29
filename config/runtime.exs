@@ -310,6 +310,9 @@ if config_env() != :test do
   config :malachi,
     tcp_port: String.to_integer(System.get_env("MALACHI_TCP_PORT") || "4040"),
     dashboard_port: String.to_integer(System.get_env("MALACHI_DASHBOARD_PORT") || "4041"),
+    console_port: String.to_integer(System.get_env("MALACHI_CONSOLE_PORT") || "4042"),
+    # Off starts no console listener; the dashboard and the broker are unaffected either way.
+    console_enabled: System.get_env("MALACHI_CONSOLE_ENABLED") != "false",
     # Rate limiting configuration
     auth_rate_limit: parse_int.("MALACHI_AUTH_RATE_LIMIT", 10),
     auth_rate_window_ms: parse_int.("MALACHI_AUTH_RATE_WINDOW_MS", 60_000),
