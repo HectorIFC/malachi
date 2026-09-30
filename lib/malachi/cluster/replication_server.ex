@@ -320,11 +320,17 @@ defmodule Malachi.Cluster.ReplicationServer do
   replica. The primary's own fan-out does not come through here: it pushes `:replica_append` casts
   from its loop, which is what keeps the pipeline per-pair FIFO. A batch that arrives here never
   triggers a catch-up, since the caller is already driving one.
+
+  `{:error, :unreachable}` when the target cannot be called (a server that is not running, its node
+  restarting, or a call that times out), as `read/4` answers: the caller is a healing pass, and the exit
+  would take it down with the copy.
   """
   @spec follow(term(), term(), non_neg_integer(), [Malachi.Log.Record.t()]) ::
-          {:ok, non_neg_integer()} | {:error, :out_of_sync | {:storage, term()}}
+          {:ok, non_neg_integer()} | {:error, :out_of_sync | :unreachable | {:storage, term()}}
   def follow(ref, segment_id, expected_first, records) do
     GenServer.call(ref, {:follow, segment_id, expected_first, records})
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc """

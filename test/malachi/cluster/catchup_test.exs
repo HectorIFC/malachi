@@ -82,4 +82,20 @@ defmodule Malachi.Cluster.CatchupTest do
     target = start_broker()
     assert ReplicationServer.end_offset(target, @segment) == :empty
   end
+
+  # A drill on Linux: a heal pass backfilling onto a node whose replication server was restarting took the
+  # heal coordinator down with the exit of that call.
+  test "a target that is not running is a target error, not an exit" do
+    source = seed_source(["a", "b"])
+    gone = {:no_such_replication_server, :"nonexistent@127.0.0.1"}
+
+    assert {:error, {:target, :unreachable}} = Catchup.run(gone, source, @segment, 0, 2)
+  end
+
+  test "a source that is not running is a source error, not an exit" do
+    target = start_broker()
+    gone = {:no_such_replication_server, :"nonexistent@127.0.0.1"}
+
+    assert {:error, {:source, :unreachable}} = Catchup.run(target, gone, @segment, 0, 2)
+  end
 end
