@@ -291,8 +291,9 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
   keeps the byte size** is now caught by the integrity scrub (see the storage layer above); the
   harness gains that event with the scrub's certification. A **storage failure** on any copy, primary
   or follower (a full volume, a failing device), is sealed on failure the way NorthGuard does it: the
-  node takes that copy out of service, `Malachi.Cluster.Failover` seals the segment on the remaining
-  majority, and producers move to a new segment. Once sealed, the failed copy is a lost replica on a live
+  node takes that copy out of service, `Malachi.Cluster.Failover` seals the segment on the intact copies
+  once enough answer to cover every acknowledged write (at two replicas, the one left), and producers
+  move to a new segment. Once sealed, the failed copy is a lost replica on a live
   node: `Malachi.Cluster.SelfHealing` backfills a replacement on another broker and the healing pass then
   deletes the broken copy, while the integrity scrub leaves it alone rather than refetching it onto the
   disk that failed. The drill's filled-volume event certifies that the node survives it. One deliberate limit remains, tracked as a roadmap item: **damage found by reading a

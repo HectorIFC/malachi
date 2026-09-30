@@ -367,10 +367,10 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   The measuring half of `seal/4`, kept separate because the two answer different questions and only one
   of them has consequences. A failover pass has to learn what its replicas hold before it knows whether
-  a majority answered, and fencing to find that out would close replicas of a segment the pass then
-  declines to seal: a fence has no inverse, so those replicas keep refusing writes after their primary
-  returns, and the range never recovers. So the pass measures first with this, and fences with `seal/4`
-  only once it knows it is going to seal.
+  enough answered to seal (`Malachi.Cluster.Failover.seal_quorum/1`), and fencing to find that out would
+  close replicas of a segment the pass then declines to seal: a fence has no inverse, so those replicas
+  keep refusing writes after their primary returns, and every later write needs its quorum without them.
+  So the pass measures first with this, and fences with `seal/4` only once it knows it is going to seal.
 
   Flushes before answering, for the same reason `seal/4` does: a log's next offset counts buffered
   records while the store serves only committed ones, so an unflushed answer describes records a read
@@ -774,7 +774,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   # segment: a pass that fenced while probing is what wedged a range at `replication_factor: 2` before.
   def handle_call({:fenced_segments, segments}, _from, state) do
     # A FAILED copy is left out even when it carries a fence marker: its end cannot be trusted, and a
-    # failed segment is `failed_segments/3`'s to report, where the heal pass seals it on a majority.
+    # failed segment is `failed_segments/3`'s to report, where the heal pass seals it on the intact copies.
     {state, fenced} =
       Enum.reduce(segments, {state, %{}}, fn {segment_id, base_offset}, {acc_state, acc} ->
         if not Map.has_key?(acc_state.failed, segment_id) and fenced?(acc_state, segment_id) do

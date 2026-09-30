@@ -553,15 +553,16 @@ defmodule Malachi.I18n do
         "could not record the seal for %{count} fenced segment(s): %{segments}. Their ranges take no " <>
           "write until a later pass succeeds, so the control plane is the thing to look at"
     },
-    heal_seal_no_majority: %{
+    heal_seal_no_quorum: %{
       "pt_BR" =>
         "segmento %{segment_id} não pode ser selado para failover: %{answered} de %{replicas} réplicas " <>
-          "responderam, sem maioria. Seu range fica bloqueado para escrita até uma maioria voltar, " <>
-          "porque selar numa minoria poderia descartar escritas já confirmadas",
+          "responderam, e são precisas %{needed} para cobrir toda escrita confirmada. Seu range fica " <>
+          "bloqueado para escrita até elas voltarem, porque selar em menos poderia descartar escritas já " <>
+          "confirmadas",
       "en_US" =>
         "segment %{segment_id} cannot be sealed for failover: %{answered} of %{replicas} replicas " <>
-          "answered, no majority. Its range is blocked for writes until a majority returns, because " <>
-          "sealing on a minority could discard acknowledged writes"
+          "answered, and %{needed} are needed to cover every acknowledged write. Its range is blocked for " <>
+          "writes until they return, because sealing on fewer could discard acknowledged writes"
     },
     auto_rebalance_committed: %{
       "pt_BR" => "rebalanceamento automático aplicado: %{applied}",

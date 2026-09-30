@@ -176,13 +176,14 @@ taken out of service as a storage failure (`malachi_storage_failures_total{reaso
 `failed in storage` log line naming the segment and `damaged_tail`). What happens next depends on the
 replication factor:
 
-- **RF 3 or more.** The heal pass seals the segment on the intact copies at the furthest end they hold,
+- **RF 2 or more.** The heal pass seals the segment on the intact copies at the furthest end they hold,
   and writing rolls to a new segment, which is what NorthGuard does when a replica of a segment fails.
-  Producers see nothing. The damaged copy is replaced by self-healing.
-- **RF 2 and RF 1.** Sealing needs a majority of intact copies to answer, and one copy is gone, so the
-  range stops taking writes until an operator acts. That is deliberate: the alternative was writing new
-  records over ones that may have been acknowledged. Rolling a single-copy segment on without that
-  risk is tracked in [#210](https://github.com/HectorIFC/malachi/issues/210).
+  Producers see nothing. The damaged copy is replaced by self-healing. At RF 2 one intact copy is
+  enough: an acknowledgement needed both copies, so the intact one holds every acknowledged record.
+- **RF 1.** There is no other copy to seal on, so the range stops taking writes until an operator
+  acts. That is deliberate: the alternative was writing new records over ones that may have been
+  acknowledged. Rolling a single-copy segment on without that risk is tracked in
+  [#210](https://github.com/HectorIFC/malachi/issues/210).
 
 To recover a blocked range by hand, on the node that reported the damage:
 
