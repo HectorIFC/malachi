@@ -216,7 +216,10 @@ Every swap is certified three ways: acks kept flowing while the node was down (t
 and the count is polled while it stays stopped, before it is recreated), acks kept flowing once it was
 back, and a produce through that node alone was clean. Every phase ends with the acked-durability
 check and a comparison of every Raft group across its members at equal applied indexes. The run ends by
-searching the saved log of every container it replaced for a crash report.
+searching the saved log of every container it replaced for a crash report, and any crash fails the run.
+The one exception is a crash an OLD build is known to have, listed in the drill's `OLD_KNOWN_CRASHES` with
+the change that fixed it: certifying NEW cannot wait on fixing a release already shipped, but only a crash
+someone has read and named is excused, and it is still printed.
 
 `OLD_PATCH` and `NEW_PATCH` apply one more patch to either tree. They exist for the runs that show the
 drill catches what it claims (revert a guard and watch it fail); a result recorded with either is marked

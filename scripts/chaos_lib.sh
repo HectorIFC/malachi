@@ -160,6 +160,8 @@ capture_logs() {
   LOG_SEQ=$((LOG_SEQ + 1))
   seq=$(printf '%02d' "$LOG_SEQ")
   echo "$seq $1 $2" >> "$WORK/logs/index.txt"
+  # The image the container ran, so a drill that runs two builds can tell which one wrote each log.
+  echo "$seq $(image_of "$1" 2>/dev/null)" >> "$WORK/logs/images.txt"
   docker logs "$1" >"$WORK/logs/$seq-$1.log" 2>&1 || echo "could not read the log of $1"
 }
 

@@ -28,8 +28,8 @@
 #
 # Invariants: every write acknowledged in each phase is readable (one checker window and one topic per
 # phase), every Raft group holds the same state on every member at the end of each phase, availability holds
-# through every node swap (`roll_node`), no process crashed on a message it did not know, and a clean produce
-# passes at the end.
+# through every node swap (`roll_node`), no process crashed except an OLD one in a way that release is known to
+# (check_no_crash, OLD_KNOWN_CRASHES), and a clean produce passes at the end.
 #
 # Knobs: OLD_REF (a release at 0.14.2 or later, 0.16.1 for a sharded run, which no release is before the first
 # with the fix for #136); OLD_PATCH and NEW_PATCH, an extra
@@ -430,17 +430,64 @@ refused_rollback() {
 
 # Invariant: no process crashed on a message it did not know, in any container of the run, the replaced ones
 # included (their logs were saved before each recreate).
+# Any crash report fails the run, in a NEW build's log and in an OLD one's, with one exception: a crash an OLD
+# build is known to have, listed below with the change that fixed it. A released build cannot be fixed by
+# certifying the next one, but only a crash someone has read and named is excused: a crash in an OLD log over a
+# message it did not know, whatever form it takes (an unknown tag, or a known tag in a shape it cannot read),
+# is what the upgrade itself causes, and fails. An excused crash is printed all the same, so it is seen.
+CRASH_ANY="FunctionClauseError|GenServer .* terminating|\*\* \(EXIT\)"
+# One extended regex per known crash, matched against the line after its "GenServer ... terminating" line.
+OLD_KNOWN_CRASHES=(
+  # A heal or retention coordinator dying on the broker's :metadata call timing out while other nodes restart.
+  # Fixed by fix(cluster): heal and retention skip a pass the broker cannot answer (#196).
+  'GenServer\.call\(Malachi\.LogBroker, :metadata'
+)
+
+# $1 with every crash report of an OLD_KNOWN_CRASHES kind removed: the "GenServer ... terminating" line and
+# everything up to the next timestamped line.
+# Closed when in doubt: with no entry it removes nothing (an empty regex would match every line and excuse every
+# crash), and an entry awk cannot read makes it fail rather than print what it read before the error.
+without_known_crashes() {
+  if [ "${#OLD_KNOWN_CRASHES[@]}" -eq 0 ]; then
+    cat "$1"
+    return
+  fi
+  # Through the environment, not -v: awk reads escape sequences in a -v value, which would turn the regexes'
+  # backslashes into nothing and leave them unbalanced.
+  KNOWN_CRASHES=$(IFS='|'; echo "${OLD_KNOWN_CRASHES[*]}") awk '
+    skipping && /^[0-9][0-9]:[0-9][0-9]:/ { skipping = 0 }
+    skipping { next }
+    /GenServer .* terminating/ { held = $0; if ((getline line) > 0) { if (line ~ ENVIRON["KNOWN_CRASHES"]) { skipping = 1; next } print held; print line; next } print held; next }
+    { print }
+  ' "$1"
+}
+
 check_no_crash() {
   say "invariant: no process crashed on a message it did not know"
   for n in 1 2 3; do capture_logs "malachi-cluster-$n" "end of the drill"; done
-  crashes=$(grep -lE "FunctionClauseError|GenServer .* terminating|\*\* \(EXIT\)" "$WORK/logs/"*.log 2>/dev/null)
-  if [ -z "$crashes" ]; then
-    echo "no crash report in any of the $(grep -c . "$WORK/logs/index.txt") saved container logs"
+  crashed=0
+  for f in "$WORK/logs/"*.log; do
+    [ -f "$f" ] || continue
+    seq=$(basename "$f" | cut -d- -f1)
+    image=$(awk -v s="$seq" '$1 == s {print $2}' "$WORK/logs/images.txt" 2>/dev/null)
+    if [ "$image" != "$OLD_IMAGE" ]; then
+      checked=$(cat "$f")
+    elif ! checked=$(without_known_crashes "$f"); then
+      fail "OLD_KNOWN_CRASHES holds an entry awk cannot read as a regular expression"
+      checked=$(cat "$f")
+    fi
+    if echo "$checked" | grep -qE "$CRASH_ANY"; then
+      echo "--- $(basename "$f") (${image:-unknown image})"
+      echo "$checked" | grep -E -A 5 "$CRASH_ANY" | head -20
+      crashed=1
+    elif grep -qE "$CRASH_ANY" "$f"; then
+      echo "--- $(basename "$f") (OLD, a crash it is known to have, listed in OLD_KNOWN_CRASHES; not failed)"
+      grep -E -A 3 "$CRASH_ANY" "$f" | head -8
+    fi
+  done
+  if [ "$crashed" = 0 ]; then
+    echo "no crash report the certification counts in any of the $(grep -c . "$WORK/logs/index.txt") saved container logs"
   else
-    for f in $crashes; do
-      echo "--- $(basename "$f")"
-      grep -E -A 5 "FunctionClauseError|GenServer .* terminating|\*\* \(EXIT\)" "$f" | head -20
-    done
     fail "a process crashed during the upgrade (see the logs above)"
   fi
 }

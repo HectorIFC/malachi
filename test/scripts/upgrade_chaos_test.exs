@@ -510,6 +510,55 @@ defmodule UpgradeChaosTest do
     end
   end
 
+  describe "the known OLD crash filter" do
+    # Run as the drill defines it: its list and function, lifted from the script, over a log written here.
+    @known_then_unknown """
+    13:40:11.858 [error] GenServer Malachi.LogHealer terminating
+    ** (stop) exited in: GenServer.call(Malachi.LogBroker, :metadata, 5000)
+        ** (EXIT) time out
+        (elixir 1.19.6) lib/gen_server.ex:1142: GenServer.call/3
+    13:40:12.000 [error] GenServer Malachi.LogReplication terminating
+    ** (FunctionClauseError) no function clause matching in Malachi.Cluster.ReplicationServer.handle_cast/2
+    13:40:13.000 [info] done
+    """
+
+    defp filter(ctx, override) do
+      log = Path.join(ctx.tmp_dir, "old.log")
+      File.write!(log, @known_then_unknown)
+
+      script = """
+      eval "$(sed -n '/^OLD_KNOWN_CRASHES=(/,/^}/p' "$DRILL")"
+      #{override}
+      without_known_crashes "$LOG"
+      echo "status=$?"
+      """
+
+      System.cmd("bash", ["-c", script],
+        env: [{"DRILL", Path.join(@scripts, "docker-upgrade-chaos.sh")}, {"LOG", log}],
+        stderr_to_stdout: true
+      )
+    end
+
+    test "drops a known crash and keeps the one after it, which fails the run", ctx do
+      {output, 0} = filter(ctx, "")
+      refute output =~ "LogHealer terminating"
+      assert output =~ "LogReplication terminating"
+      assert output =~ "** (FunctionClauseError)"
+      assert output =~ "status=0"
+    end
+
+    test "with no known crash listed, removes nothing", ctx do
+      {output, 0} = filter(ctx, "OLD_KNOWN_CRASHES=()")
+      assert output =~ "LogHealer terminating"
+      assert output =~ "LogReplication terminating"
+    end
+
+    test "an entry that is not a regular expression fails, rather than hide what it did not read", ctx do
+      {output, 0} = filter(ctx, "OLD_KNOWN_CRASHES=('GenServer.call(Malachi.LogBroker')")
+      refute output =~ "status=0"
+    end
+  end
+
   describe "the closing invariants" do
     test "fails on a crash report in the saved log of a container that was since replaced", ctx do
       # The crash is only in the log node 2's OLD container had when phase 1 replaced it: the live
@@ -517,6 +566,30 @@ defmodule UpgradeChaosTest do
       assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "1"}])
       assert output =~ "--- 02-malachi-cluster-2.log"
       assert output =~ "** (FunctionClauseError) no function clause matching"
+      assert output =~ "FAIL: a process crashed during the upgrade"
+    end
+
+    test "an OLD build's crash that is listed as known is shown, not failed: it is that release's own", ctx do
+      # What the drill met on Linux: v0.17.0's heal coordinator died on a broker call timing out, the bug
+      # this branch fixes. A released build cannot be fixed by certifying the next one.
+      assert {output, 0} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
+      assert output =~ "(OLD, a crash it is known to have, listed in OLD_KNOWN_CRASHES; not failed)"
+      assert output =~ "GenServer Malachi.LogHealer terminating"
+      refute output =~ "FAIL: a process crashed"
+    end
+
+    test "any other OLD crash fails, including a known message in a shape it cannot read", ctx do
+      # Not a FunctionClauseError: the tag matched a clause and the payload did not fit it.
+      assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_keyerror"}])
+      assert output =~ "repo-upgrade:old)"
+      assert output =~ "** (KeyError) key :records not found"
+      assert output =~ "FAIL: a process crashed during the upgrade"
+    end
+
+    test "any crash in a NEW build's log fails, whatever it was over", ctx do
+      assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "new_timeout"}])
+      assert output =~ "repo-upgrade:new)"
+      assert output =~ "GenServer Malachi.LogHealer terminating"
       assert output =~ "FAIL: a process crashed during the upgrade"
     end
 
@@ -630,6 +703,9 @@ defmodule UpgradeChaosTest do
   #   STUB_REFUSAL        healthy: OLD starts on the directory; flag: it exits 78 for the flag, not the marker
   #   STUB_MD5_CHANGES    1: the data directory's digest differs after the refused start
   #   STUB_CRASH          1: node 2's first log (its OLD container, replaced in phase 1) carries a crash report
+  #                       over an unknown message; old_timeout / new_timeout: node 2's first log from that
+  #                       build carries the heal coordinator's :metadata call timing out; old_keyerror: node 2's
+  #                       first OLD log carries a KeyError, a known tag in a shape it cannot read
   #   STUB_CACHE_NOTE     what node 3's broker cache holds as the canary note (default nil)
   #   STUB_BUILD_FAILS    old or new: that image does not build
   #   STUB_SPLIT          refused: the reshard is refused
@@ -659,6 +735,10 @@ defmodule UpgradeChaosTest do
     case "$1" in
       up)
         img() { v="$1"; echo "${v##*:}"; }
+        # Remember what each recreated node runs, so `inspect` answers with it as docker does.
+        for n in 1 2 3; do
+          case " $* " in *" malachi$n "*) v="UPGRADE_IMAGE_$n"; echo "${!v:-}" > "$STUB_LOG.image.$n" ;; esac
+        done
         args="$args | pin=${MALACHI_RA_MACHINE_VERSION:-} images=$(img "$UPGRADE_IMAGE_1"),$(img "$UPGRADE_IMAGE_2"),$(img "$UPGRADE_IMAGE_3") restart=${UPGRADE_RESTART_3:-}" ;;
       build)
         ctx="${@: -1}"
@@ -688,7 +768,7 @@ defmodule UpgradeChaosTest do
       inspect)
         case "$*" in
           *Mounts*) echo "vol-${2##*-}" ;;
-          *Config.Image*) echo "repo-malachi${2##*-}" ;;
+          *Config.Image*) cat "$STUB_LOG.image.${2##*-}" 2>/dev/null || echo "repo-malachi${2##*-}" ;;
           *NetworkSettings*) echo stub-net ;;
           *State.Status*)
             case "${STUB_REFUSAL:-}" in
@@ -753,7 +833,24 @@ defmodule UpgradeChaosTest do
         if [ "${STUB_CRASH:-}" = 1 ] && [ "$2" = malachi-cluster-2 ] && [ ! -f "$STUB_LOG.crashed" ]; then
           touch "$STUB_LOG.crashed"
           echo "** (FunctionClauseError) no function clause matching in Malachi.Cluster.ReplicationServer.handle_cast/2"
-        fi ;;
+        fi
+        # A crash that is not over an unknown message, in a log of the build named by STUB_CRASH (old or new).
+        running=$(cat "$STUB_LOG.image.${2##*-}" 2>/dev/null)
+        case "${STUB_CRASH:-}" in
+          old_keyerror)
+            if [ "$2" = malachi-cluster-2 ] && [ "${running##*:}" = old ] && [ ! -f "$STUB_LOG.crashed" ]; then
+              touch "$STUB_LOG.crashed"
+              echo "12:00:00.000 [error] GenServer Malachi.LogReplication terminating"
+              echo "** (KeyError) key :records not found in: %{batch: []}"
+            fi ;;
+          old_timeout | new_timeout)
+            if [ "$2" = malachi-cluster-2 ] && [ "${running##*:}" = "${STUB_CRASH%_timeout}" ] && [ ! -f "$STUB_LOG.crashed" ]; then
+              touch "$STUB_LOG.crashed"
+              echo "12:00:00.000 [error] GenServer Malachi.LogHealer terminating"
+              echo "** (stop) exited in: GenServer.call(Malachi.LogBroker, :metadata, 5000)"
+              echo "    ** (EXIT) time out"
+            fi ;;
+        esac ;;
       run)
         case "$*" in
           *"chaos_checker.exs produce"*)
