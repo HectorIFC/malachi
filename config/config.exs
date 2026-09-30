@@ -3,6 +3,11 @@ import Config
 config :malachi,
   tcp_port: 4040,
   dashboard_port: 4041,
+  # The console endpoint (Malachi.Console.Endpoint): its own port, beside the legacy dashboard until the
+  # console reaches parity. Off means the listener is not started at all, which is how a node runs
+  # headless against a console served elsewhere, such as a front end dev server.
+  console_enabled: true,
+  console_port: 4042,
   locale: "en_US",
   # Largest request frame the binary protocol will accept (bytes). A declared length beyond this is
   # rejected at the length prefix, before the body is buffered, bounding per-connection memory.

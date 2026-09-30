@@ -91,7 +91,7 @@ defmodule WorktreeEnvTest do
   end
 
   describe "a new worktree" do
-    test "gets the issue's five ports, its data directories, node name and compose project", ctx do
+    test "gets the issue's six ports, its data directories, node name and compose project", ctx do
       assert {output, 0} = run(ctx, 244, ctx.worktree)
       assert output =~ "dashboard: http://127.0.0.1:22441"
 
@@ -101,6 +101,7 @@ defmodule WorktreeEnvTest do
                "JAEGER_UI_PORT" => "22442",
                "OTLP_PORT" => "22443",
                "PROMETHEUS_PORT" => "22444",
+               "MALACHI_CONSOLE_PORT" => "22445",
                "MALACHI_LOG_DATA_DIR" => Path.join(ctx.worktree, "tmp/data/log"),
                "MALACHI_RA_DATA_DIR" => Path.join(ctx.worktree, "tmp/data/ra"),
                "MALACHI_NODE" => "malachi_244@127.0.0.1",
@@ -183,11 +184,12 @@ defmodule WorktreeEnvTest do
 
     test "an issue whose ports would reach the Linux ephemeral range, and not the last one below it", ctx do
       assert {output, 65} = run(ctx, 1277, ctx.worktree)
-      assert output =~ "32770-32774"
+      assert output =~ "32770-32775"
       refute File.exists?(env_file(ctx))
 
       assert {_output, 0} = run(ctx, 1276, ctx.worktree)
       assert read_env(ctx)["PROMETHEUS_PORT"] == "32764"
+      assert read_env(ctx)["MALACHI_CONSOLE_PORT"] == "32765"
     end
 
     test "an issue number that is not a positive integer", ctx do
@@ -254,6 +256,31 @@ defmodule WorktreeEnvTest do
       refute File.exists?(marker)
     end
 
+    test "written before the console port existed is kept and names the line to append", ctx do
+      five_ports = """
+      MALACHI_TCP_PORT=22500
+      MALACHI_DASHBOARD_PORT=22501
+      JAEGER_UI_PORT=22502
+      OTLP_PORT=22503
+      PROMETHEUS_PORT=22504
+      """
+
+      File.write!(env_file(ctx), five_ports)
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      assert output =~ "no line for MALACHI_CONSOLE_PORT"
+      assert output =~ "append: MALACHI_CONSOLE_PORT=22505"
+      assert File.read!(env_file(ctx)) == five_ports
+    end
+
+    test "missing a port line with no TCP port to derive it from still warns without a suggestion", ctx do
+      File.write!(env_file(ctx), "MALACHI_DASHBOARD_PORT=22501\n")
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      assert output =~ "no line for MALACHI_TCP_PORT"
+      refute output =~ "append:"
+    end
+
     test "is kept when one of its ports is in use, with a warning naming the holder", ctx do
       assert {_output, 0} = run(ctx, 250, ctx.worktree)
 
@@ -270,5 +297,6 @@ defmodule WorktreeEnvTest do
     end
   end
 
-  defp ports, do: ~w(MALACHI_TCP_PORT MALACHI_DASHBOARD_PORT JAEGER_UI_PORT OTLP_PORT PROMETHEUS_PORT)
+  defp ports,
+    do: ~w(MALACHI_TCP_PORT MALACHI_DASHBOARD_PORT JAEGER_UI_PORT OTLP_PORT PROMETHEUS_PORT MALACHI_CONSOLE_PORT)
 end
