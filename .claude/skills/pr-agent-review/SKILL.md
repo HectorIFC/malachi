@@ -48,7 +48,8 @@ Every value is checked with a `case` over the whole value before it is used, as 
 ```
 case "$tool" in review|improve|describe|all) ;; *) echo "stop: unknown tool"; exit 1 ;; esac
 case "$N" in ''|*[!0-9]*) echo "stop: not a PR number"; exit 1 ;; esac          # only when one was given
-case "$threshold" in ''|*[!0-9]*) echo "stop: bad threshold"; exit 1 ;; esac   # then 0..10
+case "$threshold" in ''|*[!0-9]*) echo "stop: bad threshold"; exit 1 ;; esac
+[ "$threshold" -le 10 ] || { echo "stop: bad threshold"; exit 1; }
 case "$max_findings" in ''|*[!0-9]*|0) echo "stop: bad max-findings"; exit 1 ;; esac
 ```
 
@@ -75,8 +76,7 @@ worktree of its own, so the reviewers read the code the pull request actually ca
 checkout:
 
 ```
-gh pr view "$N" --json number,title,body,author,headRefOid,baseRefOid,headRefName,closingIssuesReferences,commits > "$S/pr.json"
-read -r head base < <(gh pr view "$N" --json headRefOid,baseRefOid --jq '"\(.headRefOid) \(.baseRefOid)"')
+{ read -r head base; cat > "$S/pr.json"; } < <(gh pr view "$N" --json number,title,body,author,headRefOid,baseRefOid,headRefName,closingIssuesReferences,commits --jq '"\(.headRefOid) \(.baseRefOid)", tojson')
 case "$head$base" in *[!0-9a-f]*|'') echo "stop: unexpected commit ids"; exit 1 ;; esac
 /usr/bin/git fetch --no-tags origin "$head" "$base"
 /usr/bin/git cat-file -e "$head^{commit}" || { echo "stop: head $head of #$N could not be fetched"; exit 1; }
@@ -85,19 +85,20 @@ mb=$(/usr/bin/git merge-base "$base" "$head") || { echo "stop: no merge base for
 (cd "$S/pr-$N" && "$pin" pin --base "$mb" "$S/pin"); rc=$?
 ```
 
-The head and the base come from one `gh pr view` call, and the head is fetched by that commit id rather
-than by `pull/$N/head`: a force-push after the call would otherwise bring in a different commit and leave
-the one that was read missing. GitHub serves a commit by its id while it still has the object, which
-includes a commit a force-push has just orphaned until GitHub collects it, and a fork's pull request as
-well; when it no longer does, the fetch brings nothing and `git cat-file` stops the review before any
-worktree exists. `core.hooksPath=/dev/null` keeps this repository's own git hooks from running on the
-checkout. The worktree is only ever read. The merge base is computed before the worktree exists, so a
-pull request with no common history stops with nothing to clean up. From the moment the worktree exists,
-every stop removes it first (`/usr/bin/git worktree remove --force "$S/pr-$N"`): a pin that fails and a
-pin that finds nothing to review included, not only the end of step 7. At the end (step 7), compare
-`headRefOid` again and say so if the pull request moved while it was reviewed, then remove the worktree
-(`/usr/bin/git worktree remove --force "$S/pr-$N"`). The checkout the subagents read is `$S/pr-$N`.
-Title, body and commit messages come from `$S/pr.json`.
+The head, the base and `$S/pr.json` come from one `gh pr view` call, so the review, its metadata and its
+issue describe the same state of the pull request, and the head is fetched by that commit id rather than
+by `pull/$N/head`: a force-push after the call would otherwise bring in a different commit and leave the
+one that was read missing. GitHub serves a commit by its id while it still has the object, which includes
+a commit a force-push has just orphaned until GitHub collects it, and a fork's pull request as well; when
+it no longer does, the fetch brings nothing and `git cat-file` stops the review before any worktree
+exists. `core.hooksPath=/dev/null` keeps this repository's own git hooks from running on the checkout.
+The worktree is only ever read. The merge base is computed before the worktree exists, so a pull request
+with no common history stops with nothing to clean up. From the moment the worktree exists, every stop
+removes it first (`/usr/bin/git worktree remove --force "$S/pr-$N"`): a pin that fails and a pin that
+finds nothing to review included, not only the end of step 7. At the end (step 7), compare `headRefOid`
+again and say so if the pull request moved while it was reviewed, then remove the worktree (`/usr/bin/git
+worktree remove --force "$S/pr-$N"`). The checkout the subagents read is `$S/pr-$N`. Title, body and
+commit messages come from `$S/pr.json`.
 
 Then, for both modes:
 
@@ -130,10 +131,14 @@ The issue belongs to the target only when `$branch` equals the current branch (b
 request's `headRefName` (PR mode). Then:
 
 ```
-"$section" plan "$S/issue.md" > "$S/plan.md"
-"$section" verification "$S/issue.md" > "$S/verification.md"
+"$section" plan "$S/issue.md" > "$S/plan.md"; plan_rc=$?
+"$section" verification "$S/issue.md" > "$S/verification.md"; verification_rc=$?
 "$section" pr-description "$S/issue.md" > "$S/planned-description.md"
 ```
+
+`issue-section.sh` exits 3 when a section is missing or blank. A section that is missing is not a
+requirement that was met: the compliance check gets the other section only, the report says which one
+the issue lacks, and when both are missing the compliance check is skipped and the report says why.
 
 No issue found, or one whose branch does not match, is an answer: the compliance section says "no issue
 found for this branch" (or which issue was found and why it was not used) and no requirements are
