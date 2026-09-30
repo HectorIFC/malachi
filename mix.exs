@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.17.2"
+  @version "0.18.0"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -139,6 +139,10 @@ defmodule Malachi.MixProject do
       "README.md": [title: "Overview"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
+      # The companion docs/design/design-tokens.json is deliberately not an extra: ExDoc renders
+      # markdown, and that file is a build input for the web, terminal and Elixir token generators.
+      # The specification links to it by path.
+      "docs/design/operator-interfaces.md": [title: "Operator interfaces (spec)"],
       "SECURITY.md": [title: "Security policy"],
       "docs/SECURITY_DEVELOPMENT.md": [title: "Secure development"],
       "docs/RATE_LIMITING.md": [title: "Rate limiting"],
@@ -180,7 +184,11 @@ defmodule Malachi.MixProject do
         "docs/guides/operations.md",
         "README.md"
       ],
-      Architecture: ["docs/ARCHITECTURE.md", "docs/AUTH_USER_MANAGEMENT.md"],
+      Architecture: [
+        "docs/ARCHITECTURE.md",
+        "docs/AUTH_USER_MANAGEMENT.md",
+        "docs/design/operator-interfaces.md"
+      ],
       Security: ["SECURITY.md", "docs/SECURITY_DEVELOPMENT.md"],
       Operations: [
         "docs/RATE_LIMITING.md",
@@ -315,6 +323,13 @@ defmodule Malachi.MixProject do
       # Automatic node discovery + connection (Erlang distribution) for a multi-node deploy; opt-in via
       # MALACHI_CLUSTER_STRATEGY (gossip/kubernetes/epmd). Absent => single-node, no distribution.
       {:libcluster, "~> 3.5"},
+      # HTTP server for the operator console (Malachi.Console.Endpoint). The legacy dashboard parses
+      # HTTP by hand on :gen_tcp and closes the socket after every response; a bundled single page
+      # application needs keep alive, conditional requests and content negotiation, which Bandit and
+      # Plug provide with bounded, configurable parsing. Pinned to patch level because this is the
+      # first dependency that parses bytes straight off an untrusted socket.
+      {:bandit, "~> 1.12.5"},
+      {:plug, "~> 1.20.3"},
 
       # Development and test dependencies - PINNED to patch-level
       # 1.7.19 fixes the Credo.Code.Token sigil-token crash under Elixir 1.20 (1.7.15 crashed on ~r//).

@@ -153,8 +153,8 @@ docker-compose up -d
 Access the dashboard at: http://localhost:4041
 
 Every host port the stack publishes can be moved, so two stacks (two checkouts) can run side by side:
-`MALACHI_TCP_PORT` (4040), `MALACHI_DASHBOARD_PORT` (4041), `JAEGER_UI_PORT` (16686), `OTLP_PORT` (4318)
-and `PROMETHEUS_PORT` (9090), each defaulting to the value in parentheses, plus a `COMPOSE_PROJECT_NAME`
+`MALACHI_TCP_PORT` (4040), `MALACHI_DASHBOARD_PORT` (4041), `MALACHI_CONSOLE_PORT` (4042),
+`JAEGER_UI_PORT` (16686), `OTLP_PORT` (4318) and `PROMETHEUS_PORT` (9090), each defaulting to the value in parentheses, plus a `COMPOSE_PROJECT_NAME`
 of its own. They change only the ports on your machine; inside the containers nothing moves.
 
 ### Build Locally (All Platforms)
@@ -198,6 +198,7 @@ For complete configuration, see [SECURITY.md](SECURITY.md) and the [Security Har
 |------|-------------|
 | 4040 | TCP log protocol (binary) |
 | 4041 | Web Dashboard |
+| 4042 | Operator console (see [Operations](docs/guides/operations.md#the-console-endpoint)) |
 
 ## 📈 Observability
 
@@ -305,6 +306,8 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 |----------|---------|-------------|
 | `MALACHI_TCP_PORT` | 4040 | TCP server port |
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
+| `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
+| `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
 | `MALACHI_LOCALE` | en_US | Language (en_US, pt_BR) |
 | `MALACHI_ADMIN_PASS` | admin123 | Admin password |
 | `MALACHI_PRODUCER_PASS` | producer123 | Producer password |
