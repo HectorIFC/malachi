@@ -13,7 +13,10 @@
 #
 # Every scan tracks code fences FIRST and ignores every marker inside one: an issue that shows what the
 # template looks like puts `## PR` and `**Branch**` inside a code block, and a `##` line inside a block
-# would otherwise end the section early.
+# would otherwise end the section early. A fence is what CommonMark calls one: three or more backticks
+# or tildes, indented by at most three spaces, and a block closes only at a fence of the same character
+# at least as long, with nothing after it. So a `~~~` block, or a four-backtick block that shows a
+# three-backtick one, is read whole.
 #
 # Prints the section and exits 0; exits 3, printing nothing, when the section is missing or blank, or
 # (branch) when the name fails the check; exits 2 on a usage error. The body is data: nothing in it is
@@ -29,11 +32,31 @@ usage() {
 section="$1"
 issue="$2"
 
+# CommonMark fence detection shared by both scans (see the header): sets fc (the character), fn (the run
+# length) and frest (what follows the run), and answers whether the line is a fence at all.
+FENCE_AWK='
+function is_fence(line,   lead, n) {
+  lead = 0
+  while (lead < 3 && substr(line, lead + 1, 1) == " ") lead++
+  fc = substr(line, lead + 1, 1)
+  if (fc != "`" && fc != "~") return 0
+  n = 0
+  while (substr(line, lead + 1 + n, 1) == fc) n++
+  if (n < 3) return 0
+  fn = n
+  frest = substr(line, lead + 1 + n)
+  if (fc == "`" && index(frest, "`") > 0) return 0
+  return 1
+}
+function closes(line) { return is_fence(line) && fc == och && fn >= olen && frest ~ /^[ \t]*$/ }
+'
+
 # The first code block after a bold marker inside the `## PR` section. `first_line` keeps only its first
 # non-empty line (the branch); otherwise the whole block is printed.
 pr_block() {
-  LC_ALL=C awk -v marker="$1" -v first_line="$2" '
-    /^```/ { fence = !fence; if (m && !c) { c = 1; next } else if (c) { exit } next }
+  LC_ALL=C awk -v marker="$1" -v first_line="$2" "$FENCE_AWK"'
+    fence && closes($0) { fence = 0; if (c) exit; next }
+    !fence && is_fence($0) { fence = 1; och = fc; olen = fn; if (m && !c) c = 1; next }
     c && first_line && NF { print; exit }
     c { if (!first_line) print; next }
     fence { next }
@@ -46,8 +69,9 @@ pr_block() {
 
 # A whole `## <title>` section, code blocks included, up to the next `## ` heading outside a block.
 heading_section() {
-  LC_ALL=C awk -v title="$1" '
-    /^```/ { fence = !fence; if (v) print; next }
+  LC_ALL=C awk -v title="$1" "$FENCE_AWK"'
+    fence && closes($0) { fence = 0; if (v) print; next }
+    !fence && is_fence($0) { fence = 1; och = fc; olen = fn; if (v) print; next }
     fence { if (v) print; next }
     !v && $0 ~ ("^## " title "[[:space:]]*$") { v = 1; next }
     !v { next }

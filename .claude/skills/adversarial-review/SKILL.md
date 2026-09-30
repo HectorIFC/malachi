@@ -35,7 +35,9 @@ untracked, leaving out only the files the `prepare-commits` skill generates (`co
 untracked. It writes `$S/diff.patch` (the full diff, untracked files included as new files),
 `$S/files.txt` (the changed files) and `$S/base.txt` (the commit it compared against).
 
-`rc` 3 means nothing to review, which is an answer: say so in one line and stop. Any `rc` other than 0
+`rc` 3 means nothing to review, which is an answer: say so in one line and stop. A warning on stderr that
+there is no merge base with `origin/main` means only uncommitted changes were pinned: repeat it in the
+report, and for `rc` 3 say that the branch's commits were not looked at rather than that nothing changed. Any `rc` other than 0
 or 3 means the pin failed (1 when git could not read a file, 2 on a usage error) and the files it wrote
 are incomplete: report the script's message and stop rather than review a diff that is missing files.
 

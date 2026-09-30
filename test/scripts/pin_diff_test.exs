@@ -134,7 +134,9 @@ defmodule PinDiffTest do
       File.write!(Path.join(ctx.repo, "b.ex"), "b\n")
       commit!(ctx.repo, "feature work")
 
-      assert {_, 3} = pin(ctx)
+      # Silent before: the committed work vanished from the diff with no word said.
+      assert {out, 3} = pin(ctx)
+      assert out =~ "no merge base with origin/main"
 
       File.write!(Path.join(ctx.repo, "c.ex"), "c\n")
       assert {_, 0} = pin(ctx)

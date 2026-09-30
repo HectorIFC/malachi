@@ -11,6 +11,7 @@
 #        root (commit_message.sh, commit_<n>.patch, commit_message.txt, commit_message_<n>.txt), dropped
 #        by exact name and only while untracked: a file of that name the project committed is its own.
 #        Writes <outdir>/diff.patch, <outdir>/files.txt (one path per line) and <outdir>/base.txt.
+#        Without a merge base with origin/main it pins only what is uncommitted and says so on stderr.
 #        Exit 0 when there is something to review, 3 when there is nothing, 2 on a usage error, 1 when
 #        git failed (a file it cannot read, say): the files it wrote are then incomplete, and a caller
 #        stops rather than review them.
@@ -81,7 +82,13 @@ pin() {
       exit 2
     }
   elif git rev-parse --verify --quiet HEAD > /dev/null; then
-    base=$(git merge-base HEAD origin/main 2> /dev/null) || base=$(git rev-parse HEAD)
+    # Without a merge base (no origin/main, or a shallow clone that never fetched the fork point) only
+    # what is uncommitted is pinned, as the Stop hook counts it; the branch's commits are then left out,
+    # so the caller is told rather than left to read a small diff, or none, as the whole branch.
+    base=$(git merge-base HEAD origin/main 2> /dev/null) || {
+      base=$(git rev-parse HEAD)
+      echo "pin-diff: warning: no merge base with origin/main, so only uncommitted changes are pinned; fetch origin/main or pass --base" >&2
+    }
   else
     # No commit yet: everything is new, compared against the empty tree.
     base=$(git hash-object -t tree /dev/null)

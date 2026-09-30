@@ -127,6 +127,49 @@ defmodule IssueSectionTest do
     refute out =~ "feat/the-real-branch"
   end
 
+  describe "fences other than three backticks" do
+    test "a tilde fence holds a heading without ending the section", ctx do
+      issue =
+        write(ctx.dir, "tilde.md", "## Plan\n~~~\n## Example heading\n~~~\n- Required step\n## Verification\n- check\n")
+
+      assert run(["plan", issue]) == {"~~~\n## Example heading\n~~~\n- Required step\n", 0}
+    end
+
+    test "a four-backtick block holds a three-backtick one", ctx do
+      body = "## PR\n\n**Description**\n\n````\nText\n```\ninner\n```\nmore text\n````\n"
+      issue = write(ctx.dir, "four.md", body)
+
+      assert run(["pr-description", issue]) == {"Text\n```\ninner\n```\nmore text\n", 0}
+    end
+
+    test "a backtick line does not close a tilde fence, and a fence may be indented up to three spaces", ctx do
+      issue =
+        write(
+          ctx.dir,
+          "mixed.md",
+          "## Verification\n   ~~~~\n```\n## not a heading\n~~~\nstill inside\n   ~~~~\n- after\n## Next\n"
+        )
+
+      assert {out, 0} = run(["verification", issue])
+      assert out =~ "## not a heading\n"
+      assert out =~ "still inside\n"
+      assert out =~ "- after\n"
+      refute out =~ "## Next"
+    end
+
+    test "four leading spaces make an indented code line, not a fence", ctx do
+      issue = write(ctx.dir, "indented.md", "## Plan\n    ```\n- step\n## Verification\n- check\n")
+
+      assert run(["plan", issue]) == {"    ```\n- step\n", 0}
+    end
+
+    test "a branch block may be a tilde fence", ctx do
+      issue = write(ctx.dir, "branch.md", "## PR\n\n**Branch**\n\n~~~\nfeat/tilde\n~~~\n")
+
+      assert run(["branch", issue]) == {"feat/tilde\n", 0}
+    end
+  end
+
   test "a missing section exits 3 and prints nothing", ctx do
     bare = write(ctx.dir, "bare.md", "## Context\n\nNothing else.\n")
 

@@ -66,7 +66,9 @@ S=$(mktemp -d)                  # or S="$CLAUDE_JOB_DIR/tmp/pr-agent-review" in 
 "$pin" pin "$S/pin"; rc=$?
 ```
 
-`rc` 3 is "nothing to review": say so in one line and stop. Any `rc` other than 0 or 3 (in either mode,
+`rc` 3 is "nothing to review": say so in one line and stop. A warning on stderr that there is no merge
+base with `origin/main` means only uncommitted changes were pinned: repeat it in the report, and for
+`rc` 3 say that the branch's commits were not looked at rather than that nothing changed. Any `rc` other than 0 or 3 (in either mode,
 including a PR worktree that could not be created) means the pin failed and its files are incomplete:
 report the error and stop, never review what it left. The checkout the subagents read is `$top`.
 Title and description: the issue's title (step 2) and none. Commit messages:
