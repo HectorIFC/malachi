@@ -578,6 +578,27 @@ defmodule UpgradeChaosTest do
       refute output =~ "FAIL: a process crashed"
     end
 
+    # The list is the drill's own, so these edit the copy of the drill this test runs.
+    defp known_crashes!(ctx, entry) do
+      drill = Path.join([ctx.root, "scripts", "docker-upgrade-chaos.sh"])
+      text = File.read!(drill)
+      [known] = Regex.run(~r/^  'GenServer.*:metadata'$/m, text)
+      File.write!(drill, String.replace(text, known, "  " <> entry))
+    end
+
+    test "an entry awk cannot read as a regular expression fails the run instead of hiding the log", ctx do
+      known_crashes!(ctx, "'GenServer.call(Malachi.LogBroker'")
+      assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
+      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an empty entry or one awk cannot read as a regular expression"
+      assert output =~ "FAIL: a process crashed during the upgrade"
+    end
+
+    test "an empty entry fails the run: an empty regular expression would excuse every crash", ctx do
+      known_crashes!(ctx, "''")
+      assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
+      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an empty entry"
+    end
+
     test "any other OLD crash fails, including a known message in a shape it cannot read", ctx do
       # Not a FunctionClauseError: the tag matched a clause and the payload did not fit it.
       assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_keyerror"}])
