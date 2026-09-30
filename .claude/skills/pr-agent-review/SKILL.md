@@ -78,12 +78,16 @@ gh pr view "$N" --json number,title,body,author,headRefOid,baseRefOid,headRefNam
 head=$(gh pr view "$N" --json headRefOid --jq .headRefOid)
 base=$(gh pr view "$N" --json baseRefOid --jq .baseRefOid)
 case "$head$base" in *[!0-9a-f]*|'') echo "stop: unexpected commit ids"; exit 1 ;; esac
-/usr/bin/git fetch --no-tags origin "pull/$N/head" "$base"
+/usr/bin/git fetch --no-tags origin "$head" "$base"
+/usr/bin/git cat-file -e "$head^{commit}" || { echo "stop: head $head of #$N could not be fetched"; exit 1; }
 mb=$(/usr/bin/git merge-base "$base" "$head") || { echo "stop: no merge base for #$N"; exit 1; }
 /usr/bin/git -c core.hooksPath=/dev/null worktree add --detach "$S/pr-$N" "$head"
 (cd "$S/pr-$N" && "$pin" pin --base "$mb" "$S/pin"); rc=$?
 ```
 
+The head is fetched by the commit `gh pr view` reported, not by `pull/$N/head`: a force-push between the
+two calls would otherwise bring in a different commit and leave the validated one missing. GitHub serves
+any commit reachable from the repository by its id, a fork's pull request included.
 `core.hooksPath=/dev/null` keeps this repository's own git hooks from running on the checkout. The
 worktree is only ever read. The merge base is computed before the worktree exists, so a pull request with
 no common history stops with nothing to clean up. From the moment the worktree exists, every stop removes
