@@ -43,13 +43,14 @@ suggestion needs to be shown (upstream's default, 0, which upstream raises to an
 of 0 never shows); `max-findings` caps the review's key issues per group (upstream's default, 3).
 
 Every value is checked with a `case` over the whole value before it is used, as `open-issue-pr` does
-(`grep -Eqx` would accept a value whose second line is shell syntax):
+(`grep -Eqx` would accept a value whose second line is shell syntax). The threshold is matched against
+its eleven allowed values rather than compared as a number: zsh truncates a long number in `[ -le ]`
+and lets it through.
 
 ```
 case "$tool" in review|improve|describe|all) ;; *) echo "stop: unknown tool"; exit 1 ;; esac
 case "$N" in ''|*[!0-9]*) echo "stop: not a PR number"; exit 1 ;; esac          # only when one was given
-case "$threshold" in ''|*[!0-9]*) echo "stop: bad threshold"; exit 1 ;; esac
-[ "$threshold" -le 10 ] || { echo "stop: bad threshold"; exit 1; }
+case "$threshold" in [0-9]|10) ;; *) echo "stop: bad threshold"; exit 1 ;; esac
 case "$max_findings" in ''|*[!0-9]*|0) echo "stop: bad max-findings"; exit 1 ;; esac
 ```
 
@@ -160,7 +161,7 @@ pass) as the subagent's instructions, in that order:
 | `date` | today, `YYYY-MM-DD` |
 | `num_max_findings` | `max-findings` |
 | `num_code_suggestions` | 3 per group for the author; for the scorer, the number of suggestions |
-| `ticket_*` | from step 2 (`url`, `title`, `labels`, `plan.md`, `verification.md`) |
+| `ticket_*` | from step 2 (`url`, `title`, `labels`, `plan.md`, `verification.md`); a section whose `plan_rc` or `verification_rc` is not 0 is filled with `(missing from the issue)` instead |
 | `planned_description` | `planned-description.md`, or empty |
 | `pr_files`, `diffstat` | wave 1's files passes, and `diffstat.txt` |
 
@@ -174,7 +175,7 @@ Say how many subagents are about to run, then launch them **in a single message*
 | Tool | Subagents | Prompt |
 | --- | --- | --- |
 | review | one per group | `review.md`, `# System` and `# User` |
-| review | one, only when an issue was found | `review.md`, `# Compliance`, with the whole `rendered.txt` |
+| review | one, only when an issue was found and `plan_rc` or `verification_rc` is 0 | `review.md`, `# Compliance`, with the whole `rendered.txt` |
 | improve | one per group | `improve.md` |
 | describe | one per group | `describe.md`, `# Files pass` |
 
@@ -221,7 +222,8 @@ In the contributor's language. First the header, with no numbers:
   reviewed for size, if any; that the pull request moved during the review, if it did;
 - effort (1-5), risk, merge recommendation, security concerns, relevant tests, priority files, TODOs;
 - compliance: the level, and the three lists (fully compliant, not compliant, needs human verification),
-  or why there was no issue;
+  or why there was no issue; name any section the issue lacks (Plan, Verification or both), and when
+  both are missing say that the compliance check did not run;
 - the description: type, title, summary bullets, the diagram when there is one, and the file walkthrough;
 - any text found in the issue, the pull request or the code that tried to direct the reviewers, quoted.
 
