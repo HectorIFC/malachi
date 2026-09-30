@@ -59,6 +59,90 @@ defmodule Malachi.Cluster.SelfHealingTest do
     assert SelfHealing.heal_sealed(healed, [a, b, d], 3).applied == []
   end
 
+  test "a backfill cut short resumes where the new replica's copy ends instead of starting over" do
+    # A pass fsyncs the first batch on d, then its next follow fails (d restarting, or a call that timed
+    # out). Placement is deterministic, so the next pass picks d again; starting over at the segment's
+    # base would be refused as out of sync on every pass, and the segment would never heal.
+    [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+    {:ok, 0} = ReplicationServer.follow(d, segment_id, 0, records(["x"]))
+
+    result = SelfHealing.heal_sealed(metadata, [a, b, d], 3)
+
+    assert result.failed == []
+    assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+    assert d in new_set
+    assert read_values(d, segment_id) == ["x", "y", "z"]
+  end
+
+  test "a new replica that already holds the whole segment is added without copying it again" do
+    [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+    {:ok, 2} = ReplicationServer.follow(d, segment_id, 0, records(["x", "y", "z"]))
+
+    result = SelfHealing.heal_sealed(metadata, [a, b, d], 3)
+
+    assert result.failed == []
+    assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+    assert d in new_set
+    assert read_values(d, segment_id) == ["x", "y", "z"]
+  end
+
+  test "a new replica that is not running fails the segment and adds nothing" do
+    # Covers the probe's unreachable answer. The same outcome came from `follow/4` before the backfill
+    # probed where the copy ends, so what tells the two apart is the storage test below.
+    [a, b, c] = [start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+    gone = {:no_such_replication_server, :"nonexistent@127.0.0.1"}
+
+    result = SelfHealing.heal_sealed(metadata, [a, b, gone], 3)
+
+    assert result.applied == []
+    assert result.failed == [{segment_id, {:target, :unreachable}}]
+  end
+
+  test "a new replica whose copy failed in storage is reported with the storage reason, not as unreachable" do
+    # A disk failure on a broker that answers is not a broker that is down: the reason is what the
+    # operator reads in the heal warning. The copy is latched failed by an earlier pass, so the
+    # probe of where it ends is what meets the failure.
+    [a, b, c] = [start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+
+    dir_d = TmpDir.path("malachi_heal")
+    on_exit(fn -> File.rm_rf!(dir_d) end)
+    on_exit(fn -> FaultySegmentStore.clear(dir_d) end)
+    FaultySegmentStore.fail(dir_d, :open, {:error, :eio})
+    FaultySegmentStore.fail(dir_d, :recover, {:error, :eio})
+
+    d =
+      start_supervised!({ReplicationServer, directory: dir_d, store: FaultySegmentStore},
+        id: {:repl, System.unique_integer([:positive])}
+      )
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, {:storage, _latched}} = ReplicationServer.follow(d, segment_id, 0, records(["x"]))
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, d], 3)
+
+      assert result.applied == []
+      assert [{^segment_id, {:target, {:storage, _reason}}}] = result.failed
+    end)
+  end
+
+  test "a new replica holding more than the seal is added without a copy and left to be settled" do
+    # An old primary that wrote a batch its quorum never acknowledged comes back one record past the
+    # seal. The integrity pass settles it down to the sealed length once it is in the set.
+    [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+    {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+    {:ok, 3} = ReplicationServer.follow(d, segment_id, 0, records(["x", "y", "z", "w"]))
+
+    result = SelfHealing.heal_sealed(metadata, [a, b, d], 3)
+
+    assert result.failed == []
+    assert [{:set_segment_replicas, ^segment_id, new_set}] = result.applied
+    assert d in new_set
+  end
+
   test "a FENCED sealed segment still heals: the fence never blocks repair" do
     # `follow/4` is deliberately outside the fence, because re-replicating sealed segments is this
     # module's whole job. The bound is structural rather than a permission: a follow requires
