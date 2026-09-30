@@ -445,15 +445,18 @@ OLD_KNOWN_CRASHES=(
 
 # $1 with every crash report of an OLD_KNOWN_CRASHES kind removed: the "GenServer ... terminating" line and
 # everything up to the next timestamped line.
-# Closed when in doubt: with no entry it removes nothing, an empty entry makes it fail (an empty regex would match
-# every line and excuse every crash), and so does an entry awk cannot read, rather than print what it read
-# before the error.
+# Closed when in doubt: with no entry it removes nothing, an entry that matches an empty line makes it fail (an
+# empty regex, .* or () matches every line and would excuse every crash), and so does an entry awk cannot read,
+# rather than print what it read before the error. An entry that matches only almost every line (a single space)
+# is not caught: the list is reviewed like the rest of the script.
 without_known_crashes() {
   if [ "${#OLD_KNOWN_CRASHES[@]}" -eq 0 ]; then
     cat "$1"
     return
   fi
-  for entry in "${OLD_KNOWN_CRASHES[@]}"; do [ -n "$entry" ] || return 2; done
+  for entry in "${OLD_KNOWN_CRASHES[@]}"; do
+    KNOWN_CRASH="$entry" awk 'BEGIN { exit ("" ~ ENVIRON["KNOWN_CRASH"]) }' || return 2
+  done
   # Through the environment, not -v: awk reads escape sequences in a -v value, which would turn the regexes'
   # backslashes into nothing and leave them unbalanced.
   KNOWN_CRASHES=$(IFS='|'; echo "${OLD_KNOWN_CRASHES[*]}") awk '
@@ -475,7 +478,7 @@ check_no_crash() {
     if [ "$image" != "$OLD_IMAGE" ]; then
       checked=$(cat "$f")
     elif ! checked=$(without_known_crashes "$f"); then
-      fail "OLD_KNOWN_CRASHES holds an empty entry or one awk cannot read as a regular expression"
+      fail "OLD_KNOWN_CRASHES holds an entry that matches an empty line or one awk cannot read as a regular expression"
       checked=$(cat "$f")
     fi
     if echo "$checked" | grep -qE "$CRASH_ANY"; then

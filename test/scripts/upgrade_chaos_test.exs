@@ -557,6 +557,15 @@ defmodule UpgradeChaosTest do
       {output, 0} = filter(ctx, "OLD_KNOWN_CRASHES=('GenServer.call(Malachi.LogBroker')")
       refute output =~ "status=0"
     end
+
+    test "one entry that matches an empty line fails the list, even beside a valid one", ctx do
+      # Entries are joined with |, so a single match-anything entry would excuse every crash.
+      for entry <- ["'()'", "'.*'", "'x*'"] do
+        {output, 0} = filter(ctx, "OLD_KNOWN_CRASHES=('GenServer\\.call\\(Malachi\\.LogBroker' #{entry})")
+        assert output =~ "status=2", entry
+        refute output =~ "terminating", entry
+      end
+    end
   end
 
   describe "the closing invariants" do
@@ -589,14 +598,24 @@ defmodule UpgradeChaosTest do
     test "an entry awk cannot read as a regular expression fails the run instead of hiding the log", ctx do
       known_crashes!(ctx, "'GenServer.call(Malachi.LogBroker'")
       assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
-      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an empty entry or one awk cannot read as a regular expression"
+
+      assert output =~
+               "FAIL: OLD_KNOWN_CRASHES holds an entry that matches an empty line or one awk cannot read as a regular expression"
+
       assert output =~ "FAIL: a process crashed during the upgrade"
     end
 
     test "an empty entry fails the run: an empty regular expression would excuse every crash", ctx do
       known_crashes!(ctx, "''")
       assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
-      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an empty entry"
+      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an entry that matches an empty line"
+    end
+
+    test "an entry that matches every line fails the run like an empty one", ctx do
+      known_crashes!(ctx, "'.*'")
+      assert {output, 1} = run_drill(ctx, [{"STUB_CRASH", "old_timeout"}])
+      assert output =~ "FAIL: OLD_KNOWN_CRASHES holds an entry that matches an empty line"
+      assert output =~ "FAIL: a process crashed during the upgrade"
     end
 
     test "any other OLD crash fails, including a known message in a shape it cannot read", ctx do
