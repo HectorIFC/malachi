@@ -48,7 +48,8 @@ function is_fence(line,   lead, n) {
   if (fc == "`" && index(frest, "`") > 0) return 0
   return 1
 }
-function closes(line) { return is_fence(line) && fc == och && fn >= olen && frest ~ /^[ \t]*$/ }
+# A carriage return counts as trailing space: a body saved with CRLF line endings closes its fences too.
+function closes(line) { return is_fence(line) && fc == och && fn >= olen && frest ~ /^[ \t\r]*$/ }
 '
 
 # The first code block after a bold marker inside the `## PR` section. `first_line` keeps only its first

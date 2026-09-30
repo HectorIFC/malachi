@@ -163,6 +163,15 @@ defmodule IssueSectionTest do
       assert run(["plan", issue]) == {"    ```\n- step\n", 0}
     end
 
+    test "a body with CRLF line endings still closes its fences", ctx do
+      # What the GitHub web editor can save. The section comes back byte for byte, \r included.
+      body = "## Plan\r\n```\r\n## inside\r\n```\r\n- step\r\n## Verification\r\n- check\r\n"
+      issue = write(ctx.dir, "crlf.md", body)
+
+      assert run(["plan", issue]) == {"```\r\n## inside\r\n```\r\n- step\r\n", 0}
+      assert run(["verification", issue]) == {"- check\r\n", 0}
+    end
+
     test "a branch block may be a tilde fence", ctx do
       issue = write(ctx.dir, "branch.md", "## PR\n\n**Branch**\n\n~~~\nfeat/tilde\n~~~\n")
 

@@ -143,6 +143,22 @@ defmodule PinDiffTest do
       assert files(ctx) == ["c.ex"]
     end
 
+    test "the missing merge base is reported on stderr, never on stdout", ctx do
+      git!(ctx.repo, ["update-ref", "-d", "refs/remotes/origin/main"])
+      File.write!(Path.join(ctx.repo, "c.ex"), "c\n")
+      stderr = Path.join(ctx.dir, "stderr.txt")
+
+      {stdout, 0} =
+        System.cmd("bash", ["-c", ~s(bash "$0" pin "$1" 2> "$2"), @script, ctx.out, stderr],
+          cd: ctx.repo,
+          env: @no_git_env
+        )
+
+      assert File.read!(stderr) =~ "no merge base with origin/main"
+      refute stdout =~ "merge base"
+      refute File.read!(Path.join(ctx.out, "diff.patch")) =~ "merge base"
+    end
+
     test "a repository with no commit yet compares against the empty tree", ctx do
       fresh = Path.join(ctx.dir, "fresh")
       File.mkdir!(fresh)
