@@ -90,7 +90,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
   test "a new replica that is not running fails the segment and adds nothing" do
     # Covers the probe's unreachable answer. The same outcome came from `follow/4` before the backfill
-    # probed where the copy ends, so what tells the two apart is the storage test below.
+    # probed where the copy ends, so this pins the outcome rather than the probe.
     [a, b, c] = [start_broker(), start_broker(), start_broker()]
     {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
     gone = {:no_such_replication_server, :"nonexistent@127.0.0.1"}
@@ -103,8 +103,10 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
   test "a new replica whose copy failed in storage is reported with the storage reason, not as unreachable" do
     # A disk failure on a broker that answers is not a broker that is down: the reason is what the
-    # operator reads in the heal warning. The copy is latched failed by an earlier pass, so the
-    # probe of where it ends is what meets the failure.
+    # operator reads in the heal warning. The copy is latched failed by an earlier pass, so the probe
+    # of where it ends meets the failure first. Before that probe existed `follow/4` reported the same
+    # reason, so this does not tell the probe from no probe: it guards the probe against folding a
+    # storage failure into :unreachable, which is what the integrity pass's own probe does.
     [a, b, c] = [start_broker(), start_broker(), start_broker()]
     {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
 
