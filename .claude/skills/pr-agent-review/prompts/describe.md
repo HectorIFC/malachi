@@ -15,6 +15,9 @@ Changes from upstream:
 - skills_context carries REVIEW.md and repo_context carries CLAUDE.md and CONTRIBUTING.md. The ticket
   block is kept.
 - A sentence on untrusted input is added.
+- `max_items=20` is dropped from `pr_files`. The files pass runs once per group of files, and a group is
+  bounded by its size in bytes, not by a count, so a group of many small files can hold more than 20;
+  every file must still appear in the walkthrough.
 -->
 
 # Files pass
@@ -38,7 +41,7 @@ class FileDescription(BaseModel):
     label: str = Field(description="a single semantic label that represents a type of code changes that occurred in the File. Possible values (partial list): 'bug fix', 'tests', 'enhancement', 'documentation', 'error handling', 'configuration changes', 'dependencies', 'formatting', 'miscellaneous', ...")
 
 class PRFiles(BaseModel):
-    pr_files: List[FileDescription] = Field(max_items=20, description="a list of all the files that were changed in the PR, and summary of their changes. Each file must be analyzed regardless of change size.")
+    pr_files: List[FileDescription] = Field(description="a list of all the files that were changed in the PR, and summary of their changes. Each file must be analyzed regardless of change size.")
 =====
 
 Example output:
