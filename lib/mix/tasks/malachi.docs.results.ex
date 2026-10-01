@@ -407,12 +407,24 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
   defp details_section(_result), do: ""
 
+  # A key is shown only for a value it holds, and a map that holds none renders as absent, as a list does.
   defp detail(value) when is_map(value) do
-    value |> Enum.sort() |> Enum.map_join(", ", fn {key, inner} -> "#{key}: #{detail(inner)}" end)
+    rendered = for {key, inner} <- Enum.sort(value), shown = detail(inner), shown != nil, do: "#{key}: #{shown}"
+    if rendered == [], do: nil, else: Enum.join(rendered, ", ")
   end
 
-  defp detail(value) when value in [nil, ""], do: nil
+  defp detail(value) when value in [nil, "", []], do: nil
   defp detail(value) when is_binary(value), do: code(value)
+  # Element by element: to_string/1 reads a list of small integers as a charlist and has no clause for a
+  # list holding a map, which would fail the docs build over a field a drill only meant to record. An empty
+  # element is dropped like an empty field, and a list left with nothing renders as absent.
+  defp detail(value) when is_list(value) do
+    case value |> Enum.map(&detail/1) |> Enum.reject(&is_nil/1) do
+      [] -> nil
+      rendered -> Enum.join(rendered, ", ")
+    end
+  end
+
   defp detail(value), do: to_string(value)
 
   defp chaos_headline(%{"verdict" => "passed"} = result) do

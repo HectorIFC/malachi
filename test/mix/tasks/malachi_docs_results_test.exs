@@ -569,6 +569,45 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       refute body =~ "negative_control"
     end
 
+    test "a drill's list details render element by element, not as a charlist or a crash", context do
+      # A list of small integers is a charlist to to_string/1, and a list holding a map has no String.Chars.
+      publish(
+        context,
+        "chaos-upgrade.json",
+        chaos_result(%{
+          "details" => %{
+            "ports" => [65, 66],
+            "hosts" => ["malachi1", "malachi2"],
+            "phases" => [%{"name" => "p1", "acked" => 3}],
+            "skipped" => [],
+            "nodes" => ["malachi1", nil, ""],
+            "unset" => [nil, ""],
+            "shards" => [%{}, "s1"],
+            "empty_map" => %{},
+            "blank_map" => %{"a" => nil, "b" => ""},
+            "partial_map" => %{"a" => 1, "b" => nil}
+          }
+        })
+      )
+
+      run(context)
+      body = page(context, "chaos-upgrade-results.md")
+
+      assert body =~ "| `ports` | 65, 66 |"
+      assert body =~ "| `hosts` | `malachi1`, `malachi2` |"
+      assert body =~ "| `phases` | acked: 3, name: `p1` |"
+      # An empty element is left out rather than rendered as a stray separator.
+      assert body =~ "| `nodes` | `malachi1` |"
+      assert body =~ "| `shards` | `s1` |"
+      # A map keeps its key only for a value it holds.
+      assert body =~ "| `partial_map` | a: 1 |"
+      refute body =~ "empty_map"
+      refute body =~ "blank_map"
+      # Recorded as empty, rendered as absent, like an empty string: a list of nothing but empties too.
+      refute body =~ "skipped"
+      refute body =~ "unset"
+    end
+
     test "a drill that records no details gets no details section", context do
       publish(context, "chaos-node.json", chaos_result(%{"details" => %{}}))
       run(context)
