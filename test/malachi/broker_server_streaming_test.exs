@@ -23,14 +23,14 @@ defmodule Malachi.BrokerServerStreamingTest do
     %{broker: broker}
   end
 
-  defp produce(broker, values) do
-    {:ok, _} = BrokerServer.produce(broker, "t", Enum.map(values, &Record.new/1))
+  defp produce(broker, values, topic \\ "t") do
+    {:ok, _} = BrokerServer.produce(broker, topic, Enum.map(values, &Record.new/1))
   end
 
-  # receive one push, returning {values, positions}
-  defp recv_push do
+  # receive one push for `topic`, returning {values, positions}
+  defp recv_push(topic \\ "t") do
     receive do
-      {:log_records, "t", records, positions} -> {Enum.map(records, & &1.value), positions}
+      {:log_records, ^topic, records, positions} -> {Enum.map(records, & &1.value), positions}
     after
       1_000 -> flunk("expected a {:log_records, ...} push")
     end
@@ -100,7 +100,12 @@ defmodule Malachi.BrokerServerStreamingTest do
     wait_until!(fn -> subscribers(broker) == [] end)
   end
 
-  defp subscribers(broker), do: Map.get(:sys.get_state(broker).subscribers, "t", [])
+  # The pids subscribed to `topic`, sorted. The only helper in this file that reads the broker's state: a
+  # dead plain subscriber is otherwise invisible (a push to a dead pid is dropped silently). It relies on
+  # nothing but `subscribers` being a per-topic list of maps carrying `:pid`, the shape #275 keeps.
+  defp subscribers(broker, topic \\ "t") do
+    :sys.get_state(broker).subscribers |> Map.get(topic, []) |> Enum.map(& &1.pid) |> Enum.sort()
+  end
 
   defp flush do
     receive do
@@ -201,5 +206,155 @@ defmodule Malachi.BrokerServerStreamingTest do
     Process.exit(pid, :kill)
     # the leave must follow the refreshed ref to coord2 (not the stale coord1), so m1 leaves coord2
     wait_until!(fn -> GroupCoordinator.assignment(coord2, "g", "t", :m1) == {:error, :unknown_member} end)
+  end
+
+  # --- subscriber teardown across topics ---
+
+  # Spawns a process that subscribes to every topic in `topics` and forwards each push to the test as
+  # `{:pushed, pid, topic, values}`. It unsubscribes one topic on `{:unsubscribe, topic, from}` and replies
+  # `{:unsubscribed, pid}`. Returns once every subscription is in place; the process is killed on exit.
+  defp spawn_subscriber(broker, topics, group, window) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        for topic <- topics, do: :ok = BrokerServer.subscribe(broker, topic, group, window, 100)
+        send(test, {:subscribed, self()})
+        forward_pushes(broker, test)
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    assert_receive {:subscribed, ^pid}, 1_000
+    pid
+  end
+
+  defp forward_pushes(broker, test) do
+    receive do
+      {:log_records, topic, records, _positions} ->
+        send(test, {:pushed, self(), topic, Enum.map(records, & &1.value)})
+
+      {:unsubscribe, topic, from} ->
+        :ok = BrokerServer.unsubscribe(broker, topic)
+        send(from, {:unsubscribed, self()})
+    end
+
+    forward_pushes(broker, test)
+  end
+
+  defp kill(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+  end
+
+  describe "multi-topic subscriber teardown" do
+    setup %{broker: broker} do
+      {:ok, _root} = BrokerServer.create_topic(broker, "u", 4)
+      :ok
+    end
+
+    test "a dead subscriber on one topic leaves the other topic's subscribers in place and still pushing",
+         %{broker: broker} do
+      # the test process subscribes to "u" with one record of its window of two already in flight
+      produce(broker, ["u0"], "u")
+      :ok = BrokerServer.subscribe(broker, "u", "gu", 2, 100)
+      assert {["u0"], _positions} = recv_push("u")
+
+      # the survivor shares the dead one's topic and also has one record of its window of two in flight
+      dead = spawn_subscriber(broker, ["t"], "g1", 10)
+      survivor = spawn_subscriber(broker, ["t"], "g2", 2)
+      assert subscribers(broker, "t") == Enum.sort([dead, survivor])
+      produce(broker, ["t0"])
+      assert_receive {:pushed, ^survivor, "t", ["t0"]}, 1_000
+
+      kill(dead)
+
+      wait_until!(fn -> subscribers(broker, "t") == [survivor] end)
+      assert subscribers(broker, "u") == [self()]
+
+      # the "u" subscriber kept its position and its in-flight count: one credit left, so one record
+      produce(broker, ["u1", "u2"], "u")
+      assert {["u1"], positions} = recv_push("u")
+      refute_receive {:log_records, "u", _, _}, 100
+
+      :ok = BrokerServer.stream_ack(broker, "u", "gu", positions, 2)
+      assert {["u2"], _positions} = recv_push("u")
+
+      # the survivor on the dead one's topic kept its position (no t0 again) and its credit (no t2 yet)
+      produce(broker, ["t1", "t2"])
+      assert_receive {:pushed, ^survivor, "t", ["t1"]}, 1_000
+      refute_receive {:pushed, ^survivor, "t", _}, 100
+    end
+
+    test "a process subscribed to two topics is removed from both when it dies", %{broker: broker} do
+      both = spawn_subscriber(broker, ["t", "u"], "g", 10)
+      on_t = spawn_subscriber(broker, ["t"], "gt", 10)
+      on_u = spawn_subscriber(broker, ["u"], "gu", 10)
+      assert subscribers(broker, "t") == Enum.sort([both, on_t])
+      assert subscribers(broker, "u") == Enum.sort([both, on_u])
+
+      kill(both)
+
+      wait_until!(fn -> subscribers(broker, "t") == [on_t] and subscribers(broker, "u") == [on_u] end)
+
+      produce(broker, ["t1"])
+      produce(broker, ["u1"], "u")
+      assert_receive {:pushed, ^on_t, "t", ["t1"]}, 1_000
+      assert_receive {:pushed, ^on_u, "u", ["u1"]}, 1_000
+    end
+
+    test "unsubscribing one topic keeps the other subscription, and the process's death still removes it",
+         %{broker: broker} do
+      both = spawn_subscriber(broker, ["t", "u"], "g", 10)
+
+      send(both, {:unsubscribe, "t", self()})
+      assert_receive {:unsubscribed, ^both}, 1_000
+      assert subscribers(broker, "t") == []
+      assert subscribers(broker, "u") == [both]
+
+      kill(both)
+
+      wait_until!(fn -> subscribers(broker, "u") == [] end)
+      assert subscribers(broker, "t") == []
+    end
+
+    test "a member on two topics leaves both groups on death, and a member on another topic stays",
+         %{broker: broker} do
+      coord = start_coordinator(broker)
+      test = self()
+
+      member = fn member, topics ->
+        pid =
+          spawn(fn ->
+            for topic <- topics, do: :ok = LogApi.subscribe_member(broker, coord, topic, "g", member, 10, 10)
+            send(test, {:subscribed, member})
+            Process.sleep(:infinity)
+          end)
+
+        on_exit(fn -> Process.exit(pid, :kill) end)
+        pid
+      end
+
+      m1 = member.(:m1, ["t", "u"])
+      assert_receive {:subscribed, :m1}, 2_000
+      _m2 = member.(:m2, ["u"])
+      assert_receive {:subscribed, :m2}, 2_000
+
+      assigned? = fn topic, member -> match?({:ok, _, _}, GroupCoordinator.assignment(coord, "g", topic, member)) end
+
+      gone? = fn topic, member ->
+        GroupCoordinator.assignment(coord, "g", topic, member) == {:error, :unknown_member}
+      end
+
+      assert assigned?.("t", :m1) and assigned?.("u", :m1) and assigned?.("u", :m2)
+
+      kill(m1)
+
+      # the broker's :DOWN leaves each of the dead member's groups in an async task, one per subscription
+      wait_until!(fn -> gone?.("t", :m1) and gone?.("u", :m1) end)
+      # a leave aimed at the wrong subscriber would land within the same burst of tasks
+      assert wait_until(fn -> gone?.("u", :m2) end, timeout: 200) == {:error, :timeout}
+      assert assigned?.("u", :m2)
+    end
   end
 end
