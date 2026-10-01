@@ -139,11 +139,12 @@ defmodule LoadtestJsTest do
       assert {output, 0} = run_js(ctx, args)
       assert {:ok, %{"batch" => 7, "record_size" => 100}} = Jason.decode(output)
 
-      # This generator's own defaults, which differ from the Elixir one's; recorded, not assumed.
+      # This generator's own defaults, recorded, not assumed. The batch size still differs from the Elixir
+      # generator's (1 against 10); the record size is the same as its.
       assert {defaults, 0} =
                run_js(ctx, ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()])
 
-      assert {:ok, %{"batch" => 1, "record_size" => 128}} = Jason.decode(defaults)
+      assert {:ok, %{"batch" => 1, "record_size" => 256}} = Jason.decode(defaults)
     end
 
     test "both generators record the same regime fields for the same flags", ctx do

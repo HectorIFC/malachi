@@ -731,7 +731,7 @@ ${colors.yellow('Options')}
   --duration <s>     Test duration in seconds (default 10)
   --topic <t>        Topic (default loadtest_<timestamp>, auto-created)
   --batch <n>        Records per produce op (default 1)
-  --record-size <b>  Value size in bytes (default 128)
+  --record-size <b>  Value size in bytes (default 256)
   --keys <n>         Key cardinality (default 1000)
   --max <n>          Max records per fetch/push (default 100)
   --window <n>       Streaming credit window (default 100)
@@ -809,7 +809,7 @@ async function main() {
     warmup: int(flags.warmup, 0),
     topic: flags.topic || `loadtest_${Date.now()}`,
     batch: int(flags.batch, 1),
-    recordSize: int(flags['record-size'], 128),
+    recordSize: int(flags['record-size'], 256),
     keys: int(flags.keys, 1000),
     max: int(flags.max, 100),
     window: int(flags.window, 100),
