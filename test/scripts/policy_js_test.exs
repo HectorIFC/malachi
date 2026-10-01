@@ -15,7 +15,7 @@ defmodule PolicyJsTest do
 
   setup_all do
     # A missing runtime fails loudly instead of skipping: a skipped client test reads as a passing one.
-    node = System.find_executable("node") || flunk("node is required to test scripts/policy.js; install Node 20+")
+    node = System.find_executable("node") || flunk("node is required to test scripts/policy.js; install Node 22.15+")
     %{node: node}
   end
 

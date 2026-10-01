@@ -326,11 +326,11 @@ jobs:
           elixir-version: '1.19.4'
           otp-version: '28.1'
 
-      # The load generator tests drive scripts/loadtest.js, as in the CI test job.
+      # The load generator tests drive scripts/loadtest.js, as in the CI test job, on the same Node 22.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # Restore only: a dozen runners saving the same key would race each other for nothing.
       - name: Restore dependencies
