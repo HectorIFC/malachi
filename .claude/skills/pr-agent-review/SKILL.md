@@ -98,13 +98,10 @@ exists. `core.hooksPath=/dev/null` keeps this repository's own git hooks from ru
 The worktree is only ever read. The merge base is computed before the worktree exists, so a pull request
 with no common history stops with nothing to clean up. From the moment the worktree exists, every stop
 removes it first (`/usr/bin/git worktree remove --force "$S/pr-$N"`): a pin that fails and a pin that
-finds nothing to review included, not only the end of step 7. At the end (step 7), compare `headRefOid`
-and `baseRefOid` again and say so if either changed while the pull request was reviewed (the diff changes
-with the base when the pull request was retargeted, when the base was rewritten, and when the base took
-in commits the head already had, such as a pull request this one was stacked on being merged; a changed
-base means the review covered a diff the pull request no longer has, so say it should be run again), then
-remove the worktree (`/usr/bin/git worktree remove --force "$S/pr-$N"`). The checkout the subagents read
-is `$S/pr-$N`. Title, body and commit messages come from `$S/pr.json`.
+finds nothing to review included, not only the end of step 7. At the end (step 7), check that the review
+still matches the pull request (step 7 says how), then remove the worktree (`/usr/bin/git worktree remove
+--force "$S/pr-$N"`). The checkout the subagents read is `$S/pr-$N`. Title, body and commit messages come
+from `$S/pr.json`.
 
 Then, for both modes:
 
@@ -249,6 +246,25 @@ Each item gets:
 
 Then ask with `AskUserQuestion`, up to four items per call, each option labelled with its number and
 letter (`3A`, `3B`). Ask again for the rest.
+
+In PR mode, check that the review still matches the pull request before reporting. What was reviewed
+is the diff from the merge base `$mb` to `$head`, so that pair is what is compared, not the base itself:
+the base moving forward with commits the head does not have (another pull request merged, a release
+commit) leaves `$mb` and the diff as they were, and is not worth a word.
+
+```
+read -r head2 base2 < <(gh pr view "$N" --json headRefOid,baseRefOid --jq '"\(.headRefOid) \(.baseRefOid)"')
+case "$head2$base2" in *[!0-9a-f]*|'') echo "could not re-read #$N" ;; *)
+  /usr/bin/git fetch --no-tags origin "$head2" "$base2"
+  mb2=$(/usr/bin/git merge-base "$base2" "$head2")
+  [ "$head2" = "$head" ] && [ "$mb2" = "$mb" ] && echo "unchanged" || echo "moved" ;;
+esac
+```
+
+`moved` means the review covered a diff the pull request no longer has: a push to the head, a retarget,
+a rewritten base, or a base that took in commits the head already had (a pull request this one was
+stacked on being merged). Say so in the header and that the review should be run again. `could not
+re-read` is said as it is, not taken as unchanged.
 
 End with one line on which review to trust for what (defects: `adversarial-review`; compliance,
 suggestions and summary: this one), and remove the pull request's worktree if there is one.
