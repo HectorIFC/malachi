@@ -29,6 +29,14 @@ set -euo pipefail
 WHICH=${1:-all}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${2:-${TMPDIR:-/tmp}/loadtest_ab_results}
+# Without its trailing slashes, which tab completion adds: the build log is written beside OUT as
+# "$OUT.build.log", and with a slash left on that path lands inside OUT, which is deleted further down.
+while [ "$OUT" != / ] && [ "${OUT%/}" != "$OUT" ]; do OUT=${OUT%/}; done
+# OUT is removed with rm -rf before every run, so the root is refused outright.
+if [ "$OUT" = / ]; then
+  echo "refusing OUT_DIR=/: the results directory is deleted before every run" >&2
+  exit 2
+fi
 REPS=${AB_REPS:-7}
 DUR=${DUR:-5}
 WARM=${WARM:-1}
@@ -56,6 +64,9 @@ fi
 trap '$COMPOSE down -v > /dev/null 2>&1 || true' EXIT
 
 say "building the bench images"
+# The build log sits beside OUT, which is only created further down: an OUT_DIR whose parent does not
+# exist yet would otherwise fail this redirection before anything is built.
+mkdir -p "$(dirname "$OUT")"
 $COMPOSE build > "$OUT.build.log" 2>&1 || { tail -20 "$OUT.build.log" >&2; exit 1; }
 
 fresh_server() {
