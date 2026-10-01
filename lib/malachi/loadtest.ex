@@ -312,8 +312,20 @@ defmodule Malachi.Loadtest do
   defp topic_for(%{topic: base, topics: 1}, _index), do: base
   defp topic_for(%{topic: base, topics: n}, index), do: "#{base}_#{rem(index, n)}"
 
+  # A connection whose authentication fails is closed before the error goes back: nothing else holds it,
+  # and a reconnect retries up to @max_reconnect_tries times per drop, so each refused attempt left open
+  # would keep its socket (or at least its port) until the worker exits.
   defp connect_auth(conn_opts) do
-    with {:ok, conn} <- Conn.connect(conn_opts), do: Conn.authenticate(conn, conn_opts)
+    with {:ok, conn} <- Conn.connect(conn_opts) do
+      case Conn.authenticate(conn, conn_opts) do
+        {:ok, conn} ->
+          {:ok, conn}
+
+        {:error, _} = refused ->
+          Conn.close(conn)
+          refused
+      end
+    end
   end
 
   # Opens worker `index`'s connection under the configured strategy (see the moduledoc). Mid-run
@@ -521,7 +533,7 @@ defmodule Malachi.Loadtest do
         # Transport error: the connection dropped. Reconnect and keep going within the window.
         :halt ->
           case after_drop(m) do
-            {:ok, conn} -> closed_loop(conn, ctx, m, corr + 1)
+            {:ok, new_conn} -> closed_loop(replace(conn, new_conn), ctx, m, corr + 1)
             :give_up -> conn
           end
 
@@ -554,7 +566,7 @@ defmodule Malachi.Loadtest do
   # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe.
   defp reconnect_pipelined(dead_conn, ctx, m) do
     case after_drop(m) do
-      {:ok, conn} -> pipelined(conn, ctx, m)
+      {:ok, conn} -> pipelined(replace(dead_conn, conn), ctx, m)
       :give_up -> dead_conn
     end
   end
@@ -611,7 +623,19 @@ defmodule Malachi.Loadtest do
 
     case Conn.send_frame(conn, Wire.subscribe_key(), 2, payload) do
       :ok -> stream_recv(conn, ctx, s, m)
-      {:error, _} -> conn
+      # A send error is a broken socket, the same as a recv error in stream_recv/4: count the drop and
+      # resubscribe, instead of ending the worker with nothing recorded.
+      {:error, _} -> resubscribe(conn, ctx, s, m)
+    end
+  end
+
+  # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe. A server that
+  # authenticates and then drops every subscribe keeps this reconnecting until the deadline, one backoff
+  # apart and each counted in `dropped`: the retry cap in after_drop/1 only bounds failed connects.
+  defp resubscribe(dead_conn, ctx, s, m) do
+    case after_drop(m) do
+      {:ok, conn} -> stream_loop(replace(dead_conn, conn), ctx, s, m)
+      :give_up -> dead_conn
     end
   end
 
@@ -625,12 +649,15 @@ defmodule Malachi.Loadtest do
         {:ok, body, conn} ->
           handle_push(conn, ctx, s, m, Wire.decode_response(body))
 
+        # The recv waited for exactly the time left in the window, so a timeout is the deadline and not a
+        # lost connection: the stream ends here with nothing counted. Counting it made every stream run that
+        # went quiet before the end report one drop per connection.
+        {:error, :timeout} ->
+          conn
+
         # The connection dropped: reconnect and re-subscribe within the window.
         {:error, _reason} ->
-          case after_drop(m) do
-            {:ok, conn} -> stream_loop(conn, ctx, s, m)
-            :give_up -> conn
-          end
+          resubscribe(conn, ctx, s, m)
       end
     end
   end
@@ -640,6 +667,10 @@ defmodule Malachi.Loadtest do
     n = length(records)
     if mono_ms() >= m.warmup_end and n > 0, do: record_push(m, n)
     ack = Wire.encode_stream_ack_req(ctx.topic, s.group, s.member, next_cursor, n)
+    # Unchecked on purpose. The socket has no send_timeout (Conn.socket_opts/0), so a send on a live socket
+    # blocks until the kernel takes the bytes and an error only comes back once the socket is already gone.
+    # The stream_recv/4 right below then fails on the same socket and takes the drop path, so a failed ack
+    # costs one wasted round trip and a live socket cannot lose credit this way.
     _ = Conn.send_frame(conn, Wire.stream_ack_key(), 3, ack)
     stream_recv(conn, ctx, s, m)
   end
@@ -797,6 +828,20 @@ defmodule Malachi.Loadtest do
       :give_up ->
         :give_up
     end
+  end
+
+  # Closes a dropped connection once its replacement is up and hands the replacement on. A transport error
+  # does not always free the port: with exit_on_close the socket is released but the port stays in the
+  # table until its owner exits, so a worker that reconnects all run long would pile up one per drop. The
+  # dead connection is kept until then because on :give_up it is what the worker's final Conn.close gets.
+  # The close can wait in one case: over TLS, a connection dropped because it stopped answering (a 15 s
+  # recv timeout) is still open, and :ssl.close/1 sends close_notify and waits up to 5 s for the peer, twice
+  # that if its send queue is full. A zero timeout does not help: once the connection is up, OTP uses its
+  # own 5 s. That wait follows 15 s the worker already spent idle on the same connection, so it is accepted
+  # rather than worked around.
+  defp replace(dead_conn, new_conn) do
+    Conn.close(dead_conn)
+    new_conn
   end
 
   defp reconnect(m, tries) do
@@ -1106,7 +1151,7 @@ defmodule Malachi.Loadtest do
   defp warn_if_empty(%{ops: 0} = r) do
     cause =
       if r.dropped > 0 do
-        "#{r.dropped} connection(s) dropped under load (the server likely timed out the produce call)"
+        "#{r.dropped} connection(s) dropped (the server closed them or timed out a request)"
       else
         "per-op latency likely exceeds warmup + duration"
       end

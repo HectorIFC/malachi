@@ -129,6 +129,30 @@ defmodule Malachi.I18n do
       "pt_BR" => "🌐 Malachi Dashboard rodando em http://localhost:%{port}",
       "en_US" => "🌐 Malachi Dashboard running at http://localhost:%{port}"
     },
+    console_started: %{
+      "pt_BR" => "Console do Malachi servindo em http://localhost:%{port}",
+      "en_US" => "Malachi console serving at http://localhost:%{port}"
+    },
+    console_bundle_absent: %{
+      "pt_BR" =>
+        "Console sem bundle: %{dir} não tem index.html. O endpoint sobe e responde 503 até um release " <>
+          "trazer o bundle",
+      "en_US" =>
+        "Console bundle absent: %{dir} holds no index.html. The endpoint starts and answers 503 until a " <>
+          "release carries the bundle"
+    },
+    console_asset_unreadable: %{
+      "pt_BR" => "Console deixou de fora %{path}: não foi possível ler (%{reason})",
+      "en_US" => "Console left out %{path}: it could not be read (%{reason})"
+    },
+    console_listen_failed: %{
+      "pt_BR" =>
+        "Console não abriu a porta %{port} (%{reason}). O broker segue sem console; libere a porta ou " <>
+          "defina MALACHI_CONSOLE_PORT e reinicie",
+      "en_US" =>
+        "Console could not listen on port %{port} (%{reason}). The broker carries on without a console; " <>
+          "free the port or set MALACHI_CONSOLE_PORT and restart"
+    },
     dashboard_cookie_plain: %{
       "pt_BR" =>
         "Cookie de sessão do dashboard sem Secure. O listener serve HTTP puro; defina " <>

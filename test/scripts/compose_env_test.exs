@@ -13,7 +13,8 @@ defmodule ComposeEnvTest do
     "MALACHI_DASHBOARD_PORT" => 4041,
     "JAEGER_UI_PORT" => 16_686,
     "OTLP_PORT" => 4318,
-    "PROMETHEUS_PORT" => 9090
+    "PROMETHEUS_PORT" => 9090,
+    "MALACHI_CONSOLE_PORT" => 4042
   }
 
   test "fixes no container name" do

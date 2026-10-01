@@ -50,6 +50,28 @@ defmodule Malachi.Dashboard.SecurityHeaders do
   instead of spelling the whole response out.
   """
   def add_security_headers(response, request_path, request_origin \\ nil) do
+    prepend_headers(response, headers(request_path, request_origin))
+  end
+
+  @doc """
+  The security headers for a response to `request_path`, as `{name, value}` tuples with lowercase
+  names, which is the shape `Plug.Conn` takes. `add_security_headers/3` renders the same list into a
+  raw response, so the dashboard and the console endpoint send one set of headers from one place.
+
+  The CSP comes from `build_csp_header/0`, HSTS from `build_hsts_header/0`, and CORS from
+  `build_cors_headers/2` unless `cors: false` is passed. The console passes it: CORS is a property of
+  the dashboard's `/metrics` and `/stream` routes, and the console serves a page at those paths, not
+  the API.
+
+  ## Examples
+
+      iex> headers = Malachi.Dashboard.SecurityHeaders.headers("/", nil, cors: false)
+      iex> List.keyfind(headers, "x-frame-options", 0)
+      {"x-frame-options", "DENY"}
+
+  """
+  @spec headers(String.t(), String.t() | nil, keyword()) :: [{String.t(), String.t()}]
+  def headers(request_path, request_origin \\ nil, opts \\ []) do
     base_headers = [
       {"x-content-type-options", "nosniff"},
       {"x-frame-options", "DENY"},
@@ -58,13 +80,12 @@ defmodule Malachi.Dashboard.SecurityHeaders do
       {"permissions-policy", @permissions_policy}
     ]
 
-    csp_header = build_csp_header()
-    hsts_header = build_hsts_header()
-    cors_headers = build_cors_headers(request_path, request_origin)
+    cors_headers =
+      if Keyword.get(opts, :cors, true),
+        do: build_cors_headers(request_path, request_origin),
+        else: []
 
-    all_headers = base_headers ++ csp_header ++ hsts_header ++ cors_headers
-
-    prepend_headers(response, all_headers)
+    base_headers ++ build_csp_header() ++ build_hsts_header() ++ cors_headers
   end
 
   @doc """

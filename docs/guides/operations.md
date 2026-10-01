@@ -9,9 +9,42 @@ left at their development values.
 |---|---|---|
 | 4040 | `MALACHI_TCP_PORT` | the binary log protocol, all client traffic |
 | 4041 | `MALACHI_DASHBOARD_PORT` | dashboard, health checks, metrics |
+| 4042 | `MALACHI_CONSOLE_PORT` | the operator console, while it replaces the dashboard |
 
-Only 4040 needs to be reachable by clients. Treat 4041 as an internal port: it exposes operational detail
-and user management.
+Only 4040 needs to be reachable by clients. Treat 4041 and 4042 as internal ports: they expose
+operational detail and user management.
+
+## The console endpoint
+
+The operator console is served from its own port, beside the dashboard, until it reaches parity with it
+(`docs/design/operator-interfaces.md`, sections 10.6 and 13). It serves the console bundle from
+`priv/static/console/`, which is never committed. The bundle is to be built and injected by CI once the
+web console itself lands (phase 3 of that document); until then no build produces one, and the endpoint
+answers `503` as described below.
+
+- **No bundle, no failure.** With no `index.html` in that directory, the node boots, logs a warning, and
+  every console request answers `503` saying the console was not built into the release.
+- **Switch it off** with `MALACHI_CONSOLE_ENABLED=false`, which starts no listener at all, for a node run
+  headless against a console served elsewhere.
+- **A port it cannot open does not stop the broker.** The error is logged and the node runs without a
+  console until the port is freed and the node restarts.
+- **Plain HTTP only, for now.** TLS for the console is #70. Put it behind a TLS-terminating proxy, like
+  the dashboard, when it is reached from anywhere but the host.
+- **Caching.** Every file is hashed at startup and served with that hash as its ETag. Files under
+  `assets/` whose last name segment looks like a build hash (eight or more letters, digits or
+  underscores with a digit, as Vite writes them) are cached for a year as immutable; `index.html` and
+  everything else are revalidated on every use, which costs a `304`. A stable file that must change in
+  place belongs outside `assets/`, or under a name that cannot pass for a hash. A new bundle is picked
+  up at restart. Until then a file changed or removed while the node runs, or swapped for a symbolic
+  link (the file or a directory above it), answers `404` rather than new bytes under the old ETag. The
+  check looks for links on every level below the root and compares each file's device, inode, size and
+  modification time before sending it, so it does not see a rewrite that keeps the size and the
+  modification time, nor a swap made between the check and the send. Replace a bundle by restarting the
+  node, not by writing into it.
+- **Limits.** The header limits and read deadline are the dashboard's (`MALACHI_DASHBOARD_MAX_HEADER_*`),
+  and an idle keep alive connection is closed after that deadline.
+- **Sessions.** Nothing the console serves today needs a login. A login on the dashboard sets the
+  `malachi_token` cookie, which the browser also sends to the console's port on the same host.
 
 ## Health checks
 

@@ -139,7 +139,8 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
     end
 
     test "the backpressure section appears only for a run that counted it", context do
-      publish(context, "loadtest-node.json", loadtest_result())
+      # A Node run outside the stream scenario writes the two counters it does not measure as null.
+      publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => nil, "reconnects" => nil}))
 
       publish(
         context,

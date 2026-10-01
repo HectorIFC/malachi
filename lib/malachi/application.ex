@@ -58,6 +58,8 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.Topology
   alias Malachi.Cluster.TopologyPublisher
   alias Malachi.Cluster.VnodeCoordinatorManager
+  alias Malachi.Console.Endpoint
+  alias Malachi.Console.HeaderDeadline
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.DataPlaneRouter
@@ -142,11 +144,31 @@ defmodule Malachi.Application do
           # or one per led vnode (on the leader) when the control plane is sharded.
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
-        ]
+        ] ++
+        console_children(
+          Application.get_env(:malachi, :console_enabled, true),
+          Application.get_env(:malachi, :console_port, 4042)
+        )
 
     opts = [strategy: :one_for_one, name: Malachi.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  @doc """
+  The console endpoint on `port`, with the registry its header deadlines live in
+  (`Malachi.Console.HeaderDeadline`), or nothing when the console is switched off. It is the last child,
+  so it never delays one the broker needs, and a port it cannot open makes it `:ignore` rather than
+  failing the boot (see `Malachi.Console.Endpoint`).
+  """
+  @spec console_children(boolean(), :inet.port_number()) :: [Supervisor.child_spec() | {module(), term()}]
+  def console_children(true, port) do
+    [
+      {Registry, keys: :unique, name: HeaderDeadline.registry()},
+      {Endpoint, port}
+    ]
+  end
+
+  def console_children(false, _port), do: []
 
   # libcluster node discovery (connectivity-only): starts a Cluster.Supervisor only when a strategy is
   # configured (MALACHI_CLUSTER_STRATEGY). Absent => [] (single-node default, no Erlang distribution

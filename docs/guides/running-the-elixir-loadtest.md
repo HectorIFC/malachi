@@ -156,9 +156,10 @@ that reads it, and a connection that still fails aborts the run with a `SetupErr
 how many failed, instead of a crashed worker's exit dump.
 
 This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
-counts backpressure that the Node one does not (dropped connections, server-shed produces,
-reconnects). Both pages render only what the run recorded, so the two sections legitimately show
-different fields rather than one of them looking incomplete.
+counts backpressure that the Node one does not: server-shed produces in every scenario, and dropped
+connections and reconnects outside the stream scenario (the Node generator counts those two only for a
+stream run and writes null for them elsewhere). Both pages render only what the run recorded, so the
+two sections legitimately show different fields rather than one of them looking incomplete.
 
 Two things about that `meta` block are worth knowing. The recorded command is rebuilt from the
 **effective** configuration rather than copied from what you typed, so a knob you left at its default
@@ -172,8 +173,9 @@ the recorded ref then reads `<sha>-dirty` rather than naming a commit.
 
 ## Reading the output
 
-Beyond throughput and the latency tail, this generator reports what the Node one does not: `dropped`
-connections, `overloaded` (produces the server shed under backpressure) and `reconnects`. Those three
+Beyond throughput and the latency tail, this generator reports `dropped` connections, `overloaded`
+(produces the server shed under backpressure) and `reconnects`, the first and last of which the Node one
+reports only for a stream run. Those three
 are the difference between a server that is slow and a server that is shedding, and a throughput
 number taken while any of them is climbing describes the backpressure rather than the capacity.
 

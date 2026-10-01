@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Gives one git worktree of this repository its own development environment, written to worktree.env at
-# the worktree's root: five host ports, the dev node's data directories and node name, and a compose
+# the worktree's root: six host ports, the dev node's data directories and node name, and a compose
 # project name. The start-issue-work skill runs it for every new worktree, and every session in that
 # worktree loads the file before any `mix` or `docker` command:
 #
@@ -8,7 +8,7 @@
 #
 # Usage: scripts/worktree-env.sh <issue number> <worktree directory>
 #
-# The ports are 20000 + 10 * <issue number>, plus 0 to 4, so a port names its worktree. They stay below
+# The ports are 20000 + 10 * <issue number>, plus 0 to 5, so a port names its worktree. They stay below
 # 32768, where Linux starts handing out ephemeral ports (macOS starts at 49152): a dev node must never be
 # given a port the kernel may also give a random outgoing connection. That caps the issue number at 1276,
 # and a larger one is refused rather than wrapped around.
@@ -39,8 +39,8 @@ case "$issue" in
 esac
 
 base=$((20000 + 10 * issue))
-if [ $((base + 4)) -ge 32768 ]; then
-  echo "refusing: issue $issue would get ports $base-$((base + 4)), inside the Linux ephemeral range" \
+if [ $((base + 5)) -ge 32768 ]; then
+  echo "refusing: issue $issue would get ports $base-$((base + 5)), inside the Linux ephemeral range" \
     "(32768 and up); the formula serves issues up to 1276" >&2
   exit 65
 fi
@@ -61,9 +61,9 @@ fi
 
 command -v lsof >/dev/null 2>&1 || { echo "refusing: lsof is required to check the ports" >&2; exit 69; }
 
-names=(MALACHI_TCP_PORT MALACHI_DASHBOARD_PORT JAEGER_UI_PORT OTLP_PORT PROMETHEUS_PORT)
+names=(MALACHI_TCP_PORT MALACHI_DASHBOARD_PORT JAEGER_UI_PORT OTLP_PORT PROMETHEUS_PORT MALACHI_CONSOLE_PORT)
 
-# Given the five ports in the order of `names`, prints one line per port some process is listening on:
+# Given the six ports in the order of `names`, prints one line per port some process is listening on:
 # the variable, the port, the command and its pid.
 taken_ports() {
   local ports=("$@") i port holder
@@ -87,13 +87,35 @@ if [ -e "$env_file" ]; then
   # have been written for another number, or edited.
   echo "kept existing $env_file"
   kept=()
+  absent=()
+  malformed=0
   for name in "${names[@]}"; do
     value=$(sed -n "s/^$name=\([0-9][0-9]*\)\$/\1/p" "$env_file")
     case "$value" in
-      '' | *[!0-9]*) kept=(); break ;;
+      '')
+        # No plain numeric line: either the name is not in the file at all, or its value is not a number.
+        if grep -q "^$name=" "$env_file"; then malformed=1; else absent+=("$name"); fi
+        ;;
+      *[!0-9]*) malformed=1 ;;
       *) kept+=("$value") ;;
     esac
   done
+  if [ "$malformed" -eq 0 ] && [ "${#absent[@]}" -gt 0 ] && [ "${#kept[@]}" -gt 0 ]; then
+    # A file written before a port was added to `names` (MALACHI_CONSOLE_PORT came last). Without the
+    # line, the dev compose stack falls back to the port's shared default and collides with every other
+    # worktree in the same state, so the missing line is named along with the value this worktree's
+    # TCP port implies for it.
+    echo "warning: it has no line for ${absent[*]}, added to this script after the file was written; ports not checked"
+    tcp=$(sed -n 's/^MALACHI_TCP_PORT=\([0-9][0-9]*\)$/\1/p' "$env_file")
+    if [ -n "$tcp" ]; then
+      for name in "${absent[@]}"; do
+        for i in "${!names[@]}"; do
+          if [ "${names[$i]}" = "$name" ]; then echo "  append: $name=$((tcp + i))"; fi
+        done
+      done
+    fi
+    exit 0
+  fi
   if [ "${#kept[@]}" -ne "${#names[@]}" ]; then
     echo "warning: its port lines are missing or not one plain number each; ports not checked"
     exit 0
@@ -107,7 +129,7 @@ if [ -e "$env_file" ]; then
   exit 0
 fi
 
-taken=$(taken_ports "$base" $((base + 1)) $((base + 2)) $((base + 3)) $((base + 4)))
+taken=$(taken_ports "$base" $((base + 1)) $((base + 2)) $((base + 3)) $((base + 4)) $((base + 5)))
 if [ -n "$taken" ]; then
   echo "refusing: ports for issue $issue are already in use; nothing was written" >&2
   echo "$taken" >&2
