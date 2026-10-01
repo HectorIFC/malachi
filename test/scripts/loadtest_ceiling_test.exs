@@ -85,6 +85,15 @@ defmodule LoadtestCeilingTest do
       refute File.exists?(ctx.log)
     end
 
+    test "a payload the generators would refuse", ctx do
+      assert {output, 2} = run_script(ctx, [{"PAYLOAD", "zip"}])
+      assert output =~ ~s(PAYLOAD must be one of constant, json, random, got "zip")
+
+      assert {output, 2} = run_script(ctx, [{"PAYLOAD_SEED", "4"}])
+      assert output =~ "PAYLOAD_SEED only applies to the json and random payloads, got 4"
+      refute File.exists?(ctx.log)
+    end
+
     test "a batch size that is not a number", ctx do
       assert {output, 2} = run_script(ctx, [{"BATCH_LADDER", "10 1-0"}])
       assert output =~ ~s(BATCH_LADDER has "1-0", which is not an integer)
@@ -126,11 +135,47 @@ defmodule LoadtestCeilingTest do
         assert line =~ "prealloc=67108864"
         assert line =~ "rsize=256"
         assert line =~ "marker=yes"
+        # Constant bytes are the generators' default, so the flag is not passed and the command each
+        # generator records stays the one every published run recorded.
+        assert line =~ "payload= seed="
       end
+
+      assert result["payload"] == "constant"
 
       assert output =~ "== headline: 80 rec/s @ 8 connections, batch 10 x 256B"
       assert output =~ "WARN: batch 10 peaked at the top of its connection ladder; widen CONNS_LADDER_10"
       assert output =~ "WARN: batch 100 has no peak (no_clean_rung)."
+    end
+
+    for generator <- ~w(elixir node) do
+      test "a json sweep passes the payload and its seed to the #{generator} generator and names it", ctx do
+        assert {_output, 0} =
+                 run_script(ctx, [
+                   {"GENERATOR", unquote(generator)},
+                   {"BATCH_LADDER", "10"},
+                   {"CONNS_LADDER_10", "4"},
+                   {"PAYLOAD", "json"},
+                   {"PAYLOAD_SEED", "5"}
+                 ])
+
+        for line <- File.read!(ctx.log) |> String.split("\n", trim: true) do
+          assert line =~ "kind=#{unquote(generator)}"
+          assert line =~ "payload=json seed=5"
+        end
+
+        result = read_json!(ctx.out)
+        assert result["payload"] == "json"
+        assert result["payload_seed"] == 5
+        assert result["regime_label"] =~ ~r/segment preallocation 64MB, payload json\)\z/
+      end
+    end
+
+    test "a json sweep without a seed leaves the generators their default, which the plan expects", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"BATCH_LADDER", "10"}, {"CONNS_LADDER_10", "4"}, {"PAYLOAD", "random"}])
+
+      assert File.read!(ctx.log) =~ "payload=random seed=\n"
+      assert %{"payload" => "random", "payload_seed" => 1} = read_json!(ctx.out)
     end
 
     test "without a headline peak it writes the result, runs no A-A repeat and exits 1", ctx do
@@ -320,7 +365,9 @@ defmodule LoadtestCeilingTest do
       {"BATCH_LADDER", nil},
       {"HEADLINE_BATCH", nil},
       {"CONNS_LADDER", nil},
-      {"REPS", nil}
+      {"REPS", nil},
+      {"PAYLOAD", nil},
+      {"PAYLOAD_SEED", nil}
     ]
 
     env = Enum.reduce(env, base, fn {key, value}, acc -> List.keystore(acc, key, 0, {key, value}) end)
@@ -395,17 +442,24 @@ defmodule LoadtestCeilingTest do
   defp generator_stub do
     ~S"""
     #!/usr/bin/env bash
-    batch="" conns="" rsize="" marker=""
+    batch="" conns="" rsize="" marker="" payload="" seed=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --batch) batch="$2"; shift ;;
         --connections) conns="$2"; shift ;;
         --record-size) rsize="$2"; shift ;;
         --measure-marker) marker="$2"; shift ;;
+        --payload) payload="$2"; shift ;;
+        --payload-seed) seed="$2"; shift ;;
       esac
       shift
     done
-    echo "gen kind=$STUB_KIND batch=$batch conns=$conns rsize=$rsize group_commit=$MALACHI_GROUP_COMMIT prealloc=$MALACHI_SEGMENT_PREALLOC_BYTES marker=${marker:+yes}" >> "$STUB_LOG"
+    echo "gen kind=$STUB_KIND batch=$batch conns=$conns rsize=$rsize group_commit=$MALACHI_GROUP_COMMIT prealloc=$MALACHI_SEGMENT_PREALLOC_BYTES marker=${marker:+yes} payload=$payload seed=$seed" >> "$STUB_LOG"
+
+    # What the real generators report: constant bytes with no seed unless told otherwise, and seed 1
+    # for json or random when none was given.
+    reported_payload="${payload:-constant}"
+    if [ "$reported_payload" = constant ]; then reported_seed=null; else reported_seed="${seed:-1}"; fi
 
     rule="$(awk -v b="$batch" -v c="$conns" '$1 == b && $2 == c { print $3, $4, $5; exit }' "$STUB_RULES" 2> /dev/null)"
     read -r behaviour rate errors <<< "${rule:-$STUB_DEFAULT}"
@@ -413,8 +467,8 @@ defmodule LoadtestCeilingTest do
     errors="${errors:-0}"
 
     result() {
-      printf '{"scenario":"produce","batch":%s,"record_size":%s,"connections":%s,"records_per_s":%s,"errors":%s,"duration_s":1,"meta":{"command":"stub"}}\n' \
-        "$batch" "$rsize" "$conns" "$rate" "$1"
+      printf '{"scenario":"produce","batch":%s,"record_size":%s,"connections":%s,"records_per_s":%s,"errors":%s,"duration_s":1,"payload":"%s","payload_seed":%s,"meta":{"command":"stub"}}\n' \
+        "$batch" "$rsize" "$conns" "$rate" "$1" "$reported_payload" "$reported_seed"
     }
 
     case "$behaviour" in

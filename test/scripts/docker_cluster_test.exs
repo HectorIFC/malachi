@@ -224,6 +224,31 @@ defmodule DockerClusterTest do
       end
     end
 
+    test "a json payload reaches the generator and the regime label; constant bytes reach neither as a flag",
+         ctx do
+      assert {output, 0} =
+               run_script(ctx, [{"STUB_REAL_MIX", "1"}, {"RFS", "1"}, {"PAYLOAD", "json"}, {"OUT", ctx.out}])
+
+      label =
+        "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation off, payload json)"
+
+      assert output =~ "regime: " <> label
+      assert [%{"regime_label" => ^label}] = cases(ctx)
+      assert [run] = loadtest_runs(ctx)
+      assert run.args =~ "--payload json"
+
+      # The stub log keeps the first run's calls, so the second run's case is the last one.
+      assert {_output, 0} = run_script(ctx, [{"RFS", "1"}])
+      refute List.last(loadtest_runs(ctx)).args =~ "--payload"
+    end
+
+    test "a payload the label task refuses stops the run before any case", ctx do
+      assert {output, 1} = run_script(ctx, [{"STUB_REAL_MIX", "1"}, {"PAYLOAD", "zip"}])
+      assert output =~ "could not name the regime for RF=1"
+      assert output =~ ~s(--payload must be one of constant, json, random, got "zip")
+      assert compose_calls(ctx, ["up"]) == []
+    end
+
     test "a regime that cannot be named stops the run before any case", ctx do
       assert {output, 1} = run_script(ctx, [{"STUB_LABEL", "fail"}])
       assert output =~ "could not name the regime for RF=1"
@@ -514,7 +539,7 @@ defmodule DockerClusterTest do
       assert %{
                "data_mode" => "disk",
                "rf" => 1,
-               "regime_label" => "LABEL batch=100 rsize=256 group_commit=true prealloc=67108864",
+               "regime_label" => "LABEL batch=100 rsize=256 group_commit=true prealloc=67108864 payload=constant",
                "outcome" => "ok",
                "prealloc_bytes" => @prealloc,
                "du_bytes" => 3_072_000_000,
@@ -532,7 +557,10 @@ defmodule DockerClusterTest do
                "malachi3" => %{"fstype" => "ext4", "mount_options" => "rw,relatime"}
              }
 
-      assert %{"rf" => 3, "regime_label" => "LABEL batch=100 rsize=256 group_commit=false prealloc=67108864"} = rf3
+      assert %{
+               "rf" => 3,
+               "regime_label" => "LABEL batch=100 rsize=256 group_commit=false prealloc=67108864 payload=constant"
+             } = rf3
     end
 
     test "creates its directory", ctx do
@@ -563,6 +591,7 @@ defmodule DockerClusterTest do
       # Nothing from the environment running the tests may leak into a case.
       {"BATCH", nil},
       {"RSIZE", nil},
+      {"PAYLOAD", nil},
       {"RFS", nil},
       {"REAL_DISK", nil},
       {"DISK_PREALLOC_BYTES", nil},
@@ -723,10 +752,11 @@ defmodule DockerClusterTest do
                 exit 0 ;;
             esac ;;
         esac
-        batch="" rsize="" gc="" prealloc="" entrypoint=""
+        batch="" rsize="" gc="" prealloc="" entrypoint="" payload=""
         while [ $# -gt 0 ]; do
           case "$1" in
             --entrypoint) entrypoint="$2"; shift ;;
+            --payload) payload="$2"; shift ;;
             --batch) batch="$2"; shift ;;
             --record-size) rsize="$2"; shift ;;
             --group-commit) gc="$2"; shift ;;
@@ -739,10 +769,11 @@ defmodule DockerClusterTest do
           if [ "${STUB_LABEL:-}" = fail ]; then echo "label exploded" >&2; exit 1; fi
           if [ "${STUB_REAL_MIX:-}" = 1 ]; then
             cd "$REAL_PROJECT" && MIX_ENV=test exec "$REAL_MIX" malachi.loadtest.ceiling label \
-              --batch "$batch" --record-size "$rsize" --group-commit "$gc" --segment-prealloc-bytes "$prealloc"
+              --batch "$batch" --record-size "$rsize" --group-commit "$gc" --segment-prealloc-bytes "$prealloc" \
+              --payload "$payload"
           fi
           echo "Compiling nothing"
-          echo "LABEL batch=$batch rsize=$rsize group_commit=$gc prealloc=$prealloc"
+          echo "LABEL batch=$batch rsize=$rsize group_commit=$gc prealloc=$prealloc${payload:+ payload=$payload}"
           exit 0
         fi
 

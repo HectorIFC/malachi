@@ -75,8 +75,9 @@ How much a block compresses then depends on how many records it holds, which is 
 level 1 and 256-byte values, about 1.3x at one record per block and 3.8x at a thousand. The document,
 the generator and the pool are specified in `Malachi.Loadtest.Payload`.
 
-A json or random run records `payload` and `payload_seed` beside `batch` and `record_size` in its
-JSON.
+A json or random run names its payload in the regime label (`..., payload json)`) and records
+`payload` and `payload_seed` beside `batch` and `record_size` in its JSON; a constant run's label reads
+exactly as it always did.
 
 ```bash
 node loadtest.js --scenario produce --connections 20 --batch 100 --payload json --payload-seed 7

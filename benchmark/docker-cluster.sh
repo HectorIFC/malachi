@@ -43,7 +43,7 @@
 # Linux only, like Malachi: the measurement counts only there. On any other host the script refuses to
 # run unless ALLOW_NON_LINUX=1, which runs it as a smoke test whose numbers are not comparable.
 #
-# Knobs (env): DUR WARM CONNS BATCH RSIZE TOPICS RFS SRV_CPUSET LT_CPUSET, and
+# Knobs (env): DUR WARM CONNS BATCH RSIZE PAYLOAD TOPICS RFS SRV_CPUSET LT_CPUSET, and
 #   MALACHI_USER, MALACHI_PASS  the dashboard login for the flush scrape (default admin / admin123)
 #   REAL_DISK            0 or 1, see above
 #   DISK_PREALLOC_BYTES  preallocation in disk mode, 1..67108864 (the broker clamps it to the 64MB
@@ -76,6 +76,12 @@ WARM="${WARM:-5}"
 CONNS="${CONNS:-192}"
 BATCH="${BATCH:-100}"
 RSIZE="${RSIZE:-256}"
+# What the record values are: constant (the default), json or random (lib/malachi/loadtest/payload.ex).
+# The label task refuses any other value before a case runs, and the generator gets the flag only when it
+# is not constant, so a constant run records the command it always did.
+PAYLOAD="${PAYLOAD:-constant}"
+payload_args=()
+if [ "$PAYLOAD" != constant ]; then payload_args+=(--payload "$PAYLOAD"); fi
 TOPICS="${TOPICS:-64}"
 RFS="${RFS:-1 3}"
 # Only an unset REAL_DISK means tmpfs: an empty one (a blank CI variable, say) is refused below rather
@@ -298,7 +304,7 @@ declare -A LABELS
 for rf in $RFS; do
   label="$($COMPOSE run --rm --no-deps --entrypoint mix loadtest malachi.loadtest.ceiling label \
              --batch "$BATCH" --record-size "$RSIZE" --group-commit "$(group_commit_for_rf "$rf")" \
-             --segment-prealloc-bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
+             --segment-prealloc-bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" --payload "$PAYLOAD" \
              2> "$WORK/label.err" | tail -1)"
   if [ -z "$label" ]; then
     echo "could not name the regime for RF=$rf; its stderr:"
@@ -463,7 +469,7 @@ for rf in $RFS; do
     --host malachi1,malachi2,malachi3 --scenario produce \
     --connections "$CONNS" --batch "$BATCH" --topics "$TOPICS" --prepopulate "$BATCH" \
     --duration "$DUR" --warmup "$WARM" --record-size "$RSIZE" --measure-marker "$MEASURE_MARKER" --json \
-    > "$WORK/loadtest.out" 2> "$WORK/loadtest-rf$rf.err"
+    ${payload_args[@]+"${payload_args[@]}"} > "$WORK/loadtest.out" 2> "$WORK/loadtest-rf$rf.err"
   status=$?
   touch "$WORK/run.done"
   wait "$stats_pid" 2> /dev/null

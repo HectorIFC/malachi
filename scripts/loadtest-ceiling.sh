@@ -20,7 +20,7 @@
 # the JSON shape) is decided by `mix malachi.loadtest.ceiling`, which is tested; this script runs things.
 #
 # Usage: GENERATOR=node|elixir OUT=/path/loadtest-node.json scripts/loadtest-ceiling.sh
-# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  DUR=15  WARM=3  RSIZE=256  REPS=1
+# Knobs (env): SRV_CPUSET=1,2,3  LT_CPUSET=0  DUR=15  WARM=3  RSIZE=256  REPS=1  PAYLOAD=constant  PAYLOAD_SEED
 #   BATCH_LADDER="10 100 512 1024 4096"  HEADLINE_BATCH=10
 #   CONNS_LADDER="32 64 128 256 512" (for any batch size without its own)
 #   CONNS_LADDER_<batch>="..." (that batch size's ladder; defaults below for 100, 512, 1024 and 4096)
@@ -71,6 +71,15 @@ MARKER_TIMEOUT="${MARKER_TIMEOUT:-300}"
 # leaves its side unsampled.
 if [ "$DUR" -ge 3 ]; then SAMPLE_S=$((DUR - 1)); else SAMPLE_S="$DUR"; fi
 RSIZE="${RSIZE:-256}"
+# What the record values are (lib/malachi/loadtest/payload.ex): constant bytes, as every published series
+# so far, or seeded json or random values. PAYLOAD_SEED applies to json and random only, and an empty one
+# is the generators' default; the planner refuses a combination the generators would refuse. Passed to
+# the generators only when it is not constant, so the command a constant run records is unchanged.
+PAYLOAD="${PAYLOAD:-constant}"
+PAYLOAD_SEED="${PAYLOAD_SEED:-}"
+payload_args=()
+if [ "$PAYLOAD" != constant ]; then payload_args+=(--payload "$PAYLOAD"); fi
+if [ -n "$PAYLOAD_SEED" ]; then payload_args+=(--payload-seed "$PAYLOAD_SEED"); fi
 export MALACHI_USER="${MALACHI_USER:-admin}"
 export MALACHI_PASS="${MALACHI_PASS:-admin123}"
 export MALACHI_PORT="${MALACHI_PORT:-4040}"
@@ -293,7 +302,7 @@ run_point() {
     $lt_pin node scripts/loadtest.js --scenario produce --json \
       --connections "$n" --batch "$batch" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" \
-      --connect-strategy bounded --connect-concurrency 32 \
+      --connect-strategy bounded --connect-concurrency 32 ${payload_args[@]+"${payload_args[@]}"} \
       --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" < /dev/null &
   else
     # shellcheck disable=SC2086  # $lt_pin is a controlled 'taskset -c N' prefix (or empty); split intended
@@ -301,7 +310,7 @@ run_point() {
       --connections "$n" --batch "$batch" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
       --connect-strategy bounded --connect-concurrency 32 \
-      --user "$MALACHI_USER" --pass "$MALACHI_PASS" \
+      --user "$MALACHI_USER" --pass "$MALACHI_PASS" ${payload_args[@]+"${payload_args[@]}"} \
       --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" < /dev/null &
   fi
   local gen_pid=$!
@@ -375,7 +384,7 @@ done
 plan_output="$(ceiling plan --batch-ladder "$BATCH_LADDER" "${conns_args[@]}" \
   --headline-batch "$HEADLINE_BATCH" --reps "$REPS" --record-size "$RSIZE" \
   --group-commit "$MALACHI_GROUP_COMMIT" --segment-prealloc-bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
-  --out "$SWEEP")"
+  --payload "$PAYLOAD" --payload-seed "$PAYLOAD_SEED" --out "$SWEEP")"
 plan_status=$?
 if [ "$plan_status" -ne 0 ]; then
   exit "$plan_status"
