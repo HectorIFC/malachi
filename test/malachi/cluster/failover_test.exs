@@ -1,8 +1,12 @@
 defmodule Malachi.Cluster.FailoverTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Malachi.Cluster.Failover
+  alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Metadata
+
+  doctest Malachi.Cluster.Failover
 
   # Epoch milliseconds, the shape `System.system_time(:millisecond)` produces, which is what the caller
   # passes as `now_ms` and what `sealed_at` carries into retention. Fixed rather than read from the
@@ -41,6 +45,121 @@ defmodule Malachi.Cluster.FailoverTest do
 
       {metadata, _} = segment([:a, :b, :c], false)
       assert Failover.candidates(metadata, [:d]) == []
+    end
+  end
+
+  describe "a segment placed below the replication factor (#270)" do
+    # A roll while a broker is down places the next segment on the brokers left: two, at replication
+    # factor 3. Its acknowledgements need both, so either one alone holds every acknowledged write.
+    test "two replicas with the primary dead: sealed on the survivor, which becomes the head" do
+      {metadata, segment_id} = segment([:a, :b], false)
+
+      assert Failover.candidates(metadata, [:b, :c]) == [{segment_id, [:b]}]
+
+      assert Failover.plan(metadata, [:b, :c], probes(segment_id, %{b: {7, 700}}), @now) == [
+               {:seal_segment, segment_id, 7, 700, @now},
+               {:set_segment_replicas, segment_id, [:b, :a]}
+             ]
+    end
+
+    test "two replicas with the follower dead: a candidate although its primary lives, sealed on the primary" do
+      # The live primary alone is below the acknowledgement quorum of two, so the range takes no write.
+      {metadata, segment_id} = segment([:a, :b], false)
+
+      assert Failover.candidates(metadata, [:a, :c]) == [{segment_id, [:a]}]
+
+      assert Failover.plan(metadata, [:a, :c], probes(segment_id, %{a: {4, 400}}), @now) == [
+               {:seal_segment, segment_id, 4, 400, @now},
+               {:set_segment_replicas, segment_id, [:a, :b]}
+             ]
+    end
+
+    test "three replicas with one follower dead still take writes, so the segment is left alone" do
+      {metadata, _segment_id} = segment([:a, :b, :c], false)
+      assert Failover.candidates(metadata, [:a, :b]) == []
+    end
+
+    test "four replicas with the primary and one follower dead: sealed on the two left, not a majority" do
+      # Any acknowledgement needed three of four, so two answers share a replica with every one of them.
+      {metadata, segment_id} = segment([:a, :b, :c, :d], false)
+
+      assert Failover.plan(metadata, [:c, :d], probes(segment_id, %{c: {5, 500}, d: {6, 600}}), @now) == [
+               {:seal_segment, segment_id, 6, 600, @now},
+               {:set_segment_replicas, segment_id, [:d, :a, :b, :c]}
+             ]
+    end
+
+    test "an active segment with an empty replica set is no candidate, and does not break the pass" do
+      {metadata, segment_id} = segment([:a], false)
+      metadata = put_in(metadata.segments[segment_id].replica_set, [])
+      assert Failover.candidates(metadata, [:a]) == []
+    end
+
+    test "on a tie for the furthest end, the head is a replica the view counts live" do
+      # :c was heard from but the view has it gone, and a plain maximum would pick it (the last of equals);
+      # :b is live and holds the same records, so it is the one reads should route to.
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+
+      assert [{:seal_segment, ^segment_id, 5, 500, @now}, {:set_segment_replicas, ^segment_id, [:b | _]}] =
+               Failover.plan(metadata, [:b], probes(segment_id, %{b: {5, 500}, c: {5, 500}}), @now)
+    end
+
+    test "three replicas with both followers dead: a candidate, blocked until one returns" do
+      {metadata, segment_id} = segment([:a, :b, :c], false)
+
+      assert Failover.candidates(metadata, [:a]) == [{segment_id, [:a]}]
+      assert Failover.plan(metadata, [:a], probes(segment_id, %{a: {4, 400}}), @now) == []
+    end
+  end
+
+  describe "the seal quorum" do
+    # Each replica's log is contiguous, so a replica's end says which offsets it holds. The acknowledged
+    # end is the highest offset at least `quorum_size(n)` replicas hold: exactly what the tracker commits.
+    property "any answers reaching the seal quorum reach the acknowledged end" do
+      check all(
+              ends <- list_of(integer(0..20), min_length: 1, max_length: 7),
+              answering <- answering_subset(length(ends))
+            ) do
+        acknowledged = ends |> Enum.sort(:desc) |> Enum.at(ReplicaTracker.quorum_size(length(ends)) - 1)
+        answers = Enum.map(answering, &Enum.at(ends, &1))
+        replica_set = Enum.to_list(1..length(ends))
+
+        if Failover.seal_quorum?(length(answers), replica_set) do
+          assert Enum.max(answers) >= acknowledged
+        end
+      end
+    end
+
+    property "one answer fewer is not enough: some such answers miss an acknowledged write" do
+      check all(n <- integer(2..7), ahead <- integer(1..20)) do
+        quorum = ReplicaTracker.quorum_size(n)
+        # Exactly `quorum` replicas reach `ahead`, which is therefore acknowledged; the rest hold nothing.
+        ends = List.duplicate(ahead, quorum) ++ List.duplicate(0, n - quorum)
+        acknowledged = ends |> Enum.sort(:desc) |> Enum.at(quorum - 1)
+        lagging = Enum.drop(ends, quorum)
+        replica_set = Enum.to_list(1..n)
+
+        assert acknowledged == ahead
+        # Those answers are one short of the seal quorum, and they would indeed miss the acknowledged end.
+        assert length(lagging) == Failover.seal_quorum(replica_set) - 1
+        assert Enum.all?(lagging, &(&1 < acknowledged))
+
+        # And the policy itself declines them: the replicas that hold `ahead` are gone (the primary among
+        # them), the lagging ones are all that answer, and nothing is sealed on them.
+        {metadata, segment_id} = segment(replica_set, false)
+        live = Enum.drop(replica_set, quorum)
+        answers = Map.new(live, &{&1, {0, 0}})
+
+        # With no one left to answer (two replicas, both of them ahead) there is nothing to probe at all.
+        assert Failover.candidates(metadata, live) == if(live == [], do: [], else: [{segment_id, live}])
+        assert Failover.plan(metadata, live, probes(segment_id, answers), @now) == []
+      end
+    end
+  end
+
+  defp answering_subset(n) do
+    gen all(picks <- list_of(boolean(), length: n)) do
+      for {true, index} <- Enum.with_index(picks), do: index
     end
   end
 
@@ -105,10 +224,17 @@ defmodule Malachi.Cluster.FailoverTest do
       assert Failover.plan(metadata, [:a, :b, :c], probes(segment_id, ends), @now, two_failed) == []
     end
 
-    test "rf=2 and rf=1 with a failed copy stay blocked: without it there is no majority" do
+    test "rf=2 with a failed copy seals on the other one, which held every acknowledged write" do
+      # An acknowledgement at two replicas needed both, so the healthy copy alone covers all of them.
       {rf2, rf2_id} = segment([:a, :b], false)
-      assert Failover.plan(rf2, [:a, :b], probes(rf2_id, %{b: {3, 300}}), @now, MapSet.new([{rf2_id, :a}])) == []
 
+      assert Failover.plan(rf2, [:a, :b], probes(rf2_id, %{b: {3, 300}}), @now, MapSet.new([{rf2_id, :a}])) == [
+               {:seal_segment, rf2_id, 3, 300, @now},
+               {:set_segment_replicas, rf2_id, [:b, :a]}
+             ]
+    end
+
+    test "rf=1 with a failed copy stays blocked: nothing else holds its writes" do
       {rf1, rf1_id} = segment([:a], false)
       assert Failover.candidates(rf1, [:a], MapSet.new([{rf1_id, :a}])) == []
       assert Failover.plan(rf1, [:a], %{}, @now, MapSet.new([{rf1_id, :a}])) == []

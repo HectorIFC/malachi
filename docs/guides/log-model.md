@@ -170,21 +170,29 @@ them are covered by the guarantee:
   promoting that one would let it append at offsets the dead primary had already acknowledged. Sealing
   removes the possibility instead of detecting it. Finding the seal point and making it binding are two
   steps, in this order: the pass first **measures** every live replica, leaving it writable, and only
-  once those answers reach a majority does it **fence** them, sealing each answering copy before the
-  control plane records anything. An old primary that comes back then appends to its own log and finds
-  no quorum, because every follower it reaches refuses the push. The order matters because a fence has
-  no inverse: closing replicas of a segment the pass then declines to seal would leave them refusing
-  writes forever, which at a replication factor of 2 blocks the range for good. The seal goes at the
-  **highest** durable end reported, once a **majority** of the replica set has answered. Why that covers everything
-  acknowledged: take any acknowledged record, at offset `o`. It lives on a majority, the answering
-  replicas are a majority, and two majorities of a set always intersect, so **some** answering replica
-  holds it. A replica's log is contiguous, so that replica's durable end is above `o`, and the highest
-  end among the answers is at least that. The replica doing the covering can be a different one for
-  each record, which is why the seal takes the highest end rather than trusting any single replica to
-  hold the whole segment. Note also that it is the highest end among the answers, not the end a
-  majority of them agree on; that lower point can sit below a record the dead primary acknowledged
-  with a single survivor. Without a majority answering there is no intersection to argue from, so the
-  segment is left alone and its range stops accepting writes until one answers again.
+  once enough answers are in does it **fence** them, sealing each answering copy before the control
+  plane records anything. An old primary that comes back then appends to its own log and finds no
+  quorum, because every follower it reaches refuses the push. The order matters because a fence has no
+  inverse: closing replicas of a segment the pass then declines to seal would leave them refusing writes
+  forever, shrinking every later write quorum for nothing. The seal goes at the **highest** durable end
+  reported, once the **seal quorum** has answered: `n - q + 1` of `n` replicas, where `q` is the
+  acknowledgement quorum. Why that covers everything acknowledged: take any acknowledged record, at
+  offset `o`. It lives on at least `q` replicas, the answering replicas are at least `n - q + 1`, and
+  two such subsets of `n` replicas always share one, so **some** answering replica holds it. A
+  replica's log is contiguous, so that replica's durable end is above `o`, and the highest end among
+  the answers is at least that. The replica doing the covering can be a different one for each record,
+  which is why the seal takes the highest end rather than trusting any single replica to hold the whole
+  segment. Note also that it is the highest end among the answers, not the end a majority of them
+  agree on; that lower point can sit below a record the dead primary acknowledged with a single
+  survivor. At three replicas the seal quorum is two; at two it is one, since an acknowledgement needed
+  both, so a segment placed on two brokers is sealed on its survivor. Below the seal quorum there is
+  no intersection to argue from, so the segment is left alone and its range stops accepting writes
+  until enough answer again.
+- **A primary that is alive does not keep a segment writable on its own.** Every append needs the
+  acknowledgement quorum, so a segment whose live replicas fall below it (the follower of a two-replica
+  segment gone) is sealed on those that answer under the same rule. A broker the membership view calls
+  gone is asked directly first, read-only, and one that answers counts as alive: a suspicion is not a
+  failure, and it seals nothing.
 - **The write half of the split gap is closed; the read half needs no closing.** Before a split (or a
   merge) the parent's write head is **fenced in the data plane**: its primary seals the segment's log
   and refuses every later append with `{:error, {:sealed, end_offset}}`, durably, so it refuses again

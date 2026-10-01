@@ -2,6 +2,8 @@ defmodule Malachi.Cluster.ReplicaTrackerTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  doctest Malachi.Cluster.ReplicaTracker
+
   alias Malachi.Cluster.ReplicaTracker
 
   describe "construction" do

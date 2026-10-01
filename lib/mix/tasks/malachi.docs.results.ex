@@ -56,6 +56,14 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       title: "Chaos certification results",
       generator: "`scripts/docker-chaos-test.sh`, the node-fault certification drill",
       how_to: {"../guides/running-chaos-drills.md", "Running the chaos drills"}
+    },
+    %{
+      kind: :chaos,
+      source: "chaos-upgrade.json",
+      output: "chaos-upgrade-results.md",
+      title: "Rolling upgrade certification results",
+      generator: "`scripts/docker-upgrade-chaos.sh`, the rolling upgrade and rollback drill",
+      how_to: {"../guides/running-chaos-drills.md", "Running the chaos drills"}
     }
   ]
 
@@ -383,10 +391,41 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       "## Invariants",
       table(chaos_invariant_rows(result)),
       failures_section(result),
+      details_section(result),
       "## Reproduce",
       table(meta_rows(result["meta"]))
     ])
   end
+
+  # What a drill records about its own run beyond the shared fields, such as which release the upgrade drill
+  # rolled from and back to, which is what an operator checks before an upgrade. Rendered as recorded, keys
+  # sorted since a decoded JSON object keeps no order; a drill that records none gets no section.
+  defp details_section(%{"details" => details}) when is_map(details) and map_size(details) > 0 do
+    rows = for {key, value} <- Enum.sort(details), do: {code(key), detail(value)}
+    "## Run details\n\n" <> table(rows)
+  end
+
+  defp details_section(_result), do: ""
+
+  # A key is shown only for a value it holds, and a map that holds none renders as absent, as a list does.
+  defp detail(value) when is_map(value) do
+    rendered = for {key, inner} <- Enum.sort(value), shown = detail(inner), shown != nil, do: "#{key}: #{shown}"
+    if rendered == [], do: nil, else: Enum.join(rendered, ", ")
+  end
+
+  defp detail(value) when value in [nil, "", []], do: nil
+  defp detail(value) when is_binary(value), do: code(value)
+  # Element by element: to_string/1 reads a list of small integers as a charlist and has no clause for a
+  # list holding a map, which would fail the docs build over a field a drill only meant to record. An empty
+  # element is dropped like an empty field, and a list left with nothing renders as absent.
+  defp detail(value) when is_list(value) do
+    case value |> Enum.map(&detail/1) |> Enum.reject(&is_nil/1) do
+      [] -> nil
+      rendered -> Enum.join(rendered, ", ")
+    end
+  end
+
+  defp detail(value), do: to_string(value)
 
   defp chaos_headline(%{"verdict" => "passed"} = result) do
     faults = length(result["events"] || [])

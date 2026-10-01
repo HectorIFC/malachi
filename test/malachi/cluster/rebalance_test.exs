@@ -112,4 +112,56 @@ defmodule Malachi.Cluster.RebalanceTest do
       refute Enum.any?(calls(log), fn {_op, vnode_id, _node} -> vnode_id == :vn_1 end)
     end
   end
+
+  describe "ra_remove_member/4 (what the leave-and-delete answers)" do
+    # ra deletes a member only once its leave has committed, through rpcs to the member's node; the leave
+    # itself never answers a badrpc nor exits. So everything below that can come only from the delete means
+    # the group has already let the member go.
+    defp removing(answer, stop \\ fn _system, _server -> flunk("must not stop here") end) do
+      leave = fn :default, [{:vn_0, :a@h}, {:vn_0, :b@h}], {:vn_0, :b@h} -> answer.() end
+      Rebalance.ra_remove_member(:vn_0, :b@h, [:a@h, :b@h], leave: leave, stop: stop)
+    end
+
+    test "the leave committed and the member is gone" do
+      assert removing(fn -> :ok end) == :ok
+    end
+
+    test "the leave committed and the member's node was down for the delete, as when a dead node's replica is replaced" do
+      assert removing(fn -> {:error, {:badrpc, :nodedown}} end) == :ok
+      assert removing(fn -> {:badrpc, :nodedown} end) == :ok
+      assert removing(fn -> {:error, :system_not_started} end) == :ok
+      assert removing(fn -> {:error, :not_found} end) == :ok
+    end
+
+    test "the leave committed and the member's node went away in the middle of the delete" do
+      assert removing(fn -> exit({{:nodedown, :b@h}, {:gen_server, :call, [:sup, :terminate]}}) end) == :ok
+    end
+
+    test "a member the group no longer has is stopped, never deleted" do
+      # Within one call, the leave ra retried after a timeout commits and is heard as not_member, and ra
+      # deleted nothing: the member would keep running. But not_member comes from whichever server believes
+      # it leads, and ra has no check-quorum, so an isolated old leader answers it from an old membership.
+      # Stopping is what is safe either way: a member its group still counts is resumed by its own node.
+      test_pid = self()
+
+      stop = fn :default, server ->
+        send(test_pid, {:stopped, server})
+        :ok
+      end
+
+      assert removing(fn -> {:error, :not_member} end, stop) == :ok
+      assert_received {:stopped, {:vn_0, :b@h}}
+    end
+
+    test "a member the group no longer has counts as removed even when its node cannot be reached" do
+      assert removing(fn -> {:error, :not_member} end, fn _system, _server -> {:error, :nodedown} end) == :ok
+      assert removing(fn -> {:error, :not_member} end, fn _system, _server -> exit(:nodedown) end) == :ok
+    end
+
+    test "a leave that did not commit is an error, and nothing is deleted" do
+      assert removing(fn -> :timeout end) == {:error, :timeout}
+      assert removing(fn -> {:error, :noproc} end) == {:error, :noproc}
+      assert removing(fn -> {:error, :nodedown} end) == {:error, :nodedown}
+    end
+  end
 end

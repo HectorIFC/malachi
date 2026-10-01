@@ -21,11 +21,13 @@ defmodule Malachi.Cluster.PeriodicWorker do
 
   ## The state this module owns
 
-  `new/3` builds the three keys read here, which the host merges into its own state:
+  `new/3` builds the four keys read here, which the host merges into its own state:
 
     * `:worker` - the label unknown messages are reported under (see `Malachi.UnexpectedMessage`);
     * `:interval` - the validated tick period in ms;
-    * `:unexpected_shapes` - the message shapes already logged.
+    * `:unexpected_shapes` - the message shapes already logged;
+    * `:skipping` - why the last pass was skipped, as the I18n key it was logged under, or `nil`
+      (see `skip/3`).
 
   ## What a host writes
 
@@ -53,7 +55,10 @@ defmodule Malachi.Cluster.PeriodicWorker do
   exposes (`scrub_now/1`, `run_now/1`, `heal_now/1`, `reconcile_now/1`) deliberately ignores that gate.
   """
 
+  require Logger
+
   alias Malachi.Config
+  alias Malachi.I18n
   alias Malachi.UnexpectedMessage
 
   @typedoc """
@@ -67,6 +72,7 @@ defmodule Malachi.Cluster.PeriodicWorker do
           required(:worker) => UnexpectedMessage.server(),
           required(:interval) => pos_integer(),
           required(:unexpected_shapes) => term(),
+          required(:skipping) => atom() | nil,
           optional(any()) => any()
         }
 
@@ -91,7 +97,7 @@ defmodule Malachi.Cluster.PeriodicWorker do
       |> Keyword.get(:interval, default_interval)
       |> Config.checked(setting, default_interval, &(is_integer(&1) and &1 > 0))
 
-    %{worker: worker, interval: interval, unexpected_shapes: MapSet.new()}
+    %{worker: worker, interval: interval, unexpected_shapes: MapSet.new(), skipping: nil}
   end
 
   @doc "Schedules the next `:tick` for this worker's interval."
@@ -133,6 +139,28 @@ defmodule Malachi.Cluster.PeriodicWorker do
   catch
     :exit, reason -> {:error, reason}
   end
+
+  @doc """
+  Records that this pass was skipped for the cause `message` (an I18n key taking `reason`), and logs it
+  when the cause changed.
+
+  Once per cause rather than once per pass: a store or a broker that stays unreadable for a minute would
+  otherwise say the same thing every interval. Per cause rather than once until a pass completes: a
+  worker that first could not read one thing and then could not read another must say so, or its last
+  line names a cause that has already recovered. `resume/1` clears it once a pass gets through.
+  """
+  @spec skip(t(), atom(), term()) :: t()
+  def skip(state, message, reason) do
+    if state.skipping != message do
+      Logger.warning(I18n.t(message, reason: inspect(reason)))
+    end
+
+    %{state | skipping: message}
+  end
+
+  @doc "Clears what `skip/3` recorded, once a pass got through, so the next skip is logged again."
+  @spec resume(t()) :: t()
+  def resume(state), do: %{state | skipping: nil}
 
   @doc "The reply and state for a call this worker does not implement."
   @spec unknown_call(t(), term()) :: {:reply, term(), t()}

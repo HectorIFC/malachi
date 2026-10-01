@@ -17,7 +17,7 @@ defmodule Malachi.Cluster.SealedOverrun do
       acknowledged, and `Malachi.Cluster.Failover` seals the segment on the replicas that answered, at
       the shorter length they hold. The old primary comes back holding one record more, and the fence
       never reached it, so it never refused anything;
-    * `Malachi.Cluster.Failover` seals at the largest end a majority reported but fences each replica
+    * `Malachi.Cluster.Failover` seals at the largest end its answers reported but fences each replica
       at the end THAT replica holds, so a replica above the recorded length ends up fenced above it.
 
   Neither is visible to anything that runs today. The sealed-copy integrity probe in
@@ -53,7 +53,7 @@ defmodule Malachi.Cluster.SealedOverrun do
 
   `Malachi.Cluster.HealCoordinator` learned the hard way that a pass must never fence while it probes:
   fencing a replica of an ACTIVE segment the pass then declines to seal closes a copy nothing can
-  reopen, and at `replication_factor: 2` that wedges the range permanently.
+  reopen, and every later write to that range then needs its quorum without it.
 
   That argument is about active segments and does not carry over. Here the control plane has already
   sealed the segment, the length is immutable, no producer will ever write to it again, and there is no

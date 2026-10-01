@@ -24,33 +24,44 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   Each pass **reconciles** against the live set: it runs `Malachi.Cluster.SelfHealing.heal_sealed/4`
   (re-replicating under-replicated sealed segments, backfilling via `Malachi.Cluster.Catchup`) and
-  `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died or that have a copy that
-  failed in storage, so writing rolls to a fresh segment), and applies all resulting commands. `heal_now/1` runs
-  one pass synchronously and returns the combined result, for tests and manual triggers.
+  `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died, that have a copy that
+  failed in storage, or whose live replicas fall below the acknowledgement quorum, so writing rolls to a
+  fresh segment), and hands the resulting commands to the control
+  plane, seals first, stopping at the first one the broker does not answer. The rest wait for the next pass,
+  which plans them again, except a failover seal whose reason is gone by then (see `apply_commands/2`'s
+  comment, and #269). Membership is a view, so before fencing for failover the pass asks, read-only, each
+  broker the view calls gone that a candidate needs, and leaves alone a segment that is no candidate once
+  those that answered are counted: a suspicion is not a failure. The exception is a segment an earlier
+  pass already fenced a follower of for a seal that did not land, which is kept so the seal is retried.
+  `heal_now/1` runs one pass
+  synchronously and returns the combined result, for tests and manual triggers; its `applied` is what the pass
+  planned, as in `Malachi.Cluster.SelfHealing`, not what reached the control plane.
 
   Failover needs to know what each surviving replica holds, which no pure function can answer, so this
   pass does the probing, in two steps whose order carries the safety. `Failover.candidates/3` names the
   segments; each live replica is MEASURED (`:probe`), which leaves it writable; and only once those
-  answers reach a majority is each answering replica FENCED (`:fence`), which is what makes its answer
-  final. The fence answers go to `Failover.plan/5`, which applies the majority rule again to them, so a
-  fence that fails on enough replicas still declines rather than sealing on a minority.
+  answers reach the seal quorum (`Failover.seal_quorum/1`) is each answering replica FENCED (`:fence`),
+  which is what makes its answer final. The fence answers go to `Failover.plan/5`, which applies the
+  same rule again to them, so a fence that fails on enough replicas still declines rather than sealing on
+  too few.
 
-  Fencing before knowing whether a majority answered would close replicas of a segment the pass then
-  declines to seal, and nothing unseals a store: see `Malachi.Cluster.Failover`'s moduledoc for why that
-  is terminal at `replication_factor: 2`. A replica that does not answer in time simply does not count,
-  which is what leaves a segment below a majority unsealed and its range blocked; that case is logged
-  every pass, because a blocked range that says nothing is the failure mode worth avoiding.
+  Fencing before knowing whether enough answered would close replicas of a segment the pass then
+  declines to seal, and nothing unseals a store: see `Malachi.Cluster.Failover`'s moduledoc. A replica
+  that does not answer in time simply does not count, which is what leaves a segment below the seal
+  quorum unsealed and its range blocked; that case is logged every pass, because a blocked range that
+  says nothing is the failure mode worth avoiding.
 
     * `:probe` - `((replica, segment_id, base_offset) -> {end_offset, byte_size} | :error)`, how a
       replica is MEASURED (default `Malachi.Cluster.ReplicationServer.durable_stats/4` with a short
       timeout, so an unreachable replica cannot stall the pass);
-    * `:fence` - the same shape, how a replica is CLOSED once a majority has answered (default
+    * `:fence` - the same shape, how a replica is CLOSED once the seal quorum has answered (default
       `Malachi.Cluster.ReplicationServer.seal/4`). Separate from `:probe` so a test can watch a pass
-      measure without fencing, which is the property that must hold below a majority;
+      measure without fencing, which is the property that must hold below the seal quorum;
     * `:seal_state` - `((replica, [{segment_id, base_offset}]) -> %{segment_id => {end_offset, byte_size}})`,
       which of a replica's segments are ALREADY fenced (default
       `Malachi.Cluster.ReplicationServer.fenced_segments/3`, answering `%{}` on any error). See the
-      orphaned-fence pass below;
+      orphaned-fence pass below; the failover pass also asks it, batched per follower, about the few
+      candidates a suspected broker's answer would otherwise drop;
     * `:failed_state` - `((replica, [segment_id]) -> MapSet.t(segment_id))`, which of a replica's
       segments have a copy that FAILED there in storage (default
       `Malachi.Cluster.ReplicationServer.failed_segments/3`, answering an empty set on any error). An
@@ -75,7 +86,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   asked about EVERY active segment on every pass rather than a handful of failover candidates, so it is
   batched per primary and its default answers from a marker check rather than opening and flushing each
   log. And like `:probe` it must never fence: this pass visits the whole workload, so a probe that
-  fenced here would be the `replication_factor: 2` wedge described below, multiplied by every range.
+  fenced here would close a replica of every range it asked about, and nothing unseals a store.
 
   ## The settling pass
 
@@ -151,11 +162,11 @@ defmodule Malachi.Cluster.HealCoordinator do
         spread: Keyword.get(opts, :spread, fn -> nil end),
         # Two seams, not one, because the two calls differ in consequence: `:probe` measures and leaves
         # the replica writable, `:fence` closes it. Injectable separately so a test can watch a pass
-        # measure without fencing, which is exactly the case that must hold below a majority.
+        # measure without fencing, which is exactly the case that must hold below the seal quorum.
         probe: Keyword.get(opts, :probe, default_probe(Keyword.get(opts, :probe_timeout, 1_000))),
         fence: Keyword.get(opts, :fence, default_fence(Keyword.get(opts, :probe_timeout, 1_000))),
-        # The third seam. Read-only like `:probe`, batched per primary unlike either, and asked about
-        # every active segment rather than a failover candidate. See the moduledoc.
+        # The third seam. Read-only like `:probe`, batched per replica unlike either, and asked about every
+        # active segment's primary (and a rescued failover candidate's followers). See the moduledoc.
         seal_state: Keyword.get(opts, :seal_state, default_seal_state(Keyword.get(opts, :probe_timeout, 1_000))),
         # The fourth seam, as cheap as `:seal_state` (a lookup, no disk) and batched per replica, because it is
         # asked of every live replica of every active segment.
@@ -172,7 +183,10 @@ defmodule Malachi.Cluster.HealCoordinator do
   end
 
   @impl true
-  def handle_call(:heal_now, _from, state), do: {:reply, run(state), state}
+  def handle_call(:heal_now, _from, state) do
+    {result, state} = run(state)
+    {:reply, result, state}
+  end
 
   def handle_call(message, _from, state), do: PeriodicWorker.unknown_call(state, message)
 
@@ -187,16 +201,29 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   # The gate belongs to the tick alone: `heal_now/1` is a manual trigger and ignores it.
   defp heal_if_leader(state) do
-    if state.leader?.(), do: run(state)
-    state
+    if state.leader?.(), do: state |> run() |> elem(1), else: state
   end
 
   # --- internals ---
 
+  # A pass that could not read the metadata is a pass that did not happen: reported once per cause
+  # (`PeriodicWorker.skip/3`), not crashed, as the scrubber does (see `PeriodicWorker.ask/1`). A broker busy
+  # for longer than the call's timeout while other nodes restart is the ordinary case, and a crash would say
+  # nothing an operator could act on. Only the node-wide coordinator's source can exit (a call to the
+  # broker): a vnode's answers an empty metadata when its group cannot be read
+  # (`Malachi.Application.vnode_metadata_source/1`), and that pass finds nothing to do.
   defp run(state) do
-    live = state.live_brokers.()
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} ->
+        run(state, metadata)
 
+      {:error, reason} ->
+        {%{applied: [], failed: [], repaired: []}, PeriodicWorker.skip(state, :heal_metadata_unavailable, reason)}
+    end
+  end
+
+  defp run(state, metadata) do
+    live = state.live_brokers.()
     now_ms = System.system_time(:millisecond)
 
     # Asked first, because both halves below act on it: a failed copy of an active segment is a failover
@@ -205,10 +232,17 @@ defmodule Malachi.Cluster.HealCoordinator do
     heal_opts = state.heal_opts |> put_spread(state.spread.()) |> Keyword.put(:failed, failed)
     healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
     seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live, failed), now_ms, failed)
-    orphans = OrphanedFence.plan(metadata, probe_fences(state, metadata, live), now_ms)
+    # A segment this pass seals for failover may have a primary it just fenced, which the orphaned-fence
+    # probe below would find fenced and seal a second time, counting a divergence that never existed.
+    sealed_here = MapSet.new(for {:seal_segment, segment_id, _length, _bytes, _at} <- seals, do: segment_id)
+
+    orphans =
+      metadata
+      |> OrphanedFence.plan(probe_fences(state, metadata, live), now_ms)
+      |> Enum.reject(fn {:seal_segment, segment_id, _length, _bytes, _at} -> segment_id in sealed_here end)
 
     applied = healed.applied ++ seals ++ orphans
-    Enum.each(applied, state.apply_command)
+    state = apply_commands(state, seals ++ orphans ++ healed.applied)
 
     discard_replaced_copies(state, replaced_copies(healed.applied, failed))
     report_orphans(orphans, state)
@@ -220,7 +254,39 @@ defmodule Malachi.Cluster.HealCoordinator do
       Logger.warning(I18n.t(:heal_repair_failed, count: length(healed.failed), failures: inspect(healed.failed)))
     end
 
-    %{applied: applied, failed: healed.failed, repaired: healed.repaired}
+    {%{applied: applied, failed: healed.failed, repaired: healed.repaired}, state}
+  end
+
+  # Handed to the broker one at a time, and stopped at the first that does not answer: a broker busy past the
+  # call's timeout is the ordinary case `run/1` describes, and every command after it would wait on the same
+  # broker. A command that timed out may still have landed, which is why what follows re-reads the control
+  # plane rather than trusting this list.
+  #
+  # Seals are handed over first (`run/2`), because this pass has already fenced their replicas. A heal command
+  # or an orphan seal that did not land is planned again by the next pass, but a failover seal is planned only
+  # while its reason lasts: its primary dead, a copy latched as failed in storage, or its live replicas below
+  # the acknowledgement quorum. One that did not land, whose reason is gone by the next pass (the primary
+  # back in the view, the primary's failed copy unlatched by a restart of its replication server, or enough
+  # replicas back), leaves the segment active with fenced followers and an unfenced primary, which neither
+  # `Malachi.Cluster.Failover` nor `Malachi.Cluster.OrphanedFence` (it asks only the primary) plans again.
+  # The one way back this pass itself takes: a primary the view still calls gone but that answers does not
+  # drop a segment an earlier pass already fenced a follower of (`fenced_followers/3`). Going first keeps a slow heal
+  # command from being what holds one back, and nothing more: the first command that does not answer stops
+  # every command after it, so a failover seal can still be left behind by its own call, by an earlier seal,
+  # or by the head move `Malachi.Cluster.Failover.plan/5` pairs with each seal of a segment before it (#269).
+  defp apply_commands(state, commands) do
+    unanswered =
+      Enum.find_value(commands, fn command ->
+        case PeriodicWorker.ask(fn -> state.apply_command.(command) end) do
+          {:ok, _reply} -> nil
+          {:error, reason} -> {:error, reason}
+        end
+      end)
+
+    case unanswered do
+      nil -> PeriodicWorker.resume(state)
+      {:error, reason} -> PeriodicWorker.skip(state, :heal_commands_unapplied, reason)
+    end
   end
 
   # Adds the resolved spread to the heal opts for this pass (nil = leave them unchanged).
@@ -249,8 +315,18 @@ defmodule Malachi.Cluster.HealCoordinator do
   # round trip only on the passes that found something, which is the rare case.
   defp report_orphans([], _state), do: :ok
 
+  # A re-read that exits (only the node-wide coordinator's source can, see `run/1`) reports nothing: a seal
+  # that did not land is found again by the next pass, and one that did is left uncounted, which undercounts
+  # `fence_reconciled` rather than inverting it. A vnode's source answers an empty metadata instead, so there
+  # every orphan of that pass is reported as unrecorded, landed or not.
   defp report_orphans(orphans, state) do
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> report_orphans_landed(orphans, metadata)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp report_orphans_landed(orphans, metadata) do
     {landed, pending} = Enum.split_with(orphans, &sealed_now?(metadata, &1))
 
     if landed != [] do
@@ -339,9 +415,18 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp discard_replaced_copies(_state, []), do: :ok
 
   # Re-read like `report_orphans/2`, and for a sharper reason: a copy deleted while the control plane still
-  # lists it answers reads with nothing, where the latched copy answered with an error.
+  # lists it answers reads with nothing, where the latched copy answered with an error. A re-read that exits
+  # discards nothing, and neither does a vnode's empty answer (`left_the_set?/3` finds no segment). Such a
+  # copy is not found again: once its heal command landed the replica is out of the segment's set, and no
+  # later pass probes it, so it stays latched on its broker until retention deletes the segment.
   defp discard_replaced_copies(state, replaced) do
-    metadata = state.metadata_source.()
+    case PeriodicWorker.ask(state.metadata_source) do
+      {:ok, metadata} -> discard_replaced_copies(state, replaced, metadata)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp discard_replaced_copies(state, replaced, metadata) do
     discarded = Enum.filter(replaced, fn {segment_id, replica} -> left_the_set?(metadata, segment_id, replica) end)
 
     Enum.each(discarded, fn {segment_id, replica} -> state.discard_copy.(replica, segment_id) end)
@@ -373,33 +458,92 @@ defmodule Malachi.Cluster.HealCoordinator do
   # Asks every live replica of every failover candidate what it holds. The impure half of the
   # failover decision: `Failover` stays a pure function of these answers. A failed copy is not asked,
   # since `Failover.candidates/3` already leaves it out.
+  #
+  # Membership is a view, and a broker it calls gone may only be suspected: one missed ack is enough for
+  # SWIM, well before it confirms a failure. Fencing on that view would seal a segment that can still take
+  # writes. So the replicas the view leaves out are asked too, read-only, and one that answers counts as
+  # live: a segment that is no candidate once they are counted is left alone this pass, unfenced, unless an
+  # earlier pass already fenced one of its followers (`fenced_followers/3`).
+  #
+  # Liveness is a broker's, not a segment's, so each broker the view leaves out is asked once per pass,
+  # about one of its candidate segments: a dead broker costs one probe timeout per pass, not one per
+  # segment it held.
+  #
+  # A segment kept is probed over every replica that answers, the view's and the ones it left out alike,
+  # except a copy latched as failed.
   defp probe_candidates(state, metadata, live, failed) do
-    metadata
-    |> Failover.candidates(live, failed)
-    |> Map.new(fn {segment_id, replicas} ->
-      segment = Map.fetch!(metadata.segments, segment_id)
-      answers = for r <- replicas, stats = probe(state, r, segment_id, segment.start_offset), into: %{}, do: {r, stats}
-      warn_if_blocked(segment_id, answers, segment.replica_set)
-      {segment_id, fence_answered(state, segment, answers)}
+    live_set = MapSet.new(live)
+    candidates = Enum.map(Failover.candidates(metadata, live, failed), &Map.fetch!(metadata.segments, elem(&1, 0)))
+    reachable = MapSet.union(live_set, answering_absent(state, candidates, live_set))
+    {still, rescued} = Enum.split_with(candidates, &Failover.candidate?(&1, reachable, failed))
+    fenced = fenced_followers(state, rescued, reachable)
+
+    (still ++ Enum.filter(rescued, &MapSet.member?(fenced, &1.id)))
+    |> Map.new(fn segment ->
+      answers =
+        for r <- segment.replica_set,
+            MapSet.member?(reachable, r),
+            not MapSet.member?(failed, {segment.id, r}),
+            stats = probe(state, r, segment.id, segment.start_offset),
+            into: %{},
+            do: {r, stats}
+
+      warn_if_blocked(segment.id, answers, segment.replica_set)
+      {segment.id, fence_answered(state, segment, answers)}
     end)
   end
 
-  # Measure first, fence second, and only once the measurement has shown a majority.
+  # The brokers the view leaves out of some candidate's replica set that answer a read-only probe, each
+  # asked once, about the first candidate segment it holds. An answer that is an error counts as no answer:
+  # a broker whose copy of that one segment failed in storage is taken as gone for the pass, which costs its
+  # other segments a seal they did not need, never a write they acknowledged.
+  defp answering_absent(state, candidates, live_set) do
+    candidates
+    |> Enum.flat_map(fn segment ->
+      for replica <- segment.replica_set, not MapSet.member?(live_set, replica), do: {replica, segment}
+    end)
+    |> Enum.uniq_by(&elem(&1, 0))
+    |> Enum.filter(fn {replica, segment} -> probe(state, replica, segment.id, segment.start_offset) != nil end)
+    |> MapSet.new(&elem(&1, 0))
+  end
+
+  # The `rescued` segments (no candidate once the brokers that answered are counted) that an earlier pass
+  # already fenced a follower of. Only a failover fences an active segment's follower, so that pass
+  # committed to a seal that did not land; a primary that answers now does not undo it (a fenced follower
+  # refuses its appends, so it cannot close a quorum), so the segment is kept and the seal retried, rather
+  # than left with its followers closed and nothing to finish it (#269). Followers only: a fenced primary is
+  # a roll, a split or an orphaned failover, which `Malachi.Cluster.OrphanedFence` finishes and reports.
+  # Asked like `probe_fences/3`, one batched call per replica, whatever the number of segments.
+  defp fenced_followers(_state, [], _reachable), do: MapSet.new()
+
+  defp fenced_followers(state, rescued, reachable) do
+    rescued
+    |> Enum.flat_map(fn segment ->
+      for follower <- Enum.drop(segment.replica_set, 1),
+          MapSet.member?(reachable, follower),
+          do: {follower, {segment.id, segment.start_offset}}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.reduce(MapSet.new(), fn {follower, segments}, acc ->
+      state.seal_state.(follower, segments) |> Map.keys() |> MapSet.new() |> MapSet.union(acc)
+    end)
+  end
+
+  # Measure first, fence second, and only once the measurement has reached the seal quorum
+  # (`Failover.seal_quorum/1`).
   #
   # The fence is what makes a seal point final, so it has to happen before the point is recorded. But it
   # has no inverse: nothing in the system unseals a replica's store. Fencing every replica that answers,
-  # before knowing whether a majority did, therefore closes replicas of a segment this pass may then
-  # decline to seal, and those replicas keep refusing writes after their primary comes back. With
-  # `replication_factor: 2` that is terminal: one live follower is not a majority, so nothing is sealed,
-  # and when the primary returns the segment is no longer a failover candidate, so no later pass ever
-  # finishes the seal, while every produce fails quorum against the follower that stayed closed.
+  # before knowing whether enough did, therefore closes replicas of a segment this pass may then decline
+  # to seal, and those replicas keep refusing writes after their primary comes back, shrinking every later
+  # write quorum for nothing.
   #
-  # Below a majority the pass leaves the replicas untouched and the range simply stays blocked until one
-  # returns, which is the CP choice `Malachi.Cluster.Failover` already documents. At or above it, the
-  # fence answers are what `Failover.plan/5` seals on, and it applies the majority rule again to them, so
-  # a fence that fails on enough replicas still declines rather than sealing on a minority.
+  # Below the seal quorum the pass leaves the replicas untouched and the range simply stays blocked until
+  # enough return, which is the CP choice `Malachi.Cluster.Failover` already documents. At or above it, the
+  # fence answers are what `Failover.plan/5` seals on, and it applies the same rule again to them, so a
+  # fence that fails on enough replicas still declines rather than sealing on too few.
   defp fence_answered(state, segment, answers) do
-    if Failover.majority?(map_size(answers), segment.replica_set) do
+    if Failover.seal_quorum?(map_size(answers), segment.replica_set) do
       for {replica, _measured} <- answers,
           fenced = probe_with(state.fence, replica, segment.id, segment.start_offset),
           into: %{},
@@ -422,18 +566,20 @@ defmodule Malachi.Cluster.HealCoordinator do
   end
 
   defp warn_if_blocked(segment_id, answers, replica_set) do
-    unless Failover.majority?(map_size(answers), replica_set) do
+    unless Failover.seal_quorum?(map_size(answers), replica_set) do
       Logger.warning(
-        I18n.t(:heal_seal_no_majority,
+        I18n.t(:heal_seal_no_quorum,
           segment_id: inspect(segment_id),
           answered: map_size(answers),
-          replicas: length(replica_set)
+          replicas: length(replica_set),
+          needed: Failover.seal_quorum(replica_set)
         )
       )
     end
   end
 
-  # Read-only: this is the measurement that decides whether a majority is even present. It flushes
+  # Read-only: this is the measurement that decides whether the seal quorum is even present, and whether a
+  # broker the membership view calls gone still answers. It flushes
   # before answering (see `ReplicationServer.durable_stats/4`), so what it reports is what a read can
   # serve, but it leaves the replica writable. `fence` below is the half with consequences.
   defp default_probe(timeout), do: answer_fun(&ReplicationServer.durable_stats/4, timeout)

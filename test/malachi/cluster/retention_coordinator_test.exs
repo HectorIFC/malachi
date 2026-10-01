@@ -273,4 +273,51 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
       assert RetentionCoordinator.run_now(server) == ["old"]
     end)
   end
+
+  describe "a broker that does not answer in time" do
+    import ExUnit.CaptureLog
+
+    test "skips the sweep, says why once, and stays up" do
+      source = fn -> exit({:timeout, {GenServer, :call, [Malachi.LogBroker, :metadata, 5000]}}) end
+      server = start(metadata_source: source)
+
+      log =
+        capture_log(fn ->
+          assert RetentionCoordinator.run_now(server) == []
+          assert RetentionCoordinator.run_now(server) == []
+        end)
+
+      assert log =~ "retention sweep skipped: the metadata could not be read"
+      assert length(String.split(log, "retention sweep skipped")) == 2
+      assert Process.alive?(server)
+    end
+
+    # One latch for both causes would keep the first cause as the only line while the second one lasts, so
+    # an operator reads about a store that has already recovered. Each order is checked, since a latch keyed
+    # on either cause alone would pass one of them.
+    test "a cause that changes is logged again, whichever came first" do
+      for {first, second} <- [{:policies, :metadata}, {:metadata, :policies}] do
+        cause = :counters.new(1, [])
+        :counters.put(cause, 1, 0)
+        failing? = fn which -> if :counters.get(cause, 1) == 0, do: which == first, else: which == second end
+        down = fn -> exit({:timeout, {GenServer, :call, [Malachi.LogBroker, :metadata, 5000]}}) end
+
+        server =
+          start(
+            policies: fn -> if failing?.(:policies), do: {:error, :unreachable}, else: {:ok, %{}} end,
+            metadata_source: fn -> if failing?.(:metadata), do: down.(), else: with_sealed([{"old", 0, 100, 1_000}]) end
+          )
+
+        first_log = capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end)
+        :counters.put(cause, 1, 1)
+        second_log = capture_log(fn -> assert RetentionCoordinator.run_now(server) == [] end)
+
+        assert first_log =~ message(first), "#{first} then #{second}: #{first_log}"
+        assert second_log =~ message(second), "#{first} then #{second}: #{second_log}"
+      end
+    end
+  end
+
+  defp message(:policies), do: "the policy store did not answer"
+  defp message(:metadata), do: "retention sweep skipped: the metadata could not be read"
 end

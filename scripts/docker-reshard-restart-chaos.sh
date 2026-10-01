@@ -47,69 +47,6 @@ CHECKER_WINDOW_S="${CHECKER_WINDOW_S:-240}"
 CHAOS_TOPIC=chaos_acked
 source "$(dirname "$0")/chaos_lib.sh"
 
-acked_count() { wc -l < "$WORK/acked.log" 2>/dev/null | tr -d ' '; }
-
-# Requires the acked count to have grown past $1 (availability held through the step named $2).
-require_progress() {
-  now=$(acked_count)
-  if [ "${now:-0}" -gt "$1" ]; then
-    echo "acks kept flowing through $2 ($1 -> $now)"
-  else
-    fail "no produce was acknowledged through $2 (stuck at ${now:-0})"
-  fi
-}
-
-# Runs an operator mix task inside node $1, targeting that same node. The cluster uses short names, so
-# the task has to run from a VM that is itself short-named with the same cookie; a separate long-named
-# container could not connect to it at all.
-node_task() {
-  idx=$1
-  shift
-  docker exec "malachi-cluster-$idx" sh -c \
-    "cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix $* --node malachi@malachi$idx" 2>&1
-}
-
-# Re-sharding is lease-gated and the lease is elected, so an operator has to issue it on the node that
-# currently holds it; refusing elsewhere with "try another node" is the task's documented behaviour.
-# Walking the three nodes is what an operator does, and it keeps the drill from failing on an election
-# that simply landed somewhere other than node 1.
-reshard_on_lease_holder() {
-  for idx in 1 2 3; do
-    out=$(node_task "$idx" "malachi.reshard --to $1")
-    status=$?
-    if [ $status -eq 0 ]; then
-      echo "reshard ran on node $idx (the lease holder)"
-      return 0
-    fi
-    if ! echo "$out" | grep -q "does not hold the cluster lease"; then
-      echo "$out" | sed 's/^/    /'
-      return 1
-    fi
-  done
-  echo "    no node accepted the reshard; none reported holding the lease"
-  return 1
-}
-
-# The durable ring as the cluster records it. Read from node 1; the query is linearizable, so ra routes
-# it to the leader wherever that is. Retried, because right after a full restart the ring store may need
-# a moment to elect before it can answer, and an unreadable store is not the same as a changed ring.
-ring_show() {
-  for _ in $(seq 1 20); do
-    out=$(node_task 1 "malachi.ring --show")
-    if echo "$out" | grep -q "durable ring: version"; then
-      echo "$out"
-      return 0
-    fi
-    sleep 3
-  done
-  echo "$out"
-  return 1
-}
-
-ring_vnode_count() {
-  ring_show | sed -n 's/.*, \([0-9][0-9]*\) vnodes .*/\1/p' | head -1
-}
-
 # The recorded ring as token, vnode id and placement, one line per vnode. All three, not just the id:
 # a vnode keeping its name while its token or its placement moved would change metadata routing just as
 # surely, and comparing ids alone would call that unchanged.

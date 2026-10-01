@@ -13,8 +13,10 @@ defmodule Malachi.Cluster.OrphanedFence do
   What that leaves is a produce loop with no exit: `ensure_segment/2` finds no cached segment, adopts
   the one the metadata still calls active, the store refuses the batch with `{:error, {:sealed, N}}`,
   the cache is dropped, and the next produce adopts the same segment again. A successor is never
-  opened. Nothing else rescues it either: `Malachi.Cluster.Failover` requires the primary to be DEAD
-  and here it is alive and answering, while healing and retention only touch sealed segments.
+  opened. Nothing else rescues it either: `Malachi.Cluster.Failover` takes a segment only when its
+  primary is dead, a copy failed, or its live replicas fall below the acknowledgement quorum, and here the
+  primary is alive, healthy and among enough replicas, while healing and retention only touch sealed
+  segments.
 
   So this is the level-triggered half. `candidates/2` names the segments to ask about, the caller asks
   each primary which of them are already fenced, and `plan/3` turns those answers into seal commands.
@@ -22,10 +24,11 @@ defmodule Malachi.Cluster.OrphanedFence do
   that owed the seal is alive: `Malachi.BrokerServer` seeds offsets and sequence floors on restart, not
   rolls, so a restart loses the debt for good.
 
-  ## Why no majority rule here
+  ## Why no seal quorum here
 
-  `Malachi.Cluster.Failover` seals only on a majority of answers, and it has to: its primary is dead,
-  so the committed end is only knowable from the intersection of two majorities. Here the primary is
+  `Malachi.Cluster.Failover` seals only once its seal quorum answered, and it has to: its primary may be
+  dead, so the committed end is only knowable from the answers every acknowledgement quorum shares a
+  replica with. Here the primary is
   ALIVE and its store is fenced, and the end it reports is the very number the fencing node itself
   would have recorded had its metadata write landed. The fence is a latch, so nothing can extend the
   segment past it. That is the same rule, from the same source,
@@ -69,8 +72,10 @@ defmodule Malachi.Cluster.OrphanedFence do
   pass, so a call per segment would make the poll's cost scale with the number of ranges.
 
   Only segments whose primary is LIVE. A dead primary is `Malachi.Cluster.Failover`'s case and sealing
-  it from here would need that module's majority rule, so the two sets are disjoint by construction and
-  neither can act on the other's segments. A segment with an empty replica set has no primary to ask
+  it from here would need that module's seal quorum. The two can still meet on one segment: a failover
+  that fences a live primary (a failed copy, or live replicas below the acknowledgement quorum) leaves it
+  fenced, and `Malachi.Cluster.HealCoordinator` drops this module's seal for a segment its own pass
+  already sealed, so it is neither sealed twice nor counted as an orphaned fence. A segment with an empty replica set has no primary to ask
   and is skipped, as `Malachi.Broker.active_roll/2` skips it for the same reason.
   """
   @spec candidates(Metadata.t(), [Metadata.broker()]) :: [{Metadata.broker(), [{term(), non_neg_integer()}]}]

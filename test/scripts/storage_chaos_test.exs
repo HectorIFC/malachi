@@ -476,6 +476,7 @@ defmodule StorageChaosTest do
             [ "$verdict" = identical ] || whole=differs
             echo "COPIES segments=2 whole_file=$whole content=$content control=ok"
             [ "$content" = ok ] ;;
+          *"chaos_checker.exs control-plane"*) echo "CONTROL-PLANE OK groups=9 projection=all" ;;
           *--scenario*) echo '{"errors":0,"dropped":0,"records_per_s":100}' ;;
           *) : ;;
         esac ;;

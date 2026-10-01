@@ -326,6 +326,215 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
+  describe "resume_local_vnodes/3" do
+    # ra does not restart a node's registered servers when the node comes back: something has to, and for
+    # every other store it is that store's own reconciler. These pin the rule for the metadata vnodes.
+    defp resume_opts(overrides) do
+      test_pid = self()
+
+      Keyword.merge(
+        [
+          peers: [:n1@h, :n2@h, :n3@h],
+          running?: fn _server -> false end,
+          registered?: fn _server -> true end,
+          members: fn _server -> {:ok, [:n1@h, :n2@h, :n3@h]} end,
+          resume: fn server ->
+            send(test_pid, {:resumed, server})
+            :ok
+          end
+        ],
+        overrides
+      )
+    end
+
+    test "resumes this node's stopped member of every vnode the group still counts it in" do
+      vnodes = [{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}, {:vn_b, 1, [:n1@h, :n2@h, :n3@h]}]
+
+      assert App.resume_local_vnodes(vnodes, :n3@h, resume_opts([])) == [{:vn_a, :ok}, {:vn_b, :ok}]
+      assert_received {:resumed, {:vn_a, :n3@h}}
+      assert_received {:resumed, {:vn_b, :n3@h}}
+    end
+
+    # Counts the asks in flight at once and keeps the highest count seen: what "at once" means, measured without
+    # a clock. Each ask holds long enough for every other one started with it to be counted.
+    defp counting_members(answer) do
+      in_flight = :atomics.new(2, [])
+
+      members = fn _server ->
+        now = :atomics.add_get(in_flight, 1, 1)
+        max_seen(in_flight, now)
+        Process.sleep(150)
+        :atomics.sub(in_flight, 1, 1)
+        answer
+      end
+
+      {members, fn -> :atomics.get(in_flight, 2) end}
+    end
+
+    defp max_seen(in_flight, now) do
+      seen = :atomics.get(in_flight, 2)
+
+      if now > seen and :atomics.compare_exchange(in_flight, 2, seen, now) != :ok,
+        do: max_seen(in_flight, now)
+    end
+
+    test "asks every group through every node at once, so a pass costs one ask, not one per member and node" do
+      # A group with no leader holds each ask for its whole timeout. Asked in turn, four stopped members
+      # through two nodes each would hold the manager's loop for eight of them.
+      {members, most_at_once} = counting_members({:ok, [:n1@h, :n2@h, :n3@h]})
+      vnodes = for n <- 1..4, do: {:"vn_#{n}", n, [:n1@h, :n2@h, :n3@h]}
+
+      assert length(App.resume_local_vnodes(vnodes, :n3@h, resume_opts(members: members))) == 4
+      assert most_at_once.() == 8
+    end
+
+    test "with no leader anywhere, every node of every group is asked at once, not one node after another" do
+      # The case the concurrency exists for: each ask holds for its whole timeout and answers nothing. Asked
+      # node by node within a group, three nodes would cost three asks; the pass must cost one, whatever the
+      # number of groups or of nodes.
+      {members, most_at_once} = counting_members(:error)
+      vnodes = for n <- 1..4, do: {:"vn_#{n}", n, [:n1@h, :n2@h, :n3@h, :n4@h]}
+      opts = resume_opts(peers: [:n1@h, :n2@h, :n3@h, :n4@h], members: members)
+
+      # No group answered, so each counts this node, as the rule says; and all twelve asks were out together.
+      assert length(App.resume_local_vnodes(vnodes, :n4@h, opts)) == 4
+      assert most_at_once.() == 12
+    end
+
+    test "the first node in order that answers decides, as when they were asked in turn" do
+      # n1 answers last but first in order, and still counts this node: its answer is the one that decides.
+      members = fn
+        {:vn_a, :n1@h} ->
+          Process.sleep(200)
+          {:ok, [:n1@h, :n2@h, :n3@h]}
+
+        {:vn_a, :n2@h} ->
+          {:ok, [:n1@h, :n2@h]}
+      end
+
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, resume_opts(members: members)) ==
+               [{:vn_a, :ok}]
+    end
+
+    test "an ask that outlives the bound counts as no answer, and the pass does not wait for it" do
+      members = fn
+        {:vn_a, :n1@h} ->
+          Process.sleep(:infinity)
+
+        {:vn_a, :n2@h} ->
+          :error
+      end
+
+      {elapsed_us, resumed} =
+        :timer.tc(fn ->
+          App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, resume_opts(members: members))
+        end)
+
+      assert resumed == [{:vn_a, :ok}]
+      assert elapsed_us < 4_000_000, "took #{div(elapsed_us, 1000)} ms"
+    end
+
+    test "leaves a member that is running alone, without asking anyone" do
+      members = fn _server -> flunk("must not ask the group about a member that is running") end
+      opts = resume_opts(running?: fn server -> server == {:vn_a, :n3@h} end, members: members)
+
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, opts) == []
+      refute_received {:resumed, _server}
+    end
+
+    test "never resumes a member the group removed and that is still registered here" do
+      # A rebalance now deletes the member it removes (Malachi.Cluster.Rebalance.ra_remove_member/3); one
+      # removed before it did, or whose delete failed, is still registered and stopped.
+      opts = resume_opts(members: fn _server -> {:ok, [:n1@h, :n2@h]} end)
+
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, opts) == []
+      refute_received {:resumed, _server}
+    end
+
+    test "never asks about a vnode this node never hosted" do
+      members = fn _server -> flunk("must not ask the group about a vnode this node never hosted") end
+      resume = fn _server -> flunk("must not try to resume a vnode this node never hosted") end
+      opts = resume_opts(registered?: fn _server -> false end, members: members, resume: resume)
+
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, opts) == []
+    end
+
+    test "asks the group through every other node of the cluster, not only the ring's placement" do
+      # The ring's placement changes only on a split, never on a rebalance: a vnode moved to other nodes still
+      # lists the old ones, whose members are stopped. Only a node of the group as it is now can answer.
+      test_pid = self()
+
+      members = fn {:vn_a, node} = server ->
+        send(test_pid, {:asked, server})
+        if node == :n4@h, do: {:ok, [:n4@h, :n5@h, :n6@h]}, else: :error
+      end
+
+      opts = resume_opts(peers: [:n1@h, :n2@h, :n3@h, :n4@h, :n5@h, :n6@h], members: members)
+
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n1@h, opts) == []
+      assert_received {:asked, {:vn_a, :n4@h}}
+      refute_received {:resumed, _server}
+    end
+
+    test "asks the group through the other nodes of the placement, never this one" do
+      test_pid = self()
+
+      members = fn {:vn_a, node} = server ->
+        send(test_pid, {:asked, server})
+        if node == :n2@h, do: {:ok, [:n1@h, :n2@h, :n3@h]}, else: :error
+      end
+
+      opts = resume_opts(members: members)
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, opts) == [{:vn_a, :ok}]
+      assert_received {:asked, {:vn_a, :n1@h}}
+      assert_received {:asked, {:vn_a, :n2@h}}
+      refute_received {:asked, {:vn_a, :n3@h}}
+    end
+
+    test "resumes when no other member answers, the only way a cold-restarted group regains a quorum" do
+      opts = resume_opts(members: fn _server -> :error end)
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h, :n3@h]}], :n3@h, opts) == [{:vn_a, :ok}]
+    end
+
+    test "resumes a member a rebalance added, which the ring's recorded placement does not list" do
+      opts = resume_opts(members: fn _server -> {:ok, [:n1@h, :n2@h, :n3@h]} end)
+      assert App.resume_local_vnodes([{:vn_a, 0, [:n1@h, :n2@h]}], :n3@h, opts) == [{:vn_a, :ok}]
+    end
+
+    test "reports a vnode this node never hosted as nothing, and a failed resume as its error" do
+      resume = fn
+        {:vn_a, _node} -> :not_hosted
+        {:vn_b, _node} -> {:error, :corrupt}
+      end
+
+      vnodes = [{:vn_a, 0, [:n1@h, :n3@h]}, {:vn_b, 1, [:n1@h, :n3@h]}]
+
+      assert App.resume_local_vnodes(vnodes, :n3@h, resume_opts(resume: resume)) == [{:vn_b, {:error, :corrupt}}]
+    end
+
+    test "the default membership read counts a peer that is not running as not answering" do
+      # Covers the default `:members` path: ra asked through a node that does not exist answers nothing, so no
+      # node answers for the group and this node's own member is resumed.
+      test_pid = self()
+
+      resume = fn server ->
+        send(test_pid, {:resumed, server})
+        :ok
+      end
+
+      peer = :"nonexistent@127.0.0.1"
+      opts = [peers: [peer], running?: fn _ -> false end, registered?: fn _ -> true end, resume: resume]
+      assert App.resume_local_vnodes([{:vn_a, 0, [peer, node()]}], node(), opts) == [{:vn_a, :ok}]
+      this = node()
+      assert_received {:resumed, {:vn_a, ^this}}
+    end
+
+    test "with the live defaults, a vnode no ra server was ever started for is not resumed" do
+      vnode = :"vn_never_started_#{System.unique_integer([:positive])}"
+      assert App.resume_local_vnodes([{vnode, 0, [node()]}]) == []
+    end
+  end
+
   describe "store_reconciler_child/5" do
     test "a clustered store self-joins and watches its machine version" do
       test_pid = self()

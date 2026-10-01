@@ -64,7 +64,28 @@ defmodule Malachi.Cluster.RebalanceMultinodeTest do
     assert {:ok, members_after, _} = :ra.members({vnode, node_a})
     refute {vnode, node_b} in members_after
 
+    # and gone from node_b altogether, not just stopped: a stopped member stays registered, and a node that
+    # comes back resumes its registered vnode members (Malachi.Application.resume_local_vnodes/3)
+    assert :erpc.call(node_b, :ra_directory, :uid_of, [:default, vnode]) == :undefined
+
     # idempotent: removing node_b again is a no-op
     assert Rebalance.ra_remove_member(vnode, node_b, [node_a]) == :ok
+  end
+
+  test "ra_remove_member takes a dead node's member out of the group, which is how a lost replica is replaced" do
+    {_peer_a, node_a} = start_peer()
+    {_peer_b, node_b} = start_peer()
+    {peer_c, node_c} = start_peer()
+    vnode = :"vn_#{System.unique_integer([:positive])}"
+
+    {:ok, _server} = :erpc.call(node_a, MetadataServer, :start, [vnode, [node_a, node_b, node_c]])
+    {:ok, {:ok, _root}} = retry(fn -> MetadataServer.command({vnode, node_a}, {:create_topic, "t", 4}) end)
+
+    # The node is gone, so ra can commit the leave through the other two and cannot delete anything on it.
+    :peer.stop(peer_c)
+
+    assert Rebalance.ra_remove_member(vnode, node_c, [node_a, node_b, node_c]) == :ok
+    assert {:ok, members, _leader} = :ra.members({vnode, node_a})
+    refute {vnode, node_c} in members
   end
 end
