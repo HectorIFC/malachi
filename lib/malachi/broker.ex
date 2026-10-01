@@ -492,9 +492,10 @@ defmodule Malachi.Broker do
 
   @doc """
   Applies control-plane `:set_segment_replicas` `commands` (from `Malachi.Cluster.SelfHealing`
-  healing sealed segments, or `Malachi.Cluster.Failover` promoting an active segment's primary).
-  Each command updates the metadata; when it targets a range's **active** segment, the broker's
-  active-segment cache is updated too, so the next produce routes to the new replica set/primary.
+  healing sealed segments, or `Malachi.Cluster.Failover` moving the replica that holds a sealed
+  segment's end to the head of its set). Each command updates the metadata; when it targets a range's
+  **active** segment, the broker's active-segment cache is updated too, so the next produce routes to
+  the new replica set.
   """
   @spec apply_heal(t(), [Metadata.command()]) :: t()
   def apply_heal(%__MODULE__{} = broker, commands) do

@@ -2,6 +2,8 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
   # async: false: ra is global/stateful (one data dir, on-disk Raft logs).
   use ExUnit.Case, async: false
 
+  alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Metadata
   alias Malachi.Test.SilentRaMember
@@ -40,6 +42,68 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
 
     # still exactly one topic in the cache
     assert ReplicatedMetadata.metadata(replicated).topics |> map_size() == 1
+  end
+
+  test "a command the replicated machine refuses leaves the cache as it was, even one the cache would apply" do
+    # ra commits the entry and the machine answers {:error, _}: the answer of a member whose effective
+    # machine version is below the command's, or of a vnode refusing an export format. The cache runs
+    # Malachi.Metadata.apply/2, which has no such gate, so applying the command there would put into it a
+    # topic every replica refused, and the broker would route by a state the log never took.
+    server = :"rm_refusing_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = RaCluster.start(Malachi.Test.RefusingInsertMachine, server, [node()])
+    on_exit(fn -> RaCluster.delete(server_id) end)
+
+    {source, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    export = Metadata.export_topic(source, "events")
+    cache = Metadata.new()
+
+    assert {^cache, {:error, {:unsupported_export_format, 1, 0}}} =
+             ReplicatedMetadata.apply_command(server_id, cache, {:insert_topic, export})
+
+    assert {:ok, nil} = MetadataServer.query(server_id, &Metadata.get_topic(&1, "events"))
+  end
+
+  # The refusals a member makes under a machine version pin: a newer member knows the command and refuses it
+  # at the pinned version, an older one does not know it at all. Either way no replica applied it.
+  defp version_refusing_server do
+    server = :"rm_version_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = RaCluster.start(Malachi.Test.VersionRefusingMachine, server, [node()])
+    on_exit(fn -> RaCluster.delete(server_id) end)
+    server_id
+  end
+
+  test "a command refused above the group's machine version leaves the cache as it was" do
+    cache = Metadata.new()
+
+    assert {^cache, {:error, {:unsupported_command, {:create_topic, 3}, 4, 3}}} =
+             ReplicatedMetadata.apply_command(version_refusing_server(), cache, {:create_topic, "unsupported", 2})
+  end
+
+  test "a command an older member does not know leaves the cache as it was" do
+    cache = Metadata.new()
+
+    assert {^cache, {:error, {:unknown_command, {:create_topic, 3}, 3}}} =
+             ReplicatedMetadata.apply_command(version_refusing_server(), cache, {:create_topic, "unknown", 2})
+  end
+
+  test "a refusal of the metadata itself still reaches a stale cache, which then converges on it" do
+    # Only the refusals the machine makes before the metadata sees the command are kept out of the cache.
+    # A seal that loses to an earlier one (a roll fence racing a failover seal) is refused by the metadata,
+    # and a cache still holding the segment active must still seal it: the broker's roll settles on the
+    # winner's edge from here, and a cache that kept the segment active would have the next produce adopt it.
+    replicated = start()
+    {{:ok, root}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
+    segment = {root, 0}
+
+    {:ok, replicated} = ReplicatedMetadata.command(replicated, {:register_segment, root, segment, [node()], 0})
+
+    stale = ReplicatedMetadata.metadata(replicated)
+    {:ok, _winner} = ReplicatedMetadata.command(replicated, {:seal_segment, segment, 50, 500, 1})
+
+    assert {cache, {:error, {:already_sealed, 50}}} =
+             ReplicatedMetadata.apply_command(replicated.server_id, stale, {:seal_segment, segment, 40, 400, 2})
+
+    assert %{state: :sealed} = Map.fetch!(cache.segments, segment)
   end
 
   test "the cache equals the replicated state (refresh is a no-op for the sole writer)" do

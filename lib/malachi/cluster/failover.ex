@@ -1,8 +1,9 @@
 defmodule Malachi.Cluster.Failover do
   @moduledoc """
   Pure primary-failover policy for **active** segments: when an active segment's primary is no longer
-  alive, the segment is **sealed** and writing rolls to a fresh one, which is what NorthGuard does
-  ("we just seal it, make a new one, move the producers over to that new segment").
+  alive, or its live replicas can no longer reach the acknowledgement quorum, the segment is **sealed**
+  and writing rolls to a fresh one, which is what NorthGuard does ("we just seal it, make a new one, move
+  the producers over to that new segment").
 
   Sealing rather than promoting is what makes this safe. A batch is acknowledged once a majority holds
   it durably, so a replica outside that majority can be behind. Promoting such a replica would let it
@@ -16,44 +17,50 @@ defmodule Malachi.Cluster.Failover do
   The fence is what makes the seal binding rather than advisory, and `Malachi.Cluster.HealCoordinator`
   applies it in two steps, in this order. It first MEASURES every live replica with
   `Malachi.Cluster.ReplicationServer.durable_stats/4`, which reports what a replica holds and leaves it
-  writable. Only if those answers reach a majority does it FENCE them with
+  writable. Only if those answers reach the seal quorum (`seal_quorum/1`) does it FENCE them with
   `Malachi.Cluster.ReplicationServer.seal/4`, and the fence answers are what `plan/5` then seals on, so
   the point is recorded after every replica behind it has stopped accepting writes. A returning old
   primary is refused an append by each fenced replica it reaches, including by its own store after a
   restart, and so cannot close a quorum.
 
   Measuring before fencing is not a nicety. A fence has no inverse: nothing unseals a replica's store.
-  Fencing whatever answers, before knowing whether a majority did, therefore closes replicas of a
-  segment this pass may then decline to seal, and they keep refusing writes after their primary comes
-  back. With `replication_factor: 2` that is terminal: one live follower is never a majority, so nothing
-  is sealed, and once the primary returns the segment is no longer a candidate, so no later pass ever
-  finishes while every produce fails quorum against a replica nothing can reopen. Below a majority the
-  pass therefore leaves every replica untouched, and the range stays blocked until one returns.
+  Fencing whatever answers, before knowing whether enough did, therefore closes replicas of a segment
+  this pass may then decline to seal, and they keep refusing writes after their primary comes back,
+  shrinking every later write quorum for nothing. Below the seal quorum the pass therefore leaves every
+  replica untouched, and the range stays blocked until enough return.
 
   Note what this still does not claim: a replica the pass never reached is not fenced.
 
   ## The seal point, and when a range is left blocked
 
-  The seal is placed at the **highest durable end** any replica reports, and only when a **majority** of
-  the replica set answered the probe. Both halves are forced, not chosen.
+  The seal is placed at the **highest durable end** any replica reports, and only when at least the
+  **seal quorum** of the replica set answered the probe: `n - q + 1` answers for `n` replicas and an
+  acknowledgement quorum `q` (`Malachi.Cluster.ReplicaTracker.quorum_size/1`). Both halves are forced,
+  not chosen.
 
   The argument, per record rather than per replica, because the difference matters: take an
-  acknowledged record at offset `o`. It lives on a majority of the full replica set, the answering
-  replicas are themselves a majority, and two majorities of the same set always intersect, so **some**
-  answering replica holds `o`. A replica's log is contiguous (replication rejects a gap), so that
-  replica's reported end is above `o`, and the highest end among the answers is at least that. The
+  acknowledged record at offset `o`. It lives on at least `q` replicas of the full set, the answering
+  replicas are at least `n - q + 1` of it, and two such subsets of `n` replicas always share one, since
+  together they count more than `n`. So **some** answering replica holds `o`. A replica's log is
+  contiguous (replication rejects a gap), so that replica's reported end is above `o`, and the highest
+  end among the answers is at least that. The
   covering replica may be a **different one for each record**; no single answer need hold the whole
   segment, which is exactly why the seal takes the maximum instead of trusting one replica's view.
 
   Any lower point, including the offset a majority of the ANSWERS agree on, can sit below an
   acknowledged record that only the dead primary and one survivor ever held, and sealing there would
-  discard it: exactly what this policy exists to prevent. Below a majority answering, no such
-  intersection is guaranteed, the committed end is unknowable, and the segment is left alone with its
-  range no longer accepting writes.
+  discard it: exactly what this policy exists to prevent. Below the seal quorum, no such intersection is
+  guaranteed, the committed end is unknowable, and the segment is left alone with its range no longer
+  accepting writes.
+
+  With three replicas the seal quorum is two, a majority. With two it is one: an acknowledgement needed
+  both replicas, so either one alone holds every acknowledged record, and a segment placed on two brokers
+  (a roll while a third was down) is sealed on its survivor instead of blocking its range for as long as
+  the other is gone. With one replica it is one, which a dead primary cannot give.
 
   That block is not a latch. The caller (`Malachi.Cluster.HealCoordinator`) is a periodic
-  level-triggered loop, so the next pass re-evaluates: as soon as a majority answers again, the seal is
-  emitted and writing rolls to a new segment on its own. If a majority never returns, the range stays
+  level-triggered loop, so the next pass re-evaluates: as soon as enough answer again, the seal is
+  emitted and writing rolls to a new segment on its own. If they never return, the range stays
   blocked, which is the CP choice, and recovering it is a deliberate operator decision rather than
   something this policy takes on the operator's behalf.
 
@@ -72,10 +79,19 @@ defmodule Malachi.Cluster.Failover do
 
   The argument above carries over unchanged, because a failed copy is removed from the answers just as a
   dead primary is: it is never probed, never fenced, and never becomes the head. The consequence carries
-  over too: without the failed copy there must still be a majority, so at `replication_factor: 3` one
-  failed copy seals the segment on the other two, while at 2 and 1 the range stays blocked until the
+  over too: without the failed copy the seal quorum must still answer, so one failed copy seals the
+  segment on the others at three replicas and at two, while at one the range stays blocked until the
   failed server restarts.
+
+  ## Live replicas below the quorum
+
+  A primary that is alive does not make a segment writable on its own: every append needs the
+  acknowledgement quorum. A segment whose live, non-failed replicas fall below it (a follower gone from a
+  segment placed on two brokers) refuses every write while its primary looks healthy, so it is a
+  candidate too, and it is sealed on whoever answers under the same seal quorum.
   """
+
+  alias Malachi.Cluster.ReplicaTracker
 
   alias Malachi.Metadata
 
@@ -89,9 +105,9 @@ defmodule Malachi.Cluster.Failover do
   @type failed :: MapSet.t()
 
   @doc """
-  The active segments whose primary is dead or that have a failed copy, each with the live, non-failed
-  replicas worth probing. The caller probes these and feeds the results to `plan/5`. Sorted, so a pass is
-  deterministic.
+  The active segments whose primary is dead, that have a failed copy, or whose live, non-failed replicas
+  are below the acknowledgement quorum, each with the live, non-failed replicas worth probing. The caller
+  probes these and feeds the results to `plan/5`. Sorted, so a pass is deterministic.
   """
   @spec candidates(Metadata.t(), [Metadata.broker()], failed()) :: [{term(), [Metadata.broker()]}]
   def candidates(%Metadata{} = metadata, live_brokers, failed \\ MapSet.new()) do
@@ -99,7 +115,7 @@ defmodule Malachi.Cluster.Failover do
 
     metadata.segments
     |> Map.values()
-    |> Enum.filter(&(active_primary_dead?(&1, live) or active_copy_failed?(&1, failed)))
+    |> Enum.filter(&candidate?(&1, live, failed))
     |> Enum.map(&{&1.id, probeable_replicas(&1, live, failed)})
     |> Enum.reject(fn {_id, replicas} -> replicas == [] end)
     |> Enum.sort()
@@ -107,8 +123,8 @@ defmodule Malachi.Cluster.Failover do
 
   @doc """
   The seal commands for the probed segments, at `now_ms` (passed in so every replica applies the same
-  timestamp, as the produce path already does for its own seals). A segment whose probes do not reach a
-  majority of its replica set is skipped: see the moduledoc on why that leaves the range blocked rather
+  timestamp, as the produce path already does for its own seals). A segment whose probes do not reach the
+  seal quorum of its replica set is skipped: see the moduledoc on why that leaves the range blocked rather
   than risking acknowledged data. Returns a sorted (deterministic) list.
   """
   @spec plan(Metadata.t(), [Metadata.broker()], probes(), integer(), failed()) :: [Metadata.command()]
@@ -117,7 +133,7 @@ defmodule Malachi.Cluster.Failover do
     # (seal, then head), so the list is not re-sorted here.
     metadata
     |> candidates(live_brokers, failed)
-    |> Enum.flat_map(&seal(&1, metadata, probes, now_ms, failed))
+    |> Enum.flat_map(&seal(&1, metadata, probes, now_ms, failed, MapSet.new(live_brokers)))
   end
 
   @doc """
@@ -143,11 +159,36 @@ defmodule Malachi.Cluster.Failover do
   end
 
   @doc """
-  Whether `answered` replicas are a majority of `replica_set`, the condition under which a seal point
-  can be trusted. Public because the caller logs the blocked case and wants the same rule.
+  How many answers a seal needs for a segment on `replica_set`: `n - q + 1`, the fewest replicas that
+  share one with every acknowledgement quorum `q` (see the moduledoc).
+
+      iex> sets = [[:a], [:a, :b], [:a, :b, :c], [:a, :b, :c, :d], [:a, :b, :c, :d, :e]]
+      iex> Enum.map(sets, &Malachi.Cluster.Failover.seal_quorum/1)
+      [1, 1, 2, 2, 3]
   """
-  @spec majority?(non_neg_integer(), [Metadata.broker()]) :: boolean()
-  def majority?(answered, replica_set), do: answered * 2 > length(replica_set)
+  @spec seal_quorum([Metadata.broker(), ...]) :: pos_integer()
+  def seal_quorum([_ | _] = replica_set) do
+    replicas = length(replica_set)
+    replicas - ReplicaTracker.quorum_size(replicas) + 1
+  end
+
+  @doc """
+  Whether `answered` replicas reach the seal quorum of `replica_set`, the condition under which a seal
+  point can be trusted. Public because the caller fences and logs by the same rule.
+  """
+  @spec seal_quorum?(non_neg_integer(), [Metadata.broker(), ...]) :: boolean()
+  def seal_quorum?(answered, replica_set), do: answered >= seal_quorum(replica_set)
+
+  @doc """
+  Whether `segment` is a failover candidate against the `live` broker set and the `failed` copies: the
+  rule `candidates/3` applies to every segment, for a caller that has to decide again about one after
+  learning more than the membership view said (a replica it thought gone answered after all).
+  """
+  @spec candidate?(Metadata.segment_meta(), MapSet.t(), failed()) :: boolean()
+  def candidate?(segment, live, failed) do
+    active_primary_dead?(segment, live) or active_copy_failed?(segment, failed) or
+      active_below_quorum?(segment, live, failed)
+  end
 
   defp active_primary_dead?(%{state: :active, replica_set: [primary | _]}, live) do
     not MapSet.member?(live, primary)
@@ -161,34 +202,52 @@ defmodule Malachi.Cluster.Failover do
 
   defp active_copy_failed?(_segment, _failed), do: false
 
+  # The answer the seal point comes from, and the replica that becomes the head: the furthest end, and among
+  # replicas that reach it, one the membership view counts live over one it merely heard from (a caller may
+  # probe a broker the view has lost but that answered), so reads do not route to a suspected broker when a
+  # live one holds the same records. The order among equals is the answers' own, so a pass is deterministic.
+  defp head_holder(answers, live) do
+    furthest = answers |> Enum.map(fn {_replica, {offset, _bytes}} -> offset end) |> Enum.max()
+
+    answers
+    |> Enum.filter(fn {_replica, {offset, _bytes}} -> offset == furthest end)
+    |> Enum.min_by(fn {replica, _probe} -> not MapSet.member?(live, replica) end)
+  end
+
+  defp active_below_quorum?(%{state: :active, replica_set: [_ | _] = replica_set} = segment, live, failed) do
+    length(probeable_replicas(segment, live, failed)) < ReplicaTracker.quorum_size(length(replica_set))
+  end
+
+  defp active_below_quorum?(_segment, _live, _failed), do: false
+
   defp probeable_replicas(segment, live, failed) do
     Enum.filter(segment.replica_set, &(MapSet.member?(live, &1) and not MapSet.member?(failed, {segment.id, &1})))
   end
 
-  defp seal({segment_id, _live_replicas}, metadata, probes, now_ms, failed) do
+  defp seal({segment_id, _live_replicas}, metadata, probes, now_ms, failed, live) do
     segment = Map.fetch!(metadata.segments, segment_id)
 
     # Filtered here as well as in `candidates/3`, because the probes come from the caller: an answer that
-    # arrived from a copy known to have failed must neither count toward the majority nor become the head.
+    # arrived from a copy known to have failed must neither count toward the seal quorum nor become the head.
     answers =
       probes
       |> Map.get(segment_id, %{})
       |> Map.reject(fn {replica, _probe} -> MapSet.member?(failed, {segment_id, replica}) end)
 
-    if majority?(map_size(answers), segment.replica_set) do
+    if seal_quorum?(map_size(answers), segment.replica_set) do
       # The furthest end reported, not the one a majority of the ANSWERS agree on. Taking the
       # majority-th largest looks like Raft's commit index but is wrong here: the dead primary does not
       # answer, so a record it acknowledged together with a single survivor sits above that point and
       # would be sealed away. The intersection argument in the moduledoc is what makes the maximum both
       # safe and the lowest safe choice.
       {holder, {end_offset, byte_size}} =
-        Enum.max_by(answers, fn {_replica, {offset, _bytes}} -> offset end)
+        head_holder(answers, live)
 
       [
         Metadata.seal_command(segment, end_offset, byte_size, now_ms),
-        # Reads route to the head of the replica set, and the head here is the broker that just died,
-        # so the sealed segment would answer `:unreachable` until re-replication got to it. Moving a
-        # replica that holds everything the seal promised to the head restores reads at once.
+        # Reads route to the head of the replica set, and the head here may be the broker that died, so
+        # the sealed segment would answer `:unreachable` until re-replication got to it. Moving a replica
+        # that holds everything the seal promised to the head restores reads at once.
         # Reordering is what was unsafe on an ACTIVE segment (the new head would reissue offsets); on a
         # sealed one no append is possible at all, so it is only a routing change.
         {:set_segment_replicas, segment_id, [holder | List.delete(segment.replica_set, holder)]}

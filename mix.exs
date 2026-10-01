@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.18.0"
+  @version "0.19.2"
   @source_url "https://github.com/HectorIFC/malachi"
 
   def project do
@@ -120,6 +120,13 @@ defmodule Malachi.MixProject do
   defp extras do
     [
       "docs/guides/introduction.md": [title: "Introduction"],
+      # External link to the published container image. An absolute URL renders as a plain sidebar link
+      # (no swup interception, since it leaves the site), so an operator reading the docs can reach the
+      # image without hunting for it in the README. It sits right after the introduction, in the Guides
+      # group (see groups_for_extras), because of where ExDoc draws it otherwise: an extra no group
+      # claims goes above the first group, and ExDoc scrolls the sidebar on load until the current page
+      # is at the top, so on the landing page the link was out of view until the sidebar was scrolled up.
+      "Docker Hub": [url: "https://hub.docker.com/r/hectorcardoso/malachi"],
       "docs/guides/getting-started.md": [title: "Getting started"],
       "docs/guides/log-model.md": [title: "The log model"],
       "docs/guides/produce-and-consume.md": [title: "Produce and consume"],
@@ -152,15 +159,12 @@ defmodule Malachi.MixProject do
       "docs/generated/loadtest-node-results.md": [title: "Node.js load test results"],
       "docs/generated/loadtest-elixir-results.md": [title: "Elixir load test results"],
       "docs/generated/chaos-results.md": [title: "Chaos certification results"],
+      "docs/generated/chaos-upgrade-results.md": [title: "Rolling upgrade certification results"],
       # External link (ExDoc :url extra -> URLNode): the benchmark dashboard is a standalone static page
       # staged at /benchmarks/, not an ExDoc-generated page. The trailing slash and no `.html` matter: ExDoc
       # navigates with swup, which only intercepts relative links ending in `.html`, so `benchmarks/` is a
       # full-page navigation (an in-site `.html` would be hijacked and break, since the page has no swup root).
-      "All results, one page": [url: "benchmarks/"],
-      # External link to the published container image. An absolute URL renders as a plain sidebar link
-      # (no swup interception, since it leaves the site), so an operator reading the docs can reach the
-      # image without hunting for it in the README.
-      "Docker Hub": [url: "https://hub.docker.com/r/hectorcardoso/malachi"]
+      "All results, one page": [url: "benchmarks/"]
     ]
   end
 
@@ -168,6 +172,8 @@ defmodule Malachi.MixProject do
     [
       Guides: [
         "docs/guides/introduction.md",
+        # A URL extra is matched by its url, as the benchmark dashboard below explains.
+        "https://hub.docker.com/r/hectorcardoso/malachi",
         "docs/guides/getting-started.md",
         "docs/guides/log-model.md",
         "docs/guides/produce-and-consume.md",
@@ -211,7 +217,8 @@ defmodule Malachi.MixProject do
       ],
       "Chaos Engineering": [
         "docs/guides/running-chaos-drills.md",
-        "docs/generated/chaos-results.md"
+        "docs/generated/chaos-results.md",
+        "docs/generated/chaos-upgrade-results.md"
       ],
       Development: ["docs/HOOKS.md"]
     ]

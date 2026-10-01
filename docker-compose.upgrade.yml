@@ -1,0 +1,33 @@
+# Override for scripts/docker-upgrade-chaos.sh (issue #196): lets each node run its own image, so a cluster
+# can be caught halfway through a rolling upgrade, and passes the machine version pin through.
+#
+# Every node image is required: the drill builds an OLD one from a release tag and a NEW one from the working
+# tree with the upgrade canary applied, and says which one each node runs. `pull_policy: never` because both
+# exist only locally; the `build:` the base file gives each node is never used under this override, since the
+# drill builds the images itself and never asks compose to.
+#
+# MALACHI_RA_MACHINE_VERSION holds the control-plane machines at a version while the roll is in progress
+# (see the operations guide, "Upgrades and the rollback floor"); empty means no pin. UPGRADE_RESTART_3 lets the
+# drill bound the restarts of node 3 when it starts a build that must refuse the data directory, which a plain
+# `on-failure` would restart forever.
+#
+#   docker compose -f docker-compose.cluster.yml -f docker-compose.upgrade.yml up
+services:
+  malachi1:
+    image: ${UPGRADE_IMAGE_1:?set by scripts/docker-upgrade-chaos.sh}
+    pull_policy: never
+    environment:
+      MALACHI_RA_MACHINE_VERSION: ${MALACHI_RA_MACHINE_VERSION:-}
+
+  malachi2:
+    image: ${UPGRADE_IMAGE_2:?set by scripts/docker-upgrade-chaos.sh}
+    pull_policy: never
+    environment:
+      MALACHI_RA_MACHINE_VERSION: ${MALACHI_RA_MACHINE_VERSION:-}
+
+  malachi3:
+    image: ${UPGRADE_IMAGE_3:?set by scripts/docker-upgrade-chaos.sh}
+    pull_policy: never
+    restart: ${UPGRADE_RESTART_3:-on-failure}
+    environment:
+      MALACHI_RA_MACHINE_VERSION: ${MALACHI_RA_MACHINE_VERSION:-}

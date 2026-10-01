@@ -56,6 +56,12 @@
 #   mix run --no-start scripts/chaos_checker.exs topology host1,host2,host3 topic
 #   mix run --no-start scripts/chaos_checker.exs copies   host1,host2,host3 topic attempts interval_ms \
 #     [segment=<dir>] node1=/path/to/its/log/root node2=... node3=...
+#   elixir --sname chaoschk --cookie <cookie> -S mix run --no-start scripts/chaos_checker.exs control-plane \
+#     malachi@malachi1,malachi@malachi2,malachi@malachi3 [--project all|topics] [--attempts N] [--interval-ms N]
+#
+# control-plane mode: reads every `ra` group on every node over Erlang distribution and compares the members of
+# each group at equal applied indexes, so a control plane whose replicas diverged fails even with every node
+# healthy. See `ChaosChecker.ControlPlane`.
 #
 # copies mode: reads every copy of every <topic>-r<R>-s<S> segment directory under each node's log root
 # (the drill mounts the per-node data volumes read-only) and prints, per segment and per node, what the
@@ -551,6 +557,265 @@ defmodule ChaosChecker.Copies do
   defp short(md5), do: binary_part(md5, 0, @short_md5)
 end
 
+defmodule ChaosChecker.ControlPlane do
+  @moduledoc """
+  Whether every member holds the same control-plane state (issue #196).
+
+  A cluster whose Raft groups diverged still reports three healthy nodes: in the failure #188 closed, a
+  command applied by newer members and skipped by older ones leaves every member advancing its applied
+  index with a different state, and no health check notices. So this reads, from each node, every `ra`
+  group registered there, and compares the members of each group.
+
+  ## What is compared, and when
+
+  For each group, on each member, one `:ra.local_query/3` returns the applied index and the query's
+  answer together, so the two describe the same moment. Members are compared only at equal indexes: a
+  follower one entry behind holds a different state for a perfectly good reason, and that reading is
+  retried rather than reported. At equal indexes a deterministic state machine holds the same state on
+  every member, so any difference there is a divergence, reported at once.
+
+  The query is built from stdlib functions only, never from Malachi code, because it runs inside the
+  `ra` server of a node that may be on another build (`ra` applies it without a catch, see
+  `Malachi.Cluster.RaCluster`). `ra` appends the state as the last argument:
+
+    * `:all` - `{:erlang, :phash2, []}`, a digest of the whole state. Meaningful only between members on
+      the same build, where the same state is the same term; the drill compares with it only when every
+      node runs one image.
+    * `:topics` - `{:maps, :with, [[:topics]]}`, the topic map alone, hashed here. The field both builds
+      keep, so it stays comparable while a newer build carries fields the older one does not; a topic
+      written by one member and not another is exactly the #188 divergence. Every machine's state is a
+      struct, so on a group without topics it answers `%{}` everywhere.
+
+  The effective machine version of each member is compared too, read from the counter
+  `Malachi.Cluster.MachineVersion` reads. It is not part of the same atomic read, so a difference is
+  retried rather than reported.
+
+  Nothing about the cluster is a pass by default: an unreachable node, an unreadable member, a group
+  running on some members only, and no group at all are all pending, and pending after the last attempt
+  is a failure.
+  """
+
+  @timeout 5_000
+
+  @typedoc "What one member answered for one group."
+  @type member :: %{index: non_neg_integer(), digest: non_neg_integer(), version: non_neg_integer() | nil}
+
+  @typedoc "One reading of every group on every node."
+  @type reading :: %{
+          unreachable: %{node() => term()},
+          groups: %{atom() => %{node() => member() | :absent | {:error, term()}}}
+        }
+
+  @typedoc "What a reading says."
+  @type verdict :: {:ok, pos_integer()} | {:wait, [String.t()]} | {:diverged, [String.t()]}
+
+  @typedoc "An `:rpc.call/5`."
+  @type rpc :: (node(), module(), atom(), [term()], timeout() -> term())
+
+  @doc "The `ra` query MFA for a projection."
+  @spec query(:all | :topics) :: {module(), atom(), [term()]}
+  def query(:all), do: {:erlang, :phash2, []}
+  def query(:topics), do: {:maps, :with, [[:topics]]}
+
+  @doc """
+  Reads every group registered on any of `nodes`, querying the members of each group concurrently so
+  they are read as close together as the network allows.
+  """
+  @spec read([node()], :all | :topics, rpc()) :: reading()
+  def read(nodes, projection, rpc \\ &:rpc.call/5) do
+    listed = Map.new(nodes, &{&1, list_groups(&1, rpc)})
+    unreachable = for {node, {:error, reason}} <- listed, into: %{}, do: {node, reason}
+    reachable = Enum.reject(nodes, &Map.has_key?(unreachable, &1))
+
+    groups =
+      listed
+      |> Enum.flat_map(fn
+        {_node, {:ok, groups}} -> groups
+        {_node, {:error, _reason}} -> []
+      end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    %{
+      unreachable: unreachable,
+      groups: Map.new(groups, &{&1, read_group(&1, reachable, projection, rpc)})
+    }
+  end
+
+  defp list_groups(node, rpc) do
+    case rpc.(node, :ra_directory, :list_registered, [:default], @timeout) do
+      registered when is_list(registered) -> {:ok, Enum.map(registered, fn {name, _uid} -> name end)}
+      other -> {:error, other}
+    end
+  end
+
+  defp read_group(group, nodes, projection, rpc) do
+    nodes
+    |> Task.async_stream(&{&1, read_member(group, &1, projection, rpc)}, timeout: :infinity)
+    |> Map.new(fn {:ok, answer} -> answer end)
+  end
+
+  defp read_member(group, node, projection, rpc) do
+    server = {group, node}
+
+    case rpc.(node, :ra, :local_query, [server, query(projection), @timeout], @timeout + 1_000) do
+      {:ok, {{index, _term}, answer}, _leader} ->
+        %{index: index, digest: digest(projection, answer), version: version(server, rpc)}
+
+      {:error, :noproc} ->
+        :absent
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp digest(:all, digest), do: digest
+  defp digest(:topics, topics), do: :erlang.phash2(topics)
+
+  defp version({_group, node} = server, rpc) do
+    case rpc.(node, :ra_counters, :counters, [server, [:effective_machine_version]], @timeout) do
+      %{effective_machine_version: version} -> version
+      _unknown -> nil
+    end
+  end
+
+  @doc """
+  What `reading` says: `{:ok, groups}` when every group agrees on every member, `{:diverged, reasons}`
+  when some group holds different states at the same index (which wins over anything pending), and
+  `{:wait, reasons}` for anything a later reading could still settle.
+  """
+  @spec verdict(reading()) :: verdict()
+  def verdict(%{unreachable: unreachable, groups: groups}) do
+    unreachable_reasons =
+      for {node, reason} <- Enum.sort(unreachable), do: "node #{node} unreachable: #{inspect(reason)}"
+
+    judged =
+      for {group, members} <- Enum.sort(groups),
+          not Enum.all?(members, fn {_node, member} -> member == :absent end),
+          do: {group, judge(group, members)}
+
+    diverged = for {_group, {:diverged, reason}} <- judged, do: reason
+    pending = unreachable_reasons ++ for({_group, {:wait, reason}} <- judged, do: reason)
+
+    cond do
+      diverged != [] -> {:diverged, diverged}
+      pending != [] -> {:wait, pending}
+      judged == [] -> {:wait, ["no control-plane group is running on any node"]}
+      true -> {:ok, length(judged)}
+    end
+  end
+
+  defp judge(group, members) do
+    members = Enum.sort(members)
+
+    with :ok <- running(group, members),
+         :ok <- readable(group, members),
+         :ok <- same(group, members, :index, "indexes differ", :wait),
+         :ok <- same(group, members, :digest, "index=#{index(members)} state differs", :diverged) do
+      same(group, members, :version, "effective versions differ", :wait)
+    end
+  end
+
+  # Called only once every member answered at one index.
+  defp index([{_node, %{index: index}} | _members]), do: index
+
+  defp running(group, members) do
+    case for({node, :absent} <- members, do: node) do
+      [] -> :ok
+      nodes -> {:wait, "group=#{group} not running on #{Enum.join(nodes, ",")}"}
+    end
+  end
+
+  defp readable(group, members) do
+    case for({node, {:error, reason}} <- members, do: {node, reason}) do
+      [] -> :ok
+      [{node, reason} | _more] -> {:wait, "group=#{group} unreadable on #{node}: #{inspect(reason)}"}
+    end
+  end
+
+  defp same(group, members, key, what, outcome) do
+    if members |> Enum.map(fn {_node, member} -> Map.fetch!(member, key) end) |> Enum.uniq() |> length() == 1 do
+      :ok
+    else
+      values = Enum.map_join(members, " ", fn {node, member} -> "#{node}=#{Map.fetch!(member, key)}" end)
+      {outcome, "group=#{group} #{what}: #{values} outliers=#{Enum.join(outliers(members, key), ",")}"}
+    end
+  end
+
+  # The members that disagree with the majority, so a failure names the replica to look at rather than
+  # leaving the reader to compare numbers. With no value held by more than half, every member is named:
+  # there is no majority to measure the others against.
+  defp outliers(members, key) do
+    frequencies = members |> Enum.map(fn {_node, member} -> Map.fetch!(member, key) end) |> Enum.frequencies()
+    {common, count} = Enum.max_by(frequencies, fn {_value, count} -> count end)
+
+    if count * 2 > length(members),
+      do: for({node, member} <- members, Map.fetch!(member, key) != common, do: node),
+      else: Enum.map(members, fn {node, _member} -> node end)
+  end
+
+  @doc """
+  Re-reads until the verdict is converged or diverged, or `attempts` runs out, sleeping `interval_ms`
+  between readings, and returns the last verdict.
+  """
+  @spec settle((-> verdict()), pos_integer(), non_neg_integer(), (non_neg_integer() -> any())) :: verdict()
+  def settle(read, attempts, interval_ms, sleep \\ &Process.sleep/1) do
+    case read.() do
+      {:wait, _reasons} when attempts > 1 ->
+        sleep.(interval_ms)
+        settle(read, attempts - 1, interval_ms, sleep)
+
+      verdict ->
+        verdict
+    end
+  end
+
+  @doc "Whether a verdict is a pass."
+  @spec passed?(verdict()) :: boolean()
+  def passed?({:ok, _groups}), do: true
+  def passed?(_verdict), do: false
+
+  @doc "The verdict as printed: one line per reason, then one closing line the drill greps."
+  @spec lines(verdict(), :all | :topics) :: [String.t()]
+  def lines({:ok, groups}, projection), do: ["CONTROL-PLANE OK groups=#{groups} projection=#{projection}"]
+
+  def lines({:diverged, reasons}, projection),
+    do: Enum.map(reasons, &"CONTROL-PLANE MISMATCH #{&1}") ++ ["CONTROL-PLANE DIVERGED projection=#{projection}"]
+
+  def lines({:wait, reasons}, projection),
+    do: Enum.map(reasons, &"CONTROL-PLANE PENDING #{&1}") ++ ["CONTROL-PLANE UNSETTLED projection=#{projection}"]
+
+  @doc """
+  Parses `<node>,<node>... [--project all|topics] [--attempts N] [--interval-ms N]`. Node names are
+  turned into atoms, which is safe here: they come from the drill, not from a client.
+  """
+  @spec parse_args([String.t()]) :: {:ok, map()} | {:error, String.t()}
+  def parse_args([nodes | options]) when nodes != "" do
+    with {:ok, parsed} <- parse_options(options, %{projection: :all, attempts: 30, interval_ms: 2_000}) do
+      {:ok, Map.put(parsed, :nodes, nodes |> String.split(",", trim: true) |> Enum.map(&String.to_atom/1))}
+    end
+  end
+
+  def parse_args(_argv), do: {:error, "expected <node>,<node>... as the first argument"}
+
+  defp parse_options([], parsed), do: {:ok, parsed}
+  defp parse_options(["--project", "all" | rest], parsed), do: parse_options(rest, %{parsed | projection: :all})
+  defp parse_options(["--project", "topics" | rest], parsed), do: parse_options(rest, %{parsed | projection: :topics})
+
+  defp parse_options([flag, value | rest], parsed) when flag in ["--attempts", "--interval-ms"] do
+    key = if flag == "--attempts", do: :attempts, else: :interval_ms
+    minimum = if key == :attempts, do: 1, else: 0
+
+    case Integer.parse(value) do
+      {n, ""} when n >= minimum -> parse_options(rest, Map.put(parsed, key, n))
+      _malformed -> {:error, "#{flag} expects an integer of at least #{minimum}, got: #{inspect(value)}"}
+    end
+  end
+
+  defp parse_options([unknown | _rest], _parsed), do: {:error, "unknown or incomplete option: #{inspect(unknown)}"}
+end
+
 defmodule ChaosChecker do
   alias Malachi.Loadtest.Conn
   alias Malachi.Log.Record
@@ -678,6 +943,30 @@ defmodule ChaosChecker do
     System.halt(if ChaosChecker.Copies.passed?(report), do: 0, else: 1)
   end
 
+  def main(["control-plane" | args]) do
+    alias ChaosChecker.ControlPlane
+
+    case ControlPlane.parse_args(args) do
+      {:ok, %{nodes: nodes, projection: projection, attempts: attempts, interval_ms: interval_ms}} ->
+        # The drill starts this VM short-named with the cluster's cookie; without distribution there is
+        # nothing to read, and saying so beats every node reading as unreachable.
+        unless Node.alive?() do
+          IO.puts("control-plane needs a distributed VM: run it under elixir --sname ... --cookie ...")
+          System.halt(2)
+        end
+
+        Enum.each(nodes, &Node.connect/1)
+        read = fn -> nodes |> ControlPlane.read(projection) |> ControlPlane.verdict() end
+        verdict = ControlPlane.settle(read, attempts, interval_ms)
+        Enum.each(ControlPlane.lines(verdict, projection), &IO.puts/1)
+        System.halt(if ControlPlane.passed?(verdict), do: 0, else: 1)
+
+      {:error, reason} ->
+        IO.puts(reason)
+        System.halt(2)
+    end
+  end
+
   def main(_argv) do
     IO.puts("usage: chaos_checker.exs produce  <hosts> <topic> <duration_s> <acked_file>")
     IO.puts("       chaos_checker.exs verify   <hosts> <topic> <acked_file>")
@@ -685,6 +974,10 @@ defmodule ChaosChecker do
 
     IO.puts(
       "       chaos_checker.exs copies   <hosts> <topic> <attempts> <interval_ms> [segment=<dir>] <node>=<root>..."
+    )
+
+    IO.puts(
+      "       chaos_checker.exs control-plane <node>,<node>... [--project all|topics] [--attempts N] [--interval-ms N]"
     )
 
     System.halt(2)

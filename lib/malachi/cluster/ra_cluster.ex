@@ -210,6 +210,14 @@ defmodule Malachi.Cluster.RaCluster do
   end
 
   @doc """
+  Restarts `server_id`'s member from its persisted log when this node has ever started it, and does
+  nothing else: `:not_hosted` when the name was never registered here. Never forms or joins, so it can
+  never register a fresh uid over a member that exists (the amnesia `Malachi.Cluster.RaResume` describes).
+  """
+  @spec resume(server_id()) :: :ok | :not_hosted | {:error, term()}
+  def resume(server_id), do: RaResume.resume_or(@system, server_id, fn -> :not_hosted end)
+
+  @doc """
   Stops and deletes the cluster, removing its on-disk state. Prefer a `server_id` addressing a real
   member, so a cluster placed on a subset of nodes is deleted through a node that hosts it: `ra`
   finds the leader from there and propagates the deletion. A bare `cluster_name` means the local node.

@@ -1,0 +1,123 @@
+name: Rolling upgrade certification
+
+# Runs scripts/docker-upgrade-chaos.sh on a real Linux host (issue #196): a three-node cluster rolled from the
+# release before this code to this tree and back under load, then forward again with a canary feature switched on and a
+# rollback that must be refused.
+#
+# Nightly and on demand, and not on every pull request: three image builds and fourteen node swaps make a run far
+# longer than the pull request jobs, and the canary patch it depends on is already applied and compiled on every
+# pull request by test/scripts/upgrade_canary_patch_test.exs, so a change that breaks it fails there first.
+#
+# It does not gate a release: release.yml tags every merge on its own. What it gives is a published record,
+# every night, of rolling the release before main's code to main's code and back, which the operations guide
+# tells an operator to check before deploying. `old_ref` takes the drill to another release by hand; such a run
+# certifies a different pair, so it is not published.
+#
+# Not a required check yet, like the storage drill: promote it once it has been green on its own.
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      old_ref:
+        description: Release the cluster starts on (default, the newest release whose code differs from the commit's)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-chaos:
+    name: Rolling upgrade certification
+    runs-on: ubuntu-latest
+    # The three checker windows alone are 29 minutes (480 + 360 + 900 s, and each phase waits out its window),
+    # before three image builds, the cluster start and a verify per phase: estimated at 40 to 55 minutes, to be
+    # replaced by the first measured run. Well past that is stuck rather than slow.
+    timeout-minutes: 75
+
+    steps:
+      # The full history and its tags: OLD is a release tag, resolved and exported by git.
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Same cpuset split as the other drills: a runner has four cores, and the harness defaults assume eight.
+      - name: 🔁 Run the rolling upgrade certification
+        env:
+          SRV_CPUSET: '1,2,3'
+          LT_CPUSET: '0'
+          CHAOS_COMMAND: scripts/docker-upgrade-chaos.sh
+          CHAOS_WORK_ROOT: ${{ runner.temp }}/chaos
+          OLD_REF: ${{ inputs.old_ref }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          CHAOS_RESULT_FILE="$RUNNER_TEMP/results/chaos-upgrade.json" scripts/docker-upgrade-chaos.sh
+
+      # if: always() because a failed certification is the run whose record matters most: the drill writes its
+      # JSON and keeps the logs of every container it replaced before exiting non-zero.
+      - name: 📤 Upload result and evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-upgrade
+          path: |
+            ${{ runner.temp }}/results/*.json
+            ${{ runner.temp }}/chaos/evidence/
+          if-no-files-found: warn
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: upgrade-chaos
+    # A failed certification is published too, the same way the node-fault drill's is: the page says it failed.
+    # Only from main, and never from a run taken to another release by hand, which certifies a different pair.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.old_ref == '' }}
+
+    permissions:
+      contents: write
+
+    # The same group as results.yml's publisher, so the two never push results over each other.
+    concurrency:
+      group: publish-results-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      # The full history, because publishing decides between two results by which commit is newer.
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # By pattern rather than by name: a run killed before it wrote anything uploads no artifact, and asking for
+      # a named one that does not exist would fail this job as well, a second red job saying nothing new.
+      # Every other early end of the drill writes its result, as failed, and is published like any other.
+      - name: 📥 Download result
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chaos-upgrade
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+
+      - name: 📋 Collect what was measured
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark/published
+          for f in "$RUNNER_TEMP"/artifacts/results/*.json "$RUNNER_TEMP"/artifacts/*.json; do
+            [ -e "$f" ] || continue
+            cp "$f" "benchmark/published/$(basename "$f")"
+          done
+          git status --porcelain -- benchmark/published
+
+      # scripts/publish-results.sh decides per file whether main should hold this result and retries a push that
+      # loses a race. Its commit does not start pages.yml, so the page refreshes with the next results.yml run.
+      - name: 📌 Commit the refreshed result
+        env:
+          PUBLISH_SHA: ${{ github.sha }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          scripts/publish-results.sh

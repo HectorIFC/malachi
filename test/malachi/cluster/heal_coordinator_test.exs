@@ -152,12 +152,11 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     end
   end
 
-  test "below a majority nothing is sealed and nothing is fenced, so the pass leaves no debt" do
-    # A fence has no inverse. Closing the one replica that answered would keep it refusing writes
-    # after the primary returns, and at rf=2 that is terminal: one follower is never a majority, so no
-    # pass seals, and once the primary is alive again the segment stops being a candidate, so no later
-    # pass ever finishes. Every produce would then fail quorum against a follower nothing can reopen.
-    # Measuring is free of that, so the pass measures first and only fences what it is about to seal.
+  test "below the seal quorum nothing is sealed and nothing is fenced, so the pass leaves no debt" do
+    # A fence has no inverse. Closing the one replica that answered would keep it refusing writes after
+    # the primary returns, shrinking every later write quorum for nothing, since one answer of five cannot
+    # cover every acknowledged write. Measuring is free of that, so the pass measures first and only
+    # fences what it is about to seal. And it says why the range is blocked, with the numbers.
     b = start_broker()
     {metadata, segment_id} = active_segment([:dead_primary, b, :gone_c, :gone_d, :gone_e], [b], ["x", "y"])
     {source, apply} = metadata_store(metadata)
@@ -170,14 +169,15 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
         probe_timeout: 500
       )
 
-    HealCoordinator.heal_now(coordinator)
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
+    assert log =~ "cannot be sealed for failover: 1 of 5 replicas answered, and 3 are needed"
     assert Metadata.get_segment(source.(), segment_id).state == :active
     # Still writable: this is the assertion the previous behavior got backwards.
     assert {:ok, 2} = ReplicationServer.replicate(b, segment_id, [b], 0, records(["late"]))
   end
 
-  test "a pass below a majority does not call the fence at all" do
+  test "a pass below the seal quorum does not call the fence at all" do
     # The seam, watched directly, because the test above can only observe the absence of an effect and
     # would still pass if the fence were called and happened to fail.
     {:ok, fenced} = Agent.start_link(fn -> [] end)
@@ -216,11 +216,21 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     {metadata, segment_id} = active_segment(replica_set, [old_primary, b, c], ["x", "y"])
     {source, apply} = metadata_store(metadata)
 
+    # The old primary is cut off for the whole pass: the view has lost it and so does the read-only probe
+    # that asks whether it is really gone. It runs in this VM, so only the seam can make it unreachable.
+    probe = fn replica, id, base ->
+      case replica != old_primary and ReplicationServer.durable_stats(replica, id, base, 500) do
+        {:ok, end_offset, byte_size} -> {end_offset, byte_size}
+        _unreachable -> :error
+      end
+    end
+
     coordinator =
       start_coordinator(
         live_brokers: fn -> [b, c] end,
         metadata_source: source,
         apply_command: apply,
+        probe: probe,
         probe_timeout: 500
       )
 
@@ -243,6 +253,336 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     end)
 
     :ok
+  end
+
+  describe "a segment placed below the replication factor (#270)" do
+    # A roll while a broker was down placed it on the two left. Its acknowledgements needed both, so the
+    # one that answers holds every acknowledged write, and the range must not stay blocked on the other.
+    test "with its primary dead, it is sealed on the survivor, which keeps every record readable" do
+      follower = start_broker()
+      {metadata, segment_id} = active_segment([:gone, follower], [follower], ["x", "y", "z"])
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [follower] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      refute log =~ "cannot be sealed for failover"
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 3
+      assert hd(sealed.replica_set) == follower
+      assert read_values(follower, segment_id) == ["x", "y", "z"]
+    end
+
+    test "with its follower dead, it is sealed on the primary, which alone cannot close a write quorum" do
+      primary = start_broker()
+      {metadata, segment_id} = active_segment([primary, :gone], [primary], ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(coordinator)
+
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 2
+      assert read_values(primary, segment_id) == ["x", "y"]
+      # Fenced, not merely recorded as sealed: a batch still parked on it cannot close a quorum later.
+      assert {:error, {:sealed, 2}} = ReplicationServer.replicate(primary, segment_id, [primary], 0, records(["late"]))
+    end
+
+    test "with both followers of three gone, its primary is asked, never fenced, and the block is reported" do
+      primary = start_broker()
+      {metadata, segment_id} = active_segment([primary, :gone_b, :gone_c], [primary], ["x"])
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> assert HealCoordinator.heal_now(coordinator).applied == [] end)
+
+      assert log =~ "1 of 3 replicas answered, and 2 are needed"
+      assert Metadata.get_segment(source.(), segment_id).state == :active
+      assert ReplicationServer.fenced_segments(primary, [{segment_id, 0}]) == {:ok, %{}}
+    end
+  end
+
+  describe "a broker the membership view has lost but that answers (a suspicion, not a failure)" do
+    # SWIM suspects a broker after one missed ack, well before it confirms a failure, and the live set
+    # holds only the members it calls alive. The pass asks the ones the view left out, read-only, and
+    # acts only on a segment that is still a candidate once those that answered are counted.
+    test "a two-replica segment whose follower is merely suspected is neither fenced nor sealed" do
+      primary = start_broker()
+      follower = start_broker()
+      {metadata, segment_id} = active_segment([primary, follower], [primary, follower], ["x"])
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      assert HealCoordinator.heal_now(coordinator).applied == []
+      assert Metadata.get_segment(source.(), segment_id).state == :active
+      assert {:ok, 1} = ReplicationServer.replicate(primary, segment_id, [primary, follower], 0, records(["y"]))
+    end
+
+    test "a three-replica segment whose primary is merely suspected keeps its followers writable" do
+      primary = start_broker()
+      [b, c] = [start_broker(), start_broker()]
+      {metadata, segment_id} = active_segment([primary, b, c], [primary, b, c], ["x"])
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      assert HealCoordinator.heal_now(coordinator).applied == []
+      assert ReplicationServer.fenced_segments(b, [{segment_id, 0}]) == {:ok, %{}}
+      assert ReplicationServer.fenced_segments(c, [{segment_id, 0}]) == {:ok, %{}}
+    end
+
+    test "a broker the view has lost is asked once per pass, however many candidate segments it holds" do
+      [b, c] = [start_broker(), start_broker()]
+      test_pid = self()
+
+      metadata =
+        Enum.reduce(["events", "more", "other"], Metadata.new(), fn topic, meta ->
+          {meta, {:ok, root}} = Metadata.apply(meta, {:create_topic, topic, 4})
+          {meta, :ok} = Metadata.apply(meta, {:register_segment, root, {root, 0}, [:gone, b, c], 0})
+          for replica <- [b, c], do: {:ok, _last} = ReplicationServer.follow(replica, {root, 0}, 0, records(["x"]))
+          meta
+        end)
+
+      probe = fn replica, id, base ->
+        send(test_pid, {:probed, replica})
+
+        case replica != :gone and ReplicationServer.durable_stats(replica, id, base, 500) do
+          {:ok, end_offset, byte_size} -> {end_offset, byte_size}
+          _unreachable -> :error
+        end
+      end
+
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe: probe,
+          probe_timeout: 500
+        )
+
+      HealCoordinator.heal_now(coordinator)
+
+      assert length(for({:probed, :gone} <- drain(), do: :gone)) == 1
+    end
+  end
+
+  describe "a seal an earlier pass could not land" do
+    test "is retried when its primary answers again, since the followers that pass fenced stay closed" do
+      # Pass one: the primary does not answer, both followers are fenced, and the seal does not land. Pass
+      # two: the primary answers while the view still has it gone. Dropping the segment then would leave it
+      # with fenced followers and an unfenced primary, which nothing plans again.
+      [primary, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = active_segment([primary, b, c], [primary, b, c], ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+      pass = :counters.new(1, [])
+
+      probe = fn replica, id, base ->
+        case (replica != primary or :counters.get(pass, 1) > 0) and
+               ReplicationServer.durable_stats(replica, id, base, 500) do
+          {:ok, end_offset, byte_size} -> {end_offset, byte_size}
+          _unreachable -> :error
+        end
+      end
+
+      apply_command = fn command ->
+        if :counters.get(pass, 1) == 0,
+          do: exit({:timeout, {GenServer, :call, [Malachi.LogBroker, {:apply_heal, [command]}, 5000]}}),
+          else: apply.(command)
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [b, c] end,
+          metadata_source: source,
+          apply_command: apply_command,
+          probe: probe,
+          probe_timeout: 500
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert Metadata.get_segment(source.(), segment_id).state == :active
+      assert {:ok, %{^segment_id => _end}} = ReplicationServer.fenced_segments(b, [{segment_id, 0}])
+
+      :counters.put(pass, 1, 1)
+      HealCoordinator.heal_now(coordinator)
+
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 2
+    end
+  end
+
+  describe "which fences keep a rescued segment (#269)" do
+    # A segment is rescued when the broker the view lost answers after all. It is kept only if a FOLLOWER
+    # is already fenced, which only a failover does; the replicas are asked in one batch each.
+    setup do
+      [primary, b, c] = [start_broker(), start_broker(), start_broker()]
+      %{primary: primary, b: b, c: c}
+    end
+
+    test "followers are asked once each, however many rescued segments they hold", ctx do
+      test_pid = self()
+
+      metadata =
+        Enum.reduce(["events", "more"], Metadata.new(), fn topic, meta ->
+          {meta, {:ok, root}} = Metadata.apply(meta, {:create_topic, topic, 4})
+          {meta, :ok} = Metadata.apply(meta, {:register_segment, root, {root, 0}, [ctx.primary, ctx.b, ctx.c], 0})
+
+          for r <- [ctx.primary, ctx.b, ctx.c],
+              do: {:ok, _last} = ReplicationServer.follow(r, {root, 0}, 0, records(["x"]))
+
+          meta
+        end)
+
+      seal_state = fn replica, segments ->
+        send(test_pid, {:asked, replica, length(segments)})
+        %{}
+      end
+
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [ctx.b, ctx.c] end,
+          metadata_source: source,
+          apply_command: apply,
+          seal_state: seal_state,
+          probe_timeout: 500
+        )
+
+      assert HealCoordinator.heal_now(coordinator).applied == []
+
+      # One call per follower about both segments; the orphaned-fence pass asks nothing (no live primary).
+      asked = for {:asked, replica, count} <- drain(), do: {replica, count}
+      assert Enum.sort(asked) == Enum.sort([{ctx.b, 2}, {ctx.c, 2}])
+    end
+
+    test "a fenced primary alone does not keep it: that is the orphaned-fence pass's, which reports it", ctx do
+      # Two replicas, the follower lost by the view but answering, the primary fenced by a roll whose seal
+      # never landed. Failover leaves it, and the orphaned-fence pass seals it and counts it.
+      {metadata, segment_id} = active_segment([ctx.primary, ctx.b], [ctx.primary, ctx.b], ["x"])
+      {:ok, 1, _bytes} = ReplicationServer.seal(ctx.primary, segment_id, 0)
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [ctx.primary] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert Metadata.get_segment(source.(), segment_id).state == :sealed
+      assert log =~ "reconciled 1 segment"
+      assert ReplicationServer.fenced_segments(ctx.b, [{segment_id, 0}]) == {:ok, %{}}
+    end
+
+    test "a follower fenced earlier keeps it even while the view has that follower gone too", ctx do
+      # Primary and one follower lost by the view, both answering; the other follower fenced by a pass
+      # whose seal did not land. The kept segment is probed over every replica that answers.
+      {metadata, segment_id} = active_segment([ctx.primary, ctx.b, ctx.c], [ctx.primary, ctx.b, ctx.c], ["x", "y"])
+      {:ok, 2, _bytes} = ReplicationServer.seal(ctx.c, segment_id, 0)
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [ctx.b] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 2
+    end
+  end
+
+  describe "a seal this pass already planned for failover" do
+    test "is not planned a second time as an orphaned fence, nor counted as one" do
+      # The pass fences the live primary of a segment whose follower is gone; the orphaned-fence probe that
+      # follows finds that primary fenced, and must not report a divergence that never happened.
+      primary = start_broker()
+      {metadata, segment_id} = active_segment([primary, :gone], [primary], ["x", "y"])
+      {source, apply} = metadata_store(metadata)
+      handler = "no-orphan-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:malachi, :cluster, :fence_reconciled],
+        fn _e, m, _md, _c -> send(test_pid, {:reconciled, m}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary] end,
+          metadata_source: source,
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn -> assert HealCoordinator.heal_now(coordinator).applied |> length() == 2 end)
+
+      assert Metadata.get_segment(source.(), segment_id).state == :sealed
+      refute log =~ "reconciled"
+      refute_received {:reconciled, _measurements}
+    end
+  end
+
+  defp drain do
+    receive do
+      message -> [message | drain()]
+    after
+      0 -> []
+    end
   end
 
   describe "a copy that failed in storage (seal-on-failure)" do
@@ -311,7 +651,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
       assert hd(sealed.replica_set) in [a, b]
     end
 
-    test "at rf=2 a failed copy leaves no majority: nothing is sealed and the healthy replica is not fenced" do
+    test "at rf=2 a failed primary copy seals on the healthy replica, which held every acknowledged write" do
       {primary, primary_dir} = start_broker_at(store: FaultySegmentStore)
       b = start_broker()
       {metadata, segment_id} = active_segment([primary, b], [primary, b], ["x", "y"])
@@ -328,10 +668,12 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
 
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
-      assert log =~ "no majority"
-      assert Metadata.get_segment(source.(), segment_id).state == :active
-      assert ReplicationServer.fenced_segments(b, [{segment_id, 0}]) == {:ok, %{}}
-      assert {:ok, 2} = ReplicationServer.follow(b, segment_id, 2, records(["z"]))
+      refute log =~ "cannot be sealed for failover"
+      sealed = Metadata.get_segment(source.(), segment_id)
+      assert sealed.state == :sealed
+      assert sealed.length == 2
+      assert hd(sealed.replica_set) == b
+      assert read_values(b, segment_id) == ["x", "y"]
     end
 
     test "the failed-state seam is what makes a copy a candidate, and an empty answer makes none" do
@@ -607,9 +949,8 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     end
 
     test "does not touch a segment whose primary is dead: that is failover's case, with its own rule" do
-      # The two policies are disjoint by construction. Sealing a dead primary's segment needs the
-      # majority rule `Malachi.Cluster.Failover` applies, and this pass has none, so it must never be
-      # the one to reach such a segment.
+      # Sealing a dead primary's segment needs the seal quorum `Malachi.Cluster.Failover` applies, and
+      # this pass has none, so it must never be the one to reach such a segment.
       b = start_broker()
       c = start_broker()
       {metadata, segment_id} = active_segment([:dead_primary, b, c], [b, c], ["x", "y"])
@@ -624,7 +965,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
           probe_timeout: 500
         )
 
-      # Failover still seals it, on its own majority rule.
+      # Failover still seals it, on its own seal quorum.
       HealCoordinator.heal_now(coordinator)
       assert Metadata.get_segment(source.(), segment_id).state == :sealed
     end
@@ -672,5 +1013,215 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     UnknownMessages.assert_survives_unknown(coordinator, :heal, fn ->
       assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
     end)
+  end
+
+  describe "a broker that does not answer in time" do
+    import ExUnit.CaptureLog
+
+    # What a rolling upgrade showed: the broker's :metadata call outlasted its timeout while other nodes
+    # restarted, and the exit took the coordinator down with it. A pass that cannot read the metadata is
+    # skipped, and the coordinator keeps its place.
+    defp timing_out, do: fn -> exit({:timeout, {GenServer, :call, [Malachi.LogBroker, :metadata, 5000]}}) end
+
+    test "skips the pass, says why, and stays up" do
+      coordinator =
+        start_coordinator(live_brokers: fn -> [] end, metadata_source: timing_out(), apply_command: fn _ -> :ok end)
+
+      log =
+        capture_log(fn ->
+          assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
+        end)
+
+      assert log =~ "heal pass skipped: the metadata could not be read"
+      assert Process.alive?(coordinator)
+    end
+
+    test "says so once while the broker stays busy, and again after a pass got through" do
+      reads = :counters.new(1, [])
+      busy = timing_out()
+
+      source = fn ->
+        :counters.add(reads, 1, 1)
+        if :counters.get(reads, 1) == 3, do: Metadata.new(), else: busy.()
+      end
+
+      coordinator =
+        start_coordinator(live_brokers: fn -> [] end, metadata_source: source, apply_command: fn _ -> :ok end)
+
+      pass = fn -> capture_log(fn -> HealCoordinator.heal_now(coordinator) end) end
+
+      assert pass.() =~ "heal pass skipped"
+      refute pass.() =~ "heal pass skipped"
+      refute pass.() =~ "heal pass skipped"
+      assert pass.() =~ "heal pass skipped"
+    end
+
+    test "a command the broker does not answer stops the rest of them, says so once, and the coordinator stays up" do
+      primary = start_broker()
+
+      # Two orphaned fences, so the pass has two commands to hand over.
+      metadata =
+        Enum.reduce(["events", "more"], Metadata.new(), fn topic, meta ->
+          {meta, {:ok, root}} = Metadata.apply(meta, {:create_topic, topic, 4})
+          {meta, :ok} = Metadata.apply(meta, {:register_segment, root, {root, 0}, [primary, :b, :c], 0})
+          {:ok, _last} = ReplicationServer.follow(primary, {root, 0}, 0, records(["x"]))
+          {:ok, 1, _bytes} = ReplicationServer.seal(primary, {root, 0}, 0)
+          meta
+        end)
+
+      test_pid = self()
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary, :b, :c] end,
+          metadata_source: fn -> metadata end,
+          apply_command: fn command ->
+            send(test_pid, {:handed, command})
+            exit({:timeout, {GenServer, :call, [Malachi.LogBroker, {:apply_heal, [command]}, 5000]}})
+          end,
+          probe_timeout: 500
+        )
+
+      log =
+        capture_log(fn ->
+          assert %{applied: [_, _]} = HealCoordinator.heal_now(coordinator)
+          assert %{applied: [_, _]} = HealCoordinator.heal_now(coordinator)
+        end)
+
+      assert_received {:handed, _first}
+      assert_received {:handed, _again}
+      refute_received {:handed, _third}
+      assert length(String.split(log, "heal pass could not hand its commands to the broker")) == 2
+      assert Process.alive?(coordinator)
+    end
+
+    test "a seal whose read-back times out is neither counted nor reported, and the coordinator stays up" do
+      primary = start_broker()
+      {metadata, segment_id} = active_segment([primary, :b, :c], [primary], ["x"])
+      {source, apply} = metadata_store(metadata)
+      {:ok, 1, _bytes} = ReplicationServer.seal(primary, segment_id, 0)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [primary, :b, :c] end,
+          metadata_source: answers_once(source),
+          apply_command: apply,
+          probe_timeout: 500
+        )
+
+      log =
+        capture_log(fn ->
+          assert [{:seal_segment, ^segment_id, 1, _bytes, _at}] = HealCoordinator.heal_now(coordinator).applied
+        end)
+
+      assert Metadata.get_segment(source.(), segment_id).state == :sealed
+      refute log =~ "reconciled 1 segment"
+      refute log =~ "could not record the seal"
+      assert Process.alive?(coordinator)
+    end
+
+    test "a replaced copy whose read-back times out is kept, and the coordinator stays up" do
+      {b, b_dir} = start_broker_at(store: FaultySegmentStore)
+      [a, c, d] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_on([b, a, c], ["x", "y", "z"])
+      {source, apply} = metadata_store(metadata)
+      fail_copy!(b, b_dir, segment_id, 3)
+      test_pid = self()
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c, d] end,
+          metadata_source: answers_once(source),
+          apply_command: apply,
+          discard_copy: fn replica, id -> send(test_pid, {:discarded, replica, id}) end
+        )
+
+      capture_log(fn ->
+        assert [{:set_segment_replicas, ^segment_id, _new_set}] = HealCoordinator.heal_now(coordinator).applied
+      end)
+
+      refute_received {:discarded, _replica, _segment_id}
+      assert ReplicationServer.failed_segments(b, [segment_id]) == {:ok, MapSet.new([segment_id])}
+      assert Process.alive?(coordinator)
+    end
+  end
+
+  describe "the order commands reach the control plane" do
+    test "a failover seal goes before a heal command, so a heal the broker does not answer cannot hold it back" do
+      # The pass has already fenced the followers of the segment it fails over, and nothing plans that seal
+      # again once its primary is back. A heal command is planned again every pass, so it is the one to wait.
+      [a, d, f1, f2] = [start_broker(), start_broker(), start_broker(), start_broker()]
+      {sealed, healed_id} = sealed_segment([a, :b, :c], a, ["x"])
+      {metadata, {:ok, root}} = Metadata.apply(sealed, {:create_topic, "more", 4})
+      failed_over = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, failed_over, [:gone, f1, f2], 0})
+      for follower <- [f1, f2], do: {:ok, _last} = ReplicationServer.follow(follower, failed_over, 0, records(["y"]))
+      test_pid = self()
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, :b, d, f1, f2] end,
+          metadata_source: fn -> metadata end,
+          apply_command: fn command ->
+            send(test_pid, {:handed, command})
+            exit({:timeout, {GenServer, :call, [Malachi.LogBroker, {:apply_heal, [command]}, 5000]}})
+          end,
+          probe_timeout: 500
+        )
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        applied = HealCoordinator.heal_now(coordinator).applied
+        assert Enum.any?(applied, &match?({:set_segment_replicas, ^healed_id, _set}, &1))
+        assert Enum.any?(applied, &match?({:seal_segment, ^failed_over, _length, _bytes, _at}, &1))
+      end)
+
+      assert_received {:handed, {:seal_segment, ^failed_over, _length, _bytes, _at}}
+      refute_received {:handed, _next}
+    end
+
+    test "an orphan seal goes before a heal command too" do
+      # Planned again every pass while its primary stays fenced, so this only saves a pass; but a range that
+      # refuses every write until then is what the orphan pass exists to end.
+      [a, d, primary] = [start_broker(), start_broker(), start_broker()]
+      {sealed, healed_id} = sealed_segment([a, :b, :c], a, ["x"])
+      {metadata, {:ok, root}} = Metadata.apply(sealed, {:create_topic, "more", 4})
+      orphan = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, orphan, [primary, :b], 0})
+      {:ok, _last} = ReplicationServer.follow(primary, orphan, 0, records(["y"]))
+      {:ok, 1, _bytes} = ReplicationServer.seal(primary, orphan, 0)
+      test_pid = self()
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, :b, d, primary] end,
+          metadata_source: fn -> metadata end,
+          apply_command: fn command ->
+            send(test_pid, {:handed, command})
+            exit({:timeout, {GenServer, :call, [Malachi.LogBroker, {:apply_heal, [command]}, 5000]}})
+          end,
+          probe_timeout: 500
+        )
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        applied = HealCoordinator.heal_now(coordinator).applied
+        assert Enum.any?(applied, &match?({:set_segment_replicas, ^healed_id, _set}, &1))
+        assert Enum.any?(applied, &match?({:seal_segment, ^orphan, _length, _bytes, _at}, &1))
+      end)
+
+      assert_received {:handed, {:seal_segment, ^orphan, _length, _bytes, _at}}
+      refute_received {:handed, _next}
+    end
+  end
+
+  # Answers the pass's first read from `source`, then times out like a broker busy with a restarting peer.
+  defp answers_once(source) do
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    fn ->
+      case Agent.get_and_update(reads, &{&1, &1 + 1}) do
+        0 -> source.()
+        _later -> exit({:timeout, {GenServer, :call, [Malachi.LogBroker, :metadata, 5000]}})
+      end
+    end
   end
 end

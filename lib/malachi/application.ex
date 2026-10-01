@@ -594,6 +594,13 @@ defmodule Malachi.Application do
   # whole pass, and the pass runs every five seconds.
   @vnode_leader_poll_timeout_ms 1_000
 
+  # The resume pass asks every group of a stopped member through every node at once (see
+  # `resume_local_vnodes/3`). An ask outlives its call's own timeout only when ra follows a redirect with a
+  # fresh one, so three of them is past any ask that can still answer; the cap bounds the processes a full
+  # restart of a large ring starts at once.
+  @vnode_resume_ask_timeout_ms 3 * @vnode_leader_poll_timeout_ms
+  @vnode_resume_ask_concurrency 256
+
   # The cluster's current routing topology, read from the membership this node already gossips with. The
   # single live read in this module: `current_ring/0` and `current_vnodes/0` both derive from it, so
   # there is one place that decides what a read failure means, and no second reader can forget the catch.
@@ -750,8 +757,10 @@ defmodule Malachi.Application do
     end)
   end
 
-  defp ra_member_nodes(server_id) do
-    case :ra.members(server_id) do
+  # `:ra.members/2` without a timeout waits ra's default of five seconds, which is what the rebalancing
+  # coordinator has always used; a caller on a reconcile loop passes its own, far below its tick.
+  defp ra_member_nodes(server_id, timeout \\ 5_000) do
+    case :ra.members(server_id, timeout) do
       {:ok, members, _leader} -> {:ok, Enum.map(members, fn {_name, node} -> node end)}
       _unreachable -> :error
     end
@@ -1378,6 +1387,7 @@ defmodule Malachi.Application do
       placement: &current_vnodes/0,
       leading: &leading_vnodes(&1, node()),
       version_servers: &local_vnode_servers(&1, node()),
+      resume: &resume_local_vnodes(&1, node()),
       spawn: &start_vnode_coordinators/1,
       stop: &stop_vnode_coordinators/1,
       interval: Application.get_env(:malachi, :vnode_reconcile_interval_ms, 5_000)
@@ -1717,6 +1727,105 @@ defmodule Malachi.Application do
       vnode_id
     end
   end
+
+  @doc """
+  Restarts this node's stopped member of every metadata vnode the group still counts it in, and returns
+  what happened to each one it tried: `{vnode_id, :ok}` for a member brought back, `{vnode_id, {:error,
+  reason}}` for one that could not be.
+
+  `ra` does not restart a node's registered servers when the node comes back. Every other store has its
+  own reconciler doing it for the node's own member on every tick; the metadata vnodes had none, so a
+  restarted node never rejoined any vnode (the leader-only bootstrap in `Malachi.BrokerServer` skips a
+  vnode whose other members still answer, and resumes only its own member). A rolling restart then took
+  the vnodes below quorum at its second node, and a full restart at once (#136). Restoring a replica is
+  the duty of the node that hosts it, as in NorthGuard, where a vnode stays in place while its Raft
+  group's replicas come and go; which node leads it, and so runs its coordinators, follows from there.
+
+  The rule, per vnode of `vnodes`:
+
+    * a member that is running is left alone, and nothing is asked;
+    * a vnode this node never registered a member of is left alone too, without a remote call, which is
+      most of the ring on a large cluster;
+    * otherwise the group is asked whether it still counts this node, through every other node of the
+      cluster and of the ring's placement. Not the placement alone: it changes only on a split, never on
+      a rebalance, so a vnode moved to other nodes still lists the old ones. A rebalance deletes the
+      member it removes once the leave commits (`Malachi.Cluster.Rebalance.ra_remove_member/4`), but a
+      member whose leave outlasted the call is only stopped, and one removed before rebalances deleted,
+      or whose delete could not reach its node, is still registered too: for each of them the group as it
+      is now says it no longer counts it;
+    * when no node answers for the group, the member is resumed anyway: that is a group whose every
+      member is down, and resuming each node's own member is the only way it regains a quorum;
+    * resuming only ever restarts a registered member (`RaCluster.resume/1`), never forms one.
+
+  The asks run on the vnode coordinator manager's loop, before it reads leadership, so they run at once
+  rather than one after another: a group with no leader holds each ask for its whole timeout, and asked in
+  turn, every stopped member times every node would hold the loop that many seconds. At once, a pass costs
+  one bounded ask while the stopped members times the nodes stay under 256, and one more per 256 above.
+
+  Seams, all defaulting to live `ra` and this node's configuration: `:peers` (the nodes to ask through,
+  default the configured cluster), `:running?` and `:registered?` (`server_id -> boolean`), `:members`
+  (`server_id -> {:ok, [node]} | :error`, bounded well below a reconcile tick) and `:resume` (`server_id
+  -> :ok | :not_hosted | {:error, reason}`).
+  """
+  @spec resume_local_vnodes([{atom(), non_neg_integer(), [node()]}], node(), keyword()) ::
+          [{atom(), :ok | {:error, term()}}]
+  def resume_local_vnodes(vnodes, this_node \\ node(), opts \\ []) do
+    peers = Keyword.get_lazy(opts, :peers, &configured_nodes/0)
+    running? = Keyword.get(opts, :running?, &vnode_member_running?/1)
+    registered? = Keyword.get(opts, :registered?, &vnode_member_registered?/1)
+    members = Keyword.get(opts, :members, &ra_member_nodes(&1, @vnode_leader_poll_timeout_ms))
+    resume = Keyword.get(opts, :resume, &RaCluster.resume/1)
+
+    # Local lookups first, so a vnode whose member runs, or that never had one here, costs no remote call.
+    stopped =
+      for {vnode_id, _token, nodes} <- vnodes,
+          not running?.({vnode_id, this_node}),
+          registered?.({vnode_id, this_node}),
+          do: {vnode_id, List.delete(Enum.uniq(peers ++ nodes), this_node)}
+
+    counted = counted_by_group(stopped, this_node, members)
+
+    Enum.flat_map(stopped, fn {vnode_id, _asked} ->
+      with true <- Map.fetch!(counted, vnode_id),
+           outcome when outcome != :not_hosted <- resume.({vnode_id, this_node}) do
+        [{vnode_id, outcome}]
+      else
+        _uncounted_or_not_hosted -> []
+      end
+    end)
+  end
+
+  # Whether each stopped member's group still counts `this_node`, every group asked through each of its
+  # nodes at once (see `resume_local_vnodes/3`). The first node in order that answers decides, as asked in
+  # turn it would have; a group none of them answers for counts it. An ask still running at the bound is
+  # killed and counts as no answer.
+  defp counted_by_group(stopped, this_node, members) do
+    asks = for {vnode_id, nodes} <- stopped, node <- nodes, do: {vnode_id, node}
+
+    answers =
+      asks
+      |> Task.async_stream(members,
+        max_concurrency: @vnode_resume_ask_concurrency,
+        timeout: @vnode_resume_ask_timeout_ms,
+        on_timeout: :kill_task
+      )
+      |> Enum.zip(asks)
+      |> Enum.group_by(fn {_answer, {vnode_id, _node}} -> vnode_id end, fn {answer, _ask} -> answer end)
+
+    Map.new(stopped, fn {vnode_id, _nodes} ->
+      case Enum.find(Map.get(answers, vnode_id, []), &match?({:ok, {:ok, _member_nodes}}, &1)) do
+        {:ok, {:ok, member_nodes}} -> {vnode_id, this_node in member_nodes}
+        nil -> {vnode_id, true}
+      end
+    end)
+  end
+
+  # ra registers a local server under its cluster name, so these are local lookups and cost nothing: the
+  # process for a running one, the directory (which outlives the process) for one that ever existed here.
+  defp vnode_member_running?({vnode_id, this_node}) when this_node == node(), do: Process.whereis(vnode_id) != nil
+
+  defp vnode_member_registered?({vnode_id, this_node}) when this_node == node(),
+    do: :ra_directory.uid_of(:default, vnode_id) != :undefined
 
   @doc """
   The reconciler child of a replicated store, which is also its machine-version watcher.

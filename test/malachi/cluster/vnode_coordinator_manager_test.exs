@@ -47,6 +47,141 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
     manager
   end
 
+  describe "resuming this node's vnode members" do
+    import ExUnit.CaptureLog
+
+    defp next_message do
+      receive do
+        message -> message
+      after
+        1_000 -> flunk("no message from the manager")
+      end
+    end
+
+    # A stopped local member reads as not hosted, so nothing about leadership or coordinators can see it:
+    # the resume has to come first on every pass.
+    defp start_resuming(outcomes_agent) do
+      test_pid = self()
+
+      {:ok, manager} =
+        Manager.start_link(
+          placement: fn -> {:ok, [:placement]} end,
+          resume: fn placement ->
+            send(test_pid, {:resume, placement})
+
+            case Agent.get(outcomes_agent, & &1) do
+              {:raise, message} -> raise ArgumentError, message
+              outcomes -> outcomes
+            end
+          end,
+          leading: fn _placement ->
+            send(test_pid, :leading)
+            []
+          end,
+          spawn: fn _vnode_id -> spawn(fn -> :ok end) end,
+          stop: fn _pid -> :ok end,
+          interval: 60_000
+        )
+
+      manager
+    end
+
+    test "resumes before it works out which vnodes this node leads, on every pass" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+
+      # Taken in arrival order, not matched anywhere in the mailbox as `assert_receive` would: both seams
+      # send from the manager, so the order they arrive in is the order they ran in.
+      assert next_message() == {:resume, [:placement]}
+      assert next_message() == :leading
+      Manager.reconcile_now(manager)
+      assert next_message() == {:resume, [:placement]}
+      assert next_message() == :leading
+    end
+
+    test "logs every member it brought back" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      # The first pass runs on its own right after start; the answers change only once it is done.
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> [{:vn_a, :ok}] end)
+
+      log = capture_log([level: :info], fn -> Manager.reconcile_now(manager) end)
+      assert log =~ "resumed this node's member of vnode :vn_a"
+    end
+
+    test "logs a member that cannot be resumed once while it keeps failing, and again after it recovers" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      # The first pass runs on its own right after start; the answers change only once it is done.
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+
+      first = capture_log(fn -> Manager.reconcile_now(manager) end)
+      assert first =~ "could not resume this node's member of vnode :vn_a: :corrupt"
+
+      again = capture_log(fn -> Manager.reconcile_now(manager) end)
+      refute again =~ "could not resume"
+
+      Agent.update(outcomes, fn _ -> [] end)
+      Manager.reconcile_now(manager)
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "could not resume this node's member"
+    end
+
+    test "a resume that raises skips the resume, logs it once, and still reconciles the coordinators" do
+      # The production resume reads the ra directory, which raises while the ra system restarts. Crashing
+      # here would restart every running coordinator with it: the manager shares a one_for_all supervisor
+      # with them. The manager is linked to this test, so a crash would fail it at the first call below.
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+
+      first = capture_log(fn -> Manager.reconcile_now(manager) end)
+      assert first =~ "could not resume this node's vnode members"
+      assert first =~ "ra system not running"
+      assert_receive :leading
+
+      again = capture_log(fn -> Manager.reconcile_now(manager) end)
+      refute again =~ "could not resume"
+      assert_receive :leading
+
+      # Once a pass completes the cause is cleared, so the same failure is reported again if it returns.
+      Agent.update(outcomes, fn _ -> [] end)
+      Manager.reconcile_now(manager)
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "could not resume this node's vnode members"
+    end
+
+    test "a resume that raises for a different cause is logged again" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "ra system not running"
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra directory table missing"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "ra directory table missing"
+    end
+
+    test "a resume that raises keeps the members still failing from before, so they are not logged anew" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "vnode :vn_a: :corrupt"
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      capture_log(fn -> Manager.reconcile_now(manager) end)
+
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      refute capture_log(fn -> Manager.reconcile_now(manager) end) =~ "vnode :vn_a"
+    end
+  end
+
   test "starts a coordinator handle for each led vnode on startup" do
     {:ok, leading} = Agent.start_link(fn -> {:ok, [:a, :b]} end)
     manager = start_manager(leading)

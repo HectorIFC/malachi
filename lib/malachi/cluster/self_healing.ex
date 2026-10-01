@@ -162,16 +162,43 @@ defmodule Malachi.Cluster.SelfHealing do
   end
 
   defp backfill(to_add, source, segment, opts) do
-    from = segment.start_offset
     to = segment.start_offset + segment.length
 
     Enum.reduce_while(to_add, :ok, fn replica, :ok ->
-      case Catchup.run(replica, source, segment.id, from, to, opts) do
+      case backfill_copy(replica, source, segment, to, opts) do
         {:ok, ^to} -> {:cont, :ok}
         {:ok, reached} -> {:halt, {:error, {:incomplete_source, reached}}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # Starts at the end of what the new replica already holds, as `repair_copy/5` does, never at the
+  # segment's base: a pass cut short after a batch was fsynced (the target restarted, or a follow timed
+  # out after landing) leaves a partial copy, placement picks the same broker next pass, and a copy
+  # restarted at the base would be refused as out of sync on every pass after that. A copy that already
+  # reaches the end needs nothing; one that runs past it is settled by the integrity pass once the
+  # replica is in the set (`Malachi.Cluster.SealedOverrun`).
+  #
+  # Asks `durable_end/4` itself rather than through `probe_durable_end/3`, which folds a storage failure
+  # into :unreachable because the integrity pass skips both alike. Here either one fails the segment,
+  # and a copy that failed on a disk that answers is not a broker that is down: the reason is what the
+  # heal warning shows.
+  defp backfill_copy(replica, source, segment, to, opts) do
+    case target_durable_end(replica, segment.id, segment.start_offset) do
+      {:ok, from} when from >= to -> {:ok, to}
+      {:ok, from} -> Catchup.run(replica, source, segment.id, from, to, opts)
+      {:error, reason} -> {:error, {:target, reason}}
+    end
+  end
+
+  defp target_durable_end(replica, segment_id, base_offset) do
+    case ReplicationServer.durable_end(replica, segment_id, base_offset, @probe_timeout) do
+      {:error, reason} -> {:error, reason}
+      end_offset -> {:ok, end_offset}
+    end
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   # --- physical integrity pass (lost sealed copies on live replicas) ---

@@ -76,6 +76,20 @@ defmodule Malachi.Cluster.RaClusterTest do
     assert match?({:ok, _topology}, Ring.topology(state)), "a resumed member must keep its history"
   end
 
+  test "resume/1 restarts a stopped member from its log, and forms nothing for a name never started here" do
+    {_name, server_id} = start_cluster()
+    {:ok, :ok} = RaCluster.command(server_id, {:init, seed_topology()})
+    :ok = :ra.stop_server(:default, server_id)
+
+    assert RaCluster.resume(server_id) == :ok
+    assert {:ok, %Ring{} = state} = RaCluster.query(server_id)
+    assert match?({:ok, _topology}, Ring.topology(state)), "a resumed member must keep its history"
+
+    never = {:"never_started_#{System.unique_integer([:positive])}", node()}
+    assert RaCluster.resume(never) == :not_hosted
+    assert :ra_directory.uid_of(:default, elem(never, 0)) == :undefined
+  end
+
   test "reconcile/3 is a no-op once the local server is up" do
     {name, server_id} = start_cluster()
     {:ok, :ok} = RaCluster.command(server_id, {:init, seed_topology()})

@@ -21,8 +21,10 @@ defmodule Malachi.Cluster.Placement do
   `{:set_segment_replicas, ...}` commands to apply through the RSM (and, later, Raft), it does
   not mutate anything itself.
 
-  Self-healing covers **all** segments, sealed as well as active: a sealed segment is immutable
-  but its data must still survive `replication_factor` failures, so a lost replica is re-placed.
+  `heal/3` and `under_replicated/3` cover **all** segments, sealed as well as active. The healing
+  that runs (`Malachi.Cluster.SelfHealing`, driven by `Malachi.Cluster.HealCoordinator`) acts on
+  sealed ones only: a sealed segment's offset range is fixed, so re-placing a lost replica is a
+  well-defined copy, while an active one is still being written.
 
   `available_brokers` is an abstract broker set supplied by the caller. Membership (which
   brokers are actually alive) is a separate concern (SWIM, later); taking it as a parameter is
