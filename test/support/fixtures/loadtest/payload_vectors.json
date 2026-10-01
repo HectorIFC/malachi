@@ -1,0 +1,160 @@
+{
+  "about": "Golden vectors for the load generator payloads (#192), read by test/malachi/loadtest/payload_test.exs and scripts/lib/payload.selftest.js. prng: the first 16 outputs of xoshiro128** seeded with SplitMix64, per seed, checked against the reference C in xoshiro128starstar_ref.c compiled on Linux (docker run --rm -v \"$PWD\":/w -w /w alpine:3.21 sh -c \"apk add gcc musl-dev && gcc -O2 -o /tmp/ref xoshiro128starstar_ref.c && /tmp/ref 0 1 4294967295\"). digests: the SHA-256 of the first count values concatenated. ratio_band: what zstd at level 1 must give for blocks of json, random and constant values.",
+  "digests": [
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 149,
+      "seed": 1,
+      "sha256": "8ab0f57b4c5efde2502567cfb6f63e5b5737e85511770d51183dba00b1181b05"
+    },
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 256,
+      "seed": 1,
+      "sha256": "5030969cc72c4c703d7bc3de0ca16ca3c5d41df21cc0bf9fc9bfe401ed6f203a"
+    },
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 1024,
+      "seed": 1,
+      "sha256": "515aa026cd6de3fc89656798b29ffbc4f03e0ed3c9483fedbd17cf188037a757"
+    },
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 149,
+      "seed": 42,
+      "sha256": "af973650a5704b03bc3cf19130b8fe0920f8ab71655c53761f364d18ac983430"
+    },
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 256,
+      "seed": 42,
+      "sha256": "bd8caebebc65f9aa820ad44da34fabeb074936f23f3d3617ba79c202f1fa96dd"
+    },
+    {
+      "count": 1000,
+      "mode": "json",
+      "record_size": 1024,
+      "seed": 42,
+      "sha256": "199ef587a76e02d2cf95f76fe17ac73cb1ce0efdc03f8a0ce990bffa170fe235"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 1,
+      "seed": 1,
+      "sha256": "ceb25ff45ca92c35b13c885386ad44ada5cc90c039ee40e7385bbbadb4c6ea2a"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 256,
+      "seed": 1,
+      "sha256": "ce678f5e2a0a38dd0e32729e809505b4fbfd6094c2d61696df6657ad5bc56516"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 1024,
+      "seed": 1,
+      "sha256": "4fe3c0340ad138995158f37a0239c9c26347ed4b8eeba274a30154ae13ddd9b6"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 1,
+      "seed": 42,
+      "sha256": "48db895a8abe44ab22f286215a4ee53e089803d465d59444c7cbc3464ff19625"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 256,
+      "seed": 42,
+      "sha256": "5fd0fe26159ec1a20568c160b66e3021b9daf9bcee9671bce8c10c05b8344b3c"
+    },
+    {
+      "count": 1000,
+      "mode": "random",
+      "record_size": 1024,
+      "seed": 42,
+      "sha256": "652704b5d3f76a75be1a004d95ccefc475c91f4d00ae2a0af09c0871d088f8be"
+    }
+  ],
+  "prng": {
+    "0": [
+      3737715805,
+      2584255861,
+      2876756834,
+      3286328325,
+      1553311962,
+      1625202774,
+      3260698944,
+      2754151956,
+      2651137455,
+      2503817145,
+      3398908791,
+      908887127,
+      2130235912,
+      3380871858,
+      3883848102,
+      3936895003
+    ],
+    "1": [
+      1695105466,
+      1423115009,
+      634581793,
+      1068227753,
+      716759206,
+      4186505319,
+      3777694425,
+      2710820970,
+      2858460077,
+      2689674896,
+      1746243532,
+      3027033989,
+      3587922718,
+      3922025073,
+      1657851167,
+      1159202888
+    ],
+    "4294967295": [
+      331202089,
+      2303545133,
+      2732085799,
+      1755962312,
+      20464611,
+      435992899,
+      115300070,
+      2552219694,
+      926509624,
+      609063632,
+      1849352508,
+      420919896,
+      1996775105,
+      1697862734,
+      3658110738,
+      4098968827
+    ]
+  },
+  "ratio_band": {
+    "constant_min": 10,
+    "json_reference": {
+      "1": 1.17,
+      "10": 2.6,
+      "100": 3.8,
+      "1000": 4.1
+    },
+    "json_tolerance": 0.25,
+    "level": 1,
+    "random_max": 1.02,
+    "random_min_from_10": 0.98,
+    "record_size": 256,
+    "seed": 1
+  }
+}
