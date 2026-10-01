@@ -628,6 +628,12 @@ defmodule Malachi.I18n do
       "pt_BR" => "não foi possível retomar o membro deste nó no vnode %{vnode}: %{reason}",
       "en_US" => "could not resume this node's member of vnode %{vnode}: %{reason}"
     },
+    vnode_members_resume_raised: %{
+      "pt_BR" =>
+        "não foi possível retomar os membros de vnode deste nó: %{reason}; a passada segue sem retomar, com os coordenadores conforme a liderança que conseguir ler",
+      "en_US" =>
+        "could not resume this node's vnode members: %{reason}; the pass goes on without resuming, with the coordinators the leadership it can read calls for"
+    },
     vnode_placement_recovered: %{
       "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó",
       "en_US" => "the vnode placement is readable again; reconciling this node's coordinators"

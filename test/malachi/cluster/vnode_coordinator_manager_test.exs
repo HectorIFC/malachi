@@ -68,7 +68,11 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
           placement: fn -> {:ok, [:placement]} end,
           resume: fn placement ->
             send(test_pid, {:resume, placement})
-            Agent.get(outcomes_agent, & &1)
+
+            case Agent.get(outcomes_agent, & &1) do
+              {:raise, message} -> raise ArgumentError, message
+              outcomes -> outcomes
+            end
           end,
           leading: fn _placement ->
             send(test_pid, :leading)
@@ -123,6 +127,58 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerTest do
       Manager.reconcile_now(manager)
       Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
       assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "could not resume this node's member"
+    end
+
+    test "a resume that raises skips the resume, logs it once, and still reconciles the coordinators" do
+      # The production resume reads the ra directory, which raises while the ra system restarts. Crashing
+      # here would restart every running coordinator with it: the manager shares a one_for_all supervisor
+      # with them. The manager is linked to this test, so a crash would fail it at the first call below.
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+
+      first = capture_log(fn -> Manager.reconcile_now(manager) end)
+      assert first =~ "could not resume this node's vnode members"
+      assert first =~ "ra system not running"
+      assert_receive :leading
+
+      again = capture_log(fn -> Manager.reconcile_now(manager) end)
+      refute again =~ "could not resume"
+      assert_receive :leading
+
+      # Once a pass completes the cause is cleared, so the same failure is reported again if it returns.
+      Agent.update(outcomes, fn _ -> [] end)
+      Manager.reconcile_now(manager)
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "could not resume this node's vnode members"
+    end
+
+    test "a resume that raises for a different cause is logged again" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "ra system not running"
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra directory table missing"} end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "ra directory table missing"
+    end
+
+    test "a resume that raises keeps the members still failing from before, so they are not logged anew" do
+      {:ok, outcomes} = Agent.start_link(fn -> [] end)
+      manager = start_resuming(outcomes)
+      assert_receive :leading
+
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      assert capture_log(fn -> Manager.reconcile_now(manager) end) =~ "vnode :vn_a: :corrupt"
+
+      Agent.update(outcomes, fn _ -> {:raise, "ra system not running"} end)
+      capture_log(fn -> Manager.reconcile_now(manager) end)
+
+      Agent.update(outcomes, fn _ -> [{:vn_a, {:error, :corrupt}}] end)
+      refute capture_log(fn -> Manager.reconcile_now(manager) end) =~ "vnode :vn_a"
     end
   end
 
