@@ -378,9 +378,11 @@ check_ring() {
 
 refused_rollback() {
   event "p3: node 3 started on OLD after the flip must refuse its data directory"
-  before=$(acked_count)
   capture_logs malachi-cluster-3 "p3 NEW node 3 before the refused rollback"
   $COMPOSE stop malachi3 >/dev/null 2>&1
+  # Counted once node 3 has stopped, as `roll_node` does: counted before, the acks node 3 took while it still
+  # ran would pass the quorum-on-2/3 check below without nodes 1 and 2 ever acknowledging a write alone.
+  before=$(acked_count)
   volume=$(data_volume_of malachi-cluster-3)
   volume_md5 "$volume" "$NEW_IMAGE" >"$WORK/md5-before.txt" || fail "could not read node 3's data before the rollback"
 

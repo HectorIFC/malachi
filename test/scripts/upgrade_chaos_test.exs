@@ -479,6 +479,13 @@ defmodule UpgradeChaosTest do
       assert output =~ "FAIL: the split did not complete"
     end
 
+    test "fails when no produce is acknowledged once node 3 stops for the refused rollback", ctx do
+      # Counted from before the stop, the acks that arrive while node 3 still runs would pass the step
+      # without nodes 1 and 2 ever acknowledging a write on their own.
+      assert {output, 1} = run_drill(ctx, [{"STUB_STALL_ON_REFUSED_ROLLBACK", "1"}, {"PROGRESS_TIMEOUT_S", "2"}])
+      assert output =~ "FAIL: no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3)"
+    end
+
     test "fails when no produce is acknowledged through the split", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_STALL_ON_SPLIT", "1"}, {"PROGRESS_TIMEOUT_S", "4"}])
       assert output =~ "FAIL: no produce was acknowledged through the split"
@@ -750,6 +757,7 @@ defmodule UpgradeChaosTest do
   #   STUB_BUILD_FAILS    old or new: that image does not build
   #   STUB_SPLIT          refused: the reshard is refused
   #   STUB_STALL_ON_SPLIT 1: no ack arrives once the split has run
+  #   STUB_STALL_ON_REFUSED_ROLLBACK 1: no ack arrives once node 3 stops for the refused rollback
   #   STUB_RING_AFTER_ROLLBACK  the vnode count every ring read after the first reports
   #   STUB_UP_REFUSED_NODE      fail: compose cannot start node 3 on OLD after the flip
   #   STUB_PRODUCE_FAILS_ON     a host list: a load test through exactly those hosts reports errors
@@ -796,6 +804,13 @@ defmodule UpgradeChaosTest do
 
     # The split is the moment acks stop, when asked: before this very call counts as one.
     [[ "$full" == *malachi.reshard* ]] && [ "${STUB_STALL_ON_SPLIT:-}" = 1 ] && touch "$STUB_LOG.stalled"
+    # The refused rollback is the one step that reads node 3's log BEFORE stopping it (a roll stops first),
+    # so a stop of malachi3 right after that read is where its acks stop, when asked.
+    if [ "${STUB_STALL_ON_REFUSED_ROLLBACK:-}" = 1 ] && [ -f "$STUB_LOG.logs3" ] && [[ "$full" == *" stop malachi3"* ]]; then
+      touch "$STUB_LOG.stalled"
+    fi
+    rm -f "$STUB_LOG.logs3"
+    [[ "$full" == "logs malachi-cluster-3"* ]] && touch "$STUB_LOG.logs3"
     acked_file="$STUB_LOG.acked"
     [ -f "$acked_file" ] && [ -f "$(cat "$acked_file")" ] && [ ! -f "$STUB_LOG.stalled" ] && echo more >> "$(cat "$acked_file")"
 
