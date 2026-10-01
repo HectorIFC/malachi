@@ -81,6 +81,7 @@ checkout:
 ```
 { read -r head base; cat > "$S/pr.json"; } < <(gh pr view "$N" --json number,title,body,author,headRefOid,baseRefOid,headRefName,closingIssuesReferences,commits --jq '"\(.headRefOid) \(.baseRefOid)", tojson')
 case "$head$base" in *[!0-9a-f]*|'') echo "stop: unexpected commit ids"; exit 1 ;; esac
+printf '%s\n' "$N" > "$S/pr-number"; printf '%s\n' "$head" > "$S/head.txt"   # read back in step 7
 /usr/bin/git fetch --no-tags origin "$head" "$base"
 /usr/bin/git cat-file -e "$head^{commit}" || { echo "stop: head $head of #$N could not be fetched"; exit 1; }
 mb=$(/usr/bin/git merge-base "$base" "$head") || { echo "stop: no merge base for #$N"; exit 1; }
@@ -218,6 +219,29 @@ Only what needs wave 1's output:
 
 ## 7. Report and hand the decision over
 
+In PR mode, first check that the review still matches the pull request, so the header can say if it
+does not. What was reviewed is the diff from the merge base to the head, so that pair is what is
+compared, not the base itself: the base moving forward with commits the head does not have (another pull
+request merged, a release commit) leaves the merge base and the diff as they were, and is not worth a
+word. Step 7 runs in a later shell than step 1, so the values come from the files step 1 left in `$S`:
+
+```
+N=$(cat "$S/pr-number"); head=$(cat "$S/head.txt"); mb=$(cat "$S/pin/base.txt")
+read -r head2 base2 < <(gh pr view "$N" --json headRefOid,baseRefOid --jq '"\(.headRefOid) \(.baseRefOid)"')
+case "$head2$base2" in *[!0-9a-f]*|'') echo "could not re-read #$N" ;; *)
+  if /usr/bin/git fetch --no-tags origin "$head2" "$base2" && mb2=$(/usr/bin/git merge-base "$base2" "$head2"); then
+    [ "$head2" = "$head" ] && [ "$mb2" = "$mb" ] && echo "unchanged" || echo "moved"
+  else
+    echo "could not re-read #$N"
+  fi ;;
+esac
+```
+
+`moved` means the review covered a diff the pull request no longer has: a push to the head, a retarget,
+a rewritten base, or a base that took in commits the head already had (a pull request this one was
+stacked on being merged). Say so in the header and that the review should be run again. `could not
+re-read` is said as it is, not taken as unchanged or as moved.
+
 In the contributor's language. First the header, with no numbers:
 
 - the target: branch and base, or `#N` with its base and head commits; the tools that ran; the files not
@@ -246,25 +270,6 @@ Each item gets:
 
 Then ask with `AskUserQuestion`, up to four items per call, each option labelled with its number and
 letter (`3A`, `3B`). Ask again for the rest.
-
-In PR mode, check that the review still matches the pull request before reporting. What was reviewed
-is the diff from the merge base `$mb` to `$head`, so that pair is what is compared, not the base itself:
-the base moving forward with commits the head does not have (another pull request merged, a release
-commit) leaves `$mb` and the diff as they were, and is not worth a word.
-
-```
-read -r head2 base2 < <(gh pr view "$N" --json headRefOid,baseRefOid --jq '"\(.headRefOid) \(.baseRefOid)"')
-case "$head2$base2" in *[!0-9a-f]*|'') echo "could not re-read #$N" ;; *)
-  /usr/bin/git fetch --no-tags origin "$head2" "$base2"
-  mb2=$(/usr/bin/git merge-base "$base2" "$head2")
-  [ "$head2" = "$head" ] && [ "$mb2" = "$mb" ] && echo "unchanged" || echo "moved" ;;
-esac
-```
-
-`moved` means the review covered a diff the pull request no longer has: a push to the head, a retarget,
-a rewritten base, or a base that took in commits the head already had (a pull request this one was
-stacked on being merged). Say so in the header and that the review should be run again. `could not
-re-read` is said as it is, not taken as unchanged.
 
 End with one line on which review to trust for what (defects: `adversarial-review`; compliance,
 suggestions and summary: this one), and remove the pull request's worktree if there is one.
