@@ -26,6 +26,23 @@ defmodule Malachi.WireTest do
   end
 
   describe "envelope" do
+    test "a request sent as iodata is the bytes of the encoded request, whatever shape the payload has" do
+      records = [%Record{key: "k", value: "v", timestamp: 7, headers: [{"h", "x"}]}]
+      encoded = Wire.encode_produce_records(records)
+      expected = Wire.encode_request(Wire.produce_key(), 9, Wire.encode_produce_req("t", records))
+
+      assert Wire.encode_produce_req_with("t", encoded) |> IO.iodata_to_binary() ==
+               Wire.encode_produce_req("t", records)
+
+      for payload <- [Wire.encode_produce_req("t", records), Wire.encode_produce_req_with("t", encoded)] do
+        assert payload |> then(&Wire.encode_request_iodata(Wire.produce_key(), 9, &1)) |> IO.iodata_to_binary() ==
+                 expected
+      end
+
+      assert Wire.encode_request_iodata(Wire.produce_key(), 1, []) |> IO.iodata_to_binary() ==
+               Wire.encode_request(Wire.produce_key(), 1, "")
+    end
+
     test "request round-trip carries api_key, correlation_id and payload" do
       {:ok, body, ""} = Wire.decode_frame(Wire.encode_request(Wire.produce_key(), 42, "PL"))
       assert Wire.decode_request(body) == {Wire.produce_key(), 42, "PL"}

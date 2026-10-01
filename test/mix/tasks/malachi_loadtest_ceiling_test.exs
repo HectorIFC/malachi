@@ -98,6 +98,21 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
     test "--out is required" do
       assert_raise Mix.Error, "--out is required", fn -> Task.run(["plan" | @plan_argv]) end
     end
+
+    test "records the payload and its seed in the sweep, constant without a seed by default", ctx do
+      plan!(ctx)
+      assert %{"payload" => "constant", "payload_seed" => nil} = ctx.sweep |> File.read!() |> Jason.decode!()
+
+      Task.run(["plan" | @plan_argv] ++ ["--payload", "json", "--payload-seed", "", "--out", ctx.sweep])
+      assert %{"payload" => "json", "payload_seed" => 1} = ctx.sweep |> File.read!() |> Jason.decode!()
+    end
+
+    test "a payload the generators would refuse stops the plan with status 2", ctx do
+      argv = ["plan" | @plan_argv] ++ ["--payload-seed", "4", "--out", ctx.sweep]
+
+      assert catch_exit(Task.run(argv)) == {:shutdown, 2}
+      assert_received {:mix_shell, :error, ["PAYLOAD_SEED only applies to the json and random payloads, got 4"]}
+    end
   end
 
   describe "peak" do
@@ -242,6 +257,17 @@ defmodule Mix.Tasks.Malachi.Loadtest.CeilingTest do
                "8192"
              ]) ==
                "batch 4096 x 512B (2MB of values per request, group commit off, segment preallocation 8KB)"
+    end
+
+    test "names a json or random payload, and refuses one that is neither" do
+      assert label!(@label_argv ++ ["--payload", "json"]) ==
+               "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation off, payload json)"
+
+      assert label!(@label_argv ++ ["--payload", "constant"]) == label!(@label_argv)
+
+      assert_raise Mix.Error, ~s(--payload must be one of constant, json, random, got "zip"), fn ->
+        Task.run(["label" | @label_argv] ++ ["--payload", "zip"])
+      end
     end
 
     test "prints nothing else" do

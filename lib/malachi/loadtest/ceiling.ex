@@ -33,10 +33,13 @@ defmodule Malachi.Loadtest.Ceiling do
     * A rung's server flush latency (`flush_latency_seconds`, the window the harness scraped, see
       `Malachi.Loadtest.FlushWindow`) comes from that same representative run, like its request latency,
       and so does `flush_latency_error` when that run's scrape gave no window.
-    * A run that reports a batch size, record size or connection count other than the point that
-      launched it is an error, not a data point: the harness and the generator disagree about what was
-      measured.
+    * A run that reports a batch size, record size, connection count or payload other than the point
+      that launched it is an error, not a data point: the harness and the generator disagree about what
+      was measured. A run that reports no payload at all came from a generator older than the field,
+      which only ever sent constant bytes, and is read that way.
   """
+
+  alias Malachi.Loadtest.Payload
 
   # Keep in step with the moduledoc above.
   @generator_saturation_threshold 0.9
@@ -51,7 +54,9 @@ defmodule Malachi.Loadtest.Ceiling do
           repetitions: pos_integer(),
           record_size: pos_integer(),
           group_commit: boolean(),
-          segment_prealloc_bytes: non_neg_integer()
+          segment_prealloc_bytes: non_neg_integer(),
+          payload: String.t(),
+          payload_seed: non_neg_integer() | nil
         }
 
   @typedoc "One planned repetition: batch size, connection count, repetition number."
@@ -69,8 +74,10 @@ defmodule Malachi.Loadtest.Ceiling do
   Builds a sweep from the harness's environment, given as strings exactly as the environment holds them.
 
   `params` has `:batch_ladder` (\"10 100\"), `:conns_ladders` (a list of \"<batch>=<ladder>\" entries),
-  `:headline_batch`, `:repetitions`, `:record_size`, `:group_commit` (\"true\" or \"false\") and
-  `:segment_prealloc_bytes`. Every problem is returned as a message naming the variable to fix.
+  `:headline_batch`, `:repetitions`, `:record_size`, `:group_commit` (\"true\" or \"false\"),
+  `:segment_prealloc_bytes`, `:payload` (\"constant\", \"json\" or \"random\"; constant when absent or
+  empty) and `:payload_seed` (json and random only, `Malachi.Loadtest.Payload.default_seed/0` when absent
+  or empty). Every problem is returned as a message naming the variable to fix.
   """
   @spec plan(map()) :: {:ok, sweep()} | {:error, String.t()}
   def plan(params) do
@@ -80,7 +87,8 @@ defmodule Malachi.Loadtest.Ceiling do
          {:ok, repetitions} <- parse_integer(params[:repetitions], "REPS"),
          {:ok, record_size} <- parse_integer(params[:record_size], "RSIZE"),
          {:ok, group_commit} <- parse_boolean(params[:group_commit], "MALACHI_GROUP_COMMIT"),
-         {:ok, prealloc} <- parse_integer(params[:segment_prealloc_bytes], "MALACHI_SEGMENT_PREALLOC_BYTES") do
+         {:ok, prealloc} <- parse_integer(params[:segment_prealloc_bytes], "MALACHI_SEGMENT_PREALLOC_BYTES"),
+         {:ok, payload, seed} <- parse_payload(params[:payload], params[:payload_seed], "PAYLOAD", "PAYLOAD_SEED") do
       validate(%{
         batch_ladder: batch_ladder,
         headline_batch: headline_batch,
@@ -88,7 +96,9 @@ defmodule Malachi.Loadtest.Ceiling do
         repetitions: repetitions,
         record_size: record_size,
         group_commit: group_commit,
-        segment_prealloc_bytes: prealloc
+        segment_prealloc_bytes: prealloc,
+        payload: payload,
+        payload_seed: seed
       })
     end
   end
@@ -134,14 +144,21 @@ defmodule Malachi.Loadtest.Ceiling do
       "repetitions" => sweep.repetitions,
       "record_size" => sweep.record_size,
       "group_commit" => sweep.group_commit,
-      "segment_prealloc_bytes" => sweep.segment_prealloc_bytes
+      "segment_prealloc_bytes" => sweep.segment_prealloc_bytes,
+      "payload" => sweep.payload,
+      "payload_seed" => sweep.payload_seed
     }
   end
 
-  @doc "Reads a sweep back from its JSON form, validating it as `plan/1` does."
+  @doc """
+  Reads a sweep back from its JSON form, validating it as `plan/1` does. A sweep written before the payload
+  was recorded has no `payload`, and was measured with constant bytes.
+  """
   @spec decode_sweep(term()) :: {:ok, sweep()} | {:error, String.t()}
   def decode_sweep(%{} = json) do
     validate(%{
+      payload: Map.get(json, "payload", "constant"),
+      payload_seed: json["payload_seed"],
       batch_ladder: json["batch_ladder"],
       headline_batch: json["headline_batch"],
       conns_ladders: decode_conns_ladders(json["conns_ladders"]),
@@ -175,7 +192,8 @@ defmodule Malachi.Loadtest.Ceiling do
       fn -> check_positive(sweep.repetitions, "REPS") end,
       fn -> check_positive(sweep.record_size, "RSIZE") end,
       fn -> check_boolean(sweep.group_commit, "MALACHI_GROUP_COMMIT") end,
-      fn -> check_non_negative(sweep.segment_prealloc_bytes, "MALACHI_SEGMENT_PREALLOC_BYTES") end
+      fn -> check_non_negative(sweep.segment_prealloc_bytes, "MALACHI_SEGMENT_PREALLOC_BYTES") end,
+      fn -> check_payload(sweep.payload, sweep.payload_seed, "PAYLOAD", "PAYLOAD_SEED") end
     ]
 
     Enum.find_value(checks, {:ok, sweep}, fn check ->
@@ -235,6 +253,23 @@ defmodule Malachi.Loadtest.Ceiling do
 
   defp check_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp check_non_negative(value, name), do: {:error, "#{name} must be a non-negative integer, got #{show_term(value)}"}
+
+  # Constant bytes have no seed; json and random always have one, a 32-bit word.
+  defp check_payload("constant", nil, _name, _seed_name), do: :ok
+
+  defp check_payload("constant", seed, _name, seed_name),
+    do: {:error, "#{seed_name} only applies to the json and random payloads, got #{show_term(seed)}"}
+
+  defp check_payload(payload, seed, _name, seed_name) when payload in ["json", "random"] do
+    if is_integer(seed) and seed in 0..0xFFFF_FFFF,
+      do: :ok,
+      else: {:error, "#{seed_name} must be an integer from 0 to 4294967295, got #{show_term(seed)}"}
+  end
+
+  defp check_payload(payload, _seed, name, _seed_name),
+    do: {:error, "#{name} must be one of #{Enum.join(payload_names(), ", ")}, got #{show_term(payload)}"}
+
+  defp payload_names, do: Enum.map(Payload.modes(), &Atom.to_string/1)
 
   defp check_boolean(value, _name) when is_boolean(value), do: :ok
   defp check_boolean(value, name), do: {:error, "#{name} must be true or false, got #{show_term(value)}"}
@@ -296,6 +331,21 @@ defmodule Malachi.Loadtest.Ceiling do
       {:ok, integer}
     end
   end
+
+  # The payload and its seed from the strings a harness holds: an absent or empty payload is constant
+  # bytes, and an absent or empty seed is the generators' default for json and random, none for constant.
+  defp parse_payload(payload, seed, name, seed_name) do
+    payload = if payload in [nil, ""], do: "constant", else: payload
+
+    with {:ok, seed} <- parse_seed(payload, seed, seed_name),
+         :ok <- check_payload(payload, seed, name, seed_name) do
+      {:ok, payload, seed}
+    end
+  end
+
+  defp parse_seed(_payload, seed, seed_name) when seed not in [nil, ""], do: parse_integer(seed, seed_name)
+  defp parse_seed("constant", _seed, _seed_name), do: {:ok, nil}
+  defp parse_seed(_payload, _seed, _seed_name), do: {:ok, Payload.default_seed()}
 
   defp parse_boolean("true", _name), do: {:ok, true}
   defp parse_boolean("false", _name), do: {:ok, false}
@@ -413,26 +463,39 @@ defmodule Malachi.Loadtest.Ceiling do
   group commit decides how many produces one sync carries, and preallocation changes sign across the
   flush sizes the ladder spans (`Malachi.Storage.Preallocation`), so a label naming one and not the
   other would still let two numbers from different regimes read alike.
+
+  The payload is the third such setting once anything compresses: constant bytes compress to almost
+  nothing, so a json or random run names its payload at the end of the parentheses
+  (`..., segment preallocation 64MB, payload json)`). Constant bytes add nothing, which keeps the label of
+  every series published before the payload was recorded, all of them constant, exactly as it was. The
+  seed is not in the label: it changes the bytes, not the regime, and every result records it. `payload`
+  defaults to constant for the in-process benchmarks (`benchmark/support/flush_regime.exs`), which send
+  nothing else.
   """
-  @spec regime_label(pos_integer(), pos_integer(), boolean(), non_neg_integer()) :: String.t()
-  def regime_label(batch, record_size, group_commit, segment_prealloc_bytes)
+  @spec regime_label(pos_integer(), pos_integer(), boolean(), non_neg_integer(), String.t()) :: String.t()
+  def regime_label(batch, record_size, group_commit, segment_prealloc_bytes, payload \\ "constant")
       when is_integer(batch) and batch > 0 and is_integer(record_size) and record_size > 0 and
-             is_boolean(group_commit) and is_integer(segment_prealloc_bytes) and segment_prealloc_bytes >= 0 do
+             is_boolean(group_commit) and is_integer(segment_prealloc_bytes) and segment_prealloc_bytes >= 0 and
+             payload in ["constant", "json", "random"] do
     commit = if group_commit, do: "on", else: "off"
 
     "batch #{batch} x #{format_bytes(record_size)} (#{format_bytes(batch * record_size)} of values per request, " <>
-      "group commit #{commit}, segment preallocation #{preallocation(segment_prealloc_bytes)})"
+      "group commit #{commit}, segment preallocation #{preallocation(segment_prealloc_bytes)}#{payload_clause(payload)})"
   end
+
+  defp payload_clause("constant"), do: ""
+  defp payload_clause(payload), do: ", payload #{payload}"
 
   defp preallocation(0), do: "off"
   defp preallocation(bytes), do: format_bytes(bytes)
 
   @doc """
-  `regime_label/4` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
+  `regime_label/5` for a harness that holds its regime as strings, as `benchmark/docker-cluster.sh` does.
 
-  `params` has `:batch` and `:record_size` (positive integers), `:group_commit` (\"true\" or \"false\")
-  and `:segment_prealloc_bytes` (a non-negative integer, 0 for off), as the command line gives them.
-  Every problem is returned as a message naming the flag to fix.
+  `params` has `:batch` and `:record_size` (positive integers), `:group_commit` (\"true\" or \"false\"),
+  `:segment_prealloc_bytes` (a non-negative integer, 0 for off) and `:payload` (\"constant\", \"json\" or
+  \"random\"; constant when absent), as the command line gives them. Every problem is returned as a
+  message naming the flag to fix.
   """
   @spec label(map()) :: {:ok, String.t()} | {:error, String.t()}
   def label(params) do
@@ -440,8 +503,9 @@ defmodule Malachi.Loadtest.Ceiling do
          {:ok, record_size} <- parse_checked(params[:record_size], "--record-size", &check_positive/2),
          {:ok, group_commit} <- parse_boolean(params[:group_commit], "--group-commit"),
          {:ok, prealloc} <-
-           parse_checked(params[:segment_prealloc_bytes], "--segment-prealloc-bytes", &check_non_negative/2) do
-      {:ok, regime_label(batch, record_size, group_commit, prealloc)}
+           parse_checked(params[:segment_prealloc_bytes], "--segment-prealloc-bytes", &check_non_negative/2),
+         {:ok, payload, _seed} <- parse_payload(params[:payload], nil, "--payload", "--payload-seed") do
+      {:ok, regime_label(batch, record_size, group_commit, prealloc, payload)}
     end
   end
 
@@ -467,7 +531,10 @@ defmodule Malachi.Loadtest.Ceiling do
       "bytes_per_request" => batch * sweep.record_size,
       "group_commit" => sweep.group_commit,
       "segment_prealloc_bytes" => sweep.segment_prealloc_bytes,
-      "regime_label" => regime_label(batch, sweep.record_size, sweep.group_commit, sweep.segment_prealloc_bytes)
+      "payload" => sweep.payload,
+      "payload_seed" => sweep.payload_seed,
+      "regime_label" =>
+        regime_label(batch, sweep.record_size, sweep.group_commit, sweep.segment_prealloc_bytes, sweep.payload)
     }
   end
 
@@ -478,9 +545,9 @@ defmodule Malachi.Loadtest.Ceiling do
 
       %{batch: batch, connections: connections, rep: rep, result: result} ->
         describes_point(
+          sweep,
           result,
           batch,
-          sweep.record_size,
           connections,
           "batch #{batch}, #{connections} connections, repetition #{rep}"
         )
@@ -491,21 +558,34 @@ defmodule Malachi.Loadtest.Ceiling do
   defp check_aa(_sweep, nil, _aa_result), do: :ok
 
   defp check_aa(sweep, peak, aa_result) do
-    describes_point(aa_result, sweep.headline_batch, sweep.record_size, peak.connections, "the A-A repeat") || :ok
+    describes_point(sweep, aa_result, sweep.headline_batch, peak.connections, "the A-A repeat") || :ok
   end
 
-  # nil when the run describes the point, so it slots into Enum.find_value/3.
-  defp describes_point(result, batch, record_size, connections, label) do
-    reported = {result["batch"], result["record_size"], result["connections"]}
+  # nil when the run describes the point, so it slots into Enum.find_value/3. A result with no payload
+  # field came from a generator that only ever sent constant bytes (see the moduledoc).
+  defp describes_point(sweep, result, batch, connections, label) do
+    reported = {
+      result["batch"],
+      result["record_size"],
+      result["connections"],
+      Map.get(result, "payload", "constant"),
+      result["payload_seed"]
+    }
 
-    if reported == {batch, record_size, connections} do
+    expected = {batch, sweep.record_size, connections, sweep.payload, sweep.payload_seed}
+
+    if reported == expected do
       nil
     else
       {:error,
-       "the run for #{label} reports batch #{show_term(elem(reported, 0))}, record_size " <>
-         "#{show_term(elem(reported, 1))}, connections #{show_term(elem(reported, 2))}; it does not describe " <>
-         "the point that launched it (batch #{batch}, record_size #{record_size}, connections #{connections})"}
+       "the run for #{label} reports #{describe_point(reported)}; it does not describe the point that " <>
+         "launched it (#{describe_point(expected)})"}
     end
+  end
+
+  defp describe_point({batch, record_size, connections, payload, seed}) do
+    "batch #{show_term(batch)}, record_size #{show_term(record_size)}, connections #{show_term(connections)}, " <>
+      "payload #{show_term(payload)}, payload_seed #{show_term(seed)}"
   end
 
   # {curve item, peak rung or nil} for one batch size.

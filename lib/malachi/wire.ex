@@ -145,6 +145,16 @@ defmodule Malachi.Wire do
     encode_frame(<<api_key::16, correlation_id::32, payload::binary>>)
   end
 
+  @doc """
+  `encode_request/3` for a payload given as iodata, returned as iodata: the frame header and the payload
+  side by side, so a sender writing it to a socket never copies the payload into a new binary. The bytes
+  are exactly those of `encode_request/3` over the same payload.
+  """
+  @spec encode_request_iodata(api_key(), non_neg_integer(), iodata()) :: iodata()
+  def encode_request_iodata(api_key, correlation_id, payload) do
+    [<<IO.iodata_length(payload) + 6::32, api_key::16, correlation_id::32>>, payload]
+  end
+
   @spec decode_request(binary()) :: {api_key(), non_neg_integer(), binary()}
   def decode_request(<<api_key::16, correlation_id::32, payload::binary>>), do: {api_key, correlation_id, payload}
 
@@ -200,9 +210,24 @@ defmodule Malachi.Wire do
     {topic, keyspace_bits}
   end
 
-  def encode_produce_req(topic, records) do
-    <<put_str(topic)::binary, length(records)::32, encode_records(records)::binary>>
-  end
+  def encode_produce_req(topic, records),
+    do: <<put_str(topic)::binary, encode_produce_records(records)::binary>>
+
+  @doc """
+  The records half of a produce request (the count, then each record), which does not depend on the
+  topic. A sender that reuses one batch across topics encodes it once with this and joins it to each
+  topic with `encode_produce_req_with/2`; `encode_produce_req(topic, records)` is the same bytes as one
+  binary.
+  """
+  @spec encode_produce_records([Record.t()]) :: binary()
+  def encode_produce_records(records), do: <<length(records)::32, encode_records(records)::binary>>
+
+  @doc """
+  A produce request for `topic` from records already encoded by `encode_produce_records/1`, as iodata, so
+  the records are referenced rather than copied; `encode_request_iodata/3` frames it the same way.
+  """
+  @spec encode_produce_req_with(String.t(), binary()) :: iodata()
+  def encode_produce_req_with(topic, encoded_records), do: [put_str(topic), encoded_records]
 
   def decode_produce_req(payload) do
     {topic, <<count::32, rest::binary>>} = take_str(payload)

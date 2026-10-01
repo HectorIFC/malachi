@@ -31,6 +31,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--tls` verifies the server's certificate and hostname against `--cacert`, or against the system
       trust store when none is given. `--insecure` skips that verification: development only, since it
       makes the connection encrypted but unauthenticated and therefore open to interception.
+    * `--payload` constant | json | random (default constant): what the record values are. constant is
+      one repeated byte, as every published series so far; json is a seeded, event-like JSON document of
+      exactly `--record-size` bytes (at least #{Malachi.Loadtest.Payload.min_json_size()}); random is seeded
+      noise, the incompressible control. `--payload-seed` (#{Malachi.Loadtest.Payload.default_seed()}) picks
+      the values and is only accepted with json or random. See `Malachi.Loadtest.Payload`.
     * `--json` emit the report as JSON
     * `--measure-marker` a path created (empty) the moment the measured window begins, after every
       connection has authenticated and the warmup has ended, so a harness can sample CPU over that
@@ -40,10 +45,21 @@ defmodule Mix.Tasks.Malachi.Loadtest do
 
   use Mix.Task
 
-  @scenarios ~w(produce fetch mixed stream user acl)
-
-  # CLI spelling => internal atom; the map is the validation (anything else is a clean Mix error).
-  @connect_strategies %{"bounded" => :bounded, "stagger" => :stagger, "all-at-once" => :all_at_once}
+  # Every enum flag, as CLI spelling => internal atom in the order the help lists them; the table is the
+  # validation (anything else is a clean Mix error naming the choices). Mirrored by ENUM_FLAGS in
+  # scripts/loadtest.js.
+  @enums [
+    scenario: [
+      {"produce", :produce},
+      {"fetch", :fetch},
+      {"mixed", :mixed},
+      {"stream", :stream},
+      {"user", :user},
+      {"acl", :acl}
+    ],
+    connect_strategy: [{"bounded", :bounded}, {"stagger", :stagger}, {"all-at-once", :all_at_once}],
+    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}]
+  ]
 
   @switches [
     scenario: :string,
@@ -73,7 +89,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     cert: :string,
     key: :string,
     json: :boolean,
-    measure_marker: :string
+    measure_marker: :string,
+    payload: :string,
+    payload_seed: :integer
   ]
 
   @impl Mix.Task
@@ -81,9 +99,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     {opts, _rest} = OptionParser.parse!(argv, strict: @switches)
 
     opts =
-      opts
-      |> Keyword.update(:scenario, :produce, &scenario!/1)
-      |> Keyword.replace_lazy(:connect_strategy, &connect_strategy!/1)
+      Enum.reduce(@enums, opts, fn {flag, choices}, opts ->
+        Keyword.replace_lazy(opts, flag, &enum!(flag, choices, &1))
+      end)
 
     Malachi.Loadtest.run(opts)
   rescue
@@ -95,18 +113,14 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     e in ArgumentError -> Mix.raise(Exception.message(e))
   end
 
-  defp scenario!(s) when s in @scenarios, do: String.to_atom(s)
-  defp scenario!(s), do: Mix.raise("unknown --scenario #{inspect(s)} (expected one of: #{Enum.join(@scenarios, ", ")})")
+  defp enum!(flag, choices, value) do
+    case List.keyfind(choices, value, 0) do
+      {^value, atom} ->
+        atom
 
-  defp connect_strategy!(s) do
-    case @connect_strategies do
-      %{^s => strategy} ->
-        strategy
-
-      _ ->
-        Mix.raise(
-          "unknown --connect-strategy #{inspect(s)} (expected one of: #{Enum.join(Map.keys(@connect_strategies), ", ")})"
-        )
+      nil ->
+        cli = flag |> Atom.to_string() |> String.replace("_", "-")
+        Mix.raise("unknown --#{cli} #{inspect(value)} (expected one of: #{Enum.map_join(choices, ", ", &elem(&1, 0))})")
     end
   end
 end

@@ -67,12 +67,13 @@ jobs:
 
       # Only the node leg needs a Node runtime: it is the generator there. The elixir leg's harness uses
       # bash and jq alone, and Elixir is set up in both legs because the SERVER under test is an Elixir
-      # application either way.
+      # application either way. Node 22 since #192, whose paired A/B (benchmark/loadtest_ab.sh, constant
+      # bytes at batch 10 and 100, A-A control) found no difference between 20 and 22 above the noise.
       - name: 🟢 Set up Node
         if: matrix.generator == 'node'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: 📦 Cache dependencies
         uses: actions/cache@v6

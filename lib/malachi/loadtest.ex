@@ -31,6 +31,7 @@ defmodule Malachi.Loadtest do
 
   alias Malachi.Histogram
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Payload
   alias Malachi.Log.Record
   alias Malachi.Wire
 
@@ -39,8 +40,21 @@ defmodule Malachi.Loadtest do
     defexception [:message]
   end
 
-  @scenarios [:produce, :fetch, :mixed, :stream, :user, :acl]
-  @connect_strategies [:bounded, :stagger, :all_at_once]
+  # Every enum option, with its values and default. Mirrored by ENUM_FLAGS in scripts/loadtest.js.
+  @enums [
+    scenario: {[:produce, :fetch, :mixed, :stream, :user, :acl], :produce},
+    connect_strategy: {[:bounded, :stagger, :all_at_once], :bounded},
+    payload: {Payload.modes(), :constant}
+  ]
+
+  # A knob only some values of an enum read, with the message for passing it with another one. Silently
+  # ignoring `connect_stagger_ms` under `:bounded`, or a payload seed with constant bytes, would let a run
+  # claim a setting it never applied. Mirrored by KNOB_REQUIRES in scripts/loadtest.js.
+  @knobs [
+    connect_concurrency: {:connect_strategy, [:bounded], "the :bounded connect strategy"},
+    connect_stagger_ms: {:connect_strategy, [:stagger], "the :stagger connect strategy"},
+    payload_seed: {:payload, [:json, :random], "the :json and :random payloads"}
+  ]
 
   @ops 1
   @records 2
@@ -56,6 +70,9 @@ defmodule Malachi.Loadtest do
   # instead of spinning. A shed is either `:overloaded` (the broker's group-commit valve) or
   # `:rate_limited` (this user over the configured publish quota); they are counted apart because they
   # tell an operator different things, and a run that hides one behind the other is a silent zero.
+  # Above this, the payload pool is announced on stderr before it is generated (see attach_pool/1).
+  @large_pool_bytes 512 * 1024 * 1024
+
   @shed_backoff_ms 5
   @reconnect_backoff_ms 20
   @max_reconnect_tries 10
@@ -78,17 +95,23 @@ defmodule Malachi.Loadtest do
   """
   @spec run(keyword()) :: map()
   def run(opts \\ []) do
-    cfg = normalize(opts)
-    setup(cfg)
-
-    # Genuine errors by reason. A table rather than a `:counters` slot because the reasons are only known
-    # when the server sends them; errors are rare, so the shared writes cost nothing on the hot path.
-    reasons = :ets.new(:loadtest_error_reasons, [:set, :public, write_concurrency: true])
+    cfg = opts |> normalize() |> attach_pool()
 
     try do
-      measure(cfg, reasons)
+      setup(cfg)
+
+      # Genuine errors by reason. A table rather than a `:counters` slot because the reasons are only
+      # known when the server sends them; errors are rare, so the shared writes cost nothing on the hot
+      # path.
+      reasons = :ets.new(:loadtest_error_reasons, [:set, :public, write_concurrency: true])
+
+      try do
+        measure(cfg, reasons)
+      after
+        :ets.delete(reasons)
+      end
     after
-      :ets.delete(reasons)
+      release_pool(cfg)
     end
   end
 
@@ -158,13 +181,15 @@ defmodule Malachi.Loadtest do
   # --- config ---
 
   defp normalize(opts) do
-    scenario = Keyword.get(opts, :scenario, :produce)
-    unless scenario in @scenarios, do: raise(ArgumentError, "unknown scenario #{inspect(scenario)}")
-    backlog? = scenario in [:fetch, :mixed, :stream]
+    enums = Map.new(@enums, fn {key, _values_and_default} -> {key, enum!(opts, key)} end)
+    check_knobs!(opts, enums)
+    backlog? = enums.scenario in [:fetch, :mixed, :stream]
 
     %{
-      scenario: scenario,
-      connect_strategy: connect_strategy!(opts),
+      scenario: enums.scenario,
+      connect_strategy: enums.connect_strategy,
+      payload: enums.payload,
+      payload_seed: payload_seed!(opts, enums.payload),
       connect_concurrency: positive!(opts, :connect_concurrency, 32),
       connect_stagger_ms: positive!(opts, :connect_stagger_ms, 100),
       connections: positive!(opts, :connections, 128),
@@ -189,6 +214,92 @@ defmodule Malachi.Loadtest do
       hosts: opts |> Keyword.get(:host, "127.0.0.1") |> String.split(",", trim: true) |> Enum.map(&String.trim/1),
       conn_opts: Keyword.take(opts, [:port, :user, :pass, :token, :tls, :cacert, :cert, :key, :insecure])
     }
+    |> check_payload_size!()
+  end
+
+  # The json and random values are generated once, here, before any connection opens: generating them
+  # inside the measured window would make the generator the bottleneck (see `Malachi.Loadtest.Payload`).
+  # Only a run that produces needs them; constant bytes keep the single pre-encoded request they always had.
+  #
+  # The batches live in `:persistent_term` for the run, under a key of their own, and `cfg` carries only
+  # the key and the count. `cfg` is copied into every worker by the closure that spawns it, so a pool held
+  # in it was copied too: the tuple into each worker's heap, and with it every batch small enough to be a
+  # heap binary, about 10MB per worker at batch 1. A term read from `:persistent_term` is not copied.
+  defp attach_pool(%{payload: :constant} = cfg), do: Map.put(cfg, :pool, nil)
+
+  defp attach_pool(cfg) do
+    if cfg.scenario in [:produce, :mixed] or cfg.prepopulate > 0 do
+      pipeline = pool_pipeline(cfg)
+      if note = large_pool_note(cfg), do: IO.puts(:stderr, note)
+
+      batches =
+        Payload.encoded_batches(
+          cfg.payload,
+          cfg.payload_seed,
+          cfg.record_size,
+          cfg.batch,
+          cfg.keys,
+          cfg.connections,
+          pipeline
+        )
+
+      key = {__MODULE__, :pool, make_ref()}
+      :persistent_term.put(key, batches)
+      Map.put(cfg, :pool, %{key: key, batches: tuple_size(batches), janitor: start_janitor(key)})
+    else
+      Map.put(cfg, :pool, nil)
+    end
+  end
+
+  # Only the produce loop pipelines; a run that uses the pool for its prepopulate alone sends one at a time.
+  defp pool_pipeline(%{scenario: scenario, pipeline: pipeline}) when scenario in [:produce, :mixed], do: pipeline
+  defp pool_pipeline(_cfg), do: 1
+
+  @doc false
+  # The note printed on stderr before a payload pool larger than 512MiB is generated, or nil. A pool sized
+  # for many connections, deep pipelines and large batches can outgrow the generator's memory, and it is
+  # generated before any connection opens, so it is announced rather than left as a long silent pause.
+  # Exposed for the tests, which would otherwise have to generate such a pool to see it.
+  @spec large_pool_note(map() | keyword()) :: String.t() | nil
+  def large_pool_note(opts) when is_list(opts), do: opts |> normalize() |> large_pool_note()
+
+  def large_pool_note(%{payload: :constant}), do: nil
+
+  def large_pool_note(cfg) do
+    pipeline = pool_pipeline(cfg)
+    bytes = Payload.pool_size(cfg.record_size, cfg.batch, cfg.connections, pipeline) * cfg.record_size
+
+    if bytes > @large_pool_bytes do
+      "note: the #{cfg.payload} payload pool holds #{div(bytes, 1024 * 1024)}MiB " <>
+        "(#{cfg.connections} connections x pipeline #{pipeline} x batch #{cfg.batch}); generating it first"
+    end
+  end
+
+  # Erasing scans every process for references to the term, which is why it happens once, after the
+  # workers have exited, and never during a run.
+  defp release_pool(%{pool: %{key: key, janitor: janitor}}) do
+    :persistent_term.erase(key)
+    send(janitor, :released)
+    :ok
+  end
+
+  defp release_pool(_cfg), do: :ok
+
+  # The `after` in `run/1` does not run when the run process dies from an exit signal: a linked worker
+  # that crashes, or a caller that kills it. A `:persistent_term` entry has no owner to die with it, so
+  # without this it would stay for the life of the VM. The janitor watches the run process and erases the
+  # pool if it goes down first; a run that ends normally releases the pool itself and lets it go.
+  defp start_janitor(key) do
+    owner = self()
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        :released -> :ok
+        {:DOWN, ^ref, :process, _owner, _reason} -> :persistent_term.erase(key)
+      end
+    end)
   end
 
   # The connection options for worker `index`: the shared opts plus its round-robin host.
@@ -196,27 +307,43 @@ defmodule Malachi.Loadtest do
     [{:host, Enum.at(cfg.hosts, rem(index, length(cfg.hosts)))} | cfg.conn_opts]
   end
 
-  # Validates the connect strategy and that each pacing knob is only passed with the strategy that reads
-  # it: silently ignoring `connect_stagger_ms` under `:bounded` (or the concurrency under `:stagger`)
-  # would let a run claim a pacing it never applied.
-  defp connect_strategy!(opts) do
-    strategy = Keyword.get(opts, :connect_strategy, :bounded)
+  defp enum!(opts, key) do
+    {values, default} = @enums[key]
+    value = Keyword.get(opts, key, default)
 
-    unless strategy in @connect_strategies do
-      raise ArgumentError,
-            "unknown connect_strategy #{inspect(strategy)} (expected one of: #{inspect(@connect_strategies)})"
+    unless value in values do
+      raise ArgumentError, "unknown #{key} #{inspect(value)} (expected one of: #{inspect(values)})"
     end
 
-    if strategy != :bounded and Keyword.has_key?(opts, :connect_concurrency) do
-      raise ArgumentError, "connect_concurrency only applies to the :bounded connect strategy"
-    end
-
-    if strategy != :stagger and Keyword.has_key?(opts, :connect_stagger_ms) do
-      raise ArgumentError, "connect_stagger_ms only applies to the :stagger connect strategy"
-    end
-
-    strategy
+    value
   end
+
+  defp check_knobs!(opts, enums) do
+    for {knob, {enum, read_by, readers}} <- @knobs, Keyword.has_key?(opts, knob), enums[enum] not in read_by do
+      raise ArgumentError, "#{knob} only applies to #{readers}"
+    end
+
+    :ok
+  end
+
+  # A seed is a 32-bit word, the generator's state size, and constant bytes have none.
+  defp payload_seed!(_opts, :constant), do: nil
+
+  defp payload_seed!(opts, _json_or_random) do
+    case Keyword.get(opts, :payload_seed, Payload.default_seed()) do
+      seed when is_integer(seed) and seed in 0..0xFFFF_FFFF -> seed
+      seed -> raise ArgumentError, "payload_seed must be an integer from 0 to 4294967295, got: #{inspect(seed)}"
+    end
+  end
+
+  # A json size too small for the document is refused here, before any connection opens, rather than
+  # inside every worker.
+  defp check_payload_size!(%{payload: :json, record_size: size} = cfg) do
+    Payload.check_json_size!(size)
+    cfg
+  end
+
+  defp check_payload_size!(cfg), do: cfg
 
   # A zero or negative count would fail late and confusingly (an ArithmeticError after the whole run,
   # or an instantly-empty measurement): reject it up front with a named error instead.
@@ -384,18 +511,26 @@ defmodule Malachi.Loadtest do
   defp prepopulate(conn, %{prepopulate: n}, _topic) when n <= 0, do: conn
 
   defp prepopulate(conn, cfg, topic) do
-    value = :binary.copy("x", cfg.record_size)
-    batch = for i <- 1..cfg.batch, do: %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
-    payload = Wire.encode_produce_req(topic, batch)
-
     # //1 keeps the range empty when prepopulate < batch (1..0 without a step enumerates DOWN and
     # would send two spurious batches).
-    Enum.reduce(1..div(cfg.prepopulate, cfg.batch)//1, {conn, 2}, fn _, {conn, corr} ->
-      conn = conn |> Conn.request(Wire.produce_key(), corr, payload) |> expect_setup_ok("prepopulate", topic, [])
-      {conn, corr + 1}
-    end)
+    1..div(cfg.prepopulate, cfg.batch)//1
+    |> Enum.reduce({conn, 2, prepopulate_source(cfg, topic)}, fn _, acc -> prepopulate_one(acc, topic) end)
     |> elem(0)
   end
+
+  defp prepopulate_one({conn, corr, source}, topic) do
+    {payload, source} = next_payload(source)
+    conn = conn |> Conn.request(Wire.produce_key(), corr, payload) |> expect_setup_ok("prepopulate", topic, [])
+    {conn, corr + 1, source}
+  end
+
+  defp prepopulate_source(%{pool: nil} = cfg, topic) do
+    value = :binary.copy("x", cfg.record_size)
+    batch = for i <- 1..cfg.batch, do: %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
+    {:fixed, Wire.encode_produce_req(topic, batch)}
+  end
+
+  defp prepopulate_source(cfg, topic), do: {:pool, topic, :persistent_term.get(cfg.pool.key), 0}
 
   # A setup request either succeeded, or was refused with one of the `tolerated` reasons, or fails the run
   # with a SetupError naming the step, the topic and the reason. A backlog shorter than asked for, or a
@@ -472,22 +607,15 @@ defmodule Malachi.Loadtest do
     send(parent, {:done, self()})
   end
 
-  # Per-connection context. produce pre-encodes its payload once (zero per-op encoding); the others carry
-  # the mutable state the closed loop threads (fetch/stream cursor, admin op counter).
+  # Per-connection context. produce pre-encodes its payload (zero per-op record encoding); the others
+  # carry the mutable state the closed loop threads (fetch/stream cursor, admin op counter).
   defp build_ctx(cfg, index) do
     topic = topic_for(cfg, index)
     base = %{topic: topic, batch: cfg.batch, max: cfg.max, window: cfg.window}
 
     case scenario_for(cfg.scenario, index) do
       :produce ->
-        value = :binary.copy("x", cfg.record_size)
-
-        records =
-          for i <- 1..cfg.batch do
-            %Record{value: value, key: "k#{rem(index * cfg.batch + i, cfg.keys)}", timestamp: 0, headers: []}
-          end
-
-        Map.put(base, :op, {:produce, Wire.encode_produce_req(topic, records)})
+        Map.put(base, :op, {:produce, produce_source(cfg, index, topic)})
 
       :fetch ->
         Map.put(base, :op, {:fetch, %{group: "grp_#{index}", member: "mem_#{index}", cursor: nil}})
@@ -501,6 +629,33 @@ defmodule Malachi.Loadtest do
       :acl ->
         Map.put(base, :op, {:acl, %{seq: index * 1_000_000}})
     end
+  end
+
+  # Where a connection's produce payloads come from. Constant bytes: one request encoded once and sent
+  # forever, exactly as every published series was measured. A pool: the next encoded batch on every
+  # send, from this connection's own starting batch (see `Malachi.Loadtest.Payload`).
+  defp produce_source(%{pool: nil} = cfg, index, topic) do
+    value = :binary.copy("x", cfg.record_size)
+
+    records =
+      for i <- 1..cfg.batch do
+        %Record{value: value, key: "k#{rem(index * cfg.batch + i, cfg.keys)}", timestamp: 0, headers: []}
+      end
+
+    {:fixed, Wire.encode_produce_req(topic, records)}
+  end
+
+  defp produce_source(cfg, index, topic) do
+    batches = :persistent_term.get(cfg.pool.key)
+    {:pool, topic, batches, Payload.start_batch(index, cfg.pool.batches, cfg.connections)}
+  end
+
+  # The payload to send next and the source to take the one after from.
+  defp next_payload({:fixed, payload} = source), do: {payload, source}
+
+  defp next_payload({:pool, topic, batches, cursor}) do
+    payload = Wire.encode_produce_req_with(topic, elem(batches, cursor))
+    {payload, {:pool, topic, batches, rem(cursor + 1, tuple_size(batches))}}
   end
 
   # mixed: even connections produce, odd fetch. Others run uniformly.
@@ -548,18 +703,18 @@ defmodule Malachi.Loadtest do
 
   defp pipelined(conn, ctx, m) do
     result =
-      Enum.reduce_while(1..m.pipeline, {conn, %{}, 2}, fn _, {conn, inflight, corr} ->
+      Enum.reduce_while(1..m.pipeline, {conn, ctx, %{}, 2}, fn _, {conn, ctx, inflight, corr} ->
         case send_produce(ctx, conn, corr) do
-          {:ok, conn} -> {:cont, {conn, Map.put(inflight, corr, mono_us()), corr + 1}}
-          {:error, conn} -> {:halt, {:send_failed, conn}}
+          {:ok, conn, ctx} -> {:cont, {conn, ctx, Map.put(inflight, corr, mono_us()), corr + 1}}
+          {:error, conn, ctx} -> {:halt, {:send_failed, conn, ctx}}
         end
       end)
 
     case result do
       # A send error is a broken socket, the same as a recv error: count the drop and reconnect,
       # instead of silently draining the pipeline and ending the worker early with no drop recorded.
-      {:send_failed, conn} -> reconnect_pipelined(conn, ctx, m)
-      {conn, inflight, next} -> pipe_loop(conn, ctx, m, inflight, next)
+      {:send_failed, conn, ctx} -> reconnect_pipelined(conn, ctx, m)
+      {conn, ctx, inflight, next} -> pipe_loop(conn, ctx, m, inflight, next)
     end
   end
 
@@ -588,14 +743,14 @@ defmodule Malachi.Loadtest do
           if now < m.measure_end do
             send_produce(ctx, conn, next)
           else
-            {:idle, conn}
+            {:idle, conn, ctx}
           end
 
         case refill do
-          {:ok, conn} -> pipe_loop(conn, ctx, m, Map.put(inflight, next, mono_us()), next + 1)
-          {:idle, conn} -> pipe_loop(conn, ctx, m, inflight, next)
+          {:ok, conn, ctx} -> pipe_loop(conn, ctx, m, Map.put(inflight, next, mono_us()), next + 1)
+          {:idle, conn, ctx} -> pipe_loop(conn, ctx, m, inflight, next)
           # Broken socket on send: same treatment as a recv error below.
-          {:error, conn} -> reconnect_pipelined(conn, ctx, m)
+          {:error, conn, ctx} -> reconnect_pipelined(conn, ctx, m)
         end
 
       # The connection dropped: reconnect and re-prime the pipeline within the window.
@@ -604,10 +759,13 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  defp send_produce(%{op: {:produce, payload}}, conn, corr) do
+  defp send_produce(%{op: {:produce, source}} = ctx, conn, corr) do
+    {payload, source} = next_payload(source)
+    ctx = %{ctx | op: {:produce, source}}
+
     case Conn.send_frame(conn, Wire.produce_key(), corr, payload) do
-      :ok -> {:ok, conn}
-      {:error, _} -> {:error, conn}
+      :ok -> {:ok, conn, ctx}
+      {:error, _} -> {:error, conn, ctx}
     end
   end
 
@@ -692,7 +850,10 @@ defmodule Malachi.Loadtest do
 
   # --- ops (closed-loop round trips); each returns {status, conn, ctx} ---
 
-  defp do_op(%{op: {:produce, payload}} = ctx, conn, corr) do
+  defp do_op(%{op: {:produce, source}} = ctx, conn, corr) do
+    {payload, source} = next_payload(source)
+    ctx = %{ctx | op: {:produce, source}}
+
     case Conn.request(conn, Wire.produce_key(), corr, payload) do
       {:ok, 0, <<count::32>>, conn} -> {{:ok, count}, conn, ctx}
       {:ok, _code, resp, conn} -> {error_status(resp), conn, ctx}
@@ -883,15 +1044,12 @@ defmodule Malachi.Loadtest do
     reconnects = :counters.get(ops, @reconnects)
     secs = cfg.duration
 
-    %{
+    cfg
+    |> regime_fields()
+    |> Map.merge(%{
       meta: meta(cfg),
       scenario: cfg.scenario,
       connections: cfg.connections,
-      # The flush regime the throughput describes, as fields of their own rather than only inside
-      # meta.command, whose syntax differs between the two generators. Mirrored by scripts/loadtest.js.
-      batch: cfg.batch,
-      record_size: cfg.record_size,
-      pipeline: cfg.pipeline,
       duration_s: secs,
       ops: op_count,
       records: records,
@@ -905,6 +1063,20 @@ defmodule Malachi.Loadtest do
       records_per_s: round(records / secs),
       mb_per_s: Float.round(records * cfg.record_size / 1_048_576 / secs, 2),
       latency_ms: %{p50: ms(hist, 50), p99: ms(hist, 99), p99_9: ms(hist, 99.9), p99_99: ms(hist, 99.99)}
+    })
+  end
+
+  # The regime the throughput describes, as fields of their own rather than only inside meta.command,
+  # whose syntax differs between the two generators. Mirrored field for field by `regimeFields` in
+  # scripts/loadtest.js, and checked by the regime parity test; a new mirrored flag adds its line here.
+  defp regime_fields(cfg) do
+    %{
+      batch: cfg.batch,
+      record_size: cfg.record_size,
+      pipeline: cfg.pipeline,
+      payload: cfg.payload,
+      payload_seed: cfg.payload_seed,
+      payload_pool_values: cfg.pool && cfg.pool.batches * cfg.batch
     }
   end
 
@@ -959,7 +1131,8 @@ defmodule Malachi.Loadtest do
         host: Enum.join(cfg.hosts, ","),
         port: Keyword.get(cfg.conn_opts, :port, 4040)
       ] ++
-        connect_options(cfg) ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
+        connect_options(cfg) ++
+        payload_options(cfg) ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
 
     Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
   end
@@ -974,6 +1147,12 @@ defmodule Malachi.Loadtest do
       :all_at_once -> ["connect-strategy": "all-at-once"]
     end
   end
+
+  # Only when the values are not constant bytes, so the command every published run recorded is unchanged.
+  # The seed travels with the mode: it is what makes the values reproducible.
+  defp payload_options(%{payload: :constant}), do: []
+
+  defp payload_options(cfg), do: [payload: cfg.payload, "payload-seed": cfg.payload_seed]
 
   # `--name=value` rather than two arguments, for every option rather than only the ones that look
   # risky. `OptionParser` reads a separate value beginning with a hyphen as another switch, so a topic

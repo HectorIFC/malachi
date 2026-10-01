@@ -41,11 +41,12 @@ jobs:
 
       # The load generator tests drive scripts/loadtest.js against the test server, so the suite needs
       # Node. Set up explicitly rather than trusting whatever the runner image happens to ship: those
-      # tests fail rather than skip when node is missing.
+      # tests fail rather than skip when node is missing. 22 because the payload checks compress with the
+      # zstd in Node's zlib, which arrived in 22.15 (#192).
       - name: 🟢 Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: 📦 Cache dependencies
         uses: actions/cache@v6

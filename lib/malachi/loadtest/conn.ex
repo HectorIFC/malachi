@@ -179,10 +179,13 @@ defmodule Malachi.Loadtest.Conn do
     end
   end
 
-  @doc "Sends a request frame without waiting for a response (pipelining)."
-  @spec send_frame(t(), non_neg_integer(), non_neg_integer(), binary()) :: :ok | {:error, term()}
+  @doc """
+  Sends a request frame without waiting for a response (pipelining). The payload may be iodata: the frame
+  goes to the socket as iodata, so the payload is never copied into a new binary to be sent.
+  """
+  @spec send_frame(t(), non_neg_integer(), non_neg_integer(), iodata()) :: :ok | {:error, term()}
   def send_frame(%__MODULE__{transport: t, socket: s}, api_key, correlation_id, payload) do
-    tsend(t, s, Wire.encode_request(api_key, correlation_id, payload))
+    tsend(t, s, Wire.encode_request_iodata(api_key, correlation_id, payload))
   end
 
   @doc """
@@ -206,7 +209,7 @@ defmodule Malachi.Loadtest.Conn do
   end
 
   @doc "Closed-loop round-trip: send a request, read its response. Returns `{:ok, error_code, payload, conn}`."
-  @spec request(t(), non_neg_integer(), non_neg_integer(), binary()) ::
+  @spec request(t(), non_neg_integer(), non_neg_integer(), iodata()) ::
           {:ok, non_neg_integer(), binary(), t()} | {:error, term()}
   def request(conn, api_key, correlation_id, payload) do
     with :ok <- send_frame(conn, api_key, correlation_id, payload),

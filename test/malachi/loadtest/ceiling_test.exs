@@ -709,6 +709,139 @@ defmodule Malachi.Loadtest.CeilingTest do
     end
   end
 
+  describe "the payload" do
+    test "a constant sweep names no payload in its label, exactly as every published label reads" do
+      assert Ceiling.regime_label(10, 256, false, 67_108_864, "constant") ==
+               Ceiling.regime_label(10, 256, false, 67_108_864)
+
+      assert Ceiling.regime_label(10, 256, false, 67_108_864) ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)"
+    end
+
+    test "json and random name themselves at the end of the parentheses, so they never read as constant" do
+      assert Ceiling.regime_label(10, 256, false, 67_108_864, "json") ==
+               "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB, " <>
+                 "payload json)"
+
+      assert Ceiling.regime_label(100, 256, true, 0, "random") ==
+               "batch 100 x 256B (25KB of values per request, group commit on, segment preallocation off, payload random)"
+
+      labels = for payload <- ~w(constant json random), do: Ceiling.regime_label(10, 256, false, 0, payload)
+      assert Enum.uniq(labels) == labels
+    end
+
+    test "the label refuses a payload that is not one of the modes" do
+      for payload <- ["zip", :json, nil] do
+        assert_raise FunctionClauseError, fn -> Ceiling.regime_label(10, 256, false, 0, payload) end
+      end
+    end
+
+    test "label/1 takes the payload, constant when it is absent, and names a bad one" do
+      params = %{batch: "10", record_size: "256", group_commit: "false", segment_prealloc_bytes: "0"}
+
+      assert Ceiling.label(Map.put(params, :payload, "json")) == {:ok, Ceiling.regime_label(10, 256, false, 0, "json")}
+      assert Ceiling.label(params) == {:ok, Ceiling.regime_label(10, 256, false, 0, "constant")}
+      assert Ceiling.label(Map.put(params, :payload, "")) == {:ok, Ceiling.regime_label(10, 256, false, 0, "constant")}
+
+      assert Ceiling.label(Map.put(params, :payload, "zip")) ==
+               {:error, ~s(--payload must be one of constant, json, random, got "zip")}
+    end
+
+    test "plan/1 defaults to constant without a seed, and gives json and random the generators' default seed" do
+      assert %{payload: "constant", payload_seed: nil} = sweep()
+      assert %{payload: "constant", payload_seed: nil} = sweep(%{payload: "", payload_seed: ""})
+      assert %{payload: "json", payload_seed: 1} = sweep(%{payload: "json"})
+      assert %{payload: "random", payload_seed: 42} = sweep(%{payload: "random", payload_seed: " 42 "})
+    end
+
+    for {label, overrides, message} <- [
+          {"an unknown payload", %{payload: "zip"}, ~s(PAYLOAD must be one of constant, json, random, got "zip")},
+          {"a seed with constant bytes", %{payload_seed: "3"},
+           "PAYLOAD_SEED only applies to the json and random payloads, got 3"},
+          {"a seed past 32 bits", %{payload: "json", payload_seed: "4294967296"},
+           "PAYLOAD_SEED must be an integer from 0 to 4294967295, got 4294967296"},
+          {"a negative seed", %{payload: "json", payload_seed: "-1"},
+           "PAYLOAD_SEED must be an integer from 0 to 4294967295, got -1"},
+          {"a seed that is not a number", %{payload: "json", payload_seed: "seven"},
+           ~s(PAYLOAD_SEED must be an integer, got "seven")}
+        ] do
+      test "plan/1 rejects #{label}" do
+        assert Ceiling.plan(Map.merge(@base_params, unquote(Macro.escape(overrides)))) == {:error, unquote(message)}
+      end
+    end
+
+    test "the sweep carries the payload through JSON, and a sweep written before it reads as constant" do
+      sweep = sweep(%{payload: "json", payload_seed: "9"})
+      json = sweep |> Ceiling.encode_sweep() |> Jason.encode!() |> Jason.decode!()
+
+      assert json["payload"] == "json"
+      assert json["payload_seed"] == 9
+      assert Ceiling.decode_sweep(json) == {:ok, sweep}
+
+      old = sweep() |> Ceiling.encode_sweep() |> Map.drop(["payload", "payload_seed"])
+      assert Ceiling.decode_sweep(old) == {:ok, sweep()}
+
+      assert {:error, "PAYLOAD_SEED only applies to the json and random payloads, got 9"} =
+               Ceiling.decode_sweep(Map.put(old, "payload_seed", 9))
+    end
+
+    test "every curve item and the headline carry the payload, its seed and the label that names it" do
+      sweep = sweep(%{payload: "json", payload_seed: "5"})
+      rates = %{{10, 32} => 1_000, {10, 64} => 2_000, {100, 16} => 5_000, {100, 32} => 4_000}
+
+      runs =
+        runs(sweep, fn b, c, _rep ->
+          result(b, c, %{"records_per_s" => rates[{b, c}], "payload" => "json", "payload_seed" => 5})
+        end)
+
+      assert {:ok, result} = Ceiling.summarize(sweep, runs, nil)
+      assert result["payload"] == "json"
+      assert result["payload_seed"] == 5
+      assert result["regime_label"] =~ ", payload json)"
+      assert result["sweep"]["payload"] == "json"
+      assert Enum.all?(result["curve"], &(&1["payload"] == "json" and &1["regime_label"] =~ "payload json"))
+    end
+
+    test "a run that sent another payload or seed than its sweep is an error, not a data point" do
+      sweep = sweep(%{payload: "json"})
+
+      for {overrides, reported} <- [
+            {%{"payload" => "random", "payload_seed" => 1}, ~s(payload "random", payload_seed 1)},
+            {%{"payload" => "json", "payload_seed" => 2}, ~s(payload "json", payload_seed 2)},
+            {%{}, ~s(payload "constant", payload_seed nil)}
+          ] do
+        runs =
+          runs(sweep, fn
+            10, 32, _rep -> result(10, 32, overrides)
+            b, c, _rep -> result(b, c, %{"payload" => "json", "payload_seed" => 1})
+          end)
+
+        assert {:error, message} = Ceiling.summarize(sweep, runs, nil)
+        assert message =~ "connections 32, #{reported}; it does not describe"
+        assert message =~ ~s(payload "json", payload_seed 1\))
+      end
+    end
+
+    test "a run from a generator older than the payload field is read as constant bytes" do
+      sweep = sweep()
+      rates = %{{10, 32} => 1_000, {10, 64} => 2_000, {100, 16} => 5_000, {100, 32} => 4_000}
+      assert {:ok, _result} = Ceiling.summarize(sweep, clean_runs(sweep, rates), nil)
+    end
+
+    test "the A-A repeat must have sent the same payload as the sweep" do
+      sweep = sweep(%{payload: "random"})
+      rates = %{{10, 32} => 3_000, {10, 64} => 2_000, {100, 16} => 5_000, {100, 32} => 4_000}
+
+      runs =
+        runs(sweep, fn b, c, _rep ->
+          result(b, c, %{"records_per_s" => rates[{b, c}], "payload" => "random", "payload_seed" => 1})
+        end)
+
+      assert {:error, message} = Ceiling.summarize(sweep, runs, result(10, 32))
+      assert message =~ "the A-A repeat reports"
+    end
+  end
+
   describe "headline_peak/2" do
     test "names the connections of the headline peak, or :none" do
       sweep = sweep()

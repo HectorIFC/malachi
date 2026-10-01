@@ -9,7 +9,10 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
 
       mix malachi.loadtest.ceiling plan --batch-ladder "10 100" --conns-ladder "10=32 64" \\
         --conns-ladder "100=16 32" --headline-batch 10 --reps 1 --record-size 256 \\
-        --group-commit false --segment-prealloc-bytes 67108864 --out sweep.json
+        --group-commit false --segment-prealloc-bytes 67108864 --payload constant --out sweep.json
+
+  `--payload` (constant, json or random; constant when omitted or empty) and `--payload-seed` (json and
+  random only; the generators' default when omitted or empty) name what the generators send.
 
   Validates the sweep, writes it to `--out`, and prints the planned points one per line as
   `<batch> <connections> <repetition>`, in the order they are to run. An invalid sweep prints the
@@ -31,9 +34,9 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
   garbage where a result belongs.
 
       mix malachi.loadtest.ceiling label --batch 100 --record-size 256 --group-commit true \\
-        --segment-prealloc-bytes 0
+        --segment-prealloc-bytes 0 --payload json
 
-  Prints `Malachi.Loadtest.Ceiling.regime_label/4` for one regime, so a harness that is not this sweep
+  Prints `Malachi.Loadtest.Ceiling.regime_label/5` for one regime (`--payload` is constant when omitted), so a harness that is not this sweep
   (`benchmark/docker-cluster.sh`) names its regime in the same words instead of formatting its own.
   An invalid flag fails the task with a message naming it.
 
@@ -67,12 +70,20 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
     record_size: :string,
     group_commit: :string,
     segment_prealloc_bytes: :string,
+    payload: :string,
+    payload_seed: :string,
     out: :string
   ]
 
   @peak_switches [run_dir: :string, sweep: :string]
   @summarize_switches [run_dir: :string, sweep: :string, out: :string]
-  @label_switches [batch: :string, record_size: :string, group_commit: :string, segment_prealloc_bytes: :string]
+  @label_switches [
+    batch: :string,
+    record_size: :string,
+    group_commit: :string,
+    segment_prealloc_bytes: :string,
+    payload: :string
+  ]
   @flush_window_switches [before: :string, after: :string, stdin: :boolean]
 
   @impl Mix.Task
@@ -96,7 +107,9 @@ defmodule Mix.Tasks.Malachi.Loadtest.Ceiling do
       repetitions: opts[:reps],
       record_size: opts[:record_size],
       group_commit: opts[:group_commit],
-      segment_prealloc_bytes: opts[:segment_prealloc_bytes]
+      segment_prealloc_bytes: opts[:segment_prealloc_bytes],
+      payload: opts[:payload],
+      payload_seed: opts[:payload_seed]
     }
 
     case Ceiling.plan(params) do
