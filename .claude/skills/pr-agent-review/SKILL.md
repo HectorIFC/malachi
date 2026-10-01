@@ -99,11 +99,12 @@ The worktree is only ever read. The merge base is computed before the worktree e
 with no common history stops with nothing to clean up. From the moment the worktree exists, every stop
 removes it first (`/usr/bin/git worktree remove --force "$S/pr-$N"`): a pin that fails and a pin that
 finds nothing to review included, not only the end of step 7. At the end (step 7), compare `headRefOid`
-and `baseRefOid` again and say so if either changed while the pull request was reviewed (the base matters
-when the pull request was retargeted or its base rewritten; a base that only moved forward leaves the
-merge base, and so the diff, as it was), then remove the worktree (`/usr/bin/git worktree remove --force
-"$S/pr-$N"`). The checkout the subagents read is `$S/pr-$N`. Title, body and commit messages come from
-`$S/pr.json`.
+and `baseRefOid` again and say so if either changed while the pull request was reviewed (the diff changes
+with the base when the pull request was retargeted, when the base was rewritten, and when the base took
+in commits the head already had, such as a pull request this one was stacked on being merged; a changed
+base means the review covered a diff the pull request no longer has, so say it should be run again), then
+remove the worktree (`/usr/bin/git worktree remove --force "$S/pr-$N"`). The checkout the subagents read
+is `$S/pr-$N`. Title, body and commit messages come from `$S/pr.json`.
 
 Then, for both modes:
 
