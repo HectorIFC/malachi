@@ -1,8 +1,9 @@
 # Review instructions
 
 These are the review criteria for Malachi. The managed Code Review reads this file on every pull request,
-and the local `adversarial-review` skill (`.claude/skills/adversarial-review/`) hands it to each of its
-reviewers, so a change is judged by one standard wherever it is reviewed. `CLAUDE.md` and
+the local `adversarial-review` skill (`.claude/skills/adversarial-review/`) hands it to each of its
+reviewers, and the `pr-agent-review` skill (`.claude/skills/pr-agent-review/`) gives it to PR-Agent's
+prompts as their review standards, so a change is judged by one standard wherever it is reviewed. `CLAUDE.md` and
 `CONTRIBUTING.md` still apply; this file says what a reviewer should flag and how hard.
 
 Reviews here are adversarial on purpose (`CONTRIBUTING.md`). The job is to find the input, the
