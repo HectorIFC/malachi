@@ -54,7 +54,18 @@ defmodule Malachi.Cluster.ReplicaTracker do
 
   @doc "The number of replicas that must hold an offset for it to commit (a strict majority)."
   @spec quorum(t()) :: pos_integer()
-  def quorum(%__MODULE__{replica_set: replica_set}), do: div(length(replica_set), 2) + 1
+  def quorum(%__MODULE__{replica_set: replica_set}), do: quorum_size(length(replica_set))
+
+  @doc """
+  The acknowledgement quorum for a replica set of `replicas` members: a strict majority. The one place the
+  rule lives, since `Malachi.Cluster.Failover` derives from it how many answers a seal needs, and the two
+  must move together for a seal never to discard an acknowledged write.
+
+      iex> Enum.map(1..5, &Malachi.Cluster.ReplicaTracker.quorum_size/1)
+      [1, 2, 2, 3, 3]
+  """
+  @spec quorum_size(pos_integer()) :: pos_integer()
+  def quorum_size(replicas) when is_integer(replicas) and replicas > 0, do: div(replicas, 2) + 1
 
   @doc """
   Records that `broker` has durably stored up to `offset`. Monotonic: a stale report (lower than

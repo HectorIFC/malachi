@@ -209,13 +209,14 @@ taken out of service as a storage failure (`malachi_storage_failures_total{reaso
 `failed in storage` log line naming the segment and `damaged_tail`). What happens next depends on the
 replication factor:
 
-- **RF 3 or more.** The heal pass seals the segment on the intact copies at the furthest end they hold,
+- **RF 2 or more.** The heal pass seals the segment on the intact copies at the furthest end they hold,
   and writing rolls to a new segment, which is what NorthGuard does when a replica of a segment fails.
-  Producers see nothing. The damaged copy is replaced by self-healing.
-- **RF 2 and RF 1.** Sealing needs a majority of intact copies to answer, and one copy is gone, so the
-  range stops taking writes until an operator acts. That is deliberate: the alternative was writing new
-  records over ones that may have been acknowledged. Rolling a single-copy segment on without that
-  risk is tracked in [#210](https://github.com/HectorIFC/malachi/issues/210).
+  Producers see nothing. The damaged copy is replaced by self-healing. At RF 2 one intact copy is
+  enough: an acknowledgement needed both copies, so the intact one holds every acknowledged record.
+- **RF 1.** There is no other copy to seal on, so the range stops taking writes until an operator
+  acts. That is deliberate: the alternative was writing new records over ones that may have been
+  acknowledged. Rolling a single-copy segment on without that risk is tracked in
+  [#210](https://github.com/HectorIFC/malachi/issues/210).
 
 To recover a blocked range by hand, on the node that reported the damage:
 
@@ -274,6 +275,15 @@ nodes at the end; then a config that fails fast at boot is pushed to a single no
 crash-loop and never go healthy while the other two keep serving quorum writes, and rolling the
 env back must bring it home to 3/3. The same closing invariants apply: no acknowledged write lost,
 full reconvergence, clean produce+fetch after the chaos.
+
+Every drill's closing reconvergence check also compares the control plane across members: every Raft
+group must hold the same state on every node at equal applied indexes, since members that diverged
+still answer health checks.
+
+`scripts/docker-upgrade-chaos.sh` certifies the procedure in
+[Upgrades and the rollback floor](#upgrades-and-the-rollback-floor): a cluster rolled from the release
+before this code to this code under the machine version pin, back again, then forward, finalized, with a canary
+feature switched on and a rollback that must be refused with exit 78.
 
 ## Retention
 
@@ -656,6 +666,13 @@ The checks that catch the common mistakes:
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
       before the first upgrade, and make your service manager stop restarting on exit status 78.
+- [ ] **The upgrade you are about to make was certified.** Releases are tagged on every merge and are not
+      held back for it, so check it yourself: the
+      [Rolling upgrade certification results](../generated/chaos-upgrade-results.md) page shows the last
+      nightly run, which rolls a cluster from the newest release whose code differs from main's to main's code and back under
+      load, following the procedure in [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor).
+      Its record names both releases and the commit it measured. For another pair, run the workflow by hand
+      with `old_ref` (see [Running the chaos drills](running-chaos-drills.md#rolling-upgrade-and-rollback)).
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
 - [ ] **Your service manager treats exit 78 differently from an ordinary failure.** Exit 78 means the

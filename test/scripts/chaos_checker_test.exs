@@ -1141,4 +1141,207 @@ defmodule ChaosCheckerTest do
                "COPIES segments=1 whole_file=differs content=differs control=unavailable"
     end
   end
+
+  describe "ChaosChecker.ControlPlane (issue #196: control-plane state across members)" do
+    alias ChaosChecker.ControlPlane
+
+    @nodes [:malachi@malachi1, :malachi@malachi2, :malachi@malachi3]
+
+    # A fake `:rpc.call/5` answering from `cluster`: node => {:ok, %{group => {index, state, version}}} for a
+    # node that answers, {:badrpc, reason} for one that does not. A group a node does not list is not
+    # registered there; one listed as :noproc is registered but not running.
+    defp fake_rpc(cluster) do
+      fn node, module, function, args, _timeout ->
+        case {Map.fetch!(cluster, node), module, function} do
+          {{:badrpc, reason}, _m, _f} ->
+            {:badrpc, reason}
+
+          {{:ok, groups}, :ra_directory, :list_registered} ->
+            [:default] = args
+            Enum.map(groups, fn {group, _member} -> {group, "uid-#{group}"} end)
+
+          {{:ok, groups}, :ra, :local_query} ->
+            [{group, ^node}, {m, f, a}, _timeout] = args
+
+            # Querying a group that is not registered on the node fails the way a stopped one does.
+            case Map.get(groups, group, :noproc) do
+              :noproc -> {:error, :noproc}
+              {:timeout, _} = timeout -> timeout
+              {index, state, _version} -> {:ok, {{index, 1}, apply(m, f, a ++ [state])}, {group, node}}
+            end
+
+          {{:ok, groups}, :ra_counters, :counters} ->
+            [{group, ^node}, [:effective_machine_version]] = args
+
+            case Map.get(groups, group) do
+              {_index, _state, version} -> %{effective_machine_version: version}
+              _not_running -> :undefined
+            end
+        end
+      end
+    end
+
+    defp everywhere(groups), do: Map.new(@nodes, &{&1, {:ok, groups}})
+
+    defp verdict(cluster, projection \\ :all) do
+      @nodes |> ControlPlane.read(projection, fake_rpc(cluster)) |> ControlPlane.verdict()
+    end
+
+    test "every group at the same index with the same state and version is converged" do
+      cluster =
+        everywhere(%{
+          malachi_log_vn_0: {40, %{topics: %{"t" => %{}}, segments: %{1 => :a}}, 3},
+          "Elixir.Malachi.LogLease": {12, %{holder: :n1}, 3}
+        })
+
+      assert verdict(cluster) == {:ok, 2}
+      assert ControlPlane.lines({:ok, 2}, :all) == ["CONTROL-PLANE OK groups=2 projection=all"]
+      assert ControlPlane.passed?({:ok, 2})
+    end
+
+    test "the same state at the same index diverging on one member is reported at once, naming it" do
+      cluster =
+        everywhere(%{malachi_log_vn_0: {40, %{topics: %{"t" => %{}}}, 3}})
+        |> Map.put(:malachi@malachi2, {:ok, %{malachi_log_vn_0: {40, %{topics: %{"t" => %{canary_note: 1}}}, 3}}})
+
+      assert {:diverged, [reason]} = verdict(cluster)
+      assert reason =~ "group=malachi_log_vn_0 index=40"
+      assert reason =~ ~r/ outliers=malachi@malachi2$/
+
+      # Whichever member it is: the report names the one that disagrees with the others.
+      on_first =
+        everywhere(%{malachi_log_vn_0: {40, %{topics: %{"t" => %{}}}, 3}})
+        |> Map.put(:malachi@malachi1, {:ok, %{malachi_log_vn_0: {40, %{topics: %{"t" => %{canary_note: 1}}}, 3}}})
+
+      assert {:diverged, [first]} = verdict(on_first)
+      assert first =~ ~r/ outliers=malachi@malachi1$/
+
+      assert [line, "CONTROL-PLANE DIVERGED projection=all"] = ControlPlane.lines({:diverged, [reason]}, :all)
+      assert line == "CONTROL-PLANE MISMATCH " <> reason
+      refute ControlPlane.passed?({:diverged, [reason]})
+    end
+
+    test "with no majority, every member is named as an outlier" do
+      cluster = %{
+        malachi@malachi1: {:ok, %{a: {5, %{x: 1}, 3}}},
+        malachi@malachi2: {:ok, %{a: {5, %{x: 2}, 3}}},
+        malachi@malachi3: {:ok, %{a: {5, %{x: 3}, 3}}}
+      }
+
+      assert {:diverged, [reason]} = verdict(cluster)
+      assert reason =~ ~r/ outliers=malachi@malachi1,malachi@malachi2,malachi@malachi3$/
+    end
+
+    test "members at different indexes are not compared yet: the reading is retried" do
+      cluster =
+        everywhere(%{malachi_log_vn_0: {40, %{a: 1}, 3}})
+        |> Map.put(:malachi@malachi3, {:ok, %{malachi_log_vn_0: {41, %{a: 2}, 3}}})
+
+      assert {:wait, [reason]} = verdict(cluster)
+      assert reason =~ "group=malachi_log_vn_0 indexes differ"
+      assert reason =~ "malachi@malachi3=41"
+    end
+
+    test "a divergence wins over a group that is only pending" do
+      cluster =
+        everywhere(%{a: {5, %{x: 1}, 3}, b: {7, %{y: 1}, 3}})
+        |> Map.put(:malachi@malachi1, {:ok, %{a: {5, %{x: 2}, 3}, b: {8, %{y: 1}, 3}}})
+
+      assert {:diverged, [reason]} = verdict(cluster)
+      assert reason =~ "group=a index=5"
+    end
+
+    test "different effective machine versions at the same index are retried, and named" do
+      cluster =
+        everywhere(%{malachi_log: {9, %{}, 4}})
+        |> Map.put(:malachi@malachi1, {:ok, %{malachi_log: {9, %{}, 3}}})
+
+      assert {:wait, [reason]} = verdict(cluster)
+      assert reason =~ "group=malachi_log effective versions differ"
+      assert reason =~ "malachi@malachi1=3"
+    end
+
+    test "a group running on some members only is pending, and one running nowhere is ignored" do
+      cluster =
+        everywhere(%{a: {1, %{}, 3}, stale: :noproc})
+        |> Map.put(:malachi@malachi2, {:ok, %{stale: :noproc}})
+
+      assert {:wait, [reason]} = verdict(cluster)
+      assert reason == "group=a not running on malachi@malachi2"
+    end
+
+    test "an unreachable node and an unreadable member are pending, never a pass" do
+      unreachable = Map.put(everywhere(%{a: {1, %{}, 3}}), :malachi@malachi3, {:badrpc, :nodedown})
+      assert {:wait, reasons} = verdict(unreachable)
+      assert "node malachi@malachi3 unreachable: {:badrpc, :nodedown}" in reasons
+
+      timing_out = Map.put(everywhere(%{a: {1, %{}, 3}}), :malachi@malachi1, {:ok, %{a: {:timeout, :x}}})
+      assert {:wait, [reason]} = verdict(timing_out)
+      assert reason =~ "group=a unreadable on malachi@malachi1: {:timeout, :x}"
+    end
+
+    test "no group at all is not a pass" do
+      assert verdict(everywhere(%{})) == {:wait, ["no control-plane group is running on any node"]}
+    end
+
+    test "the topics projection ignores everything else a newer build keeps in its state" do
+      # The shape a mixed-version cluster has: the newer member's state carries a field the older one does
+      # not know, while the topics agree. The whole-state digest differs, the projection does not.
+      cluster =
+        everywhere(%{malachi_log_vn_0: {40, %{topics: %{"t" => %{}}, segments: %{}}, 3}})
+        |> Map.put(
+          :malachi@malachi1,
+          {:ok, %{malachi_log_vn_0: {40, %{topics: %{"t" => %{}}, segments: %{}, new_field: 1}, 3}}}
+        )
+
+      assert {:diverged, _} = verdict(cluster, :all)
+      assert verdict(cluster, :topics) == {:ok, 1}
+
+      # And a topic written by one member only is exactly what it exists to catch (the #188 divergence).
+      written =
+        Map.put(cluster, :malachi@malachi1, {:ok, %{malachi_log_vn_0: {40, %{topics: %{"t" => %{n: 1}}}, 3}}})
+
+      assert {:diverged, _} = verdict(written, :topics)
+    end
+
+    test "the projection is safe on a state without topics" do
+      assert verdict(everywhere(%{"Elixir.Malachi.LogLease": {3, %{holder: :n1}, 3}}), :topics) == {:ok, 1}
+    end
+
+    test "settle retries a pending reading and stops at the first converged or diverged one" do
+      {:ok, script} = Agent.start_link(fn -> [{:wait, ["x"]}, {:wait, ["y"]}, {:ok, 1}, {:wait, ["never"]}] end)
+      read = fn -> Agent.get_and_update(script, fn [v | rest] -> {v, rest} end) end
+      {:ok, slept} = Agent.start_link(fn -> [] end)
+      sleep = fn ms -> Agent.update(slept, &[ms | &1]) end
+
+      assert ControlPlane.settle(read, 10, 250, sleep) == {:ok, 1}
+      assert Agent.get(slept, & &1) == [250, 250]
+
+      assert ControlPlane.settle(fn -> {:diverged, ["d"]} end, 10, 250, sleep) == {:diverged, ["d"]}
+    end
+
+    test "settle gives up after the attempts, returning the last pending reading" do
+      assert ControlPlane.settle(fn -> {:wait, ["still"]} end, 3, 0, fn _ -> :ok end) == {:wait, ["still"]}
+
+      assert ControlPlane.lines({:wait, ["still"]}, :topics) == [
+               "CONTROL-PLANE PENDING still",
+               "CONTROL-PLANE UNSETTLED projection=topics"
+             ]
+    end
+
+    test "parses its options, refusing anything it does not know" do
+      assert ControlPlane.parse_args(["malachi@malachi1,malachi@malachi2"]) ==
+               {:ok,
+                %{nodes: [:malachi@malachi1, :malachi@malachi2], projection: :all, attempts: 30, interval_ms: 2_000}}
+
+      assert ControlPlane.parse_args(["a@b", "--project", "topics", "--attempts", "3", "--interval-ms", "10"]) ==
+               {:ok, %{nodes: [:a@b], projection: :topics, attempts: 3, interval_ms: 10}}
+
+      assert {:error, _} = ControlPlane.parse_args(["a@b", "--project", "segments"])
+      assert {:error, _} = ControlPlane.parse_args(["a@b", "--attempts", "0"])
+      assert {:error, _} = ControlPlane.parse_args(["a@b", "--bogus"])
+      assert {:error, _} = ControlPlane.parse_args([""])
+      assert {:error, _} = ControlPlane.parse_args([])
+    end
+  end
 end

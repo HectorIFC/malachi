@@ -172,21 +172,30 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     [segment] = Metadata.segments_of_range(BrokerServer.metadata(control), root)
     [primary | _] = segment.replica_set
 
+    # Failover asks a broker the membership view has lost whether it is really gone, read-only, and a
+    # broker that answers is only suspected. The primary is made unreachable to that question rather
+    # than killed: a dead pid silently discards casts, which turns every unlucky placement into a five
+    # second produce timeout and made this test flaky. A primary whose process is truly gone is covered
+    # by the re-replication test above and by the chaos drill.
+    probe = fn replica, segment_id, base ->
+      case replica != primary and ReplicationServer.durable_stats(replica, segment_id, base, 1_000) do
+        {:ok, end_offset, byte_size} -> {end_offset, byte_size}
+        _unreachable -> :error
+      end
+    end
+
     {:ok, coordinator} =
       start_supervised(
         {HealCoordinator,
          live_brokers: fn -> Agent.get(live_agent, & &1) end,
          metadata_source: fn -> BrokerServer.metadata(control) end,
          apply_command: fn command -> BrokerServer.apply_heal(control, [command]) end,
+         probe: probe,
          replication_factor: 3,
          interval: 60_000}
       )
 
-    # The primary leaves the live set. It is dropped rather than killed on purpose: failover keys off
-    # membership, not process liveness, so this exercises the decision under test without dragging in a
-    # dead pid, whose silently discarded casts turn every unlucky placement into a five second produce
-    # timeout and made this test flaky. A primary whose process is truly gone is covered by the
-    # re-replication test above and by the chaos drill.
+    # The primary leaves the live set and stops answering the heal pass.
     Agent.update(live_agent, fn live -> live -- [primary] end)
 
     result = HealCoordinator.heal_now(coordinator)

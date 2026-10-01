@@ -132,6 +132,14 @@ turn that changes one does. The diff counts as reviewed from the moment the revi
 review you interrupt does not come back by itself; ask for it ("review the branch") when you want it.
 To turn the automatic run off for a session, start Claude Code with `MALACHI_SKIP_AUTO_REVIEW=1`.
 
+A second opinion is there when you ask for it by name: the `pr-agent-review` skill (`/pr-agent`) runs a
+port of [PR-Agent](https://github.com/The-PR-Agent/pr-agent)'s review, improve and describe on the
+branch or on a pull request by number. It checks the diff against the Plan and Verification of the issue
+it implements, proposes code suggestions that an independent pass scores, and describes the change,
+printing everything to the terminal and posting nothing. Trust `adversarial-review` for defects, and
+this one for compliance with the issue, suggestions and the summary. Both read the diff the same way,
+through `scripts/pin-diff.sh`.
+
 ## Getting help
 
 Open an issue with the template, or comment on an existing one. An observation you cannot yet fit into

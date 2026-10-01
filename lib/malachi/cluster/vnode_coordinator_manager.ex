@@ -18,6 +18,9 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
     * `:stop` - `(pid -> any)`, stops a vnode's coordinators;
     * `:version_servers` - optional `(placement -> [{machine, server_id}])`, the local vnode members whose
       machine version to watch (default none);
+    * `:resume` - optional `(placement -> [{vnode_id, :ok | {:error, reason}}])`, brings this node's
+      stopped vnode members back and says which it tried (e.g. `Malachi.Application.resume_local_vnodes/3`;
+      default none). One that raises skips the resume for that pass (see "A resume that raises");
     * `:interval` - reconcile period in ms (default 5_000);
     * `:name` - optional registered name.
 
@@ -52,6 +55,19 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   leadership changes. The interval paces the retry, so a coordinator that keeps dying respawns at most
   once per reconcile with a log each time instead of spinning. A deliberate stop demonitors first, so
   it is never mistaken for a death.
+
+  Resume first: every pass starts by bringing this node's stopped vnode members back (`:resume`), before
+  anything reads leadership. `ra` does not restart a node's registered servers when the node comes back,
+  and a stopped member reads as not hosted, so without this a restarted node would neither rejoin its
+  vnodes nor ever see that it had not. A member brought back is logged each time; one that cannot be is
+  logged once while it keeps failing, and again only after it recovered and failed anew.
+
+  A resume that raises: the production resume reads the `ra` directory, which raises while the `ra`
+  system restarts. That skips the resume for the pass rather than crashing the manager, which shares a
+  `one_for_all` supervisor with every coordinator it runs and would otherwise restart them all on every
+  tick the cause lasts. The rest of the pass still runs, so the coordinators follow whatever leadership
+  it reads. The cause is logged once while it lasts and again only after a resume completed; the last
+  per-member outcomes are kept, so a member that is still failing is not logged anew.
 
   Version watch: on the same tick and over the same placement snapshot, every member returned by
   `:version_servers` is checked with `Malachi.Cluster.MachineVersion.check/3`, whether this node leads it
@@ -111,6 +127,12 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
       spawn: Keyword.fetch!(opts, :spawn),
       stop: Keyword.fetch!(opts, :stop),
       version_servers: Keyword.get(opts, :version_servers, fn _placement -> [] end),
+      resume: Keyword.get(opts, :resume, fn _placement -> [] end),
+      # The vnode members the last pass could not resume, with why, so a failure is logged once.
+      resume_failures: %{},
+      # The cause of the last resume that raised, so it is logged once while it lasts (see
+      # `resume_members/2`); nil once a resume completes.
+      resume_raised: nil,
       version_status: %{},
       # `:ok` until a read fails, so the first failure is a transition and gets logged.
       placement_status: :ok,
@@ -204,6 +226,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   # Starts coordinators for newly-led vnodes and stops them for no-longer-led ones (stop first, so a
   # vnode that changed hands frees its coordinators before the new set spins up).
   defp reconcile_placement(state, placement) do
+    state = resume_members(state, placement)
     desired = MapSet.new(state.leading.(placement))
     running = MapSet.new(Map.keys(state.running))
     stopping = MapSet.difference(running, desired)
@@ -247,6 +270,50 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   end
 
   defp placement_readable(state), do: state
+
+  # A resume that raises (the production one reads the ra directory, which raises while the ra system
+  # restarts) skips the resume for this pass, like an unreadable placement, rather than crashing: the
+  # manager shares a one_for_all supervisor with every coordinator it runs, so a crash would restart them
+  # all, and a cause that lasts would do it every tick. The rest of the pass still runs, so the
+  # coordinators follow whatever leadership it reads: during an ra restart that is none, and they stop the
+  # ordinary way, which is right for a node that leads nothing. Logged once per cause; the last outcomes stay.
+  defp resume_members(state, placement) do
+    case run_resume(state, placement) do
+      {:ok, outcomes} -> record_resumed(%{state | resume_raised: nil}, outcomes)
+      {:raised, cause} -> record_resume_raised(state, cause)
+    end
+  end
+
+  defp run_resume(state, placement) do
+    {:ok, state.resume.(placement)}
+  catch
+    kind, reason -> {:raised, {kind, reason}}
+  end
+
+  defp record_resume_raised(%{resume_raised: cause} = state, cause), do: state
+
+  defp record_resume_raised(state, cause) do
+    Logger.warning(I18n.t(:vnode_members_resume_raised, reason: inspect(cause)))
+    %{state | resume_raised: cause}
+  end
+
+  defp record_resumed(state, outcomes) do
+    failures =
+      Enum.reduce(outcomes, %{}, fn
+        {vnode_id, :ok}, acc ->
+          Logger.info(I18n.t(:vnode_member_resumed, vnode: inspect(vnode_id)))
+          acc
+
+        {vnode_id, {:error, reason}}, acc ->
+          if Map.get(state.resume_failures, vnode_id) != reason do
+            Logger.warning(I18n.t(:vnode_member_resume_failed, vnode: inspect(vnode_id), reason: inspect(reason)))
+          end
+
+          Map.put(acc, vnode_id, reason)
+      end)
+
+    %{state | resume_failures: failures}
+  end
 
   defp check_versions(state, servers) do
     version_status =

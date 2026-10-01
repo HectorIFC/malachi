@@ -1,6 +1,6 @@
 # Running the chaos drills
 
-Three harnesses take a real 3-node RF=3 Docker cluster, inject real failures while synthetic traffic
+Five harnesses take a real 3-node RF=3 Docker cluster, inject real failures while synthetic traffic
 runs, and certify that a set of invariants held. They are the repo's version of NorthGuard's
 certification pipeline: not tests of code paths, but proof that the system as deployed survives the
 things that actually happen to it.
@@ -165,6 +165,72 @@ came back believing the environment and orphaned the metadata the reshard had mo
 > no reshard involved, and does not reproduce on an unsharded cluster. The two events above, which are
 > what this drill certifies, pass.
 
+## Rolling upgrade and rollback
+
+```bash
+scripts/docker-upgrade-chaos.sh
+OLD_REF=v0.14.2 scripts/docker-upgrade-chaos.sh
+```
+
+The one operation a release has to survive before anyone relies on it: replacing the binary node by
+node under load, and then putting the old one back. The drill builds two images. **OLD** is a release,
+built from its own tree: `OLD_REF`, or by default the release an operator would be upgrading from. Every
+merge is tagged, so when your tree's code (`lib`, `config`, `mix.lock`) is the newest release's, as it is
+on `main`, that is the newest release whose code differs (a release that only changed the docs is
+skipped); when your tree changes the code, it is the newest release. The oldest it accepts is 0.14.2
+for an unsharded run (the first release with every gate the canary exercises and every control-plane
+group this tree starts) and 0.16.1 for a sharded one (see below), although no release runs sharded before
+the first one that carries the fix for [#136](https://github.com/HectorIFC/malachi/issues/136). The run prints which release it took and why, and records it.
+
+**NEW** is your working tree with `test/support/upgrade_canary.patch` applied, which gives it what no release has yet: a capability and a cluster flag (`upgrade_canary`), a metadata
+command at the next machine version, a replication message older builds do not know, and a data format
+the flag raises the directories to. Nothing of the canary ships; on every pull request the patch is applied
+to the tree and the result compiled, so it never falls behind the code it patches.
+
+Three phases, each with its own checker window and topic, and every node keeping its volume across
+every swap:
+
+- **roll forward under the pin**: `MALACHI_RA_MACHINE_VERSION` holds the control plane at OLD's version,
+  as the [operations guide](operations.md#the-control-plane-machine-version) tells an operator to, and
+  each node goes from OLD to NEW. Halfway through, with node 3 on NEW and the others on OLD, the flag
+  must be refused naming the OLD nodes, the canary command must be refused and leave the topic metadata
+  identical on all three replicas and out of the NEW node's own metadata cache, and an OLD node must have
+  counted the unknown replication message instead of crashing on it. On a sharded run (below), with all
+  three on NEW the metadata ring is split from four vnodes to five.
+- **roll back before the flip**: every node goes back to OLD, which on a sharded run has to bring up the
+  vnode the split created. This must succeed.
+- **roll forward, finalize, flip, refused rollback**: forward again under the pin, then the pin is
+  removed node by node, which moves the control plane to the new machine version, where the canary
+  command applies. The flag is switched on, which raises every data directory to format 2. Node 3 is
+  then started on OLD: it must exit 78 with the format marker's refusal, its data directory (the segment
+  files and the control plane's state beside them) must be byte for byte what it was, and the other two
+  must keep serving. It then goes back to NEW.
+
+The control plane is sharded (four vnodes, split to five) only when OLD itself brings a restarted node's
+vnode members back, which releases before the fix for
+[#136](https://github.com/HectorIFC/malachi/issues/136) do not: rolled back onto such a release, a sharded
+cluster loses each vnode's quorum at its second node, whatever the drill does. On an older OLD the drill runs
+unsharded and splits nothing. The run prints which one it chose and why, and records it.
+
+Every swap is certified three ways: acks kept flowing while the node was down (the node is stopped first,
+and the count is polled while it stays stopped, before it is recreated), acks kept flowing once it was
+back, and a produce through that node alone was clean. Every phase ends with the acked-durability
+check and a comparison of every Raft group across its members at equal applied indexes. The run ends by
+searching the saved log of every container it replaced for a crash report, and any crash fails the run.
+The one exception is a crash an OLD build is known to have, listed in the drill's `OLD_KNOWN_CRASHES` with
+the change that fixed it: certifying NEW cannot wait on fixing a release already shipped, but only a crash
+someone has read and named is excused, and it is still printed.
+
+`OLD_PATCH` and `NEW_PATCH` apply one more patch to either tree. They exist for the runs that show the
+drill catches what it claims (revert a guard and watch it fail); a result recorded with either is marked
+`negative_control`, so it can never be mistaken for a certification.
+
+A run takes 40 to 55 minutes: the three checker windows alone are 29 (each phase waits out its window),
+on top of three image builds and fourteen node swaps. `PHASE1_WINDOW_S`, `PHASE2_WINDOW_S` and
+`PHASE3_WINDOW_S` size the windows; a phase that outlasts its window fails and names the one to raise.
+A run that cannot start (a patch that no longer applies, an image that does not build, another cluster
+already running) still writes its result, as failed, and removes the images it built.
+
 ## Recording a result
 
 Set `CHAOS_RESULT_FILE` and the harness writes the whole run as JSON alongside its console output:
@@ -183,7 +249,11 @@ from `benchmark/published/chaos-node.json`, and the [benchmark dashboard](https:
 the same run beside the two load tests.
 
 CI keeps that file current: the Publish results workflow runs the node-fault drill on every push to
-main and commits its record, failures included. Only that drill is published. The storage-corruption
+main and commits its record, failures included. The Rolling upgrade certification workflow runs the
+upgrade drill every night and on demand, and publishes the nightly record the same way to
+`benchmark/published/chaos-upgrade.json`, rendered as the
+[Rolling upgrade certification results](../generated/chaos-upgrade-results.md) page. No other drill is
+published. The storage-corruption
 drill also runs in CI (the Storage chaos certification workflow: on demand, weekly, and on pull requests
 that touch storage, replication, repair or the drill). It is not a required check, and it publishes
 nothing: its JSON and any evidence are uploaded as the `chaos-storage` artifact. The config-deployment

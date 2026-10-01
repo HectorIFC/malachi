@@ -55,23 +55,15 @@ S=$(mktemp -d)                                   # or $CLAUDE_JOB_DIR/tmp/open-p
 owner=$(gh repo view --json owner --jq .owner.login)
 name=$(gh repo view --json name --jq .name)
 gh issue view "$N" --json body --jq .body > "$S/issue.md"
-cat > "$S/branch.awk" <<'AWK'
-/^```/ { fence = !fence; if (b && !c) { c = 1; next } else if (c) { exit } next }
-c && NF { print; exit }
-fence { next }
-!p && /^## PR[[:space:]]*$/ { p = 1; next }
-!p { next }
-/^## / { exit }
-!b && /^\*\*Branch\*\*/ { b = 1 }
-AWK
-branch=$(awk -f "$S/branch.awk" "$S/issue.md")
-printf '%s\n' "$branch" | grep -Eqx '[A-Za-z0-9._/-]+' \
-  && /usr/bin/git check-ref-format --branch "$branch" >/dev/null \
-  && printf 'ok: %s\n' "$branch" || printf 'stop: %s\n' "$branch"
+section="$(/usr/bin/git rev-parse --show-toplevel)/scripts/issue-section.sh"
+branch=$("$section" branch "$S/issue.md") && printf 'ok: %s\n' "$branch" || echo "stop: no usable branch"
 ```
 
-The character check is the control, for the reason `start-issue-work` gives: `check-ref-format` accepts
-`$(id)` and backticks. On `stop`, show the value and go no further.
+`scripts/issue-section.sh` is the repository's one reader of issue sections, shared with
+`pr-agent-review`. For `branch` it prints the name only when it is made of `[A-Za-z0-9._/-]` alone and
+git accepts it as a branch name; that character check is the control, for the reason `start-issue-work`
+gives: `check-ref-format` accepts `$(id)` and backticks. On `stop`, show the `## PR` section and go no
+further.
 
 Then the preconditions, each one a stop with a report, never a fix the skill makes on its own:
 
@@ -130,40 +122,22 @@ note exactly, and filling each section:
 - **📸 Screenshots:** `Not applicable.` unless the change is visual.
 - **🔗 Related Issues:** `Closes #<N>`, the issue this branch implements, so the merge closes it.
 
-Extract the two issue blocks straight into files, never through a shell string:
-
-All three scans track the fence FIRST and ignore every marker inside one, because an issue that shows
-what the template looks like puts `## PR` and `**Branch**` inside a code block: matching them there
-picks a branch out of an example rather than the issue's own, and a `##` line inside the description or
-inside a code block in the verification truncates the extracted file. The fence state is the first rule
-in each program, so no marker is recognized while it is open.
+Extract the two issue blocks straight into files, never through a shell string, with the same script:
 
 ```
-cat > "$S/description.awk" <<'AWK'
-/^```/ { fence = !fence; if (d && !c) { c = 1; next } else if (c) { exit } next }
-c { print; next }
-fence { next }
-!p && /^## PR[[:space:]]*$/ { p = 1; next }
-!p { next }
-/^## / { exit }
-!d && /^\*\*Description\*\*/ { d = 1 }
-AWK
-cat > "$S/verification.awk" <<'AWK'
-/^```/ { fence = !fence; if (v) print; next }
-fence { if (v) print; next }
-!v && /^## Verification[[:space:]]*$/ { v = 1; next }
-!v { next }
-/^## / { exit }
-{ print }
-AWK
-awk -f "$S/description.awk" "$S/issue.md" > "$S/description.md"
-awk -f "$S/verification.awk" "$S/issue.md" | sed -e '/./,$!d' > "$S/verification.md"
+"$section" pr-description "$S/issue.md" > "$S/description.md"
+"$section" verification "$S/issue.md" > "$S/verification.md"
 missing=
 for f in description verification; do
   grep -q '[^[:space:]]' "$S/$f.md" || missing="$missing $f"
 done
 [ -z "$missing" ] && echo "ok: both sections" || { echo "stop: the issue has no$missing"; exit 1; }
 ```
+
+Every scan in the script tracks the fence FIRST and ignores every marker inside one, because an issue
+that shows what the template looks like puts `## PR` and `**Branch**` inside a code block: matching them
+there picks a branch out of an example rather than the issue's own, and a `##` line inside the
+description or inside a code block in the verification truncates the extracted file.
 
 The description scan is bounded to the `## PR` section and takes the first fenced block after
 `**Description**`, so a fence further down can never be taken for the PR's description. Either file

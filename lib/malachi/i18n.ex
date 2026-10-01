@@ -577,15 +577,16 @@ defmodule Malachi.I18n do
         "could not record the seal for %{count} fenced segment(s): %{segments}. Their ranges take no " <>
           "write until a later pass succeeds, so the control plane is the thing to look at"
     },
-    heal_seal_no_majority: %{
+    heal_seal_no_quorum: %{
       "pt_BR" =>
         "segmento %{segment_id} não pode ser selado para failover: %{answered} de %{replicas} réplicas " <>
-          "responderam, sem maioria. Seu range fica bloqueado para escrita até uma maioria voltar, " <>
-          "porque selar numa minoria poderia descartar escritas já confirmadas",
+          "responderam, e são precisas %{needed} para cobrir toda escrita confirmada. Seu range fica " <>
+          "bloqueado para escrita até elas voltarem, porque selar em menos poderia descartar escritas já " <>
+          "confirmadas",
       "en_US" =>
         "segment %{segment_id} cannot be sealed for failover: %{answered} of %{replicas} replicas " <>
-          "answered, no majority. Its range is blocked for writes until a majority returns, because " <>
-          "sealing on a minority could discard acknowledged writes"
+          "answered, and %{needed} are needed to cover every acknowledged write. Its range is blocked for " <>
+          "writes until they return, because sealing on fewer could discard acknowledged writes"
     },
     auto_rebalance_committed: %{
       "pt_BR" => "rebalanceamento automático aplicado: %{applied}",
@@ -604,6 +605,34 @@ defmodule Malachi.I18n do
         "não foi possível ler a colocação de vnodes (%{reason}); mantendo os coordenadores que este nó já roda até conseguir ler de novo",
       "en_US" =>
         "the vnode placement could not be read (%{reason}); keeping the coordinators this node already runs until it can be read again"
+    },
+    heal_metadata_unavailable: %{
+      "pt_BR" => "passada de heal pulada: não foi possível ler a metadata (%{reason})",
+      "en_US" => "heal pass skipped: the metadata could not be read (%{reason})"
+    },
+    heal_commands_unapplied: %{
+      "pt_BR" =>
+        "passada de heal não conseguiu entregar seus comandos ao broker (%{reason}); os não entregues esperam a próxima passada, e um selo de failover entre eles pode não ser planejado de novo (#269)",
+      "en_US" =>
+        "heal pass could not hand its commands to the broker (%{reason}); the ones not handed over wait for the next pass, and a failover seal among them may not be planned again (#269)"
+    },
+    retention_metadata_unavailable: %{
+      "pt_BR" => "varredura de retenção pulada: não foi possível ler a metadata (%{reason})",
+      "en_US" => "retention sweep skipped: the metadata could not be read (%{reason})"
+    },
+    vnode_member_resumed: %{
+      "pt_BR" => "membro deste nó no vnode %{vnode} retomado a partir do log persistido",
+      "en_US" => "resumed this node's member of vnode %{vnode} from its persisted log"
+    },
+    vnode_member_resume_failed: %{
+      "pt_BR" => "não foi possível retomar o membro deste nó no vnode %{vnode}: %{reason}",
+      "en_US" => "could not resume this node's member of vnode %{vnode}: %{reason}"
+    },
+    vnode_members_resume_raised: %{
+      "pt_BR" =>
+        "não foi possível retomar os membros de vnode deste nó: %{reason}; a passada segue sem retomar, com os coordenadores conforme a liderança que conseguir ler",
+      "en_US" =>
+        "could not resume this node's vnode members: %{reason}; the pass goes on without resuming, with the coordinators the leadership it can read calls for"
     },
     vnode_placement_recovered: %{
       "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó",
