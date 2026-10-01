@@ -594,6 +594,15 @@ defmodule UpgradeChaosTest do
       refute output =~ "FAIL: a process crashed"
     end
 
+    test "an OLD build's heal coordinator dying on its apply_heal call is known too", ctx do
+      # What the drill met on Linux with v0.18.0: the same bug, the call that timed out handing the heal
+      # commands to the broker rather than reading its metadata.
+      assert {output, 0} = run_drill(ctx, [{"STUB_CRASH", "old_apply_heal_timeout"}])
+      assert output =~ "(OLD, a crash it is known to have, listed in OLD_KNOWN_CRASHES; not failed)"
+      assert output =~ "{:apply_heal,"
+      refute output =~ "FAIL: a process crashed"
+    end
+
     # The list is the drill's own, so these edit the copy of the drill this test runs.
     defp known_crashes!(ctx, entry) do
       drill = Path.join([ctx.root, "scripts", "docker-upgrade-chaos.sh"])
@@ -752,7 +761,9 @@ defmodule UpgradeChaosTest do
   #   STUB_CRASH          1: node 2's first log (its OLD container, replaced in phase 1) carries a crash report
   #                       over an unknown message; old_timeout / new_timeout: node 2's first log from that
   #                       build carries the heal coordinator's :metadata call timing out; old_keyerror: node 2's
-  #                       first OLD log carries a KeyError, a known tag in a shape it cannot read
+  #                       first OLD log carries a KeyError, a known tag in a shape it cannot read;
+  #                       old_apply_heal_timeout: node 2's first OLD log carries the heal coordinator's
+  #                       {:apply_heal, ...} call timing out
   #   STUB_CACHE_NOTE     what node 3's broker cache holds as the canary note (default nil)
   #   STUB_BUILD_FAILS    old or new: that image does not build
   #   STUB_SPLIT          refused: the reshard is refused
@@ -903,6 +914,13 @@ defmodule UpgradeChaosTest do
               touch "$STUB_LOG.crashed"
               echo "12:00:00.000 [error] GenServer Malachi.LogHealer terminating"
               echo "** (stop) exited in: GenServer.call(Malachi.LogBroker, :metadata, 5000)"
+              echo "    ** (EXIT) time out"
+            fi ;;
+          old_apply_heal_timeout)
+            if [ "$2" = malachi-cluster-2 ] && [ "${running##*:}" = old ] && [ ! -f "$STUB_LOG.crashed" ]; then
+              touch "$STUB_LOG.crashed"
+              echo "12:00:00.000 [error] GenServer Malachi.LogHealer terminating"
+              echo "** (stop) exited in: GenServer.call(Malachi.LogBroker, {:apply_heal, [{:set_segment_replicas, {{\"t\", 0}, 0}, []}]}, 5000)"
               echo "    ** (EXIT) time out"
             fi ;;
         esac ;;

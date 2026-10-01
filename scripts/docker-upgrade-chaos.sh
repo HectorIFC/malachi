@@ -443,6 +443,8 @@ OLD_KNOWN_CRASHES=(
   # A heal or retention coordinator dying on the broker's :metadata call timing out while other nodes restart.
   # Fixed by fix(cluster): heal and retention skip a pass the broker cannot answer (#196).
   'GenServer\.call\(Malachi\.LogBroker, :metadata'
+  # The same coordinator dying on the call that hands the broker its heal commands, met with v0.18.0. The same fix.
+  'GenServer\.call\(Malachi\.LogBroker, \{:apply_heal'
 )
 
 # $1 with every crash report of an OLD_KNOWN_CRASHES kind removed: the "GenServer ... terminating" line and
