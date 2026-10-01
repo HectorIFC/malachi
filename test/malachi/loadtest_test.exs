@@ -7,8 +7,10 @@ defmodule Malachi.LoadtestTest do
 
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Payload
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
+  alias Malachi.Test.PollingHelper
   alias Malachi.Test.SubscribeResetStub
   alias Malachi.Wire
 
@@ -49,6 +51,154 @@ defmodule Malachi.LoadtestTest do
       defaults = run(scenario: :produce, connections: 1, topic: topic("regime_defaults"))
       assert defaults.batch == 10
       assert defaults.record_size == 256
+      assert defaults.payload == :constant
+      assert defaults.payload_seed == nil
+      assert defaults.payload_pool_values == nil
+    end
+
+    test "json and random runs produce cleanly, pipelined too, and record the payload they sent" do
+      for {payload, opts} <- [{:json, [pipeline: 4]}, {:random, [payload_seed: 9]}] do
+        t = topic("payload_#{payload}")
+        r = run([scenario: :produce, connections: 3, batch: 4, payload: payload, topic: t] ++ opts)
+
+        assert r.errors == 0
+        assert r.records == r.ops * 4
+        assert r.payload == payload
+        assert r.payload_seed == Keyword.get(opts, :payload_seed, 1)
+        assert r.payload_pool_values == Payload.pool_size(256, 4, 3, Keyword.get(opts, :pipeline, 1))
+      end
+    end
+
+    test "a pool past 512MiB is announced before it is generated, and a smaller or constant one is not" do
+      big = [payload: :json, connections: 64, pipeline: 32, batch: 4096, record_size: 256]
+
+      assert Loadtest.large_pool_note(big) ==
+               "note: the json payload pool holds 2048MiB (64 connections x pipeline 32 x batch 4096); " <>
+                 "generating it first"
+
+      assert Loadtest.large_pool_note(Keyword.put(big, :pipeline, 1)) == nil
+      assert Loadtest.large_pool_note(Keyword.put(big, :payload, :constant)) == nil
+      # A read scenario uses the pool only to prepopulate, one request at a time, so the pipeline is moot.
+      assert Loadtest.large_pool_note(Keyword.put(big, :scenario, :fetch)) == nil
+    end
+
+    test "a pipelined run sizes the pool for a full pipeline per connection" do
+      # 256KB values make 8MiB of pool 8 batches of 4, so the pipeline decides: 2 connections each sending
+      # 8 ahead need 16 batches for their first bursts to stay apart.
+      opts = [connections: 2, batch: 4, pipeline: 8, record_size: 262_144, payload: :random]
+      r = run([scenario: :produce, topic: topic("pool_pipeline")] ++ opts)
+
+      assert r.payload_pool_values == 64
+      assert Payload.pool_size(262_144, 4, 2, 1) == 32
+    end
+
+    test "each connection walks the pool from its own batch, so two connections send different values" do
+      t = topic("pool_walk")
+      run(scenario: :produce, connections: 2, batch: 2, payload: :json, payload_seed: 5, topic: t)
+
+      {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, t, %{}, 10_000, 0)
+      values = Enum.map(records, & &1.value)
+      pool = Payload.values(:json, 5, 256, Payload.pool_size(256, 2, 2, 1))
+      start = Payload.start_batch(1, div(length(pool), 2), 2) * 2
+
+      # Connection 0 starts at the pool's first batch and connection 1 half way through it.
+      assert Enum.at(pool, 0) in values
+      assert Enum.at(pool, start) in values
+      assert Enum.all?(values, &(&1 in pool))
+      refute Enum.any?(values, &(&1 == :binary.copy("x", 256)))
+    end
+
+    test "a prepopulated backlog for a fetch run is drawn from the pool" do
+      t = topic("pool_prepop")
+      run(scenario: :fetch, connections: 1, batch: 5, prepopulate: 10, payload: :random, topic: t)
+
+      {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, t, %{}, 100, 0)
+      assert Enum.map(records, & &1.value) == Payload.values(:random, 1, 256, 10)
+    end
+
+    test "a run that never produces does not generate a pool, and one that prepopulates does" do
+      r = run(scenario: :fetch, connections: 1, prepopulate: 0, payload: :json, topic: topic("no_pool"))
+      assert r.payload == :json
+      assert r.payload_pool_values == nil
+
+      r = run(scenario: :fetch, connections: 1, prepopulate: 10, batch: 5, payload: :json, topic: topic("prep_pool"))
+      assert r.payload_pool_values == Payload.pool_size(256, 5, 1, 1)
+
+      # 1MB values make 8MiB of pool a single batch of 8, so the floor of one batch per connection is what
+      # sizes it: two connections need two batches.
+      r =
+        run(
+          scenario: :fetch,
+          connections: 2,
+          prepopulate: 8,
+          batch: 8,
+          max: 1,
+          record_size: 1_048_576,
+          payload: :random,
+          topic: topic("pool_floor")
+        )
+
+      assert r.payload_pool_values == 16
+      assert Payload.pool_size(1_048_576, 8, 1, 1) == 8
+    end
+
+    test "the pool lives in persistent_term during a run, no worker holds a copy, and a killed run frees it" do
+      pools = fn -> for {{Malachi.Loadtest, :pool, _ref}, batches} <- :persistent_term.get(), do: batches end
+      opts = [port: TCPAcceptorPool.port(), user: "admin", pass: "admin123", warmup: 0, duration: 30]
+
+      # 65536 batches of one 16-byte value: each encoded batch is small enough to be a heap binary, so a
+      # worker holding its own copy of the pool would hold about 10MB.
+      runner =
+        spawn(fn ->
+          # all_at_once starts no connect gate, so the runner's links are its three workers and nothing else.
+          run_opts = [
+            scenario: :produce,
+            payload: :random,
+            record_size: 16,
+            batch: 1,
+            connections: 3,
+            connect_strategy: :all_at_once
+          ]
+
+          capture_io(fn -> Loadtest.run(opts ++ run_opts ++ [topic: topic("pool_held")]) end)
+        end)
+
+      workers = fn ->
+        case Process.info(runner, :links) do
+          {:links, links} -> links
+          nil -> []
+        end
+      end
+
+      assert :ok = PollingHelper.wait_until(fn -> pools.() != [] and length(workers.()) == 3 end, timeout: 15_000)
+      assert [batches] = pools.()
+      assert tuple_size(batches) == Payload.pool_size(16, 1, 3, 1)
+
+      for worker <- workers.() do
+        {:memory, bytes} = Process.info(worker, :memory)
+        assert bytes < 2_000_000, "a worker holds #{bytes} bytes, as if it had its own copy of the pool"
+      end
+
+      # Killed, the run never reaches its `after`, and the pool must not outlive it anyway.
+      Process.exit(runner, :kill)
+      assert :ok = PollingHelper.wait_until(fn -> pools.() == [] end)
+    end
+
+    test "the pool is released when the run ends, and when its setup fails" do
+      pools = fn -> for {{Malachi.Loadtest, :pool, _ref}, _batches} <- :persistent_term.get(), do: :pool end
+
+      run(scenario: :produce, connections: 2, batch: 2, payload: :random, topic: topic("pool_release"))
+      assert pools.() == []
+
+      {:ok, closed} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(closed)
+      :gen_tcp.close(closed)
+
+      assert_raise Loadtest.SetupError, fn ->
+        Loadtest.run(port: port, scenario: :produce, payload: :json, connections: 1, duration: 1)
+      end
+
+      assert pools.() == []
     end
 
     test "a produce refused by the publish quota is counted apart from a genuine error" do
@@ -202,6 +352,15 @@ defmodule Malachi.LoadtestTest do
     # `--keys=1000` contains it.
     defp shell_flag_absent?(command, flag) do
       command |> replay_argv() |> Enum.all?(&(not String.starts_with?(&1, flag <> "=")))
+    end
+
+    test "the payload is in the command only when it is not constant bytes, seed included" do
+      refute Loadtest.reproduce_command([]) =~ "payload"
+
+      command = Loadtest.reproduce_command(payload: :json, payload_seed: 12)
+      assert shell_value(command, "--payload") == "json"
+      assert shell_value(command, "--payload-seed") == "12"
+      assert shell_value(Loadtest.reproduce_command(payload: :random), "--payload-seed") == "1"
     end
 
     test "free text in the recorded command survives a shell round trip" do
@@ -551,6 +710,58 @@ defmodule Malachi.LoadtestTest do
 
       assert_raise ArgumentError, ~r/connect_concurrency must be a positive integer/, fn ->
         Loadtest.run(connect_concurrency: 0)
+      end
+    end
+
+    test "an unknown scenario or payload, a misplaced or bad seed and a json size too small are named errors" do
+      assert_raise ArgumentError, ~r/unknown scenario :nope \(expected one of:/, fn -> Loadtest.run(scenario: :nope) end
+      assert_raise ArgumentError, ~r/unknown payload :zip/, fn -> Loadtest.run(payload: :zip) end
+
+      assert_raise ArgumentError, "payload_seed only applies to the :json and :random payloads", fn ->
+        Loadtest.run(payload_seed: 3)
+      end
+
+      for seed <- [-1, 0x1_0000_0000, "7"] do
+        assert_raise ArgumentError, ~r/payload_seed must be an integer from 0 to 4294967295/, fn ->
+          Loadtest.run(payload: :random, payload_seed: seed)
+        end
+      end
+
+      min = Payload.min_json_size()
+
+      assert_raise ArgumentError, "json payload needs --record-size >= #{min}, got #{min - 1}", fn ->
+        Loadtest.run(payload: :json, record_size: min - 1)
+      end
+    end
+
+    test "the mix task names the choices of every enum flag it refuses" do
+      for {flag, value, choices} <- [
+            {"--scenario", "nope", "produce, fetch, mixed, stream, user, acl"},
+            {"--connect-strategy", "warp", "bounded, stagger, all-at-once"},
+            {"--payload", "zip", "constant, json, random"}
+          ] do
+        message = "unknown #{flag} #{inspect(value)} (expected one of: #{choices})"
+        assert_raise Mix.Error, message, fn -> Mix.Tasks.Malachi.Loadtest.run([flag, value]) end
+      end
+    end
+
+    test "the mix task turns every enum flag into its option and runs, and a setup failure into a Mix error" do
+      t = topic("mix_enums")
+
+      argv =
+        ~w(--scenario produce --connect-strategy all-at-once --payload json --payload-seed 3 --connections 1) ++
+          ~w(--duration 1 --warmup 0 --json --user admin --pass admin123 --port #{TCPAcceptorPool.port()} --topic #{t})
+
+      output = capture_io(fn -> Mix.Tasks.Malachi.Loadtest.run(argv) end)
+      assert %{"payload" => "json", "payload_seed" => 3, "errors" => 0} = Jason.decode!(output)
+      assert Jason.decode!(output)["meta"]["command"] =~ "--connect-strategy=all-at-once"
+
+      {:ok, closed} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(closed)
+      :gen_tcp.close(closed)
+
+      assert_raise Mix.Error, ~r/could not connect and authenticate to create the topic/, fn ->
+        Mix.Tasks.Malachi.Loadtest.run(~w(--port #{port} --connections 1 --duration 1))
       end
     end
 

@@ -14,7 +14,9 @@ comparison is fair rather than a contest of generator runtimes.
 
 ## Before you start
 
-The generator connects to an **already running** server; it does not start one.
+It needs Node 22.15 or later, the first release whose `zlib` has zstd, which the payload checks in
+`--self-test` use. CI runs Node 22. The generator connects to an **already running** server; it does
+not start one.
 
 ```bash
 MIX_ENV=dev mix run --no-halt
@@ -47,6 +49,38 @@ node loadtest.js --scenario mixed --connections 20 --record-size 512 --keys 1000
 
 `--keys` sets key cardinality, which matters for anything that partitions by key. `--prepopulate`
 defaults to 10000 for the scenarios that need a backlog and to nothing for `produce`.
+
+## Payloads
+
+By default every record value is one repeated byte, which is what every published series so far
+was measured with. Constant bytes compress to almost nothing, so no compression figure taken with them
+means anything. `--payload` picks what the values are, with the same names in both generators:
+
+- `constant` (default): the repeated byte.
+- `json`: a seeded, event-like JSON document (an id, a timestamp, an event type, a user, a region, a
+  status, an amount and a short text) of exactly `--record-size` bytes. It needs at least 149 bytes; a
+  smaller size is refused before any connection opens.
+- `random`: seeded noise, the incompressible control.
+
+`--payload-seed` (0 to 4294967295, default 1) picks the values, and only json and random accept it. The
+same mode, seed and size give byte-identical values in the Elixir and the Node generator. The values
+are generated once, before the run starts, into a pool every connection shares: about 8MiB of values
+(capped at 65536 values, so less below 128-byte records), and never less than one batch per connection.
+Each connection starts on a batch of its own and walks forward from it, so no produce repeats a value
+inside its batch and a connection only sends a value again after it has sent the whole pool. Large
+batches at many connections make the pool larger: batch 4096 of 256-byte values at 64 connections holds
+64MiB. Only the starts are kept apart: a connection that runs ahead of its neighbour sends a few of the
+same batches as the neighbour close together.
+How much a block compresses then depends on how many records it holds, which is `--batch`: with zstd at
+level 1 and 256-byte values, about 1.3x at one record per block and 3.8x at a thousand. The document,
+the generator and the pool are specified in `Malachi.Loadtest.Payload`.
+
+A json or random run records `payload` and `payload_seed` beside `batch` and `record_size` in its
+JSON.
+
+```bash
+node loadtest.js --scenario produce --connections 20 --batch 100 --payload json --payload-seed 7
+```
 
 ## Closed loop and open loop
 
@@ -157,8 +191,9 @@ have been losing connections. Outside the stream scenario those two fields are n
 connection there is counted in `errors` instead, once for every request that fails on it. `--warmup` excludes the opening seconds from the
 statistics, which matters because the first connections pay for topic creation and JIT warmup.
 
-`--self-test` validates the latency histogram against a brute-force reference without a server, if
-you ever doubt the percentiles themselves:
+`--self-test` validates the latency histogram against a brute-force reference without a server, and
+the payload generator against the golden vectors the Elixir one is tested with, if you ever doubt the
+percentiles or the values themselves:
 
 ```bash
 node loadtest.js --self-test

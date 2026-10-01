@@ -22,22 +22,36 @@
  *   node loadtest.js --scenario mixed --connections 20 --record-size 512 --keys 1000
  *
  * Common flags: --topic, --batch, --record-size, --keys, --max, --window, --prepopulate, --warmup,
- *   --json (emits reproduce metadata). Default credentials: app / app123 (produce + consume).
+ *   --payload, --payload-seed, --json (emits reproduce metadata). Default credentials: app / app123
+ *   (produce + consume).
  */
 
 const { performance } = require('perf_hooks');
 const { MalachiClient, isMigrating, isNotOwner, isTransport } = require('./lib/client');
 const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
+const payload = require('./lib/payload');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 
-const SCENARIOS = ['produce', 'fetch', 'stream', 'mixed'];
-// How connections are opened (mirrored, name for name, by `mix malachi.loadtest`): each connection
-// pays a server-side credential verification, so opening hundreds at once is a self-inflicted auth
-// storm. bounded caps in-flight connects, stagger delays each start, all-at-once is the storm.
-const CONNECT_STRATEGIES = ['bounded', 'stagger', 'all-at-once'];
+// Every enum flag, its values and its default, mirrored name for name by @enums in lib/malachi/loadtest.ex.
+// connect-strategy is how connections are opened: each one pays a server-side credential verification, so
+// opening hundreds at once is a self-inflicted auth storm; bounded caps in-flight connects, stagger delays
+// each start, all-at-once is the storm. payload is what the record values are (scripts/lib/payload.js).
+const ENUM_FLAGS = {
+  scenario: { values: ['produce', 'fetch', 'stream', 'mixed'], fallback: 'produce' },
+  'connect-strategy': { values: ['bounded', 'stagger', 'all-at-once'], fallback: 'bounded' },
+  payload: { values: payload.MODES, fallback: 'constant' },
+};
+
+// A knob only some values of an enum flag read. Passing it with another value is an error, not a silent
+// no-op: the run would otherwise claim a setting it never applied. Mirrored by @knobs in the Elixir generator.
+const KNOB_REQUIRES = {
+  'connect-concurrency': { flag: 'connect-strategy', values: ['bounded'], readers: 'the bounded connect strategy' },
+  'connect-stagger-ms': { flag: 'connect-strategy', values: ['stagger'], readers: 'the stagger connect strategy' },
+  'payload-seed': { flag: 'payload', values: ['json', 'random'], readers: 'the json and random payloads' },
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -231,6 +245,22 @@ function makeValue(size) {
   return Buffer.alloc(size, 0x61); // 'a'
 }
 
+// The json and random values, generated once before any connection opens (see scripts/lib/payload.js): a
+// whole number of batches of distinct values, shared by every connection. null for constant bytes, which
+// keep the single shared value they always had.
+function makePool(opts) {
+  if (opts.payload === 'constant') return null;
+  return payload.values(opts.payload, opts.payloadSeed, opts.recordSize, payload.poolSize(opts.recordSize, opts.batch, opts.connections, 1));
+}
+
+// The records of pool batch `n`, keyed by their position in the pool, as the Elixir generator keys them.
+function poolBatch(opts, n) {
+  return Array.from({ length: opts.batch }, (_, j) => {
+    const pos = n * opts.batch + j;
+    return { key: `key-${pos % opts.keys}`, value: opts.pool[pos] };
+  });
+}
+
 function recordBytes(records) {
   return records.reduce((acc, r) => acc + r.value.length, 0);
 }
@@ -242,16 +272,28 @@ function recordBytes(records) {
 // than counting a reshard blip as a benchmark error, matching what producer.js/consumer.js do.
 const transient = (err) => isMigrating(err) || isNotOwner(err);
 
-function produceOp(opts) {
-  const value = makeValue(opts.recordSize);
-  let seq = 0;
+// Constant bytes: one value for every record, as every published series was measured. A pool: the next
+// batch on every op, from connection `index`'s own starting batch, as the Elixir generator walks it.
+function produceOp(opts, index) {
+  if (opts.pool === null) {
+    const value = makeValue(opts.recordSize);
+    let seq = 0;
+    return async (client) => {
+      const batch = Array.from({ length: opts.batch }, () => {
+        seq += 1;
+        return { key: `key-${seq % opts.keys}`, value };
+      });
+      const n = await withRetry(() => client.produce(opts.topic, batch), transient);
+      return { records: n, bytes: value.length * batch.length };
+    };
+  }
+  const batches = opts.pool.length / opts.batch;
+  let cursor = payload.startBatch(index, batches, opts.connections);
   return async (client) => {
-    const batch = Array.from({ length: opts.batch }, () => {
-      seq += 1;
-      return { key: `key-${seq % opts.keys}`, value };
-    });
+    const batch = poolBatch(opts, cursor);
+    cursor = (cursor + 1) % batches;
     const n = await withRetry(() => client.produce(opts.topic, batch), transient);
-    return { records: n, bytes: value.length * batch.length };
+    return { records: n, bytes: opts.recordSize * batch.length };
   };
 }
 
@@ -453,8 +495,10 @@ function connectBefore(deadline) {
   });
 }
 
-// Appends `count` records up front so fetch/stream/mixed have a backlog to read.
-async function prepopulate(topic, count, recordSize, keys) {
+// Appends `count` records up front so fetch/stream/mixed have a backlog to read, from the pool when there
+// is one, walking it from its start.
+async function prepopulate(opts) {
+  const { topic, prepopulate: count, recordSize, keys, pool } = opts;
   if (count <= 0) return;
   const client = await connect();
   const value = makeValue(recordSize);
@@ -462,7 +506,10 @@ async function prepopulate(topic, count, recordSize, keys) {
   let done = 0;
   while (done < count) {
     const n = Math.min(CHUNK, count - done);
-    const batch = Array.from({ length: n }, (_, i) => ({ key: `key-${(done + i) % keys}`, value }));
+    const batch = Array.from({ length: n }, (_, i) => ({
+      key: `key-${(done + i) % keys}`,
+      value: pool === null ? value : pool[(done + i) % pool.length],
+    }));
     await withRetry(() => client.produce(topic, batch), transient);
     done += n;
   }
@@ -567,6 +614,13 @@ function recordedArgs(args) {
 // Offline check that the histogram's percentiles (including the deep tail) match a brute-force sorted
 // reference within one bucket's precision. Runs without a server: `node loadtest.js --self-test`.
 function selfTest() {
+  try {
+    console.log(`  payload: ${require('./lib/payload.selftest').run()} checks OK`);
+  } catch (err) {
+    console.log(`  payload: FAIL (${err.message})`);
+    console.log('\nself-test FAILED');
+    process.exit(1);
+  }
   const h = new Histogram();
   const ref = [];
   let seed = 123456789;
@@ -620,10 +674,7 @@ function report(scenario, opts, elapsedMs, stats) {
           scenario,
           mode: openLoopMode ? 'open-loop' : streaming ? 'stream' : 'closed-loop',
           connections: opts.connections,
-          // The flush regime the throughput describes, as fields of their own rather than only inside
-          // meta.command, whose syntax differs between the two generators. Mirrored by mix malachi.loadtest.
-          batch: opts.batch,
-          record_size: opts.recordSize,
+          ...regimeFields(opts),
           duration_s: Number(secs.toFixed(3)),
           topic: opts.topic,
           target_rate_per_s: openLoopMode ? opts.rate : null,
@@ -705,6 +756,19 @@ function report(scenario, opts, elapsedMs, stats) {
   console.log('');
 }
 
+// The regime the throughput describes, as fields of their own rather than only inside meta.command, whose
+// syntax differs between the two generators. Mirrored field for field by regime_fields/1 in the Elixir
+// generator and checked by the regime parity test; a new mirrored flag adds its line here.
+function regimeFields(opts) {
+  return {
+    batch: opts.batch,
+    record_size: opts.recordSize,
+    payload: opts.payload,
+    payload_seed: opts.payloadSeed,
+    payload_pool_values: opts.pool ? opts.pool.length : null,
+  };
+}
+
 function round(n) {
   if (!Number.isFinite(n)) return 0;
   return Math.round(n * 100) / 100;
@@ -737,6 +801,11 @@ ${colors.yellow('Options')}
   --window <n>       Streaming credit window (default 100)
   --prepopulate <n>  Records to append before fetch/stream/mixed (default 10000 for those)
   --warmup <s>       Warmup seconds excluded from stats (default 0)
+  --payload <p>      What the values are: constant | json | random (default constant). constant is one
+                     repeated byte, as every published series so far; json is a seeded, event-like JSON
+                     document of exactly --record-size bytes (at least ${payload.minJsonSize()}); random
+                     is seeded noise, the incompressible control. Values are generated before the run.
+  --payload-seed <n> json and random only: the seed, 0 to 4294967295 (default ${payload.DEFAULT_SEED})
   --samples <n>      Deprecated, ignored (percentiles now use an exact histogram, not a sample)
   --json             Emit the report as JSON (with a reproduce-metadata block)
   --measure-marker <path>  Create this (empty) file when the measured window begins, after every
@@ -756,34 +825,29 @@ async function main() {
   const valueFlags = [
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
-    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker',
+    'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker', 'payload', 'payload-seed',
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
 
-  const scenario = flags.scenario || 'produce';
-  if (!SCENARIOS.includes(scenario)) {
-    console.error(colors.red(`Unknown scenario "${scenario}" (expected: ${SCENARIOS.join(', ')})`));
-    process.exit(1);
+  // Every enum and every knob is checked before any connection opens, against the tables at the top.
+  const enums = {};
+  for (const [flag, { values, fallback }] of Object.entries(ENUM_FLAGS)) {
+    const value = flags[flag] === undefined ? fallback : flags[flag];
+    if (!values.includes(value)) {
+      console.error(colors.red(`Unknown ${flag} "${value}" (expected: ${values.join(', ')})`));
+      process.exit(1);
+    }
+    enums[flag] = value;
   }
-
-  // Mirrors the Elixir generator's connect strategies exactly (same names, defaults, and semantics):
-  // each connection pays a server-side credential verification, so HOW they open is methodology. A
-  // pacing knob passed with a strategy that does not read it is an error, not a silent no-op: the run
-  // would otherwise claim a pacing it never applied.
-  const connectStrategy = flags['connect-strategy'] || 'bounded';
-  if (!CONNECT_STRATEGIES.includes(connectStrategy)) {
-    console.error(colors.red(`Unknown connect-strategy "${connectStrategy}" (expected: ${CONNECT_STRATEGIES.join(', ')})`));
-    process.exit(1);
+  for (const [knob, { flag, values, readers }] of Object.entries(KNOB_REQUIRES)) {
+    if (flags[knob] !== undefined && !values.includes(enums[flag])) {
+      console.error(colors.red(`--${knob} only applies to ${readers}`));
+      process.exit(1);
+    }
   }
-  if (connectStrategy !== 'bounded' && flags['connect-concurrency'] !== undefined) {
-    console.error(colors.red('--connect-concurrency only applies to the bounded connect strategy'));
-    process.exit(1);
-  }
-  if (connectStrategy !== 'stagger' && flags['connect-stagger-ms'] !== undefined) {
-    console.error(colors.red('--connect-stagger-ms only applies to the stagger connect strategy'));
-    process.exit(1);
-  }
+  const scenario = enums.scenario;
+  const connectStrategy = enums['connect-strategy'];
 
   // Checked before any connection opens, as the Elixir generator does: discovering after hundreds of
   // authentications that the marker cannot be written would lose the run, and creating it early to
@@ -798,6 +862,18 @@ async function main() {
     const problem = markerProblem(measureMarker);
     if (problem) {
       console.error(colors.red(`--measure-marker ${problem}`));
+      process.exit(1);
+    }
+  }
+
+  // A seed is a 32-bit word, the generator's state size; constant bytes have none. Validated here rather
+  // than through int(), which would quietly fall back to the default on a typo.
+  let payloadSeed = null;
+  if (enums.payload !== 'constant') {
+    const raw = flags['payload-seed'] === undefined ? String(payload.DEFAULT_SEED) : flags['payload-seed'];
+    payloadSeed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+    if (!(payloadSeed <= 0xffffffff)) {
+      console.error(colors.red(`--payload-seed must be an integer from 0 to 4294967295, got ${raw}`));
       process.exit(1);
     }
   }
@@ -822,7 +898,19 @@ async function main() {
     connectStaggerMs: int(flags['connect-stagger-ms'], 100),
     json: !!flags.json,
     measureMarker: measureMarker || null,
+    payload: enums.payload,
+    payloadSeed,
   };
+
+  // A json size too small for the document is refused before any connection opens.
+  if (opts.payload === 'json') {
+    try {
+      payload.checkJsonSize(opts.recordSize);
+    } catch (err) {
+      console.error(colors.red(err.message));
+      process.exit(1);
+    }
+  }
 
   if (scenario === 'stream' && opts.rate > 0) {
     console.error(colors.yellow('note: --rate does not apply to the stream scenario (server-push); ignoring it'));
@@ -848,7 +936,15 @@ async function main() {
       admin.close();
     }
 
-    await prepopulate(opts.topic, opts.prepopulate, opts.recordSize, opts.keys);
+    // Generated before any connection opens, so nothing inside the measured window pays for it. Only a
+    // run that produces needs it, as in the Elixir generator.
+    const produces = scenario === 'produce' || scenario === 'mixed' || opts.prepopulate > 0;
+    opts.pool = produces ? makePool(opts) : null;
+    // One op per connection for the whole run, warmup and measured window alike, so each connection's
+    // cursor carries on across them the way the Elixir worker's does (see scenarioOps).
+    opts.poolOps = new Map();
+
+    await prepopulate(opts);
 
     clients = await makeClients(opts.connections, opts);
 
@@ -887,17 +983,26 @@ async function main() {
 // Builds the per-worker/per-request op selector for a scenario (shared by both drivers).
 // mixed: even indexes produce, odd indexes fetch.
 function scenarioOps(scenario, opts) {
-  if (scenario === 'produce') {
-    const op = produceOp(opts);
-    return () => op;
-  }
+  // Constant bytes keep the one op every connection shared, its key sequence included, as the published
+  // series were measured. A pool gets an op per connection, each walking it from its own batch; the closed
+  // loop asks once per connection and the open loop once per request, so the ops are cached, in
+  // opts.poolOps, which outlives this call: the warmup and the measured window each make their own
+  // selector, and a cache of their own would send the measured window back to the start of the pool.
+  const shared = opts.pool === null ? produceOp(opts, 0) : null;
+  const produceOps = opts.poolOps;
+  const produceFor = (index) => {
+    if (shared !== null) return shared;
+    const key = index % opts.connections;
+    if (!produceOps.has(key)) produceOps.set(key, produceOp(opts, key));
+    return produceOps.get(key);
+  };
+  if (scenario === 'produce') return produceFor;
   if (scenario === 'fetch') {
     const op = fetchOp(opts);
     return () => op;
   }
-  const produce = produceOp(opts);
   const fetch = fetchOp(opts);
-  return (index) => (index % 2 === 0 ? produce : fetch);
+  return (index) => (index % 2 === 0 ? produceFor(index) : fetch);
 }
 
 // Dispatches to the right driver for `durationMs`, recording into `stats`. --rate selects open-loop

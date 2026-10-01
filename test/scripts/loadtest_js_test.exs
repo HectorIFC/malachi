@@ -7,6 +7,9 @@ defmodule LoadtestJsTest do
   # Not async: the authentication counts would pick up other tests' connections.
   use ExUnit.Case, async: false
 
+  alias Malachi.DataPlaneRouter
+  alias Malachi.Loadtest.Payload
+  alias Malachi.LogApi
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.SubscribeResetStub
@@ -140,22 +143,37 @@ defmodule LoadtestJsTest do
       assert {:ok, %{"batch" => 7, "record_size" => 100}} = Jason.decode(output)
 
       # This generator's own defaults, recorded, not assumed. The batch size still differs from the Elixir
-      # generator's (1 against 10); the record size is the same as its.
+      # generator's (1 against 10); the record size and the payload are the same as its.
       assert {defaults, 0} =
                run_js(ctx, ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()])
 
-      assert {:ok, %{"batch" => 1, "record_size" => 256}} = Jason.decode(defaults)
+      assert {:ok,
+              %{
+                "batch" => 1,
+                "record_size" => 256,
+                "payload" => "constant",
+                "payload_seed" => nil,
+                "payload_pool_values" => nil
+              }} =
+               Jason.decode(defaults)
     end
 
     test "both generators record the same regime fields for the same flags", ctx do
       # The two generators mirror their flags explicitly; the ceiling sweep reads these fields from either
       # one through a single path, so a name or a value drifting in one of them would break it quietly.
-      flags = %{"connections" => 2, "batch" => 3, "record_size" => 64}
+      flags = %{
+        "connections" => 2,
+        "batch" => 3,
+        "record_size" => 160,
+        "payload" => "json",
+        "payload_seed" => 7
+      }
 
       {node_output, 0} =
         run_js(
           ctx,
-          ~w(--scenario produce --json --connections 2 --batch 3 --record-size 64 --duration 1 --topic) ++ [topic()]
+          ~w(--scenario produce --json --connections 2 --batch 3 --record-size 160 --payload json) ++
+            ~w(--payload-seed 7 --duration 1 --topic) ++ [topic()]
         )
 
       elixir_report =
@@ -167,7 +185,9 @@ defmodule LoadtestJsTest do
             scenario: :produce,
             connections: 2,
             batch: 3,
-            record_size: 64,
+            record_size: 160,
+            payload: :json,
+            payload_seed: 7,
             duration: 1,
             warmup: 0,
             topic: topic(),
@@ -180,10 +200,175 @@ defmodule LoadtestJsTest do
       assert regime.(node_output) == flags
       assert regime.(elixir_report) == flags
 
+      # Derived from the flags by the same rule on both sides, so it must agree too.
+      pool = Payload.pool_size(160, 3, 2, 1)
+      assert %{"payload_pool_values" => ^pool} = Jason.decode!(node_output)
+      assert %{"payload_pool_values" => ^pool} = Jason.decode!(elixir_report)
+
       # The error breakdown too: same name, same shape (reason to count), empty on a clean run.
       assert %{"errors" => 0, "error_reasons" => %{}} = Jason.decode!(node_output)
       assert %{"errors" => 0, "error_reasons" => %{}} = Jason.decode!(elixir_report)
     end
+  end
+
+  describe "payloads" do
+    # Observed from the broker, not from the report: a generator that reports json and sends constant
+    # bytes passes every test that reads its JSON.
+    test "both generators put the same seeded json values on the wire, in pool order", ctx do
+      pool = Payload.values(:json, 42, 256, 6)
+
+      node_topic = topic()
+
+      assert {_output, 0} =
+               run_js(
+                 ctx,
+                 ~w(--scenario produce --json --connections 1 --batch 3 --duration 1 --payload json) ++
+                   ~w(--payload-seed 42 --topic) ++ [node_topic]
+               )
+
+      elixir_topic = topic()
+
+      ExUnit.CaptureIO.capture_io(fn ->
+        Malachi.Loadtest.run(
+          port: TCPAcceptorPool.port(),
+          user: "admin",
+          pass: "admin123",
+          scenario: :produce,
+          connections: 1,
+          batch: 3,
+          payload: :json,
+          payload_seed: 42,
+          duration: 1,
+          warmup: 0,
+          topic: elixir_topic,
+          json: true
+        )
+      end)
+
+      assert first_values(node_topic, 6) == pool
+      assert first_values(elixir_topic, 6) == pool
+    end
+
+    test "random values on the wire are the seeded ones, not one repeated byte", ctx do
+      t = topic()
+      args = ~w(--scenario produce --json --connections 1 --batch 2 --record-size 64 --duration 1 --payload random)
+
+      assert {_output, 0} = run_js(ctx, args ++ ["--topic", t])
+      assert first_values(t, 4) == Payload.values(:random, 1, 64, 4)
+    end
+
+    test "a prepopulated backlog is drawn from the pool too", ctx do
+      t = topic()
+      args = ~w(--scenario fetch --json --connections 1 --duration 1 --prepopulate 5 --payload json --topic)
+
+      assert {_output, 0} = run_js(ctx, args ++ [t])
+      assert first_values(t, 5) == Payload.values(:json, 1, 256, 5)
+    end
+
+    test "constant bytes are still the one repeated byte this generator always sent", ctx do
+      t = topic()
+
+      assert {_output, 0} =
+               run_js(ctx, ~w(--scenario produce --json --connections 1 --batch 2 --duration 1 --topic) ++ [t])
+
+      assert first_values(t, 2) == List.duplicate(:binary.copy("a", 256), 2)
+    end
+
+    test "an unknown payload, a seed with constant bytes, a bad seed and a json size too small are refused " <>
+           "before any connection opens",
+         ctx do
+      min = Payload.min_json_size()
+
+      for {args, message} <- [
+            {~w(--payload zip), ~s(Unknown payload "zip" (expected: constant, json, random\))},
+            {~w(--payload-seed 3), "--payload-seed only applies to the json and random payloads"},
+            {~w(--payload json --payload-seed -1), "--payload-seed must be an integer from 0 to 4294967295"},
+            {~w(--payload random --payload-seed 4294967296), "--payload-seed must be an integer from 0 to 4294967295"},
+            {~w(--payload json --record-size #{min - 1}), "json payload needs --record-size >= #{min}"}
+          ] do
+        assert {output, 1} =
+                 run_js(ctx, ~w(--scenario produce --connections 2 --duration 1) ++ args, stderr: true)
+
+        assert output =~ message, inspect(args)
+      end
+
+      assert LoadtestProbes.successful_auths() == []
+    end
+  end
+
+  describe "the pool walk" do
+    test "a run that never produces generates no pool, and one that prepopulates does", ctx do
+      base = ~w(--scenario fetch --json --connections 1 --duration 1 --batch 5 --payload json --topic)
+
+      assert {output, 0} = run_js(ctx, ~w(--prepopulate 0) ++ base ++ [topic()])
+      assert %{"payload_pool_values" => nil} = Jason.decode!(output)
+
+      # This generator prints its prepopulate progress to stdout ahead of the report, even under --json,
+      # so the report is read from its first line on.
+      assert {output, 0} = run_js(ctx, ~w(--prepopulate 10) ++ base ++ [topic()])
+      [report] = Regex.run(~r/^\{.*\z/ms, output)
+      pool = Payload.pool_size(256, 5, 1, 1)
+      assert %{"payload_pool_values" => ^pool} = Jason.decode!(report)
+
+      # 1MB values make 8MiB of pool a single batch of 8, so the floor of one batch per connection is what
+      # sizes it: two connections need two batches.
+      args =
+        ~w(--scenario fetch --json --connections 2 --duration 1 --batch 8 --max 1 --prepopulate 8) ++
+          ~w(--record-size 1048576 --payload random --topic)
+
+      assert {output, 0} = run_js(ctx, args ++ [topic()])
+      [report] = Regex.run(~r/^\{.*\z/ms, output)
+      assert %{"payload_pool_values" => 16} = Jason.decode!(report)
+    end
+
+    test "the warmup and the measured window walk one cursor, as the Elixir generator does", ctx do
+      # A cursor rebuilt for the measured window would send the warmup's batches again from the start of
+      # the pool. Every record either phase wrote is read back, in order.
+      t = topic()
+      args = ~w(--scenario produce --json --connections 1 --batch 2 --warmup 1 --duration 1 --payload json --topic)
+
+      assert {_output, 0} = run_js(ctx, args ++ [t])
+      values = first_values(t, 1_000_000)
+      pool = Payload.values(:json, 1, 256, Payload.pool_size(256, 2, 1, 1))
+
+      assert length(values) < length(pool), "the run wrapped the pool, so a repeat proves nothing"
+      assert values == Enum.take(pool, length(values))
+    end
+
+    test "two connections start on batches of their own", ctx do
+      t = topic()
+      args = ~w(--scenario produce --json --connections 2 --batch 2 --duration 1 --payload json --topic)
+
+      assert {_output, 0} = run_js(ctx, args ++ [t])
+      values = first_values(t, 1_000_000)
+      pool = Payload.values(:json, 1, 256, Payload.pool_size(256, 2, 2, 1))
+      second = Payload.start_batch(1, div(length(pool), 2), 2) * 2
+
+      assert Enum.at(pool, 0) in values
+      assert Enum.at(pool, second) in values
+      assert Enum.all?(values, &(&1 in pool))
+    end
+
+    test "an open-loop run keeps each connection walking the pool, request after request", ctx do
+      # The open loop asks for an op on every request; an op made afresh each time would restart at its
+      # connection's first batch and send the same two batches all run long.
+      t = topic()
+      args = ~w(--scenario produce --json --connections 2 --batch 2 --rate 200 --duration 1 --payload json --topic)
+
+      assert {_output, 0} = run_js(ctx, args ++ [t])
+      values = first_values(t, 1_000_000)
+      pool = Payload.values(:json, 1, 256, Payload.pool_size(256, 2, 2, 1))
+
+      assert Enum.all?(values, &(&1 in pool))
+      assert length(Enum.uniq(values)) > 4
+      assert length(Enum.uniq(values)) == length(values)
+    end
+  end
+
+  # The values of the first `n` records of `topic`, read back through the broker.
+  defp first_values(topic, n) do
+    {:ok, records, _cursor} = LogApi.fetch(DataPlaneRouter.shard_for(topic), topic, :start, n)
+    Enum.map(records, & &1.value)
   end
 
   describe "error reasons" do

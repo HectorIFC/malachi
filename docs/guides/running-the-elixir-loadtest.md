@@ -57,6 +57,40 @@ actually lets placement spread primaries across the nodes.
 mix malachi.loadtest --host node1,node2,node3 --topics 12 --connections 192 --scenario produce
 ```
 
+## Payloads
+
+By default every record value is one repeated byte, which is what every published series so far
+was measured with. Constant bytes compress to almost nothing, so no compression figure taken with them
+means anything. `--payload` picks what the values are, with the same names in both generators:
+
+- `constant` (default): the repeated byte.
+- `json`: a seeded, event-like JSON document (an id, a timestamp, an event type, a user, a region, a
+  status, an amount and a short text) of exactly `--record-size` bytes. It needs at least 149 bytes; a
+  smaller size is refused before any connection opens.
+- `random`: seeded noise, the incompressible control.
+
+`--payload-seed` (0 to 4294967295, default 1) picks the values, and only json and random accept it. The
+same mode, seed and size give byte-identical values in the Elixir and the Node generator. The values
+are generated once, before the run starts, into a pool every connection shares: about 8MiB of values
+(capped at 65536 values, so less below 128-byte records), and never less than `--pipeline` batches per
+connection. Each connection starts on a batch of its own, at least a pipeline's worth from the next
+connection's start, and walks forward from it, so no produce repeats a value inside its batch, every
+connection's first burst of pipelined produces is its own, and a connection only sends a value again
+after it has sent the whole pool. Large batches at many connections and deep pipelines make the pool
+larger: batch 4096 of 256-byte values at 64 connections holds 64MiB, and 2GiB pipelined 32 deep, which
+the generator announces on stderr before generating it. Only the starts are kept apart: a connection that
+runs a whole gap ahead of its neighbour sends the batches the neighbour is sending, close together.
+How much a block compresses then depends on how many records it holds, which is `--batch`: with zstd at
+level 1 and 256-byte values, about 1.3x at one record per block and 3.8x at a thousand. The document,
+the generator and the pool are specified in `Malachi.Loadtest.Payload`.
+
+A json or random run records `payload` and `payload_seed` beside `batch` and `record_size` in its
+JSON.
+
+```bash
+mix malachi.loadtest --scenario produce --connections 64 --batch 100 --payload json --payload-seed 7
+```
+
 ## Pipelining
 
 `--pipeline` sets how many produce requests a connection keeps in flight. The default of 1 is a

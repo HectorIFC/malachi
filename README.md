@@ -851,6 +851,9 @@ node scripts/loadtest.js --scenario stream --connections 4 --window 500
 
 # mixed produce+fetch under contention, 512-byte records
 node scripts/loadtest.js --scenario mixed --connections 20 --record-size 512 --json
+
+# seeded, realistic JSON values instead of one repeated byte (also: --payload random)
+node scripts/loadtest.js --scenario produce --batch 100 --payload json --payload-seed 7
 ```
 
 Latency is stored in a bounded reservoir (percentiles stay representative on long runs while min/max
