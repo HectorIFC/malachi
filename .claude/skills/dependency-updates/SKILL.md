@@ -84,14 +84,28 @@ gh pr list --author app/dependabot --state open --limit 100 \
 Record every `headRefOid` now. Step 9 reads them again, and a pull request whose head moved during the
 run (Dependabot rebased or recreated it) is reported as such, not described from the old head.
 
-For each pull request, its own base: the commit it was made on (Dependabot pull requests are a single
-commit), and how far main has moved since. A pull request is compared with **that** commit, never with
+For each pull request, its own base: the commit its first commit was made on, and how far main has
+moved since. The base is the parent of the pull request's **first** commit, not of its head: a commit
+someone added on top (GitHub lets anyone with write access push to a Dependabot branch) has the earlier
+ones in its own parent, and comparing with that would hide them. Every commit must be Dependabot's; a
+pull request carrying anyone else's commit was edited by hand, and is reported as such and left out of
+the automatic triage. The author alone does not say whose a commit is: GitHub takes `author.login` from
+an email nobody verifies. A real Dependabot commit is also committed by `web-flow` and carries a
+verified signature, which a commit merely made to look like one cannot have. The list is the pull
+request's commits as they are now, so its last one must be the head recorded above (`$sha`); if not,
+the head moved in the meantime, and the two sides would come from different bases. A pull request is compared with **that** commit, never with
 today's main: against main, a stale pull request shows every change main made since as if the pull
 request had made it (packages removed, `mix.exs` lines moved), and the plan reports a STOP that is not
 there. Read both sides through the API, at the recorded SHAs, and never check them out:
 
 ```
-parent=$(gh api "repos/{owner}/{repo}/commits/$sha" --jq '.parents[0].sha')    # check it like any SHA
+gh api "repos/{owner}/{repo}/pulls/$n/commits" --paginate \
+  --jq '.[] | [.sha, .author.login // "", .committer.login // "", .commit.verification.verified] | @tsv' \
+  > "$S/commits$n.tsv"
+awk -F'\t' '$2 != "dependabot[bot]" || $3 != "web-flow" || $4 != "true"' "$S/commits$n.tsv"   # any line: stop
+last=$(tail -1 "$S/commits$n.tsv" | cut -f1)    # must be "$sha", or the head moved: list the PRs again
+first=$(head -1 "$S/commits$n.tsv" | cut -f1)
+parent=$(gh api "repos/{owner}/{repo}/commits/$first" --jq '.parents[0].sha')    # check both like any SHA
 gh api "repos/{owner}/{repo}/compare/$sha...main" --jq .ahead_by                # commits main is ahead
 for f in mix.lock mix.exs; do
   gh api "repos/{owner}/{repo}/contents/$f?ref=$parent" --jq .content | base64 -d > "$S/parent$n.$f"
@@ -162,9 +176,11 @@ included), is locked under a name it was not published under (an alias the base 
 when hex.pm confirms its app), comes from a repository other than hexpm, has an outer checksum hex.pm did not publish for that
 version, changed build tools (a new `make` or `rebar3` step is new code that runs at build time), is
 retired, needs a newer Elixir, or was not in the lock before. It also stops a lock that is not whole:
-an entry whose requirements differ from the ones hex.pm publishes for that version, or one that
-requires a package the lock does not hold. The second is how a package that ran while being resolved
-would hide itself, and `mix deps.get` would then fetch and load it past every other check. A STOP takes that package out of its group
+an entry whose requirements differ from the ones hex.pm publishes for that version, one that requires
+a package the lock does not hold, or a root of the base lock (an entry nothing in it requires, which
+only `mix.exs` brings in) missing from the new one. The last two are how a package that ran while being
+resolved would hide itself or another one, an empty lock included, and `mix deps.get` would then
+resolve and load what is missing past every other check. A STOP takes that package out of its group
 and goes in the report with the script's reason, word for word.
 
 Actions are checked in step 5, on the lines the group writes. Triage notes, for each action, the
@@ -448,7 +464,14 @@ by one:
 - **Superseded except**: for a grouped pull request whose packages went into the group pull request
   but for some, which a STOP, a failing gate or a decision took out. The comment names the group pull
   request, and each package left out with its reason and its tracking issue; the proposal adds
-  `@dependabot ignore <package> <version>` for each one declined, so the next run does not raise it again.
+  `@dependabot ignore <package> <major|minor|patch> version` for each one declined, matching the kind
+  of update it was, or `@dependabot ignore <package>` when the package itself is declined, so the next
+  run does not raise it again. Those are the forms GitHub documents for a grouped pull request; a
+  specific version cannot be ignored by comment, only by an `ignore` rule in `.github/dependabot.yml`.
+  Say what the proposal does: the versioned form stops every later update of that kind for the
+  package, the next patch that fixes the problem included, until it is lifted. So the tracking issue
+  records the `@dependabot unignore <package>` to post once the reason is gone, and that comment is
+  proposed and approved like any other.
 
 Each of those is shown with its exact comment text and done only after an approval for that pull request
 and that action. So is `@dependabot rebase`, `@dependabot recreate` or `@dependabot ignore`, which are

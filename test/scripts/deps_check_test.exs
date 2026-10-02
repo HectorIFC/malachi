@@ -455,6 +455,52 @@ defmodule DepsCheckTest do
              )
     end
 
+    test "stops a lock that lost a root of the base lock, an empty one included" do
+      # A root is an entry nothing else in the base lock requires: only mix.exs brings it in, so a
+      # dependency update has no reason to drop it, and a lock without it would have mix deps.get
+      # resolve it afresh, past every check here.
+      base =
+        lock!(
+          lock_source([entry("app_root", "1.0.0", ["child"]), entry("child", "1.0.0"), entry("other_root", "2.0.0")])
+        )
+
+      assert DepsCheck.floor_hex(base, %{}, %{}, "1.19.0") == [
+               {"app_root", "a root of the base lock is gone: an update does not remove what mix.exs depends on"},
+               {"other_root", "a root of the base lock is gone: an update does not remove what mix.exs depends on"}
+             ]
+
+      without_root = Map.delete(base, "other_root")
+
+      assert DepsCheck.floor_hex(base, without_root, %{}, "1.19.0") == [
+               {"other_root", "a root of the base lock is gone: an update does not remove what mix.exs depends on"}
+             ]
+    end
+
+    test "counts a package required only optionally as a root, so it cannot leave unchecked" do
+      # Mix locks an optional requirement only when something else (mix.exs, here) brings it in, and
+      # the closure check skips optional requirements: the root check is all that holds it.
+      with_optional =
+        ~s(  "app_root": {:hex, :app_root, "1.0.0", "inner", [:mix], ) <>
+          ~s([{:opt, "~> 1.0", [hex: :opt, repo: "hexpm", optional: true]}], "hexpm", "outer"},)
+
+      base = lock!(lock_source([with_optional, entry("opt", "1.0.0")]))
+
+      assert DepsCheck.floor_hex(base, Map.delete(base, "opt"), %{}, "1.19.0") == [
+               {"opt", "a root of the base lock is gone: an update does not remove what mix.exs depends on"}
+             ]
+    end
+
+    test "lets a transitive package nothing requires any more leave the lock" do
+      base = lock!(lock_source([entry("app_root", "1.0.0", ["child"]), entry("child", "1.0.0")]))
+      new = lock!(lock_source([entry("app_root", "1.0.0")]))
+
+      # app_root changed (it no longer requires child), so only its registry record is asked for.
+      assert DepsCheck.floor_hex(base, new, %{}, "1.19.0") == [
+               {"app_root",
+                "no registry record for app_root 1.0.0: fetch https://hex.pm/api/packages/app_root/releases/1.0.0"}
+             ]
+    end
+
     test "does not ask an optional requirement to be locked" do
       optional =
         ~s(  "parent": {:hex, :parent, "1.0.0", "inner", [:mix], ) <>
@@ -793,8 +839,8 @@ defmodule DepsCheckTest do
 
     test "refuses a group head or a main that is not a full commit SHA", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:actions]))
-      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, "main", @main])
-      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, "main"])
+      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, "main", @main, @tree])
+      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, "main", @tree])
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head])
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, @main])
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, @main, "HEAD^{tree}"])

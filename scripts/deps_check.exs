@@ -22,8 +22,11 @@
 #               Hex under its own name (or an alias the base already had, whose app hex.pm confirms),
 #               from the hexpm repository, with the outer checksum hex.pm
 #               publishes for that version, the same build tools as before, no retirement, and an Elixir
-#               requirement the given version satisfies. A package that appeared is a STOP on its own:
-#               nobody has looked at it yet. <registry_dir>/<package>-<version>.json is the body of
+#               requirement the given version satisfies, and the requirements hex.pm publishes for it.
+#               A package that appeared is a STOP on its own: nobody has looked at it yet. The lock must
+#               also be whole: a root of the base lock (an entry nothing in it requires) missing from
+#               the new one, or a requirement the new lock does not hold, is a STOP, since mix deps.get
+#               would resolve either afresh. <registry_dir>/<package>-<version>.json is the body of
 #               https://hex.pm/api/packages/<package>/releases/<version>, fetched by the skill under the
 #               name the package is published as; a missing one is reported with its URL.
 # uses          Every `uses:` line of the given workflows as TSV: file, line, action, ref, and the
@@ -432,7 +435,30 @@ defmodule DepsCheck do
         added ++ hex_reasons(name, new_entry, Map.get(base, name), registry, elixir_version)
       end)
 
-    changed ++ missing_requirements(new)
+    changed ++ missing_roots(base, new) ++ missing_requirements(new)
+  end
+
+  # A root is an entry nothing else in the base lock requires, optionally aside: only mix.exs brings it in. A dependency
+  # update has no reason to drop one, and a lock without it (an empty one, say, exported by a package
+  # that ran while resolving) would have mix deps.get resolve it afresh, past every check here. A
+  # transitive package nothing requires any more may leave; that is the closure check's business.
+  defp missing_roots(base, new) do
+    # Only a non-optional requirement makes a package something other than a root: Mix locks an
+    # optional one only when mix.exs brings it in, and the closure check skips optional requirements.
+    required =
+      for {_name, {:hex, _, _, _, _, deps, _, _}} <- base,
+          {dep, _, opts} <- deps,
+          not optional?(opts),
+          into: MapSet.new(),
+          do: dep
+
+    reasons =
+      for name <- Map.keys(base),
+          not MapSet.member?(required, name),
+          not Map.has_key?(new, name),
+          do: {name, "a root of the base lock is gone: an update does not remove what mix.exs depends on"}
+
+    Enum.sort(reasons)
   end
 
   # A lock whose entries require a package it does not hold is not a lock this floor has seen whole:

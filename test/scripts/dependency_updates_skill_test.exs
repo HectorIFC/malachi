@@ -157,6 +157,33 @@ defmodule DependencyUpdatesSkillTest do
     assert step4 =~ "do nothing"
   end
 
+  test "triage compares a pull request with the base before its first commit, and only Dependabot's" do
+    skill = File.read!(@skill)
+
+    # The head's first parent already holds every earlier commit of the pull request, so a commit
+    # someone added on top would hide the ones before it from the floor.
+    assert skill =~ ~S<gh api "repos/{owner}/{repo}/pulls/$n/commits" --paginate>
+    refute skill =~ ~S<commits/$sha" --jq '.parents[0].sha'>
+    assert skill =~ "dependabot[bot]"
+
+    # author.login comes from an unverified email: a real Dependabot commit is also committed by
+    # web-flow and carries a verified signature, which a commit made to look like one does not.
+    assert skill =~ ".commit.verification.verified"
+    assert skill =~ ~S<$3 != "web-flow">
+
+    # The list is the pull request's commits now; its last one must be the head recorded earlier, or
+    # the head moved and the two sides would come from different bases.
+    assert skill =~ ~S<last=$(tail -1 "$S/commits$n.tsv" | cut -f1)>
+  end
+
+  test "the skill proposes only Dependabot ignore commands GitHub documents" do
+    skill = File.read!(@skill)
+
+    refute skill =~ "@dependabot ignore <package> <version>"
+    assert skill =~ "`@dependabot ignore <package> <major|minor|patch> version`"
+    assert skill =~ "`@dependabot unignore <package>`"
+  end
+
   # What each gate looks like in a workflow step's run:, for the gates a workflow run is taken to prove.
   # nil is the run itself (pull request CI). The named suites and plain mix test run inside the
   # coverage step.
