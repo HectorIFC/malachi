@@ -106,7 +106,11 @@ one per path (the [clustering guide](clustering-and-resharding.md#durability-and
 the decision rule with examples):
 
 ```bash
-# rf=1 (single node), broker-level. Recommended on for throughput workloads.
+# rf=1, broker-level. Recommended on for throughput workloads. It writes a segment's primary alone, so it
+# applies only with a configured replication factor of 1: a single node runs a one-member cluster with the
+# default factor of 3, and sets MALACHI_LOG_REPLICATION_FACTOR=1 to use it (the node warns at boot
+# otherwise). The replication-level knob below batches the fsync on every replica instead.
+MALACHI_LOG_REPLICATION_FACTOR=1
 MALACHI_GROUP_COMMIT=true
 MALACHI_GROUP_COMMIT_INTERVAL_MS=5           # flush period; ~the latency each produce pays
 MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS=8000  # eager flush: bound each fsync even on slow disks
@@ -371,7 +375,8 @@ MALACHI_RETENTION_ORPHAN_MAX_TRACKED=10000
 ```
 
 It runs on **every node**, not only the one that sweeps retention: only a node can read its own disk.
-Before a directory can go, the sweep asks the metadata vnode that **owns** its segment, routed by the
+A single node is no exception: it runs its control plane as a one-member `ra` cluster and asks it the
+same way. Before a directory can go, the sweep asks the metadata vnode that **owns** its segment, routed by the
 segment's topic like any other command for it, and read linearizably. It does not use this node's
 cached copy of the metadata: that copy is refreshed by a reconcile that can fall behind without failing
 (a control plane slow enough that every refresh outlives its tick), and a view that aged in silence is
@@ -417,6 +422,47 @@ would have chosen it in silence.
 - **`malachi_retention_orphan_directories_removed_total`**: directories the sweep reclaimed. Read
   against the one above: a gap that keeps growing means the sweep is off, is being held back by a
   guard, or is not keeping up with `MAX_PER_PASS`.
+
+### Recovering a single node
+
+A single node keeps its metadata in a one-member `ra` cluster, named `malachi_log` unless
+`MALACHI_LOG_CLUSTER` says otherwise. `ra` keys that cluster by the node's name: its log lives under
+`MALACHI_RA_DATA_DIR/<node name>`, and the member is recorded under that name. So a single node keeps
+what it acknowledged across a restart as long as three things survive it: `MALACHI_LOG_DATA_DIR`,
+`MALACHI_RA_DATA_DIR`, and the node name. A release names the node after its host, so a container needs a
+fixed `--hostname` (or `RELEASE_NODE`); `iex -S mix` without `--name` always runs as `nonode@nohost`.
+
+Before the broker starts, every node checks that its log directory and its control plane describe the
+same data, and refuses to start (exit status 78, one `REFUSING TO START` line) in three cases:
+
+- **Segments nobody knows.** The log directory already holds segment directories, and the control plane
+  that would describe them is about to be formed instead of resumed: the ring store was never started
+  on this node (sharded or not), or the unsharded metadata member of `MALACHI_LOG_CLUSTER` was never
+  started here. A control plane formed now would be empty, the orphan sweep would delete every one of
+  those directories, and a topic created again under an old name would read the old bytes as its own.
+  The causes are a changed node name, a lost `ra` directory, a renamed `MALACHI_LOG_CLUSTER`, or
+  segments written by a release that kept a single node's metadata in memory (those are unreachable:
+  the metadata that described them is gone). Bring back the node name, the `ra` directory or the cluster
+  name. If the directories are not wanted, set `MALACHI_ADOPT_ORPHANED_LOG_DIR=true`: the node starts,
+  logs the names it adopted, and the orphan sweep removes them on its usual schedule. A cluster member is
+  refused too, since it would come back as a voter with no history; when its peers still hold the
+  control plane (only its own `ra` directory was lost), adopting is the normal way back: the sweep asks
+  the owners and removes only what none of them lists. A node that joins for the first time has nothing
+  on disk to refuse.
+- **A single node told it has peers.** The control plane was started on this node as a one-member
+  cluster (sharded or not), and `MALACHI_LOG_NODES` now lists other nodes. Growing a single node into a cluster in place is
+  not supported yet: this node would come back alone while the others formed a second cluster under the
+  same name. Remove the other nodes, or form the new cluster under another `MALACHI_LOG_CLUSTER` with
+  another `MALACHI_LOG_DATA_DIR`, and move the data with a client. Pointing a new cluster name at the old
+  log directory is the first case above, and refuses.
+- **A membership that cannot be read.** The same check needs the ring store member's recorded
+  membership, and the member did not report it within `MALACHI_LOG_RING_BOOT_TIMEOUT_MS` (a long log replay, or a member that
+  cannot come back). A check that cannot be made does not read as passed. Look at the node's `ra` log, or
+  raise the timeout.
+
+`MALACHI_DATA_SHARDS` above 1 with no `MALACHI_LOG_CLUSTER` is a throughput measurement mode, not a
+deployment: each shard keeps its metadata in memory, nothing written survives a restart, and it runs no
+orphan sweep. The node logs a warning saying so at boot.
 
 ### When a topic's policy cannot be read
 
