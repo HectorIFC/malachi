@@ -1,0 +1,2105 @@
+{
+  "$description": "Reference values computed by culori, independently of Malachi.UI.TokenGen, from the token file at the time this was written. Regenerate only by running the command below; never edit by hand.",
+  "$source": {
+    "library": "culori 4.0.2",
+    "command": "npm install culori@4.0.2 && node test/fixtures/tokens/golden.js docs/design/design-tokens.json test/fixtures/tokens/golden.json"
+  },
+  "colors": [
+    {
+      "path": "color.base.background",
+      "theme": "light",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.base.background",
+      "theme": "dark",
+      "oklch": "oklch(0.161 0.004 265)",
+      "srgb8": [
+        13,
+        13,
+        15
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 233,
+      "deuteranopiaOklab": [
+        0.159692,
+        0.000126,
+        -0.003992
+      ]
+    },
+    {
+      "path": "color.base.foreground",
+      "theme": "light",
+      "oklch": "oklch(0.210 0.006 265)",
+      "srgb8": [
+        23,
+        24,
+        27
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208731,
+        0.000173,
+        -0.00619
+      ]
+    },
+    {
+      "path": "color.base.foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.base.card",
+      "theme": "light",
+      "oklch": "oklch(1.000 0.000 0)",
+      "srgb8": [
+        255,
+        255,
+        255
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.base.card",
+      "theme": "dark",
+      "oklch": "oklch(0.208 0.005 265)",
+      "srgb8": [
+        23,
+        24,
+        26
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208426,
+        0.00015,
+        -0.004308
+      ]
+    },
+    {
+      "path": "color.base.card-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.210 0.006 265)",
+      "srgb8": [
+        23,
+        24,
+        27
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208731,
+        0.000173,
+        -0.00619
+      ]
+    },
+    {
+      "path": "color.base.card-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.base.popover",
+      "theme": "light",
+      "oklch": "oklch(1.000 0.000 0)",
+      "srgb8": [
+        255,
+        255,
+        255
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.base.popover",
+      "theme": "dark",
+      "oklch": "oklch(0.234 0.006 265)",
+      "srgb8": [
+        28,
+        30,
+        33
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.233599,
+        0.000191,
+        -0.006569
+      ]
+    },
+    {
+      "path": "color.base.popover-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.210 0.006 265)",
+      "srgb8": [
+        23,
+        24,
+        27
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208731,
+        0.000173,
+        -0.00619
+      ]
+    },
+    {
+      "path": "color.base.popover-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.base.primary",
+      "theme": "light",
+      "oklch": "oklch(0.278 0.010 265)",
+      "srgb8": [
+        38,
+        40,
+        45
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.276034,
+        0.000229,
+        -0.009815
+      ]
+    },
+    {
+      "path": "color.base.primary",
+      "theme": "dark",
+      "oklch": "oklch(0.925 0.003 265)",
+      "srgb8": [
+        229,
+        230,
+        232
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 254,
+      "deuteranopiaOklab": [
+        0.924495,
+        0.000142,
+        -0.002952
+      ]
+    },
+    {
+      "path": "color.base.primary-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.base.primary-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.208 0.005 265)",
+      "srgb8": [
+        23,
+        24,
+        26
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208426,
+        0.00015,
+        -0.004308
+      ]
+    },
+    {
+      "path": "color.base.secondary",
+      "theme": "light",
+      "oklch": "oklch(0.958 0.003 265)",
+      "srgb8": [
+        240,
+        241,
+        243
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.957706,
+        0.000141,
+        -0.002926
+      ]
+    },
+    {
+      "path": "color.base.secondary",
+      "theme": "dark",
+      "oklch": "oklch(0.271 0.006 265)",
+      "srgb8": [
+        37,
+        39,
+        42
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.271344,
+        0.000208,
+        -0.006321
+      ]
+    },
+    {
+      "path": "color.base.secondary-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.278 0.010 265)",
+      "srgb8": [
+        38,
+        40,
+        45
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.276034,
+        0.000229,
+        -0.009815
+      ]
+    },
+    {
+      "path": "color.base.secondary-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.base.muted",
+      "theme": "light",
+      "oklch": "oklch(0.958 0.003 265)",
+      "srgb8": [
+        240,
+        241,
+        243
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.957706,
+        0.000141,
+        -0.002926
+      ]
+    },
+    {
+      "path": "color.base.muted",
+      "theme": "dark",
+      "oklch": "oklch(0.271 0.006 265)",
+      "srgb8": [
+        37,
+        39,
+        42
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.271344,
+        0.000208,
+        -0.006321
+      ]
+    },
+    {
+      "path": "color.base.muted-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.536 0.013 265)",
+      "srgb8": [
+        106,
+        110,
+        117
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 242,
+      "deuteranopiaOklab": [
+        0.536097,
+        0.000405,
+        -0.012139
+      ]
+    },
+    {
+      "path": "color.base.muted-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.712 0.012 265)",
+      "srgb8": [
+        158,
+        162,
+        170
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 247,
+      "deuteranopiaOklab": [
+        0.710424,
+        0.00047,
+        -0.012672
+      ]
+    },
+    {
+      "path": "color.base.accent",
+      "theme": "light",
+      "oklch": "oklch(0.958 0.003 265)",
+      "srgb8": [
+        240,
+        241,
+        243
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.957706,
+        0.000141,
+        -0.002926
+      ]
+    },
+    {
+      "path": "color.base.accent",
+      "theme": "dark",
+      "oklch": "oklch(0.271 0.006 265)",
+      "srgb8": [
+        37,
+        39,
+        42
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.271344,
+        0.000208,
+        -0.006321
+      ]
+    },
+    {
+      "path": "color.base.accent-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.278 0.010 265)",
+      "srgb8": [
+        38,
+        40,
+        45
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.276034,
+        0.000229,
+        -0.009815
+      ]
+    },
+    {
+      "path": "color.base.accent-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.base.destructive",
+      "theme": "light",
+      "oklch": "oklch(0.577 0.222 27.3)",
+      "srgb8": [
+        223,
+        30,
+        34
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 160,
+      "deuteranopiaOklab": [
+        0.596769,
+        -0.020607,
+        0.11636
+      ]
+    },
+    {
+      "path": "color.base.destructive",
+      "theme": "dark",
+      "oklch": "oklch(0.579 0.201 25.4)",
+      "srgb8": [
+        215,
+        50,
+        53
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 160,
+      "deuteranopiaOklab": [
+        0.594606,
+        -0.016288,
+        0.100442
+      ]
+    },
+    {
+      "path": "color.base.destructive-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.base.destructive-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.base.border",
+      "theme": "light",
+      "oklch": "oklch(0.920 0.004 265)",
+      "srgb8": [
+        227,
+        228,
+        231
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 254,
+      "deuteranopiaOklab": [
+        0.91862,
+        0.0002,
+        -0.004237
+      ]
+    },
+    {
+      "path": "color.base.border",
+      "theme": "dark",
+      "oklch": "oklch(0.288 0.006 265)",
+      "srgb8": [
+        41,
+        43,
+        46
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.287697,
+        0.000213,
+        -0.006227
+      ]
+    },
+    {
+      "path": "color.base.input",
+      "theme": "light",
+      "oklch": "oklch(0.920 0.004 265)",
+      "srgb8": [
+        227,
+        228,
+        231
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 254,
+      "deuteranopiaOklab": [
+        0.91862,
+        0.0002,
+        -0.004237
+      ]
+    },
+    {
+      "path": "color.base.input",
+      "theme": "dark",
+      "oklch": "oklch(0.288 0.006 265)",
+      "srgb8": [
+        41,
+        43,
+        46
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.287697,
+        0.000213,
+        -0.006227
+      ]
+    },
+    {
+      "path": "color.base.ring",
+      "theme": "light",
+      "oklch": "oklch(0.709 0.011 265)",
+      "srgb8": [
+        158,
+        161,
+        168
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 247,
+      "deuteranopiaOklab": [
+        0.707835,
+        0.000424,
+        -0.010877
+      ]
+    },
+    {
+      "path": "color.base.ring",
+      "theme": "dark",
+      "oklch": "oklch(0.551 0.013 265)",
+      "srgb8": [
+        110,
+        114,
+        122
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 243,
+      "deuteranopiaOklab": [
+        0.550188,
+        0.000431,
+        -0.013534
+      ]
+    },
+    {
+      "path": "color.brand.accent",
+      "theme": "light",
+      "oklch": "oklch(0.769 0.157 70.1)",
+      "srgb8": [
+        242,
+        160,
+        37
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.78183,
+        -0.026219,
+        0.149712
+      ]
+    },
+    {
+      "path": "color.brand.accent",
+      "theme": "dark",
+      "oklch": "oklch(0.769 0.157 70.1)",
+      "srgb8": [
+        242,
+        160,
+        37
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.78183,
+        -0.026219,
+        0.149712
+      ]
+    },
+    {
+      "path": "color.brand.accent-soft",
+      "theme": "light",
+      "oklch": "oklch(0.769 0.157 70.1 / 0.14)",
+      "srgb8": [
+        242,
+        160,
+        37
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.78183,
+        -0.026219,
+        0.149712
+      ]
+    },
+    {
+      "path": "color.brand.accent-soft",
+      "theme": "dark",
+      "oklch": "oklch(0.769 0.157 70.1 / 0.16)",
+      "srgb8": [
+        242,
+        160,
+        37
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.78183,
+        -0.026219,
+        0.149712
+      ]
+    },
+    {
+      "path": "color.brand.logo-tile",
+      "theme": "light",
+      "oklch": "oklch(0.177 0.051 273.2)",
+      "srgb8": [
+        10,
+        14,
+        39
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 233,
+      "deuteranopiaOklab": [
+        0.171008,
+        -0.013074,
+        -0.052614
+      ]
+    },
+    {
+      "path": "color.brand.logo-tile",
+      "theme": "dark",
+      "oklch": "oklch(0.177 0.051 273.2)",
+      "srgb8": [
+        10,
+        14,
+        39
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 233,
+      "deuteranopiaOklab": [
+        0.171008,
+        -0.013074,
+        -0.052614
+      ]
+    },
+    {
+      "path": "color.brand.logo-mark",
+      "theme": "light",
+      "oklch": "oklch(0.816 0.146 216.5)",
+      "srgb8": [
+        0,
+        217,
+        255
+      ],
+      "clipDeltaEOK": 0.000727,
+      "ansi256": 45,
+      "deuteranopiaOklab": [
+        0.805329,
+        -0.004661,
+        -0.096867
+      ]
+    },
+    {
+      "path": "color.brand.logo-mark",
+      "theme": "dark",
+      "oklch": "oklch(0.816 0.146 216.5)",
+      "srgb8": [
+        0,
+        217,
+        255
+      ],
+      "clipDeltaEOK": 0.000727,
+      "ansi256": 45,
+      "deuteranopiaOklab": [
+        0.805329,
+        -0.004661,
+        -0.096867
+      ]
+    },
+    {
+      "path": "color.state.active",
+      "theme": "light",
+      "oklch": "oklch(0.627 0.165 149.2)",
+      "srgb8": [
+        32,
+        162,
+        76
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 35,
+      "deuteranopiaOklab": [
+        0.627906,
+        -0.009863,
+        0.074726
+      ]
+    },
+    {
+      "path": "color.state.active",
+      "theme": "dark",
+      "oklch": "oklch(0.696 0.170 149.2)",
+      "srgb8": [
+        57,
+        185,
+        95
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 71,
+      "deuteranopiaOklab": [
+        0.69757,
+        -0.009699,
+        0.076771
+      ]
+    },
+    {
+      "path": "color.state.sealed",
+      "theme": "light",
+      "oklch": "oklch(0.546 0.129 244.3)",
+      "srgb8": [
+        19,
+        118,
+        182
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 31,
+      "deuteranopiaOklab": [
+        0.532489,
+        -0.02011,
+        -0.12461
+      ]
+    },
+    {
+      "path": "color.state.sealed",
+      "theme": "dark",
+      "oklch": "oklch(0.685 0.130 244.3)",
+      "srgb8": [
+        73,
+        161,
+        228
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 39,
+      "deuteranopiaOklab": [
+        0.671646,
+        -0.013721,
+        -0.124525
+      ]
+    },
+    {
+      "path": "color.state.fenced",
+      "theme": "light",
+      "oklch": "oklch(0.661 0.155 70.7)",
+      "srgb8": [
+        205,
+        126,
+        0
+      ],
+      "clipDeltaEOK": 0.012539,
+      "ansi256": 172,
+      "deuteranopiaOklab": [
+        0.673801,
+        -0.02486,
+        0.136861
+      ]
+    },
+    {
+      "path": "color.state.fenced",
+      "theme": "dark",
+      "oklch": "oklch(0.769 0.157 70.7)",
+      "srgb8": [
+        242,
+        160,
+        36
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.781801,
+        -0.026323,
+        0.15008
+      ]
+    },
+    {
+      "path": "color.state.damaged",
+      "theme": "light",
+      "oklch": "oklch(0.577 0.222 27.3)",
+      "srgb8": [
+        223,
+        30,
+        34
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 160,
+      "deuteranopiaOklab": [
+        0.596769,
+        -0.020607,
+        0.11636
+      ]
+    },
+    {
+      "path": "color.state.damaged",
+      "theme": "dark",
+      "oklch": "oklch(0.665 0.201 25.4)",
+      "srgb8": [
+        247,
+        82,
+        79
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 203,
+      "deuteranopiaOklab": [
+        0.68152,
+        -0.015157,
+        0.101074
+      ]
+    },
+    {
+      "path": "color.state.behind",
+      "theme": "light",
+      "oklch": "oklch(0.654 0.152 90.1)",
+      "srgb8": [
+        180,
+        138,
+        0
+      ],
+      "clipDeltaEOK": 0.019636,
+      "ansi256": 136,
+      "deuteranopiaOklab": [
+        0.664672,
+        -0.023798,
+        0.13253
+      ]
+    },
+    {
+      "path": "color.state.behind",
+      "theme": "dark",
+      "oklch": "oklch(0.828 0.152 90.1)",
+      "srgb8": [
+        237,
+        193,
+        58
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.837934,
+        -0.025315,
+        0.150416
+      ]
+    },
+    {
+      "path": "color.state.ahead",
+      "theme": "light",
+      "oklch": "oklch(0.559 0.230 302.7)",
+      "srgb8": [
+        145,
+        63,
+        224
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 98,
+      "deuteranopiaOklab": [
+        0.546184,
+        -0.043976,
+        -0.186933
+      ]
+    },
+    {
+      "path": "color.state.ahead",
+      "theme": "dark",
+      "oklch": "oklch(0.671 0.207 302.7)",
+      "srgb8": [
+        176,
+        109,
+        252
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 135,
+      "deuteranopiaOklab": [
+        0.655351,
+        -0.032467,
+        -0.17034
+      ]
+    },
+    {
+      "path": "color.state.blocked",
+      "theme": "light",
+      "oklch": "oklch(0.458 0.199 19.8)",
+      "srgb8": [
+        171,
+        0,
+        36
+      ],
+      "clipDeltaEOK": 0.016178,
+      "ansi256": 124,
+      "deuteranopiaOklab": [
+        0.483612,
+        -0.014031,
+        0.08466
+      ]
+    },
+    {
+      "path": "color.state.blocked",
+      "theme": "dark",
+      "oklch": "oklch(0.553 0.207 19.8)",
+      "srgb8": [
+        208,
+        30,
+        60
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 160,
+      "deuteranopiaOklab": [
+        0.569706,
+        -0.013217,
+        0.086756
+      ]
+    },
+    {
+      "path": "color.state.unknown",
+      "theme": "light",
+      "oklch": "oklch(0.551 0.013 265)",
+      "srgb8": [
+        110,
+        114,
+        122
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 243,
+      "deuteranopiaOklab": [
+        0.550188,
+        0.000431,
+        -0.013534
+      ]
+    },
+    {
+      "path": "color.state.unknown",
+      "theme": "dark",
+      "oklch": "oklch(0.600 0.013 265)",
+      "srgb8": [
+        124,
+        128,
+        136
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 244,
+      "deuteranopiaOklab": [
+        0.598003,
+        0.000447,
+        -0.013246
+      ]
+    },
+    {
+      "path": "color.chart.1",
+      "theme": "light",
+      "oklch": "oklch(0.646 0.222 41.1)",
+      "srgb8": [
+        245,
+        73,
+        0
+      ],
+      "clipDeltaEOK": 0.016724,
+      "ansi256": 202,
+      "deuteranopiaOklab": [
+        0.666384,
+        -0.024325,
+        0.136439
+      ]
+    },
+    {
+      "path": "color.chart.1",
+      "theme": "dark",
+      "oklch": "oklch(0.488 0.243 264.4)",
+      "srgb8": [
+        20,
+        71,
+        230
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 26,
+      "deuteranopiaOklab": [
+        0.499175,
+        -0.032101,
+        -0.228966
+      ]
+    },
+    {
+      "path": "color.chart.2",
+      "theme": "light",
+      "oklch": "oklch(0.600 0.118 184.7)",
+      "srgb8": [
+        0,
+        150,
+        137
+      ],
+      "clipDeltaEOK": 0.012168,
+      "ansi256": 30,
+      "deuteranopiaOklab": [
+        0.601509,
+        0.000481,
+        -0.015609
+      ]
+    },
+    {
+      "path": "color.chart.2",
+      "theme": "dark",
+      "oklch": "oklch(0.696 0.170 162.5)",
+      "srgb8": [
+        0,
+        188,
+        125
+      ],
+      "clipDeltaEOK": 0.014994,
+      "ansi256": 36,
+      "deuteranopiaOklab": [
+        0.70182,
+        -0.004012,
+        0.042699
+      ]
+    },
+    {
+      "path": "color.chart.3",
+      "theme": "light",
+      "oklch": "oklch(0.398 0.070 227.4)",
+      "srgb8": [
+        16,
+        78,
+        100
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 23,
+      "deuteranopiaOklab": [
+        0.391223,
+        -0.003851,
+        -0.055901
+      ]
+    },
+    {
+      "path": "color.chart.3",
+      "theme": "dark",
+      "oklch": "oklch(0.769 0.188 70.1)",
+      "srgb8": [
+        254,
+        154,
+        0
+      ],
+      "clipDeltaEOK": 0.021675,
+      "ansi256": 208,
+      "deuteranopiaOklab": [
+        0.7864,
+        -0.029097,
+        0.160015
+      ]
+    },
+    {
+      "path": "color.chart.4",
+      "theme": "light",
+      "oklch": "oklch(0.828 0.189 84.4)",
+      "srgb8": [
+        255,
+        185,
+        0
+      ],
+      "clipDeltaEOK": 0.020358,
+      "ansi256": 214,
+      "deuteranopiaOklab": [
+        0.84153,
+        -0.030385,
+        0.168669
+      ]
+    },
+    {
+      "path": "color.chart.4",
+      "theme": "dark",
+      "oklch": "oklch(0.627 0.265 303.9)",
+      "srgb8": [
+        173,
+        70,
+        255
+      ],
+      "clipDeltaEOK": 0.0103,
+      "ansi256": 135,
+      "deuteranopiaOklab": [
+        0.606472,
+        -0.049607,
+        -0.203449
+      ]
+    },
+    {
+      "path": "color.chart.5",
+      "theme": "light",
+      "oklch": "oklch(0.769 0.188 70.1)",
+      "srgb8": [
+        254,
+        154,
+        0
+      ],
+      "clipDeltaEOK": 0.021675,
+      "ansi256": 208,
+      "deuteranopiaOklab": [
+        0.7864,
+        -0.029097,
+        0.160015
+      ]
+    },
+    {
+      "path": "color.chart.5",
+      "theme": "dark",
+      "oklch": "oklch(0.645 0.246 16.4)",
+      "srgb8": [
+        255,
+        32,
+        87
+      ],
+      "clipDeltaEOK": 0.001684,
+      "ansi256": 197,
+      "deuteranopiaOklab": [
+        0.662358,
+        -0.012479,
+        0.088486
+      ]
+    },
+    {
+      "path": "color.cluster.teal",
+      "theme": "light",
+      "oklch": "oklch(0.600 0.118 184.7)",
+      "srgb8": [
+        0,
+        150,
+        137
+      ],
+      "clipDeltaEOK": 0.012168,
+      "ansi256": 30,
+      "deuteranopiaOklab": [
+        0.601509,
+        0.000481,
+        -0.015609
+      ]
+    },
+    {
+      "path": "color.cluster.teal",
+      "theme": "dark",
+      "oklch": "oklch(0.600 0.118 184.7)",
+      "srgb8": [
+        0,
+        150,
+        137
+      ],
+      "clipDeltaEOK": 0.012168,
+      "ansi256": 30,
+      "deuteranopiaOklab": [
+        0.601509,
+        0.000481,
+        -0.015609
+      ]
+    },
+    {
+      "path": "color.cluster.violet",
+      "theme": "light",
+      "oklch": "oklch(0.627 0.170 303.0)",
+      "srgb8": [
+        158,
+        106,
+        219
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 134,
+      "deuteranopiaOklab": [
+        0.616105,
+        -0.020846,
+        -0.138215
+      ]
+    },
+    {
+      "path": "color.cluster.violet",
+      "theme": "dark",
+      "oklch": "oklch(0.627 0.170 303.0)",
+      "srgb8": [
+        158,
+        106,
+        219
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 134,
+      "deuteranopiaOklab": [
+        0.616105,
+        -0.020846,
+        -0.138215
+      ]
+    },
+    {
+      "path": "color.cluster.rose",
+      "theme": "light",
+      "oklch": "oklch(0.645 0.200 16.0)",
+      "srgb8": [
+        238,
+        73,
+        99
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 167,
+      "deuteranopiaOklab": [
+        0.659699,
+        -0.008922,
+        0.071317
+      ]
+    },
+    {
+      "path": "color.cluster.rose",
+      "theme": "dark",
+      "oklch": "oklch(0.645 0.200 16.0)",
+      "srgb8": [
+        238,
+        73,
+        99
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 167,
+      "deuteranopiaOklab": [
+        0.659699,
+        -0.008922,
+        0.071317
+      ]
+    },
+    {
+      "path": "color.cluster.foreground",
+      "theme": "light",
+      "oklch": "oklch(0.161 0.004 265)",
+      "srgb8": [
+        13,
+        13,
+        15
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 233,
+      "deuteranopiaOklab": [
+        0.159692,
+        0.000126,
+        -0.003992
+      ]
+    },
+    {
+      "path": "color.cluster.foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.161 0.004 265)",
+      "srgb8": [
+        13,
+        13,
+        15
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 233,
+      "deuteranopiaOklab": [
+        0.159692,
+        0.000126,
+        -0.003992
+      ]
+    },
+    {
+      "path": "color.sidebar.background",
+      "theme": "light",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.sidebar.background",
+      "theme": "dark",
+      "oklch": "oklch(0.208 0.005 265)",
+      "srgb8": [
+        23,
+        24,
+        26
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208426,
+        0.00015,
+        -0.004308
+      ]
+    },
+    {
+      "path": "color.sidebar.foreground",
+      "theme": "light",
+      "oklch": "oklch(0.210 0.006 265)",
+      "srgb8": [
+        23,
+        24,
+        27
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 234,
+      "deuteranopiaOklab": [
+        0.208731,
+        0.000173,
+        -0.00619
+      ]
+    },
+    {
+      "path": "color.sidebar.foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.sidebar.primary",
+      "theme": "light",
+      "oklch": "oklch(0.278 0.010 265)",
+      "srgb8": [
+        38,
+        40,
+        45
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.276034,
+        0.000229,
+        -0.009815
+      ]
+    },
+    {
+      "path": "color.sidebar.primary",
+      "theme": "dark",
+      "oklch": "oklch(0.488 0.243 264.4)",
+      "srgb8": [
+        20,
+        71,
+        230
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 26,
+      "deuteranopiaOklab": [
+        0.499175,
+        -0.032101,
+        -0.228966
+      ]
+    },
+    {
+      "path": "color.sidebar.primary-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.sidebar.primary-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.985 0.002 265)",
+      "srgb8": [
+        249,
+        250,
+        251
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 231,
+      "deuteranopiaOklab": [
+        0.984474,
+        0.000082,
+        -0.001651
+      ]
+    },
+    {
+      "path": "color.sidebar.accent",
+      "theme": "light",
+      "oklch": "oklch(0.958 0.003 265)",
+      "srgb8": [
+        240,
+        241,
+        243
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.957706,
+        0.000141,
+        -0.002926
+      ]
+    },
+    {
+      "path": "color.sidebar.accent",
+      "theme": "dark",
+      "oklch": "oklch(0.271 0.006 265)",
+      "srgb8": [
+        37,
+        39,
+        42
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.271344,
+        0.000208,
+        -0.006321
+      ]
+    },
+    {
+      "path": "color.sidebar.accent-foreground",
+      "theme": "light",
+      "oklch": "oklch(0.278 0.010 265)",
+      "srgb8": [
+        38,
+        40,
+        45
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.276034,
+        0.000229,
+        -0.009815
+      ]
+    },
+    {
+      "path": "color.sidebar.accent-foreground",
+      "theme": "dark",
+      "oklch": "oklch(0.962 0.002 265)",
+      "srgb8": [
+        242,
+        242,
+        244
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 255,
+      "deuteranopiaOklab": [
+        0.961534,
+        0.000123,
+        -0.002524
+      ]
+    },
+    {
+      "path": "color.sidebar.border",
+      "theme": "light",
+      "oklch": "oklch(0.920 0.004 265)",
+      "srgb8": [
+        227,
+        228,
+        231
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 254,
+      "deuteranopiaOklab": [
+        0.91862,
+        0.0002,
+        -0.004237
+      ]
+    },
+    {
+      "path": "color.sidebar.border",
+      "theme": "dark",
+      "oklch": "oklch(0.288 0.006 265)",
+      "srgb8": [
+        41,
+        43,
+        46
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 235,
+      "deuteranopiaOklab": [
+        0.287697,
+        0.000213,
+        -0.006227
+      ]
+    },
+    {
+      "path": "color.sidebar.ring",
+      "theme": "light",
+      "oklch": "oklch(0.709 0.011 265)",
+      "srgb8": [
+        158,
+        161,
+        168
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 247,
+      "deuteranopiaOklab": [
+        0.707835,
+        0.000424,
+        -0.010877
+      ]
+    },
+    {
+      "path": "color.sidebar.ring",
+      "theme": "dark",
+      "oklch": "oklch(0.551 0.013 265)",
+      "srgb8": [
+        110,
+        114,
+        122
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 243,
+      "deuteranopiaOklab": [
+        0.550188,
+        0.000431,
+        -0.013534
+      ]
+    },
+    {
+      "path": "color.overlay.overlay",
+      "theme": "light",
+      "oklch": "oklch(0.000 0.000 0 / 0.5)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.overlay.overlay",
+      "theme": "dark",
+      "oklch": "oklch(0.000 0.000 0 / 0.5)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.shadow.faint",
+      "theme": "light",
+      "oklch": "oklch(0.000 0.000 0 / 0.05)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.shadow.faint",
+      "theme": "dark",
+      "oklch": "oklch(0.000 0.000 0 / 0.05)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.shadow.strong",
+      "theme": "light",
+      "oklch": "oklch(0.000 0.000 0 / 0.1)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "path": "color.shadow.strong",
+      "theme": "dark",
+      "oklch": "oklch(0.000 0.000 0 / 0.1)",
+      "srgb8": [
+        0,
+        0,
+        0
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 16,
+      "deuteranopiaOklab": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "contrast": [
+    {
+      "foreground": "color.base.foreground",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 16.9879
+    },
+    {
+      "foreground": "color.base.foreground",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 17.3659
+    },
+    {
+      "foreground": "color.base.card-foreground",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 17.7528
+    },
+    {
+      "foreground": "color.base.card-foreground",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 15.8905
+    },
+    {
+      "foreground": "color.base.popover-foreground",
+      "background": "color.base.popover",
+      "theme": "light",
+      "ratio": 17.7528
+    },
+    {
+      "foreground": "color.base.popover-foreground",
+      "background": "color.base.popover",
+      "theme": "dark",
+      "ratio": 14.9419
+    },
+    {
+      "foreground": "color.base.primary-foreground",
+      "background": "color.base.primary",
+      "theme": "light",
+      "ratio": 14.1136
+    },
+    {
+      "foreground": "color.base.primary-foreground",
+      "background": "color.base.primary",
+      "theme": "dark",
+      "ratio": 14.2264
+    },
+    {
+      "foreground": "color.base.secondary-foreground",
+      "background": "color.base.secondary",
+      "theme": "light",
+      "ratio": 13.0503
+    },
+    {
+      "foreground": "color.base.secondary-foreground",
+      "background": "color.base.secondary",
+      "theme": "dark",
+      "ratio": 13.3941
+    },
+    {
+      "foreground": "color.base.muted-foreground",
+      "background": "color.base.muted",
+      "theme": "light",
+      "ratio": 4.532
+    },
+    {
+      "foreground": "color.base.muted-foreground",
+      "background": "color.base.muted",
+      "theme": "dark",
+      "ratio": 5.8492
+    },
+    {
+      "foreground": "color.base.accent-foreground",
+      "background": "color.base.accent",
+      "theme": "light",
+      "ratio": 13.0503
+    },
+    {
+      "foreground": "color.base.accent-foreground",
+      "background": "color.base.accent",
+      "theme": "dark",
+      "ratio": 13.3941
+    },
+    {
+      "foreground": "color.base.destructive-foreground",
+      "background": "color.base.destructive",
+      "theme": "light",
+      "ratio": 4.6234
+    },
+    {
+      "foreground": "color.base.destructive-foreground",
+      "background": "color.base.destructive",
+      "theme": "dark",
+      "ratio": 4.5701
+    },
+    {
+      "foreground": "color.sidebar.foreground",
+      "background": "color.sidebar.background",
+      "theme": "light",
+      "ratio": 16.9879
+    },
+    {
+      "foreground": "color.sidebar.foreground",
+      "background": "color.sidebar.background",
+      "theme": "dark",
+      "ratio": 15.8905
+    },
+    {
+      "foreground": "color.sidebar.primary-foreground",
+      "background": "color.sidebar.primary",
+      "theme": "light",
+      "ratio": 14.1136
+    },
+    {
+      "foreground": "color.sidebar.primary-foreground",
+      "background": "color.sidebar.primary",
+      "theme": "dark",
+      "ratio": 6.5378
+    },
+    {
+      "foreground": "color.sidebar.accent-foreground",
+      "background": "color.sidebar.accent",
+      "theme": "light",
+      "ratio": 13.0503
+    },
+    {
+      "foreground": "color.sidebar.accent-foreground",
+      "background": "color.sidebar.accent",
+      "theme": "dark",
+      "ratio": 13.3941
+    },
+    {
+      "foreground": "color.state.active",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 3.1726
+    },
+    {
+      "foreground": "color.state.active",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 7.6544
+    },
+    {
+      "foreground": "color.state.active",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 3.3155
+    },
+    {
+      "foreground": "color.state.active",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 7.0041
+    },
+    {
+      "foreground": "color.state.sealed",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 4.6792
+    },
+    {
+      "foreground": "color.state.sealed",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 6.9357
+    },
+    {
+      "foreground": "color.state.sealed",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 4.8899
+    },
+    {
+      "foreground": "color.state.sealed",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 6.3465
+    },
+    {
+      "foreground": "color.state.fenced",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 3.0539
+    },
+    {
+      "foreground": "color.state.fenced",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 9.0879
+    },
+    {
+      "foreground": "color.state.fenced",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 3.1914
+    },
+    {
+      "foreground": "color.state.fenced",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 8.3158
+    },
+    {
+      "foreground": "color.state.damaged",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 4.6234
+    },
+    {
+      "foreground": "color.state.damaged",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 5.8014
+    },
+    {
+      "foreground": "color.state.damaged",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 4.8316
+    },
+    {
+      "foreground": "color.state.damaged",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 5.3085
+    },
+    {
+      "foreground": "color.state.behind",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 3.0558
+    },
+    {
+      "foreground": "color.state.behind",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 11.363
+    },
+    {
+      "foreground": "color.state.behind",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 3.1934
+    },
+    {
+      "foreground": "color.state.behind",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 10.3976
+    },
+    {
+      "foreground": "color.state.ahead",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 5.0347
+    },
+    {
+      "foreground": "color.state.ahead",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 5.9534
+    },
+    {
+      "foreground": "color.state.ahead",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 5.2614
+    },
+    {
+      "foreground": "color.state.ahead",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 5.4477
+    },
+    {
+      "foreground": "color.state.blocked",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 7.2886
+    },
+    {
+      "foreground": "color.state.blocked",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 3.6363
+    },
+    {
+      "foreground": "color.state.blocked",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 7.6168
+    },
+    {
+      "foreground": "color.state.blocked",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 3.3274
+    },
+    {
+      "foreground": "color.state.unknown",
+      "background": "color.base.background",
+      "theme": "light",
+      "ratio": 4.6186
+    },
+    {
+      "foreground": "color.state.unknown",
+      "background": "color.base.background",
+      "theme": "dark",
+      "ratio": 4.9004
+    },
+    {
+      "foreground": "color.state.unknown",
+      "background": "color.base.card",
+      "theme": "light",
+      "ratio": 4.8265
+    },
+    {
+      "foreground": "color.state.unknown",
+      "background": "color.base.card",
+      "theme": "dark",
+      "ratio": 4.4841
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.teal",
+      "theme": "light",
+      "ratio": 5.292
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.teal",
+      "theme": "dark",
+      "ratio": 5.292
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.violet",
+      "theme": "light",
+      "ratio": 5.1206
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.violet",
+      "theme": "dark",
+      "ratio": 5.1206
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.rose",
+      "theme": "light",
+      "ratio": 5.3335
+    },
+    {
+      "foreground": "color.cluster.foreground",
+      "background": "color.cluster.rose",
+      "theme": "dark",
+      "ratio": 5.3335
+    }
+  ]
+}

@@ -84,6 +84,14 @@ jobs:
       - name: 🎨 Check formatting
         run: mix format --check-formatted
         if: matrix.lint
+
+      # docs/design/design-tokens.json generates the web stylesheet, the terminal palette, the Elixir
+      # module and the snapshot (#227). This fails on an output that was not regenerated and committed,
+      # on a committed output that breaks the cross language contract, and on a raw color literal in
+      # assets/src or tui/src. Its own step, so the message is the first thing in the log.
+      - name: 🎨 Check design tokens
+        run: mix malachi.tokens --check
+        if: matrix.lint
       
       - name: 🔎 Run Credo (static analysis)
         run: mix credo --strict

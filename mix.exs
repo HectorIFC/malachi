@@ -266,6 +266,7 @@ defmodule Malachi.MixProject do
         Malachi.I18n,
         ~r/^Malachi\.CLI\./
       ],
+      "Operator interfaces": [~r/^Malachi\.UI\./],
       "Mix tasks": [~r/^Mix\.Tasks\./]
     ]
   end
