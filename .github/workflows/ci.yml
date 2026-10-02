@@ -263,6 +263,12 @@ jobs:
           docker stop malachi-test
           echo "✅ All tests passed!"
 
+      # A single node keeps what it acknowledged across a restart and a recreate, and refuses to start
+      # rather than delete segments its control plane does not know (#273). Its own container and data
+      # directory, so it shares nothing with the smoke test above.
+      - name: 🔁 Single-node restart drill
+        run: SRV_CPUSET=0,1 scripts/docker-single-node-restart.sh malachi:test
+
   quality:
     name: Code Quality
     runs-on: ubuntu-latest
