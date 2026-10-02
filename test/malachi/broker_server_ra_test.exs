@@ -6,6 +6,7 @@ defmodule Malachi.BrokerServerRaTest do
   import Malachi.Test.PollingHelper
   import Malachi.Test.TeardownHelper
 
+  alias Malachi.Broker
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -89,6 +90,86 @@ defmodule Malachi.BrokerServerRaTest do
     assert length(all) == 6
 
     :ok = BrokerServer.stop(second)
+  end
+
+  describe "a range whose end the recovery could not learn (#273)" do
+    # The broker comes back before the replication server holding the range's active segment, so the
+    # recovery cannot learn where the durable records end. It used to seed the horizon at zero, and
+    # every consume then answered an empty page, successfully, until the next reconcile: a consumer
+    # cannot tell that from having caught up, and a single node now runs this path on every restart.
+    setup do
+      cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+      on_exit(fn -> MetadataServer.delete(cluster) end)
+      directory = TmpDir.path("malachi_unrecovered")
+      on_exit(fn -> File.rm_rf!(directory) end)
+      name = :"unrecovered_repl_#{System.unique_integer([:positive])}"
+      opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 3_600_000]
+
+      {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+      {:ok, first} = BrokerServer.start_link("unused", opts)
+      {:ok, _root} = BrokerServer.create_topic(first, "events", 4)
+      {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+      :ok = BrokerServer.stop(first)
+      :ok = GenServer.stop(repl)
+
+      # Only the broker comes back: its recovery asks a replication server that is not there.
+      {:ok, broker} = BrokerServer.start_link("unused", opts)
+      on_exit(fn -> stop_quietly(broker) end)
+
+      start_repl = fn ->
+        {:ok, pid} = ReplicationServer.start_link(directory: directory, name: name)
+        on_exit(fn -> stop_quietly(pid) end)
+        pid
+      end
+
+      %{broker: broker, start_repl: start_repl}
+    end
+
+    test "refuses the consume instead of answering an empty page", %{broker: broker} do
+      assert BrokerServer.consume(broker, "events", %{}, 100, 0) == {:error, :metadata_unavailable}
+      # A long poll is refused too, rather than parked on a horizon it can never pass.
+      assert BrokerServer.consume(broker, "events", %{}, 100, 200) == {:error, :metadata_unavailable}
+    end
+
+    test "serves every durable record once a reconcile learns the end", %{broker: broker, start_repl: start_repl} do
+      start_repl.()
+      :ok = BrokerServer.reconcile_now(broker)
+
+      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
+      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
+    end
+
+    # The answer ends the wait even when it is exactly what the frontend planned: a range whose counter
+    # already holds its true end (an empty range, or one a probe raced) must not keep refusing consumes
+    # until the next reconcile because the produce had nothing to correct.
+    test "a produce whose answer matches the plan ends the wait too", %{broker: broker, start_repl: start_repl} do
+      range_id = {"events", 0}
+      # The boot reconcile has run, with the primary still down, so nothing but the produce below can end
+      # the wait (the periodic one is an hour away).
+      :ok = BrokerServer.reconcile_now(broker)
+      assert Broker.unrecovered?(:sys.get_state(broker).broker, range_id)
+
+      start_repl.()
+      # The counter already holds the true end (5), and the range is still waiting: the plan for the next
+      # record is offset 5, which is exactly what the primary will answer.
+      :sys.replace_state(broker, fn state ->
+        broker_state = state.broker
+        %{state | broker: %{broker_state | offsets: Map.put(broker_state.offsets, range_id, 5)}}
+      end)
+
+      assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("v6", key: "k6")])
+      refute Broker.unrecovered?(:sys.get_state(broker).broker, range_id)
+    end
+
+    test "a produce is not held back, and its primary's answer ends the wait", %{broker: broker, start_repl: start_repl} do
+      start_repl.()
+
+      # Before any reconcile: the produce lands, and the end its primary assigns is the range's end.
+      assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("v6", key: "k6")])
+
+      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
+      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..6, do: "v#{i}"))
+    end
   end
 
   test "a restarted broker AND replication server serve reads of pre-restart data" do

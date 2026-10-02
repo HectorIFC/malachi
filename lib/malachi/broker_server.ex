@@ -1015,9 +1015,10 @@ defmodule Malachi.BrokerServer do
   # re-seed only moves forward (the ra log is the source of truth).
   # Recovers each range's end offset and segment sequence floor from the authoritative metadata plus
   # the primaries' logs, so a restarted broker can serve reads of pre-restart data. Active segments
-  # ask their primary's replication server for the true end (falling back to the segment's start
-  # offset when unreachable, self-correcting later via offset adoption); sealed-only ranges compute
-  # the end from the sealed metadata (start_offset + length).
+  # ask their primary's replication server for the true end; a range whose primary does not answer is
+  # left unrecovered, refusing consumes until a later pass or a produce learns the end
+  # (`Malachi.Broker.seed_unrecovered_range/3`). Sealed-only ranges compute the end from the sealed
+  # metadata (start_offset + length).
   defp recover_range_state(broker) do
     metadata = DSRSM.merged_metadata(broker.dsrsm)
 
@@ -1033,26 +1034,23 @@ defmodule Malachi.BrokerServer do
         broker
 
       segments ->
-        next = recovered_next_offset(segments)
         min_seq = segments |> Enum.map(fn %{id: {_range, seq}} -> seq end) |> Enum.max() |> Kernel.+(1)
-        Broker.seed_range_state(broker, range_id, next, min_seq)
+
+        case recovered_next_offset(segments) do
+          next when is_integer(next) -> Broker.seed_range_state(broker, range_id, next, min_seq)
+          # The primary did not answer, so the end is unknown. Any horizon guessed here is wrong in one
+          # direction: the segment's start would serve the range's earlier segments and hide the active
+          # one, zero would hide everything, and either page comes back empty and successful. So the
+          # range refuses its reads until a later pass (every reconcile runs this again) learns the end.
+          :unreachable -> Broker.seed_unrecovered_range(broker, range_id, min_seq)
+        end
     end
   end
 
   defp recovered_next_offset(segments) do
     case Enum.find(segments, &(&1.state == :active)) do
       %{id: segment_id, start_offset: start_offset, replica_set: [primary | _]} ->
-        case safe_durable_end(primary, segment_id, start_offset) do
-          next when is_integer(next) ->
-            next
-
-          # The primary did not answer, so the end is unknown. Zero is inert under the monotone seed,
-          # which is the point: start_offset would be a horizon high enough to serve the range's
-          # earlier segments and low enough to hide the active one, and a page that stops in the
-          # middle of durable data is the failure this whole change is about. Retried next tick.
-          :unreachable ->
-            0
-        end
+        safe_durable_end(primary, segment_id, start_offset)
 
       nil ->
         # Sealed-only range: the seal command recorded each segment's length deterministically.
@@ -1636,7 +1634,9 @@ defmodule Malachi.BrokerServer do
     %{range_id: range_id, segment_id: segment_id, last: expected, count: count} = dispatch
 
     if actual == expected do
-      {state, pending}
+      # Nothing to move, but the primary's answer is still the range's end, which is what an unrecovered
+      # range was waiting for: adopting it is a no-op on the counter and ends the wait.
+      {%{state | broker: Broker.adopt_offsets(state.broker, range_id, segment_id, actual)}, pending}
     else
       # The placements always follow the primary's truth, even when the counter no longer does: the
       # client must be told where its records actually landed. The counter, in contrast, is only moved
