@@ -69,6 +69,7 @@ defmodule Malachi.Application do
   alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Storage.DataDirGuard
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
 
@@ -197,6 +198,15 @@ defmodule Malachi.Application do
       {:refuse, reason} -> FormatMarker.refuse!(reason, halt_fun)
     end
   end
+
+  @doc """
+  The startup gate over the log data directory against the control plane `cluster` over `nodes`
+  (`Malachi.Storage.DataDirGuard.check/4`, whose options `opts` are): refuses the start when the
+  directory holds segments a control plane formed now would not know, or when a one-member cluster is
+  configured with peers, and logs and goes on when the operator adopted the directory.
+  """
+  @spec ensure_data_dir_identity(atom(), [node()], Path.t(), keyword()) :: term()
+  def ensure_data_dir_identity(cluster, nodes, dir, opts), do: DataDirGuard.check(cluster, nodes, dir, opts)
 
   defp log_data_dir do
     Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
@@ -375,12 +385,13 @@ defmodule Malachi.Application do
     end
   end
 
-  # The log stack's supervised children. Single-node (no :log_cluster): one BrokerServer owning a
-  # local ReplicationServer, or N independent broker shards when MALACHI_DATA_SHARDS > 1 (the
-  # measurement mode, see Malachi.DataPlaneRouter). Clustered: start `ra`, plus a named
-  # ReplicationServer (this node's data-plane broker) and the BrokerServer wired to every node's
-  # ReplicationServer with a replication factor. The ReplicationServer must precede the BrokerServer
-  # (the latter references it).
+  # The log stack's supervised children. Every deployment runs its control plane in `ra`: a single node as
+  # a one-member cluster (`Malachi.Config.log_cluster/2` names it when MALACHI_LOG_CLUSTER is not set), a
+  # cluster over every configured node. Either way: start `ra`, a named ReplicationServer (this node's
+  # data-plane broker) and the BrokerServer wired to every node's ReplicationServer with a replication
+  # factor. The ReplicationServer must precede the BrokerServer (the latter references it). Only the
+  # data-plane sharding measurement mode (MALACHI_DATA_SHARDS > 1, no cluster) runs N independent
+  # in-memory brokers, whose metadata does not survive a restart (see Malachi.DataPlaneRouter).
   defp log_children do
     cluster = Application.get_env(:malachi, :log_cluster)
     nodes = configured_nodes()
@@ -393,6 +404,9 @@ defmodule Malachi.Application do
     # Resolving once matters now that this reads `ra`: the placement used to be a pure function of the
     # environment and was recomputed wherever it was needed, but two reads of a live store can disagree,
     # which would leave the broker routing by one ring and the coordinators by another.
+    # Whether this node ever started a control plane, read before `boot_topology/2` starts the ring store
+    # and so registers it (`Malachi.Storage.DataDirGuard`).
+    ring_known? = not is_nil(cluster) and DataDirGuard.ring_known?()
     topology = boot_topology(cluster, nodes)
     vnodes = boot_vnodes(topology)
 
@@ -400,10 +414,17 @@ defmodule Malachi.Application do
       if cluster do
         # `ra` is already started in `start/2` (the user store needs it unconditionally).
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
-        # precede the broker that references it. Data-plane sharding is single-node only; warn and ignore.
-        if DataPlaneRouter.shard_count() > 1 do
+        # precede the broker that references it. Data-plane sharding needs the in-memory measurement
+        # mode; warn and ignore (DataPlaneRouter.shard_count/0 answers 1 here).
+        if Application.get_env(:malachi, :data_shards, 1) > 1 do
           Logger.warning(I18n.t(:data_shards_ignored_clustered))
         end
+
+        _ = warn_group_commit_needs_rf1(Application.get_env(:malachi, :group_commit, false), replication_factor())
+
+        # Before the broker starts the metadata members: a control plane formed now over segment
+        # directories it does not know would let the orphan sweep delete them (#273), sharded or not.
+        ensure_data_dir_identity(cluster, nodes, log_data_dir(), ring_known?: ring_known?, sharded?: not is_nil(vnodes))
 
         [
           ring_reconciler_child(nodes),
@@ -415,19 +436,50 @@ defmodule Malachi.Application do
           metadata_version_watcher_children(cluster, vnodes) ++
           scrubber_children() ++ orphan_sweeper_children(cluster, nodes, vnodes)
       else
-        # Single-node: one BrokerServer, or (measurement mode) N independent in-memory shards, each with its
-        # own name and isolated data dir. With one shard this is exactly the historical single child.
-        # The scrubber follows each broker: it comes after it in the list, so the broker is alive when
-        # the scrubber asks for its replication server.
-        Enum.flat_map(DataPlaneRouter.shards(log_data_dir()), fn {name, dir} ->
-          [skip_reporter_child(name), log_broker_child(nil, nodes, name, dir, nil)] ++
-            scrubber_children(name, dir) ++ orphan_sweeper_children(name, dir)
-        end)
+        measurement_children(nodes, log_data_dir())
       end
 
     # Coordinators reference the broker (and, when sharded, the vnodes' ra clusters), so they come last;
     # the sharded control plane also gets the lease + manual rebalancing coordinator (R3-b-iii).
     log_stack ++ coordinator_children(cluster, vnodes) ++ rebalance_children(nodes, vnodes)
+  end
+
+  @doc """
+  Warns, once at boot, when broker group commit is asked for (`MALACHI_GROUP_COMMIT=true`) with a
+  configured replication factor above 1, and answers `:warned`; answers `:ok` otherwise.
+
+  Broker group commit appends to a segment's primary alone, so it is only correct when every segment has
+  one replica, which only a configured factor of 1 guarantees whatever the broker set does later. A
+  single node runs a one-member cluster with the default factor of 3, so without this line the knob
+  would just stop working: the fix is `MALACHI_LOG_REPLICATION_FACTOR=1`, or
+  `MALACHI_REPLICATION_GROUP_COMMIT=true`, which batches the fsync on every replica as NorthGuard does.
+  """
+  @spec warn_group_commit_needs_rf1(boolean(), pos_integer()) :: :warned | :ok
+  def warn_group_commit_needs_rf1(true, rf) when rf > 1 do
+    Logger.warning(I18n.t(:group_commit_needs_rf1, rf: rf))
+    :warned
+  end
+
+  def warn_group_commit_needs_rf1(_group_commit?, _rf), do: :ok
+
+  @doc """
+  The children of the data-plane sharding measurement mode (`MALACHI_DATA_SHARDS` > 1 with no control
+  plane cluster): N independent in-memory brokers over `dir`, each with its own name and isolated
+  subdirectory, and a warning that nothing they hold survives a restart.
+
+  No orphan sweep: a shard's only authority is its own memory, which a restart empties, and a sweep that
+  trusted it deleted every segment written before the boot (#273). The scrubber follows each broker: it
+  comes after it in the list, so the broker is alive when the scrubber asks for its replication server.
+  Public so a test can hold the mode to that.
+  """
+  @spec measurement_children([node()], Path.t()) :: [Supervisor.child_spec()]
+  def measurement_children(nodes, dir) do
+    Logger.warning(I18n.t(:data_shards_in_memory, shards: DataPlaneRouter.shard_count()))
+
+    Enum.flat_map(DataPlaneRouter.shards(dir), fn {name, shard_dir} ->
+      [skip_reporter_child(name), log_broker_child(nil, nodes, name, shard_dir, nil)] ++
+        scrubber_children(name, shard_dir)
+    end)
   end
 
   @log_ring Malachi.LogRing
@@ -1046,10 +1098,11 @@ defmodule Malachi.Application do
   end
 
   @doc """
-  The clustered node's orphan sweep, beside the scrub and for the same reason: the data directory is a
-  fact about this node, so it is not leader gated. One sweeper over the node's named replication
-  server, whose authority is `orphan_authority/3`: the vnodes that own the segments, never this node's
-  cached copy of the metadata.
+  The node's orphan sweep, beside the scrub and for the same reason: the data directory is a fact about
+  this node, so it is not leader gated. One sweeper over the node's named replication server, whose
+  authority is `orphan_authority/3`: the vnodes that own the segments, never this node's cached copy of
+  the metadata. A single node is a one-member cluster and runs exactly this; the data-plane sharding
+  measurement mode runs no sweep.
 
   Public so a test can hold the wiring to that, since a sweeper handed a cache-backed authority here
   would reopen #249 with every other test still green.
@@ -1061,18 +1114,6 @@ defmodule Malachi.Application do
       orphan_authority(cluster, nodes, vnodes),
       {Malachi.LogReplication, node()},
       log_data_dir()
-    )
-  end
-
-  # Single-node: one per data-plane shard, over that shard's own directory and its broker's unnamed
-  # replication server, whose pid a broker restart replaces (hence the function, as in `scrubber_child/4`).
-  # The metadata is the broker's own, in memory, and it IS the truth: there is no control plane to ask.
-  defp orphan_sweeper_children(broker_name, directory) do
-    orphan_sweeper_child(
-      :"#{broker_name}OrphanSweeper",
-      local_orphan_authority(broker_name),
-      fn -> BrokerServer.replication_ref(broker_name) end,
-      directory
     )
   end
 
@@ -1108,10 +1149,10 @@ defmodule Malachi.Application do
   cached copy of the metadata (#249).
 
     * sharded (`vnodes` given): `durable_orphan_authority/1` over this cluster's durable ring store;
-    * a single `ra` cluster (`cluster` without `vnodes`): that cluster, as the one owner of every topic;
+    * a single `ra` cluster (`cluster` without `vnodes`): that cluster, as the one owner of every topic.
+      A single node is one, with one member.
 
-  Without a cluster there is no control plane to ask, and the single-node wiring uses
-  `local_orphan_authority/1` instead.
+  The data-plane sharding measurement mode has no control plane to ask, and runs no sweep.
   """
   @spec orphan_authority(atom(), [node()], term()) :: ([String.t()] -> term())
   def orphan_authority(cluster, nodes, nil) do
@@ -1151,7 +1192,8 @@ defmodule Malachi.Application do
       the control plane is not sharded. Never this node's cached copy of the metadata, for the reason
       the orphan sweep gives (#249): it misses a vnode this node has not reached and a bind made
       through another node since its last refresh.
-    * Single node: every data-plane broker's own metadata, which is in memory and IS the truth.
+    * The data-plane sharding measurement mode: every shard's own in-memory metadata, the only copy
+      there is (and one a restart empties). A single node is clustered, with one member, and asks it.
   """
   @spec bound_topics(String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def bound_topics(name) do
@@ -1210,23 +1252,6 @@ defmodule Malachi.Application do
   defp single_cluster_topology(cluster, nodes) do
     {:ok, ring} = HashRing.add_vnode(HashRing.new(), cluster, 0)
     RingTopology.new(ring, %{cluster => nodes})
-  end
-
-  @doc """
-  The orphan sweep's authority on a single node, where there is no control plane: the broker's own
-  metadata, which is in memory and IS the truth, so a segment it does not list is not anywhere.
-  """
-  @spec local_orphan_authority(GenServer.server()) :: ([String.t()] -> term())
-  def local_orphan_authority(broker_name) do
-    &Orphans.explain(&1, fn ids ->
-      {:ok,
-       %{
-         known: Orphans.known_among(BrokerServer.metadata(broker_name).segments, ids),
-         unroutable: [],
-         migrating: [],
-         misplaced: []
-       }}
-    end)
   end
 
   defp scrubber_child(name, metadata_source, local_ref, directory) do

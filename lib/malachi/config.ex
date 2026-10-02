@@ -15,6 +15,9 @@ defmodule Malachi.Config do
 
   alias Malachi.I18n
 
+  # The control plane a single node runs when MALACHI_LOG_CLUSTER is not set (`log_cluster/2`).
+  @default_log_cluster :malachi_log
+
   @doc """
   Normalizes an on-disk data directory taken from an environment variable.
 
@@ -280,6 +283,40 @@ defmodule Malachi.Config do
       "report" -> :report
       "off" -> :off
       _other -> raise "MALACHI_RETENTION_ORPHAN_SWEEP must be delete, report or off, got: #{inspect(raw)}"
+    end
+  end
+
+  @doc """
+  The control plane cluster this node runs, from `MALACHI_LOG_CLUSTER` and the data-plane shard count.
+
+    * A name given: that cluster, whatever the shard count (a clustered node runs one data-plane
+      shard, `Malachi.DataPlaneRouter.shard_count/0`).
+    * No name and one shard (the default): `:malachi_log`, so a single node runs its metadata as a
+      one-member `ra` cluster and keeps it across a restart. Before #273 this was `nil`, in-memory
+      metadata that a restart forgot, after which the orphan sweep deleted every segment written
+      before the boot.
+    * No name and more than one shard: `nil`, the in-memory data-plane sharding measurement mode, whose
+      shards hold their metadata in memory only and run no orphan sweep.
+
+  The name comes from a trusted operator (deploy config), so creating the atom is fine.
+
+  ## Examples
+
+      iex> Malachi.Config.log_cluster(nil, 1)
+      :malachi_log
+
+      iex> Malachi.Config.log_cluster(" ", 4)
+      nil
+
+      iex> Malachi.Config.log_cluster("orders_meta", 4)
+      :orders_meta
+
+  """
+  @spec log_cluster(String.t() | nil, integer()) :: atom() | nil
+  def log_cluster(raw, data_shards) when is_integer(data_shards) do
+    case raw && String.trim(raw) do
+      blank when blank in [nil, ""] -> if data_shards > 1, do: nil, else: @default_log_cluster
+      name -> String.to_atom(name)
     end
   end
 end

@@ -426,6 +426,108 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "ranges whose end a recovery could not learn (#273)" do
+    test "an unrecovered range refuses read_consume until a seed learns its end", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1"), record("b", "k2")])
+
+      # A restarted frontend: its bookkeeping is empty, and the recovery's primary did not answer.
+      restarted = %{broker | offsets: %{}, segment_seq: %{}} |> Broker.seed_unrecovered_range(root_id, 1)
+      assert Broker.unrecovered?(restarted, root_id)
+      assert Broker.read_consume(restarted, root_id, :start, 100, read_fun(store)) == {:error, :metadata_unavailable}
+
+      recovered = Broker.seed_range_state(restarted, root_id, 2, 1)
+      refute Broker.unrecovered?(recovered, root_id)
+      {delivered, _cursor} = consume(recovered, store, root_id, :start)
+      assert delivered |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b"]
+    end
+
+    test "seeds the segment sequence floor and an inert zero, never rewinding" do
+      {broker, root_id} = broker_with_topic()
+
+      fresh = Broker.seed_unrecovered_range(broker, root_id, 3)
+      assert fresh.segment_seq[root_id] == 3
+      assert fresh.offsets[root_id] == 0
+
+      advanced = %{fresh | segment_seq: %{root_id => 9}, offsets: %{root_id => 7}}
+      again = Broker.seed_unrecovered_range(advanced, root_id, 3)
+      assert again.segment_seq[root_id] == 9
+      assert again.offsets[root_id] == 7
+    end
+
+    test "a range already serving reads keeps its end when a later probe times out" do
+      {broker, root_id} = broker_with_topic()
+      live = Broker.seed_range_state(broker, root_id, 42, 1)
+
+      probed = Broker.seed_unrecovered_range(live, root_id, 1)
+      refute Broker.unrecovered?(probed, root_id)
+      assert probed.offsets[root_id] == 42
+    end
+
+    test "an unrecovered range stays so through repeated failed probes" do
+      {broker, root_id} = broker_with_topic()
+
+      twice = broker |> Broker.seed_unrecovered_range(root_id, 1) |> Broker.seed_unrecovered_range(root_id, 1)
+      assert Broker.unrecovered?(twice, root_id)
+    end
+
+    test "the primary's answer to a produce on the head ends the wait; a stale one does not", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      waiting = %{broker | unrecovered: %{root_id => true}}
+
+      refute waiting |> Broker.adopt_offsets(root_id, {root_id, 0}, 41) |> Broker.unrecovered?(root_id)
+      assert waiting |> Broker.adopt_offsets(root_id, {root_id, 7}, 41) |> Broker.unrecovered?(root_id)
+    end
+
+    test "only the unrecovered range is refused" do
+      {broker, root_id} = broker_with_topic()
+      other = {"events", 999}
+
+      marked = Broker.seed_unrecovered_range(broker, other, 1)
+      refute Broker.unrecovered?(marked, root_id)
+      assert Broker.unrecovered?(marked, other)
+    end
+
+    # The model: a range is unrecovered exactly when it has been probed and failed and has never been
+    # seeded with a learned end, and neither counter ever moves backwards. Two ranges, so a probe of one
+    # is also checked not to touch the other.
+    property "unrecovered iff never seeded and probed at least once; counters never rewind" do
+      ranges = [{"events", 0}, {"events", 1}]
+
+      op =
+        StreamData.one_of([
+          StreamData.tuple(
+            {StreamData.constant(:seed), StreamData.member_of(ranges), StreamData.integer(0..50),
+             StreamData.integer(0..5)}
+          ),
+          StreamData.tuple({StreamData.constant(:unreachable), StreamData.member_of(ranges), StreamData.integer(0..5)})
+        ])
+
+      check all(ops <- StreamData.list_of(op, max_length: 30), max_runs: 300) do
+        broker =
+          Enum.reduce(ops, open_broker(), fn
+            {:seed, range, next, seq}, broker -> Broker.seed_range_state(broker, range, next, seq)
+            {:unreachable, range, seq}, broker -> Broker.seed_unrecovered_range(broker, range, seq)
+          end)
+
+        for range <- ranges do
+          mine = Enum.filter(ops, &(elem(&1, 1) == range))
+          seeded? = Enum.any?(mine, &(elem(&1, 0) == :seed))
+          assert Broker.unrecovered?(broker, range) == (mine != [] and not seeded?)
+
+          nexts = for {:seed, _range, next, _seq} <- mine, do: next
+          seqs = Enum.map(mine, &elem(&1, tuple_size(&1) - 1))
+
+          if mine != [] do
+            assert broker.offsets[range] == Enum.max([0 | nexts])
+            assert broker.segment_seq[range] == Enum.max(seqs)
+          end
+        end
+      end
+    end
+  end
+
   describe "skipped offsets (data a consumer is moved past)" do
     # A range of `count` one-record segments at offsets 0..count-1, every one of them sealed.
     defp one_record_segments(store, count) do

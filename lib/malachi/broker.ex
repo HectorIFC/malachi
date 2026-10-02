@@ -101,7 +101,8 @@ defmodule Malachi.Broker do
           segment_seq: %{Metadata.range_id() => non_neg_integer()},
           offsets: %{Metadata.range_id() => non_neg_integer()},
           rolling: %{Metadata.range_id() => roll()},
-          fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}}
+          fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}},
+          unrecovered: %{Metadata.range_id() => true}
         }
 
   defstruct dsrsm: nil,
@@ -141,7 +142,14 @@ defmodule Malachi.Broker do
             # Fences this frontend has SENT and not yet seen answered, by range. Apart from `rolling` on
             # purpose: a refusal clears the roll (`forget_sealed/4`), and it is exactly then that a produce
             # must still be recognized as racing this frontend's own fence. See `awaiting_fence?/5`.
-            fencing: %{}
+            fencing: %{},
+            # Ranges whose end offset a recovery could not learn (their primary did not answer), so this
+            # frontend does not know where their durable data ends. Until a recovery or a produce learns
+            # it, a consume of one (`read_consume/5`, the path every consumer takes) refuses instead of
+            # serving a page clamped at a guessed horizon: an empty page there is a successful wrong
+            # answer. The offset reads (`read/5`, `stream_history/5`) are not gated: no consumer reaches
+            # them. See `seed_unrecovered_range/3`.
+            unrecovered: %{}
 
   @doc """
   Opens an empty broker.
@@ -315,9 +323,45 @@ defmodule Malachi.Broker do
   without seeding every read of pre-restart data would clamp to `:eof` at offset 0 even though the
   records are durable on disk and the metadata survived (the failure the chaos harness caught).
   Both merges are monotone (`max`), so re-seeding never rewinds live state.
+
+  A seeded range is recovered: it leaves the set `seed_unrecovered_range/3` put it in, if it was there.
   """
   @spec seed_range_state(t(), Metadata.range_id(), non_neg_integer(), non_neg_integer()) :: t()
   def seed_range_state(%__MODULE__{} = broker, range_id, next_offset, min_seq) do
+    broker = seed(broker, range_id, next_offset, min_seq)
+    %{broker | unrecovered: Map.delete(broker.unrecovered, range_id)}
+  end
+
+  @doc """
+  Seeds a range whose end offset could not be learned (its primary did not answer the recovery): the
+  segment sequence floor, which the metadata alone decides, and an inert zero for the next offset, which
+  the monotone merge never lets rewind live state. The range is then UNRECOVERED until a later
+  `seed_range_state/4` succeeds, and `read_consume/5` refuses it with `{:error, :metadata_unavailable}`
+  rather than serve a page that stops at the zero: that page would be empty and successful, and a
+  consumer cannot tell it from having caught up.
+
+  Only a range this frontend has never learned an end for becomes unrecovered. Every reconcile recovers
+  again, and a range already serving reads keeps its end when one of those later probes times out: the
+  end it holds is real and only moves forward, so refusing its reads then would be an outage with nothing
+  to protect.
+
+  Produces are not held back: the primary assigns the real offsets, and `adopt_offsets/4` takes them and
+  ends the wait, since what the primary reports is the end. The frontend adopts every answer for this,
+  including one that matches what it planned.
+  """
+  @spec seed_unrecovered_range(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def seed_unrecovered_range(%__MODULE__{} = broker, range_id, min_seq) do
+    known_end? = Map.has_key?(broker.offsets, range_id) and not unrecovered?(broker, range_id)
+    broker = seed(broker, range_id, 0, min_seq)
+
+    if known_end?, do: broker, else: %{broker | unrecovered: Map.put(broker.unrecovered, range_id, true)}
+  end
+
+  @doc "Whether `range_id` is waiting for a recovery that learns its end (see `seed_unrecovered_range/3`)."
+  @spec unrecovered?(t(), Metadata.range_id()) :: boolean()
+  def unrecovered?(%__MODULE__{} = broker, range_id), do: Map.has_key?(broker.unrecovered, range_id)
+
+  defp seed(broker, range_id, next_offset, min_seq) do
     %{
       broker
       | offsets: Map.update(broker.offsets, range_id, next_offset, &max(&1, next_offset)),
@@ -342,7 +386,11 @@ defmodule Malachi.Broker do
   def adopt_offsets(%__MODULE__{} = broker, range_id, segment_id, actual_last) do
     case Map.get(broker.segments, range_id) do
       %{id: ^segment_id} ->
-        %{broker | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1))}
+        %{
+          broker
+          | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1)),
+            unrecovered: Map.delete(broker.unrecovered, range_id)
+        }
 
       _closed_or_rolled ->
         broker
@@ -929,7 +977,7 @@ defmodule Malachi.Broker do
   Turns the command journal on, so `take_journal/1` can report what this broker applied locally.
 
   Only a broker that re-seeds its cache from somewhere else needs it: with in-memory metadata the local
-  cache IS the truth and nothing ever replaces it, so journaling would only grow a list nobody reads.
+  cache is the only copy and nothing ever replaces it, so journaling would only grow a list nobody reads.
   """
   @spec journal(t()) :: t()
   def journal(%__MODULE__{} = broker), do: %{broker | journal: broker.journal || []}
@@ -1050,8 +1098,9 @@ defmodule Malachi.Broker do
   later call. This is what lets a consumer drain a range's full history across splits/merges (the
   pre-split records live in the now-sealed parent's segments) without ever seeing partition/offset.
 
-  Returns `{:ok, records, next_cursor, skips}` (call again with `next_cursor`), or `{:error,
-  :no_such_range}` if the range is unknown.
+  Returns `{:ok, records, next_cursor, skips}` (call again with `next_cursor`), `{:error,
+  :no_such_range}` if the range is unknown, or `{:error, :metadata_unavailable}` while the range waits
+  for a recovery that learns its end (`seed_unrecovered_range/3`).
 
   `skips` lists every stretch of history this page moved the cursor past because it was no longer
   stored (see `Malachi.Broker.Skip`), oldest first, and is empty on an ordinary page. The page still
@@ -1064,11 +1113,16 @@ defmodule Malachi.Broker do
           {:ok, [Record.t()], consume_cursor(), [Skip.t()]} | {:error, term()}
   def read_consume(%__MODULE__{} = broker, range_id, cursor, max_records, read_fun)
       when is_integer(max_records) and max_records > 0 do
-    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
-      nil ->
+    range = DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id)
+
+    cond do
+      is_nil(range) ->
         {:error, :no_such_range}
 
-      range ->
+      unrecovered?(broker, range_id) ->
+        {:error, :metadata_unavailable}
+
+      true ->
         {index, offset} = normalize_cursor(cursor)
 
         page = %{

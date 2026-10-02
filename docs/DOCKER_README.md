@@ -92,13 +92,18 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 
 ### Data Persistence
 
-The broker keeps its log segments and its ra log (which holds user credentials, ACLs, and lockouts) on
-disk. **With no volume, both default to a path under `/tmp` and are lost on every restart.** Point the two
-directories at a persistent volume mounted at `/app/data`, which the image already owns:
+The broker keeps its log segments and its ra log (which holds the control plane: topics, segments,
+consumer group positions, user credentials, ACLs, and lockouts) on disk. **With no volume, both default to
+a path under `/tmp` and are lost on every restart.** Point the two directories at a persistent volume
+mounted at `/app/data`, which the image already owns, and give the container a fixed hostname: the release
+names the node after it, and `ra` keeps the control plane under the node name, so a container recreated
+with a new hostname would come back with no control plane for the segments on its volume (it refuses to
+start rather than delete them; see *Recovering a single node* in the operations guide):
 
 ```bash
 docker run \
   --name malachi \
+  --hostname malachi \
   -p 127.0.0.1:4040:4040 \
   -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
