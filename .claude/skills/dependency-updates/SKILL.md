@@ -110,15 +110,21 @@ done
 **What Dependabot did not raise.** `mix hex.outdated`, run in a checkout of `origin/main` (that tree is
 the project's own, so running mix there is safe), lists every Hex package behind its latest release,
 transitive ones included. For Actions, the `uses:` lines of every workflow on `origin/main`, and the
-latest release of each action:
+newest version tag of each action:
 
 ```
 root=$(/usr/bin/git rev-parse --show-toplevel)
 rm -rf "$S/main"; mkdir -p "$S/main"
 /usr/bin/git archive origin/main .github/workflows | tar -x -C "$S/main"
 (cd "$S/main" && elixir "$root/scripts/deps_check.exs" uses .github/workflows/*.yml) > "$S/base_uses.tsv"
-gh api "repos/$owner_repo/releases/latest" --jq .tag_name
+gh api "repos/$owner_repo/git/matching-refs/tags/v" --paginate --jq '.[].ref | sub("refs/tags/"; "")' \
+  | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1
 ```
+
+The version comes from the tags, not from the releases: a tag with no release never appears among
+them, and the latest release is not always a version of the action (`github/codeql-action`'s is a
+CodeQL bundle, `codeql-bundle-v2.27.1`, while its newest action tag is `v4.38.2`). In apply, the same
+command with the decided major (`.../matching-refs/tags/v4.`) gives the newest tag within it.
 
 The workflows come out of `origin/main` itself, like the locks above, rather than from whatever this
 checkout holds: triage may run on any branch, and a workflow that exists only here, or is missing here,
@@ -318,13 +324,24 @@ comm -23 "$S/al-group" "$S/al-main"    # empty means no new finding
 
 Run the gates the plan printed, in its order, and stop at the first failure. The gates a workflow run
 cannot prove (listed below) run here, on the worktree, before anything is committed; the rest are read
-from CI in step 8, once the group branch is pushed. Record each one in `$S/results.json`:
+from CI in step 8, once the group branch is pushed. Before running them, take the tree they run on, the
+worktree as it is now with the updated lock, through a private index so the real one is not touched:
+
+```
+tree=$(GIT_INDEX_FILE="$S/tree.idx" sh -c '/usr/bin/git read-tree HEAD && /usr/bin/git add -A && /usr/bin/git write-tree')
+```
+
+Record each gate in `$S/results.json`:
 
 ```
 {"gates": [{"gate": "<exactly as the plan printed it>", "status": "pass", "host": "linux",
             "evidence": "<path of a log or result file, or a run URL>",
+            "tree": "<with a log: the $tree it ran on>",
             "workflow": "<with a run URL: ci.yml>", "sha": "<with a run URL: the commit the run tested>"}]}
 ```
+
+A log counts only for the tree it ran on. When the group changes (a package taken out, the lock
+resolved again), the tree changes, every earlier log stops counting, and the gates run again.
 
 `host` is the system Malachi ran on: `linux` for a CI runner or for the Linux containers of a Docker
 drill, `darwin` for a `mix test` on this Mac. Malachi is measured on Linux only, so the verdict refuses
@@ -389,13 +406,15 @@ and main's, and take the CI gates from the runs of that head only:
 /usr/bin/git fetch origin main "$branch"
 head=$(/usr/bin/git rev-parse "origin/$branch")
 main=$(/usr/bin/git rev-parse origin/main)
+tree=$(/usr/bin/git rev-parse "origin/$branch^{tree}")    # what the local gates ran on, if unchanged
 gh run list --branch "$branch" --json databaseId,headSha,conclusion,workflowName
 gh run view "$run" --json headSha,conclusion
-gh api "repos/{owner}/{repo}/actions/runs/$run" --jq .path    # .github/workflows/ci.yml
+gh api "repos/{owner}/{repo}/actions/runs/$run" --jq '.path | sub("@.*$"; "")'    # .github/workflows/ci.yml
 ```
 
 Record a run as the evidence of each gate its workflow proves, with `"workflow"` set to the basename of
-that `.path` (`ci.yml`; `workflowName` is the workflow's `name:`, `CI`, which the verdict does not know)
+that `.path`, without any `@ref` the API may append (`ci.yml`; `workflowName` is the workflow's
+`name:`, `CI`, which the verdict does not know)
 and `"sha"` set to the run's `headSha`. Every value read here passes `check_number` or `check_sha`
 first. A run whose `headSha` is not `$head`, or whose `conclusion` is not `success`, proves nothing.
 
@@ -404,13 +423,14 @@ Its tiers are the group's `verdict tiers:` line in the plan's output, passed exa
 `auth,http`, `consensus`); for the actions group, `actions`:
 
 ```
-elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main"
+elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main" "$tree"
 ```
 
 Never pass a tier the plan did not print for that group: the verdict checks only the gates of the tiers
 it is given, so a wrong one verifies the group against another group's checks. A `$head` equal to
 `$main` is refused: it means nothing was pushed, and every run of main would count as a run of the
-update.
+update. The pushed branch's tree is the tree the local gates recorded only when the commits hold
+exactly what was tested; anything changed after the local gates makes their logs stop counting.
 
 
 

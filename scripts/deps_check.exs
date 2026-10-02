@@ -10,7 +10,7 @@
 #   elixir scripts/deps_check.exs floor-hex    <base.lock> <new.lock> <registry_dir> <elixir_version>
 #   elixir scripts/deps_check.exs uses         <workflow.yml>...
 #   elixir scripts/deps_check.exs floor-action <base_uses.tsv> <new_uses.tsv> <api_dir>
-#   elixir scripts/deps_check.exs verdict      <tier>[,<tier>...] <results.json> <group head sha> <main sha>
+#   elixir scripts/deps_check.exs verdict      <tier>[,<tier>...] <results.json> <group head sha> <main sha> <group tree sha>
 #
 # plan          Diffs the two locks and prints, per group, every package that changed or appeared, the
 #               tiers it falls in and the gates those tiers require. A package the table does not name
@@ -40,7 +40,8 @@
 #               Linux, with its evidence: a path that exists (a drill's CHAOS_RESULT_FILE, a log), or a
 #               GitHub Actions run URL with its `workflow` and the `sha` it ran named, for the gates
 #               that workflow runs as blocking steps, and only when that sha is the group head given,
-#               which must not be main itself (before the push, a worktree's HEAD is main's commit). Malachi is measured on Linux only, so a pass anywhere else counts for
+#               which must not be main itself (before the push, a worktree's HEAD is main's commit). A
+#               log counts only with the `tree` it ran on, equal to the group tree given. Malachi is measured on Linux only, so a pass anywhere else counts for
 #               nothing.
 #
 # Exit 0 when the answer is ok, 3 when it is a STOP or NOT VERIFIED (the reasons are printed), 2 on a
@@ -596,11 +597,11 @@ defmodule DepsCheck do
     end)
   end
 
-  # owner/repo/path@ref runs owner/repo. A local (./) or docker:// action has no repository to check,
-  # and is refused as one rather than passed.
+  # owner/repo/path@ref runs owner/repo. A local (./), same-repository ($/) or docker:// action has no
+  # repository to check, and is refused as one rather than passed.
   defp repo_of(action) do
     case String.split(action, "/") do
-      [owner, repo | _path] when owner not in [".", "..", "docker:"] -> {owner, repo}
+      [owner, repo | _path] when owner not in [".", "..", "$", "docker:"] -> {owner, repo}
       _other -> {:unsupported, action}
     end
   end
@@ -666,29 +667,31 @@ defmodule DepsCheck do
 
   @doc """
   Every gate the tiers require that the results do not prove, as {gate, reason}. `head` is the commit
-  the group branch stands on: a run URL proves a gate only for a run of that commit.
+  the group branch stands on and `tree` its tree: a run URL proves a gate only for a run of that
+  commit, and a log only for a run on that tree, so a gate that passed before the group changed (a
+  package taken out, the lock resolved again) proves nothing about it.
   """
-  def verdict(tiers, results, head) do
+  def verdict(tiers, results, {head, tree}) do
     by_gate = Map.new(results, &{&1["gate"], &1})
 
     Enum.flat_map(gates_for(tiers), fn gate ->
       case Map.fetch(by_gate, gate) do
         :error -> [{gate, "not run"}]
-        {:ok, result} -> result |> result_reasons(head) |> Enum.map(&{gate, &1})
+        {:ok, result} -> result |> result_reasons({head, tree}) |> Enum.map(&{gate, &1})
       end
     end)
   end
 
-  defp result_reasons(result, head) do
+  defp result_reasons(result, {head, tree}) do
     [
       result["status"] != "pass" && "status #{inspect(result["status"])}, not pass",
       result["host"] != "linux" && "ran on #{inspect(result["host"])}: Malachi is measured on Linux only",
-      evidence_reason(result, head)
+      evidence_reason(result, {head, tree})
     ]
     |> Enum.filter(&is_binary/1)
   end
 
-  defp evidence_reason(%{"evidence" => "https://github.com/" <> rest} = result, head) do
+  defp evidence_reason(%{"evidence" => "https://github.com/" <> rest} = result, {head, _tree}) do
     workflow = result["workflow"]
 
     cond do
@@ -706,10 +709,15 @@ defmodule DepsCheck do
     end
   end
 
-  defp evidence_reason(%{"evidence" => path}, _head) when is_binary(path) and path != "",
-    do: if(File.exists?(path), do: false, else: no_evidence())
+  defp evidence_reason(%{"evidence" => path} = result, {_head, tree}) when is_binary(path) and path != "" do
+    cond do
+      not File.exists?(path) -> no_evidence()
+      result["tree"] != tree -> "a log of tree #{result["tree"] || "nil"}, not of the group tree #{tree}"
+      true -> false
+    end
+  end
 
-  defp evidence_reason(_result, _head), do: no_evidence()
+  defp evidence_reason(_result, _head_and_tree), do: no_evidence()
 
   defp no_evidence, do: "no evidence: a file that exists, or the run URL of a workflow that proves it"
 
@@ -748,14 +756,14 @@ defmodule DepsCheck do
     end
   end
 
-  def run(["verdict", tiers, results_file, head, main]) do
+  def run(["verdict", tiers, results_file, head, main, tree]) do
     names = String.split(tiers, ",")
     known = Enum.map(tier_names(), &Atom.to_string/1)
 
     with true <- names != [] and Enum.all?(names, &(&1 in known)),
-         true <- Regex.match?(@sha, head) and Regex.match?(@sha, main),
+         true <- Regex.match?(@sha, head) and Regex.match?(@sha, main) and Regex.match?(@sha, tree),
          {:ok, %{"gates" => results}} when is_list(results) <- JSON.decode(File.read!(results_file)) do
-      verdict_output(tiers, Enum.map(names, &String.to_existing_atom/1), results, head, main)
+      verdict_output(tiers, Enum.map(names, &String.to_existing_atom/1), results, {head, tree}, main)
     else
       _ -> usage()
     end
@@ -779,15 +787,15 @@ defmodule DepsCheck do
 
   # Before the update is committed and pushed, the worktree's HEAD is main itself, and every run of main
   # would then count as a run of the group.
-  defp verdict_output(tiers, _names, _results, main, main),
+  defp verdict_output(tiers, _names, _results, {main, _tree}, main),
     do:
       {[
          "NOT VERIFIED #{tiers}",
          "  the group head is main itself: commit and push the group branch, then read CI from its runs"
        ], 3}
 
-  defp verdict_output(tiers, names, results, head, _main) do
-    case verdict(names, results, head) do
+  defp verdict_output(tiers, names, results, {head, tree}, _main) do
+    case verdict(names, results, {head, tree}) do
       [] -> {["VERIFIED #{tiers}"], 0}
       reasons -> {["NOT VERIFIED #{tiers}" | Enum.map(reasons, fn {gate, why} -> "  #{gate}: #{why}" end)], 3}
     end

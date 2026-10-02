@@ -24,6 +24,8 @@ defmodule DepsCheckTest do
   @head "c27d355ed5f9cc2fd0d8b8d65914b9c0639344ce"
   # The origin/main the group branch was cut from.
   @main "fc1c296000000000000000000000000000000000"
+  # The tree the group's local gates ran on (git write-tree of the worktree, mix.lock included).
+  @tree "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
 
   @drills [
     "scripts/docker-chaos-test.sh",
@@ -564,6 +566,13 @@ defmodule DepsCheckTest do
              ]
     end
 
+    test "stops a same-repository $/ action as one with no repository, not as an unpinned one" do
+      assert action_floor([{"ci.yml", 30, "$/.github/actions/build", "", ""}]) == [
+               {"ci.yml:30 $/.github/actions/build", "an action the base never used"},
+               {"ci.yml:30 $/.github/actions/build", "not an owner/repo action"}
+             ]
+    end
+
     test "stops a local or docker action, which has no repository to check" do
       assert action_floor([{"ci.yml", 30, "./.github/actions/x", @v7, "v1"}]) == [
                {"ci.yml:30 ./.github/actions/x", "an action the base never used"},
@@ -683,7 +692,7 @@ defmodule DepsCheckTest do
       rows =
         for gate <- gates do
           Map.merge(
-            %{"gate" => gate, "status" => "pass", "host" => "linux", "evidence" => evidence},
+            %{"gate" => gate, "status" => "pass", "host" => "linux", "evidence" => evidence, "tree" => @tree},
             Map.get(overrides, gate, %{})
           )
         end
@@ -693,19 +702,19 @@ defmodule DepsCheckTest do
 
     test "verifies the ra group only with every gate passed on Linux with evidence", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:consensus]))
-      assert DepsCheck.run(["verdict", "consensus", file, @head, @main]) == {["VERIFIED consensus"], 0}
+      assert DepsCheck.run(["verdict", "consensus", file, @head, @main, @tree]) == {["VERIFIED consensus"], 0}
     end
 
     test "refuses the ra group without the upgrade drill", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:consensus]) -- ["scripts/docker-upgrade-chaos.sh"])
 
-      assert DepsCheck.run(["verdict", "consensus", file, @head, @main]) ==
+      assert DepsCheck.run(["verdict", "consensus", file, @head, @main, @tree]) ==
                {["NOT VERIFIED consensus", "  scripts/docker-upgrade-chaos.sh: not run"], 3}
     end
 
     test "refuses an unclassified package with only the cheap checks", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:tool]))
-      assert {["NOT VERIFIED full" | missing], 3} = DepsCheck.run(["verdict", "full", file, @head, @main])
+      assert {["NOT VERIFIED full" | missing], 3} = DepsCheck.run(["verdict", "full", file, @head, @main, @tree])
       assert "  scripts/docker-upgrade-chaos.sh: not run" in missing
       assert "  make docker-build docker-validate: not run" in missing
     end
@@ -717,7 +726,7 @@ defmodule DepsCheckTest do
           "pull request CI" => %{"status" => "fail", "evidence" => Path.join(dir, "missing.log")}
         })
 
-      assert DepsCheck.run(["verdict", "actions", file, @head, @main]) ==
+      assert DepsCheck.run(["verdict", "actions", file, @head, @main, @tree]) ==
                {[
                   "NOT VERIFIED actions",
                   ~s(  actionlint: ran on "darwin": Malachi is measured on Linux only),
@@ -729,7 +738,7 @@ defmodule DepsCheckTest do
     test "refuses a result with no evidence field at all", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:actions]), %{"actionlint" => %{"evidence" => nil}})
 
-      assert DepsCheck.run(["verdict", "actions", file, @head, @main]) ==
+      assert DepsCheck.run(["verdict", "actions", file, @head, @main, @tree]) ==
                {[
                   "NOT VERIFIED actions",
                   "  actionlint: no evidence: a file that exists, or the run URL of a workflow that proves it"
@@ -741,12 +750,12 @@ defmodule DepsCheckTest do
       from_ci = %{"evidence" => run_url, "sha" => @head, "workflow" => "ci.yml"}
 
       ok = results(dir, DepsCheck.gates_for([:actions]), %{"pull request CI" => from_ci})
-      assert {["VERIFIED actions"], 0} = DepsCheck.run(["verdict", "actions", ok, @head, @main])
+      assert {["VERIFIED actions"], 0} = DepsCheck.run(["verdict", "actions", ok, @head, @main, @tree])
 
       # The same URL with no workflow named, or one that is not a run, proves nothing.
       for evidence <- [%{"evidence" => run_url}, %{"evidence" => "https://github.com/HectorIFC/malachi/pull/278"}] do
         bad = results(dir, DepsCheck.gates_for([:actions]), %{"pull request CI" => evidence})
-        assert {["NOT VERIFIED actions", _], 3} = DepsCheck.run(["verdict", "actions", bad, @head, @main])
+        assert {["NOT VERIFIED actions", _], 3} = DepsCheck.run(["verdict", "actions", bad, @head, @main, @tree])
       end
     end
 
@@ -761,8 +770,24 @@ defmodule DepsCheckTest do
           ] do
         file = results(dir, DepsCheck.gates_for([:actions]), %{"pull request CI" => evidence})
 
-        assert DepsCheck.run(["verdict", "actions", file, @head, @main]) ==
+        assert DepsCheck.run(["verdict", "actions", file, @head, @main, @tree]) ==
                  {["NOT VERIFIED actions", "  pull request CI: #{reason}"], 3}
+      end
+    end
+
+    test "refuses a log of another tree, or one that does not say which tree it ran on", %{dir: dir} do
+      # A gate that passed before a package left the group, or before the lock was resolved again,
+      # proves nothing about the tree that is now being verified.
+      other = String.duplicate("8", 40)
+
+      for {override, reason} <- [
+            {%{"tree" => other}, "a log of tree #{other}, not of the group tree #{@tree}"},
+            {%{"tree" => nil}, "a log of tree nil, not of the group tree #{@tree}"}
+          ] do
+        file = results(dir, DepsCheck.gates_for([:actions]), %{"actionlint" => override})
+
+        assert DepsCheck.run(["verdict", "actions", file, @head, @main, @tree]) ==
+                 {["NOT VERIFIED actions", "  actionlint: #{reason}"], 3}
       end
     end
 
@@ -771,6 +796,8 @@ defmodule DepsCheckTest do
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, "main", @main])
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, "main"])
       assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head])
+      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, @main])
+      assert {_usage, 2} = DepsCheck.run(["verdict", "actions", file, @head, @main, "HEAD^{tree}"])
     end
 
     test "refuses a group head that is main itself, before the update was committed and pushed", %{dir: dir} do
@@ -781,7 +808,7 @@ defmodule DepsCheckTest do
           "pull request CI" => %{"evidence" => run_url, "sha" => @main, "workflow" => "ci.yml"}
         })
 
-      assert DepsCheck.run(["verdict", "actions", file, @main, @main]) ==
+      assert DepsCheck.run(["verdict", "actions", file, @main, @main, @tree]) ==
                {[
                   "NOT VERIFIED actions",
                   "  the group head is main itself: commit and push the group branch, then read CI from its runs"
@@ -797,7 +824,7 @@ defmodule DepsCheckTest do
             do: {gate, %{"evidence" => run_url, "sha" => @head, "workflow" => "ci.yml"}}
 
       file = results(dir, DepsCheck.gates_for([:tool]), overrides)
-      assert {["NOT VERIFIED tool" | reasons], 3} = DepsCheck.run(["verdict", "tool", file, @head, @main])
+      assert {["NOT VERIFIED tool" | reasons], 3} = DepsCheck.run(["verdict", "tool", file, @head, @main, @tree])
 
       assert reasons == [
                "  mix credo --strict: a run of ci.yml does not prove it: keep the log of a run on Linux",
@@ -817,7 +844,7 @@ defmodule DepsCheckTest do
       }
 
       file = results(dir, DepsCheck.gates_for([:consensus]), overrides)
-      assert DepsCheck.run(["verdict", "consensus", file, @head, @main]) == {["VERIFIED consensus"], 0}
+      assert DepsCheck.run(["verdict", "consensus", file, @head, @main, @tree]) == {["VERIFIED consensus"], 0}
 
       wrong =
         results(dir, DepsCheck.gates_for([:consensus]), %{
@@ -825,22 +852,25 @@ defmodule DepsCheckTest do
         })
 
       assert {["NOT VERIFIED consensus", "  mix deps.audit: a run of ci.yml does not prove it" <> _], 3} =
-               DepsCheck.run(["verdict", "consensus", wrong, @head, @main])
+               DepsCheck.run(["verdict", "consensus", wrong, @head, @main, @tree])
     end
 
     test "takes several tiers for a group that mixes them", %{dir: dir} do
       file = results(dir, DepsCheck.gates_for([:auth, :http]))
-      assert DepsCheck.run(["verdict", "auth,http", file, @head, @main]) == {["VERIFIED auth,http"], 0}
+      assert DepsCheck.run(["verdict", "auth,http", file, @head, @main, @tree]) == {["VERIFIED auth,http"], 0}
 
       assert {["NOT VERIFIED auth,http,consensus" | _], 3} =
-               DepsCheck.run(["verdict", "auth,http,consensus", file, @head, @main])
+               DepsCheck.run(["verdict", "auth,http,consensus", file, @head, @main, @tree])
     end
 
     test "refuses an unknown tier and results that are not a gate list", %{dir: dir} do
       file = results(dir, [])
-      assert {_usage, 2} = DepsCheck.run(["verdict", "nonsense", file, @head, @main])
-      assert {_usage, 2} = DepsCheck.run(["verdict", "tool", write(dir, "bad.json", ~s({"gates": 1})), @head, @main])
-      assert {_usage, 2} = DepsCheck.run(["verdict", "tool", write(dir, "broken.json", "{"), @head, @main])
+      assert {_usage, 2} = DepsCheck.run(["verdict", "nonsense", file, @head, @main, @tree])
+
+      assert {_usage, 2} =
+               DepsCheck.run(["verdict", "tool", write(dir, "bad.json", ~s({"gates": 1})), @head, @main, @tree])
+
+      assert {_usage, 2} = DepsCheck.run(["verdict", "tool", write(dir, "broken.json", "{"), @head, @main, @tree])
     end
   end
 

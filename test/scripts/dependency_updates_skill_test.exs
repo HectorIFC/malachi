@@ -108,9 +108,17 @@ defmodule DependencyUpdatesSkillTest do
   test "the verdict takes the group's own tiers from the plan, never a fixed one" do
     skill = File.read!(@skill)
 
-    assert skill =~ ~s(elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main")
+    assert skill =~ ~s(elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main" "$tree")
     assert skill =~ "`verdict tiers:`"
     assert Regex.scan(~r/deps_check\.exs verdict (\S+)/, skill, capture: :all_but_first) == [[~s("$tiers")]]
+
+    # The tree the verdict holds every log to: taken from the worktree through a private index before
+    # the local gates (the real index may hold something else), and read back from the pushed branch as
+    # a tree, not a commit, so the two compare equal exactly when the commits hold what was tested.
+    assert skill =~
+             ~S<tree=$(GIT_INDEX_FILE="$S/tree.idx" sh -c '/usr/bin/git read-tree HEAD && /usr/bin/git add -A && /usr/bin/git write-tree')>
+
+    assert skill =~ ~S<tree=$(/usr/bin/git rev-parse "origin/$branch^{tree}")>
   end
 
   test "the skill runs mix deps.update only inside the disposable container" do
@@ -130,7 +138,12 @@ defmodule DependencyUpdatesSkillTest do
 
     # gh run view gives the workflow's name: (CI), never its file (ci.yml), which is what the verdict
     # knows; the run's path does.
-    assert skill =~ ~s(gh api "repos/{owner}/{repo}/actions/runs/$run" --jq .path)
+    assert skill =~ ~S<gh api "repos/{owner}/{repo}/actions/runs/$run" --jq '.path | sub("@.*$"; "")'>
+
+    # releases/latest is not an action's version: github/codeql-action's latest release is a CodeQL
+    # bundle (codeql-bundle-v2.27.1), and a tag with no release never appears there.
+    refute skill =~ "releases/latest"
+    assert skill =~ ~s(gh api "repos/$owner_repo/git/matching-refs/tags/v" --paginate)
     assert skill =~ ~s(/usr/bin/git archive origin/main .github/workflows | tar -x -C "$S/main")
   end
 
