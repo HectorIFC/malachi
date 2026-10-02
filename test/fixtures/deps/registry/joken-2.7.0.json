@@ -1,0 +1,19 @@
+{
+  "version": "2.7.0",
+  "checksum": "ffd0d92e12dbf497311386b75f9b5027d370e32c74f6e5576804d3a9eed668ab",
+  "retirement": null,
+  "meta": {
+    "elixir": "~> 1.16",
+    "app": "joken",
+    "build_tools": [
+      "mix"
+    ]
+  },
+  "requirements": {
+    "jose": {
+      "app": "jose",
+      "optional": false,
+      "requirement": "~> 1.11.12"
+    }
+  }
+}
