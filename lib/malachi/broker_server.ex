@@ -94,7 +94,8 @@ defmodule Malachi.BrokerServer do
       single local replication server rooted at `directory` (single-node default).
     * `:live_brokers` - a `(-> [broker])` (e.g. from membership); when given, the placement broker
       set is refreshed from it every `:brokers_refresh_interval` ms, so new segments land on
-      currently-alive brokers. An empty result is ignored (the last non-empty set is kept).
+      currently-alive brokers. An empty result is ignored (the last non-empty set is kept), and so is
+      a call that exits (the membership server is down); `:broker_attributes` likewise.
     * `:brokers_refresh_interval` - refresh period in ms (default 1000).
     * `:reconcile_read_timeout` - ms one control plane read made by the reconcile may take before the
       vnode counts as unreachable for that pass (default 1000). Deliberately far below ra's 5s.
@@ -1441,18 +1442,35 @@ defmodule Malachi.BrokerServer do
     |> Enum.reject(&is_nil/1)
   end
 
-  # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is.
+  # An empty live set is ignored (keep the last non-empty one); no source leaves the broker as-is, and so
+  # does a source that did not answer. The source is the membership server, a sibling the supervisor
+  # restarts on its own; a call into it that exits while it is down says nothing about which brokers are
+  # alive, and letting that exit take this broker down would cost every client its connection over a
+  # refresh that can simply wait for the next tick. A single node runs that server too (it is a
+  # one-member cluster), so this is the path every deployment takes.
   defp refresh_broker_set(broker, nil), do: broker
 
   defp refresh_broker_set(broker, live_brokers) do
-    case live_brokers.() do
+    case ask_membership(live_brokers, []) do
       [] -> broker
       live -> Broker.set_brokers(broker, live)
     end
   end
 
   defp refresh_broker_attributes(broker, nil), do: broker
-  defp refresh_broker_attributes(broker, attributes_fun), do: Broker.set_broker_attributes(broker, attributes_fun.())
+
+  defp refresh_broker_attributes(broker, attributes_fun) do
+    case ask_membership(attributes_fun, :unanswered) do
+      :unanswered -> broker
+      attributes -> Broker.set_broker_attributes(broker, attributes)
+    end
+  end
+
+  defp ask_membership(fun, unanswered) do
+    fun.()
+  catch
+    :exit, _reason -> unanswered
+  end
 
   # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
   # returns {records, next_positions, skips}. This is the read orchestration the LogApi used to do client-side;
