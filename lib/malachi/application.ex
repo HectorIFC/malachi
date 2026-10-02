@@ -69,6 +69,7 @@ defmodule Malachi.Application do
   alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Storage.DataDirGuard
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
 
@@ -197,6 +198,15 @@ defmodule Malachi.Application do
       {:refuse, reason} -> FormatMarker.refuse!(reason, halt_fun)
     end
   end
+
+  @doc """
+  The startup gate over the log data directory against the control plane `cluster` over `nodes`
+  (`Malachi.Storage.DataDirGuard.check/4`, whose options `opts` are): refuses the start when the
+  directory holds segments a control plane formed now would not know, or when a one-member cluster is
+  configured with peers, and logs and goes on when the operator adopted the directory.
+  """
+  @spec ensure_data_dir_identity(atom(), [node()], Path.t(), keyword()) :: term()
+  def ensure_data_dir_identity(cluster, nodes, dir, opts), do: DataDirGuard.check(cluster, nodes, dir, opts)
 
   defp log_data_dir do
     Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
@@ -394,6 +404,9 @@ defmodule Malachi.Application do
     # Resolving once matters now that this reads `ra`: the placement used to be a pure function of the
     # environment and was recomputed wherever it was needed, but two reads of a live store can disagree,
     # which would leave the broker routing by one ring and the coordinators by another.
+    # Whether this node ever started a control plane, read before `boot_topology/2` starts the ring store
+    # and so registers it (`Malachi.Storage.DataDirGuard`).
+    ring_known? = not is_nil(cluster) and DataDirGuard.ring_known?()
     topology = boot_topology(cluster, nodes)
     vnodes = boot_vnodes(topology)
 
@@ -408,6 +421,10 @@ defmodule Malachi.Application do
         end
 
         _ = warn_group_commit_needs_rf1(Application.get_env(:malachi, :group_commit, false), replication_factor())
+
+        # Before the broker starts the metadata members: a control plane formed now over segment
+        # directories it does not know would let the orphan sweep delete them (#273), sharded or not.
+        ensure_data_dir_identity(cluster, nodes, log_data_dir(), ring_known?: ring_known?, sharded?: not is_nil(vnodes))
 
         [
           ring_reconciler_child(nodes),

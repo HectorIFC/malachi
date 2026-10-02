@@ -135,6 +135,10 @@ config :malachi,
   # Malachi.Config.log_cluster/2.
   log_cluster: Malachi.Config.log_cluster(System.get_env("MALACHI_LOG_CLUSTER"), data_shards),
   log_nodes: log_nodes,
+  # A node configured alone whose control plane was never started under its node name refuses to boot
+  # over segment directories nothing knows (Malachi.Storage.DataDirGuard). true is the operator saying
+  # those directories are not wanted: the node starts and the orphan sweep removes them.
+  adopt_orphaned_log_dir: System.get_env("MALACHI_ADOPT_ORPHANED_LOG_DIR") == "true",
   # libcluster node discovery (parsed by Malachi.Cluster.Topology.build/1; connectivity-only). The
   # strategy-specific keys are read only for the selected strategy. :epmd reuses log_nodes.
   cluster_topology: %{
