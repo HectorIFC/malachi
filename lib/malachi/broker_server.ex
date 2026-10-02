@@ -106,7 +106,9 @@ defmodule Malachi.BrokerServer do
       `fence_and_seal/2`.
     * `:metadata_cluster` - a Raft cluster name (atom). When given, the metadata is made
       authoritative via that `ra` cluster (mutations go through the log; reads come from a local
-      cache); `ra` must already be running. When omitted, metadata is in-memory (single node).
+      cache); `ra` must already be running. When omitted, metadata is in memory and gone on a restart:
+      only the data-plane sharding measurement mode (`MALACHI_DATA_SHARDS` > 1) and direct callers
+      such as benchmarks run that way. A single node runs a one-member cluster.
     * `:metadata_nodes` - the nodes the metadata Raft cluster spans (default `[node()]`); several
       nodes make the control plane HA (the metadata survives losing a member).
     * `:replication_factor` - replicas per segment (default 1; clamped to the broker count).
@@ -411,14 +413,17 @@ defmodule Malachi.BrokerServer do
     {:ok, broker} = Broker.open(broker_opts)
 
     # Only a replicated control plane re-seeds this cache from a read, so only it can undo a local
-    # write by installing one; in-memory metadata IS the truth and never replaces itself.
+    # write by installing one; in-memory metadata never replaces itself.
     broker = if metadata_refresh, do: Broker.journal(broker), else: broker
 
     # With authoritative (ra-backed) metadata, the topics/ranges/segments survive a restart, but the
     # in-memory offsets and segment_seq maps do not: without recovery, every read of pre-restart data
     # clamps to :eof at offset 0 (durable data unreadable, the failure the chaos harness caught).
-    # Best-effort: an unreachable primary falls back to the metadata floor and self-corrects later
-    # through offset adoption. In-memory metadata (nil refresh) has nothing to recover from.
+    # An unreachable primary leaves its range unrecovered, refusing reads until a later pass or a
+    # produce learns the end (`Malachi.Broker.seed_unrecovered_range/3`). In-memory metadata (nil
+    # refresh) has nothing to recover from because it does not survive the restart at all, which is why
+    # only the data-plane sharding measurement mode still runs that way: a single node runs a
+    # one-member cluster (`Malachi.Config.log_cluster/2`).
     broker = if metadata_refresh, do: recover_range_state(broker), else: broker
 
     state = %{
@@ -1513,11 +1518,6 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  # Whether this broker holds a view of `topic`'s metadata that it is entitled to answer from. Without a
-  # metadata authority the local metadata IS the truth, so there is nothing to wait for. With one, the
-  # topic's vnode must have answered at least once: until then the cache holds an empty placeholder for
-  # it, which reads exactly like a topic that exists and is drained.
-  # What readiness reports: every vnode has been read at least once AND the last refresh reached them
   # What readiness reports: every vnode on the ring has been read at least once, so this node holds a
   # view of the whole keyspace and can answer for any topic routed to it. The same question the read
   # path asks per topic in `topic_metadata_ready?/2`, asked about the node, because a load balancer
@@ -1535,6 +1535,11 @@ defmodule Malachi.BrokerServer do
     state.broker.dsrsm |> DSRSM.vnode_ids() |> Enum.all?(&MapSet.member?(state.seen_vnodes, &1))
   end
 
+  # Whether this broker holds a view of `topic`'s metadata that it is entitled to answer from. Without a
+  # metadata authority (the in-memory measurement mode) the local metadata is the only copy there is, so
+  # there is nothing to wait for. With one, the topic's vnode must have answered at least once: until
+  # then the cache holds an empty placeholder for it, which reads exactly like a topic that exists and is
+  # drained.
   defp topic_metadata_ready?(%{metadata_refresh: nil}, _topic), do: true
 
   defp topic_metadata_ready?(state, topic) do

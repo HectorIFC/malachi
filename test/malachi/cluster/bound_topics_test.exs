@@ -15,11 +15,11 @@ defmodule Malachi.Cluster.BoundTopicsTest do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.RingMachine
-  alias Malachi.Cluster.RingServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
   alias Malachi.Policies
+  alias Malachi.Test.AppChildren
   alias Malachi.Test.SilentRaMember
   alias Malachi.Test.TmpDir
 
@@ -147,16 +147,21 @@ defmodule Malachi.Cluster.BoundTopicsTest do
   describe "Malachi.Application.bound_topics/1 over several data-plane shards" do
     # MALACHI_DATA_SHARDS runs one broker per shard, each with its own topics: the question has to reach
     # every one of them.
+    # Sharding is the in-memory measurement mode, so these run with no control plane cluster.
     setup do
-      previous = Application.fetch_env(:malachi, :data_shards)
-      Application.put_env(:malachi, :data_shards, 2)
+      for {key, value} <- [data_shards: 2, log_cluster: nil] do
+        previous = Application.fetch_env(:malachi, key)
+        Application.put_env(:malachi, key, value)
 
-      on_exit(fn ->
-        case previous do
-          {:ok, value} -> Application.put_env(:malachi, :data_shards, value)
-          :error -> Application.delete_env(:malachi, :data_shards)
-        end
-      end)
+        on_exit(fn ->
+          case previous do
+            {:ok, value} -> Application.put_env(:malachi, key, value)
+            :error -> Application.delete_env(:malachi, key)
+          end
+        end)
+      end
+
+      :ok
     end
 
     test "finds a binding held by the second shard's broker" do
@@ -189,7 +194,13 @@ defmodule Malachi.Cluster.BoundTopicsTest do
   end
 
   describe "Malachi.Application.bound_topics/1 with a control plane" do
+    # The application runs a ring store of its own (a single node is a one-member cluster). Each test
+    # needs the name to itself, from no store at all, so the store and the reconciler that keeps this node
+    # joined to it are taken down for the test and an empty store, the application's own state, is formed
+    # again after it.
     setup do
+      AppChildren.borrow_ring()
+
       previous = Application.fetch_env(:malachi, :log_cluster)
       Application.put_env(:malachi, :log_cluster, :"bt_cluster_#{System.unique_integer([:positive])}")
 
@@ -207,7 +218,7 @@ defmodule Malachi.Cluster.BoundTopicsTest do
       cluster = Application.fetch_env!(:malachi, :log_cluster)
       {:ok, server_id} = MetadataServer.start(cluster, [node()])
       on_exit(fn -> MetadataServer.delete(server_id) end)
-      start_ring!(nil)
+      AppChildren.start_ring!(nil)
       topic = bind!(server_id, "single_bound", "keep")
 
       assert App.bound_topics("keep") == {:ok, [topic]}
@@ -217,24 +228,18 @@ defmodule Malachi.Cluster.BoundTopicsTest do
       # The binding exists only on its vnode's log: a cache-backed answer would miss it.
       {state, topology, _a, b} = start_vnodes()
       topic = bind!(state.vnodes[b], topic_on(state.ring, b, "durable"), "keep")
-      start_ring!(topology)
+      AppChildren.start_ring!(topology)
 
       assert App.bound_topics("keep") == {:ok, [topic]}
     end
 
     test "a ring store that cannot be read refuses the answer, and so the delete" do
-      # This test node runs no ring store, which is what a store that lost quorum looks like to a reader.
+      # No ring store runs here (the setup took the application's down), which is what a store that lost
+      # quorum looks like to a reader.
       assert {:error, {:topology_unavailable, _reason}} = App.bound_topics("keep")
 
       assert {:error, {:bindings_unavailable, {:topology_unavailable, _}}} =
                Policies.delete("bt_#{System.unique_integer([:positive])}", "tester")
     end
-  end
-
-  defp start_ring!(topology) do
-    {:ok, server_id} = RaCluster.start(RingMachine, Malachi.LogRing, [node()])
-    on_exit(fn -> RaCluster.delete(Malachi.LogRing) end)
-    if topology, do: :ok = RingServer.init(server_id, topology)
-    server_id
   end
 end

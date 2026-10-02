@@ -14,6 +14,9 @@ cd "$ROOT" || exit 1
 export MALACHI_USER="${MALACHI_USER:-admin}" MALACHI_PASS="${MALACHI_PASS:-admin123}" MALACHI_PORT="${MALACHI_PORT:-4040}"
 export MALACHI_RATE_LIMIT_ENABLED=false MALACHI_CONNECTION_LIMIT_ENABLED=false
 export MALACHI_GROUP_COMMIT=true MALACHI_GROUP_COMMIT_INTERVAL_MS="${MALACHI_GROUP_COMMIT_INTERVAL_MS:-2}"
+# Broker group commit applies only with a configured replication factor of 1, and a single node runs a
+# one-member control plane cluster whose default factor is 3 (#273).
+export MALACHI_LOG_REPLICATION_FACTOR="${MALACHI_LOG_REPLICATION_FACTOR:-1}"
 TMP="${TMPDIR:-/tmp}"
 DUR="${DUR:-8}"
 # Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).

@@ -124,7 +124,8 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementTest do
   and the real ones would start this node's whole heal, retention and consumer-group stack per vnode
   against the suite's broker.
 
-  `async: false`: real `ra`, plus the production membership name.
+  `async: false`: real `ra`, plus the production membership name, which the application's own
+  membership server (a single node is a one-member cluster) gives up for the length of each test.
   """
   use ExUnit.Case, async: false
 
@@ -135,6 +136,11 @@ defmodule Malachi.Cluster.VnodeCoordinatorLivePlacementTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Cluster.VnodeCoordinatorManager, as: Manager
+  alias Malachi.Test.AppChildren
+
+  setup do
+    AppChildren.suspend(Malachi.LogMembership)
+  end
 
   @membership Malachi.LogMembership
 

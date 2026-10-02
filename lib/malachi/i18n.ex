@@ -298,6 +298,26 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
       "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"
     },
+    group_commit_needs_rf1: %{
+      "pt_BR" =>
+        "⚠️ MALACHI_GROUP_COMMIT=true não se aplica com MALACHI_LOG_REPLICATION_FACTOR=%{rf}: o group commit " <>
+          "do broker grava só o primário, então só vale com fator 1. Para um nó único defina " <>
+          "MALACHI_LOG_REPLICATION_FACTOR=1, ou use MALACHI_REPLICATION_GROUP_COMMIT=true, que agrupa o fsync " <>
+          "em todas as réplicas",
+      "en_US" =>
+        "⚠️ MALACHI_GROUP_COMMIT=true does not apply with MALACHI_LOG_REPLICATION_FACTOR=%{rf}: broker group " <>
+          "commit writes the primary alone, so it needs a factor of 1. On a single node set " <>
+          "MALACHI_LOG_REPLICATION_FACTOR=1, or use MALACHI_REPLICATION_GROUP_COMMIT=true, which batches the " <>
+          "fsync on every replica"
+    },
+    data_shards_in_memory: %{
+      "pt_BR" =>
+        "⚠️ MALACHI_DATA_SHARDS=%{shards} é o modo de medição: a metadata de cada shard fica só em memória " <>
+          "e nada escrito sobrevive a um restart; não há orphan sweep neste modo",
+      "en_US" =>
+        "⚠️ MALACHI_DATA_SHARDS=%{shards} is the measurement mode: each shard's metadata lives in memory only " <>
+          "and nothing written survives a restart; there is no orphan sweep in this mode"
+    },
     data_shards_ignored_clustered: %{
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"

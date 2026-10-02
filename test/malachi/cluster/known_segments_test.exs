@@ -17,6 +17,7 @@ defmodule Malachi.Cluster.KnownSegmentsTest do
   alias Malachi.Cluster.RingTopology
   alias Malachi.Log.Record
   alias Malachi.Storage.Layout
+  alias Malachi.Test.AppChildren
   alias Malachi.Test.SilentRaMember
   alias Malachi.Test.TmpDir
 
@@ -322,7 +323,8 @@ defmodule Malachi.Cluster.KnownSegmentsTest do
       # only on its owner and the only topology is the one in the ring store.
       {state, topology, a, _b} = start_vnodes()
       live = register_segment!(state.vnodes[a], topic_on(state.ring, a, "wired"))
-      start_ring!(Malachi.LogRing, topology)
+      AppChildren.borrow_ring()
+      AppChildren.start_ring!(topology)
 
       [%{start: {Malachi.Retention.OrphanSweeper, :start_link, [opts]}}] =
         App.orphan_sweeper_children(:ks_wired, [node()], [{a, 4, [node()]}])

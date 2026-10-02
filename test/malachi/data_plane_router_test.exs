@@ -109,6 +109,24 @@ defmodule Malachi.DataPlaneRouterTest do
     end
   end
 
+  describe "Malachi.Application.measurement_children/2" do
+    import ExUnit.CaptureLog
+
+    # The measurement mode's only authority is each shard's own memory, which a restart empties: a sweep
+    # trusting it deleted every segment written before the boot (#273). It must never be wired here.
+    test "one broker per shard, no orphan sweep, and a warning that nothing survives a restart" do
+      set_shards(3)
+
+      {children, log} =
+        with_log(fn -> Malachi.Application.measurement_children([node()], "/data") end)
+
+      ids = Enum.map(children, & &1.id)
+      assert Enum.all?(0..2, &(DataPlaneRouter.shard_name(&1) in ids))
+      refute Enum.any?(children, fn %{start: {module, _fun, _args}} -> module == Malachi.Retention.OrphanSweeper end)
+      assert log =~ "MALACHI_DATA_SHARDS=3"
+    end
+  end
+
   describe "shard independence" do
     # The spike rests on shards sharing nothing but disk and schedulers. Two independent in-memory brokers
     # (unique names, own dirs) must not leak state: the same topic name produced to each stays isolated.

@@ -81,6 +81,10 @@ log_nodes =
   |> String.split(",", trim: true)
   |> Enum.map(&String.to_atom(String.trim(&1)))
 
+# Data-plane shards, read once because it also decides whether there is a control plane cluster at all
+# (Malachi.Config.log_cluster/2): more than one shard is the in-memory measurement mode.
+data_shards = parse_int.("MALACHI_DATA_SHARDS", 1)
+
 # Node-discovery strategy for libcluster (connectivity-only). Absent => no clustering supervisor.
 cluster_strategy =
   case System.get_env("MALACHI_CLUSTER_STRATEGY") do
@@ -124,14 +128,12 @@ config :malachi,
   # permission still grants every topic, and ACLs only add access. Strict mode ignores the global
   # permissions and denies by default. A produce/consume needs an explicit ACL grant (or :admin).
   acl_strict: System.get_env("MALACHI_ACL_STRICT") == "true",
-  # NorthGuard log control plane. Absent MALACHI_LOG_CLUSTER => single-node in-memory metadata
-  # (the default). Set it (with the peer node names) for a replicated, HA control plane over `ra`.
-  # Node/cluster names come from a trusted operator (deploy config), so String.to_atom is fine here.
-  log_cluster:
-    (case System.get_env("MALACHI_LOG_CLUSTER") do
-       cluster when cluster in [nil, ""] -> nil
-       cluster -> String.to_atom(cluster)
-     end),
+  # NorthGuard log control plane, always in `ra`: absent MALACHI_LOG_CLUSTER, a single node runs it as a
+  # one-member cluster named malachi_log, so its metadata survives a restart (#273). Set it (with the
+  # peer node names) for a replicated, HA control plane. Only the data-plane sharding measurement mode
+  # (MALACHI_DATA_SHARDS > 1 without MALACHI_LOG_CLUSTER) keeps its metadata in memory. See
+  # Malachi.Config.log_cluster/2.
+  log_cluster: Malachi.Config.log_cluster(System.get_env("MALACHI_LOG_CLUSTER"), data_shards),
   log_nodes: log_nodes,
   # libcluster node discovery (parsed by Malachi.Cluster.Topology.build/1; connectivity-only). The
   # strategy-specific keys are read only for the selected strategy. :epmd reuses log_nodes.
@@ -151,7 +153,11 @@ config :malachi,
   # Group commit (NorthGuard fps-store style): when true, a produce buffers its batch and its client
   # reply is deferred until the next flush, so concurrent producers coalesce into one fsync. Trades a
   # little per-produce latency (~the flush interval) for much higher small-batch throughput. Off by
-  # default; only active on a single-node (rf=1) broker, which is where it applies today.
+  # default; only active with a configured replication factor of 1 (MALACHI_LOG_REPLICATION_FACTOR=1),
+  # since it writes a segment's primary alone. A single node runs a one-member cluster whose default
+  # factor is 3, so it needs that too; the node warns at boot otherwise. The data-shards measurement mode
+  # (MALACHI_DATA_SHARDS > 1, no MALACHI_LOG_CLUSTER) always runs one replica per shard, so there it is
+  # active whatever MALACHI_LOG_REPLICATION_FACTOR says, with no warning.
   group_commit: System.get_env("MALACHI_GROUP_COMMIT") == "true",
   # Group commit on the REPLICATED path (rf > 1): fsync coalescing on primary and followers with the
   # ack still waiting for a durable quorum (NorthGuard: fsync on all replicas every 10ms/20k/10MB).
@@ -199,10 +205,11 @@ config :malachi,
   # above that the trade reverses. See Malachi.Application.segment_prealloc_bytes/0 and the measured
   # curve in Malachi.Storage.Preallocation.
   segment_prealloc_bytes: parse_int.("MALACHI_SEGMENT_PREALLOC_BYTES", 64 * 1024 * 1024),
-  # Data-plane shards (single-node measurement mode): 1 (default) => a single BrokerServer, unchanged. N > 1
-  # runs N independent in-memory broker shards, produce routed by hash(topic), to measure how far parallel
-  # brokers lift the networked throughput ceiling. Ignored (forced 1) when the control plane is clustered.
-  data_shards: parse_int.("MALACHI_DATA_SHARDS", 1),
+  # Data-plane shards (measurement mode): 1 (default) => a single BrokerServer over the control plane. N > 1
+  # without MALACHI_LOG_CLUSTER runs N independent in-memory broker shards, produce routed by hash(topic),
+  # to measure how far parallel brokers lift the networked throughput ceiling; nothing they hold survives
+  # a restart. Ignored (forced 1, Malachi.DataPlaneRouter.shard_count/0) when a cluster is configured.
+  data_shards: data_shards,
   # Eager-flush threshold (records): flush as soon as this many produce records are parked, so each fsync
   # and each reply stays bounded and a produce never waits long enough to time out, even on a slow disk.
   group_commit_flush_max_records: parse_int.("MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS", 8_000),

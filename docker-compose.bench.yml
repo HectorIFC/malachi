@@ -21,6 +21,9 @@ services:
       MALACHI_TCP_PORT: "4040"
       MALACHI_DASHBOARD_PORT: "4041"
       MALACHI_GROUP_COMMIT: "true"
+      # A single node runs a one-member control plane cluster, whose default replication factor (3) turns
+      # broker group commit off; 1 keeps this harness's regime (#273).
+      MALACHI_LOG_REPLICATION_FACTOR: "1"
       MALACHI_GROUP_COMMIT_INTERVAL_MS: "2"
       # Data-plane shards (single-node measurement mode): 1 = one broker, N = N independent broker shards
       # with produce routed by hash(topic). Swept by benchmark/docker-shards.sh to measure the ceiling lift.

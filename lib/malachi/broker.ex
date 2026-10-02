@@ -977,7 +977,7 @@ defmodule Malachi.Broker do
   Turns the command journal on, so `take_journal/1` can report what this broker applied locally.
 
   Only a broker that re-seeds its cache from somewhere else needs it: with in-memory metadata the local
-  cache IS the truth and nothing ever replaces it, so journaling would only grow a list nobody reads.
+  cache is the only copy and nothing ever replaces it, so journaling would only grow a list nobody reads.
   """
   @spec journal(t()) :: t()
   def journal(%__MODULE__{} = broker), do: %{broker | journal: broker.journal || []}
