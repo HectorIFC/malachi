@@ -400,8 +400,9 @@ defmodule Malachi.Application do
       if cluster do
         # `ra` is already started in `start/2` (the user store needs it unconditionally).
         # Order matters (one_for_one starts in order): membership feeds live_brokers; replication must
-        # precede the broker that references it. Data-plane sharding is single-node only; warn and ignore.
-        if DataPlaneRouter.shard_count() > 1 do
+        # precede the broker that references it. Data-plane sharding needs the in-memory measurement
+        # mode; warn and ignore (DataPlaneRouter.shard_count/0 answers 1 here).
+        if Application.get_env(:malachi, :data_shards, 1) > 1 do
           Logger.warning(I18n.t(:data_shards_ignored_clustered))
         end
 

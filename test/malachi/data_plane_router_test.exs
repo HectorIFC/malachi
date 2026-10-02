@@ -1,5 +1,5 @@
 defmodule Malachi.DataPlaneRouterTest do
-  # async: false because the routing tests toggle the shared :data_shards app env.
+  # async: false because the routing tests toggle the shared :data_shards and :log_cluster app env.
   use ExUnit.Case, async: false
 
   import Malachi.Test.TeardownHelper
@@ -9,16 +9,21 @@ defmodule Malachi.DataPlaneRouterTest do
   alias Malachi.Log.Record
   alias Malachi.Test.TmpDir
 
+  # Sharding is the measurement mode, which has no control plane cluster: every test starts there, and
+  # the one that asks about a cluster sets one.
   setup do
-    original = Application.get_env(:malachi, :data_shards)
+    for key <- [:data_shards, :log_cluster] do
+      original = Application.fetch_env(:malachi, key)
 
-    on_exit(fn ->
-      case original do
-        nil -> Application.delete_env(:malachi, :data_shards)
-        value -> Application.put_env(:malachi, :data_shards, value)
-      end
-    end)
+      on_exit(fn ->
+        case original do
+          :error -> Application.delete_env(:malachi, key)
+          {:ok, value} -> Application.put_env(:malachi, key, value)
+        end
+      end)
+    end
 
+    Application.delete_env(:malachi, :log_cluster)
     :ok
   end
 
@@ -50,6 +55,19 @@ defmodule Malachi.DataPlaneRouterTest do
       assert DataPlaneRouter.shard_count() == 1
       set_shards(-3)
       assert DataPlaneRouter.shard_count() == 1
+    end
+  end
+
+  describe "with a control plane cluster" do
+    test "one shard whatever was configured, so no topic routes to a broker that never started" do
+      set_shards(4)
+      Application.put_env(:malachi, :log_cluster, :malachi_log)
+
+      assert DataPlaneRouter.shard_count() == 1
+
+      for i <- 1..50 do
+        assert DataPlaneRouter.shard_for("topic_#{i}") == Malachi.LogBroker
+      end
     end
   end
 
