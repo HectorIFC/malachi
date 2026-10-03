@@ -1,0 +1,19 @@
+{
+  "version": "1.4.8",
+  "checksum": "cbd5a851571e5dfeb32aaf2e840bfa98b7864cb3071bf2ef5d95d1276b12e072",
+  "retirement": null,
+  "meta": {
+    "elixir": ">= 1.6.0",
+    "app": "dialyxir",
+    "build_tools": [
+      "mix"
+    ]
+  },
+  "requirements": {
+    "erlex": {
+      "app": "erlex",
+      "optional": false,
+      "requirement": ">= 0.2.8"
+    }
+  }
+}

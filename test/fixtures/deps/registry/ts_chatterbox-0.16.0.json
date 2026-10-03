@@ -1,0 +1,19 @@
+{
+  "version": "0.16.0",
+  "checksum": "34c145c702f3a8d22f49a189eb34579ef3db68f9a98a82d19b5cf6e390aad54f",
+  "retirement": null,
+  "meta": {
+    "elixir": null,
+    "app": "chatterbox",
+    "build_tools": [
+      "rebar3"
+    ]
+  },
+  "requirements": {
+    "hpack_erl": {
+      "app": "hpack",
+      "optional": false,
+      "requirement": "~>0.3.0"
+    }
+  }
+}
