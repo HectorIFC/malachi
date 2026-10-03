@@ -282,24 +282,37 @@ decision.
 package that means evaluating the package's `rebar.config.script`, which is Erlang code from the
 tarball (`chatterbox`, `gproc`, `tls_certificate_check` and `yamerl` ship one today). Hex's checksum
 check proves only that the tarball is the one published, not that it is safe to run. So the resolution
-runs in a disposable Linux container that sees a copy of the tree and nothing else (no home directory,
-no credentials, no Docker socket), and only the `mix.lock` it writes comes back:
+runs in a disposable Linux container that mounts a copy of the tree and nothing else of this machine's
+files (no home directory, no credentials, no Docker socket), and only the `mix.lock` it writes comes
+back. Its image, `malachi-box`, is the Elixir image of the Dockerfile with `build-base` added, since
+`argon2_elixir` compiles a NIF; it is built once and serves every container of this skill:
 
 ```
+printf 'FROM elixir:1.19-otp-28-alpine\nRUN apk add --no-cache build-base\n' | docker build -q -t malachi-box -
 R="$S/resolve"; rm -rf "$R"; mkdir -p "$R"
 /usr/bin/git archive HEAD | tar -x -C "$R"
 cp mix.exs "$R/mix.exs"                          # with the decided constraint change, if any
-docker run --rm -v "$R":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix elixir:1.19-otp-28-alpine \
+docker run --rm -v "$R":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix malachi-box \
   sh -c 'mix local.hex --force > /dev/null && mix deps.update <packages>'
 cp "$R/mix.lock" mix.lock
 ```
 
+This container needs the network to reach hex.pm, and a container with a network can also reach the
+services this Mac listens on at its loopback: Colima forwards `host.docker.internal` (192.168.5.2) to
+them. The local gates that run in the box (credo and the dev compile, step 6) run with no network at
+all. Three things cannot: this resolution and the fetch in step 6, which need hex.pm, and the gates
+that build and run the image (the image gate and the drills), whose build fetches from hex.pm and whose
+nodes talk to each other. Those gates come from CI wherever a workflow runs them (`ci.yml` builds and
+boots the image, `results.yml`, `storage-chaos.yml` and `upgrade-chaos.yml` run the node, storage and
+upgrade drills), where the runner holds nothing of this machine. Only what no workflow runs is run
+here (the config and reshard drills, `make docker-build docker-validate`), and the report must
+declare that exposure next to its result.
+
 The package names reach that command only after the character check in step 0. `$S` lives under
 `/Users`, the only path Docker on this machine shares. Then the floor and the plan, on the lock that came
-back, and only when the floor passes does the worktree fetch and build it, with
-`mix deps.get --check-locked` and then the gates. `--check-locked` makes the fetch fail rather than
-change the lock: the worktree only ever fetches the closure the floor checked, never one Mix resolved
-on its own afterwards:
+back. Only when the floor passes is the lock fetched and built, and never on the host: in the box of
+step 6, with `mix deps.get --check-locked`, which fails rather than change the lock, so only the
+closure the floor checked is ever fetched:
 
 ```
 elixir scripts/deps_check.exs floor-hex "$S/base.lock" mix.lock "$S/registry" 1.19.0
@@ -342,13 +355,42 @@ comm -23 "$S/al-group" "$S/al-main"    # empty means no new finding
 ## 6. Local gates, cheapest first
 
 Run the gates the plan printed, in its order, and stop at the first failure. The gates a workflow run
-cannot prove (listed below) run here, on the worktree, before anything is committed; the rest are read
-from CI in step 8, once the group branch is pushed. Before running them, take the tree they run on, the
-worktree as it is now with the updated lock, through a private index so the real one is not touched:
+cannot prove (listed below) run here, before anything is committed; the rest are read from CI in step
+8, once the group branch is pushed. Before running them, take the tree they run on, the worktree as it
+is now with the updated lock, through a private index so the real one is not touched:
 
 ```
 tree=$(GIT_INDEX_FILE="$S/tree.idx" sh -c '/usr/bin/git read-tree HEAD && /usr/bin/git add -A && /usr/bin/git write-tree')
 ```
+
+**No `mix` runs on the host once the lock has changed.** The floor proves each package is the one
+hex.pm published, not that its code is harmless, and fetching or compiling a dependency runs its code.
+So the fetch and every local gate that loads dependencies run in a disposable container, the box: it
+mounts a copy of the worktree's files and nothing else (no home directory, no credentials, no Docker
+socket), and only the fetch gets a network. The gates that need Docker build what they run inside their own containers (the image
+gate and the drills), and the rest come from CI runners, which hold none of the contributor's
+credentials. A failed attempt is thrown away with its box: a package taken out means a new box.
+
+```
+root=$(/usr/bin/git rev-parse --show-toplevel)
+B="$S/box"; rm -rf "$B"; mkdir -p "$B"
+(cd "$root" && /usr/bin/git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf -) | tar -x -C "$B"
+in_box_net() {    # the fetch, and only the fetch: it has to reach hex.pm
+  docker run --rm -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix -e MIX_ENV=test malachi-box sh -c "$1"
+}
+in_box() {
+  docker run --rm --network none -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix -e MIX_ENV=test \
+    malachi-box sh -c "$1"
+}
+in_box_net 'mix local.hex --force > /dev/null && mix local.rebar --force > /dev/null && mix deps.get --check-locked' > "$S/results/deps-get.log" 2>&1
+in_box 'mix credo --strict' > "$S/results/credo.log" 2>&1
+in_box 'MIX_ENV=dev mix compile --warnings-as-errors' > "$S/results/compile-dev.log" 2>&1
+```
+
+The fetch installs Hex and rebar into the box's own `MIX_HOME`, so the gates after it, which have no
+network, never need to download anything. Only the gate strings the plan printed go into `in_box`,
+never text from a pull request or a registry.
+Each log is the evidence of its gate, with `host` set to `linux`: the box is a Linux container.
 
 Record each gate in `$S/results.json`:
 
@@ -376,8 +418,8 @@ fail), `MIX_ENV=dev mix compile --warnings-as-errors` (no workflow runs it), `ma
 the config and reshard drills, and `actionlint`. The image gate names both make targets on purpose:
 `scripts/validate-docker-build.sh` on its own runs whatever image already carries the version tag,
 which a dependency update does not change, so it would validate the image from before the update.
-`make docker-build` builds that tag from the worktree first (and retags `latest` on this machine). Run those in a Linux container or in the Docker drills,
-with the output saved under `$S/results/`.
+`make docker-build` builds that tag from the worktree first (and retags `latest` on this machine). The
+mix ones run in the box, the others in their own containers, with the output saved under `$S/results/`.
 
 **Drills** run one at a time across every worktree on this machine. Before each one, `docker ps
 --filter name=malachi-cluster-` must list nothing (`scripts/chaos_lib.sh` refuses a second cluster
@@ -411,7 +453,9 @@ Through `prepare-commits`: one commit per group, `chore(deps): ...` for Hex and 
 Actions, the body naming every pull request it supersedes (`Supersedes #63, #157.`) and the decisions
 taken. This skill never runs `git commit` or `git push`, and pushing is the contributor's. The pull
 request comes from `open-issue-pr` once they have pushed. The group is not verified yet: its CI gates
-have not all run on it until that pull request exists.
+have not all run on it until that pull request exists. The checks `prepare-commits` runs before handing
+over follow the same rule for a dependency group: `mix format --check-formatted` and `mix credo --strict`
+run in the box, and `mix test` is the pull request's CI, never a run on the host.
 
 ## 8. CI evidence and the verdict, after the pull request is open
 

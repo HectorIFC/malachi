@@ -121,6 +121,85 @@ defmodule DependencyUpdatesSkillTest do
     assert skill =~ ~S<tree=$(/usr/bin/git rev-parse "origin/$branch^{tree}")>
   end
 
+  test "no mix command of the skill runs on the host: fetch and local gates run in the box" do
+    # The floor proves a package is what hex.pm published, not that its code is benign: once the
+    # lock passes, fetching and compiling run that code, so they run in a disposable container with
+    # no home, no credentials and no Docker socket, never in the worktree on the host.
+    skill = File.read!(@skill)
+
+    host_mix =
+      for block <- Regex.scan(~r/^```[a-z]*\n(.*?)^```$/ms, skill, capture: :all_but_first),
+          line <- block |> hd() |> String.split("\n"),
+          not (line =~ ~r/in_box(_net)?\b|sh -c/),
+          line =~ ~r/(^|&&|\|\||;|\||\$\()\s*(MIX_ENV=\S+\s+)?mix\s/,
+          do: line
+
+    assert host_mix == []
+
+    # The prose counts as much as the commands: every paragraph that tells to fetch says where, and it
+    # is the box.
+    prose = Regex.replace(~r/^```[a-z]*\n.*?^```$/ms, skill, "")
+
+    for paragraph <- String.split(prose, ~r/\n\s*\n/), paragraph =~ "mix deps.get" do
+      assert paragraph =~ "box", paragraph
+    end
+
+    assert skill =~
+             ~S[in_box_net 'mix local.hex --force > /dev/null && mix local.rebar --force > /dev/null && mix deps.get --check-locked']
+
+    # Only the fetch has a network; every gate runs without one, so dependency code cannot reach this
+    # machine's loopback services (Colima forwards host.docker.internal to them).
+    assert skill =~ ~S[in_box() {
+  docker run --rm --network none]
+
+    net_calls = Regex.scan(~r/^in_box_net '/m, skill)
+    assert length(net_calls) == 1, "only the fetch may run with a network"
+
+    # The image gate and the drills build and run dependency code with a network: the skill says so
+    # instead of promising every gate runs without one.
+    refute skill =~ "every gate runs with no network at all"
+    assert skill =~ "declare that exposure"
+
+    # The step 7 rule that keeps prepare-commits' checks off the host.
+    assert skill =~
+             "`mix format --check-formatted` and `mix credo --strict`\nrun in the box, and `mix test` is the pull request's CI"
+  end
+
+  test "every container the skill starts sees the copy it works on and nothing else of this machine" do
+    # Each docker run is read whole, continuation lines included, and its only bind mount must be the
+    # copy: no home directory, no credentials directory, no Docker socket.
+    commands =
+      File.read!(@skill)
+      |> String.replace("\\\n", " ")
+      |> String.split("\n")
+      |> Enum.filter(&(&1 =~ "docker run"))
+      |> Enum.reject(&(&1 =~ ~r/^\s*\S+.*`docker run/))
+
+    assert length(commands) >= 3
+
+    for command <- commands do
+      mounts = Regex.scan(~r/(?:-v|--volume|--mount)[\s=]+(\S+)/, command, capture: :all_but_first) |> List.flatten()
+
+      assert mounts in [[~s("$B":/w)], [~s("$R":/w)]], command
+      refute command =~ "docker.sock", command
+    end
+  end
+
+  test "prepare-commits keeps a changed lock off the host too" do
+    # A session that loads only prepare-commits (a later /commits) must not run mix test on the host
+    # against a lock the dependency-updates floor checked but the host never fetched.
+    prepare = File.read!(Path.join(@root, ".claude/skills/prepare-commits/SKILL.md"))
+
+    assert prepare =~ "dependency-updates"
+    assert prepare =~ ~S[/usr/bin/git diff --quiet "$(/usr/bin/git merge-base origin/main HEAD)" -- mix.lock]
+
+    # A later session has no box of its own: it builds a new one from the tree as it is now, fetches
+    # with the network, and runs the checks without it.
+    assert prepare =~ "a new box"
+    assert prepare =~ "in_box_net"
+    refute prepare =~ "in its box"
+  end
+
   test "the worktree fetches only the lock the floor checked" do
     # A plain mix deps.get resolves whatever the lock does not satisfy, outside the container and past
     # the floor; with --check-locked it fails instead.
