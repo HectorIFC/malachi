@@ -468,13 +468,30 @@ defmodule DepsCheck do
   defp missing_requirements(lock) do
     reasons =
       for {name, {:hex, _, _, _, _, deps, _, _}} <- lock,
-          {dep, _requirement, opts} <- deps,
+          {dep, requirement, opts} <- deps,
           not optional?(opts),
-          not Map.has_key?(lock, dep),
-          do: {name, "requires #{dep}, which the lock does not hold"}
+          reason = unmet(dep, requirement, Map.get(lock, dep)),
+          do: {name, reason}
 
     Enum.sort(reasons)
   end
+
+  # Whether the entry the lock holds for a requirement satisfies it. A lock that holds the package at a
+  # version its parent does not accept is not a lock Mix would keep: mix deps.get would resolve another
+  # version, past every check here, so it is as much a STOP as a package that is missing.
+  defp unmet(dep, _requirement, nil), do: "requires #{dep}, which the lock does not hold"
+
+  defp unmet(dep, requirement, {:hex, _, version, _, _, _, _, _}) do
+    with {:ok, parsed} <- Version.parse_requirement(requirement || ""),
+         {:ok, locked} <- Version.parse(version) do
+      if Version.match?(locked, parsed), do: nil, else: "requires #{dep} #{requirement}, and the lock holds #{version}"
+    else
+      :error -> "requires #{dep} with an invalid requirement: #{requirement}"
+    end
+  end
+
+  # A git or path entry is already refused by the floor when it changes; its version is not Hex's.
+  defp unmet(_dep, _requirement, {:other, _term}), do: nil
 
   defp optional?(opts), do: option(opts, "optional") == true
 

@@ -177,10 +177,11 @@ when hex.pm confirms its app), comes from a repository other than hexpm, has an 
 version, changed build tools (a new `make` or `rebar3` step is new code that runs at build time), is
 retired, needs a newer Elixir, or was not in the lock before. It also stops a lock that is not whole:
 an entry whose requirements differ from the ones hex.pm publishes for that version, one that requires
-a package the lock does not hold, or a root of the base lock (an entry nothing in it requires, which
-only `mix.exs` brings in) missing from the new one. The last two are how a package that ran while being
-resolved would hide itself or another one, an empty lock included, and `mix deps.get` would then
-resolve and load what is missing past every other check. A STOP takes that package out of its group
+a package the lock does not hold or holds at a version the requirement does not accept, or a root of
+the base lock (an entry nothing in it requires, which only `mix.exs` brings in) missing from the new
+one. Those are how a package that ran while being resolved would hide itself or another one, an empty
+lock included, and a fetch that may change the lock would then resolve and load what the lock does
+not settle, past every other check. A STOP takes that package out of its group
 and goes in the report with the script's reason, word for word.
 
 Actions are checked in step 5, on the lines the group writes. Triage notes, for each action, the
@@ -295,8 +296,10 @@ cp "$R/mix.lock" mix.lock
 
 The package names reach that command only after the character check in step 0. `$S` lives under
 `/Users`, the only path Docker on this machine shares. Then the floor and the plan, on the lock that came
-back, and only when the floor passes does the worktree fetch and build it (`mix deps.get`, then the
-gates):
+back, and only when the floor passes does the worktree fetch and build it, with
+`mix deps.get --check-locked` and then the gates. `--check-locked` makes the fetch fail rather than
+change the lock: the worktree only ever fetches the closure the floor checked, never one Mix resolved
+on its own afterwards:
 
 ```
 elixir scripts/deps_check.exs floor-hex "$S/base.lock" mix.lock "$S/registry" 1.19.0

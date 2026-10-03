@@ -121,6 +121,15 @@ defmodule DependencyUpdatesSkillTest do
     assert skill =~ ~S<tree=$(/usr/bin/git rev-parse "origin/$branch^{tree}")>
   end
 
+  test "the worktree fetches only the lock the floor checked" do
+    # A plain mix deps.get resolves whatever the lock does not satisfy, outside the container and past
+    # the floor; with --check-locked it fails instead.
+    skill = File.read!(@skill)
+
+    assert skill =~ "`mix deps.get --check-locked`"
+    refute skill =~ ~r/mix deps\.get(?! --check-locked)/
+  end
+
   test "the skill runs mix deps.update only inside the disposable container" do
     # Mix evaluates a rebar3 package's rebar.config.script while it fetches, so a command that runs
     # mix deps.update anywhere but the container runs the package's code before the floor sees it.

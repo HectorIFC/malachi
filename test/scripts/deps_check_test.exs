@@ -476,6 +476,27 @@ defmodule DepsCheckTest do
              ]
     end
 
+    test "stops a lock whose locked version does not satisfy the requirement on it" do
+      # mix deps.get would resolve such a lock to another version, past every check here.
+      lock = lock!(lock_source([entry("parent", "1.0.0", ["child"]), entry("child", "2.0.0")]))
+
+      assert DepsCheck.floor_hex(lock, lock, %{}, "1.19.0") == [
+               {"parent", "requires child ~> 1.0, and the lock holds 2.0.0"}
+             ]
+    end
+
+    test "stops a requirement in the lock that is not a version requirement" do
+      broken =
+        ~s(  "parent": {:hex, :parent, "1.0.0", "inner", [:mix], ) <>
+          ~s([{:child, "not a requirement", [hex: :child, repo: "hexpm", optional: false]}], "hexpm", "outer"},)
+
+      lock = lock!(lock_source([broken, entry("child", "1.0.0")]))
+
+      assert DepsCheck.floor_hex(lock, lock, %{}, "1.19.0") == [
+               {"parent", "requires child with an invalid requirement: not a requirement"}
+             ]
+    end
+
     test "counts a package required only optionally as a root, so it cannot leave unchecked" do
       # Mix locks an optional requirement only when something else (mix.exs, here) brings it in, and
       # the closure check skips optional requirements: the root check is all that holds it.
