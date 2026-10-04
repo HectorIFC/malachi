@@ -391,11 +391,22 @@ left behind: a `grep -rnE` over `.github/workflows` for each old ref of the grou
 nothing. Lines the group does not touch keep their tags; pinning those is a separate issue.
 
 The `actionlint` gate is **no new finding**, not a clean run: main already carries shellcheck findings
-of its own. Compare the two runs and record the gate as passed only when the group adds none:
+of its own. Compare the two runs and record the gate as passed only when the group adds none. Both run
+in the same pinned Linux image, with no network and nothing mounted but a copy of the workflows, so the
+two runs use one actionlint and one shellcheck, and the log is a Linux run like every other gate's (the
+verdict refuses a run on this Mac). The workflows are passed by name: with no `.git` in the copy,
+actionlint finds no project on its own.
 
 ```
-actionlint -no-color -format '{{json .}}' .github/workflows/*.yml > "$S/actionlint-group.json"
-# the same in a checkout of origin/main, into "$S/actionlint-main.json"
+A="$S/actionlint"; rm -rf "$A"; mkdir -p "$A/group/.github" "$A/main"
+cp -R .github/workflows "$A/group/.github/"
+/usr/bin/git archive origin/main .github/workflows | tar -x -C "$A/main"
+for side in group main; do
+  W="$A/$side"
+  docker run --rm --network none -v "$W":/w -w /w --entrypoint sh \
+    rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+    -c "actionlint -no-color -format '{{json .}}' .github/workflows/*.yml" > "$S/actionlint-$side.json"
+done
 jq -r '.[] | "\(.kind) \(.filepath) \(.message)"' "$S/actionlint-group.json" | sort > "$S/al-group"
 jq -r '.[] | "\(.kind) \(.filepath) \(.message)"' "$S/actionlint-main.json" | sort > "$S/al-main"
 comm -23 "$S/al-group" "$S/al-main"    # empty means no new finding

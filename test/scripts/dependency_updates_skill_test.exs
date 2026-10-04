@@ -218,10 +218,36 @@ defmodule DependencyUpdatesSkillTest do
       assert flags == length(mounts), command
       refute command =~ "--volumes-from", command
 
-      allowed = if command =~ "wget -T 3", do: [[]], else: [[~s("$B":/w)], [~s("$R":/w)]]
+      # The box gets the worktree copy, the resolver the HEAD copy, actionlint a copy of the workflows.
+      copies = [[~s("$B":/w)], [~s("$R":/w)], [~s("$W":/w)]]
+      allowed = if command =~ "wget -T 3", do: [[]], else: copies
       assert mounts in allowed, command
       refute command =~ "docker.sock", command
     end
+  end
+
+  test "actionlint runs only in a pinned Linux container with no network, on copies of the workflows" do
+    skill = File.read!(@skill)
+    blocks = Regex.scan(~r/^```[a-z]*\n(.*?)^```$/ms, skill, capture: :all_but_first) |> Enum.map(&hd/1)
+
+    # A run on this Mac would carry host darwin, which the verdict refuses, so the gate could never
+    # pass without a false host: no fenced line starts actionlint on the host.
+    refute Enum.any?(blocks, &(&1 =~ ~r/^\s*actionlint\b/m))
+
+    [run] =
+      skill
+      |> String.replace("\\\n", " ")
+      |> String.split("\n")
+      |> Enum.filter(&(&1 =~ "docker run" and &1 =~ "actionlint"))
+
+    assert run =~ "--network none"
+    assert run =~ ~r/rhysd\/actionlint@sha256:[0-9a-f]{64}/, "the image is pinned by digest"
+    assert run =~ ~S[-c "actionlint -no-color -format '{{json .}}' .github/workflows/*.yml"]
+
+    # The group and main run in the same image, from copies, so a finding main already had is not new.
+    assert skill =~ ~S[cp -R .github/workflows "$A/group/.github/"]
+    assert skill =~ ~S[/usr/bin/git archive origin/main .github/workflows | tar -x -C "$A/main"]
+    assert skill =~ ~S[comm -23 "$S/al-group" "$S/al-main"]
   end
 
   test "the box helpers live in one block, and every call of them stops the run on a failure" do
