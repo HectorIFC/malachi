@@ -389,11 +389,27 @@ defmodule DependencyUpdatesSkillTest do
       if command do
         steps = workflow_steps(Path.join(@root, ".github/workflows/#{workflow}"))
 
-        assert Enum.any?(steps, fn step ->
-                 String.contains?(step["run"] || "", command) and step["continue-on-error"] != true
-               end),
+        assert Enum.any?(steps, &(String.contains?(&1.run, command) and blocking?(&1))),
                "#{workflow} has no blocking step running #{inspect(command)} for #{gate}"
       end
+    end
+  end
+
+  # A step blocks when neither it nor its job may fail, and when, for at least one entry of the job's
+  # matrix, both the job's and the step's `if` let it run. A run whose gate step was skipped still ends
+  # green, and the verdict would take it as proof of a gate that never ran.
+  defp blocking?(step) do
+    step.continue_on_error == [] and
+      Enum.any?(step.matrix, fn entry -> Enum.all?(step.conditions, &runs?(&1, entry)) end)
+  end
+
+  # Only the forms the workflows use are read; any other condition on a mapped step fails the test
+  # rather than being guessed at.
+  defp runs?(condition, entry) do
+    case Regex.run(~r/^(?:\$\{\{\s*)?(!?)\s*matrix\.([a-z_-]+)\s*(?:\}\})?$/, String.trim(to_string(condition))) do
+      [_, "", key] -> entry[key] == true
+      [_, "!", key] -> entry[key] != true
+      nil -> flunk("a gate step runs under a condition this test cannot read: #{condition}")
     end
   end
 
@@ -402,9 +418,36 @@ defmodule DependencyUpdatesSkillTest do
     {"jobs", jobs} = List.keyfind(document, "jobs", 0)
 
     for {_job, settings} <- jobs,
-        {"steps", steps} <- [List.keyfind(settings, "steps", 0)],
-        step <- steps,
-        do: Map.new(step)
+        job = Map.new(settings),
+        step <- Map.get(job, "steps", []),
+        step = Map.new(step) do
+      %{
+        run: step["run"] || "",
+        conditions: Enum.reject([job["if"], step["if"]], &is_nil/1),
+        continue_on_error:
+          Enum.filter([job["continue-on-error"], step["continue-on-error"]], &(&1 not in [nil, false])),
+        matrix: matrix_entries(job["strategy"])
+      }
+    end
+  end
+
+  # The entries a job runs for: every combination of its axes, plus its `include` entries, or one empty
+  # entry when it has no matrix. An `exclude` is not read, so a matrix with one fails the test instead
+  # of counting an entry that never runs.
+  defp matrix_entries(nil), do: [%{}]
+
+  defp matrix_entries(strategy) do
+    matrix = Map.new(Map.new(strategy)["matrix"] || [])
+    refute Map.has_key?(matrix, "exclude"), "a matrix exclude is not read"
+    {include, axes} = Map.pop(matrix, "include", [])
+
+    combinations =
+      Enum.reduce(axes, [%{}], fn {key, values}, acc ->
+        for entry <- acc, value <- values, do: Map.put(entry, key, value)
+      end)
+
+    combinations = if axes == %{} and include != [], do: [], else: combinations
+    combinations ++ Enum.map(include, &Map.new/1)
   end
 
   test "every dependency mix.exs declares has a tier in the gate table" do
