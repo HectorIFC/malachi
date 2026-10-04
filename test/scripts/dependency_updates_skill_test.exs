@@ -177,12 +177,72 @@ defmodule DependencyUpdatesSkillTest do
 
     assert length(commands) >= 3
 
+    # A container either has no network at all, or the box network, whose traffic to the Mac
+    # (192.168.5.2, where Colima forwards host.docker.internal) the VM's firewall drops: never the
+    # default network, which reaches every service this Mac listens on at its loopback.
+    for command <- commands do
+      assert command =~ "--network none" or command =~ "--network malachi-box-net", command
+    end
+
+    skill = File.read!(@skill)
+    assert skill =~ ~S[docker network create --subnet 172.31.250.0/24 malachi-box-net]
+    # The firewall is an allowlist: every private destination and the VM itself are dropped from the
+    # box subnet, so neither the Mac (its loopback forward or its LAN address) nor a port published in
+    # the VM answers, and only the internet, hex.pm among it, does.
+    for destination <- ~w(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10) do
+      assert skill =~ "colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d #{destination} -j DROP"
+    end
+
+    assert skill =~ ~S[colima ssh -- sudo iptables -I INPUT -s 172.31.250.0/24 -j DROP]
+
+    # The probe is a guard that fails, not a message: it covers the Mac's forward, the network's gateway
+    # and the Mac's LAN address, and every container with a network runs only after it passed.
+    assert skill =~ ~S[for ip in 192.168.5.2 "$gw" $lan; do]
+    assert skill =~ ~S[| grep -q 'timed out' || { echo "stop: the box network reaches $ip"; return 1; }]
+
+    for block <- Regex.scan(~r/^```[a-z]*\n(.*?)^```$/ms, skill, capture: :all_but_first) |> Enum.map(&hd/1),
+        [line] <- Regex.scan(~r/^.*--network malachi-box-net.*$/m, block),
+        not (line =~ "wget -T 3") do
+      [before | _] = String.split(block, line, parts: 2)
+      guarded_here = before =~ "box_net_ok || exit 1"
+      guarded_in_function = before =~ ~r/in_box_net\(\) \{[^}]*box_net_ok \|\| return 1[^}]*$/s
+      assert guarded_here or guarded_in_function, "unguarded networked container: " <> line
+    end
+
     for command <- commands do
       mounts = Regex.scan(~r/(?:-v|--volume|--mount)[\s=]+(\S+)/, command, capture: :all_but_first) |> List.flatten()
 
-      assert mounts in [[~s("$B":/w)], [~s("$R":/w)]], command
+      # Every mount flag must be one the regex read, so an attached `-v"$HOME":/w` or a
+      # `--volumes-from` cannot slip past as "no mount"; only the network probe mounts nothing.
+      flags = Regex.scan(~r/\s(?:-v|--volume|--mount)\b/, command) |> length()
+      assert flags == length(mounts), command
+      refute command =~ "--volumes-from", command
+
+      allowed = if command =~ "wget -T 3", do: [[]], else: [[~s("$B":/w)], [~s("$R":/w)]]
+      assert mounts in allowed, command
       refute command =~ "docker.sock", command
     end
+  end
+
+  test "the box helpers live in one block, and every call of them stops the run on a failure" do
+    skill = File.read!(@skill)
+    blocks = Regex.scan(~r/^```[a-z]*\n(.*?)^```$/ms, skill, capture: :all_but_first) |> Enum.map(&hd/1)
+
+    # Shell functions do not survive between two calls of the agent's shell tool: the three helpers
+    # are defined together, and the skill says to run them in the same call as their users.
+    assert Enum.any?(blocks, &(&1 =~ "box_net_ok() {" and &1 =~ "in_box_net() {" and &1 =~ "in_box() {"))
+    assert skill =~ "in the same shell call"
+
+    calls = Regex.scan(~r/^in_box(?:_net)? '.*$/m, skill) |> List.flatten()
+    assert length(calls) >= 3
+
+    for call <- calls do
+      [_, log] = Regex.run(~r/> "(\$S\/results\/[^"]+)" 2>&1/, call)
+      assert String.ends_with?(call, ~s(|| { cat "#{log}"; exit 1; })), call
+    end
+
+    # What the guard checks, said as it is: it does not prove every rule is installed.
+    refute skill =~ "proves the rules are in place"
   end
 
   test "prepare-commits keeps a changed lock off the host too" do

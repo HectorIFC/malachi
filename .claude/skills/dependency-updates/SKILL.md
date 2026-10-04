@@ -289,18 +289,67 @@ back. Its image, `malachi-box`, is the Elixir image of the Dockerfile with `buil
 
 ```
 printf 'FROM elixir:1.19-otp-28-alpine\nRUN apk add --no-cache build-base\n' | docker build -q -t malachi-box -
+docker network inspect malachi-box-net > /dev/null 2>&1 \
+  || docker network create --subnet 172.31.250.0/24 malachi-box-net
+box_net_ok() {    # every way to this Mac or the VM must time out from the box network
+  [ "$(docker network inspect malachi-box-net --format '{{(index .IPAM.Config 0).Subnet}}')" = 172.31.250.0/24 ] \
+    || { echo "stop: malachi-box-net is not 172.31.250.0/24"; return 1; }
+  gw=$(docker network inspect malachi-box-net --format '{{(index .IPAM.Config 0).Gateway}}')
+  lan=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
+  for ip in 192.168.5.2 "$gw" $lan; do
+    docker run --rm --network malachi-box-net malachi-box sh -c "wget -T 3 -qO- http://$ip:9/ 2>&1; true" \
+      | grep -q 'timed out' || { echo "stop: the box network reaches $ip"; return 1; }
+  done
+}
+in_box_net() {    # the fetch, and only the fetch: it has to reach hex.pm, through the box network
+  box_net_ok || return 1
+  docker run --rm --network malachi-box-net -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix \
+    -e MIX_ENV=test malachi-box sh -c "$1"
+}
+in_box() {
+  docker run --rm --network none -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix -e MIX_ENV=test \
+    malachi-box sh -c "$1"
+}
+box_net_ok || exit 1
 R="$S/resolve"; rm -rf "$R"; mkdir -p "$R"
 /usr/bin/git archive HEAD | tar -x -C "$R"
 cp mix.exs "$R/mix.exs"                          # with the decided constraint change, if any
-docker run --rm -v "$R":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix malachi-box \
+docker run --rm --network malachi-box-net -v "$R":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix malachi-box \
   sh -c 'mix local.hex --force > /dev/null && mix deps.update <packages>'
 cp "$R/mix.lock" mix.lock
 ```
 
-This container needs the network to reach hex.pm, and a container with a network can also reach the
-services this Mac listens on at its loopback: Colima forwards `host.docker.internal` (192.168.5.2) to
-them. The local gates that run in the box (credo and the dev compile, step 6) run with no network at
-all. Three things cannot: this resolution and the fetch in step 6, which need hex.pm, and the gates
+This container needs the network to reach hex.pm, and on the default network a container also reaches
+every service this Mac listens on at its loopback: Colima forwards `host.docker.internal`
+(192.168.5.2) to them, as well as the Mac's LAN address and any port published in the VM. So the
+containers that need a network use their own, `malachi-box-net`, and the Colima VM's firewall drops
+everything from it to a private address and to the VM itself; hex.pm, on the internet, stays reachable.
+The rules live in the VM and do not survive a restart of Colima:
+
+```
+colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d 10.0.0.0/8 -j DROP
+colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d 172.16.0.0/12 -j DROP
+colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d 192.168.0.0/16 -j DROP
+colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d 169.254.0.0/16 -j DROP
+colima ssh -- sudo iptables -I DOCKER-USER -s 172.31.250.0/24 -d 100.64.0.0/10 -j DROP
+colima ssh -- sudo iptables -I INPUT -s 172.31.250.0/24 -j DROP
+```
+
+DNS keeps working, because Docker's resolver queries from outside that subnet.
+
+`box_net_ok` is a guard, not a message, and it checks the paths that matter most rather than every rule:
+from the box network, a connection to the Mac's forward, to the network's gateway and to the Mac's
+address on `en0` or `en1` must each time out (a refused connection means something answered), or it
+fails and nothing with a network runs. It does not prove every rule is installed (a missing `10/8` rule
+goes unseen), and it reads the Mac's address from `en0` or `en1` only. The three helpers above
+(`box_net_ok`, `in_box_net`, `in_box`) are shell functions, which do not survive from one call of a
+shell tool to the next: run them in the same shell call as the commands that use them, this resolution
+here and the box of step 6 (paste the helpers in front of that block). `in_box_net` runs the guard
+again, since Colima may restart in between. On a stop,
+show the rules above to the contributor; they change their machine, so they are run only on their
+explicit yes, and the guard runs again after them.
+The local gates that run in the box (credo and the dev compile, step 6) run with no network at all.
+Three things need more: this resolution and the fetch in step 6, which need hex.pm, and the gates
 that build and run the image (the image gate and the drills), whose build fetches from hex.pm and whose
 nodes talk to each other. Those gates come from CI wherever a workflow runs them (`ci.yml` builds and
 boots the image, `results.yml`, `storage-chaos.yml` and `upgrade-chaos.yml` run the node, storage and
@@ -367,7 +416,7 @@ tree=$(GIT_INDEX_FILE="$S/tree.idx" sh -c '/usr/bin/git read-tree HEAD && /usr/b
 hex.pm published, not that its code is harmless, and fetching or compiling a dependency runs its code.
 So the fetch and every local gate that loads dependencies run in a disposable container, the box: it
 mounts a copy of the worktree's files and nothing else (no home directory, no credentials, no Docker
-socket), and only the fetch gets a network. The gates that need Docker build what they run inside their own containers (the image
+socket), and only the fetch gets a network, the box network of step 5, which cannot reach this Mac. The gates that need Docker build what they run inside their own containers (the image
 gate and the drills), and the rest come from CI runners, which hold none of the contributor's
 credentials. A failed attempt is thrown away with its box: a package taken out means a new box.
 
@@ -375,16 +424,9 @@ credentials. A failed attempt is thrown away with its box: a package taken out m
 root=$(/usr/bin/git rev-parse --show-toplevel)
 B="$S/box"; rm -rf "$B"; mkdir -p "$B"
 (cd "$root" && /usr/bin/git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf -) | tar -x -C "$B"
-in_box_net() {    # the fetch, and only the fetch: it has to reach hex.pm
-  docker run --rm -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix -e MIX_ENV=test malachi-box sh -c "$1"
-}
-in_box() {
-  docker run --rm --network none -v "$B":/w -w /w -e HEX_HOME=/w/.hex -e MIX_HOME=/w/.mix -e MIX_ENV=test \
-    malachi-box sh -c "$1"
-}
-in_box_net 'mix local.hex --force > /dev/null && mix local.rebar --force > /dev/null && mix deps.get --check-locked' > "$S/results/deps-get.log" 2>&1
-in_box 'mix credo --strict' > "$S/results/credo.log" 2>&1
-in_box 'MIX_ENV=dev mix compile --warnings-as-errors' > "$S/results/compile-dev.log" 2>&1
+in_box_net 'mix local.hex --force > /dev/null && mix local.rebar --force > /dev/null && mix deps.get --check-locked' > "$S/results/deps-get.log" 2>&1 || { cat "$S/results/deps-get.log"; exit 1; }
+in_box 'mix credo --strict' > "$S/results/credo.log" 2>&1 || { cat "$S/results/credo.log"; exit 1; }
+in_box 'MIX_ENV=dev mix compile --warnings-as-errors' > "$S/results/compile-dev.log" 2>&1 || { cat "$S/results/compile-dev.log"; exit 1; }
 ```
 
 The fetch installs Hex and rebar into the box's own `MIX_HOME`, so the gates after it, which have no
