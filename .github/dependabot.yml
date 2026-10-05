@@ -15,6 +15,31 @@ updates:
       - "HectorIFC"
     commit-message:
       prefix: "chore(deps):"
+    # Shaped the way the dependency-updates skill (.claude/skills/dependency-updates) processes the queue,
+    # and checked against its table (scripts/deps_check.exs) by test/scripts/dependency_updates_skill_test.exs.
+    # ra matches no group on purpose: every control plane store runs on it, so it always arrives alone and
+    # is verified with the multinode suite and the drills. update-types keeps majors out of both groups, so
+    # a major arrives as a pull request of its own, which is a decision and not a bump.
+    groups:
+      hex-auth:
+        patterns:
+          - "joken"
+          - "jose"
+          - "argon2_elixir"
+        update-types:
+          - "minor"
+          - "patch"
+      hex:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "ra"
+          - "joken"
+          - "jose"
+          - "argon2_elixir"
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -30,3 +55,9 @@ updates:
       - "HectorIFC"
     commit-message:
       prefix: "chore(ci):"
+    # One pull request for every action, majors included: an action's tag is its major, so a bump is
+    # almost always one, and the skill applies the group to every workflow on main and pins it by SHA.
+    groups:
+      actions:
+        patterns:
+          - "*"
