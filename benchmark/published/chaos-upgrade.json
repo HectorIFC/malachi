@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "timestamp": "2026-10-05T11:23:26Z",
+    "command": "scripts/docker-upgrade-chaos.sh",
+    "git_ref": "aba2ad0",
+    "git_ref_date": "2026-10-04T10:36:43Z",
+    "malachi_version": "0.19.3",
+    "hardware": {
+      "cpu": "x86_64",
+      "cores": 4,
+      "os": "Linux 6.17.0-1022-azure"
+    }
+  },
+  "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
+  "verdict": "failed",
+  "replication_factor": 3,
+  "events": [
+    "p1: rolling every node from OLD to NEW (pin 4)",
+    "p1: mixed cluster (node 3 on NEW, nodes 1 and 2 on OLD)",
+    "p1: splitting the metadata ring from 4 to 5 vnodes on NEW",
+    "p2: rolling every node from NEW back to OLD (pin 4)",
+    "p3: rolling every node from OLD to NEW (pin 4)",
+    "p3: finalizing: the pin removed node by node",
+    "p3: switching the canary flag on",
+    "p3: node 3 started on OLD after the flip must refuse its data directory"
+  ],
+  "invariants": {
+    "acked_writes": 50112,
+    "post_chaos_records_per_s": 17260
+  },
+  "failures": [
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1950)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 5159)",
+    "nodes 1 and 2 did not serve a clean produce while node 3 was down",
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 5159)"
+  ],
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261005T104943Z-aba2ad0",
+  "details": {
+    "old_ref": "v0.19.2",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.19.3's",
+    "old_sha": "658df42663d26e29fe569acb317e70d6931db8ec",
+    "old_version": "0.19.2",
+    "old_machine_version": 4,
+    "old_patch": null,
+    "new_patch": null,
+    "negative_control": false,
+    "acked_writes_by_phase": {
+      "phase1": 18463,
+      "phase2": 12585,
+      "phase3": 19064
+    },
+    "vnodes": 4,
+    "vnode_rule": "sharded: v0.19.2 resumes its vnode members after a restart",
+    "vnodes_after_split": 5
+  }
+}
