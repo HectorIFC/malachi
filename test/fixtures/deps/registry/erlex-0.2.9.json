@@ -1,0 +1,13 @@
+{
+  "version": "0.2.9",
+  "checksum": "8cfffc0ec7159e6d73de2ab28a588064de80f88b2798d5cbe4482cbbc200178b",
+  "retirement": null,
+  "meta": {
+    "elixir": "~> 1.6",
+    "app": "erlex",
+    "build_tools": [
+      "mix"
+    ]
+  },
+  "requirements": {}
+}
