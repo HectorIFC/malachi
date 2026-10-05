@@ -1,0 +1,29 @@
+{
+  "version": "3.2.0",
+  "checksum": "8542b71af2fad6b4e92b98c2092beebb6e51e1cada9d51d6d4bb1cdca3dbcd06",
+  "retirement": null,
+  "meta": {
+    "elixir": null,
+    "app": "ra",
+    "build_tools": [
+      "rebar3"
+    ]
+  },
+  "requirements": {
+    "aten": {
+      "app": "aten",
+      "optional": false,
+      "requirement": "0.6.0"
+    },
+    "gen_batch_server": {
+      "app": "gen_batch_server",
+      "optional": false,
+      "requirement": "0.10.0"
+    },
+    "seshat": {
+      "app": "seshat",
+      "optional": false,
+      "requirement": "1.0.1"
+    }
+  }
+}
