@@ -27,7 +27,8 @@ defmodule Malachi.Cluster.Retention do
   @typedoc "A retention policy. A `nil` (or absent) bound disables that rule."
   @type policy :: %{
           optional(:max_age_ms) => non_neg_integer() | nil,
-          optional(:max_bytes) => non_neg_integer() | nil
+          optional(:max_bytes) => non_neg_integer() | nil,
+          optional(:segment_max_age_ms) => pos_integer() | nil
         }
 
   # The retention bounds a policy can set, read from the one table of policy fields, so a bound added
@@ -139,11 +140,17 @@ defmodule Malachi.Cluster.Retention do
   ## Examples
 
       iex> Malachi.Cluster.Retention.effective(nil, %{}, %{max_age_ms: 1_000}, nil)
-      %{resolution: :none, retention: %{max_age_ms: {1_000, :global}, max_bytes: {nil, :global}}}
+      %{
+        resolution: :none,
+        retention: %{max_age_ms: {1_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
+      }
 
       iex> policies = %{"keep" => %{retention: %{max_bytes: 0}}}
       iex> Malachi.Cluster.Retention.effective("keep", policies, %{max_age_ms: 1_000}, nil)
-      %{resolution: :resolved, retention: %{max_age_ms: {1_000, :global}, max_bytes: {0, :policy}}}
+      %{
+        resolution: :resolved,
+        retention: %{max_age_ms: {1_000, :global}, max_bytes: {0, :policy}, segment_max_age_ms: {nil, :global}}
+      }
 
   """
   @spec effective(

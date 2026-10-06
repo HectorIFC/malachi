@@ -37,8 +37,9 @@ defmodule Malachi.Cluster.MachineVersion do
   `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, and version 4 is where
   `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, and version 5 is where
   `Malachi.Auth.UserRegistry` introduced the console roles (`{:set_role, username, role}`, a five element
-  `put_user` and `{:import_users_with_roles, entries}`), so each time the others moved with nothing but
-  that no-op.
+  `put_user` and `{:import_users_with_roles, entries}`), and version 6 is where `Malachi.Cluster.Policy`
+  introduced the `retention.segment_max_age_ms` field (#197), so each time the others moved with nothing
+  but that no-op.
 
   ## State that a command fills from the log entry
 
@@ -82,11 +83,13 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  # 5 introduces the console roles in `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`,
+  # 6 introduces the `retention.segment_max_age_ms` policy field in `Malachi.Cluster.Policy` (#197), which
+  # `{:define_policy, name, policy}` validates against the effective version. 5 introduced the console
+  # roles in `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`,
   # `{:put_user, username, hash, permissions, role}` and `{:import_users_with_roles, entries}`. 4
   # introduced `{:bind_topic_policy, topic, name}` in `Malachi.Metadata` (#194), 3 the storage policy
-  # store and 2 the cluster flags; all are released, which is why the roles take the next version.
-  @code_version 5
+  # store and 2 the cluster flags; all are released, which is why the field takes the next version.
+  @code_version 6
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

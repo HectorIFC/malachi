@@ -952,12 +952,16 @@ defmodule Malachi.Application do
   @spec expire_segment(Metadata.segment_meta(), GenServer.server()) :: term()
   def expire_segment(segment, broker \\ Malachi.LogBroker), do: Expirer.expire(segment, broker)
 
-  @doc "The configured retention policy (`:max_age_ms` / `:max_bytes`; `nil` = that rule is off)."
+  @doc """
+  The configured retention policy: `:max_age_ms` / `:max_bytes` (`nil` = that rule is off) and
+  `:segment_max_age_ms`, how old an active segment may get before the sweep rolls it (7 days unless set).
+  """
   @spec retention_policy() :: Malachi.Cluster.Retention.policy()
   def retention_policy do
     %{
       max_age_ms: Application.get_env(:malachi, :retention_max_age_ms),
-      max_bytes: Application.get_env(:malachi, :retention_max_bytes)
+      max_bytes: Application.get_env(:malachi, :retention_max_bytes),
+      segment_max_age_ms: Application.get_env(:malachi, :segment_max_age_ms, Malachi.Config.segment_max_age_ms(nil))
     }
   end
 
