@@ -40,6 +40,19 @@ defmodule Malachi.Cluster.MachineVersion do
   `put_user` and `{:import_users_with_roles, entries}`), so each time the others moved with nothing but
   that no-op.
 
+  ## State that a command fills from the log entry
+
+  A field added to the STATE a command produces, with the command's shape unchanged, is not a new
+  command by the rule above, as long as nothing an older member decides reads it. `register_segment`
+  is the case in point: since #197 a registered segment carries `opened_at`, filled from
+  `meta.system_time`, the timestamp the leader wrote into the log entry (`Malachi.Cluster.MetadataMachine`).
+  Every replica on this code stamps the same value, a replay stamps it again, and a member on older code
+  stores the segment without the field and never reads it, so no member applies the command differently
+  from another in anything either one acts on. The same holds for a topic export that carries the field
+  (`:insert_topic`): a destination on older code stores a key it never reads, so the export format does
+  not move for it. A field an older member would act on, or one carried in the command, still takes a
+  new shape at a new version.
+
   ## Holding the version during an upgrade
 
   `version/0` is `min(code_version(), pin)`, where the pin is `MALACHI_RA_MACHINE_VERSION`

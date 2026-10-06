@@ -1035,10 +1035,12 @@ defmodule Malachi.Broker do
       |> Metadata.committed_offsets(group, topic)
       |> Map.merge(offsets, fn _range_id, read, journaled -> max(read, journaled) end)
 
-    Metadata.apply(metadata, {:commit_offset, group, topic, merged})
+    Metadata.apply(metadata, {:commit_offset, group, topic, merged}, System.system_time(:millisecond))
   end
 
-  defp replay_apply(metadata, command), do: Metadata.apply(metadata, command)
+  # A replayed registration stamps this node's clock as its `opened_at`, as the cache did when it first
+  # applied it (`Malachi.Cluster.ReplicatedMetadata`); the next re-seed installs the replicated value.
+  defp replay_apply(metadata, command), do: Metadata.apply(metadata, command, System.system_time(:millisecond))
 
   @typedoc "Opaque cursor for `stream_history/5`: `:start`, an internal position, or `:done`."
   @type history_cursor :: :start | {non_neg_integer(), non_neg_integer()} | :done

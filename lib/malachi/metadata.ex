@@ -5,25 +5,27 @@ defmodule Malachi.Metadata do
 
   Unlike the data-plane storage (`Malachi.Broker`/`Log`, which hold open file handles),
   this holds only metadata: it is pure data and a pure transition function. All
-  mutations go through `apply/2` (`command -> {new_state, reply}`), exactly the contract a
+  mutations go through `apply/3` (`command -> {new_state, reply}`), exactly the contract a
   Raft machine's `apply` needs, so the `ra` integration replicates this state without
   changing it. This is what makes topic structure durable.
 
   ## Determinism
 
-  `apply/2` must be deterministic so every replica reaches the same state from the same
+  `apply/3` must be deterministic so every replica reaches the same state from the same
   command log: no wall-clock time and no random/process-unique values are generated inside
-  it. New range ids come from a counter in the state (`next_range_id`); anything else
-  non-deterministic (timestamps, broker-chosen segment ids) is supplied *in the command* by
-  the proposer. Bad input returns an error tuple rather than raising (a raise would crash a
+  it. New range ids come from a counter in the state (`next_range_id`); a seal's time and the
+  broker-chosen segment ids are supplied *in the command* by the proposer, and a registered segment's
+  `opened_at` is the `at_ms` argument, which inside ra is the timestamp the leader wrote into the log
+  entry (see `apply/3`). Bad input returns an error tuple rather than raising (a raise would crash a
   replica).
 
   Reads are plain functions over the state (`get_topic/2`, `ranges_of_topic/2`, …), not
   commands.
   """
 
-  # We define apply/2 (the Raft-style transition function), which shadows Kernel.apply/2.
-  import Kernel, except: [apply: 2]
+  # We define apply/2 and apply/3 (the Raft-style transition function), which shadow Kernel.apply/2 and
+  # Kernel.apply/3.
+  import Kernel, except: [apply: 2, apply: 3]
 
   alias Malachi.Cluster.Policy
   alias Malachi.Keyspace
@@ -66,7 +68,12 @@ defmodule Malachi.Metadata do
           byte_size: non_neg_integer() | nil,
           # Epoch ms the segment was sealed (`nil` while active). Set from the seal command, so it is
           # deterministic across replicas; used by retention to expire sealed segments by age.
-          sealed_at: non_neg_integer() | nil
+          sealed_at: non_neg_integer() | nil,
+          # Epoch ms the segment was registered, or `nil` when the apply that registered it had no clock
+          # (see `apply/3`). Taken from the timestamp the Raft leader wrote into the log entry, so it is
+          # deterministic across replicas and on every replay; used to roll an active segment by age
+          # (`Malachi.Cluster.SegmentRoll`).
+          opened_at: non_neg_integer() | nil
         }
 
   @typedoc "A consumer group's name."
@@ -293,26 +300,49 @@ defmodule Malachi.Metadata do
 
   @doc """
   Applies a command, returning `{new_state, reply}`. Deterministic: the same command on the
-  same state always yields the same result on every replica. On failure the state is
-  returned unchanged with an `{:error, reason}` reply.
+  same state, at the same `at_ms`, always yields the same result on every replica. On failure the
+  state is returned unchanged with an `{:error, reason}` reply.
+
+  `at_ms` is the epoch ms the command was accepted at, and only `register_segment` reads it: it
+  becomes the new segment's `opened_at`. Inside ra it is the timestamp the leader wrote into the log
+  entry (`Malachi.Cluster.MetadataMachine`), so every replica and every replay stamps the same value
+  without the command carrying it. A cache applying a command it already submitted passes its own
+  clock, and the next re-seed replaces that guess with the replicated value. `nil` (the two argument
+  form, for callers with no clock) leaves `opened_at` unset, which `Malachi.Cluster.SegmentRoll`
+  treats as already due.
 
   `register_segment` requires the `segment_id` to be **globally unique** across the cluster
   (the broker-assigned contract). Within a vnode this is checked (`:segment_exists`), but
   uniqueness across vnodes is the caller's responsibility: it is what keeps a topic's
   segments safe when it migrates to another vnode (see `insert_topic/2`).
   """
-  @spec apply(t(), command()) :: {t(), term()}
-  def apply(%__MODULE__{} = state, command) do
+  @spec apply(t(), command(), non_neg_integer() | nil) :: {t(), term()}
+  def apply(%__MODULE__{} = state, command, at_ms \\ nil) do
     # migration fence (seal-first, à la NorthGuard's range split): a mutating command targeting a topic
     # that is being migrated to another vnode is rejected, so the split's snapshot is never raced.
     case command_topic(state, command) do
       topic when is_binary(topic) ->
-        if Map.has_key?(state.migrating, topic), do: {state, {:error, :migrating}}, else: do_apply(state, command)
+        if Map.has_key?(state.migrating, topic),
+          do: {state, {:error, :migrating}},
+          else: apply_unfenced(state, command, at_ms)
 
       nil ->
-        do_apply(state, command)
+        apply_unfenced(state, command, at_ms)
     end
   end
+
+  # The one command that reads the clock; every other command is a function of the state alone.
+  defp apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset}, at_ms) do
+    # The range is the context, so it is settled first: a range that is unknown or sealed does not
+    # accept a segment at any offset, and reporting an offset complaint about it would send the caller
+    # off to fix the wrong thing.
+    case fetch_active_range(state, range_id) do
+      {:error, _reason} = error -> {state, error}
+      {:ok, _range} -> register_into_range(state, range_id, segment_id, replica_set, start_offset, at_ms)
+    end
+  end
+
+  defp apply_unfenced(state, command, _at_ms), do: do_apply(state, command)
 
   # The topic a mutating command would change, or `nil` when the command is not topic-scoped or is a
   # migration/read command that must never be fenced (create_topic, define_policy, begin/end_migration,
@@ -408,16 +438,6 @@ defmodule Malachi.Metadata do
       do_merge_ranges(state, range_a, range_b)
     else
       {:error, _reason} = error -> {state, error}
-    end
-  end
-
-  defp do_apply(%__MODULE__{} = state, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
-    # The range is the context, so it is settled first: a range that is unknown or sealed does not
-    # accept a segment at any offset, and reporting an offset complaint about it would send the caller
-    # off to fix the wrong thing.
-    case fetch_active_range(state, range_id) do
-      {:error, _reason} = error -> {state, error}
-      {:ok, _range} -> register_into_range(state, range_id, segment_id, replica_set, start_offset)
     end
   end
 
@@ -571,7 +591,7 @@ defmodule Malachi.Metadata do
     if active_segment?(state, range_id), do: {:error, :active_segment_exists}, else: :ok
   end
 
-  defp register_into_range(state, range_id, segment_id, replica_set, start_offset) do
+  defp register_into_range(state, range_id, segment_id, replica_set, start_offset, opened_at) do
     cond do
       Map.has_key?(state.segments, segment_id) ->
         {state, {:error, :segment_exists}}
@@ -605,7 +625,7 @@ defmodule Malachi.Metadata do
         {state, {:error, :segment_overlap}}
 
       true ->
-        register_new_segment(state, range_id, segment_id, replica_set, start_offset)
+        register_new_segment(state, range_id, segment_id, replica_set, start_offset, opened_at)
     end
   end
 
@@ -623,7 +643,7 @@ defmodule Malachi.Metadata do
   @spec get_segment(t(), segment_id()) :: segment_meta() | nil
   def get_segment(%__MODULE__{} = state, segment_id), do: Map.get(state.segments, segment_id)
 
-  @doc "All ranges of a topic (any state). O(k) via the `topic_ranges` index, see `apply/2`."
+  @doc "All ranges of a topic (any state). O(k) via the `topic_ranges` index, see `apply/3`."
   @spec ranges_of_topic(t(), topic_name()) :: [range_meta()]
   def ranges_of_topic(%__MODULE__{} = state, name) do
     state.topic_ranges
@@ -637,7 +657,7 @@ defmodule Malachi.Metadata do
     state |> ranges_of_topic(name) |> Enum.filter(&(&1.state == :active))
   end
 
-  @doc "All segments of a range. O(k) via the `range_segments` index, see `apply/2`."
+  @doc "All segments of a range. O(k) via the `range_segments` index, see `apply/3`."
   @spec segments_of_range(t(), range_id()) :: [segment_meta()]
   def segments_of_range(%__MODULE__{} = state, range_id) do
     state.range_segments
@@ -725,7 +745,7 @@ defmodule Malachi.Metadata do
 
   defp segment_detail(segment) do
     segment
-    |> Map.take([:state, :start_offset, :length, :byte_size, :sealed_at])
+    |> Map.take([:state, :start_offset, :length, :byte_size, :sealed_at, :opened_at])
     |> Map.put(:seq, segment_seq(segment.id))
     |> Map.put(:primary, segment.replica_set |> List.first() |> broker_ref_string())
     |> Map.put(:replica_set, Enum.map(segment.replica_set, &broker_ref_string/1))
@@ -869,7 +889,7 @@ defmodule Malachi.Metadata do
   Segment ids, however, are caller-supplied and independent of range ids: this merges them
   by id, so a segment id that already exists in `state` is **overwritten**. Migration is
   therefore safe only if segment ids are globally unique across the cluster (the
-  broker-assigned contract, see `register_segment` in `apply/2`).
+  broker-assigned contract, see `register_segment` in `apply/3`).
   """
   @spec insert_topic(t(), topic_export()) :: t()
   def insert_topic(%__MODULE__{} = state, export) do
@@ -882,13 +902,18 @@ defmodule Malachi.Metadata do
       state
       | topics: Map.put(state.topics, name, export.topic),
         ranges: Map.merge(state.ranges, export.ranges),
-        segments: Map.merge(state.segments, export.segments),
+        segments: Map.merge(state.segments, Map.new(export.segments, fn {id, seg} -> {id, with_opened_at(seg)} end)),
         committed_offsets: Map.merge(state.committed_offsets, offsets)
     }
 
     state = Enum.reduce(export.ranges, state, fn {id, range}, s -> index_add_range(s, range.topic, id) end)
     Enum.reduce(export.segments, state, fn {id, seg}, s -> index_add_segment(s, seg.range_id, id) end)
   end
+
+  # A segment exported before segments carried `opened_at` has no such key. It is completed with `nil`
+  # (no known opening time, so the segment is due for an age roll) rather than left out, so every
+  # reader can match the field strictly.
+  defp with_opened_at(segment), do: Map.put_new(segment, :opened_at, nil)
 
   # --- internals: topic ---
 
@@ -1112,7 +1137,7 @@ defmodule Malachi.Metadata do
 
   # The insert itself. Every precondition (the range accepts writes, the id is free, the range has no
   # write head, the offset is above what is sealed) is settled by the caller.
-  defp register_new_segment(state, range_id, segment_id, replica_set, start_offset) do
+  defp register_new_segment(state, range_id, segment_id, replica_set, start_offset, opened_at) do
     segment = %{
       id: segment_id,
       range_id: range_id,
@@ -1121,7 +1146,8 @@ defmodule Malachi.Metadata do
       start_offset: start_offset,
       length: nil,
       byte_size: nil,
-      sealed_at: nil
+      sealed_at: nil,
+      opened_at: opened_at
     }
 
     state = %{state | segments: Map.put(state.segments, segment_id, segment)}
