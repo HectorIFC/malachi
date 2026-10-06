@@ -852,7 +852,10 @@ defmodule Malachi.Broker do
 
   An owed roll whose segment is not cached here (an age roll the sweep asked for, `request_rolls/2`) is
   dropped too once the control plane has moved past it: the segment is sealed, or the range's head is
-  now a LATER segment (a higher sequence; a range's segment sequence only grows). Its fence may never be answered (a primary that died and was replaced), and since
+  now a LATER segment (a higher sequence). The sequence grows for as long as the range keeps a segment
+  in the control plane: one whose segments retention has all expired lists nothing to seed a frontend's
+  counter from, so the next head may start again at 0, and a roll owed for an older sequence is then
+  kept until its fence answers (and the control plane says the segment is gone) or the node restarts. Its fence may never be answered (a primary that died and was replaced), and since
   a range owes one roll at a time, a roll left behind would swallow every later roll of the range on this
   node. A segment the refreshed view does not hold at all, with no later head beside it, keeps its roll:
   that is a head this view has not caught up with (an older head still listed is just as behind), the
