@@ -298,6 +298,26 @@ defmodule Malachi.I18n do
       "pt_BR" => "⚠️ Flush do group commit falhou no pipeline %{pipeline}: %{reason}",
       "en_US" => "⚠️ Group commit flush failed on pipeline %{pipeline}: %{reason}"
     },
+    group_commit_needs_rf1: %{
+      "pt_BR" =>
+        "⚠️ MALACHI_GROUP_COMMIT=true não se aplica com MALACHI_LOG_REPLICATION_FACTOR=%{rf}: o group commit " <>
+          "do broker grava só o primário, então só vale com fator 1. Para um nó único defina " <>
+          "MALACHI_LOG_REPLICATION_FACTOR=1, ou use MALACHI_REPLICATION_GROUP_COMMIT=true, que agrupa o fsync " <>
+          "em todas as réplicas",
+      "en_US" =>
+        "⚠️ MALACHI_GROUP_COMMIT=true does not apply with MALACHI_LOG_REPLICATION_FACTOR=%{rf}: broker group " <>
+          "commit writes the primary alone, so it needs a factor of 1. On a single node set " <>
+          "MALACHI_LOG_REPLICATION_FACTOR=1, or use MALACHI_REPLICATION_GROUP_COMMIT=true, which batches the " <>
+          "fsync on every replica"
+    },
+    data_shards_in_memory: %{
+      "pt_BR" =>
+        "⚠️ MALACHI_DATA_SHARDS=%{shards} é o modo de medição: a metadata de cada shard fica só em memória " <>
+          "e nada escrito sobrevive a um restart; não há orphan sweep neste modo",
+      "en_US" =>
+        "⚠️ MALACHI_DATA_SHARDS=%{shards} is the measurement mode: each shard's metadata lives in memory only " <>
+          "and nothing written survives a restart; there is no orphan sweep in this mode"
+    },
     data_shards_ignored_clustered: %{
       "pt_BR" => "⚠️ MALACHI_DATA_SHARDS é ignorado quando o control plane é clusterizado; usando 1 shard",
       "en_US" => "⚠️ MALACHI_DATA_SHARDS is ignored when the control plane is clustered; using 1 shard"
@@ -319,6 +339,116 @@ defmodule Malachi.I18n do
         "the format marker %{path} records format %{format}, written by release %{written_by}, and this " <>
           "binary understands at most format %{supported}. Start release %{requires} or newer; do not " <>
           "delete the marker, that would let this binary overwrite data it cannot read"
+    },
+    # Log directory against the control plane (Malachi.Storage.DataDirGuard).
+    data_dir_cluster_renamed: %{
+      "pt_BR" =>
+        "%{path} pertence ao control plane %{recorded}, e este nó (%{node}) iniciaria nele como %{cluster}. " <>
+          "O anel e os membros do ra são um só por diretório ra e nome de nó, seja qual for o nome do cluster, " <>
+          "então os dois control planes se misturariam e o orphan sweep poderia apagar os segmentos do " <>
+          "primeiro. Volte MALACHI_LOG_CLUSTER para %{recorded}, ou forme %{cluster} com outro " <>
+          "MALACHI_LOG_DATA_DIR e outro MALACHI_RA_DATA_DIR e mova os dados com um cliente",
+      "en_US" =>
+        "%{path} belongs to the control plane %{recorded}, and this node (%{node}) would start on it as " <>
+          "%{cluster}. The ring store and the ra members are one per ra directory and node name, whatever the " <>
+          "cluster is called, so the two control planes would mix and the orphan sweep could delete the " <>
+          "first one's segments. Set MALACHI_LOG_CLUSTER back to %{recorded}, or form %{cluster} with another " <>
+          "MALACHI_LOG_DATA_DIR and another MALACHI_RA_DATA_DIR and move the data with a client"
+    },
+    data_dir_cluster_marker_unreadable: %{
+      "pt_BR" => "um nome ilegível (o arquivo malachi.cluster não tem exatamente uma linha cluster=<nome>)",
+      "en_US" => "an unreadable name (the malachi.cluster file does not hold exactly one cluster=<name> line)"
+    },
+    data_dir_unknown_segments: %{
+      "pt_BR" =>
+        "%{path} tem %{count} diretórios de segmento (%{names}) e o control plane %{cluster} seria formado " <>
+          "agora neste nó, com o nome de nó %{node}, sem histórico deles, então o orphan sweep poderia apagá-los. " <>
+          "Causas: o nome do nó mudou (fixe --hostname ou RELEASE_NODE), o diretório MALACHI_RA_DATA_DIR se " <>
+          "perdeu, MALACHI_LOG_CLUSTER mudou, ou os dados vêm de um release que guardava a metadata de um nó " <>
+          "único em memória. Volte o nome do nó, o diretório ra ou o nome do cluster; ou defina " <>
+          "MALACHI_ADOPT_ORPHANED_LOG_DIR=true para iniciar mesmo assim. Num nó único o sweep então os " <>
+          "remove; num membro de cluster cujos pares ainda guardam o control plane, adotar é o caminho de " <>
+          "volta normal e o sweep remove só o que nenhum dono lista",
+      "en_US" =>
+        "%{path} holds %{count} segment directories (%{names}) and the control plane %{cluster} would be " <>
+          "formed now on this node, under the node name %{node}, with no history of them, so the orphan " <>
+          "sweep could delete them. Causes: the node name changed (pin --hostname or RELEASE_NODE), the " <>
+          "MALACHI_RA_DATA_DIR directory was lost, MALACHI_LOG_CLUSTER changed, or the data comes from a " <>
+          "release that kept a single node's metadata in memory. Bring back the node name, the ra directory " <>
+          "or the cluster name; or set MALACHI_ADOPT_ORPHANED_LOG_DIR=true to start anyway. On a single node " <>
+          "the sweep then removes them; on a cluster member whose peers still hold the control plane, " <>
+          "adopting is the normal way back and the sweep removes only what no owner lists"
+    },
+    data_dir_grow_unsupported: %{
+      "pt_BR" =>
+        "o control plane %{cluster} foi iniciado neste nó (%{node}) como cluster de um membro, e a " <>
+          "configuração agora lista também %{others}. Crescer um nó único em cluster no lugar não é " <>
+          "suportado: este nó voltaria sozinho enquanto os outros formariam outro cluster com o mesmo nome. " <>
+          "Remova os outros nós de MALACHI_LOG_NODES, ou forme o cluster novo com outro MALACHI_LOG_CLUSTER " <>
+          "e outro MALACHI_LOG_DATA_DIR e mova os dados com um cliente",
+      "en_US" =>
+        "the control plane %{cluster} was started on this node (%{node}) as a one-member cluster, and the " <>
+          "configuration now also lists %{others}. Growing a single node into a cluster in place is not " <>
+          "supported: this node would come back alone while the others formed another cluster under the " <>
+          "same name. Remove the other nodes from MALACHI_LOG_NODES, or form the new cluster under another " <>
+          "MALACHI_LOG_CLUSTER with another MALACHI_LOG_DATA_DIR and move the data with a client"
+    },
+    data_dir_reshard_unsupported: %{
+      "pt_BR" =>
+        "o control plane %{cluster} já rodou sem sharding neste nó (%{node}), e MALACHI_LOG_VNODES pede " <>
+          "vnodes. Converter um control plane para sharding no lugar não é suportado: o anel sharded valeria " <>
+          "dali em diante e a metadata atual dos tópicos não seria mais lida, então o orphan sweep apagaria " <>
+          "os segmentos deles. Nada foi gravado: remova MALACHI_LOG_VNODES para iniciar como antes. Para fazer " <>
+          "sharding, forme um cluster novo com outro MALACHI_LOG_CLUSTER, outro MALACHI_LOG_DATA_DIR e outro " <>
+          "MALACHI_RA_DATA_DIR (o anel é um só por diretório ra) e mova os dados com um cliente",
+      "en_US" =>
+        "the control plane %{cluster} already ran unsharded on this node (%{node}), and MALACHI_LOG_VNODES asks " <>
+          "for vnodes. Converting a control plane to sharding in place is not supported: the sharded ring would " <>
+          "rule from then on and the topics' current metadata would no longer be read, so the orphan sweep " <>
+          "would delete their segments. Nothing was written: remove MALACHI_LOG_VNODES to start as before. To " <>
+          "shard, form a new cluster under another MALACHI_LOG_CLUSTER with another MALACHI_LOG_DATA_DIR and " <>
+          "another MALACHI_RA_DATA_DIR (there is one ring store per ra directory) and move the data with a client"
+    },
+    data_dir_resharded: %{
+      "pt_BR" =>
+        "o control plane %{cluster} rodou sem sharding neste nó (%{node}), e um anel sharded já está gravado " <>
+          "para ele (por outro nó, por uma release anterior que convertia control planes no lugar, ou por " <>
+          "uma release anterior neste nó sob outro MALACHI_LOG_CLUSTER no mesmo diretório ra). A " <>
+          "metadata sem sharding dos tópicos não é mais lida e o anel vale mais que MALACHI_LOG_VNODES, então " <>
+          "não há volta no lugar; iniciar deixaria o orphan sweep apagar os segmentos que essa metadata " <>
+          "descreve. Forme o cluster de novo com outro MALACHI_LOG_CLUSTER, outro MALACHI_LOG_DATA_DIR e outro " <>
+          "MALACHI_RA_DATA_DIR, e guarde os diretórios deste nó até os dados não serem mais necessários",
+      "en_US" =>
+        "the control plane %{cluster} ran unsharded on this node (%{node}), and a sharded ring is already " <>
+          "recorded for it (by another node, by an earlier release that converted control planes in place, or by " <>
+          "an earlier release on this node under another MALACHI_LOG_CLUSTER over the same ra directory). " <>
+          "The topics' unsharded metadata is no longer read and the ring outranks MALACHI_LOG_VNODES, so there " <>
+          "is no way back in place; starting would let the orphan sweep delete the segments that metadata " <>
+          "describes. Form the cluster again under another MALACHI_LOG_CLUSTER with another " <>
+          "MALACHI_LOG_DATA_DIR and another MALACHI_RA_DATA_DIR, and keep this node's directories until the " <>
+          "data is no longer wanted"
+    },
+    data_dir_membership_unknown: %{
+      "pt_BR" =>
+        "o control plane %{cluster} foi iniciado neste nó (%{node}) e a configuração lista outros nós, mas o " <>
+          "membro do ring store não informou a sua membership dentro de MALACHI_LOG_RING_BOOT_TIMEOUT_MS. Sem ela não dá " <>
+          "para saber se é um cluster de um membro que cresceria no lugar, o que não é suportado. Veja o log " <>
+          "do ra deste nó, ou aumente o timeout se o replay do log for longo",
+      "en_US" =>
+        "the control plane %{cluster} was started on this node (%{node}) and the configuration lists other " <>
+          "nodes, but the ring store member did not report its membership within MALACHI_LOG_RING_BOOT_TIMEOUT_MS. " <>
+          "Without it there is no telling whether this is a one-member cluster about to grow in place, which " <>
+          "is not supported. Check this node's ra log, or raise the timeout if the log replay is long"
+    },
+    data_dir_adopted: %{
+      "pt_BR" =>
+        "⚠️ MALACHI_ADOPT_ORPHANED_LOG_DIR=true: iniciando com %{count} diretórios de segmento em %{path} " <>
+          "que este control plane, formado agora, não conhece (%{names}); o orphan sweep remove os que " <>
+          "nenhum dono listar",
+      "en_US" =>
+        "⚠️ MALACHI_ADOPT_ORPHANED_LOG_DIR=true: starting with %{count} segment directories in %{path} " <>
+          "that this control plane, formed now, does not know (%{names}); the orphan sweep removes the ones " <>
+          "no owner lists"
     },
     data_format_marker_invalid: %{
       "pt_BR" =>

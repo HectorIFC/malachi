@@ -6,6 +6,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # The release names the node after the container's hostname, and the control plane (a one-member ra
+    # cluster on the malachi-data volume) is kept under that name. Fixed, so a recreated container finds
+    # its own control plane instead of refusing to start over segments it no longer knows.
+    hostname: malachi
     # Bound to loopback, and this file is why that matters rather than being a nicety: it ships
     # placeholder credentials that are readable in a public repository, and it turns TLS off. An
     # unqualified "4040:4040" publishes that combination on every interface the host has, so a laptop

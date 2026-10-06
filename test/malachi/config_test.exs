@@ -190,6 +190,27 @@ defmodule Malachi.ConfigTest do
     assert :ra_system.default_config().machine_upgrade_strategy == :all
   end
 
+  describe "log_cluster/2" do
+    test "a single node with no name runs the default one-member cluster" do
+      assert Config.log_cluster(nil, 1) == :malachi_log
+      assert Config.log_cluster("", 1) == :malachi_log
+      assert Config.log_cluster("   ", 1) == :malachi_log
+      # A count below one is one shard (`Malachi.DataPlaneRouter.shard_count/0` clamps it).
+      assert Config.log_cluster(nil, 0) == :malachi_log
+    end
+
+    test "a given name is the cluster, trimmed, whatever the shard count" do
+      assert Config.log_cluster("orders_meta", 1) == :orders_meta
+      assert Config.log_cluster(" orders_meta ", 1) == :orders_meta
+      assert Config.log_cluster("orders_meta", 4) == :orders_meta
+    end
+
+    test "only more than one shard with no name is the in-memory measurement mode" do
+      assert Config.log_cluster(nil, 2) == nil
+      assert Config.log_cluster("", 4) == nil
+    end
+  end
+
   describe "retention_orphan_sweep/1" do
     test "an absent or blank value is the documented default" do
       assert Config.retention_orphan_sweep(nil) == :delete

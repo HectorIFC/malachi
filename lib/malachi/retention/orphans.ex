@@ -88,8 +88,9 @@ defmodule Malachi.Retention.Orphans do
                       }}
                      | {:error, term()})
 
-  # Written by `Malachi.Storage.FormatMarker` at the root of the data directory.
-  @marker_names ["malachi.format", "malachi.format.tmp"]
+  # Written by `Malachi.Storage.FormatMarker` and `Malachi.Storage.DataDirGuard` at the root of the data
+  # directory.
+  @marker_names ["malachi.format", "malachi.format.tmp", "malachi.cluster", "malachi.cluster.tmp"]
   # Written by `Malachi.DataPlaneRouter.shards/1` when a single node runs more than one data-plane shard.
   @shard_name ~r/\A shard_ \d+ \z/x
   # The tail of `Layout.segment_directory/2`'s readable form, from one `-r` to the end of the name. It is
@@ -225,9 +226,17 @@ defmodule Malachi.Retention.Orphans do
     }
   end
 
-  defp eligible?(name, age_ms, min_age_ms) do
-    age_ms >= min_age_ms and not reserved?(name) and candidate_ids(name) != []
-  end
+  @doc """
+  Whether `name`, an entry at the root of a log data directory, is a directory the storage layout could
+  have written for a segment: not one of the reserved names beside them (the format marker, a shard
+  directory) and with at least one reading. The one rule for what a segment directory is, shared by the
+  sweep and by the boot check that refuses to start over segments nobody knows
+  (`Malachi.Storage.DataDirGuard`).
+  """
+  @spec segment_directory?(String.t()) :: boolean()
+  def segment_directory?(name) when is_binary(name), do: not reserved?(name) and candidate_ids(name) != []
+
+  defp eligible?(name, age_ms, min_age_ms), do: age_ms >= min_age_ms and segment_directory?(name)
 
   defp reserved?(name), do: name in @marker_names or Regex.match?(@shard_name, name)
 

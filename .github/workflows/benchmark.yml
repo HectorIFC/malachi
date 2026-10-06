@@ -1,8 +1,10 @@
 name: Performance Benchmarks
 
-# Runs on every branch, no exceptions: push and pull_request without a branch filter, plus manual dispatch.
+# Runs for every pull request, draft or ready for review, and on main after a merge, plus manual dispatch. A
+# branch with no pull request runs nothing, the same rule as the CI workflow.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -128,7 +130,7 @@ jobs:
       - name: Run storage viability benchmark
         run: mix run --no-start benchmark/storage_viability.exs
 
-      # The measurement behind issue #83, opt-in because it takes minutes and every push runs this job.
+      # The measurement behind issue #83, opt-in because it takes minutes and every pull request runs this job.
       # It needs a real filesystem to mean anything: fsync and fdatasync cost the same on tmpfs, and on
       # macOS neither reaches stable media. The runner's /tmp is ext4 on a real disk, which is the
       # platform the decision is actually about.

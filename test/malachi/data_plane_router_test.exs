@@ -1,5 +1,5 @@
 defmodule Malachi.DataPlaneRouterTest do
-  # async: false because the routing tests toggle the shared :data_shards app env.
+  # async: false because the routing tests toggle the shared :data_shards and :log_cluster app env.
   use ExUnit.Case, async: false
 
   import Malachi.Test.TeardownHelper
@@ -9,16 +9,21 @@ defmodule Malachi.DataPlaneRouterTest do
   alias Malachi.Log.Record
   alias Malachi.Test.TmpDir
 
+  # Sharding is the measurement mode, which has no control plane cluster: every test starts there, and
+  # the one that asks about a cluster sets one.
   setup do
-    original = Application.get_env(:malachi, :data_shards)
+    for key <- [:data_shards, :log_cluster] do
+      original = Application.fetch_env(:malachi, key)
 
-    on_exit(fn ->
-      case original do
-        nil -> Application.delete_env(:malachi, :data_shards)
-        value -> Application.put_env(:malachi, :data_shards, value)
-      end
-    end)
+      on_exit(fn ->
+        case original do
+          :error -> Application.delete_env(:malachi, key)
+          {:ok, value} -> Application.put_env(:malachi, key, value)
+        end
+      end)
+    end
 
+    Application.delete_env(:malachi, :log_cluster)
     :ok
   end
 
@@ -50,6 +55,19 @@ defmodule Malachi.DataPlaneRouterTest do
       assert DataPlaneRouter.shard_count() == 1
       set_shards(-3)
       assert DataPlaneRouter.shard_count() == 1
+    end
+  end
+
+  describe "with a control plane cluster" do
+    test "one shard whatever was configured, so no topic routes to a broker that never started" do
+      set_shards(4)
+      Application.put_env(:malachi, :log_cluster, :malachi_log)
+
+      assert DataPlaneRouter.shard_count() == 1
+
+      for i <- 1..50 do
+        assert DataPlaneRouter.shard_for("topic_#{i}") == Malachi.LogBroker
+      end
     end
   end
 
@@ -88,6 +106,24 @@ defmodule Malachi.DataPlaneRouterTest do
       assert Enum.uniq(dirs) == dirs, "shard dirs must be distinct"
       assert hd(names) == Malachi.LogBroker
       assert Enum.all?(dirs, &String.starts_with?(&1, "/data/shard_"))
+    end
+  end
+
+  describe "Malachi.Application.measurement_children/2" do
+    import ExUnit.CaptureLog
+
+    # The measurement mode's only authority is each shard's own memory, which a restart empties: a sweep
+    # trusting it deleted every segment written before the boot (#273). It must never be wired here.
+    test "one broker per shard, no orphan sweep, and a warning that nothing survives a restart" do
+      set_shards(3)
+
+      {children, log} =
+        with_log(fn -> Malachi.Application.measurement_children([node()], "/data") end)
+
+      ids = Enum.map(children, & &1.id)
+      assert Enum.all?(0..2, &(DataPlaneRouter.shard_name(&1) in ids))
+      refute Enum.any?(children, fn %{start: {module, _fun, _args}} -> module == Malachi.Retention.OrphanSweeper end)
+      assert log =~ "MALACHI_DATA_SHARDS=3"
     end
   end
 

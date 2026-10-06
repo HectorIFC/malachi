@@ -1,8 +1,9 @@
-# Name the node once, before any test runs, so no test renames it later: the multinode tests' own
-# `Distribution.ensure_started/0` then leaves the name alone. Note that `mix test` (no `--no-start`) has
-# already started the application by the time this file runs, so this comes after the app's boot, not
-# before it. The name is derived from the OS pid, so a second `mix test` on the same host (another
-# worktree) does not fight this one for it in epmd.
+# Name the node once, before any test runs and before the application boots, so no test renames it
+# later: the multinode tests' own `Distribution.ensure_started/0` then leaves the name alone. `mix test`
+# runs with `--no-start` (the alias in mix.exs), so the application starts below, under this name, as a
+# release starts under its RELEASE_NODE: its control plane is a one-member `ra` cluster named after the
+# node, which a rename after boot would strand. The name is derived from the OS pid, so a second
+# `mix test` on the same host (another worktree) does not fight this one for it in epmd.
 :ok = Malachi.Test.Distribution.ensure_started()
 
 # Record every message a long-lived server drops (Malachi.UnexpectedMessage) from here on, the application's

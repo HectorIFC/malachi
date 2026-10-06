@@ -58,7 +58,12 @@ defmodule Malachi.MixProject do
       # neither has to pass the flag and local output matches CI. Overriding `docs` here does not recurse:
       # Mix runs the underlying docs task (forwarding any CLI args to it) and then the copy function (the
       # documented idiom, e.g. `test: ["test", &fun/1]`).
-      docs: ["malachi.docs.results", "docs --warnings-as-errors", &copy_benchmarks/1]
+      docs: ["malachi.docs.results", "docs --warnings-as-errors", &copy_benchmarks/1],
+      # The suite boots the application itself, after naming the node (test/test_helper.exs), the order a
+      # release has: the control plane is an `ra` cluster whose members are named after the node, so a node
+      # renamed after boot would be asking a member that no longer exists by that name (#273). Any CLI args
+      # are forwarded to the task, as for `docs`.
+      test: ["test --no-start"]
     ]
   end
 

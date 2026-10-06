@@ -127,7 +127,7 @@ defmodule Malachi.Cluster.DurableRingRestartTest do
   defp stop_the_cluster(membership_pid), do: stop_quietly(membership_pid)
 
   # What a booting node does: read the durable store, then apply the precedence rule against whatever
-  # the environment happens to say. This is `Malachi.Application.boot_topology/2` without the
+  # the environment happens to say. This is `Malachi.Application.boot_topology/3` without the
   # supervision tree around it.
   defp boot(ring_server_id, env_topology) do
     ring_server_id
