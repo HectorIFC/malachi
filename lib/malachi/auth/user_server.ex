@@ -8,7 +8,7 @@ defmodule Malachi.Auth.UserServer do
   **Writes** (`put_user`/`delete_user`/`update_password`/`import_users`) go through the log, replicated by
   consensus, so every node converges on the same users (unlike the old node-local Mnesia store). They return
   `{:ok, machine_reply}` (e.g. `{:ok, :ok}` or `{:ok, {:error, :user_exists}}`) or `{:error, reason}` when
-  the cluster is unreachable.
+  the cluster is unreachable, `{:error, :timeout}` after two seconds without a commit.
 
   **Reads** (`get_user`/`list_users`/`export_users`) use `:ra.local_query` against the **local** replica:
   fast (no consensus round-trip) and adequate for the auth hot path, which runs once per connection. They
@@ -91,7 +91,14 @@ defmodule Malachi.Auth.UserServer do
     :ok
   end
 
-  defp command(server_id, command), do: RaCluster.command(server_id, command)
+  # Every write is issued from inside `Malachi.Auth`'s server loop, whose own callers wait the default five
+  # seconds. Bounding the commit well below that lets the loop answer a lone write (with `{:error, :timeout}`,
+  # which is ambiguous: the write may still commit) before its caller gives up, and shortens the stall every
+  # other user write sees behind a cluster with no leader. Writes still queue one at a time, so a caller with
+  # two or more writes ahead of it can still pass its five seconds.
+  @command_timeout 2_000
+
+  defp command(server_id, command), do: RaCluster.command(server_id, command, @command_timeout)
 
   # Reads the local replica's state (no consensus round-trip). Eventually consistent; fine for auth.
   defp local_query(server_id, query_fun), do: RaCluster.local_query(server_id, query_fun)

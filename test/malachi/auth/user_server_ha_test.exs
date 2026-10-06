@@ -84,4 +84,23 @@ defmodule Malachi.Auth.UserServerHaTest do
     assert {:ok, {"producer", "hp", [:produce]}} = UserServer.get_user(server_id, "producer")
     assert {:ok, {"admin", "hash1", [:admin]}} = UserServer.get_user(server_id, "admin")
   end
+
+  # A write is issued from inside Malachi.Auth's loop, whose callers wait five seconds; with no quorum it
+  # must give up well before that, so the loop answers (and audits) instead of its caller timing out.
+  test "a write with no quorum gives up within the bound, well before a caller's five seconds" do
+    peers = for _ <- 1..2, do: start_peer()
+    [n1, n2] = Enum.map(peers, &elem(&1, 1))
+    name = :"users_hd_#{System.unique_integer([:positive])}"
+    on_exit(fn -> UserServer.delete(name) end)
+
+    {:ok, server_id} = UserServer.start(name, [node(), n1, n2])
+    assert {:ok, :ok} = put(server_id, "ops", "hash1", [])
+
+    for {peer, _node} <- peers, do: :ok = Distribution.stop_peer(peer)
+
+    {elapsed_us, reply} = :timer.tc(fn -> UserServer.put_user({name, node()}, "late", "hash2", []) end)
+
+    assert {:error, _no_quorum} = reply
+    assert elapsed_us < 3_000_000, "the write waited #{div(elapsed_us, 1000)} ms"
+  end
 end
