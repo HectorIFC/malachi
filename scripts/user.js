@@ -10,6 +10,8 @@
  *   node user.js list                                   # list users and their permissions (no hashes)
  *   node user.js create <username> <password>           # create a user (default perms: produce,consume)
  *   node user.js create <u> <p> --perms admin           # create with specific perms (admin|produce|consume)
+ *   node user.js create <u> <p> --perms '' --role viewer  # create with a console role and no wire permission
+ *   node user.js role <username> <viewer|editor|admin|none>  # set or remove a user's console role
  *   node user.js passwd <username> <newpassword>        # rotate a user's password
  *   node user.js delete <username>                       # remove a user (revokes it everywhere)
  *
@@ -26,10 +28,12 @@ const cfg = config({ username: 'admin', password: 'admin123' });
 function usage() {
   console.log(colors.cyan('\nMalachi User admin CLI'));
   console.log(colors.gray('   node user.js list'));
-  console.log(colors.gray('   node user.js create <username> <password> [--perms produce,consume]'));
+  console.log(colors.gray('   node user.js create <username> <password> [--perms produce,consume] [--role viewer]'));
+  console.log(colors.gray('   node user.js role <username> <viewer|editor|admin|none>'));
   console.log(colors.gray('   node user.js passwd <username> <newpassword>'));
   console.log(colors.gray('   node user.js delete <username>\n'));
   console.log(colors.gray('   Permissions: admin | produce | consume (comma-separated).'));
+  console.log(colors.gray('   Console roles: viewer | editor | admin, nested; none removes the role.'));
   console.log(colors.gray('   Auth: MALACHI_USER/MALACHI_PASS (default admin/admin123, needs admin).\n'));
 }
 
@@ -49,7 +53,8 @@ async function run(cmd, rest, flags) {
           console.log(colors.gray('(no users)'));
         } else {
           for (const u of users.sort((a, b) => a.username.localeCompare(b.username))) {
-            console.log(`${colors.bold(u.username)}  ${colors.gray(`[${u.permissions.join(', ')}]`)}`);
+            const role = u.role ? `  role: ${u.role}` : '';
+            console.log(`${colors.bold(u.username)}  ${colors.gray(`[${u.permissions.join(', ')}]${role}`)}`);
           }
         }
         break;
@@ -58,12 +63,27 @@ async function run(cmd, rest, flags) {
       case 'create': {
         const [username, password] = rest;
         if (!username || !password) return usageExit();
-        const perms = String(flags.perms || 'produce,consume')
+        // Only a missing --perms takes the default: `--perms ''` asks for no wire permission at all.
+        const perms = String(flags.perms === undefined ? 'produce,consume' : flags.perms)
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean);
         await client.createUser(username, password, perms);
         console.log(colors.green(`created user "${username}" [${perms.join(', ')}]`));
+        // The create frame carries no role, so the role is a second request. If it is refused, the user
+        // exists without one and the error says why.
+        if (flags.role) {
+          await client.setRole(username, roleArg(flags.role));
+          console.log(colors.green(`set console role of "${username}" to ${flags.role}`));
+        }
+        break;
+      }
+
+      case 'role': {
+        const [username, role] = rest;
+        if (!username || !role) return usageExit();
+        await client.setRole(username, roleArg(role));
+        console.log(colors.green(`set console role of "${username}" to ${role}`));
         break;
       }
 
@@ -91,13 +111,18 @@ async function run(cmd, rest, flags) {
   }
 }
 
+// 'none' removes the role; the server refuses anything that is not a role.
+function roleArg(role) {
+  return role === 'none' ? null : role;
+}
+
 function usageExit() {
   usage();
   process.exit(1);
 }
 
 async function main() {
-  const { positional, flags } = parseArgs(process.argv.slice(2), ['perms']);
+  const { positional, flags } = parseArgs(process.argv.slice(2), ['perms', 'role']);
   if (flags.help) {
     usage();
     process.exit(0);

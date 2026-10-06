@@ -63,6 +63,49 @@ defmodule Mix.Tasks.Malachi.UserTest do
       assert msg == "a\t[admin]\nb\t[consume]"
     end
 
+    test "create with --role passes the role, and an empty --perms asks for no wire permission" do
+      call = recording_call({:ok, :ok})
+      assert {:ok, msg} = User.execute(["create", "ops", "pw"], [perms: "", role: "viewer"], call)
+      assert msg =~ "with console role viewer"
+      assert_received {:called, Malachi.Auth, :add_user, ["ops", "pw", [], :viewer]}
+    end
+
+    test "create with an unknown role fails without calling add_user" do
+      assert {:error, msg} = User.execute(["create", "ops", "pw"], [role: "root"], recording_call({:ok, :ok}))
+      assert msg =~ "invalid console role"
+      refute_received {:called, _, _, _}
+    end
+
+    test "role sets and removes a console role, naming the task as the actor" do
+      call = recording_call({:ok, :ok})
+
+      assert {:ok, msg} = User.execute(["role", "alice", "editor"], [], call)
+      assert msg =~ "set console role of alice to editor"
+      assert_received {:called, Malachi.Auth, :set_role, ["alice", :editor, "mix malachi.user"]}
+
+      assert {:ok, _msg} = User.execute(["role", "alice", "none"], [], call)
+      assert_received {:called, Malachi.Auth, :set_role, ["alice", nil, "mix malachi.user"]}
+
+      assert {:error, msg} = User.execute(["role", "alice", "root"], [], call)
+      assert msg =~ "invalid console role"
+    end
+
+    test "a cluster still below the roles' machine version is told what to finish" do
+      call = recording_call({:ok, {:error, {:unsupported_command, {:set_role, 3}, 5, 4}}})
+      assert {:error, msg} = User.execute(["role", "alice", "viewer"], [], call)
+      assert msg =~ "machine version 4 and this needs 5"
+    end
+
+    test "a tuple reason is shown, not crashed on" do
+      call = recording_call({:ok, {:error, {:odd, 1}}})
+      assert {:error, "{:odd, 1}"} = User.execute(["role", "alice", "viewer"], [], call)
+    end
+
+    test "list shows a console role when there is one" do
+      users = [%{username: "b", permissions: [], role: :viewer}, %{username: "a", permissions: [:admin], role: nil}]
+      assert {:ok, "a\t[admin]\nb\t[]\trole: viewer"} = User.execute(["list"], [], recording_call({:ok, users}))
+    end
+
     test "an RPC transport failure is reported, not crashed" do
       call = recording_call({:error, :nodedown})
       assert {:error, msg} = User.execute(["delete", "x"], [], call)
@@ -86,6 +129,52 @@ defmodule Mix.Tasks.Malachi.UserTest do
 
       assert {:ok, _} = User.execute(["delete", username], [], local_call())
       assert {:error, :user_not_found} = UserStore.get_user(username)
+    end
+
+    test "create with a role, change it and list it through the real store" do
+      username = "mixtask_role_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+
+      assert {:ok, _} = User.execute(["create", username, "Mix-Pass-1"], [perms: "", role: "viewer"], local_call())
+      assert {:ok, %{role: :viewer, permissions: []}} = UserStore.get_principal(username)
+
+      assert {:ok, _} = User.execute(["role", username, "admin"], [], local_call())
+      assert {:ok, %{role: :admin}} = UserStore.get_principal(username)
+
+      assert {:ok, listing} = User.execute(["list"], [], local_call())
+      assert listing =~ "#{username}\t[]\trole: admin"
+
+      assert {:error, "user_not_found"} = User.execute(["role", username <> "_x", "admin"], [], local_call())
+    end
+  end
+
+  describe "run/1 against a live node" do
+    # The suite's own VM is a named, running Malachi node, so pointing the task at it exercises the path the
+    # seam tests skip: resolve the node, connect, RPC, and print.
+    setup do
+      shell = Mix.shell()
+      Mix.shell(Mix.Shell.Process)
+      on_exit(fn -> Mix.shell(shell) end)
+      %{target: to_string(node())}
+    end
+
+    test "role reaches the node, sets the role and prints the answer", %{target: target} do
+      username = "mixtask_live_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Mix-Pass-1", [])
+
+      User.run(["role", username, "editor", "--node", target])
+
+      assert_received {:mix_shell, :info, [message]}
+      assert message =~ "set console role of #{username} to editor"
+      assert {:ok, %{role: :editor}} = UserStore.get_principal(username)
+    end
+
+    test "a refusal is printed on the error channel and exits non-zero", %{target: target} do
+      assert catch_exit(User.run(["role", "mixtask_nobody", "viewer", "--node", target])) == {:shutdown, 1}
+
+      assert_received {:mix_shell, :error, [message]}
+      assert message == "user_not_found"
     end
   end
 
