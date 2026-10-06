@@ -66,6 +66,11 @@ USER malachi
 ENV MALACHI_TCP_PORT=4040
 ENV MALACHI_DASHBOARD_PORT=4041
 ENV MALACHI_LOCALE=en_US
+# Audit events go to stdout, where a container's logs are collected, instead of the release default of
+# stdout plus /var/log/malachi/audit.log: that directory is not writable by the non-root user, and a file
+# inside the container would be lost on every recreate. Mount a writable volume and set
+# MALACHI_AUDIT_LOG_OUTPUT=both (or file) with MALACHI_AUDIT_LOG_FILE under it to keep a file as well.
+ENV MALACHI_AUDIT_LOG_OUTPUT=stdout
 
 # 4040 is the wire protocol, 4041 the dashboard (health, metrics) and 4042 the operator console.
 EXPOSE 4040 4041 4042

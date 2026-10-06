@@ -281,8 +281,6 @@ spec:
                 secretKeyRef:
                   name: malachi-secrets
                   key: app-pass
-            - name: MALACHI_AUDIT_LOG_OUTPUT
-              value: stdout
           readinessProbe:
             httpGet:
               path: /ready

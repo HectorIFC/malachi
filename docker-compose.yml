@@ -52,7 +52,6 @@ services:
       - MALACHI_REQUIRE_TLS=${MALACHI_REQUIRE_TLS:-false}
       - MALACHI_RATE_LIMIT_ENABLED=true
       - MALACHI_SESSION_IP_BINDING=true
-      - MALACHI_AUDIT_LOG_OUTPUT=stdout
       # Durable storage. Without these the defaults land under /tmp, which is a tmpfs (below), so every
       # segment and the ra log (user credentials, ACLs, lockouts) would live in RAM and vanish on restart.
       # Same paths as the Kubernetes manifest, both under the one persistent mount.
