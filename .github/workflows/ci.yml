@@ -269,6 +269,17 @@ jobs:
 
           echo "✅ Dashboard is responding correctly"
 
+          # The image's own HEALTHCHECK must turn the container healthy (#282): every compose file used to
+          # override the probe, so a broken one in the image went unseen. The container above runs with no
+          # health flags, and the check refuses one that overrides the probe. Last, so its wait for the first
+          # probe overlaps the checks above instead of adding to them.
+          echo "🩺 Checking the image HEALTHCHECK..."
+          if ! scripts/docker-image-health-check.sh malachi-test; then
+            echo "📋 Container logs:"
+            docker logs malachi-test
+            exit 1
+          fi
+
           # Stop container
           echo "🛑 Stopping container..."
           docker stop malachi-test
