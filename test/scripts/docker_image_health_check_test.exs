@@ -174,6 +174,8 @@ defmodule DockerImageHealthCheckTest do
     assert {out, 1} = run_container(ctx, ["running unhealthy"], env)
     assert out =~ "reported unhealthy after"
     refute out =~ "last probe output"
+    # An unreadable log is not an empty one: saying no probe ran would be a false diagnostic.
+    refute out =~ "no probe has run yet"
   end
 
   test "budgets the image's start period plus one interval plus one probe timeout", ctx do
@@ -277,6 +279,27 @@ defmodule DockerImageHealthCheckTest do
 
     assert out =~ "this check requires coreutils timeout, which is not on PATH"
     refute File.exists?(Path.join(ctx.stub_bin, "docker-args"))
+  end
+
+  test "finds its helper when run by bare name from the scripts directory", ctx do
+    # $0 has no slash then, which is the one way to reach the fallback that resolves the helper from `.`.
+    path = "#{ctx.stub_bin}:#{System.get_env("PATH")}"
+
+    env = [
+      {"PATH", path},
+      {"STUB_CONTAINER_TEST", @probe},
+      {"STUB_IMAGE_HEALTHCHECK", @image_healthcheck},
+      {"STUB_STATES", "running healthy"}
+    ]
+
+    assert {out, 0} =
+             System.cmd("bash", [Path.basename(@script), "malachi-test"],
+               cd: Path.dirname(@script),
+               env: env,
+               stderr_to_stdout: true
+             )
+
+    assert out =~ "container malachi-test reported healthy after"
   end
 
   test "refuses to run without exactly one container", ctx do
