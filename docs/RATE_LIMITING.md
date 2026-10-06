@@ -239,13 +239,13 @@ different things to a client:
 A connection cap answers `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total
 cap), sent just before the socket is closed.
 
-**Dashboard HTTP.** The dashboard replies with `HTTP/1.1 429 Too Many Requests`, a `Retry-After` header in
-seconds, and a JSON body:
+**Dashboard HTTP.** The dashboard and the console reply with `HTTP/1.1 429 Too Many Requests`, a
+`Retry-After` header in whole seconds, rounded up, and an `application/problem+json` body:
 
 ```json
 {
-  "s": "err",
-  "reason": "rate_limit_exceeded",
+  "type": "errors.http.rate_limited",
+  "status": 429,
   "retry_after_ms": 200
 }
 ```

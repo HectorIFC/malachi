@@ -502,7 +502,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/stream
 
 #### Using Existing Session Tokens
 
-Malachi session tokens (from TCP authentication) can be used for dashboard access if the user has `:admin` permission:
+Malachi session tokens (from TCP authentication) can be used for dashboard access if the user holds a console role (`viewer`, `editor` or `admin`), or the `:admin` permission, which implies the console `admin` role. See [console roles](docs/guides/authentication.md#console-roles):
 
 ```bash
 # Authenticate via TCP to get token
@@ -517,7 +517,9 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `MALACHI_DASHBOARD_AUTH_ENABLED` | `true` (prod) | Enable/disable dashboard auth |
-| `MALACHI_DASHBOARD_REQUIRE_ADMIN` | `true` | Require `:admin` permission for HTML/SSE |
+| `MALACHI_CLUSTER_DISPLAY_NAME` | (none) | The cluster's name in the console (`GET /api/v1/me`); set the same on every node |
+| `MALACHI_CLUSTER_COLOR` | (none) | The cluster's color in the console, `#RRGGBB` |
+| `MALACHI_CLUSTER_ICON` | (none) | The cluster's icon in the console, a slug of `a-z`, `0-9` and `-` |
 | `MALACHI_DASHBOARD_AUTH_RATE_LIMIT` | `10` | Max auth attempts per window |
 | `MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS` | `60000` | Rate limit window (1 minute) |
 | `MALACHI_DASHBOARD_API_RATE_LIMIT` | `300` | Max authenticated requests per window, per session (`0` = no limit) |
@@ -546,9 +548,14 @@ docker run \
 
 ### Permission Model
 
-- **`/` (Dashboard HTML)** and **`/stream` (SSE)**: Require `:admin` permission (configurable)
-- **`/metrics`** and **`/rate_limits`**: Allow any authenticated user
-- **`/login`**: Public endpoint (no authentication required)
+Access is by **console role** (`viewer` reads, `editor` adds storage policy changes, `admin` adds users
+and ACLs), independent of the wire permissions: `produce` and `consume` grant none, and the wire `admin` is
+a console `admin`. See [console roles](docs/guides/authentication.md#console-roles).
+
+- **`/`**, **`/stream`**, **`/metrics`**, **`/topic`** and **`/rate_limits`**: `viewer`
+- **Storage policy writes**: `editor`
+- **Users and ACLs**: `admin`
+- **`/login`**, **`/health`**, **`/ready`**: public
 
 ### Security Headers
 
@@ -769,8 +776,8 @@ operation:
 | 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit (a **member** ack also heartbeats) |
 | 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
-The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21) require the
-`:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
+The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
+and 23) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
 [per-topic retention](docs/guides/per-topic-retention.md) guides.
 
 Records on the wire carry **no offset**: position travels only in the opaque cursor, and permissions

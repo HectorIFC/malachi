@@ -43,8 +43,10 @@ answers `503` as described below.
   node, not by writing into it.
 - **Limits.** The header limits and read deadline are the dashboard's (`MALACHI_DASHBOARD_MAX_HEADER_*`),
   and an idle keep alive connection is closed after that deadline.
-- **Sessions.** Nothing the console serves today needs a login. A login on the dashboard sets the
-  `malachi_token` cookie, which the browser also sends to the console's port on the same host.
+- **Sessions.** The application shell needs no login; the `/api/v1` routes do, with
+  `Authorization: Bearer` or the `malachi_token` cookie a login on the dashboard sets, which the browser
+  also sends to the console's port on the same host. Each route requires a console role
+  ([console roles](authentication.md#console-roles)), and `GET /api/v1/me` says who the session is.
 
 ## Health checks
 
@@ -67,7 +69,9 @@ format**, every series namespaced `malachi_`:
 curl -H 'Accept: text/plain' http://localhost:4041/metrics
 ```
 
-Without that header the same endpoint returns the JSON payload the dashboard uses.
+Without that header the same endpoint returns the JSON payload the dashboard uses. Either way it needs a
+session whose account holds the console `viewer` role or above (or the `admin` permission): a scraper
+logging in with a `produce` or `consume` account is refused with a 403.
 
 Worth alerting on:
 
@@ -546,8 +550,15 @@ The first release that versions these machines is version 1, and every earlier b
 Version **2** adds the cluster flag store's `enable_flag` command. Version **3** adds the storage policy
 store's `define_policy` and `delete_policy`. Version **4** adds the metadata command that binds a topic to
 a storage policy (`bind_topic_policy`), so `mix malachi.policy bind` is refused, with a message saying to
-finish the rolling upgrade, until every node runs a release with version 4 and the pin is lifted. Each time, the machines that gained nothing move with it at
-no cost, and a member on the older build refuses the new command until the whole group has moved.
+finish the rolling upgrade, until every node runs a release with version 4 and the pin is lifted. Version
+**5** adds the console roles to the user store (`set_role`, creating a user with a role, and importing users
+with roles): until the cluster reaches 5, assigning a role is refused on every surface, as HTTP 409
+`errors.cluster.upgrade_pending` on the dashboard and the console and as the same "finish the rolling
+upgrade" message over the wire and in `mix malachi.user`. A default user that carries a role is not created,
+while creating a user without one keeps working. `node scripts/user.js create --role` creates the user and
+then sets the role in a second request, so on such a cluster it leaves the user created without a role. Finalizing it gives up rolling back below the release that
+introduced the roles. Each time, the machines that gained nothing move with it at no cost, and a member on
+the older build refuses the new command until the whole group has moved.
 
 The same rule applies at every step: to keep a rollback to the previous build possible while you roll
 out, upgrade with `MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now, and finalize
@@ -659,7 +670,8 @@ The checks that catch the common mistakes:
       `test.exs`.
 - [ ] **`MALACHI_REQUIRE_TLS` not set to `false`.** It defaults to true in production, so the check is
       that nobody disabled it while debugging certificates.
-- [ ] **Dashboard not publicly reachable**, and `MALACHI_DASHBOARD_REQUIRE_ADMIN` on.
+- [ ] **Dashboard not publicly reachable**, and every operator account holding the least console role it
+      needs (`viewer` to read). See [console roles](authentication.md#console-roles).
 - [ ] **`MALACHI_LOG_REPLICATION_FACTOR` at least 3** if you want to survive a node loss. With 2, quorum
       is 2, so losing either replica stalls writes.
 - [ ] **Retention configured.** The default keeps everything, and the disk fills quietly.

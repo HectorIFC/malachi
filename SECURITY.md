@@ -58,11 +58,11 @@ export MALACHI_CONSUMER_PASS="$(openssl rand -base64 32)"
 export MALACHI_TLS_CERTFILE=/path/to/cert.pem
 export MALACHI_TLS_KEYFILE=/path/to/key.pem
 
-# Dashboard: authentication is on by default and admin is required for the HTML
-# pages. It reuses the system users above (log in as admin); there is no separate
-# dashboard credential. Keep both enabled in production.
+# Dashboard: authentication is on by default. It reuses the system users above; what each
+# may see and change is its console role (viewer, editor, admin), and the wire permissions
+# produce and consume grant none. See docs/guides/authentication.md#console-roles. Keep it
+# enabled in production.
 export MALACHI_DASHBOARD_AUTH_ENABLED=true
-export MALACHI_DASHBOARD_REQUIRE_ADMIN=true
 
 # RECOMMENDED: Enable all security features
 export MALACHI_RATE_LIMIT_ENABLED=true

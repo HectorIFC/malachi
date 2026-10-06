@@ -43,6 +43,8 @@ mix malachi.user delete alice
 ```
 
 The permissions are `admin`, `produce`, `consume`. `admin` is a superuser and bypasses every later check.
+They are **wire** permissions: what a client may do over the binary protocol. What an operator may do
+through the dashboard and the console is a separate thing, the console role below.
 
 Repeated failures trigger a **progressive lockout**. After `MALACHI_MAX_AUTH_ATTEMPTS` failures the
 pair is locked for the base duration, and each further multiple of that attempt count escalates the
@@ -125,6 +127,77 @@ Send bearer tokens over TLS. A token is a bearer credential: whoever holds it is
 A perfectly valid token for a subject with no corresponding user is rejected as `invalid_credentials`,
 the same answer a wrong password gets. That is intentional: distinguishing "no such user" from "wrong
 credential" tells an attacker which usernames are real.
+
+## Console roles
+
+The dashboard and the console decide by **console role**, not by wire permission. There are three, cluster
+wide and strictly nested, the model Redpanda Console uses:
+
+| role | adds | capabilities (`GET /api/v1/me`) |
+|---|---|---|
+| `viewer` | every read of the cluster's operational state: `/`, `/stream`, `/metrics`, `/topic`, `/rate_limits`, the storage policies | `read_cluster` |
+| `editor` | the mutations that are not security: defining, deleting and binding storage policies | `manage_policies` |
+| `admin` | users, ACLs and diagnostics | `manage_users`, `manage_acls`, `diagnostics` |
+
+The two are orthogonal. `produce` and `consume` grant **no** console role, so an account that publishes
+records cannot read the cluster's state over HTTP; and a console role grants nothing on the wire, so a
+`viewer` with no wire permission cannot produce. The one bridge is the superuser: the wire `admin` is also
+a console `admin`. A user with no role and no `admin` can still log in, and `GET /api/v1/me` answers it with
+`role: null`, so the console can say why it shows nothing.
+
+Assign a role on any of the four surfaces:
+
+```bash
+mix malachi.user create ops s3cret --perms "" --role viewer   # a read only operator, no wire permission
+mix malachi.user role alice editor
+mix malachi.user role alice none                               # remove it
+node scripts/user.js role alice viewer
+curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"role":"viewer"}' http://localhost:4041/users/alice/role
+MALACHI_DEFAULT_USERS="admin:pw:admin;ops:pw2::viewer"         # user:password:permissions[:role]
+```
+
+Managing roles is user management, so it takes the console `admin` role over HTTP and the wire `admin`
+permission over the binary protocol. Every change is audited as `user_role_changed`, with who made it.
+
+A role change takes effect on the user's **next request** on each node, as soon as that node's replica of
+the user store has applied it: the session only proves who the user is, and the role is read on each
+request from the replica on the node that received it. That read is eventually consistent. A follower
+behind the leader answers with the old role for the replication lag, and a node cut off from the leader by
+a partition keeps the old role, and still accepts logins under it, until it rejoins. An open `/stream`
+connection was authorized when it opened, so a role taken away reaches it when it reconnects or its
+session expires. If a node's replica is not running, that node answers 503 (`errors.auth.unavailable`)
+rather than falling back to the session.
+
+Which route needs which role is one table, `Malachi.Console.Access.routes/0`, read by both HTTP endpoints. A
+refusal is an `application/problem+json` body naming what is missing:
+
+```json
+{"type": "errors.auth.missing_role", "status": 403, "required_role": "viewer", "role": null}
+```
+
+With `MALACHI_DASHBOARD_AUTH_ENABLED=false` every request is an anonymous `admin`, as before roles existed;
+it is for local work only.
+
+### Upgrading to console roles
+
+This is a deliberate break, announced here and in the release notes:
+
+- An account with `admin` keeps everything, unchanged.
+- An account with only `produce` and/or `consume` **loses** dashboard reads (`/metrics`, `/topic`,
+  `/rate_limits`), which it only had as a side effect. Give it `viewer` if it needs them. A Prometheus
+  scraper that logs in with such an account needs `viewer` (the scraper in `deploy/prometheus` uses
+  `admin`).
+- `MALACHI_DASHBOARD_REQUIRE_ADMIN` is gone: `/` and `/stream` take `viewer`, like every other read.
+- Every HTTP error, on the dashboard as on the console, is now `application/problem+json` with `type` as a
+  translation key; the old `{"s": "err", "reason": ...}` body is gone. A failed login and an invalid or
+  expired session are a 401 rather than a 403.
+- Roles are stored at machine version 5. While the cluster is still rolling (a member on the previous
+  release, or `MALACHI_RA_MACHINE_VERSION` pinned below 5), setting a role is refused on every surface: as
+  HTTP 409 `errors.cluster.upgrade_pending`, naming the version it waits for, on the dashboard and the
+  console, and as the same "finish the rolling upgrade" message over the wire and in `mix malachi.user`.
+  Creating a user without a role keeps working; `node scripts/user.js create --role` creates the user first
+  and sets the role second, so there it leaves the user without a role. A default user that carries a role is not created at all on such a cluster, and the boot
+  log says why.
 
 ## Sessions
 
