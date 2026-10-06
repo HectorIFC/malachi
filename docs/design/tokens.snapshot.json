@@ -1913,36 +1913,36 @@
         "alpha": 1.0
       }
     },
-    "cluster-amber": {
-      "path": "color.cluster.amber",
+    "cluster-orange": {
+      "path": "color.cluster.orange",
       "type": "color",
       "platforms": [
         "web",
         "elixir"
       ],
-      "themed": false,
-      "ref": "brand-accent",
+      "themed": true,
+      "ref": null,
       "redeclare": {
         "dark": true,
         "modes": []
       },
       "light": {
-        "web": "var(--brand-accent)",
-        "value": "oklch(0.769 0.157 70.1)",
+        "web": "oklch(0.770 0.140 40.1)",
+        "value": "oklch(0.770 0.140 40.1)",
         "srgb8": [
-          242,
-          160,
-          37
+          255,
+          147,
+          109
         ],
         "alpha": 1.0
       },
       "dark": {
-        "web": "var(--brand-accent)",
-        "value": "oklch(0.769 0.157 70.1)",
+        "web": "oklch(0.770 0.140 40.1)",
+        "value": "oklch(0.770 0.140 40.1)",
         "srgb8": [
-          242,
-          160,
-          37
+          255,
+          147,
+          109
         ],
         "alpha": 1.0
       }
@@ -1995,22 +1995,22 @@
         "modes": []
       },
       "light": {
-        "web": "oklch(0.645 0.200 16.0)",
-        "value": "oklch(0.645 0.200 16.0)",
+        "web": "oklch(0.670 0.190 1.0)",
+        "value": "oklch(0.670 0.190 1.0)",
         "srgb8": [
-          238,
-          73,
-          99
+          237,
+          87,
+          142
         ],
         "alpha": 1.0
       },
       "dark": {
-        "web": "oklch(0.645 0.200 16.0)",
-        "value": "oklch(0.645 0.200 16.0)",
+        "web": "oklch(0.670 0.190 1.0)",
+        "value": "oklch(0.670 0.190 1.0)",
         "srgb8": [
-          238,
-          73,
-          99
+          237,
+          87,
+          142
         ],
         "alpha": 1.0
       }

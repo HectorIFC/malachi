@@ -357,7 +357,8 @@ that look similar. All four run in `mix malachi.tokens --check`, its own step in
    control border `input`, each on both `background` and `card`, and the focus ring on `background`,
    `card`, `muted` and `popover` (`sidebar-ring` on the sidebar background and accent). `border` is a divider rather than a
    control boundary and is not gated. A pair with alpha is refused rather than composited. The same step fails when two members of a `$cvd` set, simulated for deuteranopia,
-   come closer than the distance it declares.
+   come closer than the distance it declares, and when a color in an `$apart` set (a cluster's
+   identity) comes closer than its distance to one it must not be mistaken for (a state).
 
 ### 4.2 Tokens
 
@@ -383,10 +384,11 @@ its own named tokens instead:
 `--chart-1` through `--chart-5` stay reserved for time series, and are checked for deuteranopia
 distinguishability by the same generator gate.
 
-`--cluster-teal`, `--cluster-amber`, `--cluster-violet` and `--cluster-rose` are the identity color an
+`--cluster-teal`, `--cluster-orange`, `--cluster-violet` and `--cluster-rose` are the identity color an
 operator picks for a cluster, so two consoles open side by side are told apart at a glance. They are
-never a state and never a time series, are checked for deuteranopia like the chart colors, and carry
-their text in `--cluster-foreground`, which reaches 4.5 on each of them.
+never a state and never a time series, are checked for deuteranopia like the chart colors, are kept at
+least 0.05 in OKLab from every state color in both themes (`$apart`), which is why there is an orange
+and no amber, and carry their text in `--cluster-foreground`, which reaches 4.5 on each of them.
 
 ### 4.3 Themes
 
@@ -1078,7 +1080,7 @@ makes three interfaces one product rather than three that resemble each other.
 
 | Artifact | Source | Consumers | Gate |
 |---|---|---|---|
-| `docs/design/design-tokens.json` | Hand authored in OKLCH | `tokens.css`, `generated.rs`, `tokens.ex`, `tokens.snapshot.json` | `mix malachi.tokens --check`: stale output; no raw colour literals; cross language contract; contrast, deuteranopia, gamut and terminal distinctness |
+| `docs/design/design-tokens.json` | Hand authored in OKLCH | `tokens.css`, `generated.rs`, `tokens.ex`, `tokens.snapshot.json` | `mix malachi.tokens --check`: stale output; no raw colour literals; cross language contract; contrast, deuteranopia, colors kept apart, gamut and terminal distinctness |
 | `docs/design/keymap.json` | Hand authored | Web registry, kbd hints, cmdk entries, `?` overlay, ratatui dispatcher, native menu | Collision lint per surface |
 | `docs/design/commands.json` | Hand authored | Web palette, TUI palette, workspace context menus, native menu | Every command has both locales and a destructiveness flag |
 | Translation catalog | `lib/malachi/i18n.ex` | Web, TUI, desktop | Freshness check in CI |
@@ -1311,6 +1313,8 @@ moment `priv/static` holds the console.
   only surfaces a state or a chart color is drawn on: putting one on another surface, such as `muted`
   or `accent`, or using `destructive` as text, means adding its pair to the token file first, and the
   gate then holds it.
+  `focus-accent`, the brand amber, is decoration beside a focused element and never the only sign of
+  focus; `ring` is the focus indicator, which is why only `ring` is held to 3:1.
 - A live tail must be pausable, which is WCAG 2.2.2 at level A. It auto pauses when the operator
   scrolls away from the bottom, uses a fixed capacity ring buffer with a **visible** drop counter,
   and shows one state chip: live, reconnecting, paused, disconnected.

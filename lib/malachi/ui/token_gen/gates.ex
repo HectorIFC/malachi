@@ -8,6 +8,9 @@ defmodule Malachi.UI.TokenGen.Gates do
     * **Contrast.** Every pair in `$contrast`, in both themes, against its own threshold, on the
       bytes a screen shows. A pair with alpha on either side is refused rather than composited,
       because its contrast depends on what it is drawn over.
+    * **Apart.** Every member of each `$apart` set's `these` stays at least `$apart.minDeltaEOK`
+      from every member of its `from`, in OKLab, in both themes, so a color with one meaning (a
+      cluster's identity) never looks like a color with another (a state).
     * **Color vision.** Every two members of a `$cvd` set, in both themes, simulated for a
       deuteranope, must stay at least `$cvd.minDeltaEOK` apart in OKLab.
     * **Terminal distinctness.** Every two tokens in `$terminal.distinct` land on different 256 color
@@ -24,7 +27,7 @@ defmodule Malachi.UI.TokenGen.Gates do
   @doc "Runs every gate. An empty list means the tokens pass."
   @spec check(Model.t()) :: [String.t()]
   def check(%Model{} = model) do
-    gamut(model) ++ contrast(model) ++ cvd(model) ++ distinct(model) ++ redundant(model)
+    gamut(model) ++ contrast(model) ++ cvd(model) ++ apart(model) ++ distinct(model) ++ redundant(model)
   end
 
   defp gamut(%Model{entries: entries, source: source}) do
@@ -68,6 +71,26 @@ defmodule Malachi.UI.TokenGen.Gates do
         distance < min do
       "$cvd: #{a} and #{b} in #{theme} are #{fixed(distance, 3)} apart for a deuteranope, below #{min}"
     end
+  end
+
+  defp apart(%Model{source: source} = model) do
+    min = source.apart.min
+
+    for %{these: these, from: from} <- source.apart.sets,
+        a <- these,
+        b <- from,
+        theme <- @themes,
+        distance = oklab_distance(model, a, b, theme),
+        distance < min do
+      "$apart: #{a} and #{b} in #{theme} are #{fixed(distance, 3)} apart, below #{min}"
+    end
+  end
+
+  defp oklab_distance(model, a, b, theme) do
+    Color.delta_e_ok(
+      Color.srgb8_to_oklab(Model.fetch!(model, a).color[theme].srgb8),
+      Color.srgb8_to_oklab(Model.fetch!(model, b).color[theme].srgb8)
+    )
   end
 
   defp cvd_distance(model, a, b, theme) do

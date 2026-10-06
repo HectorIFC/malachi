@@ -1264,6 +1264,40 @@
       ]
     },
     {
+      "path": "color.cluster.orange",
+      "theme": "light",
+      "oklch": "oklch(0.770 0.140 40.1)",
+      "srgb8": [
+        255,
+        147,
+        109
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 209,
+      "deuteranopiaOklab": [
+        0.781719,
+        -0.01348,
+        0.098732
+      ]
+    },
+    {
+      "path": "color.cluster.orange",
+      "theme": "dark",
+      "oklch": "oklch(0.770 0.140 40.1)",
+      "srgb8": [
+        255,
+        147,
+        109
+      ],
+      "clipDeltaEOK": 0,
+      "ansi256": 209,
+      "deuteranopiaOklab": [
+        0.781719,
+        -0.01348,
+        0.098732
+      ]
+    },
+    {
       "path": "color.cluster.violet",
       "theme": "light",
       "oklch": "oklch(0.627 0.170 303.0)",
@@ -1300,35 +1334,35 @@
     {
       "path": "color.cluster.rose",
       "theme": "light",
-      "oklch": "oklch(0.645 0.200 16.0)",
+      "oklch": "oklch(0.670 0.190 1.0)",
       "srgb8": [
-        238,
-        73,
-        99
+        237,
+        87,
+        142
       ],
       "clipDeltaEOK": 0,
-      "ansi256": 167,
+      "ansi256": 168,
       "deuteranopiaOklab": [
-        0.659699,
-        -0.008922,
-        0.071317
+        0.679041,
+        -0.001427,
+        0.019845
       ]
     },
     {
       "path": "color.cluster.rose",
       "theme": "dark",
-      "oklch": "oklch(0.645 0.200 16.0)",
+      "oklch": "oklch(0.670 0.190 1.0)",
       "srgb8": [
-        238,
-        73,
-        99
+        237,
+        87,
+        142
       ],
       "clipDeltaEOK": 0,
-      "ansi256": 167,
+      "ansi256": 168,
       "deuteranopiaOklab": [
-        0.659699,
-        -0.008922,
-        0.071317
+        0.679041,
+        -0.001427,
+        0.019845
       ]
     },
     {
@@ -2479,19 +2513,19 @@
     },
     {
       "foreground": "color.cluster.foreground",
-      "background": "color.cluster.amber",
+      "background": "color.cluster.orange",
       "theme": "light",
       "foregroundOklch": "oklch(0.161 0.004 265)",
-      "backgroundOklch": "oklch(0.769 0.157 70.1)",
-      "ratio": 9.089
+      "backgroundOklch": "oklch(0.770 0.140 40.1)",
+      "ratio": 8.9187
     },
     {
       "foreground": "color.cluster.foreground",
-      "background": "color.cluster.amber",
+      "background": "color.cluster.orange",
       "theme": "dark",
       "foregroundOklch": "oklch(0.161 0.004 265)",
-      "backgroundOklch": "oklch(0.769 0.157 70.1)",
-      "ratio": 9.089
+      "backgroundOklch": "oklch(0.770 0.140 40.1)",
+      "ratio": 8.9187
     },
     {
       "foreground": "color.cluster.foreground",
@@ -2514,16 +2548,16 @@
       "background": "color.cluster.rose",
       "theme": "light",
       "foregroundOklch": "oklch(0.161 0.004 265)",
-      "backgroundOklch": "oklch(0.645 0.200 16.0)",
-      "ratio": 5.3335
+      "backgroundOklch": "oklch(0.670 0.190 1.0)",
+      "ratio": 5.8755
     },
     {
       "foreground": "color.cluster.foreground",
       "background": "color.cluster.rose",
       "theme": "dark",
       "foregroundOklch": "oklch(0.161 0.004 265)",
-      "backgroundOklch": "oklch(0.645 0.200 16.0)",
-      "ratio": 5.3335
+      "backgroundOklch": "oklch(0.670 0.190 1.0)",
+      "ratio": 5.8755
     }
   ]
 }

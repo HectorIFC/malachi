@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Malachi.Tokens do
     * `docs/design/tokens.snapshot.json`, the flat view the contract tests compare the others against.
 
   Nothing is written when the token file breaks a rule or fails a gate (contrast, color vision,
-  gamut, terminal distinctness); every reason is listed instead. See `Malachi.UI.TokenGen`.
+  colors kept apart, gamut, terminal distinctness); every reason is listed instead. See `Malachi.UI.TokenGen`.
 
   `--check` regenerates in memory and fails on any output that is missing or differs from what the
   token file produces, on a committed output that breaks the cross language contract, and on a raw

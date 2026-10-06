@@ -94,6 +94,19 @@ defmodule Malachi.UI.TokenGen.SourceTest do
       for pair <- expected, do: assert(pair in gated, "#{inspect(pair)} is not gated at 3:1")
     end
 
+    test "the repository keeps every cluster color apart from every state color" do
+      {:ok, source} = Source.parse(repo())
+      clusters = ~w(color.cluster.teal color.cluster.orange color.cluster.violet color.cluster.rose)
+
+      states =
+        ~w(active sealed fenced damaged behind ahead blocked unknown) |> Enum.map(&"color.state.#{&1}")
+
+      covered =
+        for %{these: these, from: from} <- source.apart.sets, a <- these, b <- from, into: MapSet.new(), do: {a, b}
+
+      for a <- clusters, b <- states, do: assert({a, b} in covered, "#{a} is not kept apart from #{b}")
+    end
+
     test "reads the sections" do
       {:ok, source} = Source.parse(minimal())
 
@@ -102,6 +115,12 @@ defmodule Malachi.UI.TokenGen.SourceTest do
 
       assert source.cvd == %{min: 0.05, sets: [["color.chart.1", "color.chart.2"]]}
       assert source.gamut == %{max: 0.03}
+
+      assert source.apart == %{
+               min: 0.05,
+               sets: [%{these: ["color.chart.1", "color.chart.2"], from: ["color.state.on", "color.state.off"]}]
+             }
+
       assert source.ansi16["color.state.on"] == %{code: 10, ratatui: "Color::LightGreen"}
       assert source.ansi16["color.base.background"] == %{code: :default, ratatui: "Color::Reset"}
       assert source.ansi256 == %{light: %{}, dark: %{}}
@@ -133,7 +152,7 @@ defmodule Malachi.UI.TokenGen.SourceTest do
     end
 
     test "a section present but not an object is an error, never an empty section that gates nothing" do
-      for section <- ~w($platforms $contrast $cvd $gamut $ansi16 $ansi256 $terminal), value <- [nil, 1, []] do
+      for section <- ~w($platforms $contrast $cvd $apart $gamut $ansi16 $ansi256 $terminal), value <- [nil, 1, []] do
         assert_error(put(minimal(), [section], value), "#{section}: must be an object")
       end
     end
@@ -398,6 +417,24 @@ defmodule Malachi.UI.TokenGen.SourceTest do
     test "a cvd set that is too small or names a non color" do
       assert_error(put(minimal(), ["$cvd", "sets"], [["color.chart.1"]]), "$cvd: a set names at least two")
       assert_error(put(minimal(), ["$cvd", "sets"], [["color.chart.1", "space.1"]]), "$cvd: space.1 is not a color")
+    end
+
+    test "an $apart set with the wrong shape, a non color member or a bad threshold" do
+      assert_error(
+        put(minimal(), ["$apart", "sets"], [object([{"these", ["color.chart.1"]}])]),
+        "$apart: a set has exactly these and from"
+      )
+
+      bad = object([{"these", ["color.chart.1"]}, {"from", ["space.1"]}])
+      assert_error(put(minimal(), ["$apart", "sets"], [bad]), "$apart: space.1 is not a color token")
+
+      empty = object([{"these", []}, {"from", ["color.state.on"]}])
+      assert_error(put(minimal(), ["$apart", "sets"], [empty]), "$apart: these and from each name at least one color")
+
+      assert_error(put(minimal(), ["$apart", "sets"], "all"), "$apart: sets must be a list")
+      assert_error(put(minimal(), ["$apart", "sets"], [1]), "$apart: a set has exactly these and from")
+      assert_error(put(minimal(), ["$apart", "minDeltaEOK"], 0), "$apart: minDeltaEOK")
+      assert_error(put(minimal(), ["$apart", "x"], 1), "$apart: unknown key x")
     end
 
     test "a bad threshold or gamut method" do

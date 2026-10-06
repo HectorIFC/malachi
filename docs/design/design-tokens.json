@@ -8,7 +8,7 @@
       "Regenerate and compare: `mix malachi.tokens --check` fails on any generated file that differs from what this file produces.",
       "Raw color literal: the same check fails on any #hex, oklch(, rgb(, rgba(, hsl(, hsla(, Color::Rgb, Color::Indexed or named Color:: in assets/src or tui/src outside the generated files.",
       "Cross language contract: an ExUnit test parses tokens.css, generated.rs and the Elixir module and compares each with tokens.snapshot.json in both directions, so a missing and an extra token each fail. The web and the terminal projects add their own native test when they land (#231, #233).",
-      "Contrast and distinguishability: every pair in $contrast in both themes, the deuteranopia distance in $cvd, the gamut tolerance in $gamut, and distinct terminal colors for every token in $terminal.distinct."
+      "Contrast and distinguishability: every pair in $contrast in both themes, the deuteranopia distance in $cvd, the distance between colors of different meanings in $apart, the gamut tolerance in $gamut, and distinct terminal colors for every token in $terminal.distinct."
     ]
   },
 
@@ -86,12 +86,12 @@
       "text-on-primary": { "$value": "{color.base.primary-foreground}" },
       "border-default":  { "$value": "{color.base.border}" },
       "focus-ring":      { "$value": "{color.base.ring}" },
-      "focus-accent":    { "$value": "{color.brand.accent}" }
+      "focus-accent":    { "$value": "{color.brand.accent}", "$description": "Decoration beside a focused element, never the only sign of focus; the focus indicator is focus-ring. Not contrast gated for that reason." }
     },
 
     "brand": {
       "$prefix": "brand-",
-      "$description": "Amber, carried over from benchmark/dashboard/index.html so the console is continuous with the one page in this project that was designed on purpose. Used for the focused accent, never for a state. The logo keeps its own navy and cyan from docs/logo.svg, which appear in the logo and nowhere else.",
+      "$description": "Amber, carried over from benchmark/dashboard/index.html so the console is continuous with the one page in this project that was designed on purpose. Never a state. focus-accent carries it as decoration beside a focused element and is never the only sign of focus: ring is the focus indicator and the one the contrast gate holds at 3:1, while the amber reaches only about 2:1 on the light surfaces. The logo keeps its own navy and cyan from docs/logo.svg, which appear in the logo and nowhere else.",
       "accent":       { "light": "oklch(0.769 0.157 70.1)", "dark": "oklch(0.769 0.157 70.1)" },
       "accent-soft":  { "light": "oklch(0.769 0.157 70.1 / 0.14)", "dark": "oklch(0.769 0.157 70.1 / 0.16)" },
       "logo-tile":    { "$name": "logo-tile", "light": "oklch(0.177 0.051 273.2)", "dark": "oklch(0.177 0.051 273.2)", "$description": "The logo's navy tile, #0a0e27. The logo only." },
@@ -132,11 +132,11 @@
 
     "cluster": {
       "$prefix": "cluster-",
-      "$description": "The identity color an operator picks for a cluster, so two consoles open side by side are told apart at a glance. Identity only: never a state, never a time series. The same in both themes, and checked for deuteranopia distinguishability ($cvd). Text on a swatch uses cluster-foreground.",
+      "$description": "The identity color an operator picks for a cluster, so two consoles open side by side are told apart at a glance. Identity only: never a state, never a time series. The same in both themes, checked for deuteranopia distinguishability among themselves ($cvd) and kept apart from every state color ($apart), which is why there is an orange and no amber: an amber would read as state.fenced. Text on a swatch uses cluster-foreground.",
       "teal":       { "light": "oklch(0.600 0.118 184.7)", "dark": "oklch(0.600 0.118 184.7)" },
-      "amber":      { "$value": "{color.brand.accent}" },
+      "orange":     { "light": "oklch(0.770 0.140 40.1)",  "dark": "oklch(0.770 0.140 40.1)" },
       "violet":     { "light": "oklch(0.627 0.170 303.0)", "dark": "oklch(0.627 0.170 303.0)" },
-      "rose":       { "light": "oklch(0.645 0.200 16.0)",  "dark": "oklch(0.645 0.200 16.0)" },
+      "rose":       { "light": "oklch(0.670 0.190 1.0)",   "dark": "oklch(0.670 0.190 1.0)" },
       "foreground": { "light": "oklch(0.161 0.004 265)",   "dark": "oklch(0.161 0.004 265)" }
     },
 
@@ -214,7 +214,7 @@
       { "foreground": "color.sidebar.ring", "background": "color.sidebar.background", "role": "graphic" },
       { "foreground": "color.sidebar.ring", "background": "color.sidebar.accent", "role": "graphic" },
       { "foreground": "color.cluster.foreground", "background": "color.cluster.teal",   "role": "text" },
-      { "foreground": "color.cluster.foreground", "background": "color.cluster.amber",  "role": "text" },
+      { "foreground": "color.cluster.foreground", "background": "color.cluster.orange",  "role": "text" },
       { "foreground": "color.cluster.foreground", "background": "color.cluster.violet", "role": "text" },
       { "foreground": "color.cluster.foreground", "background": "color.cluster.rose",   "role": "text" }
     ]
@@ -226,7 +226,18 @@
     "minDeltaEOK": 0.05,
     "sets": [
       ["color.chart.1", "color.chart.2", "color.chart.3", "color.chart.4", "color.chart.5"],
-      ["color.cluster.teal", "color.cluster.amber", "color.cluster.violet", "color.cluster.rose"]
+      ["color.cluster.teal", "color.cluster.orange", "color.cluster.violet", "color.cluster.rose"]
+    ]
+  },
+
+  "$apart": {
+    "$description": "Colors with different meanings that must never look alike. Every member of these stays at least minDeltaEOK from every member of from, in OKLab, in each theme. A cluster's identity color must not read as a state.",
+    "minDeltaEOK": 0.05,
+    "sets": [
+      {
+        "these": ["color.cluster.teal", "color.cluster.orange", "color.cluster.violet", "color.cluster.rose"],
+        "from": ["color.state.active", "color.state.sealed", "color.state.fenced", "color.state.damaged", "color.state.behind", "color.state.ahead", "color.state.blocked", "color.state.unknown"]
+      }
     ]
   },
 

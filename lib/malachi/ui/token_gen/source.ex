@@ -18,8 +18,8 @@ defmodule Malachi.UI.TokenGen.Source do
       the token declares `$name`. `$type` is inherited down the tree.
     * A token is an object with `$value`, or, for a color only, `light` and `dark`. A `$value` may be
       a reference, `{path.to.token}`, which keeps the referenced token's type.
-    * The sections are `$platforms`, `$contrast`, `$cvd`, `$gamut`, `$ansi16`, `$ansi256` and
-      `$terminal`, all required, plus the free text `$description` and `$meta`.
+    * The sections are `$platforms`, `$contrast`, `$cvd`, `$apart`, `$gamut`, `$ansi16`, `$ansi256`
+      and `$terminal`, all required, plus the free text `$description` and `$meta`.
     * The sixteen color tier is never inferred. A terminal token without an `$ansi16` entry is an
       error, not a gap this module fills.
   """
@@ -27,7 +27,7 @@ defmodule Malachi.UI.TokenGen.Source do
   alias Jason.OrderedObject
   alias Malachi.UI.TokenGen.{Color, Token}
 
-  @enforce_keys [:tokens, :tui, :contrast, :cvd, :gamut, :ansi16, :ansi256, :terminal]
+  @enforce_keys [:tokens, :tui, :contrast, :cvd, :apart, :gamut, :ansi16, :ansi256, :terminal]
   defstruct @enforce_keys
 
   @typedoc "A sixteen color entry: an ANSI SGR color number, or `:default` to inherit, and its ratatui name."
@@ -38,6 +38,7 @@ defmodule Malachi.UI.TokenGen.Source do
           tui: [String.t()],
           contrast: [%{foreground: String.t(), background: String.t(), role: :text | :graphic, min: float()}],
           cvd: %{min: float(), sets: [[String.t()]]},
+          apart: %{min: float(), sets: [%{these: [String.t()], from: [String.t()]}]},
           gamut: %{max: float()},
           ansi16: %{String.t() => ansi16()},
           ansi256: %{light: %{String.t() => 16..255}, dark: %{String.t() => 16..255}},
@@ -51,8 +52,8 @@ defmodule Malachi.UI.TokenGen.Source do
           }
         }
 
-  @sections ~w($description $meta $platforms $contrast $cvd $gamut $ansi16 $ansi256 $terminal)
-  @required ~w($platforms $contrast $cvd $gamut $ansi16 $ansi256 $terminal)
+  @sections ~w($description $meta $platforms $contrast $cvd $apart $gamut $ansi16 $ansi256 $terminal)
+  @required ~w($platforms $contrast $cvd $apart $gamut $ansi16 $ansi256 $terminal)
 
   @types %{
     "color" => :color,
@@ -123,6 +124,7 @@ defmodule Malachi.UI.TokenGen.Source do
     {terminal, terminal_errors} = parse_terminal(get(root, "$terminal"), platforms.tui)
     {contrast, contrast_errors} = parse_contrast(get(root, "$contrast"), index)
     {cvd, cvd_errors} = parse_cvd(get(root, "$cvd"), index)
+    {apart, apart_errors} = parse_apart(get(root, "$apart"), index)
     {gamut, gamut_errors} = parse_gamut(get(root, "$gamut"))
     {ansi16, ansi16_errors} = parse_ansi16(get(root, "$ansi16"), platforms.tui, terminal)
     {ansi256, ansi256_errors} = parse_ansi256(get(root, "$ansi256"), platforms.tui)
@@ -133,7 +135,8 @@ defmodule Malachi.UI.TokenGen.Source do
         name_errors(tokens) ++
         reference_errors(tokens, index) ++
         platform_errors ++
-        terminal_errors ++ contrast_errors ++ cvd_errors ++ gamut_errors ++ ansi16_errors ++ ansi256_errors
+        terminal_errors ++
+        contrast_errors ++ cvd_errors ++ apart_errors ++ gamut_errors ++ ansi16_errors ++ ansi256_errors
 
     case errors do
       [] ->
@@ -143,6 +146,7 @@ defmodule Malachi.UI.TokenGen.Source do
            tui: platforms.tui,
            contrast: contrast,
            cvd: cvd,
+           apart: apart,
            gamut: gamut,
            ansi16: ansi16,
            ansi256: ansi256,
@@ -688,6 +692,50 @@ defmodule Malachi.UI.TokenGen.Source do
   end
 
   defp parse_gamut(_gamut), do: {%{max: 0.0}, []}
+
+  # Colors with different meanings that must never look alike: every member of `these` stays at least
+  # minDeltaEOK from every member of `from`, in OKLab, in each theme. It keeps a cluster identity color
+  # from reading as a state, which the description of the cluster group promises.
+  defp parse_apart(%OrderedObject{} = apart, index) do
+    min = get(apart, "minDeltaEOK")
+    min_errors = if positive?(min), do: [], else: ["$apart: minDeltaEOK #{inspect(min)} must be a positive number"]
+
+    {sets, set_errors} =
+      case get(apart, "sets") do
+        sets when is_list(sets) ->
+          results = Enum.map(sets, &apart_set(&1, index))
+          {for({:ok, set} <- results, do: set), for({:error, errors} <- results, error <- errors, do: error)}
+
+        _other ->
+          {[], ["$apart: sets must be a list"]}
+      end
+
+    errors = unknown_keys(apart, ~w($description minDeltaEOK sets), "$apart") ++ min_errors ++ set_errors
+    {%{min: if(is_number(min), do: min * 1.0, else: 0.0), sets: sets}, errors}
+  end
+
+  defp parse_apart(_apart, _index), do: {%{min: 0.0, sets: []}, []}
+
+  defp apart_set(%OrderedObject{values: entries} = set, index) do
+    these = get(set, "these")
+    from = get(set, "from")
+
+    cond do
+      entries |> Enum.map(&elem(&1, 0)) |> Enum.sort() != ~w(from these) ->
+        {:error, ["$apart: a set has exactly these and from"]}
+
+      not (match?([_ | _], these) and match?([_ | _], from)) ->
+        {:error, ["$apart: these and from each name at least one color"]}
+
+      true ->
+        case Enum.flat_map(these ++ from, &color_path_errors("$apart", &1, index)) do
+          [] -> {:ok, %{these: these, from: from}}
+          errors -> {:error, errors}
+        end
+    end
+  end
+
+  defp apart_set(_set, _index), do: {:error, ["$apart: a set has exactly these and from"]}
 
   defp positive?(value), do: is_number(value) and value > 0
 

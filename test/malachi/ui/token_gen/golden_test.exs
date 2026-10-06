@@ -8,16 +8,42 @@ defmodule Malachi.UI.TokenGen.GoldenTest do
   """
   use ExUnit.Case, async: true
 
-  alias Malachi.UI.TokenGen.{Color, Contrast, Cvd, Quantize}
+  alias Malachi.UI.TokenGen.{Color, Contrast, Cvd, Model, Quantize, Source, Token}
 
   @golden "test/fixtures/tokens/golden.json" |> File.read!() |> Jason.decode!()
 
-  test "the fixture covers both themes of every color with its own value" do
-    assert length(@golden["colors"]) >= 100
-    assert length(@golden["contrast"]) >= 80
+  # The fixture is frozen, so nothing else would notice it going stale: these two tests tie it to the token
+  # file as it is now, and a changed, added, renamed or removed color or pair fails until it is regenerated.
+  test "the fixture holds exactly the token file's own colors, in both themes" do
+    {:ok, source} = Source.load(File.read!("docs/design/design-tokens.json"))
 
-    # An alias is resolved, so a pair that names one still has a reference value.
-    assert Enum.any?(@golden["contrast"], &(&1["background"] == "color.cluster.amber"))
+    expected =
+      for %Token{type: :color, themed: true} = token <- source.tokens, theme <- [:light, :dark], into: MapSet.new() do
+        {token.path, Atom.to_string(theme), Map.fetch!(token.raw, theme)}
+      end
+
+    actual = MapSet.new(@golden["colors"], &{&1["path"], &1["theme"], &1["oklch"]})
+    assert MapSet.difference(expected, actual) == MapSet.new(), "colors the fixture lacks or has stale"
+    assert MapSet.difference(actual, expected) == MapSet.new(), "colors the fixture has and the token file does not"
+  end
+
+  test "the fixture holds exactly the token file's contrast pairs, in both themes, with their resolved colors" do
+    {:ok, source} = Source.load(File.read!("docs/design/design-tokens.json"))
+    model = Model.build(source)
+    value = fn path, theme -> Model.fetch!(model, path).value[String.to_existing_atom(theme)] end
+
+    expected =
+      for %{foreground: fg, background: bg} <- source.contrast, theme <- ~w(light dark), into: MapSet.new() do
+        {fg, bg, theme, value.(fg, theme), value.(bg, theme)}
+      end
+
+    actual =
+      MapSet.new(@golden["contrast"], fn pair ->
+        {pair["foreground"], pair["background"], pair["theme"], pair["foregroundOklch"], pair["backgroundOklch"]}
+      end)
+
+    assert MapSet.difference(expected, actual) == MapSet.new(), "pairs the fixture lacks or has stale"
+    assert MapSet.difference(actual, expected) == MapSet.new(), "pairs the fixture has and the token file does not"
   end
 
   for %{"path" => path, "theme" => theme} = vector <- @golden["colors"] do

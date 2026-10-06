@@ -15,7 +15,7 @@ defmodule Malachi.UI.TokenGen do
 
   The pipeline is `Malachi.UI.TokenGen.Source` (parse and validate the file), then
   `Malachi.UI.TokenGen.Model` (compute every value once), then `Malachi.UI.TokenGen.Gates` (gamut,
-  contrast, color vision, terminal distinctness), then `Malachi.UI.TokenGen.Emit`. Nothing is
+  contrast, color vision, colors kept apart, terminal distinctness), then `Malachi.UI.TokenGen.Emit`. Nothing is
   written unless every step passes. `check/1` is what CI runs, through `mix malachi.tokens --check`.
   """
 

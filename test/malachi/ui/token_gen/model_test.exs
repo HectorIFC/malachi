@@ -140,6 +140,17 @@ defmodule Malachi.UI.TokenGen.ModelTest do
       assert_gate(file, "$cvd: color.chart.1 and color.chart.2 in light are 0.0")
     end
 
+    test "a color too close to one it must stay apart from fails the $apart gate" do
+      file =
+        put(
+          minimal(),
+          ["color", "chart", "2"],
+          object([{"light", "oklch(0.577 0.222 27.3)"}, {"dark", "oklch(0.769 0.157 70.1)"}])
+        )
+
+      assert_gate(file, "$apart: color.chart.2 and color.state.off in light are 0.000 apart, below 0.05")
+    end
+
     test "a color sRGB cannot approximate fails the gamut gate" do
       file = put(minimal(), ["color", "chart", "1", "dark"], "oklch(0.546 0.350 244.3)")
       assert_gate(file, "$gamut: color.chart.1 in dark moves")

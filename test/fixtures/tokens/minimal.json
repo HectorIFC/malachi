@@ -59,6 +59,11 @@
     "sets": [["color.chart.1", "color.chart.2"]]
   },
 
+  "$apart": {
+    "minDeltaEOK": 0.05,
+    "sets": [{ "these": ["color.chart.1", "color.chart.2"], "from": ["color.state.on", "color.state.off"] }]
+  },
+
   "$gamut": { "method": "clip", "maxDeltaEOK": 0.03 },
 
   "$ansi16": {
