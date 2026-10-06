@@ -445,7 +445,57 @@ defmodule Malachi.UI.TokenGen.Source do
         "#{token.path}: reference cycle through #{Enum.join(chain, ", ")}"
       end
 
-    Enum.reject(usage_errors, &is_nil/1) ++ cycle_errors
+    Enum.reject(usage_errors, &is_nil/1) ++ cycle_errors ++ mode_cycle_errors(tokens, index)
+  end
+
+  # A cycle that only exists inside a mode. Under `.density-<mode>` a token that declares that mode
+  # takes its alternative and every token built from a moded one is declared again with its own value
+  # (`Malachi.UI.TokenGen.Model`), so in that block each token points at its alternative when it has
+  # one and at the tokens its value is made of otherwise. Two declarations that name each other there
+  # are invalid at computed-value time, which no browser reports. Each cycle is reported once, from its
+  # alphabetically first path, and only when it runs through a token that declares the mode: a cycle
+  # with no mode in it is the whole value cycle above.
+  defp mode_cycle_errors(tokens, index) do
+    modes = tokens |> Enum.flat_map(fn token -> Enum.map(token.modes, &elem(&1, 0)) end) |> Enum.uniq()
+
+    for mode <- modes,
+        cycle <- mode_cycles(tokens, index, mode),
+        do: "#{hd(cycle)}: reference cycle in mode #{mode} through #{Enum.join(cycle, ", ")}"
+  end
+
+  defp mode_cycles(tokens, index, mode) do
+    tokens
+    |> Enum.flat_map(&cycles_from(&1.path, [&1.path], index, mode))
+    |> Enum.filter(fn cycle -> Enum.any?(cycle, &has_mode?(Map.fetch!(index, &1), mode)) end)
+    |> Enum.map(&rotate_to_first/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp cycles_from(start, path, index, mode) do
+    path
+    |> hd()
+    |> then(&mode_targets(Map.get(index, &1), mode))
+    |> Enum.flat_map(fn
+      ^start -> [Enum.reverse(path)]
+      next -> if next in path, do: [], else: cycles_from(start, [next | path], index, mode)
+    end)
+  end
+
+  defp mode_targets(nil, _mode), do: []
+
+  defp mode_targets(%Token{} = token, mode) do
+    case List.keyfind(token.modes, mode, 0) do
+      {^mode, target} -> [target]
+      nil -> value_references(token)
+    end
+  end
+
+  defp has_mode?(%Token{modes: modes}, mode), do: List.keymember?(modes, mode, 0)
+
+  defp rotate_to_first(cycle) do
+    {before, from_first} = Enum.split(cycle, Enum.find_index(cycle, &(&1 == Enum.min(cycle))))
+    from_first ++ before
   end
 
   defp references(%Token{} = token) do

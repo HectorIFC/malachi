@@ -377,6 +377,27 @@ defmodule Malachi.UI.TokenGen.SourceTest do
       file = put(file, ["color", "alias", "loop-b"], object([{"$value", "{color.alias.loop-a}"}]))
       assert_error(file, "color.alias.loop-a: reference cycle")
     end
+
+    test "in a cycle that exists only in one mode, between two alternatives" do
+      gap = object([{"$value", "{density.row.default}"}, {"$modes", object([{"compact", "{density.row.gap2}"}])}])
+      gap2 = object([{"$value", "{density.row.default}"}, {"$modes", object([{"compact", "{density.row.gap}"}])}])
+      file = minimal() |> put(["density", "row", "gap"], gap) |> put(["density", "row", "gap2"], gap2)
+      assert_error(file, "density.row.gap: reference cycle in mode compact through density.row.gap, density.row.gap2")
+    end
+
+    test "in a cycle that a mode closes through an ordinary value" do
+      # gap's own value names height, and height's compact alternative names gap: in .density-compact
+      # the two declarations would name each other.
+      file = put(minimal(), ["density", "row", "gap"], object([{"$value", "{density.row.height}"}]))
+      height = object([{"$value", "{density.row.default}"}, {"$modes", object([{"compact", "{density.row.gap}"}])}])
+      file = put(file, ["density", "row", "height"], height)
+      assert_error(file, "reference cycle in mode compact through")
+    end
+
+    test "a mode alternative that names a token with no mode of its own is not a cycle" do
+      gap = object([{"$value", "{density.row.default}"}, {"$modes", object([{"compact", "{density.row.height}"}])}])
+      assert {:ok, _source} = Source.parse(put(minimal(), ["density", "row", "gap"], gap))
+    end
   end
 
   describe "$contrast, $cvd and $gamut" do
