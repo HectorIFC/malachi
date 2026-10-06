@@ -88,8 +88,9 @@ defmodule Malachi.Retention.Orphans do
                       }}
                      | {:error, term()})
 
-  # Written by `Malachi.Storage.FormatMarker` at the root of the data directory.
-  @marker_names ["malachi.format", "malachi.format.tmp"]
+  # Written by `Malachi.Storage.FormatMarker` and `Malachi.Storage.DataDirGuard` at the root of the data
+  # directory.
+  @marker_names ["malachi.format", "malachi.format.tmp", "malachi.cluster", "malachi.cluster.tmp"]
   # Written by `Malachi.DataPlaneRouter.shards/1` when a single node runs more than one data-plane shard.
   @shard_name ~r/\A shard_ \d+ \z/x
   # The tail of `Layout.segment_directory/2`'s readable form, from one `-r` to the end of the name. It is

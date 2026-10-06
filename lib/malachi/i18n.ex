@@ -341,6 +341,24 @@ defmodule Malachi.I18n do
           "delete the marker, that would let this binary overwrite data it cannot read"
     },
     # Log directory against the control plane (Malachi.Storage.DataDirGuard).
+    data_dir_cluster_renamed: %{
+      "pt_BR" =>
+        "%{path} pertence ao control plane %{recorded}, e este nó (%{node}) iniciaria nele como %{cluster}. " <>
+          "O anel e os membros do ra são um só por diretório ra e nome de nó, seja qual for o nome do cluster, " <>
+          "então os dois control planes se misturariam e o orphan sweep poderia apagar os segmentos do " <>
+          "primeiro. Volte MALACHI_LOG_CLUSTER para %{recorded}, ou forme %{cluster} com outro " <>
+          "MALACHI_LOG_DATA_DIR e outro MALACHI_RA_DATA_DIR e mova os dados com um cliente",
+      "en_US" =>
+        "%{path} belongs to the control plane %{recorded}, and this node (%{node}) would start on it as " <>
+          "%{cluster}. The ring store and the ra members are one per ra directory and node name, whatever the " <>
+          "cluster is called, so the two control planes would mix and the orphan sweep could delete the " <>
+          "first one's segments. Set MALACHI_LOG_CLUSTER back to %{recorded}, or form %{cluster} with another " <>
+          "MALACHI_LOG_DATA_DIR and another MALACHI_RA_DATA_DIR and move the data with a client"
+    },
+    data_dir_cluster_marker_unreadable: %{
+      "pt_BR" => "um nome ilegível (o arquivo malachi.cluster não tem exatamente uma linha cluster=<nome>)",
+      "en_US" => "an unreadable name (the malachi.cluster file does not hold exactly one cluster=<name> line)"
+    },
     data_dir_unknown_segments: %{
       "pt_BR" =>
         "%{path} tem %{count} diretórios de segmento (%{names}) e o control plane %{cluster} seria formado " <>
@@ -374,6 +392,41 @@ defmodule Malachi.I18n do
           "supported: this node would come back alone while the others formed another cluster under the " <>
           "same name. Remove the other nodes from MALACHI_LOG_NODES, or form the new cluster under another " <>
           "MALACHI_LOG_CLUSTER with another MALACHI_LOG_DATA_DIR and move the data with a client"
+    },
+    data_dir_reshard_unsupported: %{
+      "pt_BR" =>
+        "o control plane %{cluster} já rodou sem sharding neste nó (%{node}), e MALACHI_LOG_VNODES pede " <>
+          "vnodes. Converter um control plane para sharding no lugar não é suportado: o anel sharded valeria " <>
+          "dali em diante e a metadata atual dos tópicos não seria mais lida, então o orphan sweep apagaria " <>
+          "os segmentos deles. Nada foi gravado: remova MALACHI_LOG_VNODES para iniciar como antes. Para fazer " <>
+          "sharding, forme um cluster novo com outro MALACHI_LOG_CLUSTER, outro MALACHI_LOG_DATA_DIR e outro " <>
+          "MALACHI_RA_DATA_DIR (o anel é um só por diretório ra) e mova os dados com um cliente",
+      "en_US" =>
+        "the control plane %{cluster} already ran unsharded on this node (%{node}), and MALACHI_LOG_VNODES asks " <>
+          "for vnodes. Converting a control plane to sharding in place is not supported: the sharded ring would " <>
+          "rule from then on and the topics' current metadata would no longer be read, so the orphan sweep " <>
+          "would delete their segments. Nothing was written: remove MALACHI_LOG_VNODES to start as before. To " <>
+          "shard, form a new cluster under another MALACHI_LOG_CLUSTER with another MALACHI_LOG_DATA_DIR and " <>
+          "another MALACHI_RA_DATA_DIR (there is one ring store per ra directory) and move the data with a client"
+    },
+    data_dir_resharded: %{
+      "pt_BR" =>
+        "o control plane %{cluster} rodou sem sharding neste nó (%{node}), e um anel sharded já está gravado " <>
+          "para ele (por outro nó, por uma release anterior que convertia control planes no lugar, ou por " <>
+          "uma release anterior neste nó sob outro MALACHI_LOG_CLUSTER no mesmo diretório ra). A " <>
+          "metadata sem sharding dos tópicos não é mais lida e o anel vale mais que MALACHI_LOG_VNODES, então " <>
+          "não há volta no lugar; iniciar deixaria o orphan sweep apagar os segmentos que essa metadata " <>
+          "descreve. Forme o cluster de novo com outro MALACHI_LOG_CLUSTER, outro MALACHI_LOG_DATA_DIR e outro " <>
+          "MALACHI_RA_DATA_DIR, e guarde os diretórios deste nó até os dados não serem mais necessários",
+      "en_US" =>
+        "the control plane %{cluster} ran unsharded on this node (%{node}), and a sharded ring is already " <>
+          "recorded for it (by another node, by an earlier release that converted control planes in place, or by " <>
+          "an earlier release on this node under another MALACHI_LOG_CLUSTER over the same ra directory). " <>
+          "The topics' unsharded metadata is no longer read and the ring outranks MALACHI_LOG_VNODES, so there " <>
+          "is no way back in place; starting would let the orphan sweep delete the segments that metadata " <>
+          "describes. Form the cluster again under another MALACHI_LOG_CLUSTER with another " <>
+          "MALACHI_LOG_DATA_DIR and another MALACHI_RA_DATA_DIR, and keep this node's directories until the " <>
+          "data is no longer wanted"
     },
     data_dir_membership_unknown: %{
       "pt_BR" =>

@@ -208,6 +208,22 @@ defmodule Malachi.Application do
   @spec ensure_data_dir_identity(atom(), [node()], Path.t(), keyword()) :: term()
   def ensure_data_dir_identity(cluster, nodes, dir, opts), do: DataDirGuard.check(cluster, nodes, dir, opts)
 
+  @doc """
+  The startup gate's first step, before the boot touches the ring store
+  (`Malachi.Storage.DataDirGuard.check_ring/4`, whose doc holds the rules it applies).
+  """
+  @spec ensure_ring_identity(atom(), Path.t(), boolean(), keyword()) :: term()
+  def ensure_ring_identity(cluster, dir, ring_known?, opts \\ []),
+    do: DataDirGuard.check_ring(cluster, dir, ring_known?, opts)
+
+  @doc """
+  The startup gate's step before a sharded seed is written (`Malachi.Storage.DataDirGuard.check_seed/3`):
+  refuses the start over an unsharded control plane that ran here or over segments the vnodes formed now
+  could not know, and logs and goes on when the operator adopted those segments.
+  """
+  @spec ensure_seed_identity(atom(), Path.t(), keyword()) :: term()
+  def ensure_seed_identity(cluster, dir, opts \\ []), do: DataDirGuard.check_seed(cluster, dir, opts)
+
   defp log_data_dir do
     Application.get_env(:malachi, :log_data_dir, Path.join(System.tmp_dir!(), "malachi_log"))
   end
@@ -407,7 +423,17 @@ defmodule Malachi.Application do
     # Whether this node ever started a control plane, read before `boot_topology/2` starts the ring store
     # and so registers it (`Malachi.Storage.DataDirGuard`).
     ring_known? = not is_nil(cluster) and DataDirGuard.ring_known?()
-    topology = boot_topology(cluster, nodes)
+
+    # Before the boot touches the ring store: a refusal here leaves nothing registered, so the next
+    # attempt is refused too (`Malachi.Storage.DataDirGuard`).
+    ring_identity = if cluster, do: ensure_ring_identity(cluster, log_data_dir(), ring_known?), else: :ok
+    ring_adopted? = match?({:adopt, _dirs}, ring_identity)
+
+    # Before a sharded seed is written: it outranks the environment for good and forms every vnode now,
+    # so it is refused over an unsharded control plane that ran here or over segments it cannot know.
+    {topology, seed_identity} =
+      boot_topology(cluster, nodes, fn -> ensure_seed_identity(cluster, log_data_dir(), adopted?: ring_adopted?) end)
+
     vnodes = boot_vnodes(topology)
 
     log_stack =
@@ -424,7 +450,11 @@ defmodule Malachi.Application do
 
         # Before the broker starts the metadata members: a control plane formed now over segment
         # directories it does not know would let the orphan sweep delete them (#273), sharded or not.
-        ensure_data_dir_identity(cluster, nodes, log_data_dir(), ring_known?: ring_known?, sharded?: not is_nil(vnodes))
+        ensure_data_dir_identity(cluster, nodes, log_data_dir(),
+          sharded?: not is_nil(vnodes),
+          vnodes: vnodes || [],
+          adopted?: ring_adopted? or match?({:adopt, _dirs}, seed_identity)
+        )
 
         [
           ring_reconciler_child(nodes),
@@ -497,25 +527,39 @@ defmodule Malachi.Application do
   `MALACHI_LOG_NODES`, never from the ring itself. That is what keeps the bootstrap acyclic: this Raft
   group does not live in the vnodes it describes.
 
-  Returns `nil` for an unclustered node (no ring exists) and for a clustered one that is genuinely
-  unsharded. **Raises** when the store cannot be read within `MALACHI_LOG_RING_BOOT_TIMEOUT_MS`:
+  `before_seed` runs only when the environment is about to seed the store, before anything is written: it
+  is where the boot refuses a seed (`Malachi.Storage.DataDirGuard.check_seed/3`), and what it answered is
+  returned beside the topology (`:ok` when no seed was due).
+
+  Returns `{nil, :ok}` for an unclustered node (no ring exists) and for a clustered one that is
+  genuinely unsharded. **Raises** when the store cannot be read within `MALACHI_LOG_RING_BOOT_TIMEOUT_MS`:
   refusing to boot is deliberate, because a node that cannot see the ring cannot know which vnode owns
   which arc, and serving on a guess is the corruption being fixed.
   """
-  @spec boot_topology(atom() | nil, [node()]) :: RingTopology.t() | nil
-  def boot_topology(nil, _nodes), do: nil
+  @spec boot_topology(atom() | nil, [node()], (-> term())) :: {RingTopology.t() | nil, term()}
+  def boot_topology(cluster, nodes, before_seed \\ fn -> :ok end)
 
-  def boot_topology(cluster, nodes) do
+  def boot_topology(nil, _nodes, _before_seed), do: {nil, :ok}
+
+  def boot_topology(cluster, nodes, before_seed) do
     _ = RingServer.start(@log_ring, nodes)
     server_id = {@log_ring, RaCluster.member_node(nodes)}
     timeout_ms = Application.get_env(:malachi, :log_ring_boot_timeout_ms, 60_000)
     read = RingBoot.read_until(fn -> RingServer.topology(server_id) end, timeout_ms: timeout_ms)
 
     case RingBoot.resolve(read, env_topology(cluster, nodes)) do
-      {:durable, topology} -> topology
-      {:seed, seed} -> plant_seed(server_id, seed)
-      :unsharded -> nil
-      {:error, reason} -> raise RingBoot.unreadable_message(reason, timeout_ms)
+      {:durable, topology} ->
+        {topology, :ok}
+
+      {:seed, seed} ->
+        seed_identity = before_seed.()
+        {plant_seed(server_id, seed), seed_identity}
+
+      :unsharded ->
+        {nil, :ok}
+
+      {:error, reason} ->
+        raise RingBoot.unreadable_message(reason, timeout_ms)
     end
   end
 
