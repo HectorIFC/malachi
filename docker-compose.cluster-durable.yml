@@ -81,7 +81,7 @@ x-malachi-node: &malachi-node
     - /tmp:rw,noexec,nosuid
   mem_limit: 1g
   healthcheck:
-    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
+    # The probe is the image's own HEALTHCHECK (Dockerfile); this only tunes its timings.
     interval: 5s
     timeout: 3s
     retries: 30

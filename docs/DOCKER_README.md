@@ -179,15 +179,14 @@ services:
     volumes:
       - malachi-data:/app/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4041/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
 volumes:
   malachi-data:
 ```
+
+The image ships its own `HEALTHCHECK` (probing `http://127.0.0.1:4041/health`), so the service needs no
+`healthcheck:` block. To change only its timings, give `interval`, `timeout`, `retries` or `start_period`
+without a `test`, and Docker keeps the image's probe.
 
 > These compose defaults are fine for test and development; tune them conservatively for production.
 

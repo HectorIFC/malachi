@@ -80,10 +80,10 @@ services:
     # The third thing that stopped this file from working, and the quietest. It used to probe with
     # `nc -z`, and the BusyBox nc in this image has no -z flag, so the check exited 1 forever: the
     # container ran fine and was reported unhealthy for its whole life, which also meant every
-    # `depends_on: service_healthy` below it never fired. This is the probe the image's own HEALTHCHECK
-    # and the cluster compose already use, against the endpoint built for it.
+    # `depends_on: service_healthy` below it never fired. No probe is set here any more: Docker fills
+    # the missing test from the image's own HEALTHCHECK, so this block only tunes its timings and the
+    # probe is written once, in the Dockerfile.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
       interval: 10s
       timeout: 5s
       retries: 5
