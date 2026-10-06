@@ -5,15 +5,16 @@ defmodule Malachi.Auth.UserServer do
   `Malachi.Cluster.LeaseServer`; `ra` must already be running (`:ra.start_in/1`). This module owns only the
   user cluster, not ra's lifecycle.
 
-  **Writes** (`put_user`/`delete_user`/`update_password`/`import_users`) go through the log, replicated by
+  **Writes** (`put_user`/`set_role`/`delete_user`/`update_password`/`import_users`) go through the log, replicated by
   consensus, so every node converges on the same users (unlike the old node-local Mnesia store). They return
   `{:ok, machine_reply}` (e.g. `{:ok, :ok}` or `{:ok, {:error, :user_exists}}`) or `{:error, reason}` when
-  the cluster is unreachable.
+  the cluster is unreachable, `{:error, :timeout}` after two seconds without a commit.
 
-  **Reads** (`get_user`/`list_users`/`export_users`) use `:ra.local_query` against the **local** replica:
-  fast (no consensus round-trip) and adequate for the auth hot path, which runs once per connection. They
-  are eventually consistent: a just-written user propagates within replication lag - which is acceptable
-  for auth; a caller needing linearizable reads can query the leader instead.
+  **Reads** (`get_user`/`get_principal`/`list_users`/`export_users`) use `:ra.local_query` against the **local** replica:
+  fast (no consensus round-trip) and adequate for the auth hot paths: credentials once per connection, and
+  `get_principal` on every dashboard and console request (`Malachi.Console.Access`). They are eventually
+  consistent: a just-written user propagates within replication lag, which is acceptable for auth; a
+  caller needing linearizable reads can query the leader instead.
   """
 
   alias Malachi.Auth.UserMachine
@@ -49,6 +50,29 @@ defmodule Malachi.Auth.UserServer do
     command(server_id, {:put_user, username, hash, permissions})
   end
 
+  @doc """
+  Inserts a user holding a console `role` (machine version 5). Machine reply is `:ok`,
+  `{:error, :user_exists}`, `{:error, :invalid_role}`, or a version refusal on a cluster still below 5.
+  """
+  @spec put_user(
+          server_id(),
+          UserRegistry.username(),
+          UserRegistry.password_hash(),
+          UserRegistry.permissions(),
+          UserRegistry.role() | nil
+        ) :: {:ok, UserRegistry.reply()} | {:error, term()}
+  def put_user(server_id, username, hash, permissions, role) do
+    command(server_id, {:put_user, username, hash, permissions, role})
+  end
+
+  @doc """
+  Sets (or with `nil` removes) a user's console role (machine version 5). Machine reply is `:ok`,
+  `{:error, :user_not_found}`, `{:error, :invalid_role}`, or a version refusal.
+  """
+  @spec set_role(server_id(), UserRegistry.username(), UserRegistry.role() | nil) ::
+          {:ok, UserRegistry.reply()} | {:error, term()}
+  def set_role(server_id, username, role), do: command(server_id, {:set_role, username, role})
+
   @doc "Deletes a user (idempotent). Machine reply is `:ok`."
   @spec delete_user(server_id(), UserRegistry.username()) :: {:ok, UserRegistry.reply()} | {:error, term()}
   def delete_user(server_id, username), do: command(server_id, {:delete_user, username})
@@ -64,6 +88,11 @@ defmodule Malachi.Auth.UserServer do
   @spec import_users(server_id(), [user_entry()]) :: {:ok, UserRegistry.reply()} | {:error, term()}
   def import_users(server_id, users), do: command(server_id, {:import_users, users})
 
+  @doc "Bulk-imports users with their console roles (machine version 5); otherwise as `import_users/2`."
+  @spec import_users_with_roles(server_id(), [UserRegistry.role_entry()]) ::
+          {:ok, UserRegistry.reply()} | {:error, term()}
+  def import_users_with_roles(server_id, users), do: command(server_id, {:import_users_with_roles, users})
+
   @doc "Reads a user as `{username, hash, permissions}` from the local replica, or `{:error, :user_not_found}`."
   @spec get_user(server_id(), UserRegistry.username()) ::
           {:ok, {UserRegistry.username(), UserRegistry.password_hash(), UserRegistry.permissions()}}
@@ -71,6 +100,16 @@ defmodule Malachi.Auth.UserServer do
   def get_user(server_id, username) do
     case local_query(server_id, &UserRegistry.get_user(&1, username)) do
       {:ok, {:ok, user}} -> {:ok, user}
+      {:ok, {:error, :user_not_found}} -> {:error, :user_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Reads a user's permissions and console role (no hash) from the local replica."
+  @spec get_principal(server_id(), UserRegistry.username()) :: {:ok, UserRegistry.principal()} | {:error, term()}
+  def get_principal(server_id, username) do
+    case local_query(server_id, &UserRegistry.get_principal(&1, username)) do
+      {:ok, {:ok, principal}} -> {:ok, principal}
       {:ok, {:error, :user_not_found}} -> {:error, :user_not_found}
       {:error, reason} -> {:error, reason}
     end
@@ -91,7 +130,14 @@ defmodule Malachi.Auth.UserServer do
     :ok
   end
 
-  defp command(server_id, command), do: RaCluster.command(server_id, command)
+  # Every write is issued from inside `Malachi.Auth`'s server loop, whose own callers wait the default five
+  # seconds. Bounding the commit well below that lets the loop answer a lone write (with `{:error, :timeout}`,
+  # which is ambiguous: the write may still commit) before its caller gives up, and shortens the stall every
+  # other user write sees behind a cluster with no leader. Writes still queue one at a time, so a caller with
+  # two or more writes ahead of it can still pass its five seconds.
+  @command_timeout 2_000
+
+  defp command(server_id, command), do: RaCluster.command(server_id, command, @command_timeout)
 
   # Reads the local replica's state (no consensus round-trip). Eventually consistent; fine for auth.
   defp local_query(server_id, query_fun), do: RaCluster.local_query(server_id, query_fun)

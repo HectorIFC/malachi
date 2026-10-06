@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * The storage policy codecs against the golden frames the Elixir codec is tested with
- * (test/support/fixtures/wire/policy_frames.json). Run: `node scripts/lib/wire.selftest.js [fixture]`.
+ * The storage policy and console role codecs against the golden frames the Elixir codec is tested with
+ * (test/support/fixtures/wire/policy_frames.json and user_frames.json). Run:
+ * `node scripts/lib/wire.selftest.js [fixture...]`, every fixture when none is named.
  * No server needed. ExUnit runs it (test/scripts/policy_js_test.exs), so a byte the two clients disagree
  * on fails the Elixir build too.
  *
@@ -20,8 +21,11 @@ if (process.argv[2] === '--fields') {
   process.exit(0);
 }
 
-const fixture = process.argv[2] || path.join(__dirname, '../../test/support/fixtures/wire/policy_frames.json');
-const { cases } = JSON.parse(fs.readFileSync(fixture, 'utf8'));
+const fixtureDir = path.join(__dirname, '../../test/support/fixtures/wire');
+const fixtures = process.argv.length > 2
+  ? process.argv.slice(2)
+  : ['policy_frames.json', 'user_frames.json'].map((name) => path.join(fixtureDir, name));
+const cases = fixtures.flatMap((fixture) => JSON.parse(fs.readFileSync(fixture, 'utf8')).cases);
 
 // Requests are encoded and compared byte for byte; responses are decoded and compared value for value.
 const requests = {
@@ -30,11 +34,14 @@ const requests = {
   list_policies_req: () => wire.encodeListPoliciesReq(),
   bind_topic_policy_req: (v) => wire.encodeBindTopicPolicyReq(v.topic, v.name),
   get_topic_policy_req: (v) => wire.encodeGetTopicPolicyReq(v),
+  set_role_req: (v) => wire.encodeSetRoleReq(v.username, v.role),
+  list_users_with_roles_req: () => Buffer.alloc(0),
 };
 
 const responses = {
   list_policies_resp: (buf) => wire.decodeListPoliciesResp(buf),
   topic_policy_resp: (buf) => wire.decodeTopicPolicyResp(buf),
+  list_users_with_roles_resp: (buf) => wire.decodeListUsersWithRolesResp(buf),
 };
 
 let checked = 0;
@@ -53,6 +60,7 @@ for (const c of cases) {
 // A malformed response is refused, never half read.
 assert.throws(() => wire.decodeListPoliciesResp(Buffer.from('0000000000', 'hex')), /trailing bytes/);
 assert.throws(() => wire.decodeTopicPolicyResp(Buffer.from('0100000001740007', 'hex')), /unknown code 7/);
+assert.throws(() => wire.decodeListUsersWithRolesResp(Buffer.from('0000000000', 'hex')), /trailing bytes/);
 assert.throws(() => wire.encodeDefinePolicyReq('p', [['retention.max_bytes', -1]]), /non-negative integer/);
 // A number past 2^53 has already lost precision, so it is refused rather than sent rounded, and a BigInt
 // past 2^64 - 1 is refused with the same message rather than the runtime's own range error.

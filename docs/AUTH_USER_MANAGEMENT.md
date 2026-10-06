@@ -123,6 +123,33 @@ api_keys), a **REST API** on the dashboard, a **Node CLI** (`scripts/user.js`, `
 distribution. The RPC boilerplate is shared through `Malachi.CLI.Rpc`. Passwords cross the wire in the
 clear as the handshake does, so run these over TLS in production.
 
+### Console roles are not wire permissions (#228)
+
+The wire permissions used to double as dashboard access: any authenticated account read `/metrics`,
+`/topic` and `/rate_limits`, so publishing records implied reading the cluster's operational state, and the
+only alternative was `admin`, which grants everything. The console now has its own three nested roles,
+`viewer`, `editor` and `admin` (`Malachi.Auth.ConsoleRole`), stored per user in the replicated user registry
+at machine version 5, beside and independent of the wire permissions. Only the wire `admin` implies a
+console role (`admin`), stated once in `Malachi.Auth.Authorization.superuser?/1`.
+
+Both HTTP endpoints decide through `Malachi.Console.Access`, whose single route table says what each route
+requires. The session proves identity only: the role is read from the local replica on every request, so a
+change made on any node reaches every node's sessions on their next request once that node's replica has
+applied it, which revoking sessions could not do, since sessions are node-local. The read is eventually
+consistent (a partitioned node keeps the old role until it rejoins), the price of not sending every HTTP
+request to the leader.
+
+This widens what the cluster-wide user registry is used for: before, it was read at login only; now every
+authenticated dashboard and console request reads it, so a node whose replica is not running answers those
+503 instead of serving from the session. A login on such a node is still answered as invalid credentials,
+as it was before. The registry was already one Raft group with a member on every node, which is
+already broader global state than NorthGuard keeps (only vnodes, liveness and addresses); this change
+accepts that divergence knowingly rather than adding a new one, and keeps the read local so no request
+depends on the leader or a quorum. The four surfaces above manage the role as they manage users: the
+dashboard's `PUT /users/:u/role`, wire keys 22 (`set_role`) and 23 (`list_users_with_roles`, since the
+`list_users` frame is frozen), `scripts/user.js role` and `mix malachi.user role`. See
+[the guide](guides/authentication.md#console-roles) for the upgrade notes.
+
 ## Alternatives considered
 
 - **For the store:** replicating Mnesia across nodes (`add_table_copy`, the RabbitMQ way) was rejected in

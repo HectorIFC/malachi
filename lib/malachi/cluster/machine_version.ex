@@ -35,8 +35,10 @@ defmodule Malachi.Cluster.MachineVersion do
   bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`. Version 2
   is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version 3 is where
   `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, and version 4 is where
-  `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, so each time the others moved with
-  nothing but that no-op.
+  `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, and version 5 is where
+  `Malachi.Auth.UserRegistry` introduced the console roles (`{:set_role, username, role}`, a five element
+  `put_user` and `{:import_users_with_roles, entries}`), so each time the others moved with nothing but
+  that no-op.
 
   ## Holding the version during an upgrade
 
@@ -67,10 +69,11 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  # 4 introduces `{:bind_topic_policy, topic, name}` in `Malachi.Metadata`, the binding an operator
-  # emits (#194). 3 introduced the storage policy store (`Malachi.Cluster.PolicyRegistry`) and 2 the
-  # cluster flags; both are released, which is why the binding takes the next version.
-  @code_version 4
+  # 5 introduces the console roles in `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`,
+  # `{:put_user, username, hash, permissions, role}` and `{:import_users_with_roles, entries}`. 4
+  # introduced `{:bind_topic_policy, topic, name}` in `Malachi.Metadata` (#194), 3 the storage policy
+  # store and 2 the cluster flags; all are released, which is why the roles take the next version.
+  @code_version 5
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

@@ -480,9 +480,10 @@ workspace tab strip. Both Conduktor and KafkIO ship this, and KafkIO's release n
 that a strip of tabs across prod, staging and sandbox becomes parseable by color alone. It is a
 two minute feature that prevents a whole class of incident.
 
-SOURCE for identity: none today. GAP: `GET /api/v1/me` returning username, permissions, locale, and
-the cluster's display name, color and icon. Without it the SPA cannot render by role, because today
-a non admin receives a raw JSON 403 on `/` and the page has no way to know what it may show.
+SOURCE for identity: `GET /api/v1/me` (#228), returning username, console role, the capabilities it
+implies, wire permissions, locale, and the cluster's display name, color and icon
+(`MALACHI_CLUSTER_DISPLAY_NAME`, `MALACHI_CLUSTER_COLOR`, `MALACHI_CLUSTER_ICON`). It needs a session but
+no role, so the SPA renders by role and can explain an account that holds none.
 
 ### 6.2 Overview
 
@@ -812,13 +813,13 @@ default. Its console roles are exactly three, cluster wide, and strictly nested:
 
 Malachi adopts the same separation. The console gets its own three roles with the same nesting, the
 existing atoms stay what they are, and being able to produce to a topic stops implying being able to
-read the cluster's operational state. Until that lands, every screen in section 6 renders under the
-current coarse model, which section 6.1 already has to work around with `GET /api/v1/me`.
+read the cluster's operational state. This landed with #228: `Malachi.Auth.ConsoleRole` holds the three
+roles, `Malachi.Console.Access` holds the one route table both endpoints read, and `GET /api/v1/me`
+reports the role and its capabilities.
 
-SOURCE: `GET /users`, `GET /users/:u/acls`, and the counters. GAP: `AclStore.list_all/0` has no
-surface, sessions and lockouts expose only a count, a user's `created_at` and `updated_at` are never
-returned by any of the three existing surfaces, and the console role separation above does not exist
-at all.
+SOURCE: `GET /users` (with each user's console role), `PUT /users/:u/role`, `GET /users/:u/acls`, and
+the counters. GAP: `AclStore.list_all/0` has no surface, sessions and lockouts expose only a count, and a
+user's `created_at` and `updated_at` are never returned by any of the three existing surfaces.
 
 ### 6.11 States
 
@@ -1099,14 +1100,20 @@ explanation sentence in the browser, the terminal and the desktop.
 
 ### 10.1 What exists today
 
+Auth is the console role each route requires (#228, `Malachi.Console.Access.routes/0`); every error is
+`application/problem+json` (section 10.3).
+
 | Route | Auth | Shape |
 |---|---|---|
 | `POST /login` | Public, rate limited | `{"s":"ok","token":"<43 chars>"}` plus a `malachi_token` cookie. **The CI Docker smoke test parses this `token` key; it must not change** |
-| `GET /metrics` | Any authenticated | Content negotiated: `Accept: text/plain` gives Prometheus 0.0.4, anything else gives the dashboard JSON |
-| `GET /stream` | Admin | SSE, the identical JSON payload, once a second, **no `event:`, no `id:`, no `retry:`, no heartbeat** |
-| `GET /topic?name=` | Any authenticated | Ranges and segments, unpaged |
-| `GET /rate_limits` | Any authenticated | |
-| `GET /users`, `/users/:u/acls` | Admin | Full CRUD |
+| `GET /metrics` | Viewer | Content negotiated: `Accept: text/plain` gives Prometheus 0.0.4, anything else gives the dashboard JSON |
+| `GET /stream` | Viewer | SSE, the identical JSON payload, once a second, **no `event:`, no `id:`, no `retry:`, no heartbeat** |
+| `GET /topic?name=` | Viewer | Ranges and segments, unpaged |
+| `GET /rate_limits` | Viewer | |
+| `GET /policies`, `GET /topics/:t/policy` | Viewer | |
+| `PUT`/`DELETE /policies/:name`, `/topics/:t/policy` | Editor | |
+| `GET /users`, `/users/:u/acls`, `PUT /users/:u/role` | Admin | Full CRUD |
+| `GET /api/v1/me` | Any session | Role, capabilities, permissions, locale, cluster identity |
 | `GET /health`, `/ready` | Public | |
 
 ### 10.2 The rate limiter, which blocks everything else
@@ -1138,7 +1145,7 @@ is `gte`. **No page numbers, no "N of M", and no scrollbar proportional to the d
 | # | Endpoint | Unblocks | Note |
 |---|---|---|---|
 | 1 | Split the rate limit buckets | Everything | Not an endpoint, a precondition |
-| 2 | `GET /api/v1/me` | The whole shell | Role, permissions, locale, cluster identity |
+| 2 | `GET /api/v1/me` | The whole shell | Role, permissions, locale, cluster identity. **Delivered (#228)** |
 | 3 | `GET /api/v1/records` | 6.7, the largest gap | Seek by the five modes, filter, key lookup. Nothing exists |
 | 4 | `GET /api/v1/ranges/blocked`, `POST .../seal` | 6.4, #91 | #91 already carries the plan, including sealing at an offset the **caller states explicitly**, so a stale view fails instead of discarding more than the operator saw |
 | 5 | `GET /api/v1/cluster` | 6.8 entirely | Nodes, ring, vnodes, lease, six machine versions, format marker |

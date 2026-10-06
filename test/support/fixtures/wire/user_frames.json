@@ -1,0 +1,62 @@
+{
+  "about": "Golden frames for the console role api keys 22 and 23 (#228), read by test/malachi/wire_user_frames_test.exs and by scripts/lib/wire.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "set_role_req",
+      "hex": "0100000005616c6963650100000006766965776572",
+      "name": "give a user the viewer role",
+      "value": {
+        "role": "viewer",
+        "username": "alice"
+      }
+    },
+    {
+      "codec": "set_role_req",
+      "hex": "0100000005616c69636500",
+      "name": "remove a user's role",
+      "value": {
+        "role": null,
+        "username": "alice"
+      }
+    },
+    {
+      "codec": "list_users_with_roles_req",
+      "hex": "",
+      "name": "the request carries nothing",
+      "value": null
+    },
+    {
+      "codec": "list_users_with_roles_resp",
+      "hex": "000000030100000005616c69636500000001010000000770726f6475636501000000067669657765720100000003626f6200000000000100000004726f6f7400000002010000000561646d696e0100000007636f6e73756d65010000000561646d696e",
+      "name": "a role, no role and no wire permission, and a superuser",
+      "value": [
+        {
+          "permissions": [
+            "produce"
+          ],
+          "role": "viewer",
+          "username": "alice"
+        },
+        {
+          "permissions": [],
+          "role": null,
+          "username": "bob"
+        },
+        {
+          "permissions": [
+            "admin",
+            "consume"
+          ],
+          "role": "admin",
+          "username": "root"
+        }
+      ]
+    },
+    {
+      "codec": "list_users_with_roles_resp",
+      "hex": "00000000",
+      "name": "no users",
+      "value": []
+    }
+  ]
+}

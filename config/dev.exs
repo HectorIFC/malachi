@@ -6,8 +6,8 @@ import Config
 # MALACHI_DEFAULT_USERS or the per-user MALACHI_*_PASS env vars. Do NOT use these anywhere real.
 config :malachi,
   default_users: [
-    {"admin", "admin123", [:admin]},
-    {"producer", "producer123", [:produce]},
-    {"consumer", "consumer123", [:consume]},
-    {"app", "app123", [:produce, :consume]}
+    {"admin", "admin123", [:admin], nil},
+    {"producer", "producer123", [:produce], nil},
+    {"consumer", "consumer123", [:consume], nil},
+    {"app", "app123", [:produce, :consume], nil}
   ]

@@ -19,7 +19,9 @@ defmodule DashboardSecurityBenchmark do
 
     # Setup: obtain a dashboard token via the dashboard's own /login (HTTP), not the broker's binary
     # protocol. The broker on port 4040 speaks the length-framed Malachi.Wire protocol, so newline-delimited
-    # JSON to it never worked; the token is only used for the dashboard HTTP requests below anyway.
+    # JSON to it never worked; the token is only used for the dashboard HTTP requests below anyway. The
+    # account is the admin: since the console roles (#228) a wire permission such as :produce reads none of
+    # these routes, so a producer would measure the refusal instead of the served request.
     token = fetch_dashboard_token()
 
     Benchee.run(
@@ -152,7 +154,7 @@ defmodule DashboardSecurityBenchmark do
   defp fetch_dashboard_token do
     case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 5000) do
       {:ok, socket} ->
-        body = Jason.encode!(%{username: "producer", password: "producer123"})
+        body = Jason.encode!(%{username: "admin", password: "admin123"})
 
         request =
           "POST /login HTTP/1.1\r\n" <>
@@ -169,7 +171,7 @@ defmodule DashboardSecurityBenchmark do
             token
 
           _ ->
-            IO.puts("⚠️  Dashboard login failed on port #{@dashboard_port} (user 'producer'). Response:")
+            IO.puts("⚠️  Dashboard login failed on port #{@dashboard_port} (user 'admin'). Response:")
             IO.puts(response)
             System.halt(1)
         end
@@ -192,7 +194,7 @@ defmodule DashboardSecurityBenchmark do
   defp post_login do
     case :gen_tcp.connect({127, 0, 0, 1}, @dashboard_port, [:binary, active: false], 1000) do
       {:ok, socket} ->
-        body = Jason.encode!(%{username: "producer", password: "producer123"})
+        body = Jason.encode!(%{username: "admin", password: "admin123"})
         
         request = """
         POST /login HTTP/1.1\r

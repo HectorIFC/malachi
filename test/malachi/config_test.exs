@@ -234,4 +234,101 @@ defmodule Malachi.ConfigTest do
       end
     end
   end
+
+  describe "default_users/1" do
+    test "parses permissions and an optional console role" do
+      assert Malachi.Config.default_users("a:pa:produce,consume;b:pb:admin:editor;c:pc::viewer;d:pd:") == [
+               {"a", "pa", [:produce, :consume], nil},
+               {"b", "pb", [:admin], :editor},
+               {"c", "pc", [], :viewer},
+               {"d", "pd", [], nil}
+             ]
+    end
+
+    test "an unknown permission or role stops the node, and creates no atom" do
+      unseen = "perm_never_seen_#{System.unique_integer([:positive])}"
+
+      assert_raise RuntimeError, ~r/unknown permission or role/, fn ->
+        Malachi.Config.default_users("a:pa:#{unseen}")
+      end
+
+      assert_raise RuntimeError, ~r/unknown permission or role/, fn ->
+        Malachi.Config.default_users("a:pa:produce:root")
+      end
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unseen) end
+    end
+
+    test "an empty username or password stops the node, naming the entry without printing the password" do
+      for raw <- ["ok:pw:produce;:secret-pw:admin", "ok:pw:produce;ops::admin", "ok:pw:produce;ops::admin:viewer"] do
+        error = assert_raise RuntimeError, fn -> Malachi.Config.default_users(raw) end
+        assert error.message =~ "entry 2"
+        assert error.message =~ "empty username or password"
+        refute error.message =~ "secret-pw"
+      end
+    end
+
+    test "no error prints any part of a password, whichever check fails" do
+      # Usernames and passwords the fixed text of the messages never contains, so finding one means it leaked.
+      for {raw, position} <- [
+            {"root:hunter2", 1},
+            {"ok:pw:produce;root:pa:ss:w:admin", 2},
+            {"root:pa:ss:admin", 1},
+            {"root:hunter2:superuser", 1},
+            {"root,hunter2:admin", 1},
+            {"root hunter2:produce:viewer", 1},
+            {"ok:pw:produce;ops:hunter2;more:produce", 2}
+          ] do
+        error = assert_raise RuntimeError, fn -> Malachi.Config.default_users(raw) end
+        assert error.message =~ "entry #{position}"
+        refute error.message =~ "(user "
+
+        for secret <- ["hunter2", "pa", "ss", "root", "ops"] do
+          refute error.message =~ ~r/\b#{secret}\b/, "#{inspect(raw)} leaked #{secret}: #{error.message}"
+        end
+      end
+    end
+
+    test "the position counts every segment between separators, empty ones included" do
+      for {raw, position} <- [{"ok:pw:produce;;ops::admin", 3}, {";ops::admin", 2}, {"ok:pw:produce;;root:x", 3}] do
+        error = assert_raise RuntimeError, fn -> Malachi.Config.default_users(raw) end
+        assert error.message =~ "entry #{position} "
+      end
+
+      assert Malachi.Config.default_users(";ok:pw:produce;;") == [{"ok", "pw", [:produce], nil}]
+    end
+
+    test "the shape error names both separators a password cannot hold" do
+      error = assert_raise RuntimeError, fn -> Malachi.Config.default_users("ops:pa;ss:produce") end
+      assert error.message =~ "cannot contain ':' or ';'"
+    end
+
+    test "an entry of the wrong shape stops the node" do
+      assert_raise RuntimeError, ~r/user:password:permissions\[:role\]/, fn ->
+        Malachi.Config.default_users("only-a-name")
+      end
+
+      assert_raise RuntimeError, ~r/user:password:permissions\[:role\]/, fn ->
+        Malachi.Config.default_users("a:b:produce:viewer:extra")
+      end
+    end
+  end
+
+  describe "cluster_identity/3" do
+    test "trims, and turns blank into nil" do
+      assert Malachi.Config.cluster_identity("  ", " #00ff00 ", "a-1") == %{name: nil, color: "#00ff00", icon: "a-1"}
+    end
+
+    test "a color that is not #RRGGBB stops the node" do
+      for bad <- ["00ff00", "#0f0", "#GGGGGG", "#00ff00 extra"] do
+        assert_raise RuntimeError, ~r/MALACHI_CLUSTER_COLOR/, fn -> Malachi.Config.cluster_identity(nil, bad, nil) end
+      end
+    end
+
+    test "an icon that is not a short slug stops the node" do
+      for bad <- ["Globe", "a b", "../x", String.duplicate("a", 33)] do
+        assert_raise RuntimeError, ~r/MALACHI_CLUSTER_ICON/, fn -> Malachi.Config.cluster_identity(nil, nil, bad) end
+      end
+    end
+  end
 end

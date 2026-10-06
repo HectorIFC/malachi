@@ -59,9 +59,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         assert unquote(machine).version() == MachineVersion.version()
         # Version 2 is where `Malachi.Cluster.ClusterFlags` introduced `{:enable_flag, flag}` and version
         # 3 where `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, 4 where
-        # `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`; each time the others moved
-        # with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 4
+        # `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, 5 where
+        # `Malachi.Auth.UserRegistry` introduced the console roles; each time the others moved with it,
+        # paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 5
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))

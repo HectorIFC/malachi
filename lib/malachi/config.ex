@@ -13,6 +13,8 @@ defmodule Malachi.Config do
 
   require Logger
 
+  alias Malachi.Auth
+  alias Malachi.Auth.ConsoleRole
   alias Malachi.I18n
 
   # The control plane a single node runs when MALACHI_LOG_CLUSTER is not set (`log_cluster/2`).
@@ -284,6 +286,107 @@ defmodule Malachi.Config do
       "off" -> :off
       _other -> raise "MALACHI_RETENTION_ORPHAN_SWEEP must be delete, report or off, got: #{inspect(raw)}"
     end
+  end
+
+  @doc """
+  The default users in `MALACHI_DEFAULT_USERS`: entries separated by `;`, each
+  `user:password:permissions[:role]`, permissions separated by `,` and possibly empty (an operator with a
+  console role and no wire permission, `ops:secret::viewer`). Returns `{username, password, permissions,
+  role}` tuples, `role` `nil` when absent. An unknown permission or role, an empty username or password, or
+  an entry of the wrong shape stops the node: a typo here would otherwise seed an account that cannot do
+  what the operator meant, or one that silently can do more, such as an admin with an empty password. A
+  password cannot contain `:` or `;`, the separators. Every error names the entry by its position alone, its
+  place among the `;` separated segments with empty ones counted, and prints no field, the username
+  included, since a mistyped separator can move part of a password into any of them.
+
+  ## Examples
+
+      iex> Malachi.Config.default_users("admin:s3cret:admin;ops:pw::viewer")
+      [{"admin", "s3cret", [:admin], nil}, {"ops", "pw", [], :viewer}]
+
+  """
+  @spec default_users(String.t()) :: [{String.t(), String.t(), [atom()], ConsoleRole.t() | nil}]
+  def default_users(raw) when is_binary(raw) do
+    raw
+    |> String.split(";")
+    # Numbered before the empty segments are dropped, so the position an error gives is the segment an
+    # operator counts between separators, stray ones included.
+    |> Enum.with_index(1)
+    |> Enum.reject(fn {entry, _position} -> entry == "" end)
+    |> Enum.map(&default_user/1)
+  end
+
+  defp default_user({entry, position}) do
+    {username, password, perms, role} =
+      case String.split(entry, ":") do
+        [username, password, perms] ->
+          {username, password, perms, nil}
+
+        [username, password, perms, role] ->
+          {username, password, perms, role}
+
+        fields ->
+          raise "MALACHI_DEFAULT_USERS entry #{position} has #{length(fields)} fields; entries must be " <>
+                  "user:password:permissions[:role], and a password cannot contain ':' or ';'"
+      end
+
+    if username == "" or password == "" do
+      raise "MALACHI_DEFAULT_USERS entry #{position} has an empty username or password"
+    end
+
+    with {:ok, permissions} <- Auth.parse_permissions(String.split(perms, ",", trim: true)),
+         {:ok, role} <- ConsoleRole.parse(role) do
+      {username, password, permissions, role}
+    else
+      :error ->
+        raise "MALACHI_DEFAULT_USERS entry #{position} has an unknown permission or role " <>
+                "(permissions: admin, produce, consume; roles: viewer, editor, admin)"
+    end
+  end
+
+  @doc """
+  The cluster's identity as `GET /api/v1/me` reports it, from `MALACHI_CLUSTER_DISPLAY_NAME`,
+  `MALACHI_CLUSTER_COLOR` and `MALACHI_CLUSTER_ICON`. Each is `nil` when absent or blank. The color is a
+  `#RRGGBB` hex value and the icon a short slug the console maps to an icon (`^[a-z0-9-]{1,32}$`);
+  anything else stops the node, since a console that cannot render the identity defeats its purpose,
+  which is telling clusters apart at a glance. Every node should carry the same values.
+
+  ## Examples
+
+      iex> Malachi.Config.cluster_identity(" prod-eu ", "#A1B2C3", "globe")
+      %{name: "prod-eu", color: "#A1B2C3", icon: "globe"}
+
+      iex> Malachi.Config.cluster_identity(nil, "", nil)
+      %{name: nil, color: nil, icon: nil}
+
+  """
+  @spec cluster_identity(String.t() | nil, String.t() | nil, String.t() | nil) :: %{
+          name: String.t() | nil,
+          color: String.t() | nil,
+          icon: String.t() | nil
+        }
+  def cluster_identity(name, color, icon) do
+    %{
+      name: blank_to_nil(name),
+      color: matching("MALACHI_CLUSTER_COLOR", blank_to_nil(color), ~r/\A#[0-9A-Fa-f]{6}\z/, "a #RRGGBB color"),
+      icon:
+        matching("MALACHI_CLUSTER_ICON", blank_to_nil(icon), ~r/\A[a-z0-9-]{1,32}\z/, "a slug of 1 to 32 a-z, 0-9 or -")
+    }
+  end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(raw) do
+    case String.trim(raw) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp matching(_var, nil, _pattern, _shape), do: nil
+
+  defp matching(var, value, pattern, shape) do
+    if value =~ pattern, do: value, else: raise("#{var} must be #{shape}, got: #{inspect(value)}")
   end
 
   @doc """

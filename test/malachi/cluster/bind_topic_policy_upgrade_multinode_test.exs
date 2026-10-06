@@ -47,9 +47,11 @@ defmodule Malachi.Cluster.BindTopicPolicyUpgradeMultinodeTest do
 
     # Finalize: the last member comes back on the new code, the leader re-asks its peers, and the group
     # reaches the version with no election needed.
+    # With no pin left the group reaches this build's version, which is the introducing one or a later
+    # release's: the command applies either way.
     restart(group, 2, nil)
     barrier(group)
-    await_effective(group, @introduced)
+    await_effective(group, MachineVersion.code_version())
 
     assert {:ok, :ok} = command(group, {:bind_topic_policy, "events", "durable"})
     barrier(group)

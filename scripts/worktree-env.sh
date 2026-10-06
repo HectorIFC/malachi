@@ -19,6 +19,11 @@
 #
 # Never in the main checkout: its compose volume is named after its directory (malachi_malachi-data), and
 # a compose project name there would orphan that volume with the data inside.
+#
+# It also copies the main checkout's .claude/settings.local.json into the worktree, once: the plugins and
+# permissions a Claude Code session loads live there, and git ignores the file, so a worktree has none of
+# its own unless one is copied. An existing copy in the worktree is kept, as worktree.env is, and nothing is
+# copied when the script refuses.
 set -euo pipefail
 
 # Git reads these ahead of `-C <dir>`: inherited from a hook or a `git rebase -x`, they would point every
@@ -80,6 +85,22 @@ taken_ports() {
 env_file="$root/worktree.env"
 dashboard_port=$((base + 1))
 
+# The main checkout is the first entry `git worktree list` gives.
+main_root=$(git -C "$root" worktree list --porcelain | sed -n '1s/^worktree //p')
+
+# Called on every path that ends with a worktree.env written or kept, never on a refusal.
+copy_local_settings() {
+  local source="$main_root/.claude/settings.local.json" target="$root/.claude/settings.local.json"
+  [ -f "$source" ] || return 0
+  if [ -e "$target" ]; then
+    echo "kept existing $target"
+    return 0
+  fi
+  mkdir -p "$root/.claude"
+  cp -p "$source" "$target"
+  echo "copied $source"
+}
+
 if [ -e "$env_file" ]; then
   # Kept, never rewritten: a session may already be running on these values. A port held now is most
   # likely this worktree's own dev node, so it is reported, not refused. The ports checked are the ones
@@ -114,10 +135,12 @@ if [ -e "$env_file" ]; then
         done
       done
     fi
+    copy_local_settings
     exit 0
   fi
   if [ "${#kept[@]}" -ne "${#names[@]}" ]; then
     echo "warning: its port lines are missing or not one plain number each; ports not checked"
+    copy_local_settings
     exit 0
   fi
   taken=$(taken_ports "${kept[@]}")
@@ -126,6 +149,7 @@ if [ -e "$env_file" ]; then
     echo "$taken"
   fi
   echo "dashboard: http://127.0.0.1:${kept[1]}"
+  copy_local_settings
   exit 0
 fi
 
@@ -153,3 +177,4 @@ mv "$tmp" "$env_file"
 
 echo "wrote $env_file"
 echo "dashboard: http://127.0.0.1:$dashboard_port"
+copy_local_settings

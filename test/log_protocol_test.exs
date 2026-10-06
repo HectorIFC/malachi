@@ -62,6 +62,14 @@ defmodule Malachi.LogProtocolTest do
     TCPHelper.request(socket, Wire.list_users_key(), 1, <<>>)
   end
 
+  defp set_role(socket, username, role) do
+    TCPHelper.request(socket, Wire.set_role_key(), 1, Wire.encode_set_role_req(username, role))
+  end
+
+  defp list_users_with_roles(socket) do
+    TCPHelper.request(socket, Wire.list_users_with_roles_key(), 1, <<>>)
+  end
+
   # Attempts an authentication and returns `{:ok, token}` / `{:error, reason}` (closing the socket).
   defp try_auth(username, password) do
     {:ok, socket} = TCPHelper.connect()
@@ -275,6 +283,78 @@ defmodule Malachi.LogProtocolTest do
       refute ok?(code)
       assert reason(payload) == "permission_denied"
     end)
+  end
+
+  describe "console roles over the wire (#228)" do
+    test "an admin sets and removes a console role, and lists users with their roles" do
+      username = "wirerole_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Role-Pass-123", [:produce])
+
+      with_session("admin", "admin123", fn socket ->
+        assert {code, _} = set_role(socket, username, "viewer")
+        assert ok?(code)
+
+        assert {code, payload} = list_users_with_roles(socket)
+        assert ok?(code)
+        users = Wire.decode_list_users_with_roles_resp(payload)
+        assert %{permissions: ["produce"], role: "viewer"} = Enum.find(users, &(&1.username == username))
+
+        assert {code, _} = set_role(socket, username, nil)
+        assert ok?(code)
+        {_code, payload} = list_users_with_roles(socket)
+
+        assert %{role: nil} =
+                 payload |> Wire.decode_list_users_with_roles_resp() |> Enum.find(&(&1.username == username))
+      end)
+    end
+
+    test "an unknown role or user is refused, and the frozen list_users frame still carries no role" do
+      with_session("admin", "admin123", fn socket ->
+        assert {code, payload} = set_role(socket, "admin", "root")
+        refute ok?(code)
+        assert reason(payload) == "invalid_role"
+
+        assert {code, payload} = set_role(socket, "wirerole_nobody", "viewer")
+        refute ok?(code)
+        assert reason(payload) == "user_not_found"
+
+        {_code, payload} = list_users(socket)
+
+        assert Enum.all?(
+                 Wire.decode_list_users_resp(payload),
+                 &(Map.keys(&1) |> Enum.sort() == [:permissions, :username])
+               )
+      end)
+    end
+
+    test "managing roles takes the wire :admin permission: a console admin without it is refused" do
+      username = "wireconsoleadmin_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Role-Pass-123", [:produce], :admin)
+
+      with_session(username, "Role-Pass-123", fn socket ->
+        for {code, payload} <- [set_role(socket, username, "viewer"), list_users_with_roles(socket)] do
+          refute ok?(code)
+          assert reason(payload) == "permission_denied"
+        end
+      end)
+    end
+
+    test "a console role grants nothing on the wire: a viewer with no wire permission cannot produce" do
+      username = "wireviewer_#{System.unique_integer([:positive])}"
+      topic = "wireviewer-t-#{System.unique_integer([:positive])}"
+      on_exit(fn -> Malachi.Auth.remove_user(username) end)
+      :ok = Malachi.Auth.add_user(username, "Role-Pass-123", [], :admin)
+
+      with_session("admin", "admin123", fn socket -> assert {0, _} = create_topic(socket, topic) end)
+
+      with_session(username, "Role-Pass-123", fn socket ->
+        assert {code, payload} = produce(socket, topic, [{"k", "v"}])
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+    end
   end
 
   describe "admin user management" do

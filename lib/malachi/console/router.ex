@@ -4,21 +4,27 @@ defmodule Malachi.Console.Router do
 
     1. **Header budget.** Bandit already bounds the header count and each header's length; the bytes of
        names plus values across all headers are bounded here, from the same setting the dashboard
-       enforces (`Malachi.HTTP.Limits`), and past it the answer is the dashboard's 431 body.
+       enforces (`Malachi.HTTP.Limits`), and past it the answer is the dashboard's 431 problem.
     2. **Security headers.** The dashboard's set, from `Malachi.Dashboard.SecurityHeaders.headers/3`,
        including its configurable CSP. CORS is left out: it belongs to the dashboard's API routes.
-    3. **Method.** `GET` and `HEAD` only; anything else is 405 with `Allow`.
-    4. **Bundle.** With no bundle built into the release, 503 saying so, never cached.
-    5. **Static.** `Malachi.Console.Static` answers everything else from the manifest.
+    3. **API.** A path under `/api/v1` goes to `Malachi.Console.Api`, which authorizes it through
+       `Malachi.Console.Access` and answers every error as `application/problem+json`. It is matched
+       before the static steps, because the single page application fallback answers any extensionless
+       path with `index.html`.
+    4. **Method.** `GET` and `HEAD` only; anything else is 405 with `Allow`.
+    5. **Bundle.** With no bundle built into the release, 503 saying so, never cached.
+    6. **Static.** `Malachi.Console.Static` answers everything else from the manifest.
 
-  Every body this module sends is a constant, and nothing in it touches the filesystem.
+  Nothing in this module touches the filesystem.
   """
 
   import Plug.Conn
 
+  alias Malachi.Console.Api
   alias Malachi.Console.HeaderDeadline
   alias Malachi.Console.Static
   alias Malachi.Dashboard.SecurityHeaders
+  alias Malachi.HTTP.Problem
 
   @behaviour Plug
 
@@ -46,11 +52,16 @@ defmodule Malachi.Console.Router do
   defp route(conn, %{manifest: manifest, max_header_bytes: max_header_bytes}) do
     cond do
       header_bytes(conn) > max_header_bytes ->
+        {status, headers, body} = Problem.for_error(:header_fields_too_large)
+
         conn
         |> security_headers()
-        |> put_resp_header("content-type", "application/json")
-        |> send_resp(431, ~s({"s":"err","reason":"header_fields_too_large"}))
+        |> merge_resp_headers(Enum.map(headers, fn {name, value} -> {String.downcase(name), value} end))
+        |> send_resp(status, body)
         |> halt()
+
+      Api.api_request?(conn) ->
+        conn |> security_headers() |> Api.call()
 
       conn.method not in @allowed_methods ->
         conn

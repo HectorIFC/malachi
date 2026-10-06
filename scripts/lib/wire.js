@@ -37,6 +37,9 @@ const API = {
   listPolicies: 19,
   bindTopicPolicy: 20,
   getTopicPolicy: 21,
+  // admin console roles (require the admin permission, #228)
+  setRole: 22,
+  listUsersWithRoles: 23,
 };
 
 const OK = 0;
@@ -258,6 +261,28 @@ function decodeListUsersResp(payload) {
   return users;
 }
 
+// ---- admin console roles (#228). A role is "viewer"/"editor"/"admin", or null for no role. ----
+
+function encodeSetRoleReq(username, role) {
+  return Buffer.concat([putStr(username), putStr(role ?? null)]);
+}
+
+// list_users_with_roles response: <count::u32, (putStr(username), <count::u32, putStr(perm)*>, putStr(role))*>.
+function decodeListUsersWithRolesResp(payload) {
+  const r = new Reader(payload);
+  const count = r.u32();
+  const users = [];
+  for (let i = 0; i < count; i++) {
+    const username = r.str();
+    const permCount = r.u32();
+    const permissions = [];
+    for (let j = 0; j < permCount; j++) permissions.push(r.str());
+    users.push({ username, permissions, role: r.str() });
+  }
+  expectEnd(r);
+  return users;
+}
+
 // admin per-topic ACL management. operation is "produce"/"consume"; pattern is a topic or a *-suffixed prefix.
 // grant and revoke share the request shape.
 function encodeAclReq(username, operation, pattern) {
@@ -431,6 +456,8 @@ module.exports = {
   encodeDeleteUserReq,
   encodeChangePasswordReq,
   decodeListUsersResp,
+  encodeSetRoleReq,
+  decodeListUsersWithRolesResp,
   encodeAclReq,
   encodeListAclsReq,
   decodeListAclsResp,

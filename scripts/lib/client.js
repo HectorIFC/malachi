@@ -274,10 +274,17 @@ class MalachiClient {
     return true;
   }
 
-  // Resolves with `[{ username, permissions: [...] }]`: no password hashes ever leave the server.
+  // Resolves with `[{ username, permissions: [...], role }]`, `role` null when the user has no console
+  // role: no password hashes ever leave the server.
   async listUsers() {
-    const body = await this._request(wire.API.listUsers, Buffer.alloc(0));
-    return wire.decodeListUsersResp(body);
+    const body = await this._request(wire.API.listUsersWithRoles, Buffer.alloc(0));
+    return wire.decodeListUsersWithRolesResp(body);
+  }
+
+  // Sets a user's console role ('viewer' | 'editor' | 'admin'), or removes it with null.
+  async setRole(username, role) {
+    await this._request(wire.API.setRole, wire.encodeSetRoleReq(username, role));
+    return true;
   }
 
   // per-topic ACL management. operation: 'produce' | 'consume'; pattern: a topic or a *-suffixed prefix.

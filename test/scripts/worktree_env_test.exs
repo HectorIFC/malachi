@@ -290,6 +290,65 @@ defmodule WorktreeEnvTest do
     end
   end
 
+  describe "the main checkout's local Claude Code settings" do
+    # The plugins and permissions a session loads live in .claude/settings.local.json, which git ignores,
+    # so a new worktree only gets the main checkout's by copy.
+    defp main_settings(ctx), do: Path.join([ctx.main, ".claude", "settings.local.json"])
+    defp worktree_settings(ctx), do: Path.join([ctx.worktree, ".claude", "settings.local.json"])
+
+    defp write_settings!(path, body) do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, body)
+    end
+
+    test "are copied into a new worktree, mode included", ctx do
+      write_settings!(main_settings(ctx), ~s({"enabledPlugins": {"github@x": false}}))
+      File.chmod!(main_settings(ctx), 0o600)
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      # The script reports the resolved path, as git gives it.
+      assert output =~ "copied #{Path.join([resolve(ctx.main), ".claude", "settings.local.json"])}"
+      assert File.read!(worktree_settings(ctx)) == File.read!(main_settings(ctx))
+      assert File.stat!(worktree_settings(ctx)).mode |> Bitwise.band(0o777) == 0o600
+    end
+
+    test "are copied when the worktree already has its worktree.env", ctx do
+      assert {_output, 0} = run(ctx, 250, ctx.worktree)
+      write_settings!(main_settings(ctx), "{}")
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      assert output =~ "copied "
+      assert File.read!(worktree_settings(ctx)) == "{}"
+    end
+
+    test "never replace the worktree's own", ctx do
+      write_settings!(main_settings(ctx), ~s({"from": "main"}))
+      write_settings!(worktree_settings(ctx), ~s({"from": "worktree"}))
+
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      assert output =~ "kept existing #{worktree_settings(ctx)}"
+      assert File.read!(worktree_settings(ctx)) == ~s({"from": "worktree"})
+    end
+
+    test "are skipped quietly when the main checkout has none", ctx do
+      assert {output, 0} = run(ctx, 250, ctx.worktree)
+      refute output =~ "settings.local.json"
+      refute File.exists?(worktree_settings(ctx))
+    end
+
+    test "are not copied when the script refuses, and never into the main checkout", ctx do
+      write_settings!(main_settings(ctx), "{}")
+
+      assert {_output, 75} = run(ctx, 250, ctx.worktree, taken: "22503")
+      refute File.exists?(worktree_settings(ctx))
+
+      # Source and target would be the same file there, so the content alone could not tell; the output can.
+      assert {output, 66} = run(ctx, 250, ctx.main)
+      refute output =~ "settings.local.json"
+      assert File.read!(main_settings(ctx)) == "{}"
+    end
+  end
+
   test "this repository ignores worktree.env and everything under tmp/" do
     for path <- ["worktree.env", "tmp/data/log/segment"] do
       assert {_out, 0} = System.cmd("git", ["check-ignore", "-q", path], cd: @repo_root, env: @no_git_env),

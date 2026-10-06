@@ -32,7 +32,7 @@ defmodule PolicyJsTest do
 
   test "the Node codecs read and write every golden frame byte for byte", ctx do
     assert {output, 0} = System.cmd(ctx.node, [@selftest], stderr_to_stdout: true)
-    assert output =~ "passed 12 golden frames"
+    assert output =~ "passed 17 golden frames"
   end
 
   test "the Node field table is the server's field table", ctx do

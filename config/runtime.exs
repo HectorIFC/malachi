@@ -388,13 +388,14 @@ config :malachi,
        # Auth enabled by default in ALL environments for security
        nil -> true
      end),
-  # Dashboard configuration
-  dashboard_require_admin_for_html:
-    (case System.get_env("MALACHI_DASHBOARD_REQUIRE_ADMIN") do
-       "false" -> false
-       "true" -> true
-       nil -> true
-     end),
+  # The cluster's identity in the console (GET /api/v1/me), checked by Malachi.Config.cluster_identity/3.
+  # Every node should carry the same three values.
+  cluster_identity:
+    Malachi.Config.cluster_identity(
+      System.get_env("MALACHI_CLUSTER_DISPLAY_NAME"),
+      System.get_env("MALACHI_CLUSTER_COLOR"),
+      System.get_env("MALACHI_CLUSTER_ICON")
+    ),
   dashboard_auth_rate_limit: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_LIMIT", 10),
   dashboard_auth_rate_window_ms: parse_int.("MALACHI_DASHBOARD_AUTH_RATE_WINDOW_MS", 60_000),
   # Authenticated dashboard requests, per session. 0 turns the limit off; the login bucket above has no off switch.
@@ -464,12 +465,12 @@ app_pass = System.get_env("MALACHI_APP_PASS")
 # are optional; the admin is *generated* (see `generate_admin` below) when it has no explicit password.
 explicit_standard_users =
   [
-    {"admin", admin_pass, [:admin]},
-    {"producer", producer_pass, [:produce]},
-    {"consumer", consumer_pass, [:consume]},
-    {"app", app_pass, [:produce, :consume]}
+    {"admin", admin_pass, [:admin], nil},
+    {"producer", producer_pass, [:produce], nil},
+    {"consumer", consumer_pass, [:consume], nil},
+    {"app", app_pass, [:produce, :consume], nil}
   ]
-  |> Enum.filter(fn {_name, pass, _perms} -> pass != nil end)
+  |> Enum.filter(fn {_name, pass, _perms, _role} -> pass != nil end)
 
 {default_users, generate_admin} =
   cond do
@@ -478,17 +479,9 @@ explicit_standard_users =
       {[], false}
 
     default_users_env ->
-      # Custom user list via env var: "user:pass:perm,perm;user2:..."
-      users =
-        default_users_env
-        |> String.split(";")
-        |> Enum.map(fn user_str ->
-          [username, password, perms] = String.split(user_str, ":")
-          permissions = perms |> String.split(",") |> Enum.map(&String.to_atom/1)
-          {username, password, permissions}
-        end)
-
-      {users, false}
+      # Custom user list via env var: "user:pass:perm,perm[:role];user2:...", parsed and checked by
+      # Malachi.Config.default_users/1 (an unknown permission or role stops the node).
+      {Malachi.Config.default_users(default_users_env), false}
 
     actual_env in [:dev, :test] ->
       # Keep the environment-specific convenience credentials from config/dev.exs or config/test.exs (never
