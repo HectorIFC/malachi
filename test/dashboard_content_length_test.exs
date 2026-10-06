@@ -34,6 +34,8 @@ defmodule Malachi.DashboardContentLengthTest do
 
   @json %{"content-type" => "application/json"}
   @json_no_cache Map.put(@json, "cache-control", "no-cache")
+  @problem %{"content-type" => "application/problem+json"}
+  @problem_401 Map.put(@problem, "www-authenticate", ~s(Bearer realm="Malachi"))
   @html %{"content-type" => "text/html; charset=utf-8", "cache-control" => "no-store, no-cache, must-revalidate"}
   @to_login %{"location" => "/login", "cache-control" => "no-store"}
 
@@ -47,10 +49,9 @@ defmodule Malachi.DashboardContentLengthTest do
     {"serve_login_page", :GET, "/login", :none, %{}, nil, 200, @html},
     {"send_login_success", :POST, "/login", :none, %{}, :valid_login, 200,
      Map.put(@json, "set-cookie", {:wraps, "malachi_token=", "; HttpOnly; Path=/; SameSite=Strict"})},
-    {"send_forbidden, wrong password", :POST, "/login", :none, %{}, :wrong_login, 403, @json},
-    {"send_forbidden, invalid token", :GET, "/metrics", :bogus_bearer, %{}, nil, 403, @json},
-    {"send_auth_required", :GET, "/metrics", :none, %{}, nil, 401,
-     Map.put(@json, "www-authenticate", ~s(Bearer realm="Malachi Dashboard"))},
+    {"send_problem, wrong password", :POST, "/login", :none, %{}, :wrong_login, 401, @problem_401},
+    {"send_problem, invalid token", :GET, "/metrics", :bogus_bearer, %{}, nil, 401, @problem_401},
+    {"send_problem, no credentials", :GET, "/metrics", :none, %{}, nil, 401, @problem_401},
     {"serve_html", :GET, "/", :cookie, %{}, nil, 200, @html},
     {"serve_json", :GET, "/metrics", :cookie, %{}, nil, 200, @json_no_cache},
     {"serve_prometheus", :GET, "/metrics", :cookie, %{"Accept" => "text/plain"}, nil, 200,
@@ -59,7 +60,7 @@ defmodule Malachi.DashboardContentLengthTest do
     {"serve_status, readiness", :GET, "/ready", :none, %{}, nil, 200, Map.put(@json, "cache-control", "no-store")},
     {"serve_rate_limits", :GET, "/rate_limits", :cookie, %{}, nil, 200, @json_no_cache},
     {"send_json", :GET, "/users", :cookie, %{}, nil, 200, @json},
-    {"serve_404", :GET, "/no-such-route", :cookie, %{}, nil, 404, @json},
+    {"serve_404", :GET, "/no-such-route", :cookie, %{}, nil, 404, @problem},
     # The senders below were already framed correctly; they stay here so none of them regresses.
     {"redirect to login", :GET, "/", :none, %{}, nil, 302, @to_login},
     {"cookie clearing redirect", :GET, "/logout", :none, %{}, nil, 302,
@@ -97,7 +98,7 @@ defmodule Malachi.DashboardContentLengthTest do
   end
 
   @tag :slow
-  test "a 429 (send_rate_limited) sends exactly the Content-Length it declares, as does every 403 before it" do
+  test "a 429 sends exactly the Content-Length it declares, as does every 401 before it" do
     limit = Application.get_env(:malachi, :dashboard_auth_rate_limit, 10)
 
     rate_limited =
@@ -108,7 +109,7 @@ defmodule Malachi.DashboardContentLengthTest do
       end)
 
     assert rate_limited, "expected the dashboard auth rate limit to trip within #{limit * 2} requests"
-    assert_headers(rate_limited, Map.put(@json, "retry-after", :integer))
+    assert_headers(rate_limited, Map.put(@problem, "retry-after", :integer))
   end
 
   defp request(method, path, credentials, headers, body, token) do

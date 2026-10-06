@@ -38,12 +38,13 @@ defmodule Malachi.Console.Endpoint do
 
   ## Authentication during the transition
 
-  Nothing the endpoint serves today is authenticated: the application shell holds no data. The
-  session store stays the one `Malachi.Auth` keeps, and the cookie stays `malachi_token`. A browser
-  sends a cookie to every port of the host that set it, so a login on the dashboard already reaches
-  this endpoint and nobody logs in twice. When the read API lands (#230), the access rules move out of
-  `Malachi.Dashboard` into a module both endpoints call, and `Authorization: Bearer` is the primary
-  mechanism.
+  The static application shell holds no data and is not authenticated. The `/api/v1` routes are: the
+  access rules moved out of `Malachi.Dashboard` into `Malachi.Console.Access` with the console roles
+  (#228), and both endpoints call it, so a route states the role it requires in one table.
+  `Authorization: Bearer` is the primary mechanism and the `malachi_token` cookie a browser
+  convenience. The session store stays the one `Malachi.Auth` keeps; a browser sends a cookie to every
+  port of the host that set it, so a login on the dashboard already reaches this endpoint and nobody
+  logs in twice. The first route that changes state (#230) adds the CSRF header check of section 11.
 
   ## A port that cannot be opened
 

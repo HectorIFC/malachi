@@ -5,8 +5,8 @@ defmodule Malachi.DashboardPolicyRoutesTest do
 
   alias Malachi.Auth
   alias Malachi.Cluster.PolicyStore
-  alias Malachi.Dashboard
   alias Malachi.DataPlaneRouter
+  alias Malachi.HTTP.Problem
   alias Malachi.LogApi
   alias Malachi.RateLimiter
   alias Malachi.Test.DashboardHelper
@@ -93,8 +93,10 @@ defmodule Malachi.DashboardPolicyRoutesTest do
     assert %{"field" => "retention.max_bytes", "value" => 0, "origin" => "policy"} in read_back["effective"]
     assert %{"field" => "retention.max_age_ms", "value" => nil, "origin" => "policy"} in read_back["effective"]
 
-    assert {409, %{"reason" => "policy_in_use: " <> in_use}} = req(:DELETE, "/policies/#{ctx.name}", ctx.admin)
-    assert in_use == ctx.topic
+    assert {409, %{"type" => "errors.policies.policy_in_use", "topics" => in_use}} =
+             req(:DELETE, "/policies/#{ctx.name}", ctx.admin)
+
+    assert in_use == [ctx.topic]
     assert {200, _} = req(:DELETE, "/policies/#{ctx.name}?force=true", ctx.admin)
 
     assert {200, %{"resolution" => "unresolved"}} = req(:GET, ctx.topic_path, ctx.admin)
@@ -103,21 +105,24 @@ defmodule Malachi.DashboardPolicyRoutesTest do
   end
 
   test "refusals are named and mapped to a status", ctx do
-    assert {400, %{"reason" => "unknown_policy_field: retention.ms"}} =
+    assert {400, %{"type" => "errors.policies.unknown_policy_field", "field" => "retention.ms"}} =
              req(:PUT, "/policies/#{ctx.name}", ctx.admin, %{fields: %{"retention.ms" => 1}})
 
-    assert {400, %{"reason" => "invalid_request"}} = req(:PUT, "/policies/#{ctx.name}", ctx.admin, %{nope: 1})
-    assert {400, %{"reason" => "invalid_request"}} = req(:PUT, ctx.topic_path, ctx.admin, %{policy: 1})
-    assert {404, %{"reason" => "no_such_policy"}} = req(:PUT, ctx.topic_path, ctx.admin, %{policy: ctx.name})
+    assert {400, %{"type" => "errors.http.invalid_request"}} = req(:PUT, "/policies/#{ctx.name}", ctx.admin, %{nope: 1})
+    assert {400, %{"type" => "errors.http.invalid_request"}} = req(:PUT, ctx.topic_path, ctx.admin, %{policy: 1})
 
-    assert {404, %{"reason" => "no_such_topic"}} =
+    assert {404, %{"type" => "errors.policies.no_such_policy"}} =
+             req(:PUT, ctx.topic_path, ctx.admin, %{policy: ctx.name})
+
+    assert {404, %{"type" => "errors.policies.no_such_topic"}} =
              req(:GET, "/topics/ghost-#{System.unique_integer([:positive])}/policy", ctx.admin)
 
     assert {404, _} = req(:GET, "/topics/x/other", ctx.admin)
     assert {404, _} = req(:PUT, "/policies/", ctx.admin, %{fields: %{}})
   end
 
-  test "a non-admin is forbidden on every policy route", ctx do
+  # The producer holds a wire permission and no console role, so even the reads are refused.
+  test "an account without a console role is forbidden on every policy route", ctx do
     for {method, path} <- [
           {:GET, "/policies"},
           {:PUT, "/policies/#{ctx.name}"},
@@ -145,7 +150,7 @@ defmodule Malachi.DashboardPolicyRoutesTest do
     :ok = :ra.stop_server(:default, server_id)
 
     try do
-      assert {503, %{"s" => "err"}} = req(:GET, "/policies", ctx.admin)
+      assert {503, %{"type" => "errors.http.unavailable"}} = req(:GET, "/policies", ctx.admin)
     after
       :ok = :ra.restart_server(:default, server_id)
     end
@@ -171,14 +176,18 @@ defmodule Malachi.DashboardPolicyRoutesTest do
            )
   end
 
-  test "policy_status/1 maps every refusal" do
-    assert Dashboard.policy_status(:no_such_topic) == "404 Not Found"
-    assert Dashboard.policy_status({:policy_in_use, ["t"]}) == "409 Conflict"
-    assert Dashboard.policy_status({:unsupported_command, {:bind_topic_policy, 3}, 4, 3}) == "409 Conflict"
-    assert Dashboard.policy_status({:unsupported_policy_field, "x", 5, 4}) == "409 Conflict"
-    assert Dashboard.policy_status(:invalid_topic) == "400 Bad Request"
-    assert Dashboard.policy_status({:duplicate_policy_field, "x"}) == "400 Bad Request"
-    assert Dashboard.policy_status(:migrating) == "503 Service Unavailable"
-    assert Dashboard.policy_status(:timeout) == "503 Service Unavailable"
+  # The status each policy refusal is answered with comes from Malachi.HTTP.Problem, shared with the console.
+  test "every policy refusal maps to a status, including those a test node cannot reach" do
+    assert {404, _, _} = Problem.from_error(:no_such_topic)
+    assert {409, _, _} = Problem.from_error({:policy_in_use, ["t"]})
+
+    assert {409, "errors.cluster.upgrade_pending", _} =
+             Problem.from_error({:unsupported_command, {:bind_topic_policy, 3}, 4, 3})
+
+    assert {409, _, _} = Problem.from_error({:unsupported_policy_field, "x", 5, 4})
+    assert {400, _, _} = Problem.from_error(:invalid_topic)
+    assert {400, _, _} = Problem.from_error({:duplicate_policy_field, "x"})
+    assert {503, _, _} = Problem.from_error(:migrating)
+    assert {503, _, _} = Problem.from_error(:timeout)
   end
 end

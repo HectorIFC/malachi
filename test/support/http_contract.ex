@@ -53,9 +53,9 @@ defmodule Malachi.Test.HttpContract do
         assert response.status == 431
 
         case @target do
-          # The dashboard counts the lines itself and answers with its JSON reason.
+          # The dashboard counts the lines itself and answers with its problem body.
           :dashboard ->
-            assert Jason.decode!(response.body) == %{"s" => "err", "reason" => "header_fields_too_large"}
+            assert Jason.decode!(response.body) == %{"type" => "errors.http.header_fields_too_large", "status" => 431}
 
           # On the console Bandit refuses while parsing, before any plug runs: a bare 431, no body
           # and none of the security headers. Bandit offers no hook for that answer.
@@ -71,7 +71,7 @@ defmodule Malachi.Test.HttpContract do
         :ok = HttpClient.send_raw(socket, HttpClient.encode("GET", path, headers))
 
         assert {:ok, %{status: 431, body: body}, _} = HttpClient.recv(socket)
-        assert Jason.decode!(body) == %{"s" => "err", "reason" => "header_fields_too_large"}
+        assert Jason.decode!(body) == %{"type" => "errors.http.header_fields_too_large", "status" => 431}
       end
 
       test "Content-Length is exactly the bytes of the body", %{port: port, path: path} do

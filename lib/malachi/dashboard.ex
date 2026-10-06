@@ -12,10 +12,13 @@ defmodule Malachi.Dashboard do
   require Logger
   alias Malachi.AuditLog
   alias Malachi.Auth
+  alias Malachi.Auth.ConsoleRole
   alias Malachi.BrokerServer
   alias Malachi.Cluster.Policy
+  alias Malachi.Console.Access
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.HTTP.Limits
+  alias Malachi.HTTP.Problem
   alias Malachi.I18n
   alias Malachi.IPAddress
   alias Malachi.Metadata
@@ -23,6 +26,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.Metrics.Prometheus
   alias Malachi.Policies
   alias Malachi.RateLimiter
+  alias Plug.Conn.Status
 
   @doc """
   Starts the dashboard HTTP server listening on `port`, registered under the module name.
@@ -114,10 +118,7 @@ defmodule Malachi.Dashboard do
           handle_route_with_auth(socket, %{method: method, path: path}, headers, client_ip)
 
         {:error, :too_large} ->
-          send_json(socket, "431 Request Header Fields Too Large", %{
-            "s" => "err",
-            "reason" => "header_fields_too_large"
-          })
+          send_problem(socket, :header_fields_too_large, "/")
 
         {:error, :closed} ->
           :gen_tcp.close(socket)
@@ -172,8 +173,6 @@ defmodule Malachi.Dashboard do
   end
 
   defp handle_route_with_auth(socket, request, headers, client_ip) do
-    auth_enabled = Application.get_env(:malachi, :dashboard_auth_enabled, true)
-
     # Split the query string off the path (e.g. /topic?name=x → path "/topic", query "name=x"), so routes
     # match on the bare path and a handler can still read its query.
     {path, query} =
@@ -184,119 +183,66 @@ defmodule Malachi.Dashboard do
 
     request = request |> Map.put(:path, path) |> Map.put(:query, query)
 
-    # Public routes that don't require authentication (health/readiness probes never send credentials).
-    is_public_route =
-      path in ["/login", "/logout", "/logo.svg", "/health", "/ready"] or request.method == :OPTIONS
+    # What the route requires, and whether this request has it, is decided by Malachi.Console.Access, the
+    # module both HTTP endpoints call. It also writes the audit events and counters of the decision.
+    case Access.required_role(request.method, path) do
+      :public -> handle_route(socket, request, headers, client_ip, nil)
+      required -> admit_and_route(socket, request, headers, client_ip, required)
+    end
+  end
 
-    if not auth_enabled or is_public_route do
-      # Authentication disabled or public route - allow all requests
-      handle_route(socket, request, headers, client_ip, nil)
-    else
-      # Authenticate via Cookie (primary, for browser) or Authorization header (fallback, for API)
-      auth_result = authenticate_request(headers, client_ip, path)
+  defp admit_and_route(socket, request, headers, client_ip, required) do
+    %{path: path} = request
+    origin = extract_origin(headers)
+    token = Access.token(Map.get(headers, "authorization"), Map.get(headers, "cookie"))
+    access = %{ip: client_ip, user_agent: extract_user_agent(headers), method: request.method, path: path}
 
-      case auth_result do
-        {:ok, session} ->
-          # Log successful access
-          AuditLog.log_event(
-            :dashboard_access,
-            %{username: session.username, ip: client_ip},
-            "http_#{request.method}_#{path}",
-            :success,
-            %{path: path, method: request.method}
-          )
+    case Access.admit(token, required, access) do
+      {:ok, subject} ->
+        handle_route(socket, request, headers, client_ip, subject)
 
-          handle_route(socket, request, headers, client_ip, session)
+      {:error, :authentication_required} ->
+        # For HTML page routes, redirect to login page instead of returning a 401
+        if html_route?(path, origin),
+          do: send_redirect_to_login(socket),
+          else: send_problem(socket, :authentication_required, path, origin)
 
-        {:error, :authentication_required} ->
-          # For HTML page routes, redirect to login page instead of returning JSON 401
-          if html_route?(path, extract_origin(headers)) do
-            send_redirect_to_login(socket)
-          else
-            send_auth_required(socket, path, extract_origin(headers))
-          end
+      {:error, :api_rate_limit_exceeded, retry_after_ms, _digest, _username} ->
+        send_problem(socket, {:rate_limited, retry_after_ms}, path, origin)
 
-        # A valid session that spent its own budget. Counted and audited apart from login throttling, so a
-        # busy console never reads as a brute force attempt, and recorded under the session digest (never
-        # the token) with the user it belongs to, so an operator can tell whose console it was.
-        {:error, :api_rate_limit_exceeded, retry_after_ms, session_digest, username} ->
-          Metrics.increment_rate_limit_blocked(:dashboard_api)
+      {:error, :rate_limit_exceeded, retry_after_ms} ->
+        send_problem(socket, {:rate_limited, retry_after_ms}, path, origin)
 
-          AuditLog.log_event(
-            :dashboard_api_rate_limited,
-            %{username: username, ip: client_ip},
-            "http_#{request.method}_#{request.path}",
-            :rate_limited,
-            %{path: request.path, session: session_digest, retry_after_ms: retry_after_ms}
-          )
-
-          send_rate_limited(socket, retry_after_ms, path, extract_origin(headers))
-
-        {:error, :rate_limit_exceeded, retry_after_ms} ->
-          Metrics.increment_dashboard_auth_blocked()
-
-          AuditLog.log_event(
-            :dashboard_auth_failure,
-            %{ip: client_ip},
-            "http_#{request.method}_#{request.path}",
-            :rate_limited,
-            %{path: request.path, retry_after_ms: retry_after_ms}
-          )
-
-          send_rate_limited(socket, retry_after_ms, path, extract_origin(headers))
-
-        {:error, reason} ->
-          Metrics.increment_dashboard_auth_failed()
-
-          AuditLog.log_event(
-            :dashboard_auth_failure,
-            %{ip: client_ip},
-            "http_#{request.method}_#{request.path}",
-            :failure,
-            %{path: request.path, reason: reason}
-          )
-
-          send_auth_failure(socket, reason, path, extract_origin(headers))
-      end
+      {:error, reason} ->
+        send_auth_failure(socket, reason, path, origin)
     end
   end
 
   defp send_auth_failure(socket, reason, path, request_origin) do
     if stale_session?(reason) and html_route?(path, request_origin) do
-      # The browser keeps replaying the very cookie that fails, so a bare 403 on a page route strands the
+      # The browser keeps replaying the very cookie that fails, so a bare refusal on a page route strands the
       # user there with no way back to the login form. This happens to legitimate users: IP binding is on by
       # default and a changed address (mobile, a rotating NAT) reads as a hijack, as does a browser updating
       # its User-Agent when UA binding is enabled. Clear the cookie and send them to log in again, exactly as
       # logout does.
       send_clearing_redirect(socket)
     else
-      send_forbidden(socket, reason, path, request_origin)
+      send_problem(socket, reason, path, request_origin)
     end
   end
 
-  # A session that no longer validates, as opposed to a valid session that simply lacks a permission.
+  # A session that no longer validates, as opposed to a valid session that simply lacks a role.
   defp stale_session?(reason), do: reason in [:session_expired, :session_hijack_attempt, :invalid_session]
 
   # Redirecting to the HTML login page only helps a browser navigating to a page. The two page routes are
   # GET, and a browser omits Origin on a same-origin GET navigation or EventSource, so "no Origin" is a
   # sound proxy for "this navigation can follow the redirect" while these routes stay GET-only. A request
   # that does carry an Origin is a cross-origin fetch or EventSource, which cannot follow a redirect into an
-  # HTML page: answer those with the JSON 401 instead, so the caller sees why it failed rather than an
+  # HTML page: answer those with the 401 problem instead, so the caller sees why it failed rather than an
   # opaque error. This makes the failure legible, not the flow possible: a cross-origin session is not
   # supported at all, since the cookie is SameSite=Strict and no Access-Control-Allow-Credentials is sent.
   # Cross-origin /metrics works with a Bearer token.
   defp html_route?(path, request_origin), do: is_nil(request_origin) and path in ["/", "/stream"]
-
-  defp authenticate_request(headers, client_ip, path) do
-    # Try Cookie first (browser navigation + EventSource), then Authorization header (API/curl)
-    token = extract_token_from_cookie(headers) || extract_bearer_token(headers)
-    user_agent = extract_user_agent(headers)
-
-    case token do
-      nil -> {:error, :authentication_required}
-      token_value -> validate_token_with_rate_limit(token_value, client_ip, path, user_agent)
-    end
-  end
 
   # The User-Agent is compared against the one captured at login only when session_ua_binding is enabled
   # (opt-in). Missing header -> "", which still binds consistently (login and validation both see "").
@@ -304,118 +250,6 @@ defmodule Malachi.Dashboard do
 
   # nil (no Origin header) is not a cross-origin request, so it never matches a whitelist entry.
   defp extract_origin(headers), do: Map.get(headers, "origin")
-
-  defp extract_token_from_cookie(headers) do
-    case Map.get(headers, "cookie") do
-      nil ->
-        nil
-
-      cookie_string ->
-        cookie_string
-        |> String.split(";")
-        |> Enum.find_value(fn cookie ->
-          case cookie |> String.trim() |> String.split("=", parts: 2) do
-            ["malachi_token", value] -> String.trim(value)
-            _ -> nil
-          end
-        end)
-    end
-  end
-
-  defp extract_bearer_token(headers) do
-    case Map.get(headers, "authorization") do
-      "Bearer " <> token -> token
-      _ -> nil
-    end
-  end
-
-  # Two buckets, split by what the request has proven. A token that validates is an operator at work: it
-  # spends its session's own `:dashboard_api` budget, so neither the address it comes from (a NAT shared
-  # with other operators, or with someone guessing passwords) nor the login budget has any say. A token
-  # that does not validate is spent from the address's `:dashboard_auth` bucket, the one logins use, and
-  # it is charged BEFORE it is validated: validation is what writes the expiry and hijack audit events,
-  # so a stolen token replayed from the wrong client can write no more of them than the address's login
-  # budget allows. `Auth.session_valid?/3` makes that decision without any of those effects.
-  defp validate_token_with_rate_limit(token, client_ip, path, user_agent) do
-    if Auth.session_valid?(token, client_ip, user_agent) do
-      token |> Auth.validate_token(client_ip, user_agent) |> admit_session(token, path)
-    else
-      case check_login_bucket(client_ip) do
-        :ok -> token |> Auth.validate_token(client_ip, user_agent) |> admit_session(token, path)
-        {:error, :rate_limit_exceeded, retry_after_ms} -> {:error, :rate_limit_exceeded, retry_after_ms}
-      end
-    end
-  end
-
-  # A request refused for lack of permission still spends the session's budget: it is authenticated work,
-  # and a loop probing routes it cannot reach is a loop all the same. A session that stopped validating
-  # between the check above and the validation (it expired in the gap) is answered with the reason, once.
-  defp admit_session({:ok, session_data}, token, path) do
-    case check_api_bucket(token) do
-      :ok ->
-        if has_required_permission?(session_data.permissions, path),
-          do: {:ok, session_data},
-          else: {:error, :insufficient_permissions}
-
-      {:error, :rate_limit_exceeded, retry_after_ms} ->
-        {:error, :api_rate_limit_exceeded, retry_after_ms, session_digest(token), session_data.username}
-    end
-  end
-
-  defp admit_session({:error, reason}, _token, _path), do: {:error, reason}
-
-  # The login bucket's limit, read in one place for the two checks that spend it and for /rate_limits.
-  # Unlike `:dashboard_api` it has no off switch: a limit of 0 does not disable brute force protection.
-  defp login_bucket_config do
-    %{
-      limit: Application.get_env(:malachi, :dashboard_auth_rate_limit, 10),
-      window_ms: Application.get_env(:malachi, :dashboard_auth_rate_window_ms, 60_000)
-    }
-  end
-
-  defp check_login_bucket(client_ip), do: RateLimiter.check_limit(client_ip, :dashboard_auth, login_bucket_config())
-
-  defp check_api_bucket(token) do
-    case RateLimiter.action_config(:dashboard_api) do
-      nil -> :ok
-      config -> RateLimiter.check_limit(session_digest(token), :dashboard_api, config)
-    end
-  end
-
-  # What the API bucket is keyed by: a digest of the session token, never the token. The limiter's table is
-  # public, and its blocked identifiers are printed by /rate_limits to any authenticated user, so a raw
-  # token there would hand a live session to whoever reads it. 128 bits of SHA-256 cannot be reversed or
-  # collide in practice, and it is what the `:dashboard_api_rate_limited` audit event records, so the two
-  # can be matched.
-  defp session_digest(token) do
-    :sha256 |> :crypto.hash(token) |> binary_part(0, 16) |> Base.url_encode64(padding: false)
-  end
-
-  defp has_required_permission?(permissions, path) do
-    require_admin = Application.get_env(:malachi, :dashboard_require_admin_for_html, true)
-
-    cond do
-      # Admin has access to everything
-      Malachi.Auth.Authorization.superuser?(permissions) ->
-        true
-
-      # HTML dashboard and SSE stream require admin (if configured)
-      path in ["/", "/stream"] and require_admin ->
-        false
-
-      # Read-only data endpoints accessible to any authenticated user
-      path in ["/metrics", "/rate_limits", "/topic"] ->
-        true
-
-      # Login endpoint is public
-      path == "/login" ->
-        true
-
-      # Default: deny
-      true ->
-        false
-    end
-  end
 
   # The two redirects to the login form. Both carry the usual security headers (CSP, HSTS, frame and
   # sniffing guards): the synthetic /login path passed to add_security_headers keeps CORS out, since these
@@ -483,31 +317,16 @@ defmodule Malachi.Dashboard do
     send_response(socket, "200 OK", headers, body, "/login")
   end
 
-  # The three error responses below carry the request path and Origin so a cross-origin caller can actually
-  # read the failure: without the CORS headers the browser turns a 401/403/429 on /metrics or /stream into an
-  # opaque network error. The login path is not a CORS endpoint, so its callers keep the synthetic defaults.
-  defp send_auth_required(socket, path, request_origin) do
-    body = Jason.encode!(%{"s" => "err", "reason" => "authentication_required"})
-
-    headers = [
-      {"WWW-Authenticate", ~s(Bearer realm="Malachi Dashboard")},
-      {"Content-Type", "application/json"}
-    ]
-
-    send_response(socket, "401 Unauthorized", headers, body, path, request_origin)
+  # Every error leaves as an application/problem+json body built by Malachi.HTTP.Problem, the shape the
+  # console shares. The request path and Origin go along so a cross-origin caller can actually read the
+  # failure: without the CORS headers the browser turns a 401/403/429 on /metrics or /stream into an opaque
+  # network error. Callers off a CORS route (login, user management) keep the synthetic defaults.
+  defp send_problem(socket, error, path, request_origin \\ nil) do
+    {status, headers, body} = Problem.for_error(error)
+    send_response(socket, status_line(status), headers, body, path, request_origin)
   end
 
-  defp send_forbidden(socket, reason, path \\ "/forbidden", request_origin \\ nil) do
-    body = Jason.encode!(%{"s" => "err", "reason" => to_string(reason)})
-    send_response(socket, "403 Forbidden", [{"Content-Type", "application/json"}], body, path, request_origin)
-  end
-
-  defp send_rate_limited(socket, retry_after_ms, path \\ "/rate_limited", request_origin \\ nil) do
-    body = Jason.encode!(%{"s" => "err", "reason" => "rate_limit_exceeded", "retry_after_ms" => retry_after_ms})
-
-    headers = [{"Content-Type", "application/json"}, {"Retry-After", div(retry_after_ms, 1000)}]
-    send_response(socket, "429 Too Many Requests", headers, body, path, request_origin)
-  end
+  defp status_line(status), do: "#{status} #{Status.reason_phrase(status)}"
 
   # The preflight answers from the same builder the real responses use, so it can never advertise a
   # permission the actual request would not get. No headers back (CORS disabled, a non-CORS path, or an
@@ -525,7 +344,7 @@ defmodule Malachi.Dashboard do
   defp handle_login(socket, headers, client_ip) do
     case read_json_body(socket, headers) do
       {:ok, %{"username" => username, "password" => password}} ->
-        case check_login_bucket(client_ip) do
+        case Access.check_login_bucket(client_ip) do
           :ok ->
             # Authenticate
             case Auth.authenticate(username, password, client_ip, extract_user_agent(headers)) do
@@ -553,16 +372,16 @@ defmodule Malachi.Dashboard do
                   %{reason: :invalid_credentials}
                 )
 
-                send_forbidden(socket, :invalid_credentials)
+                send_problem(socket, :invalid_credentials, "/login")
             end
 
           {:error, :rate_limit_exceeded, retry_after_ms} ->
             Metrics.increment_dashboard_auth_blocked()
-            send_rate_limited(socket, retry_after_ms)
+            send_problem(socket, {:rate_limited, retry_after_ms}, "/login")
         end
 
       _ ->
-        send_forbidden(socket, :invalid_request)
+        send_problem(socket, :invalid_request, "/login")
     end
   end
 
@@ -574,40 +393,49 @@ defmodule Malachi.Dashboard do
 
   defp serve_login_page(socket), do: send_response(socket, "200 OK", @html_headers, login_page_html(), "/login")
 
-  # --- admin user management: REST CRUD over the replicated user store. The auth stage already gated
-  # these to the :admin permission (has_required_permission?), so the handlers run only for admins. Passwords
-  # arrive in the JSON body in the clear, so run the dashboard over TLS in production. ---
+  # --- user management: REST CRUD over the replicated user store. The auth stage already gated these to
+  # the console :admin role (Malachi.Console.Access), so the handlers run only for console admins.
+  # Passwords arrive in the JSON body in the clear, so run the dashboard over TLS in production. ---
 
   defp handle_list_users(socket) do
     users =
-      Enum.map(Auth.list_users(), fn %{username: u, permissions: perms} ->
-        %{"username" => u, "permissions" => Enum.map(perms, &to_string/1)}
+      Enum.map(Auth.list_users(), fn %{username: u, permissions: perms, role: role} ->
+        %{"username" => u, "permissions" => Enum.map(perms, &to_string/1), "role" => role && to_string(role)}
       end)
 
     send_json(socket, "200 OK", %{"s" => "ok", "users" => users})
   end
 
   defp handle_create_user(socket, headers) do
-    case read_json_body(socket, headers) do
-      {:ok, %{"username" => username, "password" => password} = body} ->
-        case Auth.parse_permissions(Map.get(body, "permissions", ["produce", "consume"])) do
-          {:ok, permissions} ->
-            respond_user_result(socket, Auth.add_user(username, password, permissions), "201 Created")
-
-          :error ->
-            send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_permissions"})
-        end
-
-      _malformed ->
-        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+    with {:ok, %{"username" => username, "password" => password} = body} <- read_json_body(socket, headers),
+         {:permissions, {:ok, permissions}} <-
+           {:permissions, Auth.parse_permissions(Map.get(body, "permissions", ["produce", "consume"]))},
+         {:role, {:ok, role}} <- {:role, ConsoleRole.parse(Map.get(body, "role"))} do
+      respond_user_result(socket, Auth.add_user(username, password, permissions, role), "201 Created")
+    else
+      {:permissions, :error} -> send_problem(socket, :invalid_permissions, "/users")
+      {:role, :error} -> send_problem(socket, :invalid_role, "/users")
+      _malformed -> send_problem(socket, :invalid_request, "/users")
     end
   end
 
-  # PUT /users/:username/password, rotate a user's password.
-  defp handle_user_password(socket, rest, headers) do
+  # PUT /users/:username/password rotates a user's password; PUT /users/:username/role sets its console role.
+  defp handle_user_update(socket, rest, headers, actor) do
     case String.split(rest, "/") do
       [username, "password"] when username != "" -> handle_change_password(socket, username, headers)
+      [username, "role"] when username != "" -> handle_set_role(socket, username, headers, actor)
       _other -> serve_404(socket)
+    end
+  end
+
+  # The body names the role, or `null` (or "none") to remove it. `Auth.set_role/3` audits the change.
+  defp handle_set_role(socket, username, headers, actor) do
+    with {:ok, %{"role" => raw}} <- read_json_body(socket, headers),
+         {:ok, role} <- ConsoleRole.parse(raw) do
+      respond_user_result(socket, Auth.set_role(username, role, actor), "200 OK")
+    else
+      :error -> send_problem(socket, :invalid_role, "/users")
+      _malformed -> send_problem(socket, :invalid_request, "/users")
     end
   end
 
@@ -617,13 +445,13 @@ defmodule Malachi.Dashboard do
         respond_user_result(socket, Auth.change_password(username, password), "200 OK")
 
       _malformed ->
-        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+        send_problem(socket, :invalid_request, "/users")
     end
   end
 
   defp handle_delete_user(socket, username), do: respond_user_result(socket, Auth.remove_user(username), "200 OK")
 
-  # --- per-topic ACL management: /users/:username/acls, admin-gated by has_required_permission?. ---
+  # --- per-topic ACL management: /users/:username/acls, gated to the console :admin role. ---
 
   # Routes a /users/<rest> request: `acl_fun.(username)` when `rest` is `"<username>/acls"`, else `fallback`.
   defp route_acl(_socket, rest, acl_fun, fallback) do
@@ -667,11 +495,11 @@ defmodule Malachi.Dashboard do
       {:ok, %{"operation" => operation, "pattern" => pattern}} when is_binary(pattern) ->
         case Auth.parse_acl_operation(operation) do
           {:ok, op} -> fun.(op, pattern)
-          :error -> send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_operation"})
+          :error -> send_problem(socket, :invalid_operation, "/users")
         end
 
       _malformed ->
-        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+        send_problem(socket, :invalid_request, "/users")
     end
   end
 
@@ -689,8 +517,8 @@ defmodule Malachi.Dashboard do
   end
 
   # Who changed it, for the audit log: the session's user, or "dashboard" with authentication disabled.
-  defp actor(%{username: username}), do: username
-  defp actor(_no_session), do: "dashboard"
+  defp actor(%{username: username}) when is_binary(username), do: username
+  defp actor(_anonymous), do: "dashboard"
 
   defp handle_list_policies(socket) do
     case Policies.list() do
@@ -713,7 +541,7 @@ defmodule Malachi.Dashboard do
         respond_policy_result(socket, Policies.define(name, Enum.to_list(fields), actor), "200 OK")
 
       _malformed ->
-        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+        send_problem(socket, :invalid_request, "/users")
     end
   end
 
@@ -748,7 +576,7 @@ defmodule Malachi.Dashboard do
         respond_policy_result(socket, Policies.bind(topic, name, actor), "200 OK")
 
       _malformed ->
-        send_json(socket, "400 Bad Request", %{"s" => "err", "reason" => "invalid_request"})
+        send_problem(socket, :invalid_request, "/users")
     end
   end
 
@@ -757,43 +585,11 @@ defmodule Malachi.Dashboard do
 
   defp respond_policy_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
 
-  defp respond_policy_result(socket, {:error, reason}, _ok_status),
-    do: send_json(socket, policy_status(reason), %{"s" => "err", "reason" => Policies.reason_string(reason)})
-
-  @doc false
-  # The HTTP status of a policy refusal. A refusal the operator can act on by changing the request is 400;
-  # one about the state of the cluster (in use, an upgrade not finished) is 409; a topic or policy that
-  # does not exist is 404; and a control plane that did not answer, or a topic mid-migration, is 503: the
-  # same request can succeed later. Public only so every branch is tested, including the ones a running
-  # test node cannot reach (an unfinished upgrade).
-  @spec policy_status(Policies.reason()) :: String.t()
-  def policy_status(reason) when reason in [:no_such_policy, :no_such_topic], do: "404 Not Found"
-  def policy_status({:policy_in_use, _topics}), do: "409 Conflict"
-  def policy_status({:unsupported_command, _key, _introduced, _effective}), do: "409 Conflict"
-  def policy_status({:unsupported_policy_field, _name, _since, _effective}), do: "409 Conflict"
-
-  def policy_status(reason)
-      when reason in [:invalid_policy_name, :invalid_topic, :invalid_policy],
-      do: "400 Bad Request"
-
-  def policy_status({field_reason, _name})
-      when field_reason in [:unknown_policy_field, :invalid_policy_field, :duplicate_policy_field],
-      do: "400 Bad Request"
-
-  def policy_status(_unavailable), do: "503 Service Unavailable"
+  defp respond_policy_result(socket, {:error, reason}, _ok_status), do: send_problem(socket, reason, "/policies")
 
   defp respond_user_result(socket, :ok, ok_status), do: send_json(socket, ok_status, %{"s" => "ok"})
 
-  defp respond_user_result(socket, {:error, reason}, _ok_status) do
-    status =
-      case reason do
-        :user_exists -> "409 Conflict"
-        :user_not_found -> "404 Not Found"
-        _other -> "400 Bad Request"
-      end
-
-    send_json(socket, status, %{"s" => "err", "reason" => to_string(reason)})
-  end
+  defp respond_user_result(socket, {:error, reason}, _ok_status), do: send_problem(socket, reason, "/users")
 
   # A single request body is capped at 1 MiB. The dashboard only ever receives small JSON payloads (login,
   # user, ACL), so anything larger is malformed or hostile and is not read.
@@ -882,15 +678,15 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :OPTIONS, path: path}, headers, _client_ip, _session),
     do: serve_cors_preflight(socket, headers, path)
 
-  # Admin user management: gated to :admin by the auth stage above.
+  # User management: gated to the console :admin role by the auth stage above.
   defp handle_route(socket, %{method: :GET, path: "/users"}, _headers, _client_ip, _session),
     do: handle_list_users(socket)
 
   defp handle_route(socket, %{method: :POST, path: "/users"}, headers, _client_ip, _session),
     do: handle_create_user(socket, headers)
 
-  defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, _session),
-    do: handle_user_password(socket, rest, headers)
+  defp handle_route(socket, %{method: :PUT, path: "/users/" <> rest}, headers, _client_ip, session),
+    do: handle_user_update(socket, rest, headers, actor(session))
 
   # Per-topic ACL management: /users/:username/acls: GET lists, POST grants, DELETE revokes. A DELETE
   # on a bare /users/:username (no /acls suffix) falls back to deleting the user.
@@ -903,7 +699,7 @@ defmodule Malachi.Dashboard do
   defp handle_route(socket, %{method: :DELETE, path: "/users/" <> rest}, headers, _client_ip, _session),
     do: route_acl(socket, rest, &handle_revoke_acl(socket, &1, headers), fn -> handle_delete_user(socket, rest) end)
 
-  # Storage policies (#194), admin-gated by has_required_permission?: /policies lists, /policies/:name
+  # Storage policies (#194), read by a console :viewer and written by an :editor: /policies lists, /policies/:name
   # defines (PUT) or deletes (DELETE, `?force=true` for a policy topics are bound to), and
   # /topics/:name/policy reads a topic's effective retention (GET), binds it (PUT) or detaches it (DELETE).
   defp handle_route(socket, %{method: :GET, path: "/policies"}, _headers, _client_ip, _session),
@@ -1086,7 +882,7 @@ defmodule Malachi.Dashboard do
         },
         # Read through the limiter so the dashboard cannot disagree with what is actually enforced;
         # an unconfigured action reports a null limit rather than a default nobody applies.
-        dashboard_auth: login_bucket_config(),
+        dashboard_auth: Access.login_bucket_config(),
         publish: action_config_json(:publish),
         subscribe: action_config_json(:subscribe),
         dashboard_api: action_config_json(:dashboard_api)
@@ -1097,8 +893,8 @@ defmodule Malachi.Dashboard do
   end
 
   defp serve_logout(socket, headers) do
-    # Revoke the session if a cookie token is present
-    case extract_token_from_cookie(headers) do
+    # Revoke the session if a token is present
+    case Access.token(Map.get(headers, "authorization"), Map.get(headers, "cookie")) do
       nil -> :ok
       token -> Auth.logout(token)
     end
@@ -1122,10 +918,7 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  defp serve_404(socket) do
-    body = Jason.encode!(%{"s" => "err", "reason" => "not_found"})
-    send_response(socket, "404 Not Found", [{"Content-Type", "application/json"}], body, "/404")
-  end
+  defp serve_404(socket), do: send_problem(socket, :not_found, "/404")
 
   # Convert list of {identifier, count} tuples to JSON-encodable list of maps
   defp format_top_blocked(entries) do

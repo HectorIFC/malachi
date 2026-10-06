@@ -313,14 +313,15 @@ defmodule Malachi.Console.RouterTest do
       end
     end
 
-    test "headers past the byte budget are 431 with the dashboard's body", ctx do
+    test "headers past the byte budget are 431 with the dashboard's problem body", ctx do
       opts = %{ctx.opts | max_header_bytes: 100}
 
       assert call(opts, "/", [{"x-a", String.duplicate("a", 90)}]).status == 200
 
       conn = call(opts, "/", [{"x-a", String.duplicate("a", 97)}, {"x-b", "b"}])
       assert conn.status == 431
-      assert conn.resp_body == ~s({"s":"err","reason":"header_fields_too_large"})
+      assert Jason.decode!(conn.resp_body) == %{"type" => "errors.http.header_fields_too_large", "status" => 431}
+      assert get_resp_header(conn, "content-type") == ["application/problem+json"]
       assert get_resp_header(conn, "x-frame-options") == ["DENY"]
     end
   end

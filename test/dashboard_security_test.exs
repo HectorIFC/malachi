@@ -124,7 +124,8 @@ defmodule Malachi.DashboardSecurityTest do
       end
     end
 
-    test "GET /metrics with producer token returns 200", %{producer_token: token} do
+    # A wire permission is not a console role (#228): a producer no longer reads the operational state.
+    test "GET /metrics with producer token is refused for lack of a console role", %{producer_token: token} do
       case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
@@ -137,8 +138,9 @@ defmodule Malachi.DashboardSecurityTest do
           :gen_tcp.send(socket, request)
           {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
 
-          assert String.contains?(response, "200 OK")
-          assert String.contains?(response, "application/json")
+          assert String.contains?(response, "403 Forbidden")
+          assert String.contains?(response, "application/problem+json")
+          assert String.contains?(response, ~s("required_role":"viewer"))
 
           :gen_tcp.close(socket)
 
@@ -197,7 +199,7 @@ defmodule Malachi.DashboardSecurityTest do
       end
     end
 
-    test "POST /login with invalid credentials returns 403" do
+    test "POST /login with invalid credentials returns 401" do
       case DashboardHelper.connect() do
         {:ok, socket} ->
           body = Jason.encode!(%{"username" => "dashboard_admin", "password" => "wrong_password"})
@@ -208,8 +210,8 @@ defmodule Malachi.DashboardSecurityTest do
           :gen_tcp.send(socket, request)
           {:ok, response} = :gen_tcp.recv(socket, 0, 2000)
 
-          assert String.contains?(response, "403 Forbidden") or
-                   String.contains?(response, "403")
+          assert String.contains?(response, "401 Unauthorized")
+          assert String.contains?(response, "errors.auth.invalid_credentials")
 
           :gen_tcp.close(socket)
 
@@ -312,7 +314,7 @@ defmodule Malachi.DashboardSecurityTest do
       response = raw_request(header_lines(51))
       assert status_code(response) == 431
       assert response =~ "431 Request Header Fields Too Large"
-      assert {:ok, %{"reason" => "header_fields_too_large"}} = json_body(response)
+      assert {:ok, %{"type" => "errors.http.header_fields_too_large"}} = json_body(response)
     end
 
     test "a repeated name counts once per line" do
@@ -1256,7 +1258,7 @@ defmodule Malachi.DashboardSecurityTest do
       response = acl_req(:POST, "/users/#{user}/acls", token, %{operation: "superuser", pattern: "t.*"})
       assert status_code(response) == 400
       {:ok, body} = json_body(response)
-      assert body["reason"] == "invalid_operation"
+      assert body["type"] == "errors.acls.invalid_operation"
     end
 
     test "a non-admin is forbidden (403)", %{producer_token: token, acl_user: user} do
@@ -1279,13 +1281,13 @@ defmodule Malachi.DashboardSecurityTest do
       case DashboardHelper.connect() do
         {:ok, socket} ->
           # The setup token was minted with an empty User-Agent; a request carrying one mismatches, so ua
-          # binding rejects it (403) before the permission check runs.
+          # binding rejects the session (401) before the role check runs.
           {:ok, response} =
             DashboardHelper.authenticated_request(socket, :GET, "/metrics", token,
               headers: %{"User-Agent" => "Mozilla/5.0 (attacker)"}
             )
 
-          assert status_code(response) == 403
+          assert status_code(response) == 401
           :gen_tcp.close(socket)
 
         {:error, _} ->
@@ -1339,7 +1341,7 @@ defmodule Malachi.DashboardSecurityTest do
           {:ok, bad_resp} =
             DashboardHelper.authenticated_request(s2, :GET, "/metrics", token, headers: %{"User-Agent" => "AgentY/2.0"})
 
-          assert status_code(bad_resp) == 403
+          assert status_code(bad_resp) == 401
           :gen_tcp.close(s2)
 
         {:error, _} ->

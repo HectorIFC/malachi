@@ -127,7 +127,7 @@ defmodule Malachi.DashboardApiRateLimitTest do
       response = get(token, "/metrics", %{"Origin" => @origin})
 
       assert status(response) == 429
-      assert %{"s" => "err", "reason" => "rate_limit_exceeded", "retry_after_ms" => retry} = json_body(response)
+      assert %{"type" => "errors.http.rate_limited", "status" => 429, "retry_after_ms" => retry} = json_body(response)
       assert is_integer(retry) and retry > 0
       assert response =~ ~r/\r\nRetry-After: \d+\r\n/
       assert String.downcase(response) =~ "access-control-allow-origin: #{@origin}"
