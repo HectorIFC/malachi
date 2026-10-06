@@ -451,7 +451,7 @@ Record each gate in `$S/results.json`:
 {"gates": [{"gate": "<exactly as the plan printed it>", "status": "pass", "host": "linux",
             "evidence": "<path of a log or result file, or a run URL>",
             "tree": "<with a log: the $tree it ran on>",
-            "workflow": "<with a run URL: ci.yml>", "sha": "<with a run URL: the commit the run tested>"}]}
+            "workflow": "<with a run URL: ci.yml>", "sha": "<with a run URL: the run's headSha, the branch head>"}]}
 ```
 
 A log counts only for the tree it ran on. When the group changes (a package taken out, the lock
@@ -512,17 +512,18 @@ run in the box, and `mix test` is the pull request's CI, never a run on the host
 
 ## 8. CI evidence and the verdict, after the pull request is open
 
-Wait for the draft pull request, not only the push. `ci.yml` runs on any push, but `security.yml`
-(sobelow, deps.audit) runs on a pull request to main and `results.yml` (the node drill) on a pull
-request: before one exists those gates have no run, and the verdict reports them as not run. Once the
-contributor has pushed the group branch and `open-issue-pr` has opened its draft, read the branch head
-and main's, and take the CI gates from the runs of that head only:
+Wait for the draft pull request, not only the push. `ci.yml` runs only for a pull request (or on
+main), `security.yml` (sobelow, deps.audit) on a pull request to main and `results.yml` (the node drill)
+on a pull request: before one exists none of those gates has a run, and the verdict reports them as not
+run. Once the contributor has pushed the group branch and `open-issue-pr` has opened its draft, read
+the branch head and main's, and take the CI gates from the runs of that head only:
 
 ```
 /usr/bin/git fetch origin main "$branch"
 head=$(/usr/bin/git rev-parse "origin/$branch")
 main=$(/usr/bin/git rev-parse origin/main)
 tree=$(/usr/bin/git rev-parse "origin/$branch^{tree}")    # what the local gates ran on, if unchanged
+/usr/bin/git merge-base --is-ancestor "$main" "$head" && echo "branch holds main" || echo "stop: main moved"
 gh run list --branch "$branch" --json databaseId,headSha,conclusion,workflowName
 gh run view "$run" --json headSha,conclusion
 gh api "repos/{owner}/{repo}/actions/runs/$run" --jq '.path | sub("@.*$"; "")'    # .github/workflows/ci.yml
@@ -533,6 +534,16 @@ that `.path`, without any `@ref` the API may append (`ci.yml`; `workflowName` is
 `name:`, `CI`, which the verdict does not know)
 and `"sha"` set to the run's `headSha`. Every value read here passes `check_number` or `check_sha`
 first. A run whose `headSha` is not `$head`, or whose `conclusion` is not `success`, proves nothing.
+
+Read no run unless the branch holds main as it is now (`branch holds main` above). A pull request run
+tests the branch merged with main as main was when it ran, while its `headSha` is the branch head; when
+the branch already holds main, that merge has the branch's own tree, so the run tested `$tree`. On
+`stop: main moved` (another group merged, say), no run of `$head` is evidence. A rerun does not help, as
+it reuses the run's original commit, the old merge, and neither does closing and reopening the pull
+request, which keeps `$head`. Ask the contributor to merge main into the group branch and push; this
+skill never updates the branch itself, not with `git push` and not with `gh pr update-branch`. The new
+`$head` gets its own runs, and the merge changes the tree, so the local gates run again on it before
+their logs count.
 
 Then the verdict, which refuses a group unless every gate its tiers need passed on Linux with evidence.
 Its tiers are the group's `verdict tiers:` line in the plan's output, passed exactly as printed (`tool`,
@@ -579,7 +590,8 @@ comments too.
 
 ## What not to do
 
-- Do not run `git commit` or `git push`, and do not run the script `prepare-commits` writes.
+- Do not run `git commit` or `git push`, and do not run the script `prepare-commits` writes. Do not
+  update a branch on the remote any other way either (`gh pr update-branch`, the update-branch API).
 - Do not run `gh pr merge`, `gh pr close`, `gh pr comment`, `gh pr review` or `gh issue create`, or
   dispatch a workflow, without an explicit approval for that one action.
 - Do not check out a Dependabot branch or run `mix` on its files. Read them through `git show` or the API.

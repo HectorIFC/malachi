@@ -58,6 +58,7 @@ defmodule Malachi.Retention.OrphansTest do
         {"old-r0-s1", 1_000},
         {"new-r0-s2", 999},
         {"malachi.format", 5_000},
+        {"malachi.cluster", 5_000},
         {"shard_0", 5_000},
         {"lost+found", 5_000},
         {"shard_0-r0-s1", 5_000}

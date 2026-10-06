@@ -3,7 +3,11 @@
 #
 # Run with the server env you want to profile, e.g.:
 #
-#     MALACHI_GROUP_COMMIT=true mix run benchmark/profile_server.exs
+#     MALACHI_GROUP_COMMIT=true MALACHI_LOG_REPLICATION_FACTOR=1 mix run benchmark/profile_server.exs
+#
+# Broker group commit applies only with a configured replication factor of 1 (a single node runs a
+# one-member control plane cluster whose default factor is 3), so the header prints what the broker
+# actually runs, not what was asked for.
 #
 # The script runs inside the server VM (mix run starts the app). The load client is spawned as a
 # SEPARATE OS process (its own BEAM via `mix malachi.loadtest`), so the profiled VM contains only the
@@ -39,7 +43,9 @@ defmodule ProfileServer do
     IO.puts("""
     server VM: schedulers=#{:erlang.system_info(:schedulers_online)} \
     dirty_io=#{:erlang.system_info(:dirty_io_schedulers)} \
-    group_commit=#{Application.get_env(:malachi, :group_commit, false)}
+    group_commit=#{:sys.get_state(Malachi.LogBroker).group_commit} \
+    (asked: #{Application.get_env(:malachi, :group_commit, false)}, \
+    replication_factor: #{Application.get_env(:malachi, :log_replication_factor, 3)})
     load: produce #{@connections} conns, batch #{@batch}, #{@topics} topics, #{@warmup_s}+#{@duration_s}s (external client VM)
     """)
 

@@ -873,7 +873,9 @@ defmodule Malachi.ApplicationLivePlacementTest do
   against, and the reason the vnode coordinator manager no longer closes over the boot list.
 
   `async: false`: these register the production membership name so the real seam is exercised, and the
-  timeout case has to be the only claimant of that name while it runs.
+  timeout case has to be the only claimant of that name while it runs. The application runs its own
+  membership server under that name (a single node is a one-member cluster), so each test takes it out
+  of the supervision tree first and puts it back after.
   """
   use ExUnit.Case, async: false
 
@@ -881,6 +883,11 @@ defmodule Malachi.ApplicationLivePlacementTest do
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MembershipServer
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Test.AppChildren
+
+  setup do
+    AppChildren.suspend(Malachi.LogMembership)
+  end
 
   @membership Malachi.LogMembership
 

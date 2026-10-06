@@ -33,4 +33,15 @@ defmodule Malachi.Cluster.RaResume do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc """
+  Whether `server_id`'s name has ever been started on this node in `system`: its uid is in ra's
+  directory, which survives a restart with the data directory. The question `resume_or/3` answers by
+  trying, asked without starting anything, for a caller that must decide before the member comes up
+  whether what it finds on disk belongs to it (`Malachi.Storage.DataDirGuard`).
+  """
+  @spec registered?(atom(), :ra.server_id()) :: boolean()
+  def registered?(system, {name, _node}) do
+    :ra_directory.uid_of(system, name) != :undefined
+  end
 end

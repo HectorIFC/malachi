@@ -4,23 +4,34 @@ defmodule Malachi.DataPlaneRouter do
 
   By default there is one shard (`Malachi.LogBroker`) and every topic maps to it, so routing is a pure
   no-op and a deployment is byte-identical to one that never knew about sharding. Setting
-  `MALACHI_DATA_SHARDS` to N > 1 (single-node only, gated in `Malachi.Application`) runs N independent
-  in-memory BrokerServer shards; a topic is pinned to one shard by `:erlang.phash2/2`, so every operation
-  for that topic (create, produce, fetch, consume) lands on the same shard and same-key ordering is
-  preserved.
+  `MALACHI_DATA_SHARDS` to N > 1 (with no control plane cluster, see `Malachi.Config.log_cluster/2`)
+  runs N independent in-memory BrokerServer shards; a topic is pinned to one shard by
+  `:erlang.phash2/2`, so every operation for that topic (create, produce, fetch, consume) lands on the
+  same shard and same-key ordering is preserved.
 
   This is an experimental measurement mode for quantifying how far parallel brokers lift the networked
   throughput ceiling (the single serial `BrokerServer` mailbox), not a production feature: consumer-group
-  coordination, retention, and the dashboard still target shard 0 only.
+  coordination, retention, and the dashboard still target shard 0 only, and the shards' metadata does
+  not survive a restart.
   """
 
   # Shard 0 keeps the historical name, so a single-shard deployment is unchanged and every existing
   # reference to `Malachi.LogBroker` still resolves.
   @base Malachi.LogBroker
 
-  @doc "The configured shard count (always >= 1)."
+  @doc """
+  The shard count (always >= 1): the configured one, or 1 whenever a control plane cluster is
+  configured. A clustered node starts one broker however many shards were asked for
+  (`Malachi.Application`), so hashing a topic across the configured count would route it to a
+  `Malachi.LogBroker<i>` that does not exist.
+  """
   @spec shard_count() :: pos_integer()
-  def shard_count, do: max(1, Application.get_env(:malachi, :data_shards, 1))
+  def shard_count do
+    case Application.get_env(:malachi, :log_cluster) do
+      nil -> max(1, Application.get_env(:malachi, :data_shards, 1))
+      _cluster -> 1
+    end
+  end
 
   @doc "The registered name of shard `index` (0-based). Shard 0 is `Malachi.LogBroker`."
   @spec shard_name(non_neg_integer()) :: module()
