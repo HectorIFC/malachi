@@ -1907,6 +1907,24 @@ defmodule Malachi.BrokerTest do
       assert [%{segment_id: {^root_id, 1}}] = refreshed |> Broker.request_rolls([s1]) |> Broker.due_rolls()
     end
 
+    test "an owed age roll is dropped when the view holds a later head, and kept when it holds an earlier one" do
+      {broker, root_id} = broker_with_topic()
+
+      roll_of = fn seq ->
+        %{id: {root_id, seq}, range_id: root_id, state: :active, replica_set: [:primary], start_offset: seq}
+      end
+
+      # The roll names S1; the control plane already expired S1 and S2 is the head: the roll is behind.
+      {later, :ok} = DSRSM.command(broker.dsrsm, "events", {:register_segment, root_id, {root_id, 2}, [:primary], 2})
+      ahead = %{broker | dsrsm: later} |> Broker.request_rolls([roll_of.(1)]) |> Broker.drop_stale_active_segments()
+      assert Broker.due_rolls(ahead) == []
+
+      # The roll names S1; this view is the one behind and still lists S0 as the head: the roll is kept.
+      {earlier, :ok} = DSRSM.command(broker.dsrsm, "events", {:register_segment, root_id, {root_id, 0}, [:primary], 0})
+      behind = %{broker | dsrsm: earlier} |> Broker.request_rolls([roll_of.(1)]) |> Broker.drop_stale_active_segments()
+      assert [%{segment_id: {^root_id, 1}}] = Broker.due_rolls(behind)
+    end
+
     test "an owed age roll for a head the refreshed view does not hold yet is kept" do
       {broker, root_id} = broker_with_topic()
       unseen = %{id: {root_id, 0}, range_id: root_id, state: :active, replica_set: [:primary], start_offset: 0}

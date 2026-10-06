@@ -852,10 +852,11 @@ defmodule Malachi.Broker do
 
   An owed roll whose segment is not cached here (an age roll the sweep asked for, `request_rolls/2`) is
   dropped too once the control plane has moved past it: the segment is sealed, or the range's head is
-  now another segment. Its fence may never be answered (a primary that died and was replaced), and since
+  now a LATER segment (a higher sequence; a range's segment sequence only grows). Its fence may never be answered (a primary that died and was replaced), and since
   a range owes one roll at a time, a roll left behind would swallow every later roll of the range on this
-  node. A segment the refreshed view does not hold at all keeps its roll: that is a head this view has not
-  caught up with, the very case the age roll exists for.
+  node. A segment the refreshed view does not hold at all, with no later head beside it, keeps its roll:
+  that is a head this view has not caught up with (an older head still listed is just as behind), the
+  very case the age roll exists for.
   """
   @spec drop_stale_active_segments(t()) :: t()
   def drop_stale_active_segments(%__MODULE__{} = broker) do
@@ -879,9 +880,12 @@ defmodule Malachi.Broker do
     case DSRSM.get_segment(broker.dsrsm, topic_of_segment(roll.segment_id), roll.segment_id) do
       %{state: :sealed} -> true
       %{state: :active} -> false
-      nil -> match?(%{id: id} when id != roll.segment_id, registered_active_segment(broker, range_id))
+      nil -> later_head?(registered_active_segment(broker, range_id), roll.segment_id)
     end
   end
+
+  defp later_head?(%{id: {_range, head_seq}}, {_range_id, roll_seq}), do: head_seq > roll_seq
+  defp later_head?(_no_head, _segment_id), do: false
 
   # Defence in depth for a fence that never happened: a segment the metadata still calls ACTIVE whose
   # RANGE has been retired by a split or a merge. That state should be unreachable, since the control
