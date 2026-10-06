@@ -75,6 +75,56 @@ defmodule Malachi.BrokerServerTest do
     send(server, {:longpoll_timeout, waiter.ref})
   end
 
+  describe "the broker set refresh" do
+    # The source is the membership server, which a supervisor restarts on its own. A refresh that finds it
+    # down used to take the broker down with it, and a single node now runs it too (#273).
+    test "keeps the current set and attributes while membership does not answer, and survives" do
+      directory = TmpDir.path("bs_refresh_down")
+      on_exit(fn -> File.rm_rf!(directory) end)
+      {:ok, repl} = ReplicationServer.start_link(directory: directory)
+      on_exit(fn -> stop_quietly(repl) end)
+      down = fn -> exit({:noproc, {GenServer, :call, [Malachi.LogMembership, :alive_members, 5000]}}) end
+
+      {:ok, broker} =
+        BrokerServer.start_link(directory,
+          brokers: [repl],
+          live_brokers: down,
+          broker_attributes: down,
+          brokers_refresh_interval: 10
+        )
+
+      on_exit(fn -> stop_quietly(broker) end)
+      before = :sys.get_state(broker).broker
+
+      send(broker, :refresh_brokers)
+      after_refresh = :sys.get_state(broker).broker
+
+      assert Process.alive?(broker)
+      assert after_refresh.brokers == before.brokers
+      assert after_refresh.broker_attributes == before.broker_attributes
+      {:ok, _root} = BrokerServer.create_topic(broker, "still-serving", 4)
+    end
+
+    test "takes the attributes membership answers with" do
+      directory = TmpDir.path("bs_refresh_attrs")
+      on_exit(fn -> File.rm_rf!(directory) end)
+      {:ok, repl} = ReplicationServer.start_link(directory: directory)
+      on_exit(fn -> stop_quietly(repl) end)
+
+      {:ok, broker} =
+        BrokerServer.start_link(directory,
+          brokers: [repl],
+          live_brokers: fn -> [] end,
+          broker_attributes: fn -> %{repl => %{"rack" => "r1"}} end,
+          brokers_refresh_interval: 3_600_000
+        )
+
+      on_exit(fn -> stop_quietly(broker) end)
+      send(broker, :refresh_brokers)
+      assert :sys.get_state(broker).broker.broker_attributes == %{repl => %{"rack" => "r1"}}
+    end
+  end
+
   describe "long-poll consume" do
     test "consume returns immediately when wait_ms is 0", %{tmp_dir: directory} do
       {server, _root} = with_topic(directory)

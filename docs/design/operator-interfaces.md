@@ -300,42 +300,65 @@ Four of those deletions carry a lesson worth keeping:
 
 ### 4.1 The one artifact
 
-`docs/design/design-tokens.json` is the single source of truth for color, and it generates every
-consumer. Nothing hand mirrors a palette.
+`docs/design/design-tokens.json` is the single source of truth for every color, type, spacing,
+size, radius, shadow, density, motion and easing value, and `mix malachi.tokens` generates every
+consumer from it (`Malachi.UI.TokenGen`). Nothing hand mirrors a palette.
 
 ```
 docs/design/design-tokens.json
         |
-        +--> assets/src/styles/tokens.css      :root, .dark, @theme inline
-        +--> tui/src/theme/generated.rs        Palette with TRUECOLOR / ANSI256 / ANSI16
-        +--> lib/malachi/ui/tokens.ex          for any server rendered fallback
-        +--> docs/design/tokens.snapshot.json  flat name -> {oklch, srgb8, theme, platforms}
+        +--> assets/src/styles/tokens.css      :root, .dark, .density-*, reduced motion, @theme inline
+        +--> tui/src/theme/generated.rs        Palette with TRUECOLOR / ANSI256 / ANSI16, painted Surface
+        +--> lib/malachi/ui/tokens.ex          Malachi.UI.Tokens, for any server rendered fallback
+        +--> docs/design/tokens.snapshot.json  flat name -> {web, value, srgb8, alpha, ansi256, platforms}
 ```
 
-Colors are authored in **OKLCH**, which is what shadcn itself now emits, and quantised to the 256
-color cube and to the 16 color ANSI set **at generation time**, in a perceptual space, never by
-naive sRGB distance.
+The four outputs are generated and committed before their consumers exist: the web console (#231)
+and the terminal interface (#233) start from them rather than inventing a palette first. The Claude
+Design design system is the visual reference; a value it shows that the token file lacks is added to
+the token file, never hard coded in a component.
+
+Colors are authored in **OKLCH**, which is what shadcn itself now emits, and the web stylesheet and
+`Malachi.UI.Tokens` carry them as authored, since both are CSS a browser draws. The terminal palette,
+the contrast and color vision checks and the snapshot's `srgb8` receive sRGB, clipped in linear light; a clip that moves a color more
+than the tolerance in `$gamut` fails generation, because sRGB cannot show what was authored. The
+256 color tier is quantised **at generation time** to the 6x6x6 cube and the gray ramp, nearest in
+OKLab, never by naive sRGB distance. When two states land on one index the generator fails rather
+than picking a second choice, and the exception is declared by hand in `$ansi256`: in the dark theme
+`state.fenced` and `state.behind` both quantise to 214, so `state.behind` is declared at 221.
 
 **The 16 color mapping is hand declared, never computed.** A nearest neighbour search collapses
 `state.damaged` and `state.fenced` onto the same red, which is precisely the distinction an operator
-needs at 3 a.m. Those mappings are written in the token file as explicit values.
+needs at 3 a.m. Those mappings are written in `$ansi16` as explicit values; a terminal token without
+one is an error, not a gap the generator fills, and every state must have its own code.
 
 Four CI gates prove the sharing, and they are the reason this is one design system rather than three
-that look similar:
+that look similar. All four run in `mix malachi.tokens --check`, its own step in the CI lint job:
 
-1. Generated files are committed, and CI fails on `git diff --exit-code` after regenerating.
-2. A grep over `assets/src` and `tui/src` for raw color literals (`#`, `oklch(`, `rgb(`, `hsl(`,
-   `Color::Rgb`, `Color::Indexed`, named `Color::`) outside the generated files fails on any hit.
+1. Generated files are committed, and the check fails on any output that differs from what the token
+   file generates.
+2. A scan of `assets/src` and `tui/src` for raw color literals (a hex color where a color is written,
+   `oklch(`, `rgb(`, `rgba(`, `hsl(`, `hsla(`, `Color::Rgb`, `Color::Indexed`, any named `Color::`)
+   outside the generated files fails on any hit, on a scanned directory that does not exist, on a
+   symbolic link it would not follow, and on a Sass or Less stylesheet, which it does not read.
    Redpanda Console runs the same idea as a CI job that audits drift from its own component registry,
    flagging locally modified components, off token colors and ad hoc utility classes, and posts an
    advisory comment rather than failing the build. Malachi fails the build, because there are three
    renderers here and a drifted color is a broken contract rather than a style lapse.
-3. A cross language contract test: the web test parses `tokens.css` and the Rust test deserialises
-   `tokens.snapshot.json`, both asserting field by field in both directions, so a missing token and
-   an extra token both fail.
-4. The generator computes contrast for every declared foreground and background pair in both themes
-   and fails below threshold, including muted foreground on muted, and every `state.*` on both
-   `background` and `card`.
+3. A cross language contract: `tokens.css`, `generated.rs` and `tokens.ex` are each read the way their
+   own language reads them and compared with `tokens.snapshot.json` field by field in both
+   directions, so a missing token and an extra token both fail. It runs in ExUnit and in the check
+   today; the web console and the terminal interface add their own native test against the same
+   snapshot when their projects land (#231, #233).
+4. The generator fails below threshold on every pair in `$contrast`, in both themes, WCAG 2.2 on the
+   bytes the screen shows. A pair names its role and the generator fixes the floor, so no pair can be
+   given a weaker one: 4.5 for text (1.4.3), including muted foreground on muted and the sidebar
+   pairs, and 3 for a graphic (1.4.11), which is every `state.*`, every `chart-*` series and the
+   control border `input`, each on both `background` and `card`, and the focus ring on `background`,
+   `card`, `muted` and `popover` (`sidebar-ring` on the sidebar background and accent). `border` is a divider rather than a
+   control boundary and is not gated. A pair with alpha is refused rather than composited. The same step fails when two members of a `$cvd` set, simulated for deuteranopia,
+   come closer than the distance it declares, and when a color in an `$apart` set (a cluster's
+   identity) comes closer than its distance to one it must not be mistaken for (a state).
 
 ### 4.2 Tokens
 
@@ -360,6 +383,12 @@ its own named tokens instead:
 
 `--chart-1` through `--chart-5` stay reserved for time series, and are checked for deuteranopia
 distinguishability by the same generator gate.
+
+`--cluster-teal`, `--cluster-orange`, `--cluster-violet` and `--cluster-rose` are the identity color an
+operator picks for a cluster, so two consoles open side by side are told apart at a glance. They are
+never a state and never a time series, are checked for deuteranopia like the chart colors, are kept at
+least 0.05 in OKLab from every state color in both themes (`$apart`), which is why there is an orange
+and no amber, and carry their text in `--cluster-foreground`, which reaches 4.5 on each of them.
 
 ### 4.3 Themes
 
@@ -1052,7 +1081,7 @@ makes three interfaces one product rather than three that resemble each other.
 
 | Artifact | Source | Consumers | Gate |
 |---|---|---|---|
-| `docs/design/design-tokens.json` | Hand authored in OKLCH | `tokens.css`, `generated.rs`, `tokens.ex` | Regenerate and `git diff --exit-code`; no raw colour literals; cross language contract test; contrast |
+| `docs/design/design-tokens.json` | Hand authored in OKLCH | `tokens.css`, `generated.rs`, `tokens.ex`, `tokens.snapshot.json` | `mix malachi.tokens --check`: stale output; no raw colour literals; cross language contract; contrast, deuteranopia, colors kept apart, gamut and terminal distinctness |
 | `docs/design/keymap.json` | Hand authored | Web registry, kbd hints, cmdk entries, `?` overlay, ratatui dispatcher, native menu | Collision lint per surface |
 | `docs/design/commands.json` | Hand authored | Web palette, TUI palette, workspace context menus, native menu | Every command has both locales and a destructiveness flag |
 | Translation catalog | `lib/malachi/i18n.ex` | Web, TUI, desktop | Freshness check in CI |
@@ -1284,9 +1313,15 @@ moment `priv/static` holds the console.
 - The range lineage uses `role="treegrid"` with `aria-expanded` only on parent rows, Right Arrow to
   expand and enter, Left Arrow to collapse, combined with `aria-rowcount` and `aria-rowindex` from
   the virtualization.
-- Every status has a **text label and a shape** in addition to colour. Every semantic token is
-  verified at 4.5:1 for text and 3:1 for a status dot, a chart series and a control border, in both
-  themes.
+- Every status has a **text label and a shape** in addition to colour. The contrast gate in section
+  4.1 verifies, in both themes, 4.5:1 for every text pair and 3:1 for every state, every chart series
+  and the control border (`input`) on `background` and `card`, and for the focus ring on `background`,
+  `card`, `muted` and `popover` (`sidebar-ring` on the sidebar background and accent). Those are the
+  only surfaces a state or a chart color is drawn on: putting one on another surface, such as `muted`
+  or `accent`, or using `destructive` as text, means adding its pair to the token file first, and the
+  gate then holds it.
+  `focus-accent`, the brand amber, is decoration beside a focused element and never the only sign of
+  focus; `ring` is the focus indicator, which is why only `ring` is held to 3:1.
 - A live tail must be pausable, which is WCAG 2.2.2 at level A. It auto pauses when the operator
   scrolls away from the bottom, uses a fixed capacity ring buffer with a **visible** drop counter,
   and shows one state chip: live, reconnecting, paused, disconnected.

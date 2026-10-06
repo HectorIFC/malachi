@@ -218,6 +218,20 @@ before handing over: run the repository's formatter and its checks (here `mix fo
 `mix credo --strict`, `mix test`) over the working tree the patches were cut from, and say in the report
 that they passed.
 
+One exception: when the branch carries a dependency update, its new packages have been checked but must
+never run on this machine. The branch carries one when its `mix.lock` differs from the one it started
+from, whether the change is still in the working tree or already in an earlier commit of the branch:
+
+```
+/usr/bin/git diff --quiet "$(/usr/bin/git merge-base origin/main HEAD)" -- mix.lock || echo "dependency update"
+```
+
+Then no check runs on the host. Build a new box from the working tree as it is now, exactly as step 6 of
+the `dependency-updates` skill does (a fresh copy, the `malachi-box` image), fetch with `in_box_net` and
+`mix deps.get --check-locked`, and run `mix format --check-formatted` and `mix credo --strict` with
+`in_box`, which has no network. A box from an earlier session is a copy of an older tree; never reuse
+one. `mix test` is left to the pull request's CI. Say so in the report instead of saying the suite passed.
+
 ```
 chmod +x commit_message.sh && bash -n commit_message.sh
 ```

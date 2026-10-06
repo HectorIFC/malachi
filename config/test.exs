@@ -18,13 +18,14 @@ config :argon2_elixir, t_cost: 1, m_cost: 8, parallelism: 1
 # a pid exporter and assert on ended spans (see the LogApi tracing test). Overrides the always_off default.
 config :opentelemetry, sampler: :always_on, span_processor: :simple, traces_exporter: :none
 
-# Isolate the NorthGuard log broker's on-disk data per test run. The default dir is fixed and would
-# persist between runs; with in-memory (single-node) metadata resetting each run, a topic name reused
-# from a prior run would collide with a leftover segment on disk (Log.ensure_active :already_exists).
-# The OS pid keeps two runs started in the same nanosecond on one host (two worktrees) apart.
+# Isolate the NorthGuard log broker's on-disk data per test run, and the ra data with it. The default dirs
+# are fixed and would persist between runs: a run's control plane (a one-member ra cluster named after the
+# node, whose name changes every run) would then find the previous run's segments, which it does not know,
+# and refuse to start (Malachi.Storage.DataDirGuard). The OS pid keeps two runs started in the same
+# nanosecond on one host (two worktrees) apart.
 config :malachi,
   log_data_dir: Path.join(System.tmp_dir!(), "malachi_log_test_#{System.pid()}_#{System.system_time(:nanosecond)}"),
-  # The app now starts ra unconditionally (the replicated user store); isolate its on-disk data per run.
+  # The app starts ra unconditionally (the control plane and the replicated user store).
   ra_data_dir: Path.join(System.tmp_dir!(), "malachi_ra_test_#{System.pid()}_#{System.system_time(:nanosecond)}"),
   # Deterministic credentials the test suite authenticates with. Test-only, never shipped to prod (the base
   # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.

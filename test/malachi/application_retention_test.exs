@@ -23,8 +23,16 @@ defmodule Malachi.ApplicationRetentionTest do
   end
 
   test "the orphan sweeper runs beside the data-plane broker, on every node" do
-    sweeper = Process.whereis(Malachi.LogBrokerOrphanSweeper)
+    sweeper = Process.whereis(Malachi.LogOrphanSweeper)
     assert is_pid(sweeper)
     assert OrphanSweeper.mode(sweeper) == :delete
+  end
+
+  # The suite runs with no MALACHI_LOG_CLUSTER, the default a single node has. Its sweeper must ask a
+  # control plane that survives a restart, never the broker's memory (#273).
+  test "a single node in its default configuration runs a one-member control plane cluster" do
+    assert Application.get_env(:malachi, :log_cluster) == :malachi_log
+    member = {:malachi_log, node()}
+    assert {:ok, [^member], ^member} = :ra.members({:local, member}, 5_000)
   end
 end

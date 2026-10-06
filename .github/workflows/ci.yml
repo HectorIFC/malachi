@@ -1,8 +1,11 @@
 name: CI
 
+# Only for an open pull request, draft or ready for review (the default pull_request types cover both), plus
+# main after a merge, which keeps the cache pull requests restore and the Codecov base current. A branch with
+# no pull request runs nothing: a push to it would have run every job twice once a pull request existed.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
     branches: ['**']
 
@@ -83,6 +86,14 @@ jobs:
       
       - name: 🎨 Check formatting
         run: mix format --check-formatted
+        if: matrix.lint
+
+      # docs/design/design-tokens.json generates the web stylesheet, the terminal palette, the Elixir
+      # module and the snapshot (#227). This fails on an output that was not regenerated and committed,
+      # on a committed output that breaks the cross language contract, and on a raw color literal in
+      # assets/src or tui/src. Its own step, so the message is the first thing in the log.
+      - name: 🎨 Check design tokens
+        run: mix malachi.tokens --check
         if: matrix.lint
       
       - name: 🔎 Run Credo (static analysis)
@@ -263,6 +274,12 @@ jobs:
           docker stop malachi-test
           echo "✅ All tests passed!"
 
+      # A single node keeps what it acknowledged across a restart and a recreate, and refuses to start
+      # rather than delete segments its control plane does not know (#273). Its own container and data
+      # directory, so it shares nothing with the smoke test above.
+      - name: 🔁 Single-node restart drill
+        run: SRV_CPUSET=0,1 scripts/docker-single-node-restart.sh malachi:test
+
   quality:
     name: Code Quality
     runs-on: ubuntu-latest
@@ -362,7 +379,7 @@ jobs:
         run: mix test --only multinode
 
   # Specs are part of the contract (a storage failure is `{:error, reason}`, not a raise, and dialyzer is what
-  # checks callers still match what a function can return), so they are checked on every push rather than
+  # checks callers still match what a function can return), so they are checked on every pull request rather than
   # left to whoever remembers to run it locally.
   dialyzer:
     name: Dialyzer

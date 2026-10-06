@@ -119,6 +119,12 @@ MALACHI_LOG_VNODE_REPLICATION_FACTOR=3
 Each vnode owns an arc of the hash ring and runs its own Raft group. A topic's metadata lives in exactly
 one vnode, chosen by hashing.
 
+Set it when the cluster is formed. A control plane that already ran unsharded is not converted in place:
+a node whose unsharded metadata ran refuses to start sharded (exit 78), because the topics' metadata
+would no longer be read and the orphan sweep would delete their segments. To shard, form a new cluster
+and move the data with a client; see *Recovering a single node* in the operations guide, which lists
+every refusal.
+
 ```mermaid
 flowchart LR
   One["one Raft group for all metadata (a bottleneck)"] --> Many["vnodes: many Raft groups, each owns an arc of the ring"]
@@ -178,8 +184,8 @@ At boot each node reads that record, and the precedence rule has no room to gues
 
 | what the store says | what the node does |
 |---|---|
-| a ring is recorded | **it wins**, unconditionally |
-| never held a ring (an affirmative answer) | seed from `MALACHI_LOG_VNODES`, as a fresh cluster |
+| a ring is recorded | **it wins**, unconditionally, over the environment; a sharded ring over this node's control plane that already ran unsharded **refuses to boot** |
+| never held a ring (an affirmative answer) | seed from `MALACHI_LOG_VNODES`, as a fresh cluster, unless this node's control plane already ran unsharded, or its log directory holds segments the operator did not adopt (`MALACHI_ADOPT_ORPHANED_LOG_DIR`): then **refuse to boot** |
 | cannot answer yet | wait, then **refuse to boot** |
 
 The third row is why the store is a Raft group rather than a file per node: a missing file cannot tell

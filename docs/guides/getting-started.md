@@ -14,8 +14,11 @@ mix deps.get
 iex -S mix        # TCP on 4040, dashboard on 4041
 ```
 
-A single node is in-memory by default. Set `MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated,
-HA control plane over `ra`; the environment variables are listed in the
+A single node runs its control plane as a one-member `ra` cluster, so its topics and consumer positions
+survive a restart as long as `MALACHI_LOG_DATA_DIR`, `MALACHI_RA_DATA_DIR` and the node name stay the same
+(`iex -S mix` without `--name` always runs as `nonode@nohost`). Set `MALACHI_LOG_CLUSTER` /
+`MALACHI_LOG_NODES` for a replicated, HA control plane across several nodes; the environment variables are
+listed in the
 [README](../../README.md) (the *Environment Variables* section).
 
 Prefer containers? See [Running with Docker](../DOCKER_README.md).

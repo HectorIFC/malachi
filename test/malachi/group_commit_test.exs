@@ -59,6 +59,93 @@ defmodule Malachi.GroupCommitTest do
     end
   end
 
+  describe "the gate is the configured replication factor (#273)" do
+    import ExUnit.CaptureLog
+
+    defp group_commit_with(replicas, replication_factor) do
+      tag = System.unique_integer([:positive])
+      base = TmpDir.path("gc_gate")
+      on_exit(fn -> File.rm_rf!(base) end)
+
+      repls =
+        for index <- 1..replicas do
+          name = :"gc_gate_#{tag}_#{index}"
+          {:ok, pid} = ReplicationServer.start_link(name: name, directory: Path.join(base, "repl#{index}"))
+          on_exit(fn -> stop_quietly(pid) end)
+          name
+        end
+
+      {:ok, broker} =
+        BrokerServer.start_link(Path.join(base, "broker"),
+          brokers: repls,
+          replication_factor: replication_factor,
+          group_commit: true
+        )
+
+      on_exit(fn -> stop_quietly(broker) end)
+      :sys.get_state(broker).group_commit
+    end
+
+    # Broker group commit writes the primary alone. Only a configured factor of 1 guarantees every
+    # segment one replica, whatever the broker set does later; a set of one with a factor of 3 (a single
+    # node's one-member cluster at the default) would put a follower on any broker that joins.
+    test "only a configured factor of 1 turns it on, whatever the broker set" do
+      assert group_commit_with(1, 1)
+      assert group_commit_with(3, 1)
+      refute group_commit_with(1, 3)
+      refute group_commit_with(3, 3)
+    end
+
+    test "a broker set that grows keeps every segment on one replica, so group commit stays correct" do
+      tag = System.unique_integer([:positive])
+      base = TmpDir.path("gc_grow")
+      on_exit(fn -> File.rm_rf!(base) end)
+
+      [one, two] =
+        for index <- 1..2 do
+          name = :"gc_grow_#{tag}_#{index}"
+          {:ok, pid} = ReplicationServer.start_link(name: name, directory: Path.join(base, "repl#{index}"))
+          on_exit(fn -> stop_quietly(pid) end)
+          name
+        end
+
+      {:ok, live} = Agent.start_link(fn -> [one] end)
+
+      {:ok, broker} =
+        BrokerServer.start_link(Path.join(base, "broker"),
+          brokers: [one],
+          replication_factor: 1,
+          live_brokers: fn -> Agent.get(live, & &1) end,
+          group_commit: true,
+          brokers_refresh_interval: 3_600_000,
+          segment_max_bytes: 1
+        )
+
+      on_exit(fn -> stop_quietly(broker) end)
+      {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
+
+      Agent.update(live, fn _ -> [one, two] end)
+      send(broker, :refresh_brokers)
+
+      # Tiny segments, so these produces roll and place segments on the grown set: enough of them that
+      # placement uses the broker that joined (each lands on either with even odds).
+      for _ <- 1..20, do: {:ok, _} = BrokerServer.produce(broker, "t", batch(2))
+
+      assert :sys.get_state(broker).group_commit
+      replica_sets = BrokerServer.metadata(broker).segments |> Map.values() |> Enum.map(& &1.replica_set)
+      assert Enum.any?(replica_sets, &(&1 == [two])), "the broker that joined was never used"
+      assert Enum.all?(replica_sets, &(length(&1) == 1))
+      assert length(consume_all(broker, "t")) == 40
+    end
+
+    test "asked for with a factor above 1, the node says so at boot" do
+      log = capture_log(fn -> assert Malachi.Application.warn_group_commit_needs_rf1(true, 3) == :warned end)
+      assert log =~ "MALACHI_LOG_REPLICATION_FACTOR=1"
+      assert Malachi.Application.warn_group_commit_needs_rf1(true, 1) == :ok
+      assert Malachi.Application.warn_group_commit_needs_rf1(false, 3) == :ok
+    end
+  end
+
   test "a produce reply is deferred until the group flush, then returns durable" do
     broker = start_broker(interval: 15)
     {:ok, _} = BrokerServer.create_topic(broker, "t", 8)

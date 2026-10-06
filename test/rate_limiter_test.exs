@@ -582,11 +582,8 @@ defmodule Malachi.RateLimiterTest do
             ) do
         one_token_ms = div(window_ms + limit - 1, limit)
         times = gaps |> Enum.scan(&(&1 + &2))
-        # Starting from an empty bucket at 0, request i (from 1) is never ahead of the rate when a whole
-        # token's time has passed for each request so far.
-        on_pace? = times |> Enum.with_index(1) |> Enum.all?(fn {t, i} -> t >= i * one_token_ms end)
 
-        if on_pace? do
+        if on_pace?(times, limit, one_token_ms) do
           Enum.reduce(times, {0, 0}, fn now, state ->
             assert {:ok, next} = RateLimiter.take_bucket_token(state, now, limit, window_ms),
                    "refused at #{now} ms with state #{inspect(state)}"
@@ -595,6 +592,17 @@ defmodule Malachi.RateLimiterTest do
           end)
         end
       end
+    end
+
+    # The case that made the pace above wrong: a client one token behind from an empty start, but the
+    # bucket holds one token at most, so the millisecond it sat full is not banked. The second request
+    # comes 1300 ms after the first against one token every 1301 ms, which is ahead of the rate.
+    test "time a full bucket sits idle is not banked, so a client that then speeds up is refused" do
+      assert {:ok, state} = RateLimiter.take_bucket_token({0, 0}, 1302, 1, 1301)
+      assert {:error, 1} = RateLimiter.take_bucket_token(state, 2602, 1, 1301)
+      assert {:ok, _state} = RateLimiter.take_bucket_token(state, 2603, 1, 1301)
+      refute on_pace?([1302, 2602], 1, 1301)
+      assert on_pace?([1302, 2603], 1, 1301)
     end
 
     test "the uneven client of 150 and 350 ms against 300 a minute keeps being served" do
@@ -1218,5 +1226,20 @@ defmodule Malachi.RateLimiterTest do
       # Re-enable for other tests
       Application.put_env(:malachi, :rate_limit_enabled, true)
     end
+  end
+
+  # Whether a client starting from an empty bucket at 0 is never ahead of the rate, for a bucket that
+  # holds `limit` tokens and earns one every `one_token_ms`: the generic cell rate algorithm with a burst
+  # of `limit - 1`. `tat` is the time the next request would be due at the sustained rate; a request may
+  # come up to the burst before it, and a request after it does not move it back, which is the bucket
+  # sitting full. Counting from 0 alone (request i at `i * one_token_ms`) assumed the bucket never fills.
+  defp on_pace?(times, limit, one_token_ms) do
+    burst_ms = (limit - 1) * one_token_ms
+
+    times
+    |> Enum.reduce_while(limit * one_token_ms, fn t, tat ->
+      if t >= tat - burst_ms, do: {:cont, max(t, tat) + one_token_ms}, else: {:halt, :ahead}
+    end)
+    |> Kernel.!=(:ahead)
   end
 end

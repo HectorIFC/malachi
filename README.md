@@ -95,10 +95,16 @@ Enum.map(records, & &1.value)        #=> ["hello", "world"]
 {:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
 ```
 
-A single node writes its segments to disk under a temp directory by default, so point
-`MALACHI_LOG_DATA_DIR` and `MALACHI_RA_DATA_DIR` at a real volume to keep data across restarts; set
-`MALACHI_LOG_CLUSTER` / `MALACHI_LOG_NODES` for a replicated, HA control plane over `ra`. Over the network,
-external clients speak the [binary protocol](#client-protocol) on port 4040.
+A single node runs its control plane in `ra`, the same Raft-backed metadata a cluster uses, as a cluster of
+one member. Its topics, segments, consumer group positions, users, ACLs and policies survive a restart as
+long as three things survive with them: the log directory (`MALACHI_LOG_DATA_DIR`), the `ra` directory
+(`MALACHI_RA_DATA_DIR`) and the node name. Both directories default to a temp path, so point them at a real
+volume, and in Docker give the container a fixed `--hostname`, because the release names the node after it.
+A node that finds segments on disk with no control plane that knows them (a changed node name, a lost `ra`
+directory, or data a single node wrote before this release) refuses to start instead of deleting them; see
+*Recovering a single node* in the [operations guide](docs/guides/operations.md). Set `MALACHI_LOG_CLUSTER` /
+`MALACHI_LOG_NODES` for a replicated, HA control plane across several nodes. Over the network, external
+clients speak the [binary protocol](#client-protocol) on port 4040.
 
 ### Node discovery (libcluster)
 
@@ -280,7 +286,7 @@ config :opentelemetry_exporter,
 
 ## 🔐 Authentication
 
-Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node. They survive a restart only when the `ra` log is on a persistent volume: point `MALACHI_RA_DATA_DIR` at one, otherwise it defaults to a temp directory and the users are lost whenever that directory does not survive (a recreated container or a reboot).
+Malachi requires authentication for all producers and consumers. Users and permissions are **replicated across the cluster** via a dedicated Raft (`ra`) group, so a user created on one node exists on every node. They survive a restart only when the `ra` log is on a persistent volume and the node keeps its name: point `MALACHI_RA_DATA_DIR` at one, otherwise it defaults to a temp directory and the users are lost whenever that directory does not survive (a recreated container or a reboot); `ra` keeps them under the node name, so a container also needs a fixed `--hostname`.
 
 
 ### Default Users (development)
@@ -338,7 +344,8 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_ATOM_WARNING_THRESHOLD` | 0.7 | Atom table warning at 70% |
 | `MALACHI_ATOM_CRITICAL_THRESHOLD` | 0.9 | Atom table critical at 90% |
 | `MALACHI_GC_THRESHOLD_MB` | 500 | Auto-GC memory threshold (MB) |
-| `MALACHI_LOG_CLUSTER` | _(unset)_ | Enable the replicated control plane (peer cluster name) |
+| `MALACHI_LOG_CLUSTER` | `malachi_log` | Control plane cluster name; a single node runs it with one member |
+| `MALACHI_ADOPT_ORPHANED_LOG_DIR` | false | Start a single node over segment directories its control plane does not know, and let the orphan sweep remove them, instead of refusing to start |
 | `MALACHI_LOG_NODES` | _(unset)_ | Peer node names for the replicated log |
 | `MALACHI_LOG_RING_BOOT_TIMEOUT_MS` | 60000 | How long a clustered node waits at boot for the durable vnode ring before refusing to start |
 | `MALACHI_LOG_REPLICATION_FACTOR` | 3 | Segment replicas (clamped to node count) |
