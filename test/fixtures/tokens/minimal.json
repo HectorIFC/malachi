@@ -1,0 +1,153 @@
+{
+  "$description": "The smallest token file that exercises every token type and every section. The generator tests break one thing in a copy of it at a time.",
+  "$meta": { "version": "test" },
+
+  "$platforms": {
+    "web": { "groups": ["color", "typography", "space", "shadow", "density", "motion", "easing"] },
+    "elixir": { "groups": ["color", "typography", "space", "shadow", "density", "motion", "easing"] },
+    "tui": {
+      "tokens": [
+        "color.base.background",
+        "color.base.foreground",
+        "color.state.on",
+        "color.state.off",
+        "color.chart.1",
+        "color.chart.2"
+      ]
+    }
+  },
+
+  "color": {
+    "$type": "color",
+    "base": {
+      "$prefix": "",
+      "background": { "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.161 0.004 265)" },
+      "foreground": { "light": "oklch(0.210 0.006 265)", "dark": "oklch(0.962 0.002 265)" },
+      "card":       { "light": "oklch(1.000 0.000 0)",   "dark": "oklch(0.208 0.005 265)" }
+    },
+    "alias": {
+      "$prefix": "",
+      "text-body": { "$value": "{color.base.foreground}" }
+    },
+    "state": {
+      "$prefix": "state-",
+      "on":  { "light": "oklch(0.627 0.165 149.2)", "dark": "oklch(0.696 0.170 149.2)" },
+      "off": { "light": "oklch(0.577 0.222 27.3)",  "dark": "oklch(0.665 0.201 25.4)" }
+    },
+    "chart": {
+      "$prefix": "chart-",
+      "1": { "light": "oklch(0.546 0.129 244.3)", "dark": "oklch(0.546 0.129 244.3)" },
+      "2": { "light": "oklch(0.769 0.157 70.1)",  "dark": "oklch(0.769 0.157 70.1)" }
+    },
+    "shadow": {
+      "$prefix": "shadow-color-",
+      "soft": { "light": "oklch(0.000 0.000 0 / 0.1)", "dark": "oklch(0.000 0.000 0 / 0.1)" }
+    }
+  },
+
+  "$contrast": {
+    "pairs": [
+      { "foreground": "color.base.foreground", "background": "color.base.background", "role": "text" },
+      { "foreground": "color.state.on",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.off", "background": "color.base.card",       "role": "graphic" }
+    ]
+  },
+
+  "$cvd": {
+    "deficiency": "deuteranopia",
+    "minDeltaEOK": 0.05,
+    "sets": [["color.chart.1", "color.chart.2"]]
+  },
+
+  "$apart": {
+    "minDeltaEOK": 0.05,
+    "sets": [{ "these": ["color.chart.1", "color.chart.2"], "from": ["color.state.on", "color.state.off"] }]
+  },
+
+  "$gamut": { "method": "clip", "maxDeltaEOK": 0.03 },
+
+  "$ansi16": {
+    "color.base.background": { "code": "default", "ratatui": "Color::Reset" },
+    "color.base.foreground": { "code": "default", "ratatui": "Color::Reset" },
+    "color.state.on":        { "code": 10, "ratatui": "Color::LightGreen" },
+    "color.state.off":       { "code": 9,  "ratatui": "Color::LightRed" },
+    "color.chart.1":         { "code": 12, "ratatui": "Color::LightBlue" },
+    "color.chart.2":         { "code": 11, "ratatui": "Color::LightYellow" }
+  },
+
+  "$ansi256": { "light": {}, "dark": {} },
+
+  "$terminal": {
+    "inherited": { "background": "color.base.background", "foreground": "color.base.foreground" },
+    "distinct": ["color.state.on", "color.state.off"],
+    "painted16": {
+      "dark":  { "background": { "code": 0,  "ratatui": "Color::Black" }, "foreground": { "code": 15, "ratatui": "Color::White" } },
+      "light": { "background": { "code": 15, "ratatui": "Color::White" }, "foreground": { "code": 0,  "ratatui": "Color::Black" } }
+    }
+  },
+
+  "typography": {
+    "family": {
+      "$type": "fontFamily",
+      "$prefix": "font-",
+      "sans": { "$value": ["system-ui", "Segoe UI", "sans-serif"] }
+    },
+    "size": {
+      "$type": "dimension",
+      "$prefix": "text-",
+      "base": { "$value": "14px" }
+    },
+    "leading": {
+      "$type": "number",
+      "$prefix": "leading-",
+      "normal": { "$value": 1.5 }
+    },
+    "weight": {
+      "$type": "fontWeight",
+      "$prefix": "weight-",
+      "regular": { "$value": 400 }
+    },
+    "style": {
+      "$type": "typography",
+      "$prefix": "type-",
+      "body": { "$value": { "fontWeight": "{typography.weight.regular}", "fontSize": "{typography.size.base}", "lineHeight": "{typography.leading.normal}", "fontFamily": "{typography.family.sans}" } }
+    }
+  },
+
+  "space": {
+    "$type": "dimension",
+    "$prefix": "space-",
+    "1": { "$value": "4px" },
+    "neg": { "$value": "-0.5em" }
+  },
+
+  "shadow": {
+    "$type": "shadow",
+    "$prefix": "shadow-",
+    "xs": { "$value": [
+      { "offsetX": "0px", "offsetY": "1px", "blur": "2px", "spread": "-1px", "color": "{color.shadow.soft}" }
+    ] }
+  },
+
+  "density": {
+    "$type": "dimension",
+    "row": {
+      "$prefix": "row-",
+      "default": { "$value": "32px" },
+      "compact": { "$value": "24px" },
+      "height":  { "$value": "{density.row.default}", "$modes": { "compact": "{density.row.compact}" } }
+    }
+  },
+
+  "motion": {
+    "$type": "duration",
+    "$prefix": "motion-",
+    "fast": { "$value": "100ms", "$reducedMotion": "0ms" }
+  },
+
+  "easing": {
+    "$type": "cubicBezier",
+    "$prefix": "ease-",
+    "standard": { "$value": [0.2, 0, 0, 1] }
+  }
+}
