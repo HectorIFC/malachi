@@ -135,7 +135,8 @@ defmodule Malachi.Broker do
             segments: %{},
             segment_seq: %{},
             offsets: %{},
-            # Ranges whose active segment crossed `:segment_max_bytes` and still owes a fence. A REQUEST,
+            # Ranges whose active segment crossed `:segment_max_bytes`, or outlived its topic's
+            # `:segment_max_age_ms` (`request_rolls/2`), and still owes a fence. A REQUEST,
             # not a barrier: the range keeps taking writes, and whatever lands meanwhile is inside the end
             # the fence eventually reports. See `due_rolls/1` and `record_seal/5`.
             rolling: %{},
@@ -604,7 +605,8 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  The fences this broker owes: ranges whose active segment crossed `:segment_max_bytes`.
+  The fences this broker owes: ranges whose active segment crossed `:segment_max_bytes`, or that the
+  retention sweep found older than their topic's `:segment_max_age_ms` (`request_rolls/2`).
 
   The caller fences each one's primary and hands the answer back through `record_seal/5`. Until it
   does, the range stays writable and the segment simply overshoots its soft threshold.
@@ -655,6 +657,13 @@ defmodule Malachi.Broker do
 
   Once the segment is sealed (a failover, or another frontend's roll, closed it first), its length is not
   this answer's to say, and the roll is only cleared.
+
+  A segment this frontend's view does not hold at all is the control plane's to judge, not the view's: an
+  age roll (`request_rolls/2`) is fenced by the sweeping leader, whose cache may never have seen a head
+  another frontend opened, and dropping the answer there would leave the store fenced under a segment
+  the control plane still calls active. So the seal is sent anyway. It is safe for the reason a retry is:
+  the control plane answers an already sealed segment with its own length (`record_seal/5` converges on
+  it), and one that is gone (expired by retention) with `:no_such_segment`, which only clears the roll.
   """
   @spec record_fence(t(), roll(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
           {t(), :ok | {:error, term()}}
@@ -663,10 +672,19 @@ defmodule Malachi.Broker do
       %{state: :active} ->
         record_seal(broker, roll, end_offset, byte_size, sealed_at)
 
-      _sealed_or_gone ->
-        {broker |> clear_roll(roll.range_id, roll.segment_id) |> clear_fencing(roll.range_id, roll.segment_id), :ok}
+      nil ->
+        case record_seal(broker, roll, end_offset, byte_size, sealed_at) do
+          {_unchanged, {:error, :no_such_segment}} -> {settle_cleared(broker, roll), :ok}
+          recorded -> recorded
+        end
+
+      _sealed ->
+        {settle_cleared(broker, roll), :ok}
     end
   end
+
+  defp settle_cleared(broker, roll),
+    do: broker |> clear_roll(roll.range_id, roll.segment_id) |> clear_fencing(roll.range_id, roll.segment_id)
 
   @doc """
   Stops awaiting the fence of `roll` after it FAILED. The roll stays owed (`fences_to_send/3` resends it),
@@ -831,18 +849,38 @@ defmodule Malachi.Broker do
   other frontend kept routing produces at a segment the metadata had sealed and only learned otherwise
   when the store refused a batch. This makes the convergence level-triggered on every node instead,
   bounded by the reconcile interval.
+
+  An owed roll whose segment is not cached here (an age roll the sweep asked for, `request_rolls/2`) is
+  dropped too once the control plane has moved past it: the segment is sealed, or the range's head is
+  now another segment. Its fence may never be answered (a primary that died and was replaced), and since
+  a range owes one roll at a time, a roll left behind would swallow every later roll of the range on this
+  node. A segment the refreshed view does not hold at all keeps its roll: that is a head this view has not
+  caught up with, the very case the age roll exists for.
   """
   @spec drop_stale_active_segments(t()) :: t()
   def drop_stale_active_segments(%__MODULE__{} = broker) do
-    Enum.reduce(broker.segments, broker, fn {range_id, active}, acc ->
-      case DSRSM.get_segment(acc.dsrsm, topic_of_segment(active.id), active.id) do
-        %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
-          forget_sealed(acc, range_id, active.id, start_offset + length)
+    broker =
+      Enum.reduce(broker.segments, broker, fn {range_id, active}, acc ->
+        case DSRSM.get_segment(acc.dsrsm, topic_of_segment(active.id), active.id) do
+          %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
+            forget_sealed(acc, range_id, active.id, start_offset + length)
 
-        _still_active_or_unknown ->
-          drop_if_range_retired(acc, range_id)
-      end
+          _still_active_or_unknown ->
+            drop_if_range_retired(acc, range_id)
+        end
+      end)
+
+    Enum.reduce(broker.rolling, broker, fn {range_id, roll}, acc ->
+      if superseded_roll?(acc, range_id, roll), do: settle_cleared(acc, roll), else: acc
     end)
+  end
+
+  defp superseded_roll?(broker, range_id, roll) do
+    case DSRSM.get_segment(broker.dsrsm, topic_of_segment(roll.segment_id), roll.segment_id) do
+      %{state: :sealed} -> true
+      %{state: :active} -> false
+      nil -> match?(%{id: id} when id != roll.segment_id, registered_active_segment(broker, range_id))
+    end
   end
 
   # Defence in depth for a fence that never happened: a segment the metadata still calls ACTIVE whose
@@ -1286,16 +1324,14 @@ defmodule Malachi.Broker do
 
       meta ->
         active = %{id: meta.id, start_offset: meta.start_offset, bytes: 0, replica_set: meta.replica_set}
-        {_range, seq} = meta.id
 
         broker = %{
           broker
           | segments: Map.put(broker.segments, range_id, active),
-            segment_seq: Map.update(broker.segment_seq, range_id, seq + 1, &max(&1, seq + 1)),
             offsets: Map.update(broker.offsets, range_id, meta.start_offset, &max(&1, meta.start_offset))
         }
 
-        {:ok, broker, active}
+        {:ok, seq_past(broker, range_id, meta.id), active}
     end
   end
 
@@ -1370,14 +1406,48 @@ defmodule Malachi.Broker do
     if active.bytes >= broker.segment_max_bytes, do: request_roll(broker, range_id), else: broker
   end
 
-  # `Map.put_new`: a range whose fence has not answered yet must keep the roll it already owes, not a
-  # fresh one built from a segment that may since have been rolled out of the cache.
   defp request_roll(broker, range_id) do
     case Map.fetch(broker.segments, range_id) do
       :error -> broker
-      {:ok, active} -> %{broker | rolling: Map.put_new(broker.rolling, range_id, roll_of(range_id, active))}
+      {:ok, active} -> owe_roll(broker, range_id, active)
     end
   end
+
+  @doc """
+  Owes a roll for each of `segments`, active segments the retention sweep found older than their
+  topic's `:segment_max_age_ms` (`Malachi.Cluster.SegmentRoll.due/5`). The caller sends the fences
+  (`fences_to_send/3`), exactly as for a roll requested by size.
+
+  Built from the segment's control-plane metadata rather than from this frontend's cache, because the
+  sweep runs on the leader and the leader is usually not where the range is produced to: a quiet
+  topic's head is in no frontend's cache at all after a restart. That is the split path's reasoning too
+  (`active_roll/2`). A segment that is no longer active, or has no replica to fence, is skipped; one
+  whose seal this view has not seen yet is fenced anyway, which answers the end it already has and is
+  then only cleared (`record_fence/5`).
+
+  The range's segment sequence is raised past the rolled segment's, as `adopt_active_segment/2` does:
+  this frontend may never have opened or adopted it, and the next produce here would otherwise try to
+  register a successor under the very id the roll is closing.
+  """
+  @spec request_rolls(t(), [Metadata.segment_meta()]) :: t()
+  def request_rolls(%__MODULE__{} = broker, segments) do
+    Enum.reduce(segments, broker, fn
+      %{state: :active, replica_set: [_ | _]} = segment, acc ->
+        acc |> owe_roll(segment.range_id, segment) |> seq_past(segment.range_id, segment.id)
+
+      _sealed_or_unplaced, acc ->
+        acc
+    end)
+  end
+
+  defp seq_past(broker, range_id, {_range, seq}),
+    do: %{broker | segment_seq: Map.update(broker.segment_seq, range_id, seq + 1, &max(&1, seq + 1))}
+
+  # `Map.put_new`: a range whose fence has not answered yet must keep the roll it already owes, not a
+  # fresh one built from a segment that may since have been rolled out of the cache. The one place a
+  # roll becomes owed, whether by size or by age, so the two cannot disagree on what a roll is.
+  defp owe_roll(broker, range_id, active),
+    do: %{broker | rolling: Map.put_new(broker.rolling, range_id, roll_of(range_id, active))}
 
   defp roll_of(range_id, active) do
     %{

@@ -11,6 +11,7 @@ A policy is a named, cluster-wide definition. It can set:
 |---|---|---|
 | `retention.max_age_ms` | non-negative integer | a sealed segment older than this expires |
 | `retention.max_bytes` | non-negative integer | per range, the oldest sealed segments expire until the range fits |
+| `retention.segment_max_age_ms` | integer, at least 60000 | an active segment older than this is sealed, so age retention can see it |
 | `spread_by` | broker attribute key | the failure domain new segments of the topic are spread across |
 
 A topic is **bound** to a policy by name. One policy can serve any number of topics, and changing it
@@ -22,7 +23,7 @@ topic's own state, and travels with it when a vnode split moves it.
 Each field of a policy is in one of three states, and every surface keeps them apart:
 
 - **Left out**: the topic inherits the cluster's global value (`MALACHI_RETENTION_MAX_AGE_MS`,
-  `MALACHI_RETENTION_MAX_BYTES`, `MALACHI_LOG_SPREAD_BY`).
+  `MALACHI_RETENTION_MAX_BYTES`, `MALACHI_SEGMENT_MAX_AGE_MS`, `MALACHI_LOG_SPREAD_BY`).
 - **Off** (`null`, `--off`): that rule does not apply to the policy's topics, whatever the global says.
 - **Zero** is a real budget. `retention.max_bytes=0` expires every sealed segment the rule can see.
 
@@ -92,4 +93,31 @@ every node alike, and each surface says to finish the rolling upgrade. Policies 
 time and bound once the upgrade is finalized.
 
 A field added to policies by a later release is refused the same way (`unsupported_policy_field`) until
-the cluster reaches the version that introduced it.
+the cluster reaches the version that introduced it. `retention.segment_max_age_ms` is the first: it needs
+version 6.
+
+## Rolling quiet topics by age
+
+Age retention only ever expires **sealed** segments, and a segment seals by size on its own, at
+`MALACHI_SEGMENT_MAX_BYTES` (64 MiB). A topic that writes 1 MB a day would keep its first record for
+about two months before its segment filled, and a topic that never reaches 64 MiB would never expire
+anything at all. `retention.segment_max_age_ms` closes that: the retention sweep asks for an active
+segment older than this to be sealed, through the same fence a size roll uses, whether or not anything
+is producing to it. A record then lives at most `segment_max_age_ms` plus `max_age_ms`, plus up to two
+retention sweep intervals (`MALACHI_RETENTION_INTERVAL_MS`: the sweep that asks for the roll and the one
+that expires the segment) and the time the fence takes to answer.
+
+The cluster's value is `MALACHI_SEGMENT_MAX_AGE_MS`, 7 days unless set. Lower it for a topic whose
+`max_age_ms` is short, so the bound is close to what the policy says; `--off` turns the roll off for a
+topic, which then seals by size alone. A segment that is never written to after the roll is not
+replaced: the next produce opens the successor, so an idle topic does not grow one empty segment per
+interval.
+
+The floor is 60000 (one minute), the retention sweep's default cadence, and it is refused below that.
+Every roll is one more segment: in the metadata until retention removes it, and one preallocated file
+(`MALACHI_SEGMENT_PREALLOC_BYTES`, 64 MiB by default) written when the produce after it opens the
+successor. A topic produced to once a minute with a one-minute roll makes 1440 segments a day per
+range, so keep the interval well above the topic's write rhythm unless its retention is short too.
+
+This is not `MALACHI_LOG_ROLL_MAX_AGE_MS`, which rolls files inside one segment's storage and never
+seals the segment.

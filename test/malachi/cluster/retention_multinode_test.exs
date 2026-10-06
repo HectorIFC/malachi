@@ -11,8 +11,10 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
   @moduletag :multinode
 
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Log.Record
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
@@ -145,5 +147,62 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
                     %{topic: "events", group: "billing", origin: :cursor, span: :exact}}
 
     assert offsets == length(expired)
+  end
+
+  # #197 across real nodes: the sweeping node is not the one producing. Two frontends on this node share
+  # one Raft control plane; the segment's replicas, and so its primary, live on the peers. The sweep reads
+  # the control plane and asks ITS frontend to roll, which fences the remote primary; the producing
+  # frontend learns of the seal from the primary's refusal and opens the successor at the sealed edge.
+  test "the sweeping frontend rolls a head another frontend produced to, by fencing the remote primary" do
+    replicas = [start_peer_replica(), start_peer_replica()]
+    cluster = :"retention_multinode_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    start = fn ->
+      {:ok, pid} =
+        BrokerServer.start_link("unused", brokers: replicas, replication_factor: 2, metadata_cluster: cluster)
+
+      on_exit(fn -> if Process.alive?(pid), do: BrokerServer.stop(pid) end)
+      pid
+    end
+
+    producer = start.()
+    leader = start.()
+
+    {:ok, root} = BrokerServer.create_topic(producer, "audit", 4)
+    {:ok, _placements} = BrokerServer.produce(producer, "audit", [Record.new("v0", key: "k0")])
+
+    {:ok, coordinator} =
+      RetentionCoordinator.start_link(
+        metadata_source: fn -> MetadataServer.query({cluster, node()}, & &1) |> elem(1) end,
+        expire_segment: fn _segment -> :ok end,
+        roll_segments: &BrokerServer.request_rolls(leader, &1),
+        policy: %{segment_max_age_ms: 60_000},
+        policies: fn -> {:ok, %{}} end,
+        clock: fn -> System.system_time(:millisecond) + 61_000 end,
+        interval: 3_600_000
+      )
+
+    RetentionCoordinator.run_now(coordinator)
+
+    sealed? = fn ->
+      {:ok, metadata} = MetadataServer.query({cluster, node()}, & &1)
+      match?([%{state: :sealed, length: 1}], Metadata.segments_of_range(metadata, root))
+    end
+
+    assert eventually(sealed?)
+    [primary | _] = replicas
+    assert {:ok, [%{value: "v0"}]} = ReplicationServer.read(primary, {root, 0}, 0, 10)
+
+    # The producer still caches the old head: its next produce is refused by the fenced primary, which
+    # seats it at the sealed edge, and the retry opens the successor there.
+    assert eventually(fn ->
+             match?({:ok, _}, BrokerServer.produce(producer, "audit", [Record.new("v1", key: "k1")]))
+           end)
+
+    {:ok, metadata} = MetadataServer.query({cluster, node()}, & &1)
+
+    assert [%{state: :sealed, start_offset: 0, length: 1}, %{state: :active, start_offset: 1}] =
+             metadata |> Metadata.segments_of_range(root) |> Enum.sort_by(& &1.start_offset)
   end
 end

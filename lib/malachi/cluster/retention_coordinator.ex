@@ -18,14 +18,21 @@ defmodule Malachi.Cluster.RetentionCoordinator do
     * `:unresolved_policy_max_age_ms` - the backstop for a topic pointing at a name that does not
       resolve (default none, meaning nothing expires for it). Off by default because a bound nobody
       stated is not one this code gets to invent, and the counter below is what makes the case visible;
+    * `:roll_segments` - `([Malachi.Metadata.segment_meta()] -> any())`, asks for the given active segments
+      to be sealed (default none). Each sweep hands it what `Malachi.Cluster.SegmentRoll.due/5` finds: the
+      active segments older than their topic's `:segment_max_age_ms`. A request, answered asynchronously
+      by the fence path (`Malachi.BrokerServer.request_rolls/2`), so the sweep neither waits for it nor
+      counts it; the seal lands before a later sweep, which is the one that can expire the segment;
     * `:clock` - `(-> non_neg_integer())` epoch ms (default `System.system_time/1`);
     * `:interval` - the sweep period in ms (default 60_000);
     * `:leader?` - `(-> boolean())`, whether this node should sweep (default always). Only the cluster's
       membership leader sweeps, so N nodes do not redo the same work (1C); a non-leader still ticks but
       skips the sweep.
 
-  Each sweep asks `Retention.expired/3` which sealed segments to drop, resolves each to its metadata
-  (for its replica set), and calls `expire_segment` on it. `run_now/1` runs one sweep synchronously,
+  Each sweep asks `Retention.expired/5` which sealed segments to drop, resolves each to its metadata
+  (for its replica set), and calls `expire_segment` on it; then it asks `SegmentRoll.due/5` which
+  active segments are old enough to roll, from the same metadata and policies, and hands them to
+  `roll_segments`. `run_now/1` runs one sweep synchronously,
   ignoring `:leader?` (it is a manual trigger).
 
   Every segment it tries emits `[:malachi, :retention, :expire]` and every sweep that runs emits
@@ -38,6 +45,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   alias Malachi.Cluster.PeriodicWorker
   alias Malachi.Cluster.PolicyStore
   alias Malachi.Cluster.Retention
+  alias Malachi.Cluster.SegmentRoll
   alias Malachi.Metadata
   alias Malachi.Telemetry
 
@@ -60,6 +68,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       Map.merge(PeriodicWorker.new(opts, :retention, @default_interval, :retention_interval_ms), %{
         metadata_source: Keyword.fetch!(opts, :metadata_source),
         expire_segment: Keyword.fetch!(opts, :expire_segment),
+        roll_segments: Keyword.get(opts, :roll_segments, fn _segments -> :ok end),
         policy: Keyword.fetch!(opts, :policy),
         policies: Keyword.get(opts, :policies, &PolicyStore.fetch_all/0),
         unresolved_policy_max_age_ms: Keyword.get(opts, :unresolved_policy_max_age_ms),
@@ -126,6 +135,13 @@ defmodule Malachi.Cluster.RetentionCoordinator do
     for topic <- Retention.unresolved_policies(metadata, policies), do: Telemetry.retention_unresolved_policy(topic)
 
     labels = for id <- expired_ids, segment = Metadata.get_segment(metadata, id), do: expire(state, segment)
+
+    # After the expiry, from the same read: a segment this asks to seal is still active, so it cannot be
+    # among what was just expired, and it becomes expirable only once its seal has landed.
+    _ =
+      state.roll_segments.(
+        SegmentRoll.due(metadata, now_ms, state.policy, policies, state.unresolved_policy_max_age_ms)
+      )
 
     duration_us = System.convert_time_unit(System.monotonic_time() - started, :native, :microsecond)
     Telemetry.retention_sweep(duration_us, Enum.count(labels, &(&1 == :ok)), Enum.count(labels, &failed?/1))

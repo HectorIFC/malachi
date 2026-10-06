@@ -283,6 +283,15 @@ defmodule Malachi.BrokerServer do
   """
   def topics_overview(server), do: GenServer.call(server, :topics_overview)
 
+  @doc """
+  Asks this broker to seal the given active segments (`Malachi.Cluster.SegmentRoll.due/5`, from the
+  retention sweep) and sends their fences. A cast: each roll goes through the same owed-roll entry and
+  asynchronous fence as a size roll (`Malachi.Broker.request_rolls/2`), so a roll already owed is not
+  owed twice, and the seal is recorded when the fence answers.
+  """
+  @spec request_rolls(GenServer.server(), [Malachi.Metadata.segment_meta()]) :: :ok
+  def request_rolls(server, segments), do: GenServer.cast(server, {:request_rolls, segments})
+
   @doc "Applies `:set_segment_replicas` healing commands to the control plane."
   @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok
   def apply_heal(server, commands), do: GenServer.call(server, {:apply_heal, commands})
@@ -755,6 +764,10 @@ defmodule Malachi.BrokerServer do
          bootstrap: bootstrap,
          reconcile_generation: state.reconcile_generation + 1
      }}
+  end
+
+  def handle_cast({:request_rolls, segments}, state) do
+    {:noreply, send_roll_fences(%{state | broker: Broker.request_rolls(state.broker, segments)})}
   end
 
   def handle_cast(message, state), do: {:noreply, drop_unexpected(state, :cast, message)}

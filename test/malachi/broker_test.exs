@@ -7,6 +7,7 @@ defmodule Malachi.BrokerTest do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Placement
+  alias Malachi.Cluster.SegmentRoll
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Test.FakeSegmentStore
@@ -1657,6 +1658,23 @@ defmodule Malachi.BrokerTest do
       assert Broker.active_range_ids(Broker.replay_journal(reseeded, commands), "orders") != []
     end
 
+    test "a replayed registration opens at a real clock, so the age roll does not take it for unknown", %{store: store} do
+      # A registration with no opening time is due for an age roll at once (`Malachi.Cluster.SegmentRoll`),
+      # so a replay that dropped the clock would have the next sweep seal a head that just opened.
+      {broker, root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+      stale = broker.dsrsm
+
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      {commands, broker} = Broker.take_journal(broker)
+      assert Enum.any?(commands, &match?({:register_segment, _, _, _, _}, &1))
+
+      replayed = broker |> Broker.put_cache(stale, []) |> Broker.replay_journal(commands)
+
+      assert [%{state: :active, opened_at: opened_at}] = segments(replayed, root_id)
+      assert is_integer(opened_at)
+    end
+
     test "a replayed commit never moves a group backwards" do
       # The machine applies commit_offset last-write-wins, which is right for the log and wrong for a
       # replay: the read being replayed onto was taken first and may already carry a higher position
@@ -1706,6 +1724,216 @@ defmodule Malachi.BrokerTest do
       emptied = %{broker | dsrsm: empty_ring}
 
       assert Broker.replay_journal(emptied, commands) == emptied
+    end
+  end
+
+  describe "age rolls (request_rolls/2, from the retention sweep)" do
+    # The leader that sweeps is usually not the frontend that produced: same control plane, nothing cached.
+    defp leader_view(broker), do: %{broker | segments: %{}, rolling: %{}, fencing: %{}, segment_seq: %{}}
+
+    defp head(broker, range_id), do: Enum.find(segments(broker, range_id), &(&1.state == :active))
+
+    test "an idle range's head is rolled from the control plane, with no produce and no successor", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      assert Broker.due_rolls(broker) == []
+
+      leader = broker |> leader_view() |> Broker.request_rolls([head(broker, root_id)])
+
+      assert [%{segment_id: {^root_id, 0}, primary: :primary, start_offset: 0, fence_sent_at: nil}] =
+               Broker.due_rolls(leader)
+
+      leader = settle(leader, store)
+
+      # Sealed where the fence said, and the range is left with no write head: the successor is opened by
+      # the next produce, so a topic that stays idle does not grow an empty segment per interval.
+      assert [%{state: :sealed, length: 1}] = segments(leader, root_id)
+      assert Broker.due_rolls(leader) == []
+      assert read_all(leader, store, root_id) |> Enum.map(& &1.value) == ["v0"]
+    end
+
+    test "the next produce after an age roll opens a successor at the sealed edge, under a fresh id", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+
+      leader = broker |> leader_view() |> Broker.request_rolls([head(broker, root_id)]) |> settle(store)
+      {leader, {:ok, _placements}} = produce(leader, store, "events", [record("v1", "k1")])
+
+      assert [%{id: {^root_id, 0}, state: :sealed}, %{id: {^root_id, 1}, state: :active, start_offset: 1}] =
+               segments(leader, root_id)
+
+      assert read_all(leader, store, root_id) |> Enum.map(& &1.value) == ["v0", "v1"]
+    end
+
+    test "a roll already owed by size is not owed twice, and its fence is not sent again", %{store: store} do
+      {broker, root_id, store} = one_record_topic(store)
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      {broker, [sent]} = Broker.fences_to_send(broker, 0, 1_000)
+
+      broker = Broker.request_rolls(broker, [head(broker, root_id)])
+
+      assert Broker.due_rolls(broker) == [sent]
+      assert Broker.fences_to_send(broker, 1, 1_000) == {broker, []}
+    end
+
+    test "a segment that is sealed, or has no replica to fence, is skipped", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      active = head(broker, root_id)
+
+      assert Broker.request_rolls(broker, [%{active | state: :sealed}]) == broker
+      assert Broker.request_rolls(broker, [%{active | replica_set: []}]) == broker
+      assert Broker.request_rolls(broker, []) == broker
+    end
+
+    test "a stale view of a segment someone already sealed is fenced and then only cleared", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      stale = head(broker, root_id)
+      broker = broker |> Broker.request_rolls([stale]) |> settle(store)
+      sealed = segments(broker, root_id)
+
+      # The sweep read the metadata before that seal landed.
+      broker = Broker.request_rolls(broker, [stale])
+      {broker, [roll]} = Broker.fences_to_send(broker, 0, 1_000)
+      {:ok, end_offset, bytes} = FakeSegmentStore.seal(store, roll.primary, roll.segment_id, roll.start_offset)
+
+      assert {broker, :ok} = Broker.record_fence(broker, roll, end_offset, bytes, 2_000)
+      assert Broker.due_rolls(broker) == []
+      assert segments(broker, root_id) == sealed
+    end
+
+    test "an age roll racing a failover seal converges on the failover's length", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      leader = broker |> leader_view() |> Broker.request_rolls([head(broker, root_id)])
+      {leader, [roll]} = Broker.fences_to_send(leader, 0, 1_000)
+
+      # Failover sealed the segment first, at the end its own fence learned.
+      leader = Broker.apply_heal(leader, [{:seal_segment, {root_id, 0}, 1, 7, 500}])
+
+      assert {leader, :ok} = Broker.record_fence(leader, roll, 1, 99, 1_000)
+      assert Broker.due_rolls(leader) == []
+      assert [%{state: :sealed, length: 1, byte_size: 7, sealed_at: 500}] = segments(leader, root_id)
+    end
+
+    test "two frontends rolling the same head seal it once, whichever records second", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      active = head(broker, root_id)
+
+      # Both fences are out before either answer is recorded: the leader's age roll and this frontend's own.
+      {leader, [leader_roll]} =
+        broker |> leader_view() |> Broker.request_rolls([active]) |> Broker.fences_to_send(0, 1_000)
+
+      {frontend, [frontend_roll]} = broker |> Broker.request_rolls([active]) |> Broker.fences_to_send(0, 1_000)
+      {:ok, end_offset, bytes} = FakeSegmentStore.seal(store, :primary, active.id, 0)
+
+      {leader, :ok} = Broker.record_fence(leader, leader_roll, end_offset, bytes, 1_000)
+      sealed = segments(leader, root_id)
+      assert [%{state: :sealed, length: 1, sealed_at: 1_000}] = sealed
+
+      # The second answer, recorded on a view that already holds the first seal: cleared, no second command.
+      seen = %{frontend | dsrsm: leader.dsrsm, command_fun: recording_command_fun(self())}
+      assert {seen, :ok} = Broker.record_fence(seen, frontend_roll, end_offset, bytes, 2_000)
+      assert commands_seen() == []
+      assert Broker.due_rolls(seen) == [] and seen.fencing == %{}
+      assert segments(seen, root_id) == sealed
+
+      # The same answer on a view that has not seen the first seal yet goes to the control plane, which
+      # already holds it: the retry is idempotent, so the sealed edge and its clock do not move.
+      authority = fn _cache, topic, command -> DSRSM.command(leader.dsrsm, topic, command) end
+      stale = %{frontend | command_fun: authority}
+      assert {stale, :ok} = Broker.record_fence(stale, frontend_roll, end_offset, bytes, 2_000)
+      assert Broker.due_rolls(stale) == []
+      assert segments(stale, root_id) == sealed
+    end
+
+    test "a fence for a head this view never held is sealed by the control plane, not dropped", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      authoritative = broker.dsrsm
+      active = head(broker, root_id)
+
+      # The sweeping leader's cache predates the head; its commands reach the control plane, which has it.
+      {stale, {:ok, _root}} = Broker.create_topic(open_broker(), "events", 4)
+      authority = fn _cache, topic, command -> DSRSM.command(authoritative, topic, command) end
+      leader = %{stale | command_fun: authority} |> Broker.request_rolls([active])
+      {leader, [roll]} = Broker.fences_to_send(leader, 0, 1_000)
+      {:ok, end_offset, bytes} = FakeSegmentStore.seal(store, roll.primary, roll.segment_id, roll.start_offset)
+
+      assert {leader, :ok} = Broker.record_fence(leader, roll, end_offset, bytes, 2_000)
+      assert Broker.due_rolls(leader) == []
+      assert [%{state: :sealed, length: 1, sealed_at: 2_000}] = segments(leader, root_id)
+    end
+
+    test "a fence for a head the control plane no longer lists only clears the roll", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      active = head(broker, root_id)
+
+      {gone, {:ok, _root}} = Broker.create_topic(open_broker(), "events", 4)
+      gone = Broker.request_rolls(gone, [active])
+      {gone, [roll]} = Broker.fences_to_send(gone, 0, 1_000)
+
+      assert {gone, :ok} = Broker.record_fence(gone, roll, 1, 10, 2_000)
+      assert Broker.due_rolls(gone) == []
+      assert gone.fencing == %{}
+      assert segments(gone, root_id) == []
+    end
+
+    test "an owed age roll whose fence never answers is dropped once the control plane moves past it", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      active = head(broker, root_id)
+
+      # The leader owes S0's roll and its fence went to a primary that never answers.
+      {leader, [_unanswered]} =
+        broker |> leader_view() |> Broker.request_rolls([active]) |> Broker.fences_to_send(0, 1_000)
+
+      # Still active in the control plane: the roll is kept, the fence may yet be answered.
+      assert [%{segment_id: {^root_id, 0}}] = leader |> Broker.drop_stale_active_segments() |> Broker.due_rolls()
+
+      # Failover sealed S0 on another node and a produce opened S1; this view learns it on the next refresh.
+      {dsrsm, :ok} = DSRSM.command(leader.dsrsm, "events", {:seal_segment, {root_id, 0}, 1, 7, 500})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:register_segment, root_id, {root_id, 1}, [:primary], 1})
+      refreshed = Broker.drop_stale_active_segments(%{leader | dsrsm: dsrsm})
+
+      assert Broker.due_rolls(refreshed) == []
+      assert refreshed.fencing == %{}
+
+      # So S1's own roll is owed rather than swallowed by the one left behind.
+      s1 = Enum.find(segments(refreshed, root_id), &(&1.state == :active))
+      assert [%{segment_id: {^root_id, 1}}] = refreshed |> Broker.request_rolls([s1]) |> Broker.due_rolls()
+    end
+
+    test "an owed age roll for a head the refreshed view does not hold yet is kept" do
+      {broker, root_id} = broker_with_topic()
+      unseen = %{id: {root_id, 0}, range_id: root_id, state: :active, replica_set: [:primary], start_offset: 0}
+
+      assert [%{segment_id: {^root_id, 0}}] =
+               broker |> Broker.request_rolls([unseen]) |> Broker.drop_stale_active_segments() |> Broker.due_rolls()
+    end
+
+    test "an empty head gets one zero-length seal, the sweep stops asking, and the range reads on", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+
+      # A head registered by a produce whose append never landed: the registration is in the control plane,
+      # the store holds nothing.
+      {dsrsm, :ok} = DSRSM.command(broker.dsrsm, "events", {:register_segment, root_id, {root_id, 0}, [:primary], 0})
+      broker = %{broker | dsrsm: dsrsm}
+
+      broker = broker |> Broker.request_rolls([head(broker, root_id)]) |> settle(store)
+
+      assert [%{state: :sealed, length: 0}] = segments(broker, root_id)
+      assert SegmentRoll.due(Broker.metadata(broker), 0, %{segment_max_age_ms: 60_000}, %{}) == []
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+
+      assert [%{state: :sealed, length: 0, start_offset: 0}, %{state: :active, start_offset: 0, id: {^root_id, 1}}] =
+               broker |> segments(root_id) |> Enum.sort_by(&elem(&1.id, 1))
+
+      assert {[%{value: "v0"}], _cursor} = consume(broker, store, root_id, :start)
     end
   end
 end

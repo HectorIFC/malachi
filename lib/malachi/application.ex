@@ -892,8 +892,9 @@ defmodule Malachi.Application do
 
   # Started whatever the environment says. Retention used to be gated on the two global limits being set,
   # which is not where a policy can be: with both unset, the default, no coordinator existed at all and a
-  # per-topic policy was inert. A sweep with no bound anywhere is a pure no-op (`Retention.expired/4`
-  # answers `[]` for a `nil` bound), so the gate only ever cost the policies it hid.
+  # per-topic policy was inert. A sweep with no bound anywhere expires nothing (`Retention.expired/5`
+  # answers `[]` for a `nil` bound), so the gate only ever cost the policies it hid; it still rolls active
+  # segments older than `:segment_max_age_ms`, which is on by default.
   defp retention_children(cluster), do: [retention_child(cluster)]
 
   defp retention_child(cluster) do
@@ -904,12 +905,16 @@ defmodule Malachi.Application do
     %{id: Malachi.LogRetention, start: {RetentionCoordinator, :start_link, [opts]}}
   end
 
+  @doc false
   # The retention coordinator opts shared by the node-wide (1C-a) and per-vnode (1C-b) coordinators; only
-  # the metadata source (global merge vs one vnode) and the leader gate differ.
-  defp retention_opts(metadata_source, leader?) do
+  # the metadata source (global merge vs one vnode) and the leader gate differ. Public (and documented
+  # false) only so the seams it wires, `:roll_segments` among them, can be tested against the running app.
+  @spec retention_opts((-> Metadata.t()), (-> boolean())) :: keyword()
+  def retention_opts(metadata_source, leader?) do
     [
       metadata_source: metadata_source,
       expire_segment: &expire_segment/1,
+      roll_segments: &BrokerServer.request_rolls(Malachi.LogBroker, &1),
       policy: retention_policy(),
       unresolved_policy_max_age_ms: Application.get_env(:malachi, :retention_unresolved_policy_max_age_ms),
       interval: Application.get_env(:malachi, :retention_interval_ms, 60_000),

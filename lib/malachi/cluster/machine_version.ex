@@ -49,7 +49,10 @@ defmodule Malachi.Cluster.MachineVersion do
   `meta.system_time`, the timestamp the leader wrote into the log entry (`Malachi.Cluster.MetadataMachine`).
   Every replica on this code stamps the same value, a replay stamps it again, and a member on older code
   stores the segment without the field and never reads it, so no member applies the command differently
-  from another in anything either one acts on. The same holds for a topic export that carries the field
+  from another in anything either one acts on. The reverse direction is the reader's to handle: a member
+  on this code can read an older leader's state (a consistent query runs at the leader), whose segments
+  lack the key, so `Malachi.Cluster.SegmentRoll` treats a missing key as unknown and leaves the segment
+  alone rather than raising or rolling it. The same holds for a topic export that carries the field
   (`:insert_topic`): a destination on older code stores a key it never reads, so the export format does
   not move for it. A field an older member would act on, or one carried in the command, still takes a
   new shape at a new version.
