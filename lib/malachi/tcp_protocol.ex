@@ -16,6 +16,7 @@ defmodule Malachi.TCPProtocol do
 
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
+  alias Malachi.Auth.ConsoleRole
   alias Malachi.Cluster.Policy
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
@@ -118,6 +119,8 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.grant_acl_key() -> grant_acl(correlation_id, payload, session)
       api_key == Wire.revoke_acl_key() -> revoke_acl(correlation_id, payload, session)
       api_key == Wire.list_acls_key() -> list_acls(correlation_id, payload, session)
+      api_key == Wire.set_role_key() -> set_role(correlation_id, payload, session)
+      api_key == Wire.list_users_with_roles_key() -> list_users_with_roles(correlation_id, payload, session)
       true -> dispatch_policy(api_key, correlation_id, payload, session)
     end
   end
@@ -268,6 +271,26 @@ defmodule Malachi.TCPProtocol do
   defp list_users(correlation_id, _payload, session) do
     with_permission(session, :admin, correlation_id, fn ->
       Wire.encode_ok(correlation_id, Wire.encode_list_users_resp(Malachi.Auth.list_users()))
+    end)
+  end
+
+  # Console roles (#228) over the wire: what a console role grants is decided by Malachi.Console.Access, but
+  # managing it is user management, so it takes the wire :admin permission like every other user operation.
+  # A version refusal (a cluster still below machine version 5) is answered with the upgrade message.
+  defp set_role(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {username, role_string} = Wire.decode_set_role_req(payload)
+
+      case ConsoleRole.parse(role_string) do
+        {:ok, role} -> policy_reply(correlation_id, Malachi.Auth.set_role(username, role, session.username), <<>>)
+        :error -> Wire.encode_error(correlation_id, :invalid_role)
+      end
+    end)
+  end
+
+  defp list_users_with_roles(correlation_id, _payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      Wire.encode_ok(correlation_id, Wire.encode_list_users_with_roles_resp(Malachi.Auth.list_users()))
     end)
   end
 

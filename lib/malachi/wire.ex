@@ -23,7 +23,7 @@ defmodule Malachi.Wire do
 
   This framing is the compatibility contract with every client: the Node CLI, the Elixir client, and any
   future SDK. Two things are **stable** and must stay so: the byte layout of each frame above, and the
-  `api_key` numbers (currently 0..21, `@auth` through `@get_topic_policy`). Clients are compiled against them, so
+  `api_key` numbers (currently 0..23, `@auth` through `@list_users_with_roles`). Clients are compiled against them, so
   a running cluster and its clients agree on the wire only as long as both hold.
 
   A change is **breaking** (every deployed client must update in lockstep, so it cannot ship in a normal
@@ -73,12 +73,17 @@ defmodule Malachi.Wire do
   @list_policies 19
   @bind_topic_policy 20
   @get_topic_policy 21
+  # admin console roles (#228): set or remove a user's console role, and list users with their roles. The
+  # list is a new key rather than a field on `@list_users`, whose response is frozen like every shipped
+  # frame. Both require the wire :admin permission.
+  @set_role 22
+  @list_users_with_roles 23
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..21
+  @type api_key :: 0..23
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -104,6 +109,8 @@ defmodule Malachi.Wire do
   def list_policies_key, do: @list_policies
   def bind_topic_policy_key, do: @bind_topic_policy
   def get_topic_policy_key, do: @get_topic_policy
+  def set_role_key, do: @set_role
+  def list_users_with_roles_key, do: @list_users_with_roles
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -363,6 +370,44 @@ defmodule Malachi.Wire do
   def decode_list_users_resp(<<count::32, rest::binary>>) do
     {users, <<>>} = take_users(rest, count, [])
     users
+  end
+
+  # ---- admin console roles. A role is a byte string ("viewer"/"editor"/"admin") or absent for no role. ----
+
+  def encode_set_role_req(username, role), do: <<put_str(username)::binary, put_str(role_str(role))::binary>>
+
+  def decode_set_role_req(payload) do
+    {username, rest} = take_str(payload)
+    {role, <<>>} = take_str(rest)
+    {username, role}
+  end
+
+  # list_users_with_roles request has an empty payload; the response carries
+  # `[{username, [permission_string], role_string | absent}]`.
+  def encode_list_users_with_roles_resp(users) do
+    body =
+      for %{username: u, permissions: perms, role: role} <- users, into: <<>> do
+        <<put_str(u)::binary, put_perms(perms)::binary, put_str(role_str(role))::binary>>
+      end
+
+    <<length(users)::32, body::binary>>
+  end
+
+  def decode_list_users_with_roles_resp(<<count::32, rest::binary>>) do
+    {users, <<>>} = take_users_with_roles(rest, count, [])
+    users
+  end
+
+  defp role_str(nil), do: nil
+  defp role_str(role), do: to_string(role)
+
+  defp take_users_with_roles(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_users_with_roles(rest, n, acc) do
+    {username, rest} = take_str(rest)
+    {perms, rest} = take_perms(rest)
+    {role, rest} = take_str(rest)
+    take_users_with_roles(rest, n - 1, [%{username: username, permissions: perms, role: role} | acc])
   end
 
   # ---- admin per-topic ACL management. operation is a byte string ("produce"/"consume"); resource is a
