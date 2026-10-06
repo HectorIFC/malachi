@@ -159,6 +159,12 @@ Keep that URL for step 7.
 - **It keeps an existing `worktree.env`** rather than rewriting it, since a session may be running on it.
 - **It refuses issue numbers above 1276**, whose ports would reach the Linux ephemeral range. Stop and
   report; the formula needs revisiting then, not a workaround.
+- **It copies the main checkout's Claude Code settings.** `~/malachi/.claude/settings.local.json` holds
+  the plugins and permissions a session loads, and git ignores it, so the script copies it into the
+  worktree's `.claude/` whenever it writes or keeps a `worktree.env`. That way the planning session in step
+  6 starts with the same plugins switched off as the main checkout. It keeps a copy already in the worktree,
+  says nothing when the main checkout has none, and copies nothing when it refuses. Never copy it by hand
+  into `~/malachi`, which is where it comes from.
 
 ## 5. Move the issue to Ready on the board
 
