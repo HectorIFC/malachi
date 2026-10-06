@@ -72,8 +72,11 @@ EXPOSE 4040 4041
 # Uses busybox wget (bundled in the Alpine base) instead of curl, so the image does not ship the curl
 # package and its CVEs just for a liveness probe. -q silences output, -O /dev/null discards the body, and a
 # non-2xx response or a refused connection makes wget exit non-zero, which marks the container unhealthy.
+# 127.0.0.1 rather than localhost: inside the container localhost resolves to ::1 first, and the dashboard
+# listens on IPv4 only, so probing localhost is refused while the node serves fine (#282).
+# scripts/docker-image-health-check.sh holds CI to this probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD wget -q -O /dev/null http://localhost:4041/health || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:4041/health || exit 1
 
 # Security hardening recommendations:
 #   docker run --security-opt=no-new-privileges:true \
