@@ -1324,12 +1324,13 @@ defmodule Malachi.Dashboard do
 
             const data = await response.json();
 
-            if (data.s === 'ok') {
+            if (response.ok && data.s === 'ok') {
               // Cookie is set automatically by the server (HttpOnly)
               // Redirect to dashboard
               window.location.href = '/';
             } else {
-              throw new Error(data.reason || 'Login failed');
+              // An error is an application/problem+json body: its type is a translation key.
+              throw new Error(data.type || 'Login failed');
             }
           } catch (error) {
             errorDiv.textContent = getErrorMessage(error.message);
@@ -1339,14 +1340,14 @@ defmodule Malachi.Dashboard do
           }
         });
 
-        function getErrorMessage(reason) {
+        function getErrorMessage(type) {
           const messages = {
-            'invalid_credentials': 'Invalid username or password',
-            'rate_limit_exceeded': 'Too many attempts. Please try again later.',
-            'authentication_required': 'Authentication required',
-            'insufficient_permissions': 'Insufficient permissions'
+            'errors.auth.invalid_credentials': 'Invalid username or password',
+            'errors.http.rate_limited': 'Too many attempts. Please try again later.',
+            'errors.http.invalid_request': 'Enter a username and a password.',
+            'errors.http.header_fields_too_large': 'The request was too large. Clear the cookies for this site and try again.'
           };
-          return messages[reason] || 'An error occurred. Please try again.';
+          return messages[type] || 'An error occurred. Please try again.';
         }
 
       </script>
