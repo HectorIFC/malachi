@@ -141,7 +141,7 @@ Current assessments:
 
 - **CVE-2025-60876** (BusyBox `wget`, medium): **not affected.** The flaw is HTTP header injection when
   `wget` is handed an attacker-controlled URL. The image runs busybox `wget` only in the Docker
-  `HEALTHCHECK`, against the fixed literal URL `http://localhost:4041/health`; no attacker-controlled input
+  `HEALTHCHECK`, against the fixed literal URL `http://127.0.0.1:4041/health`; no attacker-controlled input
   reaches `wget`, so the vector cannot be triggered. Alpine has published no fixed busybox version on any
   branch, so the package cannot be upgraded to remediate. Docker Scout can consume the VEX file with
   `docker scout cves --vex-location .vex hectorcardoso/malachi:latest`. The VEX product PURL is qualified
