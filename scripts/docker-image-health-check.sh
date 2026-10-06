@@ -13,7 +13,8 @@
 # to run, plus the probe's timeout for that probe to answer. A zero timing reads as Docker's default
 # (interval 30s, timeout 30s, start period 0). IMAGE_HEALTH_TIMEOUT (seconds) replaces that budget.
 # It fails at once, without waiting the budget out, when Docker reports the container unhealthy or the
-# container stops running. Every failure prints the output of the last probe Docker recorded.
+# container stops running. Those two failures, and a spent budget, also print the output of the last
+# probe Docker recorded (or that no probe has run yet), when the probe log can still be read.
 #
 # Exits 0 when the container reports healthy, 1 on a failed check, 2 on a usage error: a wrong number of
 # arguments or an empty one, a limit that is not a whole number of seconds from 1 to 99999 written
