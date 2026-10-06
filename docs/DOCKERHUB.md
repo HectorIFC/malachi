@@ -67,6 +67,7 @@ docker run -d --name malachi \
 |------|------|
 | `4040` | Binary wire protocol: produce, consume, stream |
 | `4041` | Dashboard, `/health`, `/ready` and Prometheus `/metrics` |
+| `4042` | Operator console (`MALACHI_CONSOLE_PORT`; `MALACHI_CONSOLE_ENABLED=false` turns it off) |
 
 ## Tags
 

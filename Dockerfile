@@ -67,7 +67,8 @@ ENV MALACHI_TCP_PORT=4040
 ENV MALACHI_DASHBOARD_PORT=4041
 ENV MALACHI_LOCALE=en_US
 
-EXPOSE 4040 4041
+# 4040 is the wire protocol, 4041 the dashboard (health, metrics) and 4042 the operator console.
+EXPOSE 4040 4041 4042
 
 # Uses busybox wget (bundled in the Alpine base) instead of curl, so the image does not ship the curl
 # package and its CVEs just for a liveness probe. -q silences output, -O /dev/null discards the body, and a
