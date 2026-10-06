@@ -14,7 +14,10 @@ defmodule Malachi.UI.TokenGen.GoldenTest do
 
   test "the fixture covers both themes of every color with its own value" do
     assert length(@golden["colors"]) >= 100
-    assert length(@golden["contrast"]) >= 60
+    assert length(@golden["contrast"]) >= 80
+
+    # An alias is resolved, so a pair that names one still has a reference value.
+    assert Enum.any?(@golden["contrast"], &(&1["background"] == "color.cluster.amber"))
   end
 
   for %{"path" => path, "theme" => theme} = vector <- @golden["colors"] do
@@ -40,16 +43,14 @@ defmodule Malachi.UI.TokenGen.GoldenTest do
   end
 
   test "every contrast ratio matches within a hundredth" do
-    colors = Map.new(@golden["colors"], &{{&1["path"], &1["theme"]}, &1["oklch"]})
-
-    for %{"foreground" => fg, "background" => bg, "theme" => theme, "ratio" => want} <- @golden["contrast"] do
-      ratio = Contrast.ratio(srgb8(colors, fg, theme), srgb8(colors, bg, theme))
+    for %{"foreground" => fg, "background" => bg, "theme" => theme, "ratio" => want} = pair <- @golden["contrast"] do
+      ratio = Contrast.ratio(srgb8(pair["foregroundOklch"]), srgb8(pair["backgroundOklch"]))
       assert_in_delta ratio, want, 0.01, "#{fg} on #{bg} in #{theme}"
     end
   end
 
-  defp srgb8(colors, path, theme) do
-    {:ok, color} = Color.parse(Map.fetch!(colors, {path, theme}))
+  defp srgb8(oklch) do
+    {:ok, color} = Color.parse(oklch)
     Color.to_srgb8(color)
   end
 end

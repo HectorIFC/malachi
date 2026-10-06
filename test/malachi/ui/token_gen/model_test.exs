@@ -115,8 +115,16 @@ defmodule Malachi.UI.TokenGen.ModelTest do
       assert_gate(file, "below 3")
     end
 
+    test "a text pair is held to 4.5 even where a graphic would pass at 3" do
+      # state.on in light reaches about 3.4 on the background: enough for a mark, not for text.
+      pair = object([{"foreground", "color.state.on"}, {"background", "color.base.background"}, {"role", "text"}])
+      file = put(minimal(), ["$contrast", "pairs"], [pair])
+      assert_gate(file, "$contrast: color.state.on on color.base.background in light is 3.")
+      assert_gate(file, "below 4.5")
+    end
+
     test "a contrast pair with alpha is refused, not composited" do
-      pair = object([{"foreground", "color.shadow.soft"}, {"background", "color.base.card"}, {"min", 3}])
+      pair = object([{"foreground", "color.shadow.soft"}, {"background", "color.base.card"}, {"role", "graphic"}])
       file = put(minimal(), ["$contrast", "pairs"], [pair])
       assert_gate(file, "$contrast: color.shadow.soft on color.base.card carries alpha")
     end

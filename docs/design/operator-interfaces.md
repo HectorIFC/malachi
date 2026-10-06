@@ -351,9 +351,12 @@ that look similar. All four run in `mix malachi.tokens --check`, its own step in
    today; the web console and the terminal interface add their own native test against the same
    snapshot when their projects land (#231, #233).
 4. The generator fails below threshold on every pair in `$contrast`, in both themes, WCAG 2.2 on the
-   bytes the screen shows: 4.5 for text, including muted foreground on muted and the sidebar pairs,
-   and 3 for every `state.*` on both `background` and `card`. A pair with alpha is refused rather than
-   composited. The same step fails when two members of a `$cvd` set, simulated for deuteranopia,
+   bytes the screen shows. A pair names its role and the generator fixes the floor, so no pair can be
+   given a weaker one: 4.5 for text (1.4.3), including muted foreground on muted and the sidebar
+   pairs, and 3 for a graphic (1.4.11), which is every `state.*`, every `chart-*` series and the
+   control border `input`, each on both `background` and `card`, and the focus ring on `background`,
+   `card`, `muted` and `popover` (`sidebar-ring` on the sidebar background and accent). `border` is a divider rather than a
+   control boundary and is not gated. A pair with alpha is refused rather than composited. The same step fails when two members of a `$cvd` set, simulated for deuteranopia,
    come closer than the distance it declares.
 
 ### 4.2 Tokens
@@ -1301,9 +1304,13 @@ moment `priv/static` holds the console.
 - The range lineage uses `role="treegrid"` with `aria-expanded` only on parent rows, Right Arrow to
   expand and enter, Left Arrow to collapse, combined with `aria-rowcount` and `aria-rowindex` from
   the virtualization.
-- Every status has a **text label and a shape** in addition to colour. Every semantic token is
-  verified at 4.5:1 for text and 3:1 for a status dot, a chart series and a control border, in both
-  themes.
+- Every status has a **text label and a shape** in addition to colour. The contrast gate in section
+  4.1 verifies, in both themes, 4.5:1 for every text pair and 3:1 for every state, every chart series
+  and the control border (`input`) on `background` and `card`, and for the focus ring on `background`,
+  `card`, `muted` and `popover` (`sidebar-ring` on the sidebar background and accent). Those are the
+  only surfaces a state or a chart color is drawn on: putting one on another surface, such as `muted`
+  or `accent`, or using `destructive` as text, means adding its pair to the token file first, and the
+  gate then holds it.
 - A live tail must be pausable, which is WCAG 2.2.2 at level A. It auto pauses when the operator
   scrolls away from the bottom, uses a fixed capacity ring buffer with a **visible** drop counter,
   and shows one state chip: live, reconnecting, paused, disconnected.

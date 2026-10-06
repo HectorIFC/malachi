@@ -82,9 +82,13 @@ for (const [group, members] of Object.entries(t.color)) {
 }
 
 const pair = (a, b) => +c.wcagContrast(fromBytes(srgb8(a)), fromBytes(srgb8(b))).toFixed(4);
+// Follows a {path} reference to the color it names, so a pair on an alias has a reference value too.
 const lookup = (path, theme) => {
   const [, group, key] = path.split(".");
-  return t.color[group][key][theme];
+  const token = t.color[group][key];
+  if (token[theme]) return token[theme];
+  const ref = /^\{(.+)\}$/.exec(token.$value || "");
+  return ref ? lookup(ref[1], theme) : undefined;
 };
 const contrast = [];
 for (const p of t.$contrast.pairs) {
@@ -92,7 +96,7 @@ for (const p of t.$contrast.pairs) {
     const fg = lookup(p.foreground, theme);
     const bg = lookup(p.background, theme);
     if (!fg || !bg) continue;
-    contrast.push({ foreground: p.foreground, background: p.background, theme, ratio: pair(fg, bg) });
+    contrast.push({ foreground: p.foreground, background: p.background, theme, foregroundOklch: fg, backgroundOklch: bg, ratio: pair(fg, bg) });
   }
 }
 

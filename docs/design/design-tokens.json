@@ -69,8 +69,8 @@
       "destructive":           { "light": "oklch(0.577 0.222 27.3)", "dark": "oklch(0.579 0.201 25.4)" },
       "destructive-foreground":{ "light": "oklch(0.985 0.002 265)", "dark": "oklch(0.985 0.002 265)" },
       "border":                { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
-      "input":                 { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
-      "ring":                  { "light": "oklch(0.709 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
+      "input":                 { "light": "oklch(0.654 0.004 265)", "dark": "oklch(0.508 0.006 265)" },
+      "ring":                  { "light": "oklch(0.634 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
     },
 
     "alias": {
@@ -122,12 +122,12 @@
 
     "chart": {
       "$prefix": "chart-",
-      "$description": "Time series only. Never reused for a state or a cluster. Checked for deuteranopia distinguishability by the generator ($cvd).",
-      "1": { "light": "oklch(0.646 0.222 41.1)",  "dark": "oklch(0.488 0.243 264.4)" },
+      "$description": "Time series only. Never reused for a state or a cluster. Each series reaches 3:1 on the background and on the card ($contrast) and stays apart for a deuteranope ($cvd), which in the light theme is why series 4 and 5 are rust and blue violet rather than two more warm yellows.",
+      "1": { "light": "oklch(0.646 0.222 41.1)",  "dark": "oklch(0.524 0.243 264.4)" },
       "2": { "light": "oklch(0.600 0.118 184.7)", "dark": "oklch(0.696 0.170 162.5)" },
       "3": { "light": "oklch(0.398 0.070 227.4)", "dark": "oklch(0.769 0.188 70.1)" },
-      "4": { "light": "oklch(0.828 0.189 84.4)",  "dark": "oklch(0.627 0.265 303.9)" },
-      "5": { "light": "oklch(0.769 0.188 70.1)",  "dark": "oklch(0.645 0.246 16.4)" }
+      "4": { "light": "oklch(0.450 0.150 45.0)",  "dark": "oklch(0.627 0.265 303.9)" },
+      "5": { "light": "oklch(0.540 0.200 270.0)", "dark": "oklch(0.645 0.246 16.4)" }
     },
 
     "cluster": {
@@ -149,7 +149,7 @@
       "accent":              { "light": "oklch(0.958 0.003 265)", "dark": "oklch(0.271 0.006 265)" },
       "accent-foreground":   { "light": "oklch(0.278 0.010 265)", "dark": "oklch(0.962 0.002 265)" },
       "border":              { "light": "oklch(0.920 0.004 265)", "dark": "oklch(0.288 0.006 265)" },
-      "ring":                { "light": "oklch(0.709 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
+      "ring":                { "light": "oklch(0.634 0.011 265)", "dark": "oklch(0.551 0.013 265)" }
     },
 
     "overlay": {
@@ -166,39 +166,57 @@
   },
 
   "$contrast": {
-    "$description": "Every pair checked in both themes, WCAG 2.2 contrast computed on the sRGB the screen shows after the $gamut clip. 4.5 is text (1.4.3); 3 is a state color as a non text mark on a surface (1.4.11). A pair whose either side carries alpha is refused rather than composited.",
+    "$description": "Every pair checked in both themes, WCAG 2.2 contrast computed on the sRGB the screen shows after the $gamut clip. A pair names its role and the generator fixes the floor, so no pair can be given a weaker one: text is 4.5 (1.4.3), graphic is 3 (1.4.11): every state, chart series and the control border (input) on background and card, the focus ring on background, card, muted and popover, and sidebar.ring on the sidebar background and accent. A state or chart color drawn on any other surface, or destructive used as text, needs its pair added here first. border is a divider, not a control boundary, and is not gated. A pair whose either side carries alpha is refused rather than composited.",
     "pairs": [
-      { "foreground": "color.base.foreground",                "background": "color.base.background",  "min": 4.5 },
-      { "foreground": "color.base.card-foreground",           "background": "color.base.card",        "min": 4.5 },
-      { "foreground": "color.base.popover-foreground",        "background": "color.base.popover",     "min": 4.5 },
-      { "foreground": "color.base.primary-foreground",        "background": "color.base.primary",     "min": 4.5 },
-      { "foreground": "color.base.secondary-foreground",      "background": "color.base.secondary",   "min": 4.5 },
-      { "foreground": "color.base.muted-foreground",          "background": "color.base.muted",       "min": 4.5 },
-      { "foreground": "color.base.accent-foreground",         "background": "color.base.accent",      "min": 4.5 },
-      { "foreground": "color.base.destructive-foreground",    "background": "color.base.destructive", "min": 4.5 },
-      { "foreground": "color.sidebar.foreground",             "background": "color.sidebar.background", "min": 4.5 },
-      { "foreground": "color.sidebar.primary-foreground",     "background": "color.sidebar.primary",  "min": 4.5 },
-      { "foreground": "color.sidebar.accent-foreground",      "background": "color.sidebar.accent",   "min": 4.5 },
-      { "foreground": "color.state.active",  "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.active",  "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.sealed",  "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.sealed",  "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.fenced",  "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.fenced",  "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.damaged", "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.damaged", "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.behind",  "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.behind",  "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.ahead",   "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.ahead",   "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.blocked", "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.blocked", "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.state.unknown", "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.unknown", "background": "color.base.card",       "min": 3 },
-      { "foreground": "color.cluster.foreground", "background": "color.cluster.teal",   "min": 4.5 },
-      { "foreground": "color.cluster.foreground", "background": "color.cluster.amber",  "min": 4.5 },
-      { "foreground": "color.cluster.foreground", "background": "color.cluster.violet", "min": 4.5 },
-      { "foreground": "color.cluster.foreground", "background": "color.cluster.rose",   "min": 4.5 }
+      { "foreground": "color.base.foreground",                "background": "color.base.background",  "role": "text" },
+      { "foreground": "color.base.card-foreground",           "background": "color.base.card",        "role": "text" },
+      { "foreground": "color.base.popover-foreground",        "background": "color.base.popover",     "role": "text" },
+      { "foreground": "color.base.primary-foreground",        "background": "color.base.primary",     "role": "text" },
+      { "foreground": "color.base.secondary-foreground",      "background": "color.base.secondary",   "role": "text" },
+      { "foreground": "color.base.muted-foreground",          "background": "color.base.muted",       "role": "text" },
+      { "foreground": "color.base.accent-foreground",         "background": "color.base.accent",      "role": "text" },
+      { "foreground": "color.base.destructive-foreground",    "background": "color.base.destructive", "role": "text" },
+      { "foreground": "color.sidebar.foreground",             "background": "color.sidebar.background", "role": "text" },
+      { "foreground": "color.sidebar.primary-foreground",     "background": "color.sidebar.primary",  "role": "text" },
+      { "foreground": "color.sidebar.accent-foreground",      "background": "color.sidebar.accent",   "role": "text" },
+      { "foreground": "color.state.active",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.active",  "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.sealed",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.sealed",  "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.fenced",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.fenced",  "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.damaged", "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.damaged", "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.behind",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.behind",  "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.ahead",   "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.ahead",   "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.blocked", "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.blocked", "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.state.unknown", "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.unknown", "background": "color.base.card",       "role": "graphic" },
+      { "foreground": "color.chart.1",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.chart.1",  "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.chart.2",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.chart.2",  "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.chart.3",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.chart.3",  "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.chart.4",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.chart.4",  "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.chart.5",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.chart.5",  "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.base.input", "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.base.input", "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.base.ring", "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.base.ring", "background": "color.base.card", "role": "graphic" },
+      { "foreground": "color.base.ring", "background": "color.base.muted", "role": "graphic" },
+      { "foreground": "color.base.ring", "background": "color.base.popover", "role": "graphic" },
+      { "foreground": "color.sidebar.ring", "background": "color.sidebar.background", "role": "graphic" },
+      { "foreground": "color.sidebar.ring", "background": "color.sidebar.accent", "role": "graphic" },
+      { "foreground": "color.cluster.foreground", "background": "color.cluster.teal",   "role": "text" },
+      { "foreground": "color.cluster.foreground", "background": "color.cluster.amber",  "role": "text" },
+      { "foreground": "color.cluster.foreground", "background": "color.cluster.violet", "role": "text" },
+      { "foreground": "color.cluster.foreground", "background": "color.cluster.rose",   "role": "text" }
     ]
   },
 

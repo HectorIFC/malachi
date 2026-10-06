@@ -47,9 +47,9 @@
 
   "$contrast": {
     "pairs": [
-      { "foreground": "color.base.foreground", "background": "color.base.background", "min": 4.5 },
-      { "foreground": "color.state.on",  "background": "color.base.background", "min": 3 },
-      { "foreground": "color.state.off", "background": "color.base.card",       "min": 3 }
+      { "foreground": "color.base.foreground", "background": "color.base.background", "role": "text" },
+      { "foreground": "color.state.on",  "background": "color.base.background", "role": "graphic" },
+      { "foreground": "color.state.off", "background": "color.base.card",       "role": "graphic" }
     ]
   },
 

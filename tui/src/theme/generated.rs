@@ -54,8 +54,8 @@ pub const TRUECOLOR_LIGHT: Palette = Palette {
     chart_1: Color::Rgb(245, 73, 0),
     chart_2: Color::Rgb(0, 150, 137),
     chart_3: Color::Rgb(16, 78, 100),
-    chart_4: Color::Rgb(255, 185, 0),
-    chart_5: Color::Rgb(254, 154, 0),
+    chart_4: Color::Rgb(148, 46, 0),
+    chart_5: Color::Rgb(69, 94, 225),
 };
 
 pub const ANSI256_LIGHT: Palette = Palette {
@@ -75,8 +75,8 @@ pub const ANSI256_LIGHT: Palette = Palette {
     chart_1: Color::Indexed(202),
     chart_2: Color::Indexed(30),
     chart_3: Color::Indexed(23),
-    chart_4: Color::Indexed(214),
-    chart_5: Color::Indexed(208),
+    chart_4: Color::Indexed(124),
+    chart_5: Color::Indexed(62),
 };
 
 pub const TRUECOLOR_DARK: Palette = Palette {
@@ -93,7 +93,7 @@ pub const TRUECOLOR_DARK: Palette = Palette {
     state_ahead: Color::Rgb(176, 109, 252),
     state_blocked: Color::Rgb(208, 30, 60),
     state_unknown: Color::Rgb(124, 128, 136),
-    chart_1: Color::Rgb(20, 71, 230),
+    chart_1: Color::Rgb(30, 84, 243),
     chart_2: Color::Rgb(0, 188, 125),
     chart_3: Color::Rgb(254, 154, 0),
     chart_4: Color::Rgb(173, 70, 255),
@@ -114,7 +114,7 @@ pub const ANSI256_DARK: Palette = Palette {
     state_ahead: Color::Indexed(135),
     state_blocked: Color::Indexed(160),
     state_unknown: Color::Indexed(244),
-    chart_1: Color::Indexed(26),
+    chart_1: Color::Indexed(27),
     chart_2: Color::Indexed(36),
     chart_3: Color::Indexed(208),
     chart_4: Color::Indexed(135),

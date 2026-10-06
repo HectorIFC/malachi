@@ -65,10 +65,39 @@ defmodule Malachi.UI.TokenGen.SourceTest do
       assert fast.reduced_motion == "0ms"
     end
 
+    test "a contrast floor comes from the pair's role: 4.5 for text, 3 for a graphic" do
+      {:ok, source} = Source.parse(minimal())
+      assert Enum.map(source.contrast, &{&1.role, &1.min}) == [{:text, 4.5}, {:graphic, 3.0}, {:graphic, 3.0}]
+    end
+
+    test "the repository gates every chart series and the control border at 3 against both surfaces" do
+      {:ok, source} = Source.parse(repo())
+      gated = MapSet.new(for %{role: :graphic} = p <- source.contrast, do: {p.foreground, p.background})
+
+      for fg <- ~w(color.chart.1 color.chart.2 color.chart.3 color.chart.4 color.chart.5 color.base.input),
+          bg <- ~w(color.base.background color.base.card) do
+        assert {fg, bg} in gated, "#{fg} on #{bg} is not gated at 3:1"
+      end
+    end
+
+    test "the repository gates the focus ring at 3 on background, card, muted, popover and the sidebar" do
+      {:ok, source} = Source.parse(repo())
+      gated = MapSet.new(for %{role: :graphic} = p <- source.contrast, do: {p.foreground, p.background})
+
+      expected =
+        for(
+          bg <- ~w(color.base.background color.base.card color.base.muted color.base.popover),
+          do: {"color.base.ring", bg}
+        ) ++
+          for bg <- ~w(color.sidebar.background color.sidebar.accent), do: {"color.sidebar.ring", bg}
+
+      for pair <- expected, do: assert(pair in gated, "#{inspect(pair)} is not gated at 3:1")
+    end
+
     test "reads the sections" do
       {:ok, source} = Source.parse(minimal())
 
-      assert [%{foreground: "color.base.foreground", background: "color.base.background", min: 4.5} | _] =
+      assert [%{foreground: "color.base.foreground", background: "color.base.background", role: :text, min: 4.5} | _] =
                source.contrast
 
       assert source.cvd == %{min: 0.05, sets: [["color.chart.1", "color.chart.2"]]}
@@ -145,8 +174,8 @@ defmodule Malachi.UI.TokenGen.SourceTest do
         {["$platforms", "tui"], 1, "$platforms.tui: must be an object"},
         {["$platforms", "tui", "tokens"], "color.base.background", "$platforms.tui: tokens must be a list"},
         {["$contrast", "pairs"], "all", "$contrast: pairs must be a list"},
-        {["$contrast", "pairs"], [1], "$contrast: a pair has exactly foreground, background and min"},
-        {["$contrast", "pairs"], [object([{"foreground", 5}, {"background", "color.base.card"}, {"min", 3}])],
+        {["$contrast", "pairs"], [1], "$contrast: a pair has exactly foreground, background and role"},
+        {["$contrast", "pairs"], [object([{"foreground", 5}, {"background", "color.base.card"}, {"role", "graphic"}])],
          "$contrast: 5 is not a color token"},
         {["$cvd", "sets"], "charts", "$cvd: sets must be a list"},
         {["$terminal", "distinct"], "states", "$terminal.distinct: must be a list"},
@@ -334,17 +363,31 @@ defmodule Malachi.UI.TokenGen.SourceTest do
   describe "$contrast, $cvd and $gamut" do
     test "a pair naming a missing or non color token" do
       pairs = fetch!(minimal(), ["$contrast", "pairs"])
-      bad = object([{"foreground", "space.1"}, {"background", "color.base.nope"}, {"min", 3}])
+      bad = object([{"foreground", "space.1"}, {"background", "color.base.nope"}, {"role", "graphic"}])
       file = put(minimal(), ["$contrast", "pairs"], pairs ++ [bad])
       assert_error(file, "$contrast: space.1 is not a color token")
       assert_error(file, "$contrast: color.base.nope is not a color token")
     end
 
     test "a pair with an impossible threshold or extra keys" do
-      bad = object([{"foreground", "color.base.foreground"}, {"background", "color.base.card"}, {"min", 30}])
-      assert_error(put(minimal(), ["$contrast", "pairs"], [bad]), "$contrast: min 30 is not a ratio between 1 and 21")
+      bad = object([{"foreground", "color.base.foreground"}, {"background", "color.base.card"}, {"role", "decoration"}])
 
-      extra = object([{"foreground", "color.base.foreground"}, {"background", "color.base.card"}, {"min", 3}, {"x", 1}])
+      assert_error(
+        put(minimal(), ["$contrast", "pairs"], [bad]),
+        ~s|$contrast: role "decoration" is not text or graphic|
+      )
+
+      # The floor comes from the role, so a pair cannot declare a weaker one of its own.
+      weaker = object([{"foreground", "color.base.foreground"}, {"background", "color.base.card"}, {"min", 2}])
+
+      assert_error(
+        put(minimal(), ["$contrast", "pairs"], [weaker]),
+        "$contrast: a pair has exactly foreground, background and role"
+      )
+
+      extra =
+        object([{"foreground", "color.base.foreground"}, {"background", "color.base.card"}, {"role", "text"}, {"x", 1}])
+
       assert_error(put(minimal(), ["$contrast", "pairs"], [extra]), "$contrast: a pair has exactly")
     end
 

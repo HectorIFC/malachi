@@ -36,7 +36,7 @@ defmodule Malachi.UI.TokenGen.Source do
   @type t :: %__MODULE__{
           tokens: [Token.t()],
           tui: [String.t()],
-          contrast: [%{foreground: String.t(), background: String.t(), min: float()}],
+          contrast: [%{foreground: String.t(), background: String.t(), role: :text | :graphic, min: float()}],
           cvd: %{min: float(), sets: [[String.t()]]},
           gamut: %{max: float()},
           ansi16: %{String.t() => ansi16()},
@@ -69,6 +69,12 @@ defmodule Malachi.UI.TokenGen.Source do
   @leaf_keys ~w($value light dark $description $name $modes $reducedMotion)
 
   @shadow_keys ~w(offsetX offsetY blur spread color)
+
+  # The WCAG 2.2 floors, fixed here rather than authored per pair, so a pair cannot be given a weaker one:
+  # text against its background is 1.4.3 (4.5), a mark a reader must see (a state, a chart series, a
+  # control border) is 1.4.11 (3).
+  @contrast_floors %{"text" => {:text, 4.5}, "graphic" => {:graphic, 3.0}}
+  @pair_shape "$contrast: a pair has exactly foreground, background and role"
   @typography_members %{
     "fontWeight" => :font_weight,
     "fontSize" => :dimension,
@@ -609,28 +615,31 @@ defmodule Malachi.UI.TokenGen.Source do
   defp parse_contrast(_contrast, _index), do: {[], []}
 
   defp contrast_pair(%OrderedObject{values: entries} = pair, index) do
-    if entries |> Enum.map(&elem(&1, 0)) |> Enum.sort() == ~w(background foreground min) do
+    if entries |> Enum.map(&elem(&1, 0)) |> Enum.sort() == ~w(background foreground role) do
       foreground = get(pair, "foreground")
       background = get(pair, "background")
-      min = get(pair, "min")
+      role = get(pair, "role")
 
       errors =
         color_path_errors("$contrast", foreground, index) ++
           color_path_errors("$contrast", background, index) ++
-          if(is_number(min) and min >= 1 and min <= 21,
+          if(Map.has_key?(@contrast_floors, role),
             do: [],
-            else: ["$contrast: min #{inspect(min)} is not a ratio between 1 and 21"]
+            else: ["$contrast: role #{inspect(role)} is not text or graphic"]
           )
 
-      if errors == [],
-        do: {:ok, %{foreground: foreground, background: background, min: min * 1.0}},
-        else: {:error, errors}
+      if errors == [] do
+        {name, floor} = Map.fetch!(@contrast_floors, role)
+        {:ok, %{foreground: foreground, background: background, role: name, min: floor}}
+      else
+        {:error, errors}
+      end
     else
-      {:error, ["$contrast: a pair has exactly foreground, background and min"]}
+      {:error, [@pair_shape]}
     end
   end
 
-  defp contrast_pair(_pair, _index), do: {:error, ["$contrast: a pair has exactly foreground, background and min"]}
+  defp contrast_pair(_pair, _index), do: {:error, [@pair_shape]}
 
   defp parse_cvd(%OrderedObject{} = cvd, index) do
     deficiency = get(cvd, "deficiency")
