@@ -5,7 +5,7 @@ defmodule Malachi.Auth.Authorization do
 
   `allow?/4` layers three rules, in order:
 
-    1. `:admin` is a superuser, always allowed.
+    1. A superuser (`superuser?/1`, `:admin`) is always allowed.
     2. **Backward compatibility (default):** when strict mode is **off**, a global operation permission
        (`:produce`/`:consume` in the session) grants the operation on **any** topic, exactly as before ACLs
        existed, so enabling ACLs breaks no existing deployment.
@@ -20,6 +20,13 @@ defmodule Malachi.Auth.Authorization do
   """
 
   @doc """
+  Whether `permissions` make a **superuser**: `:admin` holds every wire operation and every console role.
+  This is the one statement of that rule; every other module asks here rather than testing for the atom.
+  """
+  @spec superuser?([atom()]) :: boolean()
+  def superuser?(permissions) when is_list(permissions), do: :admin in permissions
+
+  @doc """
   Whether `operation` is allowed given the session `permissions` and `strict?`. `acl_grant_fun` is a
   zero-arity function returning whether a matching per-topic ACL grant exists; it is called only when the
   decision falls through to the ACL (so the caller can skip an ACL store query otherwise).
@@ -28,7 +35,7 @@ defmodule Malachi.Auth.Authorization do
   def allow?(permissions, operation, strict?, acl_grant_fun)
       when is_list(permissions) and is_boolean(strict?) and is_function(acl_grant_fun, 0) do
     cond do
-      :admin in permissions -> true
+      superuser?(permissions) -> true
       not strict? and operation in permissions -> true
       true -> acl_grant_fun.()
     end

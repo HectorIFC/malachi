@@ -7,8 +7,11 @@ defmodule Malachi.Auth do
   require Logger
   alias Malachi.Auth.AclRegistry
   alias Malachi.Auth.AclStore
+  alias Malachi.Auth.Authorization
+  alias Malachi.Auth.ConsoleRole
   alias Malachi.Auth.SessionManager
   alias Malachi.Auth.UserStore
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.I18n
   alias Malachi.Telemetry
 
@@ -157,11 +160,28 @@ defmodule Malachi.Auth do
   end
 
   @doc """
-  Adds a new user.
-  Permissions: :admin, :produce, :consume
+  Adds a new user with wire `permissions` (`:admin`, `:produce`, `:consume`) and an optional console
+  `role` (`Malachi.Auth.ConsoleRole`). Returns `:ok`, `{:error, :user_exists}`, `{:error, :invalid_role}`,
+  a version refusal (`Malachi.Cluster.MachineVersion.refusal?/1`) when a role is given on a cluster still
+  below machine version 5, or `{:error, :persist_failed}`.
   """
-  def add_user(username, password, permissions \\ [:produce, :consume]) do
-    GenServer.call(__MODULE__, {:add_user, username, password, permissions})
+  @spec add_user(String.t(), String.t(), [atom()], ConsoleRole.t() | nil) :: :ok | {:error, term()}
+  def add_user(username, password, permissions \\ [:produce, :consume], role \\ nil) do
+    GenServer.call(__MODULE__, {:add_user, username, password, permissions, role})
+  end
+
+  @doc """
+  Sets `username`'s console role, or removes it with `nil`, on behalf of `actor` (who the audit event
+  names, `:user_role_changed`, whatever the outcome). Takes effect on the user's next HTTP request on
+  each node once that node's replica has applied it, since the console access rules read the role from the
+  local replica on each request rather than from the session (`Malachi.Console.Access`); a node cut off
+  from the leader keeps the old role until it rejoins. Returns `:ok`, `{:error, :user_not_found}`,
+  `{:error, :invalid_role}`, a version refusal on a cluster below machine version 5, or
+  `{:error, :persist_failed}`.
+  """
+  @spec set_role(String.t(), ConsoleRole.t() | nil, String.t()) :: :ok | {:error, term()}
+  def set_role(username, role, actor) do
+    GenServer.call(__MODULE__, {:set_role, username, role, actor})
   end
 
   @doc """
@@ -219,7 +239,7 @@ defmodule Malachi.Auth do
   def has_permission?(username, permission) when is_binary(username) do
     case UserStore.get_user(username) do
       {:ok, {^username, _hash, permissions}} ->
-        :admin in permissions or permission in permissions
+        has_permission?(permissions, permission)
 
       {:error, _reason} ->
         false
@@ -227,7 +247,7 @@ defmodule Malachi.Auth do
   end
 
   def has_permission?(permissions, permission) when is_list(permissions) do
-    :admin in permissions or permission in permissions
+    Authorization.superuser?(permissions) or permission in permissions
   end
 
   @doc """
@@ -282,20 +302,48 @@ defmodule Malachi.Auth do
   end
 
   @impl true
-  def handle_call({:add_user, username, password, permissions}, _from, state) do
+  def handle_call({:add_user, username, password, permissions, role}, _from, state) do
     hash = hash_password(password)
 
-    case UserStore.insert_user(username, hash, permissions) do
+    case UserStore.insert_user(username, hash, permissions, role) do
       :ok ->
         Logger.info(I18n.t(:user_created, username: username))
         {:reply, :ok, state}
 
-      {:error, :user_exists} ->
-        {:reply, {:error, :user_exists}, state}
+      {:error, reason} = error when reason in [:user_exists, :invalid_role] ->
+        {:reply, error, state}
 
-      {:error, _reason} ->
-        {:reply, {:error, :persist_failed}, state}
+      error ->
+        {:reply, store_failure(error), state}
     end
+  end
+
+  @impl true
+  def handle_call({:set_role, username, role, actor}, _from, state) do
+    result =
+      case UserStore.set_role(username, role) do
+        :ok ->
+          Logger.info(I18n.t(:user_role_changed, username: username, role: inspect(role)))
+          :ok
+
+        {:error, reason} = error when reason in [:user_not_found, :invalid_role] ->
+          error
+
+        error ->
+          store_failure(error)
+      end
+
+    # Audited here, in the loop, rather than by the caller: the write is bounded below the caller's
+    # timeout (`Malachi.Auth.UserServer`), so the event is written for every outcome, a timeout included.
+    Malachi.AuditLog.log_event(
+      :user_role_changed,
+      %{username: actor},
+      "set_role",
+      if(result == :ok, do: :success, else: :failure),
+      %{target: username, role: role, result: inspect(result)}
+    )
+
+    {:reply, result, state}
   end
 
   @impl true
@@ -332,6 +380,48 @@ defmodule Malachi.Auth do
     end
   end
 
+  @doc false
+  # A machine version refusal is returned as it is, so a surface can tell the operator the cluster is mid
+  # upgrade rather than that the write failed; any other store error is a persistence failure. Public only
+  # so both branches are tested: the application's own user store always runs at the code version, so no
+  # test node can make it refuse.
+  @spec store_failure({:error, term()}) :: {:error, term()}
+  def store_failure(reply) do
+    if MachineVersion.refusal?(reply), do: reply, else: {:error, :persist_failed}
+  end
+
+  @doc false
+  # Seeds one configured default user (`{username, password, permissions, role}`) and returns 1 when it was
+  # created, 0 otherwise. Public, with `seed_outcome/2`, only so a user with a console role and the version
+  # refusal are tested: the suite's own default users carry no role.
+  @spec seed_user({String.t(), String.t(), [atom()], ConsoleRole.t() | nil}, integer()) :: 0 | 1
+  def seed_user({username, password, permissions, role}, deadline) do
+    username |> seed_insert(hash_password(password), permissions, role, deadline) |> seed_outcome(username)
+  end
+
+  @doc false
+  @spec seed_outcome(:ok | {:error, term()}, String.t()) :: 0 | 1
+  def seed_outcome(:ok, _username), do: 1
+  def seed_outcome({:error, :user_exists}, _username), do: 0
+
+  # A role on a cluster still below the version that introduced roles: the user is not created at all
+  # rather than created without the role the operator asked for.
+  def seed_outcome({:error, {:unsupported_command, _key, introduced, effective}}, username) do
+    Logger.error(
+      I18n.t(:default_user_role_pending,
+        username: username,
+        reason: MachineVersion.upgrade_pending_message(introduced, effective)
+      )
+    )
+
+    0
+  end
+
+  def seed_outcome({:error, reason}, _username) do
+    Logger.error(I18n.t(:user_store_persist_error, reason: inspect(reason)))
+    0
+  end
+
   defp seed_default_users do
     # Users to seed come entirely from config (config/dev.exs, config/test.exs, or env via
     # config/runtime.exs). No hard-coded fallback: an empty list seeds nothing.
@@ -341,22 +431,7 @@ defmodule Malachi.Auth do
     # yet, so a transport error is transient (single-node forms instantly and never waits).
     deadline = System.monotonic_time(:millisecond) + 5_000
 
-    seeded =
-      Enum.reduce(default_users, 0, fn {username, password, permissions}, count ->
-        hash = hash_password(password)
-
-        case seed_insert(username, hash, permissions, deadline) do
-          :ok ->
-            count + 1
-
-          {:error, :user_exists} ->
-            count
-
-          {:error, reason} ->
-            Logger.error(I18n.t(:user_store_persist_error, reason: inspect(reason)))
-            count
-        end
-      end)
+    seeded = Enum.reduce(default_users, 0, fn user, count -> count + seed_user(user, deadline) end)
 
     if seeded > 0 do
       Logger.info(I18n.t(:default_users_loaded, count: seeded))
@@ -376,7 +451,7 @@ defmodule Malachi.Auth do
       password = generate_password()
       deadline = System.monotonic_time(:millisecond) + 5_000
 
-      case seed_insert(username, hash_password(password), [:admin], deadline) do
+      case seed_insert(username, hash_password(password), [:admin], nil, deadline) do
         :ok -> announce_generated_admin(username, password)
         # already seeded (an explicit config or another node) or unreachable: no password to announce
         _other -> :ok
@@ -397,13 +472,14 @@ defmodule Malachi.Auth do
   end
 
   # Inserts a seed user, retrying a transient transport error until `deadline` (the cluster reaching quorum).
-  # `:ok` and `{:error, :user_exists}` are terminal.
-  defp seed_insert(username, hash, permissions, deadline) do
-    case UserStore.insert_user(username, hash, permissions) do
-      {:error, reason} = err when reason != :user_exists ->
-        if System.monotonic_time(:millisecond) < deadline do
+  # `:ok`, `{:error, :user_exists}`, `{:error, :invalid_role}` and a version refusal are terminal: none of
+  # them changes by waiting a few seconds.
+  defp seed_insert(username, hash, permissions, role, deadline) do
+    case UserStore.insert_user(username, hash, permissions, role) do
+      {:error, reason} = err when reason not in [:user_exists, :invalid_role] ->
+        if not MachineVersion.refusal?(err) and System.monotonic_time(:millisecond) < deadline do
           Process.sleep(100)
-          seed_insert(username, hash, permissions, deadline)
+          seed_insert(username, hash, permissions, role, deadline)
         else
           err
         end

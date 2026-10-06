@@ -29,10 +29,10 @@ config :malachi,
   # Deterministic credentials the test suite authenticates with. Test-only, never shipped to prod (the base
   # config seeds nothing, and prod requires explicit passwords via env). Do NOT copy these into any real env.
   default_users: [
-    {"admin", "admin123", [:admin]},
-    {"producer", "producer123", [:produce]},
-    {"consumer", "consumer123", [:consume]},
-    {"app", "app123", [:produce, :consume]}
+    {"admin", "admin123", [:admin], nil},
+    {"producer", "producer123", [:produce], nil},
+    {"consumer", "consumer123", [:consume], nil},
+    {"app", "app123", [:produce, :consume], nil}
   ]
 
 config :malachi,

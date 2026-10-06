@@ -396,7 +396,7 @@ defmodule Malachi.Dashboard do
 
     cond do
       # Admin has access to everything
-      :admin in permissions ->
+      Malachi.Auth.Authorization.superuser?(permissions) ->
         true
 
       # HTML dashboard and SSE stream require admin (if configured)

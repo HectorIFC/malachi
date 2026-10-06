@@ -143,6 +143,79 @@ defmodule Malachi.AuthTest do
     end
   end
 
+  describe "add_user/4 and set_role/3" do
+    test "a user is created holding a console role, and the role changes and goes" do
+      username = "role_user_#{System.unique_integer([:positive])}"
+
+      assert :ok = Malachi.Auth.add_user(username, "pass", [:produce], :viewer)
+      assert {:ok, %{role: :viewer, permissions: [:produce]}} = UserStore.get_principal(username)
+
+      assert :ok = Malachi.Auth.set_role(username, :admin, "auth_test")
+      assert {:ok, %{role: :admin}} = UserStore.get_principal(username)
+
+      assert :ok = Malachi.Auth.set_role(username, nil, "auth_test")
+      assert {:ok, %{role: nil}} = UserStore.get_principal(username)
+    end
+
+    test "an unknown user or role is refused as such" do
+      username = "role_user_#{System.unique_integer([:positive])}"
+
+      assert {:error, :invalid_role} = Malachi.Auth.add_user(username, "pass", [], :root)
+      assert {:error, :user_not_found} = UserStore.get_user(username)
+      assert {:error, :user_not_found} = Malachi.Auth.set_role(username, :viewer, "auth_test")
+
+      :ok = Malachi.Auth.add_user(username, "pass", [])
+      assert {:error, :invalid_role} = Malachi.Auth.set_role(username, :root, "auth_test")
+    end
+
+    test "a machine version refusal reaches the caller instead of reading as a failed write" do
+      refusal = {:error, {:unsupported_command, {:set_role, 3}, 5, 4}}
+      assert Malachi.Auth.store_failure(refusal) == refusal
+      assert Malachi.Auth.store_failure({:error, :noproc}) == {:error, :persist_failed}
+    end
+
+    test "a default user with a console role is seeded holding it, and an existing one is left alone" do
+      username = "seed_role_#{System.unique_integer([:positive])}"
+      deadline = System.monotonic_time(:millisecond) + 1_000
+
+      assert Malachi.Auth.seed_user({username, "seed-pass", [], :viewer}, deadline) == 1
+      assert {:ok, %{role: :viewer, permissions: []}} = UserStore.get_principal(username)
+      assert Malachi.Auth.seed_user({username, "other-pass", [:admin], :admin}, deadline) == 0
+      assert {:ok, %{role: :viewer, permissions: []}} = UserStore.get_principal(username)
+    end
+
+    test "a default user refused for an unfinished upgrade is not created, and the log says why" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          refusal = {:error, {:unsupported_command, {:put_user, 5}, 5, 4}}
+          assert Malachi.Auth.seed_outcome(refusal, "seed_pending") == 0
+        end)
+
+      assert log =~ "Default user 'seed_pending' not created"
+      assert log =~ "machine version 4 and this needs 5"
+
+      log = ExUnit.CaptureLog.capture_log(fn -> assert Malachi.Auth.seed_outcome({:error, :noproc}, "x") == 0 end)
+      assert log =~ "noproc"
+    end
+
+    test "every role change is audited with its actor and outcome" do
+      username = "role_user_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(username, "pass", [])
+
+      :ok = Malachi.Auth.set_role(username, :editor, "auditor")
+      {:error, :user_not_found} = Malachi.Auth.set_role(username <> "_ghost", :editor, "auditor")
+      Malachi.AuditLog.flush()
+
+      events = Malachi.AuditLog.get_events_by_type(:user_role_changed)
+      assert Enum.any?(events, &(&1.username == "auditor" and &1.metadata.target == username and &1.status == :success))
+
+      assert Enum.any?(
+               events,
+               &(&1.metadata.target == username <> "_ghost" and &1.status == :failure)
+             )
+    end
+  end
+
   describe "remove_user/1" do
     test "removes an existing user" do
       username = "toremove_#{:rand.uniform(10000)}"

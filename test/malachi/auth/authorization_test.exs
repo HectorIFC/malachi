@@ -48,4 +48,32 @@ defmodule Malachi.Auth.AuthorizationTest do
       refute Authorization.allow?([], :consume, false, not_granted())
     end
   end
+
+  describe "superuser?/1" do
+    test "only :admin makes a superuser" do
+      assert Authorization.superuser?([:admin])
+      assert Authorization.superuser?([:produce, :admin])
+      refute Authorization.superuser?([:produce, :consume])
+      refute Authorization.superuser?([])
+    end
+
+    test "allow?/4 and has_permission?/2 follow it" do
+      assert Authorization.allow?([:admin], :produce, true, not_granted())
+      assert Malachi.Auth.has_permission?([:admin], :consume)
+      refute Malachi.Auth.has_permission?([:produce], :consume)
+    end
+
+    # The superuser rule is stated once: every other module asks Authorization.superuser?/1 rather than
+    # testing for the atom itself, so changing the rule changes it everywhere.
+    test "no module other than Authorization tests for the :admin atom itself" do
+      offenders =
+        for path <- Path.wildcard(Path.expand("../../../lib/**/*.ex", __DIR__)),
+            Path.basename(path) != "authorization.ex",
+            {line, number} <- path |> File.read!() |> String.split("\n") |> Enum.with_index(1),
+            line =~ ~r/:admin\s+in\b/,
+            do: "#{Path.relative_to_cwd(path)}:#{number}"
+
+      assert offenders == []
+    end
+  end
 end

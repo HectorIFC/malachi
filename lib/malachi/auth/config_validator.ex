@@ -24,6 +24,7 @@ defmodule Malachi.Auth.ConfigValidator do
   """
 
   require Logger
+  alias Malachi.Auth.Authorization
   alias Malachi.I18n
 
   @dangerous_passwords [
@@ -83,7 +84,7 @@ defmodule Malachi.Auth.ConfigValidator do
       # If no default users, OK (API management)
       :ok
     else
-      Enum.each(users, fn {username, password, _perms} ->
+      Enum.each(users, fn {username, password, _perms, _role} ->
         if password in @dangerous_passwords do
           raise """
 
@@ -117,7 +118,7 @@ defmodule Malachi.Auth.ConfigValidator do
       users = Application.get_env(:malachi, :default_users, [])
       min_length = Application.get_env(:malachi, :min_password_length, 12)
 
-      Enum.each(users, fn {username, password, _perms} ->
+      Enum.each(users, fn {username, password, _perms, _role} ->
         if String.length(password) < min_length do
           raise """
 
@@ -143,7 +144,7 @@ defmodule Malachi.Auth.ConfigValidator do
     disabled = Application.get_env(:malachi, :disable_default_users, false)
     generate_admin = Application.get_env(:malachi, :generate_admin, false)
 
-    has_admin = Enum.any?(users, fn {_user, _pass, perms} -> :admin in perms end)
+    has_admin = Enum.any?(users, &superuser_entry?/1)
 
     # `generate_admin` means Malachi.Auth will create a random admin at boot, so no admin in config is fine.
     unless has_admin or disabled or generate_admin do
@@ -157,7 +158,7 @@ defmodule Malachi.Auth.ConfigValidator do
     users = Application.get_env(:malachi, :default_users, [])
 
     dangerous_users =
-      Enum.filter(users, fn {_username, password, _perms} ->
+      Enum.filter(users, fn {_username, password, _perms, _role} ->
         password in @dangerous_passwords
       end)
 
@@ -166,7 +167,7 @@ defmodule Malachi.Auth.ConfigValidator do
         :ok
 
       users ->
-        usernames = Enum.map(users, fn {username, _, _} -> username end)
+        usernames = Enum.map(users, fn {username, _, _, _} -> username end)
 
         Logger.warning(I18n.t(:warning_weak_passwords, usernames: inspect(usernames)))
     end
@@ -178,7 +179,7 @@ defmodule Malachi.Auth.ConfigValidator do
       min_length = Application.get_env(:malachi, :min_password_length, 12)
 
       weak_users =
-        Enum.filter(users, fn {_username, password, _perms} ->
+        Enum.filter(users, fn {_username, password, _perms, _role} ->
           String.length(password) < min_length
         end)
 
@@ -187,7 +188,7 @@ defmodule Malachi.Auth.ConfigValidator do
           :ok
 
         users ->
-          usernames = Enum.map(users, fn {username, _, _} -> username end)
+          usernames = Enum.map(users, fn {username, _, _, _} -> username end)
 
           Logger.warning(I18n.t(:warning_short_passwords, usernames: inspect(usernames), min_length: min_length))
       end
@@ -197,7 +198,7 @@ defmodule Malachi.Auth.ConfigValidator do
   defp validate_admin_exists_warn do
     users = Application.get_env(:malachi, :default_users, [])
     generate_admin = Application.get_env(:malachi, :generate_admin, false)
-    has_admin = Enum.any?(users, fn {_user, _pass, perms} -> :admin in perms end)
+    has_admin = Enum.any?(users, &superuser_entry?/1)
 
     unless has_admin or generate_admin do
       Logger.warning(I18n.t(:warning_no_admin_dev))
@@ -239,4 +240,7 @@ defmodule Malachi.Auth.ConfigValidator do
   def dangerous_password?(password) do
     password in @dangerous_passwords
   end
+
+  # A configured default user whose permissions make it a superuser (see `Authorization.superuser?/1`).
+  defp superuser_entry?({_user, _pass, perms, _role}), do: Authorization.superuser?(perms)
 end

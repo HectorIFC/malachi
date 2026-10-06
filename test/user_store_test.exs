@@ -22,7 +22,9 @@ defmodule Malachi.Auth.UserStoreTest do
     "str_",
     "good",
     "sync_",
-    "concurrent_"
+    "concurrent_",
+    "rt_",
+    "copy_rt_"
   ]
 
   setup do
@@ -177,6 +179,41 @@ defmodule Malachi.Auth.UserStoreTest do
       ]
 
       assert {:ok, %{imported: 1, skipped: 1}} = UserStore.import_users(import_data)
+    end
+
+    test "an export round trips through an import, console roles included" do
+      assert :ok = UserStore.insert_user("rt_viewer", "h1", [:produce], :viewer)
+      assert :ok = UserStore.insert_user("rt_none", "h2", [:consume])
+
+      {:ok, exported} = UserStore.export_users()
+
+      # As the export reads after JSON: string keys and string roles, plus the hash an export never carries.
+      import_data =
+        for %{username: u} = user <- exported, u in ["rt_viewer", "rt_none"] do
+          %{
+            "username" => "copy_" <> u,
+            "password_hash" => "h",
+            "permissions" => user.permissions,
+            "role" => user.role
+          }
+        end
+
+      assert {:ok, %{imported: 2, skipped: 0}} = UserStore.import_users(import_data)
+      assert {:ok, %{role: :viewer, permissions: [:produce]}} = UserStore.get_principal("copy_rt_viewer")
+      assert {:ok, %{role: nil, permissions: [:consume]}} = UserStore.get_principal("copy_rt_none")
+    end
+
+    test "an unknown role or one of the wrong type is skipped, never crashes, and leaves the rest imported" do
+      import_data = [
+        %{"username" => "bad_role_str", "password_hash" => "h", "permissions" => [], "role" => "root"},
+        %{"username" => "bad_role_int", "password_hash" => "h", "permissions" => [], "role" => 5},
+        %{"username" => "bad_role_atom", "password_hash" => "h", "permissions" => [], "role" => :root},
+        %{"username" => "good_no_role", "password_hash" => "h", "permissions" => [], "role" => "none"}
+      ]
+
+      assert {:ok, %{imported: 1, skipped: 3}} = UserStore.import_users(import_data)
+      assert {:ok, %{role: nil}} = UserStore.get_principal("good_no_role")
+      assert {:error, :user_not_found} = UserStore.get_principal("bad_role_str")
     end
   end
 

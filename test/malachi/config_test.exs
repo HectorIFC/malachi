@@ -213,4 +213,57 @@ defmodule Malachi.ConfigTest do
       end
     end
   end
+
+  describe "default_users/1" do
+    test "parses permissions and an optional console role" do
+      assert Malachi.Config.default_users("a:pa:produce,consume;b:pb:admin:editor;c:pc::viewer;d:pd:") == [
+               {"a", "pa", [:produce, :consume], nil},
+               {"b", "pb", [:admin], :editor},
+               {"c", "pc", [], :viewer},
+               {"d", "pd", [], nil}
+             ]
+    end
+
+    test "an unknown permission or role stops the node, and creates no atom" do
+      unseen = "perm_never_seen_#{System.unique_integer([:positive])}"
+
+      assert_raise RuntimeError, ~r/unknown permission or role/, fn ->
+        Malachi.Config.default_users("a:pa:#{unseen}")
+      end
+
+      assert_raise RuntimeError, ~r/unknown permission or role/, fn ->
+        Malachi.Config.default_users("a:pa:produce:root")
+      end
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unseen) end
+    end
+
+    test "an entry of the wrong shape stops the node" do
+      assert_raise RuntimeError, ~r/user:password:permissions\[:role\]/, fn ->
+        Malachi.Config.default_users("only-a-name")
+      end
+
+      assert_raise RuntimeError, ~r/user:password:permissions\[:role\]/, fn ->
+        Malachi.Config.default_users("a:b:produce:viewer:extra")
+      end
+    end
+  end
+
+  describe "cluster_identity/3" do
+    test "trims, and turns blank into nil" do
+      assert Malachi.Config.cluster_identity("  ", " #00ff00 ", "a-1") == %{name: nil, color: "#00ff00", icon: "a-1"}
+    end
+
+    test "a color that is not #RRGGBB stops the node" do
+      for bad <- ["00ff00", "#0f0", "#GGGGGG", "#00ff00 extra"] do
+        assert_raise RuntimeError, ~r/MALACHI_CLUSTER_COLOR/, fn -> Malachi.Config.cluster_identity(nil, bad, nil) end
+      end
+    end
+
+    test "an icon that is not a short slug stops the node" do
+      for bad <- ["Globe", "a b", "../x", String.duplicate("a", 33)] do
+        assert_raise RuntimeError, ~r/MALACHI_CLUSTER_ICON/, fn -> Malachi.Config.cluster_identity(nil, nil, bad) end
+      end
+    end
+  end
 end

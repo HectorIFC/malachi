@@ -85,6 +85,30 @@ defmodule Malachi.Auth.UserServerHaTest do
     assert {:ok, {"admin", "hash1", [:admin]}} = UserServer.get_user(server_id, "admin")
   end
 
+  # The console access rules read the role from the local replica on every request (Malachi.Console.Access),
+  # so a demotion made through any member reaches a session held on any other member on its next request.
+  # This is that cross node half: a role set through one member is what another member's replica answers.
+  test "a console role set through one member is read from another member's local replica" do
+    peers = for _ <- 1..2, do: start_peer()
+    [n1, n2] = Enum.map(peers, &elem(&1, 1))
+    name = :"users_hc_#{System.unique_integer([:positive])}"
+    on_exit(fn -> UserServer.delete(name) end)
+
+    {:ok, server_id} = UserServer.start(name, [node(), n1, n2])
+    assert {:ok, :ok} = put(server_id, "ops", "hash1", [:produce])
+    assert {:ok, %{role: nil}} = eventually(fn -> :erpc.call(n2, UserServer, :get_principal, [{name, n2}, "ops"]) end)
+
+    assert {:ok, :ok} = :erpc.call(n1, UserServer, :set_role, [{name, n1}, "ops", :viewer])
+
+    assert {:ok, %{role: :viewer}} =
+             eventually(fn ->
+               case :erpc.call(n2, UserServer, :get_principal, [{name, n2}, "ops"]) do
+                 {:ok, %{role: :viewer}} = demoted -> demoted
+                 _stale -> :stale
+               end
+             end)
+  end
+
   # A write is issued from inside Malachi.Auth's loop, whose callers wait five seconds; with no quorum it
   # must give up well before that, so the loop answers (and audits) instead of its caller timing out.
   test "a write with no quorum gives up within the bound, well before a caller's five seconds" do

@@ -61,14 +61,34 @@ defmodule Malachi.Auth.UserServerTest do
     assert {:ok, listed} = UserServer.list_users(server_id)
 
     assert Enum.sort_by(listed, & &1.username) == [
-             %{username: "admin", permissions: [:admin]},
-             %{username: "app", permissions: [:produce, :consume]},
-             %{username: "producer", permissions: [:produce]}
+             %{username: "admin", permissions: [:admin], role: nil},
+             %{username: "app", permissions: [:produce, :consume], role: nil},
+             %{username: "producer", permissions: [:produce], role: nil}
            ]
 
     assert {:ok, exported} = UserServer.export_users(server_id)
     admin = Enum.find(exported, &(&1.username == "admin"))
     assert admin.permissions == ["admin"]
     refute Map.has_key?(admin, :hash)
+  end
+
+  test "console roles: put_user/5, set_role and import_users_with_roles go through the log" do
+    server_id = start_cluster()
+
+    assert {:ok, :ok} = UserServer.put_user(server_id, "ops", "h", [], :viewer)
+    assert {:ok, %{username: "ops", permissions: [], role: :viewer}} = UserServer.get_principal(server_id, "ops")
+
+    assert {:ok, :ok} = UserServer.set_role(server_id, "ops", :editor)
+    assert {:ok, %{role: :editor}} = UserServer.get_principal(server_id, "ops")
+
+    assert {:ok, {:error, :user_not_found}} = UserServer.set_role(server_id, "ghost", :viewer)
+    assert {:ok, {:error, :invalid_role}} = UserServer.set_role(server_id, "ops", :root)
+    assert {:error, :user_not_found} = UserServer.get_principal(server_id, "ghost")
+
+    entries = [{"ed", "h", [:produce], :editor}, {"ops", "h", [], :admin}]
+    assert {:ok, {:ok, %{imported: 1, skipped: 1}}} = UserServer.import_users_with_roles(server_id, entries)
+    assert {:ok, %{role: :editor, permissions: [:produce]}} = UserServer.get_principal(server_id, "ed")
+    # the existing user keeps its role: an import never overwrites
+    assert {:ok, %{role: :editor}} = UserServer.get_principal(server_id, "ops")
   end
 end

@@ -229,6 +229,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "👥 %{count} usuários padrão carregados",
       "en_US" => "👥 %{count} default users loaded"
     },
+    user_role_changed: %{
+      "pt_BR" => "Papel de console do usuário '%{username}' alterado para %{role}",
+      "en_US" => "Console role of user '%{username}' set to %{role}"
+    },
+    default_user_role_pending: %{
+      "pt_BR" => "Usuário padrão '%{username}' não criado: ele tem papel de console e %{reason}",
+      "en_US" => "Default user '%{username}' not created: it carries a console role and %{reason}"
+    },
     # Security hardening translations
     account_locked: %{
       "pt_BR" => "🔒 Conta bloqueada: '%{username}' (desbloqueio em %{time_remaining_ms}ms)",
