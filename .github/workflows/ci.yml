@@ -1,8 +1,11 @@
 name: CI
 
+# Only for an open pull request, draft or ready for review (the default pull_request types cover both), plus
+# main after a merge, which keeps the cache pull requests restore and the Codecov base current. A branch with
+# no pull request runs nothing: a push to it would have run every job twice once a pull request existed.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
     branches: ['**']
 
@@ -368,7 +371,7 @@ jobs:
         run: mix test --only multinode
 
   # Specs are part of the contract (a storage failure is `{:error, reason}`, not a raise, and dialyzer is what
-  # checks callers still match what a function can return), so they are checked on every push rather than
+  # checks callers still match what a function can return), so they are checked on every pull request rather than
   # left to whoever remembers to run it locally.
   dialyzer:
     name: Dialyzer
