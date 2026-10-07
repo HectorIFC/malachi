@@ -234,21 +234,28 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
 
     test "quorum holds with one dead follower, fails without a majority" do
-      # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives. A short
-      # follow_timeout keeps the no-quorum case fast.
-      primary = start_broker(follow_timeout: 300)
+      # Dead follower = a never-registered name: the cast vanishes, no ack ever arrives.
+      #
+      # Two primaries, because follow_timeout means two different things in the two halves. Where the
+      # batch must commit, it is how long the LIVE follower has to append, fsync and ack: about a
+      # millisecond when healthy, but a loaded runner running the whole suite can stall an fsync past
+      # a few hundred, and a short timeout there fails the commit this test asserts (the same race as
+      # issue #56, above). Where the batch must not commit, it is only how long the test waits for the
+      # no_quorum answer, so it stays short to keep the test fast.
+      committing = start_broker(follow_timeout: 5_000)
+      quorumless = start_broker(follow_timeout: 300)
       live = start_broker()
       dead1 = :"dead_#{System.unique_integer([:positive])}"
       dead2 = :"dead_#{System.unique_integer([:positive])}"
 
       # 2 of 3 durable (primary + live): committed.
-      assert {:ok, 0} = ReplicationServer.replicate(primary, @segment, [primary, live, dead1], 0, records(["a"]))
+      assert {:ok, 0} = ReplicationServer.replicate(committing, @segment, [committing, live, dead1], 0, records(["a"]))
 
       # 1 of 3 durable (primary only): the batch times out with no_quorum.
       seg2 = {{"quorumless", 0}, 0}
 
       assert {:error, :no_quorum} =
-               ReplicationServer.replicate(primary, seg2, [primary, dead1, dead2], 0, records(["b"]))
+               ReplicationServer.replicate(quorumless, seg2, [quorumless, dead1, dead2], 0, records(["b"]))
     end
 
     test "a behind follower nacks (does not fake quorum) and catches up in the background" do
