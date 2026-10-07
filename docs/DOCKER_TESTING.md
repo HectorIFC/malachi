@@ -60,6 +60,7 @@ make docker-regression-test
 | 9 | Memory stability under load | 5000 records, memory before/after |
 | 10 | Concurrent multi-topic | 10 topics, 100 records each, all drained back |
 | 11 | JIT compilation | `emu_flavor` is `jit` |
+| 12 | Image HEALTHCHECK turns healthy | `scripts/docker-image-health-check.sh` (see below) |
 
 **Expected output:**
 
@@ -70,7 +71,7 @@ Testing: Metrics endpoint returns JSON... PASS
 ===================================
 Regression Test Summary
 ===================================
-Passed: 12
+Passed: 13
 Failed: 0
 ===================================
 All regression tests passed!
@@ -108,6 +109,39 @@ otherwise pass against a copy of `priv` as a whole. `docker-regression-test.sh` 
 and prints its reason on a failure. `test/scripts/docker_static_assets_check_test.exs` covers each
 way it can fail without Docker; it needs coreutils `timeout`, so like the other `:linux` tests it runs
 on Linux (CI included) and is excluded elsewhere.
+
+## Image healthcheck check
+
+```bash
+scripts/docker-image-health-check.sh <container>
+```
+
+Run against a started container, it asserts that the image's own `HEALTHCHECK` turns the container
+healthy. The image probes `http://127.0.0.1:4041/health`; it used to probe `localhost`, which resolves
+to `::1` first inside the container while the dashboard listens on IPv4 only, so a node that served
+fine reported itself unhealthy (#282). Compose files that override the probe hid that, so the check
+first refuses a container whose probe is not the image's (an override, or `--no-healthcheck`), and an
+image with no `HEALTHCHECK` at all.
+
+It then waits for Docker to report the container healthy, within the image's start period plus one
+interval plus one probe timeout (70s for the release image), read from the image itself. It fails at
+once on `unhealthy` or a container that stops running. Those two failures, and a spent budget, also
+print the output of the last probe Docker recorded (or say that no probe has run yet), when the probe
+log can still be read; the other failures name only what went wrong.
+
+- `IMAGE_HEALTH_TIMEOUT` (seconds) replaces the budget read from the image.
+- `IMAGE_HEALTH_EXEC_TIMEOUT` (seconds, default 15) bounds each `docker inspect`.
+- `IMAGE_HEALTH_POLL` (seconds, default 1) is the pause between two reads of the health status.
+
+They follow the same rule as the static assets check: a whole number of seconds from 1 to 99999 without
+leading zeros, and set but empty is refused. It exits 0 once healthy, 1 naming the check that failed,
+and 2 on a usage error (a wrong number of arguments or an empty one, a limit outside that rule, or no
+coreutils `timeout` on `PATH`).
+
+The Docker smoke test in CI runs it last in the `docker` job of `ci.yml`, and
+`docker-regression-test.sh` runs it as its last test, so its wait overlaps the checks before it.
+`test/scripts/docker_image_health_check_test.exs` covers each outcome without Docker, on Linux only like
+the other `:linux` tests.
 
 ## Manual validation
 
@@ -216,6 +250,7 @@ jobs:
 
 - **Build validation:** `scripts/validate-docker-build.sh`
 - **Regression tests:** `scripts/docker-regression-test.sh`
+- **Image checks:** `scripts/docker-static-assets-check.sh`, `scripts/docker-image-health-check.sh` (shared helpers in `scripts/docker_check_lib.sh`)
 - **Make targets:** `Makefile` (`docker-validate`, `docker-regression-test`, `docker-test-all`)
 
 For multi-architecture builds, see [Multi-arch builds](MULTI_ARCH_BUILD.md).

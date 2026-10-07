@@ -67,6 +67,7 @@ docker run -d --name malachi \
 |------|------|
 | `4040` | Binary wire protocol: produce, consume, stream |
 | `4041` | Dashboard, `/health`, `/ready` and Prometheus `/metrics` |
+| `4042` | Operator console (`MALACHI_CONSOLE_PORT`; `MALACHI_CONSOLE_ENABLED=false` turns it off) |
 
 ## Tags
 
@@ -129,6 +130,7 @@ worth knowing before the first run:
 | `MALACHI_TRACING_ENABLED` | `false` | Turn OpenTelemetry sampling on |
 | `MALACHI_OTLP_ENDPOINT` | `http://localhost:4318` | Where to ship spans |
 | `MALACHI_LOCALE` | `en_US` | `en_US` or `pt_BR` |
+| `MALACHI_AUDIT_LOG_OUTPUT` | `stdout` | Audit events go to the container's logs. `both` or `file` also writes `MALACHI_AUDIT_LOG_FILE`, which must sit on a writable volume |
 
 ## Watching it work
 

@@ -360,7 +360,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
 | `MALACHI_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
-| `MALACHI_AUDIT_LOG_OUTPUT` | both | Audit log output (file/stdout/both/ets_only) |
+| `MALACHI_AUDIT_LOG_OUTPUT` | both (`stdout` in the Docker image) | Audit log output (file/stdout/both/ets_only) |
 | `MALACHI_AUDIT_LOG_FILE` | /var/log/malachi/audit.log | Audit log file path |
 | `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | 1 | Max audit log file size (MB) |
 
@@ -611,7 +611,7 @@ Malachi includes comprehensive audit logging for security-relevant events.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `MALACHI_AUDIT_LOG_OUTPUT` | `both` | Output mode: `file`, `stdout`, `both`, `ets_only` |
+| `MALACHI_AUDIT_LOG_OUTPUT` | `both` (`stdout` in the Docker image) | Output mode: `file`, `stdout`, `both`, `ets_only` |
 | `MALACHI_AUDIT_LOG_FILE` | `/var/log/malachi/audit.log` | Audit log file path |
 | `MALACHI_AUDIT_LOG_MAX_SIZE_MB` | `1` | Max file size in MB (auto-rotation) |
 
