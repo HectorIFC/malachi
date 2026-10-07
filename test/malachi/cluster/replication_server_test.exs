@@ -289,6 +289,11 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       GenServer.cast(primary, {:replica_ack, segment, stranger, {:ok, 1}})
       GenServer.cast(primary, {:replica_ack, segment, {dead2, node()}, {:error, :out_of_sync}})
 
+      # The system call queues behind the three acks, so this is the state once they were all handled: the
+      # batch must still be parked then. Should the 300 ms timer have won the race on a slow run, the
+      # batch would be gone and the test fails here, instead of passing on the timer alone.
+      assert [%{last: 1}] = :sys.get_state(Process.whereis(primary)).inflight[segment]
+
       assert_receive {:replicate_result, :partial, {:error, :no_quorum}}, 2_000
 
       # Not a vacuous pass: the partial ack was taken (the tracker recorded it), so the batch really was
