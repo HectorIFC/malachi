@@ -202,7 +202,7 @@ defmodule DockerImageHealthCheckTest do
       {"30000000000 30000000000 x", "30000000000 30000000000 x"},
       {"30000000000 <no value> 10000000000", "30000000000 <no value>"},
       # Past the int64 range in the start period, which has no zero test and used to wrap silently in the
-      # budget arithmetic (7766279632s for this value).
+      # budget arithmetic: this start period counts as 7766279632s, for a 7766279672s budget.
       {"99999999999999999999 30000000000 10000000000", "99999999999999999999 30000000000 10000000000"},
       # Past the int64 range in the interval and the timeout, by length and at the maximum's own length, which
       # used to fail the zero test over to Docker's 30s default, and a leading zero, which the budget
