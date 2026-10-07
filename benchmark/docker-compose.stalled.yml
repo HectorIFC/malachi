@@ -1,0 +1,29 @@
+# Override for benchmark/stalled_subscriber_ab.sh (issue #275): the bench server of
+# docker-compose.bench.yml with its data on a named volume instead of the tmpfs, so a streaming
+# subscriber reading old history pays a real disk read once the page cache is dropped on a Linux host, a
+# second load generator service for the consumers on cores of its own, and an Erlang node name.
+services:
+  malachi:
+    # A distributed node (malachi@malachi), so the harness can read each consumer group's committed position
+    # and the topic's end over Erlang distribution after a subscriber run.
+    hostname: malachi
+    entrypoint: ["elixir", "--sname", "malachi", "--cookie", "malachi_bench", "-S", "mix", "run", "--no-halt"]
+    environment:
+      MALACHI_LOG_DATA_DIR: "/data/malachi_log"
+      MALACHI_RA_DATA_DIR: "/data/malachi_ra"
+    volumes:
+      - malachi-stalled-data:/data
+
+  consumers:
+    build:
+      context: .
+      dockerfile: benchmark/Dockerfile.loadtest
+    cpuset: "${CONSUMER_CPUSET:-1}"
+    environment:
+      ERL_FLAGS: "${CONSUMER_ERL_FLAGS:-+S 1:1}"
+    depends_on:
+      malachi:
+        condition: service_healthy
+
+volumes:
+  malachi-stalled-data:

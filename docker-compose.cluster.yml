@@ -130,7 +130,7 @@ services:
       dockerfile: benchmark/Dockerfile.loadtest
     cpuset: "${LT_CPUSET:-0,1,2,3}"
     environment:
-      ERL_FLAGS: "+S 4:4"
+      ERL_FLAGS: "${LT_ERL_FLAGS:-+S 4:4}"
     mem_limit: 1g
     depends_on:
       malachi1:

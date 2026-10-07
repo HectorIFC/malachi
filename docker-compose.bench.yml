@@ -17,7 +17,7 @@ services:
     entrypoint: ["mix", "run", "--no-halt"]
     environment:
       # Match the scheduler count to the pinned cores: the BEAM can otherwise oversubscribe under a cpuset.
-      ERL_FLAGS: "+S 4:4"
+      ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
       MALACHI_TCP_PORT: "4040"
       MALACHI_DASHBOARD_PORT: "4041"
       MALACHI_GROUP_COMMIT: "true"
@@ -54,7 +54,7 @@ services:
       dockerfile: benchmark/Dockerfile.loadtest
     cpuset: "${LT_CPUSET:-0,1,2,3}"
     environment:
-      ERL_FLAGS: "+S 4:4"
+      ERL_FLAGS: "${LT_ERL_FLAGS:-+S 4:4}"
     depends_on:
       malachi:
         condition: service_healthy

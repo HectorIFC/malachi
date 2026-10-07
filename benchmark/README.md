@@ -32,6 +32,8 @@ what the broker runs, which is off above RF 1 whatever the setting says.
 | `docker-compare.sh`, `docker-pipeline.sh`, `docker-shards.sh` (`docker-compose.bench.yml`) | the node's 1g tmpfs | no | off | on |
 | `docker-ratelimit.sh` | each node's 1g tmpfs | no | off | on (RF 1 by default) |
 | `docker-scrub.sh` | each node's named volume | yes | off | on (RF 1 by default) |
+| `netem-hop.sh` (`docker-compose.cluster.yml`, `tc netem` between the nodes) | each node's 1g tmpfs | no | off | on at RF 1, off at RF 3 |
+| `stalled_subscriber_ab.sh` (`docker-compose.bench.yml` with `docker-compose.stalled.yml`) | the node's named volume | yes | off | on |
 | ceiling harness (`scripts/loadtest-ceiling.sh`) | host filesystem (ext4 on the CI runner) | yes | 64MB | off |
 | `storage_viability.exs` | host filesystem (ext4 on the CI runner) | yes | per arm | not involved (the store alone) |
 | `throughput_1m.exs`, `single_node_scale.exs` | `BENCH_DIR` on the host (the system temp dir by default; tmpfs and ramfs refused) | yes | off | off: one sync per produce |

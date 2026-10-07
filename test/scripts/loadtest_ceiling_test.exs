@@ -22,6 +22,7 @@ defmodule LoadtestCeilingTest do
   @script Path.expand("../../scripts/loadtest-ceiling.sh", __DIR__)
   @project Path.expand("../..", __DIR__)
   @scrape_lib Path.expand("../../scripts/metrics_scrape_lib.sh", __DIR__)
+  @bench_lib Path.expand("../../scripts/bench_lib.sh", __DIR__)
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
@@ -37,6 +38,7 @@ defmodule LoadtestCeilingTest do
     File.mkdir_p!(Path.join(root, "scripts"))
     File.cp!(@script, Path.join([root, "scripts", "loadtest-ceiling.sh"]))
     File.cp!(@scrape_lib, Path.join([root, "scripts", "metrics_scrape_lib.sh"]))
+    File.cp!(@bench_lib, Path.join([root, "scripts", "bench_lib.sh"]))
 
     stubs = Path.join(dir, "stubs")
     File.mkdir_p!(stubs)
