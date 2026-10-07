@@ -258,6 +258,47 @@ defmodule Malachi.Cluster.ReplicationServerTest do
                ReplicationServer.replicate(quorumless, seg2, [quorumless, dead1, dead2], 0, records(["b"]))
     end
 
+    test "an ack that leaves part of a batch below quorum does not answer it, and nothing outside the set counts" do
+      # The test above ends its no_quorum half on the timer alone: no ack arrives, so the batch is never
+      # re-evaluated. Here acks do arrive, each one making the primary re-evaluate the batch, and none of
+      # them completes a quorum over its LAST offset, which is what answering it requires.
+      primary = start_broker(follow_timeout: 300)
+      dead1 = :"dead_#{System.unique_integer([:positive])}"
+      dead2 = :"dead_#{System.unique_integer([:positive])}"
+      stranger = :"stranger_#{System.unique_integer([:positive])}"
+      segment = {{"partial", 0}, 0}
+
+      # Two records, offsets 0 and 1, durable on the primary only. A cast from this process reaches the
+      # primary after the batch it was sent behind, and the batch parks while that cast is handled, so
+      # every ack below finds it in flight. Acks name a follower the way followers do, by its canonical
+      # `{name, node}` ref: a bare name is not what the replica set holds and would count as a stranger.
+      :ok =
+        ReplicationServer.replicate_async(
+          primary,
+          segment,
+          [primary, dead1, dead2],
+          0,
+          records(["a", "b"]),
+          self(),
+          :partial
+        )
+
+      # A member that stored only the first record: offset 0 now has 2 of 3, offset 1 still has 1 of 3.
+      GenServer.cast(primary, {:replica_ack, segment, {dead1, node()}, {:ok, 0}})
+      # A process outside the replica set reporting the whole batch, and a member refusing it.
+      GenServer.cast(primary, {:replica_ack, segment, stranger, {:ok, 1}})
+      GenServer.cast(primary, {:replica_ack, segment, {dead2, node()}, {:error, :out_of_sync}})
+
+      assert_receive {:replicate_result, :partial, {:error, :no_quorum}}, 2_000
+
+      # Not a vacuous pass: the partial ack was taken (the tracker recorded it), so the batch really was
+      # re-evaluated with offset 0 at quorum and was still not answered.
+      tracker = :sys.get_state(Process.whereis(primary)).trackers[segment]
+      assert tracker.match[{dead1, node()}] == 0
+      refute Map.has_key?(tracker.match, stranger)
+      refute Map.has_key?(tracker.match, {stranger, node()})
+    end
+
     test "a behind follower nacks (does not fake quorum) and catches up in the background" do
       [primary, live] = [start_broker(), start_broker()]
       behind = start_broker()
