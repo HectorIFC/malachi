@@ -858,9 +858,9 @@ defmodule Malachi.Broker do
   kept until its fence answers (and the control plane says the segment is gone), a later head's sequence
   passes it, or the node restarts. Its fence may never be answered (a primary that died and was
   replaced), and since a range owes one roll at a time, a roll left behind would swallow every later roll
-  of the range on this node. A segment the refreshed view does not hold at all, with no later head beside it, keeps its roll:
-  that is a head this view has not caught up with (an older head still listed is just as behind), the
-  very case the age roll exists for.
+  of the range on this node. A segment the refreshed view does not hold at all, with no later head beside
+  it, keeps its roll: that is a head this view has not caught up with (an older head still listed is just
+  as behind), the very case the age roll exists for.
   """
   @spec drop_stale_active_segments(t()) :: t()
   def drop_stale_active_segments(%__MODULE__{} = broker) do
