@@ -102,13 +102,10 @@ case "${image_test:-}" in
 esac
 
 # Docker prints each timing as a whole number of nanoseconds that fits an int64. Anything else, from a CLI
-# that formats the template differently, would otherwise reach the arithmetic below and wait the wrong
-# budget or die on a raw bash error:
-#   - a word is read as an unset variable;
-#   - past the int64 range, the interval and the timeout fail their zero test over to Docker's default,
-#     and the start period, which has no zero test, wraps silently inside $((...));
-#   - a leading zero is octal inside $((...)): 020000000000 ns, meant as 20s, counts as 3s, and 08 or 09
-#     are an error.
+# that formats the template differently, would reach the zero tests and the arithmetic below, where bash
+# does not refuse it: depending on the field and the value it falls back to Docker's default, wraps, is
+# read as octal or dies on a raw error, so the check would wait the wrong budget or fail for the wrong
+# reason. test/scripts/docker_image_health_check_test.exs holds each case.
 for timing in "$start_period_ns" "$interval_ns" "$timeout_ns"; do
   case "$timing" in
     '' | *[!0-9]* | 0?* | ????????????????????*) timing_ok=false ;;
