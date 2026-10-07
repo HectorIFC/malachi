@@ -101,17 +101,30 @@ case "${image_test:-}" in
   '' | '["NONE"]') fail "image $image has no HEALTHCHECK" ;;
 esac
 
-# Docker prints each timing as a whole number of nanoseconds. Anything else, from a CLI that formats the
-# template differently, would otherwise reach the arithmetic below: a word there is read as an unset
-# variable, and in the zero test it fails over to Docker's default, so the check would wait the wrong
-# budget and pass.
+# Docker prints each timing as a whole number of nanoseconds that fits an int64. Anything else, from a CLI
+# that formats the template differently, would otherwise reach the arithmetic below: a word there is read
+# as an unset variable, a number past the int64 range or with a leading zero (which bash reads as octal)
+# fails the zero test over to Docker's default, and either way the check would wait the wrong budget.
 for timing in "$start_period_ns" "$interval_ns" "$timeout_ns"; do
   case "$timing" in
-    '' | *[!0-9]*)
-      fail "could not read the HEALTHCHECK timings of image $image, got '$start_period_ns $interval_ns $timeout_ns'"
+    '' | *[!0-9]* | 0?* | ????????????????????*) timing_ok=false ;;
+    ???????????????????)
+      # Nineteen digits fit only up to the int64 maximum. A string comparison on purpose: the value may not
+      # fit bash's integers, and at equal length string order is numeric order.
+      # shellcheck disable=SC2071
+      if [[ "$timing" > 9223372036854775807 ]]; then timing_ok=false; else timing_ok=true; fi
       ;;
+    *) timing_ok=true ;;
   esac
+  $timing_ok ||
+    fail "could not read the HEALTHCHECK timings of image $image, got '$start_period_ns $interval_ns $timeout_ns'"
 done
+
+# Whole seconds, rounded up so a fraction is still waited for. Per timing rather than on their sum, which
+# would overflow when one of them is near the int64 maximum (a start period Docker accepts).
+ns_to_seconds() {
+  echo $(($1 / 1000000000 + ($1 % 1000000000 > 0)))
+}
 
 [ "$container_test" = "$image_test" ] ||
   fail "container $container overrides the image HEALTHCHECK: it probes ${container_test:-nothing}, the image probes $image_test"
@@ -121,8 +134,7 @@ if [ -n "${IMAGE_HEALTH_TIMEOUT+set}" ]; then
 else
   [ "$interval_ns" -ne 0 ] || interval_ns=30000000000
   [ "$timeout_ns" -ne 0 ] || timeout_ns=30000000000
-  # Rounded up, so a timing below a whole second still waits for it.
-  budget=$(((start_period_ns + interval_ns + timeout_ns + 999999999) / 1000000000))
+  budget=$(($(ns_to_seconds "$start_period_ns") + $(ns_to_seconds "$interval_ns") + $(ns_to_seconds "$timeout_ns")))
 fi
 
 echo "waiting up to ${budget}s for container $container to report healthy under the image HEALTHCHECK"

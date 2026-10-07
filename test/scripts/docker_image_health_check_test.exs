@@ -200,7 +200,12 @@ defmodule DockerImageHealthCheckTest do
       {"abc 30000000000 10000000000", "abc 30000000000 10000000000"},
       {"30000000000 x 10000000000", "30000000000 x 10000000000"},
       {"30000000000 30000000000 x", "30000000000 30000000000 x"},
-      {"30000000000 <no value> 10000000000", "30000000000 <no value>"}
+      {"30000000000 <no value> 10000000000", "30000000000 <no value>"},
+      # Past the int64 range, by length and at the maximum's own length, and a leading zero bash reads as
+      # octal: each used to reach the zero test and fall over to Docker's 30s default.
+      {"30000000000 99999999999999999999 10000000000", "30000000000 99999999999999999999 10000000000"},
+      {"30000000000 30000000000 9223372036854775808", "30000000000 30000000000 9223372036854775808"},
+      {"30000000000 010 10000000000", "30000000000 010 10000000000"}
     ]
 
     for {timings, shown} <- cases do
@@ -214,6 +219,22 @@ defmodule DockerImageHealthCheckTest do
       refute out =~ "waiting up to"
       refute out =~ "overrides the image HEALTHCHECK"
     end
+  end
+
+  test "budgets a start period at the int64 maximum without overflowing", ctx do
+    # Docker accepts a start period this long. Summed in nanoseconds it wrapped to a negative budget and the
+    # check failed at once; per timing in seconds it is 9223372037 + 30 + 10.
+    env = [{"STUB_IMAGE_HEALTHCHECK", "9223372036854775807 30000000000 10000000000 #{@probe}"}]
+
+    assert {out, 0} = run_container(ctx, ["running healthy"], env)
+    assert out =~ "waiting up to 9223372077s"
+  end
+
+  test "accepts a zero timing, which is not a leading zero", ctx do
+    env = [{"STUB_IMAGE_HEALTHCHECK", "0 30000000000 10000000000 #{@probe}"}]
+
+    assert {out, 0} = run_container(ctx, ["running healthy"], env)
+    assert out =~ "waiting up to 40s"
   end
 
   test "IMAGE_HEALTH_TIMEOUT replaces the budget read from the image", ctx do
