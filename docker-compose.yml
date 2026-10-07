@@ -52,7 +52,6 @@ services:
       - MALACHI_REQUIRE_TLS=${MALACHI_REQUIRE_TLS:-false}
       - MALACHI_RATE_LIMIT_ENABLED=true
       - MALACHI_SESSION_IP_BINDING=true
-      - MALACHI_AUDIT_LOG_OUTPUT=stdout
       # Durable storage. Without these the defaults land under /tmp, which is a tmpfs (below), so every
       # segment and the ra log (user credentials, ACLs, lockouts) would live in RAM and vanish on restart.
       # Same paths as the Kubernetes manifest, both under the one persistent mount.
@@ -80,10 +79,10 @@ services:
     # The third thing that stopped this file from working, and the quietest. It used to probe with
     # `nc -z`, and the BusyBox nc in this image has no -z flag, so the check exited 1 forever: the
     # container ran fine and was reported unhealthy for its whole life, which also meant every
-    # `depends_on: service_healthy` below it never fired. This is the probe the image's own HEALTHCHECK
-    # and the cluster compose already use, against the endpoint built for it.
+    # `depends_on: service_healthy` below it never fired. No probe is set here any more: Docker fills
+    # the missing test from the image's own HEALTHCHECK, so this block only tunes its timings and the
+    # probe is written once, in the Dockerfile.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
       interval: 10s
       timeout: 5s
       retries: 5

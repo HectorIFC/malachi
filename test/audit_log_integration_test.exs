@@ -1,6 +1,7 @@
 defmodule Malachi.AuditLogIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.StorageFaults
   alias Malachi.Test.TmpDir
 
   @moduletag :isolated_audit_log
@@ -279,6 +280,28 @@ defmodule Malachi.AuditLogIntegrationTest do
       assert event["metadata"]["path"] == "/"
 
       Supervisor.terminate_child(Malachi.Supervisor, Malachi.AuditLog)
+    end
+  end
+
+  describe "a file that cannot be opened" do
+    test "names the directory that cannot be created rather than a missing file" do
+      # A parent the suite cannot write into, as /var/log is for the non-root user of the release image:
+      # creating the audit directory inside it fails with :eacces, and the open after it with :enoent.
+      parent = TmpDir.path("audit_log_unwritable")
+      File.mkdir_p!(parent)
+      on_exit(fn -> File.rm_rf(parent) end)
+      StorageFaults.make_unremovable!(parent)
+
+      file = Path.join([parent, "malachi", "audit.log"])
+      Application.put_env(:malachi, :audit_log_output, :file)
+      Application.put_env(:malachi, :audit_log_file, file)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> restart_audit_log() end)
+
+      assert log =~ Malachi.I18n.t(:audit_log_file_failed, path: file, reason: inspect(:eacces))
+      refute log =~ inspect(:enoent)
+      # It still starts: the audit log keeps its ETS copy when the file cannot be written.
+      assert Process.whereis(Malachi.AuditLog)
     end
   end
 

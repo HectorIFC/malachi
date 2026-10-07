@@ -269,6 +269,32 @@ jobs:
 
           echo "✅ Dashboard is responding correctly"
 
+          # The image's own HEALTHCHECK must turn the container healthy (#282): every compose file used to
+          # override the probe, so a broken one in the image went unseen. The container above runs with no
+          # health flags, and the check refuses one that overrides the probe. Last, so its wait for the first
+          # probe overlaps the checks above instead of adding to them.
+          echo "🩺 Checking the image HEALTHCHECK..."
+          if ! scripts/docker-image-health-check.sh malachi-test; then
+            echo "📋 Container logs:"
+            docker logs malachi-test
+            exit 1
+          fi
+
+          # The image's own defaults, which the compose files and the Kubernetes manifest rely on rather
+          # than repeat: the console port is exposed, and a node that booted healthy logged no error.
+          # Without MALACHI_AUDIT_LOG_OUTPUT=stdout in the image the release falls back to a file under
+          # /var/log/malachi, which its non-root user cannot create, and that boot logs an [error].
+          echo "🔎 Checking the image defaults..."
+          if ! docker image inspect malachi:test -f '{{json .Config.ExposedPorts}}' | grep -qF '"4042/tcp"'; then
+            echo "❌ The image does not expose the console port 4042:"
+            docker image inspect malachi:test -f '{{json .Config.ExposedPorts}}'
+            exit 1
+          fi
+          if docker logs malachi-test 2>&1 | grep -F '[error]'; then
+            echo "❌ The container logged the errors above while booting healthy"
+            exit 1
+          fi
+
           # Stop container
           echo "🛑 Stopping container..."
           docker stop malachi-test

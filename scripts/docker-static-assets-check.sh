@@ -24,34 +24,25 @@ if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
   exit 2
 fi
 
+# Parameter expansion rather than dirname, which lives on the PATH this check may be run without.
+case "$0" in
+  */*) script_dir="${0%/*}" ;;
+  *) script_dir=. ;;
+esac
+# shellcheck source=scripts/docker_check_lib.sh
+source "$script_dir/docker_check_lib.sh"
+
 container="$1"
 dashboard_url="${2%/}"
 # The default applies only when a variable is unset: set but empty is a mistake, refused below.
 http_timeout="${STATIC_ASSETS_HTTP_TIMEOUT-10}"
 exec_timeout="${STATIC_ASSETS_EXEC_TIMEOUT-15}"
 
-# Both curl and timeout read 0 as no limit at all, so 0 is refused along with anything not a number.
-# Leading zeros are refused rather than normalized, which would bring in bash's octal reading, and the
-# five digit cap keeps the value inside what curl accepts: a longer one it rejects outright, which
-# would surface as an unreachable dashboard.
-require_positive_seconds() {
-  case "$2" in
-    '' | *[!0-9]* | 0* | ??????*)
-      echo "$1 must be a whole number of seconds from 1 to 99999 without leading zeros, got '$2'" >&2
-      exit 2
-      ;;
-  esac
-}
 require_positive_seconds STATIC_ASSETS_HTTP_TIMEOUT "$http_timeout"
 require_positive_seconds STATIC_ASSETS_EXEC_TIMEOUT "$exec_timeout"
+require_coreutils_timeout
 
-# Checked up front: missing, the exec below would fail as if the container were at fault.
-if ! command -v timeout > /dev/null 2>&1; then
-  echo "this check requires coreutils timeout, which is not on PATH" >&2
-  exit 2
-fi
-
-expected_logo="$(cd "$(dirname "$0")/.." && pwd)/priv/static/logo.svg"
+expected_logo="$(cd "$script_dir/.." && pwd)/priv/static/logo.svg"
 
 fail() {
   echo "static assets check failed: $*" >&2

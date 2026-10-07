@@ -66,14 +66,23 @@ USER malachi
 ENV MALACHI_TCP_PORT=4040
 ENV MALACHI_DASHBOARD_PORT=4041
 ENV MALACHI_LOCALE=en_US
+# Audit events go to stdout, where a container's logs are collected, instead of the release default of
+# stdout plus /var/log/malachi/audit.log: that directory is not writable by the non-root user, and a file
+# inside the container would be lost on every recreate. Mount a writable volume and set
+# MALACHI_AUDIT_LOG_OUTPUT=both (or file) with MALACHI_AUDIT_LOG_FILE under it to keep a file as well.
+ENV MALACHI_AUDIT_LOG_OUTPUT=stdout
 
-EXPOSE 4040 4041
+# 4040 is the wire protocol, 4041 the dashboard (health, metrics) and 4042 the operator console.
+EXPOSE 4040 4041 4042
 
 # Uses busybox wget (bundled in the Alpine base) instead of curl, so the image does not ship the curl
 # package and its CVEs just for a liveness probe. -q silences output, -O /dev/null discards the body, and a
 # non-2xx response or a refused connection makes wget exit non-zero, which marks the container unhealthy.
+# 127.0.0.1 rather than localhost: inside the container localhost resolves to ::1 first, and the dashboard
+# listens on IPv4 only, so probing localhost is refused while the node serves fine (#282).
+# scripts/docker-image-health-check.sh holds CI to this probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD wget -q -O /dev/null http://localhost:4041/health || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:4041/health || exit 1
 
 # Security hardening recommendations:
 #   docker run --security-opt=no-new-privileges:true \
