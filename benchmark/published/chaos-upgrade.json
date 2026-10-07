@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-10-06T11:17:06Z",
+    "timestamp": "2026-10-07T11:06:02Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "651a0fc",
-    "git_ref_date": "2026-10-05T18:28:30Z",
-    "malachi_version": "0.19.4",
+    "git_ref": "f89c494",
+    "git_ref_date": "2026-10-07T04:42:37Z",
+    "malachi_version": "0.21.1",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -15,42 +15,42 @@
   "verdict": "failed",
   "replication_factor": 3,
   "events": [
-    "p1: rolling every node from OLD to NEW (pin 4)",
+    "p1: rolling every node from OLD to NEW (pin 5)",
     "p1: mixed cluster (node 3 on NEW, nodes 1 and 2 on OLD)",
     "p1: splitting the metadata ring from 4 to 5 vnodes on NEW",
-    "p2: rolling every node from NEW back to OLD (pin 4)",
-    "p3: rolling every node from OLD to NEW (pin 4)",
+    "p2: rolling every node from NEW back to OLD (pin 5)",
+    "p3: rolling every node from OLD to NEW (pin 5)",
     "p3: finalizing: the pin removed node by node",
     "p3: switching the canary flag on",
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 38187,
-    "post_chaos_records_per_s": 2787
+    "acked_writes": 50847,
+    "post_chaos_records_per_s": 19320
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1373)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 3490)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1763)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4961)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 3490)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4961)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261006T104405Z-651a0fc",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261007T103219Z-f89c494",
   "details": {
-    "old_ref": "v0.19.2",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.19.4's",
-    "old_sha": "658df42663d26e29fe569acb317e70d6931db8ec",
-    "old_version": "0.19.2",
-    "old_machine_version": 4,
+    "old_ref": "v0.21.0",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.21.1's",
+    "old_sha": "d977f55405d76b4d2aeee387b4521759b92de519",
+    "old_version": "0.21.0",
+    "old_machine_version": 5,
     "old_patch": null,
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 14898,
-      "phase2": 8847,
-      "phase3": 14442
+      "phase1": 18753,
+      "phase2": 12394,
+      "phase3": 19700
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.19.2 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.21.0 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   }
 }
