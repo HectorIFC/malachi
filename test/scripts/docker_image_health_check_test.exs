@@ -193,6 +193,29 @@ defmodule DockerImageHealthCheckTest do
     assert out =~ "waiting up to 60s"
   end
 
+  test "fails naming the timings when the image's are not whole nanoseconds", ctx do
+    # One case per field, plus a template value that `read` splits into two words. Before the check, a word
+    # in the interval or the timeout fell back to Docker's default and the run passed on the wrong budget.
+    cases = [
+      {"abc 30000000000 10000000000", "abc 30000000000 10000000000"},
+      {"30000000000 x 10000000000", "30000000000 x 10000000000"},
+      {"30000000000 30000000000 x", "30000000000 30000000000 x"},
+      {"30000000000 <no value> 10000000000", "30000000000 <no value>"}
+    ]
+
+    for {timings, shown} <- cases do
+      env = [{"STUB_IMAGE_HEALTHCHECK", "#{timings} #{@probe}"}]
+
+      assert {out, 1} = run_container(ctx, ["running healthy"], env)
+
+      assert out =~
+               "image health check failed: could not read the HEALTHCHECK timings of image sha256:abc, got '#{shown}'"
+
+      refute out =~ "waiting up to"
+      refute out =~ "overrides the image HEALTHCHECK"
+    end
+  end
+
   test "IMAGE_HEALTH_TIMEOUT replaces the budget read from the image", ctx do
     assert {out, 0} = run_container(ctx, ["running healthy"], [{"IMAGE_HEALTH_TIMEOUT", "99999"}])
     assert out =~ "waiting up to 99999s"

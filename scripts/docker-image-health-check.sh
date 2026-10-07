@@ -101,6 +101,18 @@ case "${image_test:-}" in
   '' | '["NONE"]') fail "image $image has no HEALTHCHECK" ;;
 esac
 
+# Docker prints each timing as a whole number of nanoseconds. Anything else, from a CLI that formats the
+# template differently, would otherwise reach the arithmetic below: a word there is read as an unset
+# variable, and in the zero test it fails over to Docker's default, so the check would wait the wrong
+# budget and pass.
+for timing in "$start_period_ns" "$interval_ns" "$timeout_ns"; do
+  case "$timing" in
+    '' | *[!0-9]*)
+      fail "could not read the HEALTHCHECK timings of image $image, got '$start_period_ns $interval_ns $timeout_ns'"
+      ;;
+  esac
+done
+
 [ "$container_test" = "$image_test" ] ||
   fail "container $container overrides the image HEALTHCHECK: it probes ${container_test:-nothing}, the image probes $image_test"
 
