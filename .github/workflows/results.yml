@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # This job runs repository code (deps and the generators). Nothing here does authenticated
         # git, so the token has no business staying in the local git config.
         with:
@@ -71,7 +71,7 @@ jobs:
       # bytes at batch 10 and 100, A-A control) found no difference between 20 and 22 above the noise.
       - name: 🟢 Set up Node
         if: matrix.generator == 'node'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -133,7 +133,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -188,12 +188,12 @@ jobs:
       # The full history, because publishing decides between two results by which commit is newer
       # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: 📥 Download results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/artifacts
           merge-multiple: true
@@ -233,7 +233,7 @@ jobs:
         if: >-
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');

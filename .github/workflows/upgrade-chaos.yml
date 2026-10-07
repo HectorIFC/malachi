@@ -39,7 +39,7 @@ jobs:
     steps:
       # The full history and its tags: OLD is a release tag, resolved and exported by git.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -88,7 +88,7 @@ jobs:
     steps:
       # The full history, because publishing decides between two results by which commit is newer.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -96,7 +96,7 @@ jobs:
       # a named one that does not exist would fail this job as well, a second red job saying nothing new.
       # Every other early end of the drill writes its result, as failed, and is published like any other.
       - name: 📥 Download result
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: chaos-upgrade
           path: ${{ runner.temp }}/artifacts
