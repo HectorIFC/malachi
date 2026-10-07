@@ -25,6 +25,9 @@ defmodule Malachi.Cluster.Policy do
       a binary, so the rule would simply never fire.
     * **A negative bound.** An age or a byte budget below zero expires everything the rule can see,
       which is the opposite of what anyone typing a negative number wants.
+    * **A bound below its field's floor.** `retention.segment_max_age_ms` rolls a topic's active
+      segment, and a roll every few seconds would multiply the topic's segments for no retention a
+      sweep running once a minute could deliver.
 
   `nil` is allowed for a bound and means that rule is off, which is how a policy overrides one of the
   two limits without inheriting the other.
@@ -48,7 +51,8 @@ defmodule Malachi.Cluster.Policy do
   @type t :: %{
           optional(:retention) => %{
             optional(:max_age_ms) => non_neg_integer() | nil,
-            optional(:max_bytes) => non_neg_integer() | nil
+            optional(:max_bytes) => non_neg_integer() | nil,
+            optional(:segment_max_age_ms) => pos_integer() | nil
           },
           optional(:spread_by) => String.t() | nil
         }
@@ -61,9 +65,16 @@ defmodule Malachi.Cluster.Policy do
 
   @typedoc """
   One settable field: its flat `name` (what the wire, the CLI and the dashboard say), its `path` in the
-  policy map, its `type`, and the machine version that introduced it (`since`).
+  policy map, its `type`, the machine version that introduced it (`since`), and, for a bound, the
+  smallest value it accepts other than `nil` (`min`, default 0).
   """
-  @type field :: %{name: String.t(), path: [atom(), ...], type: field_type(), since: non_neg_integer()}
+  @type field :: %{
+          required(:name) => String.t(),
+          required(:path) => [atom(), ...],
+          required(:type) => field_type(),
+          required(:since) => non_neg_integer(),
+          optional(:min) => non_neg_integer()
+        }
 
   # Every field a policy can set, and the machine version that introduced each one.
   #
@@ -78,6 +89,17 @@ defmodule Malachi.Cluster.Policy do
   @fields [
     %{name: "retention.max_age_ms", path: [:retention, :max_age_ms], type: :bound, since: 3},
     %{name: "retention.max_bytes", path: [:retention, :max_bytes], type: :bound, since: 3},
+    # How old a topic's ACTIVE segment may get before it is rolled, so that a topic too quiet to fill a
+    # segment still seals one and becomes visible to age retention (#197). Its floor is the retention
+    # sweep's default cadence: the sweep is what asks for the roll, so a shorter interval would only be
+    # rounded up to the next sweep, and every roll is one more segment in the metadata.
+    %{
+      name: "retention.segment_max_age_ms",
+      path: [:retention, :segment_max_age_ms],
+      type: :bound,
+      since: 6,
+      min: 60_000
+    },
     %{name: "spread_by", path: [:spread_by], type: :attribute, since: 3}
   ]
 
@@ -138,8 +160,8 @@ defmodule Malachi.Cluster.Policy do
   Answers `{:error, {:unsupported_policy_field, name, since}}` when the policy sets a field this build
   knows but `version` does not yet admit, so a caller can say "finish the rolling upgrade" rather than
   "invalid", and `{:error, :invalid_policy}` for anything else that is not a policy: an unknown key, a
-  bound that is not a non-negative integer or `nil`, an attribute that is not a non-empty string or
-  `nil`, or a value that is not a map where the table has a nested map.
+  bound that is neither `nil` nor a non-negative integer at or above its field's `min`, an attribute
+  that is not a non-empty string or `nil`, or a value that is not a map where the table has a nested map.
   """
   @spec validate(term(), non_neg_integer(), [field()]) ::
           :ok | {:error, :invalid_policy | {:unsupported_policy_field, String.t(), non_neg_integer()}}
@@ -150,7 +172,7 @@ defmodule Malachi.Cluster.Policy do
 
     case Enum.find(later, &set?(policy, &1.path)) do
       %{name: name, since: since} -> {:error, {:unsupported_policy_field, name, since}}
-      nil -> if valid_level?(policy, Enum.map(admitted, &{&1.path, &1.type})), do: :ok, else: {:error, :invalid_policy}
+      nil -> if valid_level?(policy, Enum.map(admitted, &{&1.path, &1})), do: :ok, else: {:error, :invalid_policy}
     end
   end
 
@@ -161,16 +183,16 @@ defmodule Malachi.Cluster.Policy do
   defp set?(map, [key | rest]) when is_map(map), do: set?(Map.get(map, key), rest)
   defp set?(_not_a_map, _path), do: false
 
-  # One level of the policy map against the admitted `{path, type}` entries: every key must head some
-  # entry, a leaf must hold a valid value of its type, and a nested key must hold a map valid one level
+  # One level of the policy map against the admitted `{path, field}` entries: every key must head some
+  # entry, a leaf must hold a valid value for its field, and a nested key must hold a map valid one level
   # down.
   defp valid_level?(map, entries) when is_map(map) do
     by_head =
-      Enum.group_by(entries, fn {[head | _rest], _type} -> head end, fn {[_head | rest], type} -> {rest, type} end)
+      Enum.group_by(entries, fn {[head | _rest], _field} -> head end, fn {[_head | rest], field} -> {rest, field} end)
 
     Enum.all?(map, fn {key, value} ->
       case Map.fetch(by_head, key) do
-        {:ok, [{[], type}]} -> valid_value?(type, value)
+        {:ok, [{[], field}]} -> valid_value?(field, value)
         {:ok, nested} -> valid_level?(value, nested)
         :error -> false
       end
@@ -187,8 +209,10 @@ defmodule Malachi.Cluster.Policy do
   @max_bound 0xFFFF_FFFF_FFFF_FFFF
 
   # `nil` turns a rule off, whatever the field's type.
-  defp valid_value?(_type, nil), do: true
-  defp valid_value?(:bound, value), do: is_integer(value) and value >= 0 and value <= @max_bound
+  defp valid_value?(_field, nil), do: true
+
+  defp valid_value?(%{type: :bound} = field, value),
+    do: is_integer(value) and value >= Map.get(field, :min, 0) and value <= @max_bound
 
   # The spread attribute is a KEY into the broker attributes, which arrive from the environment through
   # `Malachi.Application.parse_attributes/1` and are therefore keyed by string. An atom or a number
@@ -196,7 +220,7 @@ defmodule Malachi.Cluster.Policy do
   # result is a hard placement that answers `:insufficient_domains` or a soft one that quietly stops
   # spreading. Checked here rather than at the placement boundary so the store never holds a definition
   # that cannot do what it says.
-  defp valid_value?(:attribute, value), do: valid_name?(value)
+  defp valid_value?(%{type: :attribute}, value), do: valid_name?(value)
 
   @doc """
   A topic's effective placement spread attribute and where it comes from: the policy's `:spread_by`
@@ -235,10 +259,10 @@ defmodule Malachi.Cluster.Policy do
         nil ->
           {:halt, {:error, {:unknown_policy_field, name}}}
 
-        %{path: path, type: type} ->
+        %{path: path} = field ->
           cond do
             set?(policy, path) -> {:halt, {:error, {:duplicate_policy_field, name}}}
-            not valid_value?(type, value) -> {:halt, {:error, {:invalid_policy_field, name}}}
+            not valid_value?(field, value) -> {:halt, {:error, {:invalid_policy_field, name}}}
             true -> {:cont, {:ok, put_path(policy, path, value)}}
           end
       end

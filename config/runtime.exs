@@ -268,6 +268,11 @@ config :malachi,
   retention_max_bytes:
     Malachi.Config.retention_bound("MALACHI_RETENTION_MAX_BYTES", System.get_env("MALACHI_RETENTION_MAX_BYTES")),
   retention_interval_ms: parse_int.("MALACHI_RETENTION_INTERVAL_MS", 60_000),
+  # How old a topic's active segment may get before the retention sweep rolls it, so a topic too quiet to
+  # fill MALACHI_SEGMENT_MAX_BYTES still seals segments that age retention can expire. A record then lives
+  # at most this plus the age bound, plus up to two sweep intervals and the fence's answer. Not MALACHI_LOG_ROLL_MAX_AGE_MS, which only rolls files inside one
+  # segment. 7 days by default, at least 60000; a topic's policy can override it or turn it off.
+  segment_max_age_ms: Malachi.Config.segment_max_age_ms(System.get_env("MALACHI_SEGMENT_MAX_AGE_MS")),
   # Retention metrics. A consumer moved past data no longer stored is counted once per distinct skip: the
   # skip reporter beside each broker remembers up to MALACHI_RETENTION_SKIP_LEDGER_MAX skips (and as many
   # readers) and logs one reader at most once per MALACHI_RETENTION_SKIP_LOG_WINDOW_MS. The exported

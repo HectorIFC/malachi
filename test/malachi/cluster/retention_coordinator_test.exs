@@ -80,6 +80,79 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     assert RetentionCoordinator.run_now(server) == ["old"]
   end
 
+  describe "age rolls" do
+    # Topic "t" with an active segment opened at `opened_at`, beside the sealed "old" segment.
+    defp with_active(opened_at) do
+      metadata = with_sealed([{"old", 0, 100, 1_000}])
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, {"t", 0}, "head", [:b1], 1}, opened_at)
+      metadata
+    end
+
+    defp roller(opts) do
+      test_pid = self()
+
+      start(
+        Keyword.merge(
+          [
+            metadata_source: fn -> with_active(1_000) end,
+            roll_segments: fn segments -> send(test_pid, {:roll, Enum.map(segments, & &1.id)}) end,
+            policy: %{max_age_ms: 5_000, segment_max_age_ms: 60_000},
+            clock: fn -> 61_000 end
+          ],
+          opts
+        )
+      )
+    end
+
+    test "a sweep asks to roll the active segments older than the limit, after expiring" do
+      server = roller([])
+
+      assert RetentionCoordinator.run_now(server) == ["old"]
+      assert_receive {:expired, "old"}
+      assert_receive {:roll, ["head"]}
+    end
+
+    test "a sweep with nothing due still asks, with nothing" do
+      server = roller(clock: fn -> 60_999 end)
+
+      RetentionCoordinator.run_now(server)
+      assert_receive {:roll, []}
+    end
+
+    test "the segments handed over are the control plane's metadata, for the broker to fence" do
+      test_pid = self()
+      server = roller(roll_segments: fn segments -> send(test_pid, {:roll, segments}) end)
+
+      RetentionCoordinator.run_now(server)
+      assert_receive {:roll, [%{id: "head", state: :active, replica_set: [:b1], start_offset: 1, opened_at: 1_000}]}
+    end
+
+    test "a non-leader's tick rolls nothing, and run_now rolls regardless of the gate" do
+      server = roller(interval: 20, leader?: fn -> false end)
+      refute_receive {:roll, _segments}, 200
+
+      RetentionCoordinator.run_now(server)
+      assert_receive {:roll, ["head"]}
+    end
+
+    test "the leader's tick rolls" do
+      _server = roller(interval: 20)
+      assert_receive {:roll, ["head"]}, 1_000
+    end
+
+    test "a sweep that could not read the policies rolls nothing either" do
+      server = roller(policies: fn -> {:error, :unreachable} end)
+
+      capture_log(fn -> RetentionCoordinator.run_now(server) end)
+      refute_receive {:roll, _segments}, 100
+    end
+
+    test "with no roll seam the sweep still runs" do
+      server = start(metadata_source: fn -> with_active(1_000) end, policy: %{segment_max_age_ms: 60_000})
+      assert RetentionCoordinator.run_now(server) == []
+    end
+  end
+
   @tag :tmp_dir
   test "end to end: a sweep expires a real sealed segment from the control plane and storage", %{tmp_dir: directory} do
     # a real broker over a named ReplicationServer we can inspect (the same shape the app wires up)

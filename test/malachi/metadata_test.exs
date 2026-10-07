@@ -190,6 +190,44 @@ defmodule Malachi.MetadataTest do
       assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b4]
     end
 
+    test "a registered segment opens at the clock the apply was given" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_700_000_000_000)
+
+      assert %{state: :active, opened_at: 1_700_000_000_000, sealed_at: nil} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "an apply with no clock leaves opened_at unset, which the age roll reads as due" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+
+      assert %{opened_at: nil} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "only a registration reads the clock: a seal keeps the segment's opening time" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+      {state, :ok} = Metadata.apply(state, {:seal_segment, "seg1", 10, 100, 5_000}, 9_999)
+
+      assert %{opened_at: 1_000, sealed_at: 5_000} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "a refused registration stamps nothing" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      assert {^state, {:error, :active_segment_exists}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 0}, 2_000)
+    end
+
+    test "a registration on a topic being migrated is fenced before the clock is read" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+
+      assert {^state, {:error, :migrating}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+    end
+
     test "a segment cannot start below where the range already ends" do
       # Two segments handing out the same offsets is how one acknowledged record quietly replaces
       # another. The start offset comes from the caller's own view, which can lag behind a seal applied
@@ -639,7 +677,7 @@ defmodule Malachi.MetadataTest do
 
       assert [
                %{start_offset: 0, state: :sealed, byte_size: 4096, sealed_at: 1_700_000_000_000},
-               %{start_offset: 100, state: :active, byte_size: nil}
+               %{start_offset: 100, state: :active, byte_size: nil, opened_at: nil}
              ] = range_with_segs.segments
     end
 
@@ -681,6 +719,25 @@ defmodule Malachi.MetadataTest do
       reinserted = Metadata.insert_topic(without, export)
       assert index_matches_scan?(reinserted)
       assert reinserted.range_segments[left] == MapSet.new(["s1"])
+    end
+
+    test "a segment keeps its opening time across a vnode split" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+
+      assert %{opened_at: 1_000} = Metadata.get_segment(Metadata.insert_topic(Metadata.new(), export), "seg1")
+    end
+
+    test "an export from before segments carried opened_at is completed with nil" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+      legacy = %{export | segments: Map.new(export.segments, fn {id, seg} -> {id, Map.delete(seg, :opened_at)} end)}
+
+      assert %{opened_at: nil} = Metadata.get_segment(Metadata.insert_topic(Metadata.new(), legacy), "seg1")
     end
 
     test "insert_topic is idempotent: re-inserting the same export (a resumed migration) changes nothing" do

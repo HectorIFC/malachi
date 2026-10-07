@@ -56,8 +56,16 @@ defmodule Malachi.BrokerServerRaTest do
     assert Metadata.get_topic(replicated, "events").name == "events"
     assert Metadata.segments_of_range(replicated, root) != []
 
-    # and the broker's local cache is exactly the replicated state (read-your-writes)
-    assert BrokerServer.metadata(control) == replicated
+    # and the broker's local cache is the replicated state (read-your-writes), but for one field: a
+    # segment's `opened_at` is the timestamp the leader wrote into the log entry, which the reply does not
+    # carry, so the cache stamps its own clock until a re-seed installs the replicated value
+    cached = BrokerServer.metadata(control)
+    assert without_opened_at(cached) == without_opened_at(replicated)
+
+    for {id, segment} <- replicated.segments do
+      assert is_integer(segment.opened_at)
+      assert abs(cached.segments[id].opened_at - segment.opened_at) < 5_000
+    end
 
     :ok = BrokerServer.stop(control)
   end
@@ -1228,4 +1236,10 @@ defmodule Malachi.BrokerServerRaTest do
       {:ok, records, next} -> drain_history(server, range_id, next, [records | accumulated])
     end
   end
+
+  defp without_opened_at(metadata),
+    do: %{
+      metadata
+      | segments: Map.new(metadata.segments, fn {id, segment} -> {id, Map.delete(segment, :opened_at)} end)
+    }
 end

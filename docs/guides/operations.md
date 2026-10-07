@@ -304,13 +304,21 @@ MALACHI_RETENTION_INTERVAL_MS=60000
 ```
 
 **Leave a limit unset to disable it.** With both unset, segments are kept forever unless a topic's own
-storage policy says otherwise: the sweep runs either way, and with no bound anywhere it does nothing. Do
+storage policy says otherwise: the sweep runs either way, and with no bound anywhere it expires nothing,
+though it still rolls active segments older than `MALACHI_SEGMENT_MAX_AGE_MS` (below). Do
 not write `0` meaning "unlimited": `0` is a valid budget of zero bytes, and it expires every sealed
 segment it can. A bound must be a whole number from 0 through 2^64 - 1: a negative one, or one past
 that, stops the node at boot.
 
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
+
+A segment seals by size (`MALACHI_SEGMENT_MAX_BYTES`) or by age: the sweep also asks for every active
+segment older than `MALACHI_SEGMENT_MAX_AGE_MS` (7 days unless set, at least 60000) to be sealed, so a
+topic too quiet to fill a segment still expires on time. A record lives at most that plus
+`MALACHI_RETENTION_MAX_AGE_MS`, plus up to two `MALACHI_RETENTION_INTERVAL_MS` (the sweep that asks for
+the roll and the one that expires it) and the time the fence takes to answer. See [Per-topic retention](per-topic-retention.md#rolling-quiet-topics-by-age)
+for the per-topic override and what each roll costs.
 
 These are the cluster's defaults. A topic bound to a storage policy takes the bounds the policy sets and
 inherits the rest; see [Per-topic retention](per-topic-retention.md) for `mix malachi.policy`, the wire
