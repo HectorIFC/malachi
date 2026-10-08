@@ -334,6 +334,21 @@ defmodule Malachi.BrokerTest do
       assert Broker.read_history(broker, root_id, empty) == {:ok, []}
     end
 
+    test "with a store that assigns no offsets, a history page past a hole moves on from where it began",
+         %{store: store} do
+      # The read asked for offset 1, inside the hole, and began at 2; counting the cursor from the request
+      # put it back at 2, and the next history page returned v2 a second time.
+      {broker, root_id} = range_with_hole(store)
+
+      unassigned = fn ref, segment, offset, max ->
+        with {:ok, records} <- FakeSegmentStore.read(store, ref, segment, offset, max),
+             do: {:ok, Enum.map(records, &%{&1 | offset: nil})}
+      end
+
+      assert {:ok, [%{value: "v2"}], cursor} = Broker.stream_history(broker, root_id, {0, 1}, 1, unassigned)
+      assert {:ok, [%{value: "v3"}], _cursor} = Broker.stream_history(broker, root_id, cursor, 1, unassigned)
+    end
+
     test "a read error is surfaced, never taken for the end of a source", %{store: store} do
       # The clause order this depends on: the error tuple must be matched before the catch-all that
       # treats anything else as a drained source, or a failing replica reads as an empty history.

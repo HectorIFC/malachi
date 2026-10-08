@@ -1694,12 +1694,13 @@ defmodule Malachi.Broker do
         # The history read keeps its shape: it has no production caller that could act on a skip, so
         # it steps over missing data exactly as the consume path does and says nothing about it.
         case read_located(view, source_range_id, source_offset, max_records, read_fun) do
-          {:ok, [_ | _] = records, _start} ->
+          {:ok, [_ | _] = records, start} ->
             # From the records' own offsets, not from the offset asked for, mirroring `consume_page/6`.
             # The read can start ABOVE the request when `locate_segment/3` steps over a hole (a segment
             # dropped by retention or by an operator), and counting from the request puts the cursor
-            # back inside that hole, so the same page is delivered again on every call.
-            {:ok, filter_records(records, filter_range), {source_index, last_offset(records, source_offset) + 1}}
+            # behind where the read ended, so records already returned are delivered again. A store that
+            # assigns no offsets is counted from `start`, where the read began, for the same reason.
+            {:ok, filter_records(records, filter_range), {source_index, last_offset(records, start) + 1}}
 
           # Before the catch-all, or a read error is silently taken for the end of a source: a failed
           # read is not an empty log, which is the mistake this whole area has already made once.
