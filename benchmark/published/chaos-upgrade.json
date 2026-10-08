@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-10-07T11:06:02Z",
+    "timestamp": "2026-10-08T11:26:57Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "f89c494",
-    "git_ref_date": "2026-10-07T04:42:37Z",
-    "malachi_version": "0.21.1",
+    "git_ref": "c6a4350",
+    "git_ref_date": "2026-10-07T13:49:40Z",
+    "malachi_version": "0.22.0",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -25,32 +25,33 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 50847,
-    "post_chaos_records_per_s": 19320
+    "acked_writes": 38711,
+    "post_chaos_records_per_s": 1000
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1763)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4961)",
+    "malachi3 did not serve a clean produce of its own after p2: node 3 back to OLD",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1448)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 3618)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4961)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 3618)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261007T103219Z-f89c494",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261008T105348Z-c6a4350",
   "details": {
-    "old_ref": "v0.21.0",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.21.1's",
-    "old_sha": "d977f55405d76b4d2aeee387b4521759b92de519",
-    "old_version": "0.21.0",
+    "old_ref": "v0.21.1",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
+    "old_sha": "99f7289ac17af7d9a99f4c994f39c1e269b833f5",
+    "old_version": "0.21.1",
     "old_machine_version": 5,
     "old_patch": null,
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 18753,
-      "phase2": 12394,
-      "phase3": 19700
+      "phase1": 15606,
+      "phase2": 7504,
+      "phase3": 15601
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.21.0 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   }
 }
