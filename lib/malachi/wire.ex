@@ -8,9 +8,10 @@ defmodule Malachi.Wire do
       Request:   <<api_key::16, correlation_id::32, payload::binary>>
       Response:  <<correlation_id::32, error_code::16, payload::binary>>
 
-  `correlation_id` lets a client pipeline (match each response to its request). Records on the wire carry
-  **no offset**: the client never sees one; the opaque cursor carries position - so this is a distinct
-  encoding from `Malachi.Log.Record.encode/1` (the on-disk frame, which includes the offset). Keys and cursors are
+  `correlation_id` lets a client pipeline (match each response to its request). A record on the wire
+  (`encode_record/1`) carries no offset, so it is a distinct encoding from `Malachi.Log.Record.encode/1`
+  (the on-disk frame, which includes the offset); a consume batch puts each record's position beside it
+  (`Malachi.Wire.Batch`). Keys and cursors are
   length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure, this module
   only encodes/decodes binaries; the socket wiring is B1b.
 
@@ -23,7 +24,7 @@ defmodule Malachi.Wire do
 
   This framing is the compatibility contract with every client: the Node CLI, the Elixir client, and any
   future SDK. Two things are **stable** and must stay so: the byte layout of each frame above, and the
-  `api_key` numbers (currently 0..23, `@auth` through `@list_users_with_roles`). Clients are compiled against them, so
+  `api_key` numbers (currently 0..34, `@auth` through `@commit_offsets`). Clients are compiled against them, so
   a running cluster and its clients agree on the wire only as long as both hold.
 
   A change is **breaking** (every deployed client must update in lockstep, so it cannot ship in a normal
@@ -39,9 +40,45 @@ defmodule Malachi.Wire do
   raise a `MatchError` rather than being ignored, so an old peer cannot skip a field a newer one appended. A
   shipped frame is therefore frozen; a change means a new key. This mirrors the discipline the Apache Iggy
   project keeps around its own binary protocol: extend, do not rewrite.
+
+  ## Streams, routing and groups (keys 24 to 34, #275)
+
+  The data path NorthGuard describes (transcript 541 to 569): a client bootstraps the cluster's minimal
+  state from any node (`cluster_state`, key 24), resolves a topic to its ranges and each range's active
+  segment and primary (`topic_routes`, 25), then talks to that primary directly.
+
+    * **Produce** is a stream (`open_stream`, 26): a handshake binds it to a range's active segment and
+      grants a window; `append` (27) carries a sequence number and one batch, pipelined up to the window;
+      the server pushes `append_ack` with the highest sequence acknowledged, per sequence errors and the
+      current window, and `moved` when the segment seals, fails over or splits. `close_stream` (28) ends it.
+    * **Consume** is the mirror (`open_consume`, 29): pushes of `records` carry the offset of every record,
+      and `consume_ack` (30) says what was read and can move the window. `fetch_range` (31) is the unary
+      read of one range.
+    * **Groups** live beside the data path, not in it: `join_group` (32) and `group_heartbeat` (33) answer
+      a member's assignment and generation, `commit_offsets` (34) checkpoints its positions.
+
+  A server push reuses the response envelope with the correlation id of the request that opened the
+  stream, as a subscribe push always has; its payload starts with a kind byte (`append_ack`, `moved`,
+  `records`) and the stream id. Records travel in a batch (`Malachi.Wire.Batch`): a codec byte, the record
+  count, the inflated size, and the payload, compressed or not. A range travels as its sequence number
+  within the topic, a segment likewise, a position as the index of its source in the range's history (an
+  ancestor before a split, or the range itself) and an offset in that source. A range's history lists its
+  sources oldest first, and a split only extends it, so a child's history starts with its parent's: a
+  position read in the parent names the same record in the child. A merge does not keep that: the merged
+  range lists both buddies, so a position read in one of them does not carry over to it. That ordering is part
+  of the contract. A consumer of a range a split or merge just made starts from the start of its history,
+  so it reads its share of the ancestors' records again: at least once, never lost.
+
+  A window is counted in appends and bytes on a producer stream and in records on a consume stream. The
+  window an `open_stream` or `open_consume` asks for is an integer from 1 to 2^32 - 1 in each count, since a
+  stream that may never send anything is no stream: the encoders and decoders here raise on anything
+  else. In an `append_ack` the window is the
+  one granted now, and 0 holds further appends until a later ack grants more. In a `consume_ack` the
+  window is a change the consumer asks for, and 0 asks for none, so a consumer pauses by not acking.
   """
 
   alias Malachi.Log.Record
+  alias Malachi.Wire.Batch
 
   # api keys (request operations)
   @auth 0
@@ -78,12 +115,24 @@ defmodule Malachi.Wire do
   # frame. Both require the wire :admin permission.
   @set_role 22
   @list_users_with_roles 23
+  # streams, routing and groups (#275, see "Streams, routing and groups" above)
+  @cluster_state 24
+  @topic_routes 25
+  @open_stream 26
+  @append 27
+  @close_stream 28
+  @open_consume 29
+  @consume_ack 30
+  @fetch_range 31
+  @join_group 32
+  @group_heartbeat 33
+  @commit_offsets 34
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @type api_key :: 0..23
+  @type api_key :: 0..34
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -111,6 +160,17 @@ defmodule Malachi.Wire do
   def get_topic_policy_key, do: @get_topic_policy
   def set_role_key, do: @set_role
   def list_users_with_roles_key, do: @list_users_with_roles
+  def cluster_state_key, do: @cluster_state
+  def topic_routes_key, do: @topic_routes
+  def open_stream_key, do: @open_stream
+  def append_key, do: @append
+  def close_stream_key, do: @close_stream
+  def open_consume_key, do: @open_consume
+  def consume_ack_key, do: @consume_ack
+  def fetch_range_key, do: @fetch_range
+  def join_group_key, do: @join_group
+  def group_heartbeat_key, do: @group_heartbeat
+  def commit_offsets_key, do: @commit_offsets
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -582,9 +642,444 @@ defmodule Malachi.Wire do
   defp key_of(map, code),
     do: Enum.find_value(map, fn {key, value} -> if value == code, do: key end) || raise(ArgumentError)
 
+  # ---- streams, routing and groups (keys 24 to 34) ----
+
+  @broker_statuses %{alive: 0, suspect: 1, dead: 2}
+  @range_states %{active: 0, sealed: 1}
+  @push_kinds %{append_ack: 0, moved: 1, records: 2}
+
+  @typedoc "Where a range read starts or resumes: `{source_index, offset}` in the range's history."
+  @type position :: {non_neg_integer(), non_neg_integer()}
+
+  @typedoc "A range's active segment and its primary, or `nil` while the range has none yet."
+  @type route_segment :: %{segment: non_neg_integer(), primary: String.t()} | nil
+
+  @typedoc "Where a consume begins: the oldest record, the next one produced, a position, or a group's checkpoint."
+  @type consume_start :: :earliest | :latest | {:position, position()} | {:committed, String.t()}
+
+  @doc "`cluster_state` (24) asks for nothing."
+  @spec encode_cluster_state_req() :: binary()
+  def encode_cluster_state_req, do: <<>>
+
+  @doc """
+  The cluster's minimal state (transcript 609 to 613): the brokers with their status and the address each
+  advertises to clients (`nil` host and port 0 for one that advertises none), the vnodes that exist, and
+  whether the stream keys are enabled. `version` orders two answers of the same node.
+  """
+  @spec encode_cluster_state_resp(map()) :: binary()
+  def encode_cluster_state_resp(%{version: version, streams_enabled: enabled, brokers: brokers, vnodes: vnodes}) do
+    <<version::64, bool(enabled)::8, put_list(brokers, &put_broker/1)::binary, put_list(vnodes, &<<&1::32>>)::binary>>
+  end
+
+  @spec decode_cluster_state_resp(binary()) :: map()
+  def decode_cluster_state_resp(<<version::64, enabled::8, rest::binary>>) do
+    {brokers, rest} = take_list(rest, &take_broker/1)
+    {vnodes, <<>>} = take_list(rest, fn <<vnode::32, rest::binary>> -> {vnode, rest} end)
+    %{version: version, streams_enabled: from_bool(enabled), brokers: brokers, vnodes: vnodes}
+  end
+
+  @doc "`topic_routes` (25): the routes of one topic."
+  @spec encode_topic_routes_req(String.t()) :: binary()
+  def encode_topic_routes_req(topic), do: put_str(topic)
+
+  @spec decode_topic_routes_req(binary()) :: String.t()
+  def decode_topic_routes_req(payload) do
+    {topic, <<>>} = take_str(payload)
+    topic
+  end
+
+  @doc """
+  A topic's routes: its keyspace (2^`keyspace_bits` positions, a key's position being
+  `Malachi.Keyspace.position_of/2`), and each range with its slice `[key_start, key_end)`, its state and
+  its active segment and primary. `version` changes whenever any of that does; a stream opened with an
+  older one is refused.
+  """
+  @spec encode_topic_routes_resp(map()) :: binary()
+  def encode_topic_routes_resp(%{topic: topic, version: version, keyspace_bits: bits, ranges: ranges}) do
+    <<put_str(topic)::binary, version::64, bits::8, put_list(ranges, &put_route/1)::binary>>
+  end
+
+  @spec decode_topic_routes_resp(binary()) :: map()
+  def decode_topic_routes_resp(payload) do
+    {topic, <<version::64, bits::8, rest::binary>>} = take_str(payload)
+    {ranges, <<>>} = take_list(rest, &take_route/1)
+    %{topic: topic, version: version, keyspace_bits: bits, ranges: ranges}
+  end
+
+  @doc """
+  `open_stream` (26): a producer stream on one range, for the routes `routes_version` describes. `codec` is
+  the codec the appends will carry; `window_appends` and `window_bytes` are what the client asks for, and
+  the server grants at most that. `producer_id` is reserved for idempotent produce (#168) and is `nil` for
+  now; `label` names the client in the operator interfaces. The window the server grants can later change
+  in any `append_ack`.
+  """
+  @spec encode_open_stream_req(map()) :: binary()
+  def encode_open_stream_req(%{} = req) do
+    open_window!([req.window_appends, req.window_bytes])
+
+    <<put_str(req.topic)::binary, req.range::32, req.routes_version::64, Batch.codec_code(req.codec)::8,
+      req.window_appends::32, req.window_bytes::32, put_str(req.producer_id)::binary, put_str(req.label)::binary>>
+  end
+
+  @spec decode_open_stream_req(binary()) :: map()
+  def decode_open_stream_req(payload) do
+    {topic, <<range::32, version::64, codec::8, appends::32, bytes::32, rest::binary>>} = take_str(payload)
+    open_window!([appends, bytes])
+    {producer_id, rest} = take_str(rest)
+    {label, <<>>} = take_str(rest)
+
+    %{
+      topic: topic,
+      range: range,
+      routes_version: version,
+      codec: Batch.codec_of(codec),
+      window_appends: appends,
+      window_bytes: bytes,
+      producer_id: producer_id,
+      label: label
+    }
+  end
+
+  @doc "The stream the server opened: its id, the segment it is bound to, the granted window and the routes version."
+  @spec encode_open_stream_resp(map()) :: binary()
+  def encode_open_stream_resp(%{} = resp) do
+    <<resp.stream_id::32, resp.segment::32, resp.window_appends::32, resp.window_bytes::32, resp.routes_version::64>>
+  end
+
+  @spec decode_open_stream_resp(binary()) :: map()
+  def decode_open_stream_resp(<<stream_id::32, segment::32, appends::32, bytes::32, version::64>>) do
+    %{stream_id: stream_id, segment: segment, window_appends: appends, window_bytes: bytes, routes_version: version}
+  end
+
+  @doc """
+  `append` (27): one batch (`Malachi.Wire.Batch`) under `sequence`, which starts at 0 and grows by one per
+  append. The server answers with `append_ack` pushes on the stream, not with a response to this request.
+  `batch` is the batch already encoded, so a sender encodes it once.
+  """
+  @spec encode_append_req(non_neg_integer(), non_neg_integer(), iodata()) :: iodata()
+  def encode_append_req(stream_id, sequence, batch), do: [<<stream_id::32, sequence::64>>, batch]
+
+  @doc "Splits an append into its stream id, sequence and batch, without opening the batch (see `Malachi.Wire.Batch.decode/2`)."
+  @spec decode_append_req(binary()) :: {non_neg_integer(), non_neg_integer(), binary()}
+  def decode_append_req(<<stream_id::32, sequence::64, batch::binary>>) do
+    {_header, <<>>} = Batch.split(batch)
+    {stream_id, sequence, batch}
+  end
+
+  @doc "`close_stream` (28): ends a producer or consumer stream. Answered with an empty ok."
+  @spec encode_close_stream_req(non_neg_integer()) :: binary()
+  def encode_close_stream_req(stream_id), do: <<stream_id::32>>
+
+  @spec decode_close_stream_req(binary()) :: non_neg_integer()
+  def decode_close_stream_req(<<stream_id::32>>), do: stream_id
+
+  @doc """
+  `open_consume` (29): a push stream of one range, from `start`, with a credit `window` in records, at most
+  `max` records and about `max_bytes` bytes per push, in one of the codecs the client `accept`s.
+  """
+  @spec encode_open_consume_req(map()) :: binary()
+  def encode_open_consume_req(%{} = req) do
+    open_window!([req.window])
+
+    <<put_str(req.topic)::binary, req.range::32, req.routes_version::64, put_start(req.start)::binary, req.window::32,
+      req.max::32, req.max_bytes::32, put_accept(req.accept)::8>>
+  end
+
+  @spec decode_open_consume_req(binary()) :: map()
+  def decode_open_consume_req(payload) do
+    {topic, <<range::32, version::64, rest::binary>>} = take_str(payload)
+    {start, <<window::32, max::32, max_bytes::32, accept::8>>} = take_start(rest)
+    open_window!([window])
+
+    %{
+      topic: topic,
+      range: range,
+      routes_version: version,
+      start: start,
+      window: window,
+      max: max,
+      max_bytes: max_bytes,
+      accept: take_accept(accept)
+    }
+  end
+
+  @doc "The consumer stream the server opened, and the position its first push starts at."
+  @spec encode_open_consume_resp(map()) :: binary()
+  def encode_open_consume_resp(%{stream_id: stream_id, position: position}),
+    do: <<stream_id::32, put_position(position)::binary>>
+
+  @spec decode_open_consume_resp(binary()) :: map()
+  def decode_open_consume_resp(<<stream_id::32, rest::binary>>) do
+    {position, <<>>} = take_position(rest)
+    %{stream_id: stream_id, position: position}
+  end
+
+  @doc """
+  `consume_ack` (30): the consumer read everything before `position` on the stream (the read ack, transcript
+  569), and moves its window to `window` records (0 leaves it as it is: see the moduledoc). No response: the ack shows up as pushes.
+  It returns credit only; checkpointing a group's position is `commit_offsets`.
+  """
+  @spec encode_consume_ack_req(map()) :: binary()
+  def encode_consume_ack_req(%{stream_id: stream_id, position: position, window: window}),
+    do: <<stream_id::32, put_position(position)::binary, window::32>>
+
+  @spec decode_consume_ack_req(binary()) :: map()
+  def decode_consume_ack_req(<<stream_id::32, rest::binary>>) do
+    {position, <<window::32>>} = take_position(rest)
+    %{stream_id: stream_id, position: position, window: window}
+  end
+
+  @doc "`fetch_range` (31): one page of one range, waiting up to `wait_ms` for records when there are none yet."
+  @spec encode_fetch_range_req(map()) :: binary()
+  def encode_fetch_range_req(%{} = req) do
+    <<put_str(req.topic)::binary, req.range::32, req.routes_version::64, put_start(req.start)::binary, req.max::32,
+      req.max_bytes::32, req.wait_ms::32, put_accept(req.accept)::8>>
+  end
+
+  @spec decode_fetch_range_req(binary()) :: map()
+  def decode_fetch_range_req(payload) do
+    {topic, <<range::32, version::64, rest::binary>>} = take_str(payload)
+    {start, <<max::32, max_bytes::32, wait_ms::32, accept::8>>} = take_start(rest)
+
+    %{
+      topic: topic,
+      range: range,
+      routes_version: version,
+      start: start,
+      max: max,
+      max_bytes: max_bytes,
+      wait_ms: wait_ms,
+      accept: take_accept(accept)
+    }
+  end
+
+  @doc """
+  A page of one range, as `fetch_range` answers it and as a `records` push carries it: where the next page
+  starts, how many leading records of the batch the reader already had (`skip`, for a position inside a
+  stored batch), how many records the range still holds past this page (`backlog`), the records retention
+  removed before this page (`expired`, exact or an upper bound), and the batch of positioned records.
+  """
+  @spec encode_page(map()) :: iodata()
+  def encode_page(%{next: next, skip: skip, backlog: backlog, expired: expired, expired_exact: exact, batch: batch}) do
+    [<<put_position(next)::binary, skip::32, backlog::64, expired::64, bool(exact)::8>>, batch]
+  end
+
+  @spec decode_page(binary()) :: map()
+  def decode_page(payload) do
+    {next, <<skip::32, backlog::64, expired::64, exact::8, batch::binary>>} = take_position(payload)
+    {_header, <<>>} = Batch.split(batch)
+    %{next: next, skip: skip, backlog: backlog, expired: expired, expired_exact: from_bool(exact), batch: batch}
+  end
+
+  @doc """
+  A server push on a stream: `append_ack` (the highest sequence acknowledged, the sequences that failed with
+  their reason, the window granted now, where 0 holds further appends until a later ack), `moved` (the stream is over: where its range's data goes now, after a
+  seal, a failover or a split) or `records` (a page, see `encode_page/1`).
+  """
+  @spec encode_push(:append_ack | :moved | :records, map()) :: iodata()
+  def encode_push(:append_ack, %{} = ack) do
+    errors = put_list(ack.errors, fn %{sequence: seq, reason: reason} -> <<seq::64, put_str(reason)::binary>> end)
+
+    <<@push_kinds.append_ack::8, ack.stream_id::32, ack.acked_sequence::64, ack.window_appends::32,
+      ack.window_bytes::32, errors::binary>>
+  end
+
+  def encode_push(:moved, %{} = moved) do
+    <<@push_kinds.moved::8, moved.stream_id::32, put_str(moved.reason)::binary, moved.routes_version::64,
+      put_list(moved.targets, &put_target/1)::binary>>
+  end
+
+  def encode_push(:records, %{stream_id: stream_id} = page),
+    do: [<<@push_kinds.records::8, stream_id::32>>, encode_page(page)]
+
+  @spec decode_push(binary()) :: {:append_ack | :moved | :records, map()}
+  def decode_push(<<0::8, stream_id::32, acked::64, appends::32, bytes::32, rest::binary>>) do
+    {errors, <<>>} =
+      take_list(rest, fn <<seq::64, rest::binary>> ->
+        {reason, rest} = take_str(rest)
+        {%{sequence: seq, reason: reason}, rest}
+      end)
+
+    {:append_ack,
+     %{stream_id: stream_id, acked_sequence: acked, window_appends: appends, window_bytes: bytes, errors: errors}}
+  end
+
+  def decode_push(<<1::8, stream_id::32, rest::binary>>) do
+    {reason, <<version::64, rest::binary>>} = take_str(rest)
+    {targets, <<>>} = take_list(rest, &take_target/1)
+    {:moved, %{stream_id: stream_id, reason: reason, routes_version: version, targets: targets}}
+  end
+
+  def decode_push(<<2::8, stream_id::32, rest::binary>>),
+    do: {:records, Map.put(decode_page(rest), :stream_id, stream_id)}
+
+  @doc "`join_group` (32): a member joins `group` for `topic`."
+  @spec encode_join_group_req(map()) :: binary()
+  def encode_join_group_req(%{topic: topic, group: group, member: member}),
+    do: <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary>>
+
+  @spec decode_join_group_req(binary()) :: map()
+  def decode_join_group_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {member, <<>>} = take_str(rest)
+    %{topic: topic, group: group, member: member}
+  end
+
+  @doc "`group_heartbeat` (33): a member of `generation` stays in its group."
+  @spec encode_group_heartbeat_req(map()) :: binary()
+  def encode_group_heartbeat_req(%{generation: generation} = req),
+    do: <<encode_join_group_req(req)::binary, generation::64>>
+
+  @spec decode_group_heartbeat_req(binary()) :: map()
+  def decode_group_heartbeat_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {member, <<generation::64>>} = take_str(rest)
+    %{topic: topic, group: group, member: member, generation: generation}
+  end
+
+  @doc """
+  A member's assignment, as `join_group` and `group_heartbeat` answer it: the generation, the session it
+  must heartbeat within, and the ranges it consumes.
+  """
+  @spec encode_assignment_resp(map()) :: binary()
+  def encode_assignment_resp(%{generation: generation, session_ms: session_ms, ranges: ranges}),
+    do: <<generation::64, session_ms::32, put_list(ranges, &<<&1::32>>)::binary>>
+
+  @spec decode_assignment_resp(binary()) :: map()
+  def decode_assignment_resp(<<generation::64, session_ms::32, rest::binary>>) do
+    {ranges, <<>>} = take_list(rest, fn <<range::32, rest::binary>> -> {range, rest} end)
+    %{generation: generation, session_ms: session_ms, ranges: ranges}
+  end
+
+  @doc "`commit_offsets` (34): checkpoints a member's position in each of its ranges. Answered with an empty ok."
+  @spec encode_commit_offsets_req(map()) :: binary()
+  def encode_commit_offsets_req(%{positions: positions, generation: generation} = req) do
+    positions =
+      put_list(positions, fn %{range: range, position: position} -> <<range::32, put_position(position)::binary>> end)
+
+    <<encode_join_group_req(req)::binary, generation::64, positions::binary>>
+  end
+
+  @spec decode_commit_offsets_req(binary()) :: map()
+  def decode_commit_offsets_req(payload) do
+    {topic, rest} = take_str(payload)
+    {group, rest} = take_str(rest)
+    {member, <<generation::64, rest::binary>>} = take_str(rest)
+
+    {positions, <<>>} =
+      take_list(rest, fn <<range::32, rest::binary>> ->
+        {position, rest} = take_position(rest)
+        {%{range: range, position: position}, rest}
+      end)
+
+    %{topic: topic, group: group, member: member, generation: generation, positions: positions}
+  end
+
+  defp put_broker(%{id: id, host: host, port: port, status: status}),
+    do: <<put_str(id)::binary, put_str(host)::binary, port::16, Map.fetch!(@broker_statuses, status)::8>>
+
+  defp take_broker(binary) do
+    {id, rest} = take_str(binary)
+    {host, <<port::16, status::8, rest::binary>>} = take_str(rest)
+    {%{id: id, host: host, port: port, status: key_of(@broker_statuses, status)}, rest}
+  end
+
+  defp put_route(%{range: range, key_start: key_start, key_end: key_end, state: state, segment: segment}),
+    do:
+      <<range::32, key_start::64, key_end::64, Map.fetch!(@range_states, state)::8, put_route_segment(segment)::binary>>
+
+  defp take_route(<<range::32, key_start::64, key_end::64, state::8, rest::binary>>) do
+    {segment, rest} = take_route_segment(rest)
+
+    {%{range: range, key_start: key_start, key_end: key_end, state: key_of(@range_states, state), segment: segment},
+     rest}
+  end
+
+  defp put_route_segment(nil), do: <<0::8>>
+  defp put_route_segment(%{segment: segment, primary: primary}), do: <<1::8, segment::32, put_str(primary)::binary>>
+
+  defp take_route_segment(<<0::8, rest::binary>>), do: {nil, rest}
+
+  defp take_route_segment(<<1::8, segment::32, rest::binary>>) do
+    {primary, rest} = take_str(rest)
+    {%{segment: segment, primary: primary}, rest}
+  end
+
+  defp put_target(%{range: range, segment: segment}), do: <<range::32, put_route_segment(segment)::binary>>
+
+  defp take_target(<<range::32, rest::binary>>) do
+    {segment, rest} = take_route_segment(rest)
+    {%{range: range, segment: segment}, rest}
+  end
+
+  defp put_position({source, offset}), do: <<source::16, offset::64>>
+  defp take_position(<<source::16, offset::64, rest::binary>>), do: {{source, offset}, rest}
+
+  defp put_start(:earliest), do: <<0::8>>
+  defp put_start(:latest), do: <<1::8>>
+  defp put_start({:position, position}), do: <<2::8, put_position(position)::binary>>
+  defp put_start({:committed, group}), do: <<3::8, put_str(group)::binary>>
+
+  defp take_start(<<0::8, rest::binary>>), do: {:earliest, rest}
+  defp take_start(<<1::8, rest::binary>>), do: {:latest, rest}
+
+  defp take_start(<<2::8, rest::binary>>) do
+    {position, rest} = take_position(rest)
+    {{:position, position}, rest}
+  end
+
+  defp take_start(<<3::8, rest::binary>>) do
+    {group, rest} = take_str(rest)
+    {{:committed, group}, rest}
+  end
+
+  # The codecs a reader accepts, as a bitmask of their codes (bit n for code n).
+  defp put_accept(codecs),
+    do: codecs |> Enum.map(&Bitwise.bsl(1, Batch.codec_code(&1))) |> Enum.reduce(0, &Bitwise.bor/2)
+
+  defp take_accept(mask),
+    do: for(codec <- Batch.codecs(), Bitwise.band(mask, Bitwise.bsl(1, Batch.codec_code(codec))) != 0, do: codec)
+
+  defp bool(true), do: 1
+  defp bool(false), do: 0
+  defp from_bool(0), do: false
+  defp from_bool(1), do: true
+
+  @max_list 65_535
+
+  # The window a stream opens with: an integer of at least 1 in each count, and one a u32 can hold (see
+  # the moduledoc).
+  defp open_window!(counts) do
+    if Enum.all?(counts, &(is_integer(&1) and &1 >= 1 and &1 <= 0xFFFFFFFF)),
+      do: :ok,
+      else: raise(ArgumentError, "a stream opens with a window from 1 to 4294967295, not #{inspect(counts)}")
+  end
+
+  # A counted list: <<count::16, item*>>. A longer list raises rather than wrap the count, which would send
+  # a frame the peer reads as malformed.
+  defp put_list(items, put) do
+    count = length(items)
+    if count > @max_list, do: raise(ArgumentError, "a list of #{count} items, past the wire's #{@max_list}")
+    <<count::16, items |> Enum.map(put) |> IO.iodata_to_binary()::binary>>
+  end
+
+  defp take_list(<<count::16, rest::binary>>, take), do: take_n(rest, count, take, [])
+
+  defp take_n(rest, 0, _take, acc), do: {Enum.reverse(acc), rest}
+
+  defp take_n(rest, n, take, acc) do
+    {item, rest} = take.(rest)
+    take_n(rest, n - 1, take, [item | acc])
+  end
+
   # ---- wire record (no offset; key/value/headers/timestamp only) ----
 
-  @doc "Encodes a record for the wire (no offset: the client never sees one)."
+  @doc """
+  Encodes a record for the wire, with no offset: a consume batch puts the position beside the record
+  (`Malachi.Wire.Batch`).
+  """
   @spec encode_record(Record.t()) :: binary()
   def encode_record(%Record{key: key, value: value, timestamp: ts, headers: headers}) do
     <<put_str(key)::binary, byte_size(value)::32, value::binary, ts::64, encode_headers(headers)::binary>>

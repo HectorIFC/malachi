@@ -23,9 +23,12 @@ Records with the same key land in the same range and are ordered relative to eac
 
 **Range split and merge are purely logical metadata operations.** Segments are never physically combined or
 copied; a merge happens only between buddy ranges (buddy-allocator style). Total ordering is preserved
-through happens-before on splits and merges. Because a range can split or migrate at any time, the client
-never sees an offset: its position is an **opaque cursor** it carries and passes back, and the server is
-free to reshape ranges without invalidating it.
+through happens-before on splits and merges. A consumer's position is `{source_index, offset}`: an offset
+in one source of the range's history, which lists the range's ancestors oldest first and then the range.
+A split only extends that history, so a position read in a parent names the same record in its
+children; a merge lists both buddies, so a position read in one does not carry over to the merged range. Either
+way a consumer of the new ranges starts from the start of their history, so it reads its share of the
+ancestors' records again: at least once, never lost (decision 4).
 
 This is the departure from partition-and-offset systems like Kafka, where the client-visible partition is
 `hash(key) mod partitions`, so raising the partition count relocates a key and breaks its per-key ordering.
@@ -264,11 +267,16 @@ Four choices shape everything above. Each is stated with its reason and the code
    the pipelining a session layer would have added, so the protocol stays `<<len::32, body>>` and grows by
    adding api_keys. See `Malachi.Wire`.
 
-4. **An opaque cursor from the start, never a plain integer offset.** The client never sees an offset;
-   the position travels in the cursor (`Malachi.LogApi`, `@type cursor :: String.t()`). That is what lets
-   the broker reshard and split ranges without breaking clients. Because the cursor returns from an
-   untrusted client, `decode_cursor/1` deserializes with `binary_to_term(_, [:safe])` and validates the
-   shape, so a forged cursor cannot mint a new atom or an arbitrary term.
+4. **A position is an offset in a range's history, never a partition.** A consumer's position in a range
+   is `{source_index, offset}`. The `fetch` cursor (`Malachi.LogApi`, `@type cursor :: String.t()`)
+   carries one per range, opaque to the client. What keeps resharding safe is the order of a range's
+   history, oldest source first, which a split only extends: a child's history starts with its parent's,
+   so a position read before the split means the same record after it. A merge lists both buddies, so it
+   does not carry a position over. A consumer of a range a split or merge just made starts from the start
+   of its history and reads its share of the ancestors' records again (at least once, never lost).
+   Because the cursor returns from an untrusted client, `decode_cursor/1` deserializes with
+   `binary_to_term(_, [:safe])` and validates the shape, so a forged cursor cannot mint a new atom or an
+   arbitrary term.
 
 ## What we do not replicate
 

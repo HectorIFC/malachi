@@ -1,0 +1,76 @@
+{
+  "about": "Golden frames for the group keys 32 to 34 (#275), read by test/malachi/wire_stream_frames_test.exs and by scripts/lib/wire_streams.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "join_group_req",
+      "hex": "01000000066f7264657273010000000762696c6c696e6701000000026d31",
+      "name": "a member joins a group",
+      "value": {
+        "group": "billing",
+        "member": "m1",
+        "topic": "orders"
+      }
+    },
+    {
+      "codec": "group_heartbeat_req",
+      "hex": "01000000066f7264657273010000000762696c6c696e6701000000026d310000000000000007",
+      "name": "a member of a generation stays",
+      "value": {
+        "generation": 7,
+        "group": "billing",
+        "member": "m1",
+        "topic": "orders"
+      }
+    },
+    {
+      "codec": "assignment_resp",
+      "hex": "00000000000000070000753000020000000100000002",
+      "name": "two ranges",
+      "value": {
+        "generation": 7,
+        "ranges": [
+          1,
+          2
+        ],
+        "session_ms": 30000
+      }
+    },
+    {
+      "codec": "assignment_resp",
+      "hex": "0000000000000008000075300000",
+      "name": "no range for this member",
+      "value": {
+        "generation": 8,
+        "ranges": [],
+        "session_ms": 30000
+      }
+    },
+    {
+      "codec": "commit_offsets_req",
+      "hex": "01000000066f7264657273010000000762696c6c696e6701000000026d310000000000000007000200000001000000000000000000780000000200010000000000000000",
+      "name": "a checkpoint in two ranges",
+      "value": {
+        "generation": 7,
+        "group": "billing",
+        "member": "m1",
+        "positions": [
+          {
+            "position": [
+              0,
+              120
+            ],
+            "range": 1
+          },
+          {
+            "position": [
+              1,
+              0
+            ],
+            "range": 2
+          }
+        ],
+        "topic": "orders"
+      }
+    }
+  ]
+}

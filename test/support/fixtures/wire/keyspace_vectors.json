@@ -1,0 +1,865 @@
+{
+  "about": "Keyspace positions as the broker computes them (Malachi.Keyspace.position_of/2, :erlang.phash2), for each key at each size in `sizes`: the vectors scripts/lib/keyspace.js is checked against. A null key is a record with no key. Never edit, add a case.",
+  "cases": [
+    {
+      "hash": 29948,
+      "key": null,
+      "positions": [
+        0,
+        0,
+        12,
+        252,
+        29948,
+        29948
+      ]
+    },
+    {
+      "hash": 147926629,
+      "key": "",
+      "positions": [
+        0,
+        1,
+        5,
+        101,
+        11877,
+        147926629
+      ]
+    },
+    {
+      "hash": 1535449617,
+      "key": "1",
+      "positions": [
+        0,
+        1,
+        1,
+        17,
+        6673,
+        1535449617
+      ]
+    },
+    {
+      "hash": 1249730390,
+      "key": "k2",
+      "positions": [
+        0,
+        0,
+        6,
+        86,
+        24406,
+        1249730390
+      ]
+    },
+    {
+      "hash": 530113649,
+      "key": "kk3",
+      "positions": [
+        0,
+        1,
+        1,
+        113,
+        58481,
+        530113649
+      ]
+    },
+    {
+      "hash": 3703240732,
+      "key": "kkk4",
+      "positions": [
+        0,
+        0,
+        12,
+        28,
+        63516,
+        3703240732
+      ]
+    },
+    {
+      "hash": 221731947,
+      "key": "kkkk5",
+      "positions": [
+        0,
+        1,
+        11,
+        107,
+        23659,
+        221731947
+      ]
+    },
+    {
+      "hash": 1682477998,
+      "key": "kkkkk6",
+      "positions": [
+        0,
+        0,
+        14,
+        174,
+        37806,
+        1682477998
+      ]
+    },
+    {
+      "hash": 2032061019,
+      "key": "kkkkkk7",
+      "positions": [
+        0,
+        1,
+        11,
+        91,
+        51803,
+        2032061019
+      ]
+    },
+    {
+      "hash": 3597204184,
+      "key": "kkkkkkk8",
+      "positions": [
+        0,
+        0,
+        8,
+        216,
+        64216,
+        3597204184
+      ]
+    },
+    {
+      "hash": 2845433984,
+      "key": "kkkkkkkk9",
+      "positions": [
+        0,
+        0,
+        0,
+        128,
+        57472,
+        2845433984
+      ]
+    },
+    {
+      "hash": 993441225,
+      "key": "kkkkkkkkk0",
+      "positions": [
+        0,
+        1,
+        9,
+        201,
+        46537,
+        993441225
+      ]
+    },
+    {
+      "hash": 3454840563,
+      "key": "kkkkkkkkkk1",
+      "positions": [
+        0,
+        1,
+        3,
+        243,
+        44787,
+        3454840563
+      ]
+    },
+    {
+      "hash": 3812200788,
+      "key": "kkkkkkkkkkk2",
+      "positions": [
+        0,
+        0,
+        4,
+        84,
+        37204,
+        3812200788
+      ]
+    },
+    {
+      "hash": 2633312856,
+      "key": "kkkkkkkkkkkk3",
+      "positions": [
+        0,
+        0,
+        8,
+        88,
+        10840,
+        2633312856
+      ]
+    },
+    {
+      "hash": 195022826,
+      "key": "kkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        0,
+        10,
+        234,
+        53226,
+        195022826
+      ]
+    },
+    {
+      "hash": 195932371,
+      "key": "kkkkkkkkkkkkkk5",
+      "positions": [
+        0,
+        1,
+        3,
+        211,
+        45267,
+        195932371
+      ]
+    },
+    {
+      "hash": 74905092,
+      "key": "kkkkkkkkkkkkkkk6",
+      "positions": [
+        0,
+        0,
+        4,
+        4,
+        62980,
+        74905092
+      ]
+    },
+    {
+      "hash": 4037354873,
+      "key": "kkkkkkkkkkkkkkkk7",
+      "positions": [
+        0,
+        1,
+        9,
+        121,
+        9593,
+        4037354873
+      ]
+    },
+    {
+      "hash": 3731099938,
+      "key": "kkkkkkkkkkkkkkkkk8",
+      "positions": [
+        0,
+        0,
+        2,
+        34,
+        4386,
+        3731099938
+      ]
+    },
+    {
+      "hash": 2256133328,
+      "key": "kkkkkkkkkkkkkkkkkk9",
+      "positions": [
+        0,
+        0,
+        0,
+        208,
+        56528,
+        2256133328
+      ]
+    },
+    {
+      "hash": 235316908,
+      "key": "kkkkkkkkkkkkkkkkkkk0",
+      "positions": [
+        0,
+        0,
+        12,
+        172,
+        42668,
+        235316908
+      ]
+    },
+    {
+      "hash": 529821662,
+      "key": "kkkkkkkkkkkkkkkkkkkk1",
+      "positions": [
+        0,
+        0,
+        14,
+        222,
+        28638,
+        529821662
+      ]
+    },
+    {
+      "hash": 1368167294,
+      "key": "kkkkkkkkkkkkkkkkkkkkk2",
+      "positions": [
+        0,
+        0,
+        14,
+        126,
+        37758,
+        1368167294
+      ]
+    },
+    {
+      "hash": 1704118083,
+      "key": "kkkkkkkkkkkkkkkkkkkkkk3",
+      "positions": [
+        0,
+        1,
+        3,
+        67,
+        51011,
+        1704118083
+      ]
+    },
+    {
+      "hash": 3290933518,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        0,
+        14,
+        14,
+        43278,
+        3290933518
+      ]
+    },
+    {
+      "hash": 3064938995,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkk5",
+      "positions": [
+        0,
+        1,
+        3,
+        243,
+        16883,
+        3064938995
+      ]
+    },
+    {
+      "hash": 2306142250,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkk6",
+      "positions": [
+        0,
+        0,
+        10,
+        42,
+        61482,
+        2306142250
+      ]
+    },
+    {
+      "hash": 2033075140,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkk7",
+      "positions": [
+        0,
+        0,
+        4,
+        196,
+        17348,
+        2033075140
+      ]
+    },
+    {
+      "hash": 2774166940,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkk8",
+      "positions": [
+        0,
+        0,
+        12,
+        156,
+        28060,
+        2774166940
+      ]
+    },
+    {
+      "hash": 2077012506,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkk9",
+      "positions": [
+        0,
+        0,
+        10,
+        26,
+        45594,
+        2077012506
+      ]
+    },
+    {
+      "hash": 1935438649,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkk0",
+      "positions": [
+        0,
+        1,
+        9,
+        57,
+        29497,
+        1935438649
+      ]
+    },
+    {
+      "hash": 3070533684,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkk1",
+      "positions": [
+        0,
+        0,
+        4,
+        52,
+        41012,
+        3070533684
+      ]
+    },
+    {
+      "hash": 1683373212,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk2",
+      "positions": [
+        0,
+        0,
+        12,
+        156,
+        15516,
+        1683373212
+      ]
+    },
+    {
+      "hash": 2115585500,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk3",
+      "positions": [
+        0,
+        0,
+        12,
+        220,
+        17884,
+        2115585500
+      ]
+    },
+    {
+      "hash": 1738491285,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        1,
+        5,
+        149,
+        17813,
+        1738491285
+      ]
+    },
+    {
+      "hash": 1964854921,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk5",
+      "positions": [
+        0,
+        1,
+        9,
+        137,
+        20105,
+        1964854921
+      ]
+    },
+    {
+      "hash": 3458883361,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk6",
+      "positions": [
+        0,
+        1,
+        1,
+        33,
+        24353,
+        3458883361
+      ]
+    },
+    {
+      "hash": 1067415122,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk7",
+      "positions": [
+        0,
+        0,
+        2,
+        82,
+        30290,
+        1067415122
+      ]
+    },
+    {
+      "hash": 654063851,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk8",
+      "positions": [
+        0,
+        1,
+        11,
+        235,
+        14571,
+        654063851
+      ]
+    },
+    {
+      "hash": 2312904368,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk9",
+      "positions": [
+        0,
+        0,
+        0,
+        176,
+        7856,
+        2312904368
+      ]
+    },
+    {
+      "hash": 3764745361,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk0",
+      "positions": [
+        0,
+        1,
+        1,
+        145,
+        29841,
+        3764745361
+      ]
+    },
+    {
+      "hash": 4013161705,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk1",
+      "positions": [
+        0,
+        1,
+        9,
+        233,
+        64745,
+        4013161705
+      ]
+    },
+    {
+      "hash": 3082942657,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk2",
+      "positions": [
+        0,
+        1,
+        1,
+        193,
+        63681,
+        3082942657
+      ]
+    },
+    {
+      "hash": 1496876457,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk3",
+      "positions": [
+        0,
+        1,
+        9,
+        169,
+        34217,
+        1496876457
+      ]
+    },
+    {
+      "hash": 1999369658,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        0,
+        10,
+        186,
+        62906,
+        1999369658
+      ]
+    },
+    {
+      "hash": 2305110900,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk5",
+      "positions": [
+        0,
+        0,
+        4,
+        116,
+        13172,
+        2305110900
+      ]
+    },
+    {
+      "hash": 3224468982,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk6",
+      "positions": [
+        0,
+        0,
+        6,
+        246,
+        32246,
+        3224468982
+      ]
+    },
+    {
+      "hash": 1153193699,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk7",
+      "positions": [
+        0,
+        1,
+        3,
+        227,
+        22243,
+        1153193699
+      ]
+    },
+    {
+      "hash": 509148177,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk8",
+      "positions": [
+        0,
+        1,
+        1,
+        17,
+        64529,
+        509148177
+      ]
+    },
+    {
+      "hash": 3017681647,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk9",
+      "positions": [
+        0,
+        1,
+        15,
+        239,
+        10991,
+        3017681647
+      ]
+    },
+    {
+      "hash": 2388684504,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk0",
+      "positions": [
+        0,
+        0,
+        8,
+        216,
+        28376,
+        2388684504
+      ]
+    },
+    {
+      "hash": 2479528451,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk1",
+      "positions": [
+        0,
+        1,
+        3,
+        3,
+        39427,
+        2479528451
+      ]
+    },
+    {
+      "hash": 1917689316,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk2",
+      "positions": [
+        0,
+        0,
+        4,
+        228,
+        40420,
+        1917689316
+      ]
+    },
+    {
+      "hash": 2053762262,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk3",
+      "positions": [
+        0,
+        0,
+        6,
+        214,
+        60630,
+        2053762262
+      ]
+    },
+    {
+      "hash": 1139676477,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        1,
+        13,
+        61,
+        5437,
+        1139676477
+      ]
+    },
+    {
+      "hash": 915298383,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk5",
+      "positions": [
+        0,
+        1,
+        15,
+        79,
+        22607,
+        915298383
+      ]
+    },
+    {
+      "hash": 2026119234,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk6",
+      "positions": [
+        0,
+        0,
+        2,
+        66,
+        8258,
+        2026119234
+      ]
+    },
+    {
+      "hash": 3355342293,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk7",
+      "positions": [
+        0,
+        1,
+        5,
+        213,
+        30165,
+        3355342293
+      ]
+    },
+    {
+      "hash": 2956843909,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk8",
+      "positions": [
+        0,
+        1,
+        5,
+        133,
+        56197,
+        2956843909
+      ]
+    },
+    {
+      "hash": 3293261505,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk9",
+      "positions": [
+        0,
+        1,
+        1,
+        193,
+        11969,
+        3293261505
+      ]
+    },
+    {
+      "hash": 2731166613,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk0",
+      "positions": [
+        0,
+        1,
+        5,
+        149,
+        19349,
+        2731166613
+      ]
+    },
+    {
+      "hash": 1886038540,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk1",
+      "positions": [
+        0,
+        0,
+        12,
+        12,
+        43532,
+        1886038540
+      ]
+    },
+    {
+      "hash": 1184087978,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk2",
+      "positions": [
+        0,
+        0,
+        10,
+        170,
+        49066,
+        1184087978
+      ]
+    },
+    {
+      "hash": 376136853,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk3",
+      "positions": [
+        0,
+        1,
+        5,
+        149,
+        25749,
+        376136853
+      ]
+    },
+    {
+      "hash": 2797369050,
+      "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk4",
+      "positions": [
+        0,
+        0,
+        10,
+        218,
+        30426,
+        2797369050
+      ]
+    },
+    {
+      "hash": 3328361887,
+      "key": "ação",
+      "positions": [
+        0,
+        1,
+        15,
+        159,
+        50591,
+        3328361887
+      ]
+    },
+    {
+      "hash": 3184084371,
+      "key": "日本語のキー",
+      "positions": [
+        0,
+        1,
+        3,
+        147,
+        17811,
+        3184084371
+      ]
+    },
+    {
+      "hash": 619863140,
+      "key": "🔑",
+      "positions": [
+        0,
+        0,
+        4,
+        100,
+        23652,
+        619863140
+      ]
+    },
+    {
+      "hash": 1510413716,
+      "key": "orders/2026-10-08",
+      "positions": [
+        0,
+        0,
+        4,
+        148,
+        5524,
+        1510413716
+      ]
+    },
+    {
+      "hash": 3464849017,
+      "key": "éééééééééééééééééééééééééééééééééééééééé",
+      "positions": [
+        0,
+        1,
+        9,
+        121,
+        26233,
+        3464849017
+      ]
+    }
+  ],
+  "sizes": [
+    1,
+    2,
+    16,
+    256,
+    65536,
+    4294967296
+  ]
+}

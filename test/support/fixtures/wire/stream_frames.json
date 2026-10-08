@@ -1,0 +1,246 @@
+{
+  "about": "Golden frames for the producer stream keys 26 to 28 and the stream pushes (#275), read by test/malachi/wire_stream_frames_test.exs and by scripts/lib/wire_streams.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "open_stream_req",
+      "hex": "01000000066f726465727300000001000000000000000c01000000400080000000010000000c636865636b6f75742d617069",
+      "name": "zstd appends, a client label, no producer id",
+      "value": {
+        "codec": "zstd",
+        "label": "checkout-api",
+        "producer_id": null,
+        "range": 1,
+        "routes_version": 12,
+        "topic": "orders",
+        "window_appends": 64,
+        "window_bytes": 8388608
+      }
+    },
+    {
+      "codec": "open_stream_req",
+      "hex": "01000000066f726465727300000002000000000000000c0000000001000100000000",
+      "name": "plain appends, no label",
+      "value": {
+        "codec": "none",
+        "label": null,
+        "producer_id": null,
+        "range": 2,
+        "routes_version": 12,
+        "topic": "orders",
+        "window_appends": 1,
+        "window_bytes": 65536
+      }
+    },
+    {
+      "codec": "open_stream_resp",
+      "hex": "00000005000000030000002000400000000000000000000c",
+      "name": "the granted window and the bound segment",
+      "value": {
+        "routes_version": 12,
+        "segment": 3,
+        "stream_id": 5,
+        "window_appends": 32,
+        "window_bytes": 4194304
+      }
+    },
+    {
+      "codec": "append_req",
+      "hex": "000000050000000000000000000000000200000040000000400001000000026b310000000276310000019b76daa8000000000000000000000276320000019b76daa80000000001010000000574726163650100000003616263",
+      "name": "a plain batch of a keyed and an unkeyed record with a header",
+      "value": {
+        "batch": {
+          "codec": "none",
+          "layout": "plain",
+          "records": [
+            {
+              "record": {
+                "headers": [],
+                "key": "k1",
+                "timestamp": 1767225600000,
+                "value": "v1"
+              },
+              "tombstone": false
+            },
+            {
+              "record": {
+                "headers": [
+                  [
+                    "trace",
+                    "abc"
+                  ]
+                ],
+                "key": null,
+                "timestamp": 1767225600000,
+                "value": "v2"
+              },
+              "tombstone": false
+            }
+          ]
+        },
+        "sequence": 0,
+        "stream_id": 5
+      }
+    },
+    {
+      "codec": "append_req",
+      "hex": "000000050000000000000001000000000100000018000000180101000000026b31000000000000019b76daa80000000000",
+      "name": "a tombstone deletes a key",
+      "value": {
+        "batch": {
+          "codec": "none",
+          "layout": "plain",
+          "records": [
+            {
+              "record": {
+                "headers": [],
+                "key": "k1",
+                "timestamp": 1767225600000,
+                "value": ""
+              },
+              "tombstone": true
+            }
+          ]
+        },
+        "sequence": 1,
+        "stream_id": 5
+      }
+    },
+    {
+      "codec": "close_stream_req",
+      "hex": "00000005",
+      "name": "ends a stream",
+      "value": 5
+    },
+    {
+      "codec": "push",
+      "hex": "0000000005000000000000002900000010002000000000",
+      "name": "an ack with no error",
+      "value": [
+        "append_ack",
+        {
+          "acked_sequence": 41,
+          "errors": [],
+          "stream_id": 5,
+          "window_appends": 16,
+          "window_bytes": 2097152
+        }
+      ]
+    },
+    {
+      "codec": "push",
+      "hex": "00000000050000000000000029000000000000000000010000000000000028010000000a6f7665726c6f61646564",
+      "name": "an ack reporting one failed sequence",
+      "value": [
+        "append_ack",
+        {
+          "acked_sequence": 41,
+          "errors": [
+            {
+              "reason": "overloaded",
+              "sequence": 40
+            }
+          ],
+          "stream_id": 5,
+          "window_appends": 0,
+          "window_bytes": 0
+        }
+      ]
+    },
+    {
+      "codec": "push",
+      "hex": "010000000501000000067365616c6564000000000000000d000100000001010000000401000000106d616c61636869406d616c6163686933",
+      "name": "a seal moves the stream to the range's next segment",
+      "value": [
+        "moved",
+        {
+          "reason": "sealed",
+          "routes_version": 13,
+          "stream_id": 5,
+          "targets": [
+            {
+              "range": 1,
+              "segment": {
+                "primary": "malachi@malachi3",
+                "segment": 4
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "codec": "push",
+      "hex": "0100000005010000000573706c6974000000000000000e000200000003000000000400",
+      "name": "a split moves it to the two children, with no segment yet",
+      "value": [
+        "moved",
+        {
+          "reason": "split",
+          "routes_version": 14,
+          "stream_id": 5,
+          "targets": [
+            {
+              "range": 3,
+              "segment": null
+            },
+            {
+              "range": 4,
+              "segment": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "codec": "push",
+      "hex": "02000000090000000000000000000300000000000000000000007800000000000000000100000000020000004600000046000000000000000000010001000000026b310000000276310000019b76daa80000000000000000000000000000020101000000026b31000000000000019b76daa80000000000",
+      "name": "a page of records with a tombstone",
+      "value": [
+        "records",
+        {
+          "backlog": 120,
+          "batch": {
+            "codec": "none",
+            "layout": "positioned",
+            "records": [
+              {
+                "position": [
+                  0,
+                  1
+                ],
+                "record": {
+                  "headers": [],
+                  "key": "k1",
+                  "timestamp": 1767225600000,
+                  "value": "v1"
+                },
+                "tombstone": false
+              },
+              {
+                "position": [
+                  0,
+                  2
+                ],
+                "record": {
+                  "headers": [],
+                  "key": "k1",
+                  "timestamp": 1767225600000,
+                  "value": ""
+                },
+                "tombstone": true
+              }
+            ]
+          },
+          "expired": 0,
+          "expired_exact": true,
+          "next": [
+            0,
+            3
+          ],
+          "skip": 0,
+          "stream_id": 9
+        }
+      ]
+    }
+  ]
+}

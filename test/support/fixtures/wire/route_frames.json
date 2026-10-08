@@ -1,0 +1,120 @@
+{
+  "about": "Golden frames for the routing keys 24 and 25 (#275), read by test/malachi/wire_stream_frames_test.exs and by scripts/lib/wire_streams.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "cluster_state_req",
+      "hex": "",
+      "name": "the request carries nothing",
+      "value": null
+    },
+    {
+      "codec": "cluster_state_resp",
+      "hex": "000000000000000701000201000000106d616c61636869406d616c616368693101000000196d616c61636869312e6d616c616368692d686561646c6573730fc80001000000106d616c61636869406d616c61636869320000000100020000000000000001",
+      "name": "two brokers, one advertising no address, and two vnodes",
+      "value": {
+        "brokers": [
+          {
+            "host": "malachi1.malachi-headless",
+            "id": "malachi@malachi1",
+            "port": 4040,
+            "status": "alive"
+          },
+          {
+            "host": null,
+            "id": "malachi@malachi2",
+            "port": 0,
+            "status": "suspect"
+          }
+        ],
+        "streams_enabled": true,
+        "version": 7,
+        "vnodes": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "codec": "cluster_state_resp",
+      "hex": "000000000000000100000101000000106d616c61636869406d616c6163686933010000000831302e302e302e330fc8020000",
+      "name": "streams not enabled, a dead broker, no vnode yet",
+      "value": {
+        "brokers": [
+          {
+            "host": "10.0.0.3",
+            "id": "malachi@malachi3",
+            "port": 4040,
+            "status": "dead"
+          }
+        ],
+        "streams_enabled": false,
+        "version": 1,
+        "vnodes": []
+      }
+    },
+    {
+      "codec": "topic_routes_req",
+      "hex": "01000000066f7264657273",
+      "name": "the routes of one topic",
+      "value": "orders"
+    },
+    {
+      "codec": "topic_routes_resp",
+      "hex": "01000000066f7264657273000000000000000c04000300000000000000000000000000000000000000100100000000010000000000000000000000000000000800010000000301000000106d616c61636869406d616c616368693200000002000000000000000800000000000000100000",
+      "name": "a sealed parent and two children, one with no active segment yet",
+      "value": {
+        "keyspace_bits": 4,
+        "ranges": [
+          {
+            "key_end": 16,
+            "key_start": 0,
+            "range": 0,
+            "segment": null,
+            "state": "sealed"
+          },
+          {
+            "key_end": 8,
+            "key_start": 0,
+            "range": 1,
+            "segment": {
+              "primary": "malachi@malachi2",
+              "segment": 3
+            },
+            "state": "active"
+          },
+          {
+            "key_end": 16,
+            "key_start": 8,
+            "range": 2,
+            "segment": null,
+            "state": "active"
+          }
+        ],
+        "topic": "orders",
+        "version": 12
+      }
+    },
+    {
+      "codec": "topic_routes_resp",
+      "hex": "0100000004776964650000000000000001200001000000000000000000000000000000010000000000010000000001000000106d616c61636869406d616c6163686931",
+      "name": "one range over a 32-bit keyspace ends at 2^32",
+      "value": {
+        "keyspace_bits": 32,
+        "ranges": [
+          {
+            "key_end": 4294967296,
+            "key_start": 0,
+            "range": 0,
+            "segment": {
+              "primary": "malachi@malachi1",
+              "segment": 0
+            },
+            "state": "active"
+          }
+        ],
+        "topic": "wide",
+        "version": 1
+      }
+    }
+  ]
+}

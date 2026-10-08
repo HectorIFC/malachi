@@ -30,14 +30,22 @@ flowchart LR
 > **Analogy.** The key is like a name you file under: the same name always lands on the same shelf, so
 > everything for one key stays in order. You never choose the shelf; the hash does.
 
-## Why the cursor is opaque
+## Why the cursor survives a split
 
-Internally a cursor encodes per-range positions. It is deliberately opaque so the broker can **split, merge
-and restripe ranges while the cluster is running** without breaking clients.
+Internally a cursor holds a position per range, `{source_index, offset}`: an offset in one source of the
+range's **history**, which lists the range's ancestors oldest first and then the range itself. A split
+only adds to the end of that list, so a child's history starts with its parent's, and the broker can
+**split, merge and restripe ranges while the cluster is running** without the cursor changing meaning.
 
-This is the core departure from Kafka, which exposes partitions and offsets to clients. Once a client knows
-"partition 7, offset 12345", the partition count is frozen into your clients' assumptions, resharding
-becomes a migration event. Here the equivalent change is a server-side operation the client never notices.
+A consumer of the new ranges starts from the start of their history: it reads its share of the parent's
+records again before the children's own, so each record arrives **at least once and is never lost**. A
+merge lists both buddies, so a position read in one of them does not carry over to the merged range,
+which is read from the start of its own history the same way.
+
+This is the core departure from Kafka, which exposes partitions and offsets to clients. Once a client
+knows "partition 7, offset 12345", the partition count is frozen into its assumptions, and resharding
+becomes a migration event. Here it is a server-side operation the client sees at most as records read
+again.
 
 ```mermaid
 flowchart TD
@@ -45,7 +53,7 @@ flowchart TD
     O1["client remembers 'partition 7, offset 12345'"] --> O2["a reshard changes the partition count"] --> O3["the client's assumption breaks"]
   end
   subgraph cursor["Opaque cursor (durable)"]
-    C1["client holds a token (a coat-check ticket)"] --> C2["the broker rearranges ranges underneath"] --> C3["the same token still resolves"]
+    C1["client holds a token (a coat-check ticket)"] --> C2["the broker splits a range underneath"] --> C3["the same token still resolves"]
   end
 ```
 
@@ -60,16 +68,17 @@ flowchart TD
   T["Topic (the whole library)"] --> R["Range (one shelf: a band of keys)"]
   R --> S["Segment (a book, sealed when full)"]
   S --> Rec["Record (a page: key, value, headers)"]
-  R -. "splits as it grows" .-> R2["Range (a second shelf)"]
+  R -. "split by an operator" .-> R2["Range (a second shelf)"]
 ```
 
 > **Analogy.** A topic is a library, a range is one shelf holding a band of keys, a segment is a book on
-> that shelf (sealed once full, never rewritten), and a record is a page. When a shelf fills up, the library
-> adds a second shelf and moves half the books' labels over: no book is recopied, only the catalog changes.
+> that shelf (sealed once full, never rewritten), and a record is a page. When the librarian splits a shelf,
+> the library adds a second shelf and moves half the books' labels over: no book is recopied, only the
+> catalog changes.
 
 - **Range.** A topic's keyspace is divided into ranges. A record's key hashes to a position, and that
-  position lands in exactly one range. Ranges **split** as they grow, which is how a topic scales without
-  the client choosing a partition count up front.
+  position lands in exactly one range. An operator **splits** a range in two, or merges two buddies back
+  into one, which is how a topic scales without the client choosing a partition count up front.
 - **Segment.** Each range is a series of segments. The active segment takes appends until it crosses its
   size threshold, then it is **sealed** and a new one rolls. Sealing is a fence, not a label: the store is
   closed first and reports where it ended, and that answer becomes the segment's recorded length, so a

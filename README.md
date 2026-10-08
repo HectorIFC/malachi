@@ -55,10 +55,11 @@ A client deals in three things and nothing else:
 - **key**: on produce, routes each record to a range of the topic's keyspace (ordering is per key).
 - **opaque cursor**: on consume, a position token the client echoes back. It is deliberately opaque:
   internally it encodes per-range positions, but the client never sees partitions or offsets, so the
-  broker can split/merge/restripe ranges underneath without breaking the client. This is the core
-  difference from Kafka, which leaks partitions and offsets to the client.
+  broker can split/merge/restripe ranges underneath without breaking the client. After a split, a consumer
+  reads its share of the parent's records again from the new ranges (at least once, never lost). This is
+  the core difference from Kafka, which leaks partitions and offsets to the client.
 
-Under the hood a topic is a set of dynamic **ranges** (slices of the keyspace that split as they grow),
+Under the hood a topic is a set of **ranges** (slices of the keyspace that an operator splits and merges),
 each a series of **segments** replicated by quorum across nodes. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture.
 
@@ -787,12 +788,21 @@ The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 
 and 23) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
 [per-topic retention](docs/guides/per-topic-retention.md) guides.
 
-Records on the wire carry **no offset**: position travels only in the opaque cursor, and permissions
-(`:produce`/`:consume`) are enforced per operation against the authenticated session.
+Keys 24 to 34 are the NorthGuard data path being built in #275: routing (`cluster_state`, `topic_routes`),
+producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume
+streams that carry each record's offset (`open_consume`, `consume_ack`, `fetch_range`), and group
+membership beside the data path (`join_group`, `group_heartbeat`, `commit_offsets`), with records in
+batches that may be zstd compressed. Their frames are defined (`Malachi.Wire`, `Malachi.Wire.Batch`, and
+`scripts/lib/wire.js`), but no server answers them yet: until it does, they get `unknown_api_key`.
+
+Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
+frames (keys 24 to 34) carry each record's position beside it, `{source_index, offset}` in its range's
+history (see `Malachi.Wire`). Permissions (`:produce`/`:consume`) are enforced per operation against the
+authenticated session.
 
 A `fetch` with a **consumer-group member id** is server-scoped: the coordinator assigns each member of a
 group a share of the topic's ranges, so members consume in **parallel** and disjointly. The client still
-only sees records + an opaque cursor: ranges never cross the wire - and the member stays alive by
+only sees records + an opaque cursor: its share of ranges stays on the server - and the member stays alive by
 fetching (or explicitly `leave_group`s on shutdown).
 
 Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the

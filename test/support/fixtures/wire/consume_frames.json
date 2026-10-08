@@ -1,0 +1,209 @@
+{
+  "about": "Golden frames for the consume keys 29 to 31 (#275), read by test/malachi/wire_stream_frames_test.exs and by scripts/lib/wire_streams.selftest.js. Bytes are frozen once shipped: never edit a hex string, add a case.",
+  "cases": [
+    {
+      "codec": "open_consume_req",
+      "hex": "01000000066f726465727300000001000000000000000c00000003e8000000640010000003",
+      "name": "from the oldest record, either codec",
+      "value": {
+        "accept": [
+          "none",
+          "zstd"
+        ],
+        "max": 100,
+        "max_bytes": 1048576,
+        "range": 1,
+        "routes_version": 12,
+        "start": "earliest",
+        "topic": "orders",
+        "window": 1000
+      }
+    },
+    {
+      "codec": "open_consume_req",
+      "hex": "01000000066f726465727300000001000000000000000c010000000a0000000a0001000001",
+      "name": "from the next record produced, plain only",
+      "value": {
+        "accept": [
+          "none"
+        ],
+        "max": 10,
+        "max_bytes": 65536,
+        "range": 1,
+        "routes_version": 12,
+        "start": "latest",
+        "topic": "orders",
+        "window": 10
+      }
+    },
+    {
+      "codec": "open_consume_req",
+      "hex": "01000000066f726465727300000003000000000000000e020001000000000000002a00000064000000640010000002",
+      "name": "from a position in an ancestor",
+      "value": {
+        "accept": [
+          "zstd"
+        ],
+        "max": 100,
+        "max_bytes": 1048576,
+        "range": 3,
+        "routes_version": 14,
+        "start": {
+          "position": [
+            1,
+            42
+          ]
+        },
+        "topic": "orders",
+        "window": 100
+      }
+    },
+    {
+      "codec": "open_consume_req",
+      "hex": "01000000066f726465727300000001000000000000000c03010000000762696c6c696e6700000064000000320010000003",
+      "name": "from a group's checkpoint",
+      "value": {
+        "accept": [
+          "none",
+          "zstd"
+        ],
+        "max": 50,
+        "max_bytes": 1048576,
+        "range": 1,
+        "routes_version": 12,
+        "start": {
+          "committed": "billing"
+        },
+        "topic": "orders",
+        "window": 100
+      }
+    },
+    {
+      "codec": "open_consume_resp",
+      "hex": "0000000900000000000000000000",
+      "name": "the stream and where it starts",
+      "value": {
+        "position": [
+          0,
+          0
+        ],
+        "stream_id": 9
+      }
+    },
+    {
+      "codec": "consume_ack_req",
+      "hex": "000000090000000000000000000300000000",
+      "name": "read up to a position, window unchanged",
+      "value": {
+        "position": [
+          0,
+          3
+        ],
+        "stream_id": 9,
+        "window": 0
+      }
+    },
+    {
+      "codec": "consume_ack_req",
+      "hex": "0000000900010000000000000007000001f4",
+      "name": "read up to a position and widen the window",
+      "value": {
+        "position": [
+          1,
+          7
+        ],
+        "stream_id": 9,
+        "window": 500
+      }
+    },
+    {
+      "codec": "fetch_range_req",
+      "hex": "01000000066f726465727300000002000000000000000c020000000000000000000a0000006400100000000001f401",
+      "name": "a page from a position, waiting up to half a second",
+      "value": {
+        "accept": [
+          "none"
+        ],
+        "max": 100,
+        "max_bytes": 1048576,
+        "range": 2,
+        "routes_version": 12,
+        "start": {
+          "position": [
+            0,
+            10
+          ]
+        },
+        "topic": "orders",
+        "wait_ms": 500
+      }
+    },
+    {
+      "codec": "page",
+      "hex": "0001000000000000000100000002000000000000000000000000000000030000000000020000004a0000004a000000000000000000050001000000026b32000000036f6c640000019b76daa80000000000000100000000000000000001000000026b32000000036e65770000019b76daa80000000000",
+      "name": "an ancestor's records then the range's own, past expired data",
+      "value": {
+        "backlog": 0,
+        "batch": {
+          "codec": "none",
+          "layout": "positioned",
+          "records": [
+            {
+              "position": [
+                0,
+                5
+              ],
+              "record": {
+                "headers": [],
+                "key": "k2",
+                "timestamp": 1767225600000,
+                "value": "old"
+              },
+              "tombstone": false
+            },
+            {
+              "position": [
+                1,
+                0
+              ],
+              "record": {
+                "headers": [],
+                "key": "k2",
+                "timestamp": 1767225600000,
+                "value": "new"
+              },
+              "tombstone": false
+            }
+          ]
+        },
+        "expired": 3,
+        "expired_exact": false,
+        "next": [
+          1,
+          1
+        ],
+        "skip": 2
+      }
+    },
+    {
+      "codec": "page",
+      "hex": "0000000000000000000000000000000000000000000000000000000000000100000000000000000000000000",
+      "name": "an empty page",
+      "value": {
+        "backlog": 0,
+        "batch": {
+          "codec": "none",
+          "layout": "positioned",
+          "records": []
+        },
+        "expired": 0,
+        "expired_exact": true,
+        "next": [
+          0,
+          0
+        ],
+        "skip": 0
+      }
+    }
+  ]
+}
