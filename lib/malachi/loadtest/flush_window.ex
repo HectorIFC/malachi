@@ -12,7 +12,10 @@ defmodule Malachi.Loadtest.FlushWindow do
   Quantiles use the interpolation Prometheus's `histogram_quantile` uses: find the bucket the rank falls
   in and interpolate linearly inside it, with 0 as the lower bound of the first bucket and the highest
   finite edge as the answer when the rank lands in `+Inf`. With four buckets per octave, the answer is
-  within 19% of the flush it stands for.
+  within 19% of the flush it stands for when that flush took longer than the lowest edge (8us) and no
+  longer than the highest (about 16.8s). The first bucket is everything from 0 to that edge, so a flush
+  of 8us or less is answered from inside `(0, 8us]` (a single one's p50 as 4us), the number
+  `histogram_quantile` gives for the same series.
 
   Pure: text in, maps out. `mix malachi.loadtest.ceiling flush-window` is the command-line side, which
   `scripts/loadtest-ceiling.sh` and `benchmark/docker-cluster.sh` call.

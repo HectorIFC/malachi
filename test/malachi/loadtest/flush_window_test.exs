@@ -8,7 +8,8 @@ defmodule Malachi.Loadtest.FlushWindowTest do
   alias Malachi.Loadtest.FlushWindow
   alias Malachi.Test.MetricsFixtures
 
-  # Four buckets per octave: an interpolated quantile is within this factor of the flush it stands for.
+  # Four buckets per octave: an interpolated quantile is within this factor of the flush it stands for,
+  # above the lowest edge (8us). The first bucket runs from 0 to that edge.
   @bucket_ratio :math.pow(2, 0.25)
 
   defp record_all(histogram, samples), do: Enum.each(samples, &Histogram.record(histogram, &1))
@@ -226,11 +227,21 @@ defmodule Malachi.Loadtest.FlushWindowTest do
       assert summary.mean == 30.0
     end
 
-    test "flushes below the first edge interpolate from zero" do
+    test "flushes at or below the first edge interpolate from zero" do
       summary = FlushWindow.summarize(window_of([3, 3]))
 
       assert summary.p50 == 0.000004
       assert summary.p50 > 0
+
+      # The bucket is (0, 8us], so for one flush anywhere in it, the edge included, the p50 is its midpoint
+      # and the p99 and p999 that far through it: an 8us flush's p50 is half of it, which the
+      # within-a-bucket bound above the first edge does not cover.
+      for us <- [1, 5, 8] do
+        summary = FlushWindow.summarize(window_of([us]))
+        assert summary.p50 == 0.000004
+        assert_in_delta summary.p99, 0.00000792, 1.0e-15
+        assert_in_delta summary.p999, 0.000007992, 1.0e-15
+      end
     end
 
     test "interpolates inside the bucket the rank falls in, as histogram_quantile does" do
@@ -251,8 +262,9 @@ defmodule Malachi.Loadtest.FlushWindowTest do
     end
   end
 
-  # Latencies spread log-uniformly over the histogram's finite range, 8us to 2^23us.
-  defp latency, do: map(integer(30..230), fn tenth_power -> round(:math.pow(2, tenth_power / 10)) end)
+  # Latencies spread log-uniformly over the histogram's finite range above its first bucket, from 2^3.1us
+  # (9us) to 2^23us. A flush of 8us or less is answered from inside (0, 8us], which the test above pins.
+  defp latency, do: map(integer(31..230), fn tenth_power -> round(:math.pow(2, tenth_power / 10)) end)
 
   property "the window's quantiles are within one bucket of the exact quantiles of the flushes in it" do
     check all(
