@@ -7,8 +7,9 @@ defmodule Malachi.LogApi do
   so the system can split/merge/restripe underneath without breaking clients. That hiding is the
   point: it is what lets malachi evolve its physical layout where Kafka leaks it to the client.
 
-  The cursor is just a token the client echoes back; today it encodes the consumer's position as
-  `%{range_id => next_offset}`, but its contents are not part of the contract. Because it comes from
+  The cursor is just a token the client echoes back; today it encodes the consumer's position in each
+  range it has read, `%{{topic, seq} => :start | {source_index, offset}}` (an offset in one source of the
+  range's history), but its contents are not part of the contract. Because it comes from
   an untrusted client, `decode_cursor/1` bounds its size, uses `binary_to_term(_, [:safe])` and
   validates the shape.
 
