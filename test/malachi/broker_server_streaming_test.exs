@@ -1,16 +1,21 @@
 defmodule Malachi.BrokerServerStreamingTest do
   # B2-a: streaming subscribers with a credit window and durable group commit, in-process (the test is
-  # the subscriber, receiving {:log_records, ...} into its own mailbox).
+  # the subscriber: it runs the reads the broker hands it, as a connection does, through StreamPush).
   use ExUnit.Case, async: false
 
   import Malachi.Test.PollingHelper
   import Malachi.Test.TeardownHelper
 
   alias Malachi.BrokerServer
+  alias Malachi.BrokerServer.Subscribers
+  alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.LogApi
+  alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
 
   setup do
@@ -20,7 +25,7 @@ defmodule Malachi.BrokerServerStreamingTest do
     {:ok, broker} = BrokerServer.start_link(Path.join(dir, "b"), brokers: [repl])
     {:ok, _root} = BrokerServer.create_topic(broker, "t", 4)
     on_exit(fn -> File.rm_rf!(dir) end)
-    %{broker: broker}
+    %{broker: broker, repl: repl, dir: dir}
   end
 
   defp produce(broker, values, topic \\ "t") do
@@ -29,10 +34,9 @@ defmodule Malachi.BrokerServerStreamingTest do
 
   # receive one push for `topic`, returning {values, positions}
   defp recv_push(topic \\ "t") do
-    receive do
+    case StreamPush.recv() do
       {:log_records, ^topic, records, positions} -> {Enum.map(records, & &1.value), positions}
-    after
-      1_000 -> flunk("expected a {:log_records, ...} push")
+      other -> flunk("expected a push to #{topic}, got #{inspect(other)}")
     end
   end
 
@@ -52,11 +56,220 @@ defmodule Malachi.BrokerServerStreamingTest do
 
     # only the window's worth is pushed, though 5 are available
     assert {["a", "b"], positions} = recv_push()
-    refute_receive {:log_records, _, _, _}, 100
+    assert StreamPush.recv(100) == :timeout
 
     # acking 2 returns 2 credit → the next 2 are pushed
     :ok = BrokerServer.stream_ack(broker, "t", "g", positions, 2)
     assert {["c", "d"], _positions} = recv_push()
+  end
+
+  describe "reads run in the subscriber, not in the broker's loop" do
+    test "a subscriber that has not run its read is handed no second one, and appends keep going",
+         %{broker: broker} do
+      :ok = BrokerServer.subscribe(broker, "t", "g", 100, 100)
+
+      # nothing to read yet, but the first read is handed out at subscribe and left unrun
+      for i <- 1..20, do: produce(broker, ["v#{i}"])
+
+      assert {:messages, messages} = Process.info(self(), :messages)
+      assert [{:log_read, _plan}] = Enum.filter(messages, &match?({:log_read, _}, &1))
+
+      # running it delivers nothing (it was planned before the produces); the wakes that came meanwhile
+      # hand out exactly one more read, which delivers everything produced since
+      assert {:log_records, "t", records, _positions} = StreamPush.recv()
+      assert Enum.map(records, & &1.value) == Enum.map(1..20, &"v#{&1}")
+      assert StreamPush.recv(100) == :timeout
+    end
+
+    test "the window bounds a push across every range of the topic, not each range", %{broker: broker} do
+      [root] = BrokerServer.active_range_ids(broker, "t")
+      {:ok, _left, _right} = BrokerServer.split_range(broker, root)
+      produce_keyed(broker, 40)
+
+      :ok = BrokerServer.subscribe(broker, "t", "g", 2, 100)
+
+      assert {:log_records, "t", records, _positions} = StreamPush.recv()
+      assert length(records) <= 2
+    end
+
+    test "with less credit than ranges, successive pushes take turns across the ranges", %{broker: broker} do
+      [root] = BrokerServer.active_range_ids(broker, "t")
+      {:ok, left, right} = BrokerServer.split_range(broker, root)
+      produce_keyed(broker, 40)
+
+      :ok = BrokerServer.subscribe(broker, "t", "g", 1, 100)
+
+      pushed_ranges =
+        for _ <- 1..4 do
+          assert {:log_records, "t", [record], positions} = StreamPush.recv()
+          :ok = BrokerServer.stream_ack(broker, "t", "g", positions, 1)
+          range_of(broker, record, [left, right])
+        end
+
+      assert pushed_ranges in [[left, right, left, right], [right, left, right, left]]
+    end
+  end
+
+  describe "reads that fail, or would read through a view that went stale" do
+    test "a read that fails delivers nothing, moves nothing, and the subscriber is read for again",
+         %{broker: broker, repl: repl, dir: dir} do
+      produce(broker, ["a", "b"])
+      stop_supervised!(repl)
+
+      :ok = BrokerServer.subscribe(broker, "t", "g", 10, 100)
+
+      # the primary is gone: the read fails, and the broker is told so (or it would wait on it forever)
+      assert StreamPush.recv(200) == :timeout
+      wait_until!(fn -> match?([%{reading: false, in_flight: 0}], subscription(broker)) end)
+      assert [%{positions: positions}] = subscription(broker)
+      assert positions == %{}
+
+      start_supervised!({ReplicationServer, name: repl, directory: Path.join(dir, "repl")}, id: repl)
+      :ok = BrokerServer.stream_ack(broker, "t", "g", %{}, 0)
+      assert {["a", "b"], _positions} = recv_push()
+    end
+
+    test "a read planned before an ancestor segment was deleted does not move the reader past what is left",
+         %{repl: repl, dir: dir} do
+      server = start_small_segments(repl, dir, 1)
+      attach_skips(server)
+      [root] = BrokerServer.active_range_ids(server, "s")
+      keys = left_half_keys(3)
+      for key <- keys, do: {:ok, _} = BrokerServer.produce(server, "s", [Record.new(key, key: key)])
+      wait_until!(fn -> length(sealed(server, root)) == 3 end)
+      {:ok, _left, _right} = BrokerServer.split_range(server, root)
+
+      :ok = BrokerServer.subscribe(server, "s", "g", 100, 100)
+      assert_receive {:log_read, plan}, 1_000
+
+      # retention deletes the first ancestor segment, metadata then files, after the plan was handed out
+      [gone | _] = server |> sealed(root) |> Enum.sort_by(& &1.start_offset)
+      :ok = BrokerServer.delete_segment(server, gone.id)
+      :ok = ReplicationServer.delete(repl, gone.id)
+
+      # the plan still lists it: its read must fail, not hand the reader to the next source
+      assert LogApi.execute_push(plan) == :nothing
+
+      # nothing moved, and the deletion's wake hands out the next read on its own, with no produce or ack
+      assert_receive {:log_read, next}, 1_000
+      assert next.positions == %{}
+      assert [%{positions: positions}] = subscription(server, "s")
+      assert positions == %{}
+
+      # that read sees the deletion and delivers what the ancestor still holds for this child
+      send(self(), {:log_read, next})
+      assert {:log_records, "s", records, _positions} = StreamPush.recv()
+      assert Enum.map(records, & &1.value) == Enum.drop(keys, 1)
+
+      # and what it stepped over is reported, attributed to the group, not skipped in silence
+      assert_receive {:skip_event, %{offsets: 1}, %{group: "g", span: :upper_bound}}
+    end
+
+    test "a push never takes more than its budget, even across a segment boundary", %{repl: repl, dir: dir} do
+      server = start_small_segments(repl, dir, 3)
+      [root] = BrokerServer.active_range_ids(server, "s")
+
+      # three records fill the first segment, which seals before the next three open the second, so
+      # the push below has to cross a sealed edge three records in
+      for i <- 1..3, do: {:ok, _} = BrokerServer.produce(server, "s", [Record.new("v#{i}", key: "k0")])
+      wait_until!(fn -> match?([%{length: 3}], sealed(server, root)) end)
+      for i <- 4..6, do: {:ok, _} = BrokerServer.produce(server, "s", [Record.new("v#{i}", key: "k0")])
+
+      :ok = BrokerServer.subscribe(server, "s", "g", 4, 4)
+      assert {:log_records, "s", records, _positions} = StreamPush.recv()
+      assert length(records) == 4
+      assert [%{in_flight: 4}] = subscription(server, "s")
+    end
+  end
+
+  describe "the budget of a page" do
+    test "a fetch reads up to max from every range, as it always has", %{broker: broker} do
+      [root] = BrokerServer.active_range_ids(broker, "t")
+      {:ok, _left, _right} = BrokerServer.split_range(broker, root)
+      produce_keyed(broker, 40)
+
+      {records, _positions, _skips} = BrokerServer.consume(broker, "t", %{}, 1, 0)
+      assert length(records) == 2
+    end
+
+    test "a push hands the share a range left unused to the range that has more", %{broker: broker} do
+      [root] = BrokerServer.active_range_ids(broker, "t")
+      {:ok, _left, _right} = BrokerServer.split_range(broker, root)
+      {:ok, _} = BrokerServer.produce(broker, "t", for(key <- left_half_keys(6), do: Record.new(key, key: key)))
+
+      :ok = BrokerServer.subscribe(broker, "t", "g", 4, 100)
+      assert {:log_records, "t", records, _positions} = StreamPush.recv()
+      assert length(records) == 4
+    end
+  end
+
+  # The pushed-to subscriptions of `topic`, as the broker holds them.
+  defp subscription(broker, topic \\ "t"), do: :sys.get_state(broker).subscribers |> Subscribers.list(topic)
+
+  # A broker on topic "s" whose segments hold `per_segment` records each (records of two-character values
+  # and keys), with a skip reporter beside it, as the application starts one.
+  defp start_small_segments(repl, dir, per_segment) do
+    name = :"small_segments_#{System.unique_integer([:positive])}"
+    start_supervised!({SkipReporter, name: SkipReporter.name_for(name)})
+    segment_max_bytes = per_segment * Record.encoded_size(Record.new("k0", key: "k0"))
+
+    {:ok, server} =
+      BrokerServer.start_link(Path.join(dir, "small"),
+        name: name,
+        brokers: [repl],
+        segment_max_bytes: segment_max_bytes
+      )
+
+    {:ok, _root} = BrokerServer.create_topic(server, "s", 4)
+    on_exit(fn -> stop_quietly(server) end)
+    server
+  end
+
+  defp attach_skips(_server) do
+    test = self()
+    handler_id = "skips-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:malachi, :retention, :skip],
+      fn _event, measurements, metadata, _config ->
+        if metadata.topic == "s", do: send(test, {:skip_event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp sealed(server, range_id) do
+    server
+    |> BrokerServer.metadata()
+    |> Malachi.Metadata.segments_of_range(range_id)
+    |> Enum.filter(&(&1.state == :sealed))
+  end
+
+  # `n` keys of the lower half of a 4-bit keyspace: the left child after a split.
+  defp left_half_keys(n) do
+    Stream.iterate(0, &(&1 + 1))
+    |> Stream.map(&"k#{&1}")
+    |> Stream.filter(&(Keyspace.position_of(&1, 16) < 8))
+    |> Enum.take(n)
+  end
+
+  # Records with distinct keys, so a split topic gets some in each range.
+  defp produce_keyed(broker, n) do
+    {:ok, _} = BrokerServer.produce(broker, "t", for(i <- 1..n, do: Record.new("v#{i}", key: "k#{i}")))
+  end
+
+  # The range of `range_ids` that owns `record`'s key. The setup creates "t" with 4 keyspace bits.
+  defp range_of(broker, record, range_ids) do
+    position = Keyspace.position_of(record.key, 16)
+    dsrsm = :sys.get_state(broker).broker.dsrsm
+
+    Enum.find(range_ids, fn range_id ->
+      range = DSRSM.get_range(dsrsm, "t", range_id)
+      Keyspace.within?(position, range.key_start, range.key_end)
+    end)
   end
 
   test "ack commits the group's position durably", %{broker: broker} do
@@ -102,9 +315,9 @@ defmodule Malachi.BrokerServerStreamingTest do
 
   # The pids subscribed to `topic`, sorted. The only helper in this file that reads the broker's state: a
   # dead plain subscriber is otherwise invisible (a push to a dead pid is dropped silently). It relies on
-  # nothing but `subscribers` being a per-topic list of maps carrying `:pid`, the shape #275 keeps.
+  # nothing but each topic's subscribers being a list of maps carrying `:pid`.
   defp subscribers(broker, topic \\ "t") do
-    :sys.get_state(broker).subscribers |> Map.get(topic, []) |> Enum.map(& &1.pid) |> Enum.sort()
+    :sys.get_state(broker).subscribers |> Subscribers.list(topic) |> Enum.map(& &1.pid) |> Enum.sort()
   end
 
   defp flush do
@@ -138,10 +351,9 @@ defmodule Malachi.BrokerServerStreamingTest do
   end
 
   defp collect_values(acc, timeout) do
-    receive do
+    case StreamPush.recv(timeout) do
       {:log_records, "t", records, _positions} -> collect_values(acc ++ Enum.map(records, & &1.value), timeout)
-    after
-      timeout -> acc
+      :timeout -> acc
     end
   end
 
@@ -230,8 +442,11 @@ defmodule Malachi.BrokerServerStreamingTest do
 
   defp forward_pushes(broker, test) do
     receive do
-      {:log_records, topic, records, _positions} ->
-        send(test, {:pushed, self(), topic, Enum.map(records, & &1.value)})
+      {:log_read, plan} ->
+        case LogApi.execute_push(plan) do
+          {:ok, topic, records, _positions} -> send(test, {:pushed, self(), topic, Enum.map(records, & &1.value)})
+          :nothing -> :ok
+        end
 
       {:unsubscribe, topic, from} ->
         :ok = BrokerServer.unsubscribe(broker, topic)
@@ -275,7 +490,7 @@ defmodule Malachi.BrokerServerStreamingTest do
       # the "u" subscriber kept its position and its in-flight count: one credit left, so one record
       produce(broker, ["u1", "u2"], "u")
       assert {["u1"], positions} = recv_push("u")
-      refute_receive {:log_records, "u", _, _}, 100
+      assert StreamPush.recv(100) == :timeout
 
       :ok = BrokerServer.stream_ack(broker, "u", "gu", positions, 2)
       assert {["u2"], _positions} = recv_push("u")

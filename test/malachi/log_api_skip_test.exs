@@ -11,6 +11,7 @@ defmodule Malachi.LogApiSkipTest do
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.StreamPush
 
   @moduletag :tmp_dir
 
@@ -105,7 +106,7 @@ defmodule Malachi.LogApiSkipTest do
 
     :ok = LogApi.subscribe(broker, topic, "billing", 100, 100)
 
-    assert_receive {:log_records, ^topic, [%{value: "v2"}], _positions}
+    assert {:log_records, ^topic, [%{value: "v2"}], _positions} = StreamPush.recv()
     assert_receive {:skip_event, %{offsets: 2}, %{group: "billing", origin: :cursor}}
   end
 

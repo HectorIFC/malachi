@@ -452,8 +452,8 @@ defmodule Malachi.TCPAcceptor do
   end
 
   # A subscribed connection becomes a one-stream duplex: switched to active mode so a single `receive`
-  # handles both the broker's `{:log_records, ...}` pushes (forwarded to the client as response frames
-  # tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
+  # handles both the broker's `{:log_read, plan}` pushes (read here and forwarded to the client as
+  # response frames tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
   # alongside the subscribe are drained first. The stream ends when the socket closes; the broker drops
   # the subscriber via the connection process's `:DOWN`.
   defp stream_loop(%{buffer: buffer} = state, sub_corr) do
@@ -469,9 +469,18 @@ defmodule Malachi.TCPAcceptor do
 
   defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
     receive do
-      {:log_records, _topic, records, positions} ->
-        frame = Wire.encode_ok(sub_corr, Wire.encode_fetch_resp(records, LogApi.encode_cursor(positions)))
-        transport.send(socket, frame)
+      {:log_read, plan} ->
+        # The broker decided this subscriber is owed records; the read and the write run here, in the
+        # connection, not in the loop that serializes appends (`Malachi.BrokerServer.execute_push/1`).
+        case LogApi.execute_push(plan) do
+          {:ok, _topic, records, positions} ->
+            frame = Wire.encode_ok(sub_corr, Wire.encode_fetch_resp(records, LogApi.encode_cursor(positions)))
+            transport.send(socket, frame)
+
+          :nothing ->
+            :ok
+        end
+
         stream_recv(state, sub_corr)
 
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->

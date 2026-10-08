@@ -7,6 +7,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Broker
   alias Malachi.Broker.Skip
   alias Malachi.BrokerServer
+  alias Malachi.BrokerServer.Subscribers
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.ReplicatedDSRSM
@@ -15,6 +16,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnfenceablePrimary
   alias Malachi.Test.UnknownMessages
@@ -316,11 +318,12 @@ defmodule Malachi.BrokerServerTest do
 
       :ok = BrokerServer.subscribe(server, topic, "billing", 100, 100)
 
+      # The read moves past the dead ancestor and delivers nothing: no empty batch is handed back.
+      assert StreamPush.drain() == []
       assert_receive {:skip_event, %{offsets: 3}, %{group: "billing", span: :upper_bound}}
-      refute_receive {:log_records, ^topic, [], _positions}
 
       # The subscriber moved past the dead ancestor, so the next push does not scan it again.
-      assert [%{positions: %{^left_id => {1, 0}}}] = :sys.get_state(server).subscribers[topic]
+      assert [%{positions: %{^left_id => {1, 0}}}] = Subscribers.list(:sys.get_state(server).subscribers, topic)
     end
 
     test "a long-poll that times out hands back no skips", %{tmp_dir: directory} do
@@ -338,7 +341,7 @@ defmodule Malachi.BrokerServerTest do
 
       :ok = BrokerServer.subscribe(server, topic, "billing", 100, 100)
 
-      assert_receive {:log_records, ^topic, [%{value: "v2"}], _positions}
+      assert {:log_records, ^topic, [%{value: "v2"}], _positions} = StreamPush.recv()
       assert_receive {:skip_event, %{count: 1, offsets: 2}, %{group: "billing", origin: :cursor, span: :exact}}
     end
   end
@@ -453,8 +456,12 @@ defmodule Malachi.BrokerServerTest do
       assert Enum.all?(results, &match?({:ok, _}, &1)),
              "every interleaved produce must succeed, got: #{inspect(Enum.filter(results, &match?({:error, _}, &1)))}"
 
-      # All 40 records landed contiguously on the shared primary (either frontend can read them).
-      values = front_a |> read_all(root_id) |> Enum.map(& &1.value)
+      # All 40 records landed contiguously on the shared primary, read off the primary itself: a
+      # frontend reads only up to its own horizon (its local counter, see below), so reading through
+      # one of them would test that frontend's horizon rather than where the records landed.
+      [segment] = front_a |> BrokerServer.metadata() |> Metadata.segments_of_range(root_id)
+      {:ok, on_primary} = ReplicationServer.read(repl, segment.id, 0, 1_000)
+      values = Enum.map(on_primary, & &1.value)
       assert length(values) == 40
       assert Enum.sort(values) == Enum.sort(for i <- 1..40, do: "v#{i}")
 

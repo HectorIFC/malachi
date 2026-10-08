@@ -20,6 +20,7 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Test.AliveMembersStub
   alias Malachi.Test.FaultySegmentStore
   alias Malachi.Test.SilentRaMember
+  alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
@@ -270,7 +271,7 @@ defmodule Malachi.BrokerServerRaTest do
     # Produced through the OTHER broker, so nothing on this path wakes the subscription.
     {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("v1", key: "k1")])
 
-    assert_receive {:log_records, "events", records, _positions}, 3_000
+    assert {:log_records, "events", records, _positions} = StreamPush.recv(3_000)
     assert Enum.map(records, & &1.value) == ["v1"]
 
     :ok = BrokerServer.stop(writer)

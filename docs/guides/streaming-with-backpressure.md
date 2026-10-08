@@ -34,9 +34,13 @@ The budget for each push is exactly:
 budget = min(max, window - in_flight)
 ```
 
-`max` caps a single push, `window` caps the total outstanding. When the budget reaches zero the broker
-stops pushing to that subscriber and does no further work for it. Backpressure here is the absence of
-sends, not a queue building up somewhere.
+`max` caps a single push, `window` caps the total outstanding. The budget covers the whole push, across
+every range of the topic: each range is offered an equal share first, and what the ranges with nothing
+to read leave unused goes to the ones that have more. When the budget is smaller than the number of
+ranges, successive pushes start from a different range so none is always left out. (A fetch is
+different: its `max` applies to each range.) When the budget
+reaches zero the broker stops pushing to that subscriber and does no further work for it. Backpressure
+here is the absence of sends, not a queue building up somewhere.
 
 ## Subscribing
 
@@ -45,16 +49,29 @@ sends, not a queue building up somewhere.
 ```
 
 That registers the **calling process** as a push subscriber, resuming from the group's committed position.
-Records arrive as ordinary messages:
+Whenever it is owed records, the broker sends it a read to run rather than the records themselves: the
+broker serializes every append, so it decides who is owed what and leaves the read (which can go to disk
+or to another node) to the subscriber's own process. Run it with `execute_push/1`, which reads and returns
+the records:
 
 ```elixir
 receive do
-  {:log_records, topic, records, positions} ->
-    :ok = handle(records)
-    cursor = LogApi.encode_cursor(positions)
-    :ok = LogApi.stream_ack(Malachi.LogBroker, topic, "live", cursor, length(records))
+  {:log_read, plan} ->
+    case LogApi.execute_push(plan) do
+      {:ok, topic, records, positions} ->
+        :ok = handle(records)
+        cursor = LogApi.encode_cursor(positions)
+        :ok = LogApi.stream_ack(Malachi.LogBroker, topic, "live", cursor, length(records))
+
+      :nothing ->
+        :ok
+    end
 end
 ```
+
+A plan can read nothing to deliver (caught up, or only stepped over expired data); run it anyway, because
+running it is how the broker learns the read ended. A subscriber has at most one plan out at a time, so a
+slow one holds up only itself, and its pushes arrive in order.
 
 Note the fourth element is internal **positions**, not the opaque cursor. `stream_ack/5` takes a cursor,
 so encode it first. That asymmetry exists because the push path hands the subscriber the raw position and

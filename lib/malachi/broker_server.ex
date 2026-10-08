@@ -34,7 +34,9 @@ defmodule Malachi.BrokerServer do
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.Broker.Skip
+  alias Malachi.BrokerServer.Subscribers
   alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -304,10 +306,11 @@ defmodule Malachi.BrokerServer do
   def committed_offsets(server, group, topic), do: GenServer.call(server, {:committed_offsets, group, topic})
 
   @doc """
-  Subscribes the calling process as a streaming consumer of `topic` for consumer `group`: records
-  are pushed to it as `{:log_records, topic, records, next_positions}` as they are produced, resuming
-  from the group's committed position and bounded by a credit `window` (at most `window` records in
-  flight, at most `max` per push). Ack with `stream_ack/5` to return credit and commit progress. `:ok`.
+  Subscribes the calling process as a streaming consumer of `topic` for consumer `group`, resuming from
+  the group's committed position and bounded by a credit `window` (at most `window` records in flight,
+  at most `max` per push). Whenever it is owed records the process receives `{:log_read, plan}` and runs
+  the plan with `execute_push/1`, which reads in the calling process and returns the records to deliver.
+  Ack with `stream_ack/5` to return credit and commit progress. `:ok`.
   """
   @spec subscribe(
           GenServer.server(),
@@ -338,6 +341,31 @@ defmodule Malachi.BrokerServer do
           :ok
   def stream_ack(server, topic, group, positions, count, ranges \\ nil, coordinator \\ nil) do
     GenServer.call(server, {:stream_ack, topic, group, positions, count, self(), ranges, coordinator})
+  end
+
+  @doc """
+  Runs, in the calling process, a read this broker handed to it as `{:log_read, plan}`: a streaming
+  subscriber receives one whenever it is owed records, and runs it with this function rather than the
+  broker running it in the loop that serializes appends. Reads the plan's ranges through its view, tells
+  the broker how the read ended (what it pushed and where it left the positions, or that it failed, in
+  which case nothing moves and the next produce or ack reads again), and returns the records to deliver
+  as `{:ok, topic, records, next_positions}`, or `:nothing` when there are none to deliver.
+
+  The caller delivers the records it gets back (a connection writes them to its socket) before it runs
+  the next plan. The broker hands a subscriber one plan at a time, so its pushes stay in order.
+  """
+  @spec execute_push(map()) ::
+          {:ok, Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()], Malachi.Metadata.offsets()} | :nothing
+  def execute_push(%{broker: broker, ref: ref, topic: topic, group: group} = plan) do
+    case Broker.consume_shared(plan.view, plan.ranges, plan.positions, plan.budget, &ReplicationServer.read/4) do
+      {:ok, {records, next_positions, skips}} ->
+        GenServer.cast(broker, {:read_done, ref, topic, group, {:ok, length(records), next_positions, skips}})
+        if records == [], do: :nothing, else: {:ok, topic, records, next_positions}
+
+      {:error, _reason} ->
+        GenServer.cast(broker, {:read_done, ref, topic, group, :error})
+        :nothing
+    end
   end
 
   @doc "Removes the calling process's streaming subscription to `topic`. Returns `:ok`."
@@ -468,11 +496,13 @@ defmodule Malachi.BrokerServer do
       # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
       # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
       waiters: [],
-      # Streaming subscribers: `%{topic => [subscriber]}`. A subscriber is pushed records as they
-      # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
-      # commit the group's position. See `wake_subscribers/3` / `push_subscriber/2`.
-      subscribers: %{},
-      # Where a push reports the data it moved a subscriber past (see `push_subscriber/3`); nil = nowhere.
+      # Streaming subscribers (`Malachi.BrokerServer.Subscribers`). A subscriber is pushed records as
+      # they are produced, bounded by a credit window (in_flight <= window); acks return credit and
+      # durably commit the group's position. This loop only decides who is read for: the read and the
+      # socket write run in the subscriber's own process. See `dispatch_reads/2` and `execute_push/1`.
+      subscribers: Subscribers.new(),
+      # Where a push reports the data it moved a subscriber past (see `handle_cast({:read_done, ...})`);
+      # nil = nowhere.
       skip_reporter: skip_reporter,
       # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
       # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
@@ -653,7 +683,17 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:delete_segment, segment_id}, _from, state) do
     {broker, reply} = Broker.delete_segment(state.broker, segment_id)
-    {:reply, reply, %{state | broker: broker}}
+    # A read already handed out may list this segment in its view; once its copies are deleted that read
+    # fails (`Malachi.Broker` will not take a deleted segment for drained data) and nothing else would ask
+    # for another until a produce, an ack or a reconcile tick. Waking the topic's subscribers here reads
+    # them again at once with a view that no longer lists it (one mid-read is read again when its read
+    # ends).
+    state = %{state | broker: broker}
+
+    case Metadata.segment_routing_topic(segment_id) do
+      nil -> {:reply, reply, state}
+      topic -> {:reply, reply, wake_subscribers(state, topic, {:ok, []})}
+    end
   end
 
   def handle_call({:commit_offset, group, topic, offsets}, _from, state) do
@@ -672,8 +712,8 @@ defmodule Malachi.BrokerServer do
     # scope a member's start positions to its ranges (a whole-group subscriber keeps them all)
     positions = if ranges, do: Map.take(positions, ranges), else: positions
 
-    subscriber =
-      push_subscriber(state.broker, state.skip_reporter, %{
+    {reads, subscribers} =
+      Subscribers.add(state.subscribers, %{
         pid: pid,
         ref: ref,
         topic: topic,
@@ -690,8 +730,7 @@ defmodule Malachi.BrokerServer do
         coordinator: Keyword.get(group_opts, :coordinator)
       })
 
-    subscribers = Map.update(state.subscribers, topic, [subscriber], &[subscriber | &1])
-    {:reply, :ok, %{state | subscribers: subscribers}}
+    {:reply, :ok, dispatch_reads(%{state | subscribers: subscribers}, reads)}
   end
 
   def handle_call({:stream_ack, topic, group, positions, count, pid, ranges, coordinator}, _from, state) do
@@ -701,24 +740,8 @@ defmodule Malachi.BrokerServer do
     # `coordinator` refreshes the member's resolved coordinator ref, so after a vnode leadership change
     # the :DOWN leave targets the current owner (nil keeps the ref captured at subscribe).
     {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
-
-    subs =
-      state.subscribers
-      |> Map.get(topic, [])
-      |> Enum.map(fn sub ->
-        if sub.pid == pid do
-          push_subscriber(broker, state.skip_reporter, %{
-            sub
-            | in_flight: max(sub.in_flight - count, 0),
-              ranges: ranges || sub.ranges,
-              coordinator: coordinator || sub.coordinator
-          })
-        else
-          sub
-        end
-      end)
-
-    {:reply, :ok, %{state | broker: broker, subscribers: Map.put(state.subscribers, topic, subs)}}
+    {reads, subscribers} = Subscribers.ack(state.subscribers, topic, pid, count, ranges, coordinator)
+    {:reply, :ok, dispatch_reads(%{state | broker: broker, subscribers: subscribers}, reads)}
   end
 
   def handle_call({:unsubscribe, topic, pid}, _from, state) do
@@ -734,6 +757,21 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  # A subscriber's process finished the read `dispatch_reads/2` handed it (`execute_push/1`): its
+  # position and credit move by what was pushed, the data it was moved past is reported, and it is read
+  # for again at once if a wake arrived meanwhile.
+  def handle_cast({:read_done, ref, topic, group, outcome}, state) do
+    {result, skips} =
+      case outcome do
+        {:ok, pushed, positions, skips} -> {{:ok, pushed, positions}, skips}
+        :error -> {:error, []}
+      end
+
+    SkipReporter.report(state.skip_reporter, topic, group, skips)
+    {reads, subscribers} = Subscribers.read_done(state.subscribers, ref, result)
+    {:noreply, dispatch_reads(%{state | subscribers: subscribers}, reads)}
+  end
+
   # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
   # (cache ring + write router), the refresh source and the bootstrap pass, so the periodic reconcile
   # re-seeds against the new topology instead of reverting to the boot ring, and bootstraps the vnodes
@@ -890,20 +928,21 @@ defmodule Malachi.BrokerServer do
 
   # --- end of the reconcile task's replies ---
 
-  # A streaming subscriber's process died: drop it from every topic it was subscribed to.
+  # A streaming subscriber's process died: drop that subscription. Each subscribe monitors anew, so the
+  # ref names exactly one subscription and its topic is one index lookup away; a process subscribed to
+  # several topics sends one :DOWN per subscription.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    {removed, subscribers} = Subscribers.remove_ref(state.subscribers, ref)
+
     # a departing group member leaves its group for a fast rebalance: done in an unlinked task, since the
     # coordinator's leave calls back into this broker and a synchronous call from here would deadlock.
-    for {_topic, subs} <- state.subscribers,
-        sub <- subs,
-        sub.ref == ref,
-        sub.member != nil,
-        sub.coordinator != nil do
-      Task.start(fn -> GroupCoordinator.leave(sub.coordinator, sub.group, sub.topic, sub.member) end)
-    end
+    case removed do
+      %{member: member, coordinator: coordinator} = sub when member != nil and coordinator != nil ->
+        Task.start(fn -> GroupCoordinator.leave(coordinator, sub.group, sub.topic, member) end)
 
-    subscribers =
-      Map.new(state.subscribers, fn {topic, subs} -> {topic, Enum.reject(subs, &(&1.ref == ref))} end)
+      _not_a_member ->
+        :ok
+    end
 
     {:noreply, %{state | subscribers: subscribers}}
   end
@@ -1392,11 +1431,14 @@ defmodule Malachi.BrokerServer do
   # frontend only learns about writes it did not handle on this tick. Subscribers belong on the same
   # tick for the same reason.
   #
-  # A caught-up subscriber costs a local lookup per range and no round trip: `locate_segment` answers
-  # `:eof` from the offsets map before any read function is called. The subscriber that does have a
+  # Every subscriber with credit and no read out is handed one on every tick, caught up or not (one with a
+  # read out is read for again when it ends): the loop pays for a
+  # view of its ranges (local metadata lookups, shared by the subscribers reading the same ranges) and a
+  # message each way, and the read itself runs in the subscriber's process, where a caught-up one answers
+  # `:eof` from the view's end before any read function is called. The subscriber that does have a
   # backlog pays for records it was owed anyway.
   defp wake_all_subscribers(state) do
-    Enum.reduce(Map.keys(state.subscribers), state, &wake_subscribers(&2, &1, {:ok, []}))
+    Enum.reduce(Subscribers.topics(state.subscribers), state, &wake_subscribers(&2, &1, {:ok, []}))
   end
 
   # The vnodes this broker has read at least once since boot. A vnode that has never answered has no
@@ -1550,30 +1592,11 @@ defmodule Malachi.BrokerServer do
     end
   end
 
+  # A consume page for a fetch or a parked waiter, read here, through the same view a push hands out.
   # The skips of every range read ride along, in range order, for whoever delivers the page to attribute.
   defp consume_ranges(broker, topic, positions, max_records, ranges) do
-    broker
-    |> selected_ranges(topic, ranges)
-    |> Enum.reduce_while({:ok, {[], positions, []}}, fn range_id, {:ok, {acc, positions, skips}} ->
-      cursor = Map.get(positions, range_id, :start)
-
-      case Broker.read_consume(broker, range_id, cursor, max_records, &ReplicationServer.read/4) do
-        {:ok, records, next_cursor, range_skips} ->
-          {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor), skips ++ range_skips}}}
-
-        # A range the control plane no longer knows (a stale assignment whose range has since split)
-        # holds nothing for this consumer; skipping it is the right answer, not a failure.
-        {:error, :no_such_range} ->
-          {:cont, {:ok, {acc, positions, skips}}}
-
-        # Anything else is a read that FAILED: an unreachable segment primary, a storage error. This
-        # used to fall into the same skip, so the page came back short (often empty) and successful,
-        # which a consumer reads as "caught up" and commits past. Fail the fetch instead; a client can
-        # retry a failure, and cannot detect a lie.
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
+    range_ids = selected_ranges(broker, topic, ranges)
+    Broker.consume_ranges(ReadView.new(broker, range_ids), range_ids, positions, max_records, &ReplicationServer.read/4)
   end
 
   defp selected_ranges(broker, topic, nil), do: Broker.active_range_ids(broker, topic)
@@ -1765,62 +1788,65 @@ defmodule Malachi.BrokerServer do
     %{state | waiters: others ++ still_waiting}
   end
 
-  # After a successful produce to `topic`, push newly-available records to each of its subscribers, each
-  # bounded by its own window credit.
+  # After a successful produce to `topic`, hand a read to each of its subscribers that has credit, each
+  # bounded by its own window. One already reading is read for again when that read ends.
   defp wake_subscribers(state, _topic, {:error, _reason}), do: state
 
   defp wake_subscribers(state, topic, {:ok, _placements}) do
-    case Map.get(state.subscribers, topic) do
-      nil ->
-        state
-
-      subs ->
-        %{
-          state
-          | subscribers:
-              Map.put(state.subscribers, topic, Enum.map(subs, &push_subscriber(state.broker, state.skip_reporter, &1)))
-        }
-    end
+    {reads, subscribers} = Subscribers.wake(state.subscribers, topic)
+    dispatch_reads(%{state | subscribers: subscribers}, reads)
   end
 
-  # Pushes up to the subscriber's remaining window credit (min with `max`) of records from its current
-  # position, advancing the position and the in-flight count. A no-op when out of credit or caught up.
-  # The push is the one delivery path that already serves a known group, so it reports the skips it
-  # delivered itself, to the reporter beside this broker; fetches hand theirs back to `Malachi.LogApi`.
-  defp push_subscriber(broker, skip_reporter, subscriber) do
-    budget = min(subscriber.max, subscriber.window - subscriber.in_flight)
+  # Hands each read to its subscriber's own process as `{:log_read, plan}`: the ranges to read, the
+  # positions to read them from, the budget, and a `ReadView` of just those ranges, built once per set
+  # of ranges for the whole batch. Nothing is read here; see `execute_push/1`.
+  defp dispatch_reads(state, []), do: state
 
-    if budget <= 0 do
-      subscriber
-    else
-      # `subscriber.ranges` scopes the push to a group member's assigned ranges (nil = the whole group).
-      case consume_ranges(broker, subscriber.topic, subscriber.positions, budget, subscriber.ranges) do
-        # Push nothing on a failed read rather than advancing the subscriber past records it never
-        # received; the next produce (or ack) retries the push.
-        {:error, _reason} ->
-          subscriber
+  defp dispatch_reads(state, reads) do
+    _views =
+      Enum.reduce(reads, %{}, fn {sub, budget}, views ->
+        range_ids = selected_ranges(state.broker, sub.topic, sub.ranges)
+        {view, views} = view_for(views, state.broker, range_ids)
+        # `sub` is the subscriber as it was when the read was handed out, before `turn` moved past it.
+        range_ids = Subscribers.rotate(range_ids, sub)
 
-        # Nothing to push, but the read can still have moved past a source whose data is gone. The
-        # progress is kept and the skips reported; no empty batch is pushed, because what a subscriber
-        # receives is the shipped stream payload and an empty one says nothing to a client.
-        {:ok, {[], next_positions, skips}} ->
-          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
-          %{subscriber | positions: next_positions}
+        send(
+          sub.pid,
+          {:log_read,
+           %{
+             broker: self(),
+             ref: sub.ref,
+             topic: sub.topic,
+             group: sub.group,
+             ranges: range_ids,
+             positions: sub.positions,
+             budget: budget,
+             view: view
+           }}
+        )
 
-        {:ok, {records, next_positions, skips}} ->
-          send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})
-          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
-          %{subscriber | positions: next_positions, in_flight: subscriber.in_flight + length(records)}
-      end
+        views
+      end)
+
+    state
+  end
+
+  defp view_for(views, broker, range_ids) do
+    case Map.fetch(views, range_ids) do
+      {:ok, view} ->
+        {view, views}
+
+      :error ->
+        view = ReadView.new(broker, range_ids)
+        {view, Map.put(views, range_ids, view)}
     end
   end
 
   # Removes `pid`'s subscription to `topic` (and stops monitoring it).
   defp drop_subscriber(state, topic, pid) do
-    subs = Map.get(state.subscribers, topic, [])
-    {removed, kept} = Enum.split_with(subs, &(&1.pid == pid))
+    {removed, subscribers} = Subscribers.remove_pid(state.subscribers, topic, pid)
     Enum.each(removed, &Process.demonitor(&1.ref, [:flush]))
-    %{state | subscribers: Map.put(state.subscribers, topic, kept)}
+    %{state | subscribers: subscribers}
   end
 
   # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh, bootstrap}`

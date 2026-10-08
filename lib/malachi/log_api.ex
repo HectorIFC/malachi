@@ -162,13 +162,22 @@ defmodule Malachi.LogApi do
   @doc """
   Opens a streaming subscription: registers the **calling process** as a push subscriber of `topic` for
   consumer `group`, bounded by a credit `window` (max in-flight records) and a `max` per-push batch. The
-  broker resumes from the group's committed position, pushes an initial backlog, and then pushes new
-  records on produce as `{:log_records, topic, records, positions}` messages to the caller. Returns `:ok`.
+  broker resumes from the group's committed position and, whenever the caller is owed records (the
+  backlog at once, then on produce), sends it `{:log_read, plan}`; the caller runs the plan with
+  `execute_push/1`, which reads in the caller's own process. Returns `:ok`.
   """
   @spec subscribe(GenServer.server(), Metadata.topic_name(), Metadata.group(), pos_integer(), pos_integer()) :: :ok
   def subscribe(server, topic, group, window, max) do
     BrokerServer.subscribe(server, topic, group, window, max)
   end
+
+  @doc """
+  Runs a `{:log_read, plan}` a subscription received: reads in the calling process and returns the
+  records to deliver as `{:ok, topic, records, positions}`, or `:nothing`. See
+  `Malachi.BrokerServer.execute_push/1`.
+  """
+  @spec execute_push(map()) :: {:ok, Metadata.topic_name(), [Record.t()], Metadata.offsets()} | :nothing
+  def execute_push(plan), do: BrokerServer.execute_push(plan)
 
   @doc """
   Like `subscribe/5` but for a consumer-group **member**: registers the member with the `coordinator`,
@@ -252,7 +261,7 @@ defmodule Malachi.LogApi do
 
   @doc """
   Encodes internal consume `positions` into an opaque cursor. Public because the streaming push path
-  (the connection forwarding `{:log_records, ...}`) must turn the pushed positions into a client cursor,
+  (the connection delivering what `execute_push/1` returns) must turn the pushed positions into a client cursor,
   the same token `fetch`/`fetch_group` return.
   """
   @spec encode_cursor(map()) :: cursor()

@@ -7,6 +7,7 @@ defmodule Malachi.BrokerTest do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Placement
+  alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Test.FakeSegmentStore
@@ -558,6 +559,98 @@ defmodule Malachi.BrokerTest do
       {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
       broker = delete_segments(broker, expire.(segments(broker, root_id)))
       {broker, root_id, left_id}
+    end
+
+    test "a sealed ancestor segment that answers nothing fails the read instead of being taken as drained",
+         %{store: store} do
+      # The read was routed through metadata that still lists the segment, but its copy is gone (retention
+      # or a heal deleted it since), so the store answers :eof. Taking that as the end of the ancestor
+      # moved the reader into the next source, past what the ancestor's later segments still held, and
+      # reported nothing. Failing leaves the position where it was; the next read sees the deletion.
+      {broker, root_id, left_id} = split_with_expired_parent(store, fn _segments -> [] end)
+      assert {:ok, _records, _cursor, []} = Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+      [gone | _] = segments(broker, root_id)
+
+      reader = fn ref, segment, offset, max ->
+        if segment == gone.id, do: :eof, else: FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:error, :sealed_segment_unreadable} = Broker.read_consume(broker, left_id, :start, 100, reader)
+    end
+
+    test "a page over a filtered ancestor reads whole pages, however few of their records it keeps",
+         %{store: store} do
+      # 99 records of the left child's slice, then a long run of the right child's. Asking each read for
+      # only what was left of the page (1 once 99 were kept) cost one store call per sibling record.
+      {broker, root_id} = broker_with_topic()
+
+      keys = fn half ->
+        Stream.map(0..10_000, &"k#{&1}") |> Stream.filter(&(Keyspace.position_of(&1, 16) < 8 == (half == :left)))
+      end
+
+      left = Enum.take(keys.(:left), 99)
+      right = Enum.take(keys.(:right), 300)
+      {broker, {:ok, _}} = produce(broker, store, "events", Enum.map(left ++ right, &record(&1, &1)))
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+
+      calls = :counters.new(1, [])
+
+      reader = fn ref, segment, offset, max ->
+        :counters.add(calls, 1, 1)
+        FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:ok, records, _cursor, []} = Broker.read_consume(broker, left_id, :start, 100, reader)
+      assert Enum.map(records, & &1.value) == left
+      assert :counters.get(calls, 1) <= 10
+    end
+
+    test "a page cut short by its budget resumes right after the last record it took", %{store: store} do
+      # Two records from the ancestor leave room for two of the child's own five: its read returns four
+      # (a whole page), the page takes two, and the next page must start at the third.
+      {broker, root_id} = broker_with_topic()
+      left = Stream.map(0..10_000, &"k#{&1}") |> Stream.filter(&(Keyspace.position_of(&1, 16) < 8)) |> Enum.take(7)
+      {inherited, own} = Enum.split(left, 2)
+      {broker, {:ok, _}} = produce(broker, store, "events", Enum.map(inherited, &record(&1, &1)))
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+      {broker, {:ok, _}} = produce_only(broker, store, "events", Enum.map(own, &record(&1, &1)))
+
+      assert {:ok, first, cursor, []} = Broker.read_consume(broker, left_id, :start, 4, read_fun(store))
+      assert Enum.map(first, & &1.value) == inherited ++ Enum.take(own, 2)
+      assert {:ok, rest, _cursor, []} = Broker.read_consume(broker, left_id, cursor, 10, read_fun(store))
+      assert Enum.map(rest, & &1.value) == Enum.drop(own, 2)
+    end
+
+    test "with a store that assigns no offsets, a read past a hole moves on from where it began",
+         %{store: store} do
+      # The read asked for offset 1, inside the hole, and began at 2. Counting the cursor from the request
+      # put it back at 2, and the next page delivered v2 a second time.
+      {broker, root_id} = range_with_hole(store)
+
+      unassigned = fn ref, segment, offset, max ->
+        with {:ok, records} <- FakeSegmentStore.read(store, ref, segment, offset, max),
+             do: {:ok, Enum.map(records, &%{&1 | offset: nil})}
+      end
+
+      assert {:ok, [%{value: "v2"}], cursor, _skips} = Broker.read_consume(broker, root_id, {0, 1}, 1, unassigned)
+      assert {:ok, [%{value: "v3"}], _cursor, _skips} = Broker.read_consume(broker, root_id, cursor, 1, unassigned)
+    end
+
+    test "an active segment is read no further than where the range ends for the reader", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _}} = produce_only(broker, store, "events", for(i <- 0..4, do: record("v#{i}", "k#{i}")))
+      test = self()
+
+      reader = fn ref, segment, offset, max ->
+        send(test, {:asked, offset, max})
+        FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:ok, records} = Broker.read(broker, root_id, 2, 100, reader)
+      assert Enum.map(records, & &1.value) == ["v2", "v3", "v4"]
+      assert_received {:asked, 2, 3}
     end
 
     test "a cursor below the earliest stored offset reports the exact span it skips", %{store: store} do
@@ -1374,7 +1467,7 @@ defmodule Malachi.BrokerTest do
       # served plus one, which is already inside seq 1, so seq 1's head was never delivered and the
       # scan looked like one unbroken run. With the read capped at the sealed edge, the page holds
       # exactly v0..v2 from seq 0 (fewer than the page size), and consume_page carries on from offset
-      # 3 into seq 1 with the full page budget.
+      # 3 into seq 1 with what is left of the page budget.
       {broker, root_id, _sealed, _active} = sealed_with_surplus(store)
 
       {records, cursor} = consume(broker, store, root_id, :start)
@@ -1388,8 +1481,12 @@ defmodule Malachi.BrokerTest do
       assert {:ok, page, {0, 2}, []} = Broker.read_consume(broker, root_id, :start, 2, read_fun(store))
       assert Enum.map(page, &{&1.offset, &1.value}) == [{0, "v0"}, {1, "v1"}]
 
-      assert {:ok, page, {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
-      assert Enum.map(page, &{&1.offset, &1.value}) == [{2, "v2"}, {3, "v3"}, {4, "v4"}]
+      # The page budget holds across the boundary: one record from seq 0, the one left from seq 1's head.
+      assert {:ok, page, {0, 4}, []} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
+      assert Enum.map(page, &{&1.offset, &1.value}) == [{2, "v2"}, {3, "v3"}]
+
+      assert {:ok, page, {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 4}, 2, read_fun(store))
+      assert Enum.map(page, &{&1.offset, &1.value}) == [{4, "v4"}]
 
       assert {:ok, [], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 5}, 2, read_fun(store))
     end

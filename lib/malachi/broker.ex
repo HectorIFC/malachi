@@ -33,6 +33,7 @@ defmodule Malachi.Broker do
   wires the real `ReplicationServer`-backed effects and serializes access.
   """
 
+  alias Malachi.Broker.ReadView
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.Placement
@@ -438,7 +439,7 @@ defmodule Malachi.Broker do
   @spec read(t(), Metadata.range_id(), non_neg_integer(), pos_integer(), read_fun()) ::
           {:ok, [Record.t()]} | :eof | {:error, term()}
   def read(%__MODULE__{} = broker, range_id, offset, max_records, read_fun) do
-    case read_located(broker, range_id, offset, max_records, read_fun) do
+    case read_located(ReadView.new(broker, [range_id]), range_id, offset, max_records, read_fun) do
       {:ok, records, _start} -> {:ok, records}
       other -> other
     end
@@ -448,8 +449,8 @@ defmodule Malachi.Broker do
   # when `locate_segment/3` stepped over a hole. The consume path subtracts the two to learn how much
   # it skipped: from segment boundaries, never from the gaps between record offsets, which a segment may
   # have by design.
-  defp read_located(broker, range_id, offset, max_records, read_fun) do
-    case locate_segment(broker, range_id, offset) do
+  defp read_located(view, range_id, offset, max_records, read_fun) do
+    case locate_segment(view, range_id, offset) do
       :eof ->
         :eof
 
@@ -458,12 +459,29 @@ defmodule Malachi.Broker do
         # in a hole, and asking a segment for an offset it never held is not a question it can answer.
         start = max(offset, segment.start_offset)
 
-        case read_budget(segment, start, max_records) do
+        case read_budget(view, range_id, segment, start, max_records) do
           :eof -> :eof
-          budget -> with_start(read_fun.(primary(segment), segment.id, start, budget), start)
+          budget -> segment |> read_segment(start, budget, read_fun) |> with_start(start)
         end
     end
   end
+
+  # A sealed segment holds every offset below its sealed end, and the read only asks for those (see
+  # `read_budget/5`). So nothing from one is not the end of anything: it is a copy that is gone (retention
+  # or a heal deleted it after the view that routed this read was taken) or short (a damaged replica). It
+  # fails the read rather than answering :eof, because the consume path takes :eof from an ancestor as
+  # "drained" and moves the reader to the next source, past whatever the ancestor's later segments still
+  # hold, and nothing reports it. Failed, nothing moves; the next read rebuilds its view, and a segment
+  # really deleted is then stepped over and reported as a skip. An active segment answering nothing is the
+  # ordinary tail (records not yet durable are not served), and stays :eof.
+  defp read_segment(%{length: length} = segment, start, budget, read_fun) when is_integer(length) do
+    case read_fun.(primary(segment), segment.id, start, budget) do
+      :eof -> {:error, :sealed_segment_unreadable}
+      other -> other
+    end
+  end
+
+  defp read_segment(segment, start, budget, read_fun), do: read_fun.(primary(segment), segment.id, start, budget)
 
   defp with_start({:ok, records}, start), do: {:ok, records, start}
   defp with_start(other, _start), do: other
@@ -479,7 +497,7 @@ defmodule Malachi.Broker do
   # itself sits at the top of the page, where the cursor never comes back for it. So the read is
   # capped at the sealed edge: records a store holds beyond the sealed length are, by contract, not
   # part of the log, and the fence on the write side is what keeps them from being acknowledged.
-  defp read_budget(%{length: length} = segment, start, max_records) when is_integer(length) do
+  defp read_budget(_view, _range_id, %{length: length} = segment, start, max_records) when is_integer(length) do
     remaining = sealed_end(segment) - start
 
     # A non-positive remainder means the read starts at or above the sealed edge, which for a segment
@@ -491,7 +509,14 @@ defmodule Malachi.Broker do
     if remaining > 0, do: min(max_records, remaining), else: :eof
   end
 
-  defp read_budget(_active_segment, _start, max_records), do: max_records
+  # An active segment is capped at where the range ends in the view. Records produced after the view was
+  # taken are read by the next push (a produce wakes it), so the cap loses nothing; what it rules out is
+  # reading through a view taken before a seal reached it, which still shows the segment as active and
+  # would otherwise read past the sealed edge into the surplus described above.
+  defp read_budget(view, range_id, _active_segment, start, max_records) do
+    remaining = view_end(view, range_id) - start
+    if remaining > 0, do: min(max_records, remaining), else: :eof
+  end
 
   @doc """
   Splits a range: the control plane seals the parent and creates two children. Returns
@@ -1075,7 +1100,8 @@ defmodule Malachi.Broker do
       range ->
         sources = history_sources(range_id, range)
         {source_index, source_offset} = normalize_cursor(cursor)
-        read_history_page(broker, sources, source_index, source_offset, max_records, read_fun)
+        view = ReadView.new(broker, [range_id])
+        read_history_page(view, sources, source_index, source_offset, max_records, read_fun)
     end
   end
 
@@ -1113,20 +1139,31 @@ defmodule Malachi.Broker do
           {:ok, [Record.t()], consume_cursor(), [Skip.t()]} | {:error, term()}
   def read_consume(%__MODULE__{} = broker, range_id, cursor, max_records, read_fun)
       when is_integer(max_records) and max_records > 0 do
-    range = DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id)
+    read_consume_view(ReadView.new(broker, [range_id]), range_id, cursor, max_records, read_fun)
+  end
+
+  @doc """
+  `read_consume/5` through a `Malachi.Broker.ReadView` instead of the broker: the same read, run by
+  whoever holds the view. The view must hold `range_id` (`ReadView.new/2` with it among the ranges).
+  """
+  @spec read_consume_view(ReadView.t(), Metadata.range_id(), consume_cursor(), pos_integer(), read_fun()) ::
+          {:ok, [Record.t()], consume_cursor(), [Skip.t()]} | {:error, term()}
+  def read_consume_view(%ReadView{} = view, range_id, cursor, max_records, read_fun)
+      when is_integer(max_records) and max_records > 0 do
+    range = ReadView.range(view, range_id)
 
     cond do
       is_nil(range) ->
         {:error, :no_such_range}
 
-      unrecovered?(broker, range_id) ->
+      ReadView.unrecovered?(view, range_id) ->
         {:error, :metadata_unavailable}
 
       true ->
         {index, offset} = normalize_cursor(cursor)
 
         page = %{
-          broker: broker,
+          view: view,
           range_id: range_id,
           sources: history_sources(range_id, range),
           max_records: max_records,
@@ -1137,6 +1174,89 @@ defmodule Malachi.Broker do
         consume_page(page, index, offset, [], 0, [])
     end
   end
+
+  @doc """
+  Reads one consume page over several ranges through `view`: up to `max_records` from EACH range, range
+  after range in `range_ids` order, each from its position in `positions` (`:start` when absent). This is
+  the fetch contract (`Malachi.LogApi.fetch/5`: up to `max` records per current range). Returns
+  `{:ok, {records, next_positions, skips}}`, the skips of every range read in range order, or the first
+  read that FAILED as `{:error, reason}`.
+
+  A range the control plane no longer knows is passed over, and any other read error fails the page
+  (the comment on the private reader in this module says why).
+  """
+  @spec consume_ranges(ReadView.t(), [Metadata.range_id()], Metadata.offsets(), pos_integer(), read_fun()) ::
+          {:ok, {[Record.t()], Metadata.offsets(), [Skip.t()]}} | {:error, term()}
+  def consume_ranges(%ReadView{} = view, range_ids, positions, max_records, read_fun) do
+    with {:ok, {pages, positions, skips}} <-
+           read_ranges(view, range_ids, positions, fn _taken -> max_records end, read_fun) do
+      {:ok, {records_of(pages), positions, skips}}
+    end
+  end
+
+  @doc """
+  Like `consume_ranges/5`, but `budget` is the page's, not each range's: a streaming push sizes it to the
+  subscriber's remaining credit, and a budget per range let a topic with N ranges push N times that and
+  run past the window.
+
+  Two passes. The first offers each range an equal share (at least one record), so the first range of a
+  busy topic cannot take the whole page. The second hands what the first left unused to the ranges that
+  filled their share and may hold more, in order, so a page is not cut short because the other ranges
+  had nothing. When the budget is smaller than the number of ranges only the first ones are read, which
+  is why a push rotates the order between pushes (`Malachi.BrokerServer.Subscribers.rotate/2`).
+  """
+  @spec consume_shared(ReadView.t(), [Metadata.range_id()], Metadata.offsets(), pos_integer(), read_fun()) ::
+          {:ok, {[Record.t()], Metadata.offsets(), [Skip.t()]}} | {:error, term()}
+  def consume_shared(%ReadView{} = view, range_ids, positions, budget, read_fun) do
+    share = max(div(budget, max(length(range_ids), 1)), 1)
+
+    with {:ok, {first, positions, skips}} <-
+           read_ranges(view, range_ids, positions, &min(share, budget - &1), read_fun),
+         taken = length(records_of(first)),
+         filled = for({range_id, records} <- first, length(records) >= share, do: range_id),
+         {:ok, {second, positions, more_skips}} <-
+           read_ranges(view, filled, positions, &(budget - taken - &1), read_fun) do
+      {:ok, {records_of(first) ++ records_of(second), positions, skips ++ more_skips}}
+    end
+  end
+
+  # Reads `range_ids` in order, each from its position, with the budget `budget_for` gives for how many
+  # records this pass has taken so far; stops at the first range it gives none. Answers the pages per
+  # range, `[{range_id, records}]` in range order, with the moved positions and the skips. A range the
+  # control plane no longer knows (a stale assignment whose range has since split) holds nothing for this
+  # reader and is passed over. Any other error is a failed read (an unreachable segment primary, a storage
+  # error) and fails the page: a page that came back short and successful would read as caught up, and a
+  # consumer commits past it. A client can retry a failure; it cannot detect a lie.
+  defp read_ranges(view, range_ids, positions, budget_for, read_fun) do
+    range_ids
+    |> Enum.reduce_while({:ok, {[], positions, [], 0}}, fn range_id, {:ok, {pages, positions, skips, taken}} ->
+      case budget_for.(taken) do
+        budget when budget <= 0 ->
+          {:halt, {:ok, {pages, positions, skips, taken}}}
+
+        budget ->
+          case read_consume_view(view, range_id, Map.get(positions, range_id, :start), budget, read_fun) do
+            {:ok, records, next_cursor, range_skips} ->
+              {:cont,
+               {:ok,
+                {[{range_id, records} | pages], Map.put(positions, range_id, next_cursor), skips ++ range_skips,
+                 taken + length(records)}}}
+
+            {:error, :no_such_range} ->
+              {:cont, {:ok, {pages, positions, skips, taken}}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, {pages, positions, skips, _taken}} -> {:ok, {Enum.reverse(pages), positions, skips}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp records_of(pages), do: Enum.flat_map(pages, fn {_range_id, records} -> records end)
 
   # --- routing & replication ---
 
@@ -1452,13 +1572,21 @@ defmodule Malachi.Broker do
 
   defp next_offset(broker, range_id), do: Map.get(broker.offsets, range_id, 0)
 
+  # `next_offset/2` as the view saw it: where the range ends, 0 when the frontend never learned an end.
+  defp view_end(view, range_id) do
+    case ReadView.fetch_end(view, range_id) do
+      {:ok, range_end} -> range_end
+      :error -> 0
+    end
+  end
+
   # The earliest offset still stored for a range: the smallest segment start_offset (0 if none).
   # Retention deletes the oldest segments: a contiguous prefix - so a consumer positioned below this
   # has had its data expired; read callers clamp up to it (`clamp_to_stored/3`) to move on to what still
   # exists, and the consume path reports the difference as a `Malachi.Broker.Skip`.
-  defp earliest_offset(broker, range_id) do
-    broker.dsrsm
-    |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+  defp earliest_offset(view, range_id) do
+    view
+    |> ReadView.segments(range_id)
     |> Enum.map(& &1.start_offset)
     |> Enum.min(fn -> 0 end)
   end
@@ -1478,11 +1606,11 @@ defmodule Malachi.Broker do
   # consumer of the range permanently. Stepping up to the next segment instead loses only what is
   # already gone. Callers read the records' own offsets rather than counting from the one they asked
   # for, so a step forward stays consistent.
-  defp locate_segment(broker, range_id, offset) do
-    if offset < 0 or offset >= next_offset(broker, range_id) do
+  defp locate_segment(view, range_id, offset) do
+    if offset < 0 or offset >= view_end(view, range_id) do
       :eof
     else
-      segments = DSRSM.segments_of_range(broker.dsrsm, topic_of_range(range_id), range_id)
+      segments = ReadView.segments(view, range_id)
 
       below =
         segments
@@ -1512,13 +1640,14 @@ defmodule Malachi.Broker do
 
   defp serves?(_active_segment, _offset), do: true
 
-  # The last record's assigned offset, falling back to counting from `requested` when the store did
-  # not assign them (the fake stores in tests, and any reader that predates the assignment). The
-  # fallback is the old arithmetic, so a store that assigns nothing behaves exactly as before.
-  defp last_offset(records, requested) do
+  # The last record's assigned offset, falling back to counting from `start` when the store did not
+  # assign them (a test store, or any reader that predates the assignment). `start` must be where the
+  # read began, which is above the offset asked for when the read stepped over a hole: counting from the
+  # offset asked for puts the cursor back inside the hole.
+  defp last_offset(records, start) do
     case List.last(records) do
       %{offset: offset} when is_integer(offset) -> offset
-      _unassigned -> requested + length(records) - 1
+      _unassigned -> start + length(records) - 1
     end
   end
 
@@ -1552,19 +1681,19 @@ defmodule Malachi.Broker do
   # Never read below the earliest offset still stored for a source. Retention deletes the oldest
   # segments, so a position under that floor points at data that is gone; both readers clamp through
   # here, and the consume path reports the difference as skipped.
-  defp clamp_to_stored(broker, range_id, offset), do: max(offset, earliest_offset(broker, range_id))
+  defp clamp_to_stored(view, range_id, offset), do: max(offset, earliest_offset(view, range_id))
 
-  defp read_history_page(broker, sources, source_index, source_offset, max_records, read_fun) do
+  defp read_history_page(view, sources, source_index, source_offset, max_records, read_fun) do
     case Enum.at(sources, source_index) do
       nil ->
         {:ok, [], :done}
 
       {source_range_id, filter_range} ->
-        source_offset = clamp_to_stored(broker, source_range_id, source_offset)
+        source_offset = clamp_to_stored(view, source_range_id, source_offset)
 
         # The history read keeps its shape: it has no production caller that could act on a skip, so
         # it steps over missing data exactly as the consume path does and says nothing about it.
-        case read_located(broker, source_range_id, source_offset, max_records, read_fun) do
+        case read_located(view, source_range_id, source_offset, max_records, read_fun) do
           {:ok, [_ | _] = records, _start} ->
             # From the records' own offsets, not from the offset asked for, mirroring `consume_page/6`.
             # The read can start ABOVE the request when `locate_segment/3` steps over a hole (a segment
@@ -1583,22 +1712,45 @@ defmodule Malachi.Broker do
           # explicit: an administrative history read now ends early on a transient empty page rather
           # than hanging, which is the same choice `:eof` already made beside it.
           _eof_or_empty ->
-            read_history_page(broker, sources, source_index + 1, 0, max_records, read_fun)
+            read_history_page(view, sources, source_index + 1, 0, max_records, read_fun)
         end
     end
   end
 
   defp filter_records(records, nil), do: records
+  defp filter_records(records, range), do: Enum.filter(records, &in_slice?(&1, range))
 
-  defp filter_records(records, range) do
-    Enum.filter(records, fn record ->
-      Keyspace.within?(
-        Keyspace.position_of(record.key, range.keyspace_size),
-        range.key_start,
-        range.key_end
-      )
-    end)
+  defp in_slice?(record, range) do
+    Keyspace.within?(Keyspace.position_of(record.key, range.keyspace_size), range.key_start, range.key_end)
   end
+
+  # What a page takes from one read: the records in the slice (`filter_range`, nil for a range's own
+  # records), at most `room` of them, and where the cursor goes next. When the read held more records in
+  # the slice than the page has room for, the cursor stops right after the last one taken, so the rest
+  # are the next page's. Otherwise it moves past everything the read returned, from the records' own
+  # offsets, not from the offset that was asked for: the read can start ABOVE the request when it steps
+  # over a hole left by retention or an operator, and counting from the request would put the cursor
+  # back inside that hole, re-delivering what was already returned and never getting past it. `start` is
+  # where the read began, which a store that assigns no offsets counts from.
+  defp take_page(records, filter_range, room, start) do
+    indexed = for {record, index} <- Enum.with_index(records), in_page?(record, filter_range), do: {record, index}
+
+    if length(indexed) > room do
+      taken = Enum.take(indexed, room)
+      {last, last_index} = List.last(taken)
+      {Enum.map(taken, &elem(&1, 0)), record_offset(last, start, last_index) + 1}
+    else
+      {Enum.map(indexed, &elem(&1, 0)), last_offset(records, start) + 1}
+    end
+  end
+
+  defp in_page?(_record, nil), do: true
+  defp in_page?(record, range), do: in_slice?(record, range)
+
+  # A record's assigned offset, or, from a store that assigns none, its position counted from where the
+  # read began (the same fallback `last_offset/2` uses).
+  defp record_offset(%{offset: offset}, _start, _index) when is_integer(offset), do: offset
+  defp record_offset(_record, start, index), do: start + index
 
   # Like `read_history_page`, but accumulates across sources up to `max_records` and tails the self
   # source (the last one): when self yields :eof it pauses there (no `:done`), so a later produce is
@@ -1606,7 +1758,7 @@ defmodule Malachi.Broker do
   # A cursor's source_index past the end (e.g. a forged/stale client cursor) has nothing to read:
   # pause here rather than crash, mirroring how an out-of-range offset yields :eof gracefully.
   #
-  # `page` holds what is fixed for the whole call (broker, sources, budget, read_fun, and the consumed
+  # `page` holds what is fixed for the whole call (the read view, sources, budget, read_fun, and the consumed
   # range and the reader's origin, which label the skips); `skips` gathers them newest first.
   defp consume_page(%{sources: sources}, index, offset, acc, _count, skips) when index >= length(sources) do
     {:ok, Enum.reverse(acc), {index, offset}, Enum.reverse(skips)}
@@ -1618,21 +1770,20 @@ defmodule Malachi.Broker do
     source = if index == last_index, do: :self, else: :ancestor
     # Skip data retention expired: never read below the range's earliest available offset, so a
     # consumer whose position was deleted advances to the earliest data still stored (at-least-once).
-    stored = clamp_to_stored(page.broker, source_range_id, offset)
+    stored = clamp_to_stored(page.view, source_range_id, offset)
 
-    case read_located(page.broker, source_range_id, stored, page.max_records, page.read_fun) do
+    # Every read asks for a whole page, not for what is left of this one: on an ancestor most of what a
+    # read returns can belong to the sibling slice, and asking for the remainder made each read smaller
+    # as the page filled, down to one record per call (a call that can go to a remote primary, and runs
+    # in the broker loop for a fetch). What the page takes is cut to what is left of it below.
+    case read_located(page.view, source_range_id, stored, page.max_records, page.read_fun) do
       {:ok, [_ | _] = records, start} ->
         # `start` is where the read really began: above `offset` by the clamp and by any hole
         # `locate_segment/3` stepped over, both of them missing segments.
         skips = add_skip(skips, page, source_range_id, source, offset, start - offset)
-        kept = filter_records(records, filter_range)
+        {kept, next_offset} = take_page(records, filter_range, page.max_records - count, start)
         acc = Enum.reverse(kept) ++ acc
         count = count + length(kept)
-        # From the records themselves, not from the offset that was asked for. The read can start
-        # ABOVE the request when it steps over a hole left by retention or an operator, and counting
-        # from the request would put the cursor back inside that hole, re-delivering what was already
-        # returned and never getting past it.
-        next_offset = last_offset(records, stored) + 1
 
         if count >= page.max_records do
           {:ok, Enum.reverse(acc), {index, next_offset}, Enum.reverse(skips)}
@@ -1647,7 +1798,7 @@ defmodule Malachi.Broker do
       # pause on the self source so records produced later tail in on a subsequent call.
       _eof_or_empty ->
         if index < last_index do
-          remainder = unread_remainder(page.broker, source_range_id, offset)
+          remainder = unread_remainder(page.view, source_range_id, offset)
           skips = add_skip(skips, page, source_range_id, source, offset, remainder)
           consume_page(page, index + 1, 0, acc, count, skips)
         else
@@ -1683,10 +1834,10 @@ defmodule Malachi.Broker do
   # segments, so an ancestor with none left has no entry: a reader that held a position inside it may
   # have lost what was past that position, and `:unknown` says so. A reader starting from offset 0 held
   # no position, and an ancestor that never held a record looks exactly the same, so that is 0.
-  defp unread_remainder(broker, range_id, offset) do
-    segments = DSRSM.segments_of_range(broker.dsrsm, topic_of_range(range_id), range_id)
+  defp unread_remainder(view, range_id, offset) do
+    segments = ReadView.segments(view, range_id)
 
-    case Map.fetch(broker.offsets, range_id) do
+    case ReadView.fetch_end(view, range_id) do
       {:ok, range_end} ->
         # Every segment of an ancestor is sealed: a split or a merge is refused while the range still
         # has an active segment, so each one here has the length its end is computed from.
