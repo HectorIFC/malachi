@@ -89,8 +89,7 @@ defmodule Mix.Tasks.Malachi.Flag do
     end
   end
 
-  # An empty registry is the normal state of the bridge release: it ships the gate, and the first flag
-  # arrives with the first feature that needs one. Saying so beats printing an empty list.
+  # A build with no flag in its registry: saying so beats printing an empty list.
   defp render(%{known: []}), do: "this build knows no cluster flags yet"
 
   defp render(%{known: known, enabled: enabled}) do

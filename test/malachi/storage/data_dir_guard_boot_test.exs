@@ -138,7 +138,13 @@ defmodule Malachi.Storage.DataDirGuardBootTest do
     on_exit(fn -> File.rm_rf!(ra_dir) end)
     absent = :"#{name}_absent@127.0.0.1"
 
-    overrides = [log_vnodes: 2, log_nodes: [:"#{name}@127.0.0.1", absent], log_ring_boot_timeout_ms: 2_000]
+    # With an address to advertise, so the halt is the ring check's and not the missing host's.
+    overrides = [
+      log_vnodes: 2,
+      log_nodes: [:"#{name}@127.0.0.1", absent],
+      log_ring_boot_timeout_ms: 2_000,
+      advertised_host: "guard-peers.test"
+    ]
 
     assert {_node, :halted} = boot_named(name, log_dir, ra_dir, overrides)
     assert File.dir?(segment)

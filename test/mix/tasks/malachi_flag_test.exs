@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Malachi.FlagTest do
       Flag.run(["--list", "--node", target])
 
       assert_received {:mix_shell, :info, [message]}
-      assert message =~ "knows no cluster flags yet"
+      assert message =~ ~r/^producer_streams\t(on|off)$/m
     end
 
     test "a refusal is printed on the error channel and exits non-zero", %{target: target} do

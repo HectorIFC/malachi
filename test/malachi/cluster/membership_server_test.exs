@@ -3,6 +3,7 @@ defmodule Malachi.Cluster.MembershipServerTest do
 
   import ExUnit.CaptureLog
 
+  alias Malachi.Cluster.Advertised
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
@@ -390,6 +391,19 @@ defmodule Malachi.Cluster.MembershipServerTest do
       :ok = MembershipServer.set_attributes(a, %{rack: "b"})
 
       assert MembershipServer.attributes(a, a) == Capabilities.attributes(%{rack: "b"})
+    end
+
+    test "a runtime attribute change does not erase the address clients reach this node at" do
+      a = :"msattr_adv_#{System.unique_integer([:positive])}"
+      seed = %{"rack" => "a"} |> Capabilities.attributes() |> Advertised.put(%{host: "a.svc", port: 4040})
+      start_supervised!({MembershipServer, [name: a, peers: [], attributes: seed] ++ @timings}, id: a)
+
+      :ok = MembershipServer.set_attributes(a, %{"rack" => "b"})
+      assert Advertised.of(MembershipServer.attributes(a, a)) == %{host: "a.svc", port: 4040}
+
+      # a caller that states an address replaces it
+      :ok = MembershipServer.set_attributes(a, Advertised.put(%{}, %{host: "b.svc", port: 1}))
+      assert Advertised.of(MembershipServer.attributes(a, a)) == %{host: "b.svc", port: 1}
     end
 
     test "a caller that states a capability list keeps it, which is how a test plays another build" do

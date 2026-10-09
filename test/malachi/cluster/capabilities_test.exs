@@ -202,11 +202,10 @@ defmodule Malachi.Cluster.CapabilitiesTest do
   end
 
   describe "the registry this release ships" do
-    test "is empty, and known/0 and advertised/0 agree" do
-      # The bridge release ships the gate, not a feature. The first entry arrives with the first thing
-      # that needs a cluster-wide commitment (#202). If this ever fails, the release that added a
-      # capability has to have added it to both.
-      assert Capabilities.known() == []
+    test "holds producer_streams, and known/0 and advertised/0 agree" do
+      # producer_streams gates the routing and stream keys (#275). If this ever fails, the release that
+      # added or dropped a capability has to have changed both, and said so.
+      assert Capabilities.known() == [:producer_streams]
       assert Capabilities.advertised() == Capabilities.known()
     end
   end

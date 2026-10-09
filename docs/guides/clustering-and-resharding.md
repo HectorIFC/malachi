@@ -30,6 +30,7 @@ MALACHI_CLUSTER_STRATEGY=gossip     # or kubernetes, epmd. Absent = single node
 MALACHI_LOG_CLUSTER=true
 MALACHI_LOG_NODES=malachi@10.0.0.1,malachi@10.0.0.2,malachi@10.0.0.3
 MALACHI_LOG_REPLICATION_FACTOR=3
+MALACHI_ADVERTISED_HOST=10.0.0.1    # this node as clients reach it: required with peers, not loopback or 0.0.0.0
 ```
 
 | strategy | for |

@@ -312,6 +312,8 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MALACHI_TCP_PORT` | 4040 | TCP server port |
+| `MALACHI_ADVERTISED_HOST` | node name's host (single node) | Host clients reach this node at, gossiped to every node; required on a node with peers, and neither loopback nor unspecified (`0.0.0.0`, `::`) |
+| `MALACHI_ADVERTISED_PORT` | `MALACHI_TCP_PORT` | Port clients reach this node at |
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
 | `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
@@ -792,8 +794,11 @@ Keys 24 to 34 are the NorthGuard data path being built in #275: routing (`cluste
 producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume
 streams that carry each record's offset (`open_consume`, `consume_ack`, `fetch_range`), and group
 membership beside the data path (`join_group`, `group_heartbeat`, `commit_offsets`), with records in
-batches that may be zstd compressed. Their frames are defined (`Malachi.Wire`, `Malachi.Wire.Batch`, and
-`scripts/lib/wire.js`), but no server answers them yet: until it does, they get `unknown_api_key`.
+batches that may be zstd compressed (`Malachi.Wire`, `Malachi.Wire.Batch`, `scripts/lib/wire.js`). Any
+authenticated session gets `cluster_state`: every broker with its status and the address it advertises
+(`MALACHI_ADVERTISED_HOST`), the vnodes, and whether the `producer_streams` cluster flag is on. Keys 25 to 34
+answer `unsupported` until that flag is on; with it on, `topic_routes` answers anyone holding `:produce` or
+`:consume` on the topic, and keys 26 to 34 get `unknown_api_key` until a server answers them.
 
 Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
 frames (keys 24 to 34) carry each record's position beside it, `{source_index, offset}` in its range's

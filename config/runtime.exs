@@ -240,6 +240,11 @@ config :malachi,
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),
+  # Where a client reaches this node, gossiped so any node can tell a client where every broker is
+  # (Malachi.Cluster.Advertised). A node with peers must set the host to one clients can reach; the port
+  # defaults to MALACHI_TCP_PORT.
+  advertised_host: System.get_env("MALACHI_ADVERTISED_HOST"),
+  advertised_port: parse_int.("MALACHI_ADVERTISED_PORT", nil),
   # The attribute key to spread segment replicas over (e.g. "rack"); absent => no spread (plain HRW).
   log_spread_by: System.get_env("MALACHI_LOG_SPREAD_BY"),
   # Static cluster topology "node1=rack_a,node2=rack_b,...". The per-node value of :log_spread_by,

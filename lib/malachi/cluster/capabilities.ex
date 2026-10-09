@@ -61,11 +61,11 @@ defmodule Malachi.Cluster.Capabilities do
 
   alias Malachi.Cluster.Membership
 
-  # The capabilities this binary supports. Empty in the bridge release: it ships the mechanism, and
-  # the first entry arrives with the first feature that needs a cluster-wide gate (#202). A name is
-  # added here only by the release that can genuinely do the thing, because advertising is a promise
-  # the rest of the cluster acts on.
-  @capabilities []
+  # The capabilities this binary supports. A name is added here only by the release that can do the
+  # thing, because advertising is a promise the rest of the cluster acts on. `producer_streams` gates the
+  # routing and stream keys (`Malachi.Wire` 25 to 34, `Malachi.Routing.flag/0`): they answer `unsupported`
+  # until every node advertises it and an operator turns it on, which serves `topic_routes` (#275).
+  @capabilities [:producer_streams]
 
   @typedoc "A capability, which is also the name of the flag that requires it."
   @type capability :: atom()

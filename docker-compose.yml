@@ -26,6 +26,10 @@ services:
       - "127.0.0.1:${MALACHI_CONSOLE_PORT:-4042}:4042"
     environment:
       - MALACHI_TCP_PORT=4040
+      # Where a client on this machine reaches the node: the loopback port published above. A node with
+      # no peers may advertise loopback (Malachi.Cluster.Advertised).
+      - MALACHI_ADVERTISED_HOST=127.0.0.1
+      - MALACHI_ADVERTISED_PORT=${MALACHI_TCP_PORT:-4040}
       - MALACHI_DASHBOARD_PORT=4041
       - MALACHI_CONSOLE_PORT=4042
       - MALACHI_LOCALE=en_US

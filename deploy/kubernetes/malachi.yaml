@@ -226,6 +226,11 @@ spec:
               value: name
             - name: RELEASE_NODE
               value: malachi@$(POD_NAME).malachi-headless.$(POD_NAMESPACE).svc.cluster.local
+            # --- The address a routing client reaches this pod at: its stable name in the headless service,
+            #     gossiped to every node so any of them can name every broker (cluster_state). The client
+            #     Service below is only for the first contact. A node with peers refuses to start without it.
+            - name: MALACHI_ADVERTISED_HOST
+              value: $(POD_NAME).malachi-headless.$(POD_NAMESPACE).svc.cluster.local
             - name: RELEASE_COOKIE
               valueFrom:
                 secretKeyRef:

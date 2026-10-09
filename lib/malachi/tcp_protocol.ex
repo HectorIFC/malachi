@@ -17,6 +17,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
   alias Malachi.Auth.ConsoleRole
+  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.Policy
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
@@ -25,6 +26,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Metrics
   alias Malachi.Policies
   alias Malachi.RateLimiter
+  alias Malachi.Routing
   alias Malachi.Wire
 
   @coordinator_name Malachi.LogGroupCoordinator
@@ -133,7 +135,50 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.list_policies_key() -> list_policies(correlation_id, payload, session)
       api_key == Wire.bind_topic_policy_key() -> bind_topic_policy(correlation_id, payload, session)
       api_key == Wire.get_topic_policy_key() -> get_topic_policy(correlation_id, payload, session)
-      true -> Wire.encode_error(correlation_id, :unknown_api_key)
+      true -> dispatch_routing(api_key, correlation_id, payload, session)
+    end
+  end
+
+  # The routing and stream keys a routing client speaks (#275). `cluster_state` always answers: it is how a
+  # client learns whether the rest are on. The rest wait for the `producer_streams` cluster flag
+  # (`Malachi.Routing.flag/0`), which a node can only have once every node supports it.
+  defp dispatch_routing(api_key, correlation_id, payload, session) do
+    cond do
+      api_key == Wire.cluster_state_key() ->
+        cluster_state(correlation_id, payload)
+
+      api_key in Wire.topic_routes_key()..Wire.commit_offsets_key() and not ClusterFlagsCache.enabled?(Routing.flag()) ->
+        Wire.encode_error(correlation_id, :unsupported)
+
+      api_key == Wire.topic_routes_key() ->
+        topic_routes(correlation_id, payload, session)
+
+      true ->
+        Wire.encode_error(correlation_id, :unknown_api_key)
+    end
+  end
+
+  # Any authenticated session: the answer names brokers and vnodes, never a topic.
+  defp cluster_state(correlation_id, payload) do
+    :ok = Wire.decode_cluster_state_req(payload)
+
+    case Routing.read_cluster_state() do
+      {:ok, state} -> Wire.encode_ok(correlation_id, Wire.encode_cluster_state_resp(state))
+      {:error, reason} -> Wire.encode_error(correlation_id, reason)
+    end
+  end
+
+  # A producer and a consumer both need a topic's routes, so either permission on it is enough.
+  defp topic_routes(correlation_id, payload, session) do
+    topic = Wire.decode_topic_routes_req(payload)
+
+    if topic_allowed?(session, :produce, topic) or topic_allowed?(session, :consume, topic) do
+      case Routing.read_topic_routes(topic) do
+        {:ok, routes} -> Wire.encode_ok(correlation_id, Wire.encode_topic_routes_resp(routes))
+        {:error, reason} -> Wire.encode_error(correlation_id, reason)
+      end
+    else
+      Wire.encode_error(correlation_id, :permission_denied)
     end
   end
 
@@ -415,14 +460,17 @@ defmodule Malachi.TCPProtocol do
   # only when the coarse permission does not already settle it (the thunk), keeping the produce/consume hot
   # path free of an ACL lookup for the common non-strict case. A denial returns a permission-denied frame.
   defp with_topic_permission(session, operation, topic, correlation_id, fun) do
+    if topic_allowed?(session, operation, topic),
+      do: fun.(),
+      else: Wire.encode_error(correlation_id, :permission_denied)
+  end
+
+  defp topic_allowed?(session, operation, topic) do
     strict? = Application.get_env(:malachi, :acl_strict, false)
 
-    allowed? =
-      Authorization.allow?(session.permissions, operation, strict?, fn ->
-        AclStore.authorized?(session.username, operation, topic)
-      end)
-
-    if allowed?, do: fun.(), else: Wire.encode_error(correlation_id, :permission_denied)
+    Authorization.allow?(session.permissions, operation, strict?, fn ->
+      AclStore.authorized?(session.username, operation, topic)
+    end)
   end
 
   # Runs `fun` (which returns a response frame) only if the session's user is within the configured limit

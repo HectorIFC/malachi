@@ -17,17 +17,8 @@ defmodule Malachi.TCPProtocolTest do
 
   alias Malachi.Log.Record
   alias Malachi.TCPProtocol
+  alias Malachi.Test.EchoTransport
   alias Malachi.Wire
-
-  # A transport is anything answering `send/2`. This one hands the frame back to the test process, so an
-  # assertion reads the exact bytes the boundary would have written to a socket.
-  defmodule EchoTransport do
-    @moduledoc false
-    def send(pid, frame) do
-      Kernel.send(pid, {:frame, frame})
-      :ok
-    end
-  end
 
   @session %{username: "protocol_test_user", permissions: [:produce, :consume, :admin]}
 

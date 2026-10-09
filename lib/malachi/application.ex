@@ -23,6 +23,7 @@ defmodule Malachi.Application do
   alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.Advertised
   alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.ClusterFlags
@@ -69,6 +70,7 @@ defmodule Malachi.Application do
   alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
+  alias Malachi.StartupRefusal
   alias Malachi.Storage.DataDirGuard
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
@@ -97,6 +99,10 @@ defmodule Malachi.Application do
     # Before anything opens the data directory, `ra` included: a directory written in a format this
     # binary cannot read is refused here rather than recovered as damage and overwritten.
     :ok = ensure_data_format(log_data_dir())
+
+    # Before membership gossips it: a node with peers that would advertise an address no client can
+    # reach is refused here rather than routing every client to itself.
+    :ok = ensure_advertised_address()
 
     port = Application.get_env(:malachi, :tcp_port, 4040)
     dashboard_port = Application.get_env(:malachi, :dashboard_port, 4041)
@@ -1078,7 +1084,50 @@ defmodule Malachi.Application do
   """
   @spec membership_attributes() :: map()
   def membership_attributes do
-    Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
+    attributes = Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
+
+    case advertised_address() do
+      {:ok, address} -> Advertised.put(attributes, address)
+      {:error, _refusal} -> attributes
+    end
+  end
+
+  @doc """
+  The address this node advertises to clients (`Malachi.Cluster.Advertised.resolve/5`), from
+  `MALACHI_ADVERTISED_HOST`, `MALACHI_ADVERTISED_PORT`, the listener's port and whether the node has peers
+  in a control plane. A node measured in memory (no control plane) gossips no membership, so its
+  `MALACHI_LOG_NODES` makes no peers here.
+  """
+  @spec advertised_address() :: {:ok, Advertised.t()} | {:error, Advertised.refusal()}
+  def advertised_address do
+    Advertised.resolve(
+      Application.get_env(:malachi, :advertised_host),
+      Application.get_env(:malachi, :advertised_port),
+      Application.get_env(:malachi, :tcp_port, 4040),
+      node(),
+      Application.get_env(:malachi, :log_cluster) != nil and length(configured_nodes()) > 1
+    )
+  end
+
+  @doc """
+  The startup gate over the advertised address (`advertised_address/0` unless given): refuses the start,
+  through `Malachi.StartupRefusal`, when a node with peers has no host to advertise or a loopback one.
+  """
+  @spec ensure_advertised_address(
+          {:ok, Advertised.t()} | {:error, Advertised.refusal()},
+          (non_neg_integer() -> any())
+        ) :: :ok | any()
+  def ensure_advertised_address(resolved \\ advertised_address(), halt_fun \\ &System.halt/1) do
+    case resolved do
+      {:ok, _address} ->
+        :ok
+
+      {:error, :missing_host} ->
+        StartupRefusal.refuse!(I18n.t(:advertised_host_missing), halt_fun)
+
+      {:error, {:loopback_host, host}} ->
+        StartupRefusal.refuse!(I18n.t(:advertised_host_loopback, host: host), halt_fun)
+    end
   end
 
   @doc ~S"""

@@ -37,6 +37,7 @@ defmodule Malachi.Cluster.MembershipServer do
 
   require Logger
 
+  alias Malachi.Cluster.Advertised
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.RingTopology
@@ -80,9 +81,12 @@ defmodule Malachi.Cluster.MembershipServer do
   @spec alive_members(GenServer.server()) :: [Membership.member()]
   def alive_members(server), do: GenServer.call(server, :alive_members)
 
-  @doc "The current `Malachi.Cluster.Membership` view (for inspection/tests)."
-  @spec view(GenServer.server()) :: Membership.t()
-  def view(server), do: GenServer.call(server, :view)
+  @doc """
+  The current `Malachi.Cluster.Membership` view. A caller on a request path passes a short `timeout`:
+  the server also runs the gossip loop, and a wait on it is a wait on that.
+  """
+  @spec view(GenServer.server(), timeout()) :: Membership.t()
+  def view(server, timeout \\ 5_000), do: GenServer.call(server, :view, timeout)
 
   @doc """
   Sets this node's own `attributes`, raising its incarnation so the change propagates and wins.
@@ -205,8 +209,11 @@ defmodule Malachi.Cluster.MembershipServer do
     # a live node is never suspected, so nothing raises its incarnation to correct it. Putting the list
     # back here rather than asking every caller to remember it is what makes that impossible instead of
     # documented. A caller that states a list keeps it, which is the seam the multinode tests use to
-    # stand a node up as though it ran another build (`Malachi.Cluster.Capabilities.ensure/1`).
-    {view, _effect} = Membership.set_attributes(state.view, Capabilities.ensure(attributes))
+    # stand a node up as though it ran another build (`Malachi.Cluster.Capabilities.ensure/1`). The client
+    # address is kept the same way (`Malachi.Cluster.Advertised.ensure/2`).
+    current = Membership.attributes(state.view, state.view.self)
+    attributes = attributes |> Capabilities.ensure() |> Advertised.ensure(current)
+    {view, _effect} = Membership.set_attributes(state.view, attributes)
     {:reply, :ok, put_view(state, view)}
   end
 

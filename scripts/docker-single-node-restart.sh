@@ -146,7 +146,8 @@ expect_records "after recreating the container"
 echo "ok"
 
 echo "== 3. a second node configured"
-run_node "$HOST" -e MALACHI_LOG_NODES="malachi@$HOST,malachi@peer273"
+# With an address to advertise, so the refusal is the data directory's and not the missing host's.
+run_node "$HOST" -e MALACHI_LOG_NODES="malachi@$HOST,malachi@peer273" -e MALACHI_ADVERTISED_HOST="$HOST"
 expect_refusal "peers configured" "REFUSING TO START"
 docker logs "$NAME" 2>&1 | grep -cF -- "peer273" >/dev/null || fail "peers configured: the refusal does not name the new node"
 echo "ok"

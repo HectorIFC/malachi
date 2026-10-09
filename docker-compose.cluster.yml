@@ -107,6 +107,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-1
     hostname: malachi1
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi1
     volumes:
       - malachi-chaos-1:/data
 
@@ -114,6 +118,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-2
     hostname: malachi2
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi2
     volumes:
       - malachi-chaos-2:/data
 
@@ -121,6 +129,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-3
     hostname: malachi3
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi3
     volumes:
       - malachi-chaos-3:/data
 

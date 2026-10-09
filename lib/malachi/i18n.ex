@@ -510,6 +510,18 @@ defmodule Malachi.I18n do
           "it reserves one it can trust on the way back up. Carrying on would serve now and let a " <>
           "future restart resume below what peers remember, where nothing corrects it"
     },
+    advertised_host_missing: %{
+      "pt_BR" =>
+        "este nó tem peers (MALACHI_LOG_NODES) mas MALACHI_ADVERTISED_HOST não está definido: os clientes não teriam um endereço para alcançá-lo",
+      "en_US" =>
+        "this node has peers (MALACHI_LOG_NODES) but MALACHI_ADVERTISED_HOST is not set: clients would have no address to reach it at"
+    },
+    advertised_host_loopback: %{
+      "pt_BR" =>
+        "este nó tem peers (MALACHI_LOG_NODES) mas MALACHI_ADVERTISED_HOST=%{host} é um endereço de loopback ou não especificado: um cliente em outra máquina discaria para si mesmo",
+      "en_US" =>
+        "this node has peers (MALACHI_LOG_NODES) but MALACHI_ADVERTISED_HOST=%{host} is a loopback or unspecified address: a client on another machine would dial itself"
+    },
     cluster_flag_missing_capability: %{
       "pt_BR" =>
         "o cluster ligou %{flags}, que este binário não suporta; ele anuncia %{capabilities}. " <>

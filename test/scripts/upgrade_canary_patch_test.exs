@@ -85,7 +85,7 @@ defmodule UpgradeCanaryPatchTest do
   test "declares what the drill depends on" do
     patch = File.read!(@patch)
 
-    assert patch =~ "+  @capabilities [:upgrade_canary]"
+    assert patch =~ "+  @capabilities [:producer_streams, :upgrade_canary]"
     assert patch =~ "+  @code_version 6"
     assert patch =~ "+      {:canary_note, 3} => 6"
     assert patch =~ "+  @supported_format 2"

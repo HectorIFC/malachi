@@ -661,10 +661,14 @@ defmodule Malachi.Wire do
   @spec encode_cluster_state_req() :: binary()
   def encode_cluster_state_req, do: <<>>
 
+  @spec decode_cluster_state_req(binary()) :: :ok
+  def decode_cluster_state_req(<<>>), do: :ok
+
   @doc """
   The cluster's minimal state (transcript 609 to 613): the brokers with their status and the address each
   advertises to clients (`nil` host and port 0 for one that advertises none), the vnodes that exist, and
-  whether the stream keys are enabled. `version` orders two answers of the same node.
+  whether the stream keys are enabled. `version` changes exactly when the rest of the answer does, so a
+  client compares two for equality (`Malachi.Routing`).
   """
   @spec encode_cluster_state_resp(map()) :: binary()
   def encode_cluster_state_resp(%{version: version, streams_enabled: enabled, brokers: brokers, vnodes: vnodes}) do
@@ -691,8 +695,8 @@ defmodule Malachi.Wire do
   @doc """
   A topic's routes: its keyspace (2^`keyspace_bits` positions, a key's position being
   `Malachi.Keyspace.position_of/2`), and each range with its slice `[key_start, key_end)`, its state and
-  its active segment and primary. `version` changes whenever any of that does; a stream opened with an
-  older one is refused.
+  its active segment and primary. `version` changes exactly when any of that does, the same on every
+  node, so a client compares two for equality (`Malachi.Routing`).
   """
   @spec encode_topic_routes_resp(map()) :: binary()
   def encode_topic_routes_resp(%{topic: topic, version: version, keyspace_bits: bits, ranges: ranges}) do

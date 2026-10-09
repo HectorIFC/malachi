@@ -63,13 +63,13 @@ index 68ca555..6f4ab02 100644
 --- a/lib/malachi/cluster/capabilities.ex
 +++ b/lib/malachi/cluster/capabilities.ex
 @@ -65,7 +65,9 @@ defmodule Malachi.Cluster.Capabilities do
-   # the first entry arrives with the first feature that needs a cluster-wide gate (#202). A name is
-   # added here only by the release that can genuinely do the thing, because advertising is a promise
-   # the rest of the cluster acts on.
--  @capabilities []
+   # thing, because advertising is a promise the rest of the cluster acts on. `producer_streams` gates the
+   # routing and stream keys (`Malachi.Wire` 25 to 34, `Malachi.Routing.flag/0`): they answer `unsupported`
+   # until every node advertises it and an operator turns it on, which serves `topic_routes` (#275).
+-  @capabilities [:producer_streams]
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +  # scripts/docker-upgrade-chaos.sh, never into a release.
-+  @capabilities [:upgrade_canary]
++  @capabilities [:producer_streams, :upgrade_canary]
  
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()

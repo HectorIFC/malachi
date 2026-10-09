@@ -95,6 +95,7 @@ services:
     environment:
       <<: *malachi-env
       MALACHI_SERVICE_NAME: malachi1
+      MALACHI_ADVERTISED_HOST: malachi1
     # Only node 1 publishes to the host, so it is the only one reachable from your machine. The three
     # are interchangeable to a client ON the compose network, which is the sense the cluster cares
     # about: a write through any of them is quorum-replicated across all three. Publish the other two
@@ -114,6 +115,7 @@ services:
     environment:
       <<: *malachi-env
       MALACHI_SERVICE_NAME: malachi2
+      MALACHI_ADVERTISED_HOST: malachi2
     volumes:
       - malachi-durable-2:/app/data
 
@@ -124,6 +126,7 @@ services:
     environment:
       <<: *malachi-env
       MALACHI_SERVICE_NAME: malachi3
+      MALACHI_ADVERTISED_HOST: malachi3
     volumes:
       - malachi-durable-3:/app/data
 
