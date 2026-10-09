@@ -5,7 +5,9 @@
 #
 #   1. unconfigured  - what every deployment pays by default on a produce: both publish quotas read as
 #                      unlimited, so the charge touches no table
-#   2. caller-side   - the one-token check, `RateLimiter.check_limit_in_caller/3` (the subscribe quota)
+#   2. caller-side   - the one-token check, `RateLimiter.check_limit_in_caller/3`, the door the subscribe
+#                      quota uses (timed here on a publish-keyed counter; the action is only part of the
+#                      counter's key)
 #   3. charge        - what a produce pays with quotas set, `RateLimiter.charge_in_caller/2`: a batch of
 #                      100 records against the records quota, then against both records and bytes
 #   4. serialized    - the one-token check through the limiter GenServer, which is the door the auth paths

@@ -219,7 +219,7 @@ call on one hot user):
 
 | call | 1 process | 64 processes |
 |---|---|---|
-| one-token check (`check_limit_in_caller/3`, the subscribe quota) | 436 to 479 | 118 to 121 |
+| one-token check (`check_limit_in_caller/3`, the door the subscribe quota uses) | 436 to 479 | 118 to 121 |
 | produce charge, records quota set | 1,215 to 1,298 | 317 to 375 |
 | produce charge, records and bytes quotas set | 1,813 to 1,917 | 447 to 457 |
 | produce charge, both quotas unconfigured | 671 to 812 | 162 to 215 |
@@ -227,12 +227,14 @@ call on one hot user):
 A produce charge costs about three times the one-token check (four with both quotas), and still sustains
 over 2 million charges a second at 64 concurrent processes. The rows do not do the same work: the one-token
 check is timed with its limit already in hand, while every produce charge reads both quotas' limits and
-windows and builds its list of charges first. The unconfigured row is exactly that work with no table
-touched, and taking it away leaves the ETS updates at about one one-token check per configured quota:
-on the means of the 3 runs, about 1.1x (1 process) to 1.4x (64 processes) with the records quota, and about
-2.3x to 2.5x with both. Run by run the subtraction varies more (0.8x to 1.8x with the records quota at 64
-processes), since the unconfigured row it takes away is the noisiest one in the table (162 to 215 ns at
-64 processes). How the unconfigured row splits between the config reads and the list has not been
+windows and builds its list of charges first. The unconfigured row is that work with no quota to claim,
+and taking it away leaves the per-quota claim (the window and shard bookkeeping the one-token check also
+does, and the ETS update) at about one one-token check per configured quota. On the means of the 3 runs,
+at the 1 and 64 process ends: about 1.1x (1 process) to 1.4x (64 processes) with the records quota, and
+about 2.5x (1 process) to 2.3x (64 processes) with both; at 4 processes the both-quotas figure reaches
+3.0x. Run by run the subtraction varies more (0.8x to 1.8x with the records quota at 64 processes),
+because both rows it combines move from run to run: at 64 processes the records row by 58 ns and the
+unconfigured row by 53. How the work splits inside the unconfigured row, or inside a claim, has not been
 measured. Every charge timed there fits in the caller's own shard; a cost bigger than one
 shard's slice sweeps the other shards, an update or two per shard it takes from, and is not timed.
 
