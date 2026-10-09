@@ -7,6 +7,8 @@ defmodule Malachi.ProducerStreamsTest do
   # the routing reads the topology the consumer-group router publishes, cleared here for each test.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.QuotaForensics, only: [within_one_window: 2, snapshot: 2, assert_refused: 4]
+
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Log.Record
@@ -17,6 +19,7 @@ defmodule Malachi.ProducerStreamsTest do
   alias Malachi.Wire.Batch
 
   @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
+  @quota_window_ms 60_000
 
   setup do
     :ok = ClusterFlagsPause.pause()
@@ -293,6 +296,86 @@ defmodule Malachi.ProducerStreamsTest do
       {:ok, body} = TCPHelper.recv_frame(ctx.socket)
       assert {11, 1, payload} = Wire.decode_response(body)
       assert Wire.decode_error_reason(payload) == "unknown_stream"
+    end
+  end
+
+  describe "publish quotas" do
+    # Each attempt connects as a user of its own, so its quota starts unspent, and opens a topic and stream of
+    # its own. A test that expects a refusal runs inside one quota window (`within_one_window/2`) and asserts
+    # the refusal with `assert_refused/4`, so a window that turns over mid-test reruns it, from fresh state,
+    # instead of failing.
+    setup do
+      keys = [:publish_rate_limit, :publish_rate_window_ms, :publish_bytes_rate_limit, :publish_bytes_rate_window_ms]
+      prior = for key <- keys, do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- prior,
+            do:
+              if(value == nil,
+                do: Application.delete_env(:malachi, key),
+                else: Application.put_env(:malachi, key, value)
+              )
+      end)
+
+      Application.put_env(:malachi, :publish_rate_window_ms, @quota_window_ms)
+      Application.put_env(:malachi, :publish_bytes_rate_window_ms, @quota_window_ms)
+      :ok
+    end
+
+    # A new user, connected, with a topic of its own and one stream open on it.
+    defp quota_stream do
+      user = "pstream_quota_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(user, "secret-pass-123", [:produce, :consume])
+      on_exit(fn -> Malachi.Auth.remove_user(user) end)
+      {:ok, socket} = TCPHelper.connect()
+      {:ok, _token} = TCPHelper.authenticate_wire(socket, user, "secret-pass-123")
+      on_exit(fn -> :gen_tcp.close(socket) end)
+
+      topic = "pstream_quota_#{System.unique_integer([:positive])}"
+      {code, _} = TCPHelper.request(socket, Wire.create_topic_key(), 2, Wire.encode_create_topic_req(topic, 4))
+      assert code == Wire.ok_code()
+      {:ok, %{stream_id: id}} = open(socket, topic)
+      %{user: user, socket: socket, topic: topic, id: id}
+    end
+
+    # What an append's ack says about it, in the shape `assert_refused/4` reads.
+    defp ack_outcome(errors, sequence) do
+      case Enum.find(errors, &(&1.sequence == sequence)) do
+        nil -> :ok
+        %{reason: reason} -> {:error, reason}
+      end
+    end
+
+    test "an append is charged its inflated records: one past the quota is refused at its sequence" do
+      Application.put_env(:malachi, :publish_rate_limit, 3)
+
+      within_one_window(@quota_window_ms, fn ->
+        %{user: user, socket: socket, topic: topic, id: id} = quota_stream()
+        spent = snapshot(user, :publish)
+        send_append(socket, id, 0, batch(["a", "b"], codec: :zstd))
+        assert {_ack, []} = acked_through(socket, 0)
+        send_append(socket, id, 1, batch(["c", "d"], codec: :zstd))
+        {ack, errors} = acked_through(socket, 1)
+        assert_refused(ack_outcome(errors, 1), spent, user, :publish)
+        assert ack.acked_sequence == 2
+
+        # the stream goes on, and what the quota still holds is spent
+        send_append(socket, id, 2, batch(["c"], codec: :zstd))
+        assert {%{acked_sequence: 3}, []} = acked_through(socket, 2)
+        assert values(socket, topic) == ["a", "b", "c"]
+      end)
+    end
+
+    test "the bytes charged are the batch's inflated bytes, not what it weighs compressed" do
+      # 4000 repeated bytes compress to a few dozen: charging the wire size would admit them
+      Application.put_env(:malachi, :publish_bytes_rate_limit, 4_000)
+      large = batch([String.duplicate("z", 4_000)], codec: :zstd)
+      assert byte_size(large) < 200
+
+      %{socket: socket, topic: topic, id: id} = quota_stream()
+      send_append(socket, id, 0, large)
+      assert {_ack, [%{sequence: 0, reason: "quota_too_small"}]} = acked_through(socket, 0)
+      assert values(socket, topic) == []
     end
   end
 

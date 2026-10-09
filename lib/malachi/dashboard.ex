@@ -871,6 +871,7 @@ defmodule Malachi.Dashboard do
         dashboard_auth: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_auth, 20)),
         dashboard_api: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_api, 20)),
         publish: format_top_blocked(RateLimiter.get_top_blocked(:publish, 20)),
+        publish_bytes: format_top_blocked(RateLimiter.get_top_blocked(:publish_bytes, 20)),
         subscribe: format_top_blocked(RateLimiter.get_top_blocked(:subscribe, 20)),
         channel_publish: format_top_blocked(RateLimiter.get_top_blocked(:channel_publish, 20)),
         channel_subscribe: format_top_blocked(RateLimiter.get_top_blocked(:channel_subscribe, 20))
@@ -884,6 +885,7 @@ defmodule Malachi.Dashboard do
         # an unconfigured action reports a null limit rather than a default nobody applies.
         dashboard_auth: Access.login_bucket_config(),
         publish: action_config_json(:publish),
+        publish_bytes: action_config_json(:publish_bytes),
         subscribe: action_config_json(:subscribe),
         dashboard_api: action_config_json(:dashboard_api)
       }

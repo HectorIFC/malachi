@@ -17,7 +17,14 @@ defmodule Malachi.RateLimitEnforcementTest do
 
   @moduletag :security
 
-  @limit_keys [:publish_rate_limit, :publish_rate_window_ms, :subscribe_rate_limit, :subscribe_rate_window_ms]
+  @limit_keys [
+    :publish_rate_limit,
+    :publish_rate_window_ms,
+    :publish_bytes_rate_limit,
+    :publish_bytes_rate_window_ms,
+    :subscribe_rate_limit,
+    :subscribe_rate_window_ms
+  ]
 
   setup do
     prior = for key <- @limit_keys, into: %{}, do: {key, Application.get_env(:malachi, key)}
@@ -35,6 +42,7 @@ defmodule Malachi.RateLimitEnforcementTest do
   @window_ms 60_000
 
   defp limit_publish(limit), do: put_limit(:publish_rate_limit, :publish_rate_window_ms, limit)
+  defp limit_publish_bytes(limit), do: put_limit(:publish_bytes_rate_limit, :publish_bytes_rate_window_ms, limit)
   defp limit_subscribe(limit), do: put_limit(:subscribe_rate_limit, :subscribe_rate_window_ms, limit)
 
   defp put_limit(limit_key, window_key, limit) do
@@ -69,8 +77,8 @@ defmodule Malachi.RateLimitEnforcementTest do
     reply(TCPHelper.request(socket, Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8)))
   end
 
-  defp produce(socket, topic) do
-    payload = Wire.encode_produce_req(topic, [%Malachi.Log.Record{value: "v"}])
+  defp produce(socket, topic, values \\ ["v"]) do
+    payload = Wire.encode_produce_req(topic, Enum.map(values, &%Malachi.Log.Record{value: &1}))
     reply(TCPHelper.request(socket, Wire.produce_key(), 1, payload))
   end
 
@@ -209,6 +217,56 @@ defmodule Malachi.RateLimitEnforcementTest do
       assert :ok = create_topic(socket, topic)
 
       for _ <- 1..5, do: assert(:ok = produce(socket, topic))
+    end
+  end
+
+  describe "publish quotas count records and bytes" do
+    test "a produce spends one unit per record" do
+      limit_publish(5)
+
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        spent = snapshot(user, :publish)
+        assert :ok = produce(socket, topic, ["a", "b", "c"])
+        # 3 spent, 3 more would make 6
+        assert_refused(produce(socket, topic, ["d", "e", "f"]), spent, user, :publish)
+        assert :ok = produce(socket, topic, ["d", "e"])
+      end)
+    end
+
+    test "a produce spends its bytes under the bytes quota, which refuses on its own" do
+      limit_publish_bytes(1_000)
+
+      # the counter is read inside each attempt, so an attempt a window boundary reruns is not counted twice
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        before = blocked_count(:publish_bytes_blocked)
+        spent = snapshot(user, :publish_bytes)
+        assert :ok = produce(socket, topic, [String.duplicate("x", 600)])
+        assert_refused(produce(socket, topic, [String.duplicate("y", 600)]), spent, user, :publish_bytes)
+        assert blocked_count(:publish_bytes_blocked) == before + 1
+      end)
+    end
+
+    test "a produce bigger than a whole window is quota_too_small, counted as blocked, and spends nothing" do
+      limit_publish(2)
+
+      within_one_window(@window_ms, fn ->
+        {_user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        before = blocked_count(:publish_blocked)
+        assert {:error, "quota_too_small"} = produce(socket, topic, ["a", "b", "c"])
+        assert blocked_count(:publish_blocked) == before + 1
+        assert :ok = produce(socket, topic, ["a", "b"])
+      end)
     end
   end
 

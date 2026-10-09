@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# What does enforcing the publish quota cost on the produce path? The limiter is an ETS token bucket, but
-# produce is the hottest path in the system, so "an ETS lookup is free" is a claim to measure, not to
-# assume. This sweep answers it on the 3-node cluster, with the same client and cpuset separation as the
-# other benchmarks.
+# What does enforcing the publish quotas cost on the produce path? Each produce is charged its records and
+# bytes against sharded ETS window counters (`Malachi.RateLimiter.charge_in_caller/2`), but produce is the
+# hottest path in the system, so "an ETS update is free" is a claim to measure, not to assume. This sweep
+# answers it on the 3-node cluster, with the same client and cpuset separation as the other benchmarks.
 #
-# The quota is keyed by AUTHENTICATED USER and the load generator authenticates as one user, so every
-# connection in the run contends on a single hot bucket. That is deliberate: it is the worst case for
-# ETS bucket-lock contention, and the only case worth reporting.
+# The quotas are keyed by AUTHENTICATED USER and the load generator authenticates as one user, so every
+# connection in the run charges the same user's counters. That is deliberate: it is the worst case for
+# contention on them, and the only case worth reporting.
 #
 #   off           - the limiter switched off entirely, the baseline
-#   unconfigured  - limiter on, publish limit 0 (the SHIPPED DEFAULT): the cost every deployment pays,
-#                   which should be one config read and a branch
-#   high          - limiter on, publish limit far above the offered load: the cost of actually checking
-#                   the bucket on every produce, with nothing ever refused
+#   unconfigured  - limiter on, both publish quotas 0 (the SHIPPED DEFAULT): the cost every deployment pays,
+#                   the config reads of a charge that touches no table
+#   high          - limiter on, records quota far above the offered load: the cost of actually charging
+#                   every produce its records, with nothing ever refused
+#   high_both     - as `high`, with the bytes quota set far above the offered load too: a produce is
+#                   charged its records and its bytes
 #
-# The number that decides the design is `high` vs `off`. Anything inside the run-to-run noise floor
-# (roughly 15% on the reference machine) means the check is affordable; rate_limited must be 0 in every
-# case, since a refusal would mean the limit bit and the throughput number is measuring the wrong thing.
+# The numbers that decide the design are `high` and `high_both` vs `off`, read against the spread column:
+# each case's own rounds, worst to best, as a share of its best, which is the run-to-run noise floor of this
+# machine. A delta inside it means the charge is affordable; rate_limited must be 0 in every case, since a
+# refusal would mean the limit bit and the throughput number is measuring the wrong thing.
 #
-# Usage: benchmark/docker-ratelimit.sh   (override DUR/WARM/CONNS/TOPICS/BATCH/REPEATS/LIMIT via env)
+# Usage: benchmark/docker-ratelimit.sh
+#   override DUR/WARM/CONNS/TOPICS/BATCH/REPEATS/LIMIT/BYTES_LIMIT via env, and SRV_CPUSET/LT_CPUSET (the
+#   defaults, 4,5,6,7 and 0,1,2,3, need 8 cpus; on 4: SRV_CPUSET=1,2,3 LT_CPUSET=0)
 set -uo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 COMPOSE="docker compose -f docker-compose.cluster.yml"
@@ -30,6 +35,7 @@ TOPICS="${TOPICS:-24}"
 REPEATS="${REPEATS:-3}"
 # Far above anything the client can offer: the point is to pay for the check, never to be refused by it.
 LIMIT="${LIMIT:-100000000}"
+BYTES_LIMIT="${BYTES_LIMIT:-100000000000}"
 export SRV_CPUSET="${SRV_CPUSET:-4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1,2,3}"
 export RF="${RF:-1}"
 FAILED=0
@@ -64,11 +70,15 @@ run_case() {
 
 apply_case() {
   case "$1" in
-    off) export MALACHI_RATE_LIMIT_ENABLED=false MALACHI_PUBLISH_RATE_LIMIT=0 ;;
-    unconfigured) export MALACHI_RATE_LIMIT_ENABLED=true MALACHI_PUBLISH_RATE_LIMIT=0 ;;
-    high) export MALACHI_RATE_LIMIT_ENABLED=true MALACHI_PUBLISH_RATE_LIMIT="$LIMIT" ;;
+    off) export MALACHI_RATE_LIMIT_ENABLED=false MALACHI_PUBLISH_RATE_LIMIT=0 MALACHI_PUBLISH_BYTES_RATE_LIMIT=0 ;;
+    unconfigured) export MALACHI_RATE_LIMIT_ENABLED=true MALACHI_PUBLISH_RATE_LIMIT=0 MALACHI_PUBLISH_BYTES_RATE_LIMIT=0 ;;
+    high) export MALACHI_RATE_LIMIT_ENABLED=true MALACHI_PUBLISH_RATE_LIMIT="$LIMIT" MALACHI_PUBLISH_BYTES_RATE_LIMIT=0 ;;
+    high_both)
+      export MALACHI_RATE_LIMIT_ENABLED=true MALACHI_PUBLISH_RATE_LIMIT="$LIMIT"
+      export MALACHI_PUBLISH_BYTES_RATE_LIMIT="$BYTES_LIMIT"
+      ;;
   esac
-  export MALACHI_PUBLISH_RATE_WINDOW_MS=1000
+  export MALACHI_PUBLISH_RATE_WINDOW_MS=1000 MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS=1000
   # Switching the limiter on switches the AUTH limit on with it, and the generator opens CONNS
   # connections from one ip against a shipped limit of 10 a minute. Left alone it does not slow the run
   # down, it starves it of connections, and the case reports no run at all. This is a benchmark of the
@@ -86,10 +96,10 @@ echo "Building images..."
 $COMPOSE build >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 $COMPOSE down -v >/dev/null 2>&1
 
-CASES="off unconfigured high"
-declare -A best_recs best_p50 best_p99 errors dropped limited nojson
+CASES="off unconfigured high high_both"
+declare -A best_recs worst_recs rounds best_p50 best_p99 errors dropped limited nojson
 for case_name in $CASES; do
-  best_recs[$case_name]=0; best_p50[$case_name]=0; best_p99[$case_name]=0
+  best_recs[$case_name]=0; worst_recs[$case_name]=0; rounds[$case_name]=""; best_p50[$case_name]=0; best_p99[$case_name]=0
   errors[$case_name]=0; dropped[$case_name]=0; limited[$case_name]=0; nojson[$case_name]=0
 done
 
@@ -113,9 +123,26 @@ for round in $(seq 1 "$REPEATS"); do
 
     read -r recs p50 p99 err drop rl < <(echo "$json" \
       | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.rate_limited]|@tsv')
+    # An error is never left as a bare count: the reasons the server gave are printed with the round.
+    if [ "$err" != "0" ]; then
+      echo "  $case_name round $round: $err errors, $(echo "$json" | jq -c '.error_reasons')"
+    fi
     errors[$case_name]=$(( ${errors[$case_name]} + err ))
     dropped[$case_name]=$(( ${dropped[$case_name]} + drop ))
     limited[$case_name]=$(( ${limited[$case_name]} + rl ))
+    # A round that moved nothing, or lost connections, was not measuring the charge: it fails the sweep,
+    # and it is still kept in the case's rounds below so the spread shows it.
+    if [ "$recs" = "0" ] || [ "$drop" != "0" ]; then
+      echo "  $case_name round $round: $recs rec/s, $drop connection(s) dropped; not a measurement of the charge"
+      FAILED=1
+    fi
+    # Every round is kept, so the spread between a case's own rounds (its noise floor) is printed next to
+    # the best of N the comparison uses. The first round sets the worst; an empty list, not a 0, says there
+    # is none yet, since 0 is a rate a round can report.
+    if [ -z "${rounds[$case_name]}" ] || [ "$recs" -lt "${worst_recs[$case_name]}" ]; then
+      worst_recs[$case_name]=$recs
+    fi
+    rounds[$case_name]="${rounds[$case_name]} $recs"
     # Best of N: these runs share a laptop with Docker, so the slow ones measure the noise floor.
     if [ "$recs" -gt "${best_recs[$case_name]}" ]; then
       best_recs[$case_name]=$recs; best_p50[$case_name]=$p50; best_p99[$case_name]=$p99
@@ -123,8 +150,8 @@ for round in $(seq 1 "$REPEATS"); do
   done
 done
 
-printf "\n%-14s | %10s %8s %8s %7s %7s %9s %7s | %s\n" \
-  case "rec/s" "p50 ms" "p99 ms" errors dropped "rate_lim" "no json" "vs off"
+printf "\n%-14s | %10s %8s %8s %7s %7s %9s %7s | %-17s | %s\n" \
+  case "rec/s" "p50 ms" "p99 ms" errors dropped "rate_lim" "no json" "vs off" "spread (rounds)"
 printf -- "-------------------------------------------------------------------------------------------------\n"
 
 baseline=${best_recs[off]}
@@ -146,9 +173,13 @@ for case_name in $CASES; do
     delta=$(LC_NUMERIC=C awk -v a="$recs" -v b="$baseline" 'BEGIN{printf "%+.1f%%", (a-b)*100/b}')
   fi
 
-  printf "%-14s | %10s %8s %8s %7s %7s %9s %7s | %s\n" \
+  # A case's own rounds, worst to best, as a share of its best: the run-to-run noise its delta sits in.
+  spread=$(LC_NUMERIC=C awk -v a="${worst_recs[$case_name]}" -v b="$recs" 'BEGIN{printf "%.1f%%", (b-a)*100/b}')
+
+  printf "%-14s | %10s %8s %8s %7s %7s %9s %7s | %-17s | %s (%s )\n" \
     "$case_name" "$recs" "${best_p50[$case_name]}" "${best_p99[$case_name]}" \
-    "${errors[$case_name]}" "${dropped[$case_name]}" "${limited[$case_name]}" "${nojson[$case_name]}" "$delta"
+    "${errors[$case_name]}" "${dropped[$case_name]}" "${limited[$case_name]}" "${nojson[$case_name]}" "$delta" \
+    "$spread" "${rounds[$case_name]}"
 
   # A run that refused produces was not measuring the check, it was measuring the limit. Never silent.
   [ "${errors[$case_name]}" != "0" ] && FAILED=1

@@ -24,7 +24,8 @@ defmodule Malachi.Test.MetricsFixtures do
       atom_table: %{atom_count: 20_000, atom_limit: 1_048_576},
       rate_limiting: %{
         auth_blocked: 5,
-        publish_blocked: 0,
+        publish_blocked: 4,
+        publish_bytes_blocked: 6,
         subscribe_blocked: 1,
         dashboard_api_blocked: 2,
         connection_blocks: 3

@@ -351,6 +351,8 @@ if config_env() != :test do
     # broker far below what it can do.
     publish_rate_limit: parse_int.("MALACHI_PUBLISH_RATE_LIMIT", 0),
     publish_rate_window_ms: parse_int.("MALACHI_PUBLISH_RATE_WINDOW_MS", 1_000),
+    publish_bytes_rate_limit: parse_int.("MALACHI_PUBLISH_BYTES_RATE_LIMIT", 0),
+    publish_bytes_rate_window_ms: parse_int.("MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS", 1_000),
     subscribe_rate_limit: parse_int.("MALACHI_SUBSCRIBE_RATE_LIMIT", 0),
     subscribe_rate_window_ms: parse_int.("MALACHI_SUBSCRIBE_RATE_WINDOW_MS", 60_000),
     rate_limit_cleanup_interval_ms: parse_int.("MALACHI_RATE_LIMIT_CLEANUP_INTERVAL", 300_000),

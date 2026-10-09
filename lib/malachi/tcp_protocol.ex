@@ -149,7 +149,8 @@ defmodule Malachi.TCPProtocol do
   end
 
   # One append: the flag and the topic permission are checked again on every frame (an operator can revoke
-  # either while the stream is open), and the publish quota takes one token per append.
+  # either while the stream is open). The publish quotas are charged inside `ProducerStreams.append/6`, once
+  # the batch is decoded, by its inflated records and bytes (`charge_publish/3`).
   defp append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport) do
     case ProducerStreams.topic(streams, stream_id) do
       nil ->
@@ -161,7 +162,6 @@ defmodule Malachi.TCPProtocol do
           cond do
             not ClusterFlagsCache.enabled?(Routing.flag()) -> :unsupported
             not topic_allowed?(session, :produce, topic) -> :permission_denied
-            not publish_allowed?(session) -> :rate_limited
             true -> nil
           end
 
@@ -170,27 +170,41 @@ defmodule Malachi.TCPProtocol do
           streams
         else
           # `topic/2` above names only an open stream, so the append is taken or answered here
-          {streams, frames} = ProducerStreams.append(streams, stream_id, sequence, batch, max_inflated_batch_bytes())
+          charge = &charge_publish(session, &1, &2)
+
+          {streams, frames} =
+            ProducerStreams.append(streams, stream_id, sequence, batch, max_inflated_batch_bytes(), charge)
+
           Enum.each(frames, &transport.send(socket, &1))
           streams
         end
     end
   end
 
-  defp publish_allowed?(session) do
-    case RateLimiter.action_config(:publish) do
-      nil ->
-        true
+  # Charges a produce's records and bytes to the user's publish quotas (records under `:publish`, bytes
+  # under `:publish_bytes`), both or neither. A cost bigger than a whole window of its quota can never be
+  # admitted, so it is refused as `quota_too_small` rather than as a `rate_limited` the client would retry
+  # forever. The quota charges the attempt: a produce the broker then refuses (overloaded, sealed, a key
+  # outside its range) has spent its records and bytes all the same, since on the paths that can fail
+  # after a partial write no refund could tell what landed. Unconfigured quotas, the default, cost five
+  # config reads (each quota's limit and window, and whether limiting is on) and touch no table.
+  defp charge_publish(session, records, bytes) do
+    charges = [
+      {:publish, RateLimiter.action_config(:publish), records},
+      {:publish_bytes, RateLimiter.action_config(:publish_bytes), bytes}
+    ]
 
-      config ->
-        case RateLimiter.check_limit_in_caller(session.username, :publish, config) do
-          :ok ->
-            true
+    case RateLimiter.charge_in_caller(session.username, charges) do
+      :ok ->
+        :ok
 
-          {:error, :rate_limit_exceeded, _retry_after_ms} ->
-            Metrics.increment_rate_limit_blocked(:publish)
-            false
-        end
+      {:error, :rate_limit_exceeded, action, _retry_after_ms} ->
+        Metrics.increment_rate_limit_blocked(action)
+        {:error, :rate_limited}
+
+      {:error, :cost_exceeds_limit, action} ->
+        Metrics.increment_rate_limit_blocked(action)
+        {:error, :quota_too_small}
     end
   end
 
@@ -407,12 +421,17 @@ defmodule Malachi.TCPProtocol do
     {topic, records} = Wire.decode_produce_req(payload)
 
     with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      with_rate_limit(:publish, session, correlation_id, fn ->
-        case LogApi.produce_records(broker_for(topic), topic, records) do
-          {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
-          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-        end
-      end)
+      # this key carries no compression, so the bytes charged are the request's as received
+      case charge_publish(session, length(records), byte_size(payload)) do
+        :ok ->
+          case LogApi.produce_records(broker_for(topic), topic, records) do
+            {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
+            {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+          end
+
+        {:error, reason} ->
+          Wire.encode_error(correlation_id, reason)
+      end
     end)
   end
 
@@ -662,13 +681,13 @@ defmodule Malachi.TCPProtocol do
   # is what makes `rate_limit_blocked{action=...}` able to move at all.
   #
   # Ordering matters: this sits INSIDE the permission check, so a request the caller was never allowed to
-  # make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is one config
-  # read. A produce spends one token per request, not per record (the batch size is already bounded by
-  # `max_frame_size`); a per-record cost would be a different quota and is left as future work.
+  # make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is two config
+  # reads (the limit and the window). A subscribe spends one token; a produce is charged by its records and
+  # bytes (`charge_publish/3`).
   #
   # The check runs in this connection's own process (`check_limit_in_caller/3`) rather than through the
   # limiter GenServer, which would put every connection in the system behind one process on the hottest
-  # path. The count stays exact; what that door gives up is the token bucket's smoothing, so a client can
+  # path. Its count is exact; what that door gives up is the token bucket's smoothing, so a client can
   # burst to 2x the limit across a window boundary. Windows follow the monotonic clock, so a system clock
   # step does not open a new one. See the limiter's own docs for the measurements.
   #

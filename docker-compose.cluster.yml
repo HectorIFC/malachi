@@ -57,6 +57,8 @@ x-malachi-node: &malachi-node
     MALACHI_RATE_LIMIT_ENABLED: "${MALACHI_RATE_LIMIT_ENABLED:-false}"
     MALACHI_PUBLISH_RATE_LIMIT: "${MALACHI_PUBLISH_RATE_LIMIT:-0}"
     MALACHI_PUBLISH_RATE_WINDOW_MS: "${MALACHI_PUBLISH_RATE_WINDOW_MS:-1000}"
+    MALACHI_PUBLISH_BYTES_RATE_LIMIT: "${MALACHI_PUBLISH_BYTES_RATE_LIMIT:-0}"
+    MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS: "${MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS:-1000}"
     # The load generator opens dozens of connections from ONE ip, which the shipped auth limit (10 per
     # minute per ip) is designed to stop. Whenever the limiter is switched on here it is to measure the
     # PUBLISH quota, so the auth limit has to be lifted out of the way or it silently starves the run of

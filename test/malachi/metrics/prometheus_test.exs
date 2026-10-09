@@ -50,6 +50,8 @@ defmodule Malachi.Metrics.PrometheusTest do
 
     assert out =~ ~s(malachi_memory_bytes{kind="total"} #{round(40.0 * 1_048_576)})
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="auth"} 5)
+    assert out =~ ~s(malachi_rate_limit_blocked_total{action="publish"} 4)
+    assert out =~ ~s(malachi_rate_limit_blocked_total{action="publish_bytes"} 6)
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="subscribe"} 1)
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="dashboard_api"} 2)
     refute out =~ ~s(malachi_rate_limit_blocked_total{action="dashboard_auth"})

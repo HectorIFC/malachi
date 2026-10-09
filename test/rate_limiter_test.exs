@@ -841,6 +841,130 @@ defmodule Malachi.RateLimiterTest do
     end
   end
 
+  describe "charge_in_caller/2" do
+    defp used(identifier, action),
+      do: identifier |> RateLimiter.window_counters(action) |> Enum.map(& &1.used) |> Enum.sum()
+
+    test "a cost spends that many units: the window admits costs up to the limit, and not one unit more" do
+      config = %{limit: 10, window_ms: 60_000}
+
+      outcomes =
+        within_one_window(config.window_ms, fn ->
+          identifier = "weighted_#{System.unique_integer([:positive])}"
+
+          for cost <- [4, 4, 3, 2] do
+            RateLimiter.charge_in_caller(identifier, [{:publish, config, cost}])
+          end
+        end)
+
+      # 4 + 4 fits, 3 more would make 11, 2 more makes exactly 10
+      assert [:ok, :ok, {:error, :rate_limit_exceeded, :publish, retry}, :ok] = outcomes
+      assert retry > 0 and retry <= config.window_ms
+    end
+
+    test "a cost bigger than one shard's slice is gathered from the others" do
+      # every scheduler holds a slice of 64; a cost of 64 cannot fit in any one shard when there are several
+      config = %{limit: 64, window_ms: 60_000}
+
+      {first, second} =
+        within_one_window(config.window_ms, fn ->
+          identifier = "gathered_#{System.unique_integer([:positive])}"
+
+          {RateLimiter.charge_in_caller(identifier, [{:publish, config, 64}]),
+           RateLimiter.charge_in_caller(identifier, [{:publish, config, 1}])}
+        end)
+
+      assert first == :ok
+      assert {:error, :rate_limit_exceeded, :publish, _retry} = second
+    end
+
+    test "all or nothing: a charge that does not fit gives back what the others took" do
+      records = %{limit: 10, window_ms: 60_000}
+      bytes = %{limit: 100, window_ms: 60_000}
+
+      {identifier, outcome, then_records} =
+        within_one_window(records.window_ms, fn ->
+          identifier = "atomic_#{System.unique_integer([:positive])}"
+          :ok = RateLimiter.charge_in_caller(identifier, [{:publish, records, 1}, {:publish_bytes, bytes, 90}])
+          outcome = RateLimiter.charge_in_caller(identifier, [{:publish, records, 5}, {:publish_bytes, bytes, 20}])
+          {identifier, outcome, RateLimiter.charge_in_caller(identifier, [{:publish, records, 9}])}
+        end)
+
+      assert {:error, :rate_limit_exceeded, :publish_bytes, _retry} = outcome
+      # the 5 records the refused charge took are back: 1 + 9 fills the window exactly
+      assert then_records == :ok
+      assert used(identifier, :publish) == 10
+      assert used(identifier, :publish_bytes) == 90
+    end
+
+    test "a cost no window could hold is refused as such, and spends nothing" do
+      config = %{limit: 10, window_ms: 60_000}
+      identifier = "oversized_#{System.unique_integer([:positive])}"
+
+      assert RateLimiter.charge_in_caller(identifier, [{:publish, config, 11}]) ==
+               {:error, :cost_exceeds_limit, :publish}
+
+      assert used(identifier, :publish) == 0
+      # counted as blocked under the quota that refused it
+      assert {identifier, 1} in RateLimiter.get_top_blocked(:publish, 1_000)
+    end
+
+    test "an unlimited quota (nil), a cost of 0 and a disabled limiter charge nothing" do
+      identifier = "free_#{System.unique_integer([:positive])}"
+      config = %{limit: 1, window_ms: 60_000}
+
+      assert RateLimiter.charge_in_caller(identifier, [{:publish, nil, 1_000}, {:publish_bytes, config, 0}]) == :ok
+      assert used(identifier, :publish_bytes) == 0
+
+      Application.put_env(:malachi, :rate_limit_enabled, false)
+      assert RateLimiter.charge_in_caller(identifier, [{:publish, config, 1_000}]) == :ok
+    end
+
+    test "a counter a one-token check pinned past its cap stays where it was" do
+      config = %{limit: 1, window_ms: 60_000}
+
+      {before, outcome, after_charge} =
+        within_one_window(config.window_ms, fn ->
+          identifier = "pinned_#{System.unique_integer([:positive])}"
+          :ok = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+          {:error, :rate_limit_exceeded, _} = RateLimiter.check_limit_in_caller(identifier, :publish, config)
+          before = RateLimiter.window_counters(identifier, :publish)
+          outcome = RateLimiter.charge_in_caller(identifier, [{:publish, config, 1}])
+          {before, outcome, RateLimiter.window_counters(identifier, :publish)}
+        end)
+
+      assert {:error, :rate_limit_exceeded, :publish, _retry} = outcome
+      assert after_charge == before
+    end
+
+    @tag :concurrent
+    property "racing charges never admit more than the limit, and fill it when the costs allow" do
+      check all(costs <- list_of(integer(1..7), min_length: 20, max_length: 120), max_runs: 25) do
+        limit = 60
+        window_ms = 60_000
+
+        admitted =
+          within_one_window(window_ms, fn ->
+            identifier = "race_cost_#{System.unique_integer([:positive])}"
+            config = %{limit: limit, window_ms: window_ms}
+
+            costs
+            |> Enum.map(fn cost ->
+              Task.async(fn -> {cost, RateLimiter.charge_in_caller(identifier, [{:publish, config, cost}])} end)
+            end)
+            |> Task.await_many(30_000)
+            |> Enum.filter(&match?({_cost, :ok}, &1))
+            |> Enum.map(&elem(&1, 0))
+            |> Enum.sum()
+          end)
+
+        assert admitted <= limit
+        # nothing was refused while the whole offer fit
+        if Enum.sum(costs) <= limit, do: assert(admitted == Enum.sum(costs))
+      end
+    end
+  end
+
   describe "diagnostics" do
     @table :malachi_rate_limits
 

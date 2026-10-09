@@ -126,11 +126,14 @@ MALACHI_GROUP_COMMIT_INTERVAL_MS=5           # flush period; ~the latency each p
 MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS=8000  # eager flush: bound each fsync even on slow disks
 MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :overloaded past this
 
-# The produce path has TWO refusals, and a client is meant to tell them apart. :overloaded is the valve
-# above, the broker saying it is saturated right now; :rate_limited is the OPT-IN publish quota below,
-# this user saying it is over its own allowance. Off by default (0 = no limit); see docs/RATE_LIMITING.md.
-MALACHI_PUBLISH_RATE_LIMIT=0                 # produce requests per window, per user, PER NODE
+# The produce path has THREE refusals, and a client is meant to tell them apart. :overloaded is the valve
+# above, the broker saying it is saturated right now; :rate_limited is the OPT-IN publish quotas below,
+# this user saying it is over its own allowance for this window; :quota_too_small is one batch costing
+# more than a whole window, which no retry fixes. Off by default (0 = no limit); see docs/RATE_LIMITING.md.
+MALACHI_PUBLISH_RATE_LIMIT=0                 # produced records per window, per user, PER NODE
 MALACHI_PUBLISH_RATE_WINDOW_MS=1000
+MALACHI_PUBLISH_BYTES_RATE_LIMIT=0           # produced bytes per window, per user, PER NODE (a stream append's inflated)
+MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS=1000
 
 # rf>1 (replicated), replication-level. Default OFF: enable only for hot-range, fsync-bound
 # workloads (many producers per range); on thin-spread loads it lowers throughput.

@@ -4,17 +4,18 @@ Rate limiting and connection control system for Malachi.
 
 ## Enforcement status
 
-All five actions are enforced:
+All six actions are enforced:
 
 | action | keyed by | applied at | default |
 |---|---|---|---|
 | `:auth` | client IP | the TCP auth handshake | 10 per 60s |
 | `:dashboard_auth` | client IP | dashboard `POST /login`, and dashboard tokens that do not validate | 10 per 60s |
 | `:dashboard_api` | session (a SHA-256 digest of its token) | every authenticated dashboard request, `/stream` once when it opens | 300 per 60s (`0` turns it off) |
-| `:publish` | authenticated username | the `produce` frame | **off** (limit `0`) |
+| `:publish` | authenticated username | the records of a `produce` frame or a stream `append` | **off** (limit `0`) |
+| `:publish_bytes` | authenticated username | the bytes of a `produce` request as received (topic and framing included; the key carries no compression), or the inflated bytes of a stream `append` | **off** (limit `0`) |
 | `:subscribe` | authenticated username | the `subscribe` frame | **off** (limit `0`) |
 
-Read the publish and subscribe rows carefully, because three things about them are deliberate:
+Read the publish and subscribe rows carefully, because four things about them are deliberate:
 
 **Off by default.** A limit of `0` means no limit, and that is what ships. An operator opts in. Enabling
 them by default would have capped every deployment at the old configured value (1000 produce requests a
@@ -24,11 +25,19 @@ second) on a broker that measures hundreds of thousands of records a second.
 up to three times the configured limit cluster-wide. Distributed enforcement is a separate future item
 below, and nothing here should be read as a cluster-wide quota.
 
-**Per request, not per record.** A produce of one record and a produce of a thousand each cost one token.
-The batch size is already bounded by `MALACHI_MAX_FRAME_SIZE`. A per-record or per-byte quota is a
-different control and is listed as future work.
+**Records and bytes, not requests.** A produce is charged one unit of `:publish` per record and one unit
+of `:publish_bytes` per byte. A stream `append` is charged after its batch is inflated and decoded, so a
+compressed batch costs what it holds, not what it weighs on the wire. Both charges are taken together or
+not at all: an append over either quota spends neither. A subscribe costs one token.
 
-Two things are explicitly **out of scope** for these two limits, so that the one that is implemented has a
+**The attempt is charged.** A produce or append is charged before the broker takes it, and a refusal from
+the broker (`overloaded`, a sealed segment, a key outside the stream's range) does not give the charge
+back. On the paths that can fail after part of a batch was written (several ranges, a replication
+timeout) nothing could tell which records landed, so refunding some refusals and not others would let a
+user past the limit. With a publish quota set, a client retrying an `overloaded` batch spends the batch
+again; back off long enough for the quota's window to have room.
+
+Two things are explicitly **out of scope** for these limits, so that the one that is implemented has a
 single, documented meaning: keying by **IP** (the network-level control is the auth limit plus
 `ConnectionLimiter`) and keying by **topic** (listed as future work). `fetch` is not rate limited either:
 streaming already has credit-based backpressure, which bounds a consumer far better than a request count
@@ -43,7 +52,11 @@ different client behaviour:
 | reason | means | client should |
 |---|---|---|
 | `rate_limited` | this user is over its configured quota | back off until the window rolls over |
-| `overloaded` | the broker is saturated right now | back off briefly and retry |
+| `quota_too_small` | this one produce or append costs more records or bytes than a whole window of the quota | send smaller batches; retrying the same one never succeeds |
+| `overloaded` | the broker is saturated right now | back off briefly and retry (with a publish quota set, the retry is charged again) |
+
+A `produce` frame gets these as its error frame. A stream `append` gets them in its `append_ack`, as the
+error at its sequence, and the stream goes on.
 
 The response carries the reason only. `retry_after_ms` is computed server-side (it drives the metrics and
 logs) but is not on the wire: the error frame's payload is a bare reason string and `Malachi.Wire` freezes
@@ -51,7 +64,8 @@ that encoding, so carrying a structured retry-after means a new `api_key`. That 
 
 ### What an operator sees
 
-`rate_limit_blocked{action="publish"}` and `{action="subscribe"}` in the Prometheus export, and the top
+`rate_limit_blocked{action="publish"}`, `{action="publish_bytes"}` and `{action="subscribe"}` in the
+Prometheus export (a refusal counts under the quota that refused it), and the top
 blocked identifiers under `/rate_limits`. Before this was enforced those counters could only ever read
 zero, which was indistinguishable from "nobody hit the limit".
 
@@ -102,8 +116,10 @@ MALACHI_DASHBOARD_API_RATE_LIMIT=300        # Max requests per window; 0 = no li
 MALACHI_DASHBOARD_API_RATE_WINDOW_MS=60000  # Window duration (60 seconds)
 
 # Publish rate limits (per authenticated user, per node) - ENFORCED, OFF BY DEFAULT
-MALACHI_PUBLISH_RATE_LIMIT=0            # Max produce REQUESTS per window; 0 = no limit (the default)
+MALACHI_PUBLISH_RATE_LIMIT=0            # Max produced RECORDS per window; 0 = no limit (the default)
 MALACHI_PUBLISH_RATE_WINDOW_MS=1000     # Window duration (1 second)
+MALACHI_PUBLISH_BYTES_RATE_LIMIT=0      # Max produced bytes (inflated) per window; 0 = no limit (the default)
+MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS=1000
 
 # Subscribe rate limits (per authenticated user, per node) - ENFORCED, OFF BY DEFAULT
 MALACHI_SUBSCRIBE_RATE_LIMIT=0          # Max subscribe requests per window; 0 = no limit (the default)
@@ -138,9 +154,12 @@ MALACHI_MAX_TOTAL_CONN=10000
 
 **Key Functions**:
 - `check_limit/3` - Validate a request against a limit, through the GenServer (exact; the auth paths)
-- `check_limit_in_caller/3` - The same contract on a sharded fixed window, in the calling process (the
-  publish/subscribe quotas; see "Two algorithms" below)
-- `action_config/1` - The configured limit for `:publish`/`:subscribe`, or `nil` when unlimited
+- `check_limit_in_caller/3` - The same contract on a sharded fixed window, in the calling process, one
+  token per call (the subscribe quota; see "Two algorithms" below)
+- `charge_in_caller/2` - Charges a cost against one or more sharded windows at once, all or nothing (the
+  publish quotas: records and bytes)
+- `action_config/1` - The configured limit for `:publish`, `:publish_bytes` or `:subscribe`, or `nil` when
+  unlimited
 - `reset_bucket/2` - Manual bucket reset
 - `get_top_blocked/2` - Dashboard statistics
 - `get_stats/0` - System-wide statistics
@@ -150,7 +169,7 @@ MALACHI_MAX_TOTAL_CONN=10000
 The auth limits are cold (one check per connection or per login) and they are security controls, so they
 take the exact path: a token bucket read and written through the limiter GenServer.
 
-The publish quota sits on the hottest path in the system, and it is keyed by user, so every connection
+The publish quotas sit on the hottest path in the system, and they are keyed by user, so every connection
 belonging to one client contends for one quota. The obvious approach, running the same bucket body in the
 caller instead of the GenServer, is the wrong answer: ETS `write_concurrency` buys nothing when every
 caller writes the *same* key. Measured on an 8-core machine against one hot key, at 64 concurrent
@@ -164,30 +183,63 @@ processes:
 | `update_counter` sharded per scheduler | 23.8M |
 
 So the hot path counts a **fixed window sharded per scheduler**: racing callers land on different ETS keys
-and the check scales with cores. The shard caps sum to exactly the configured limit, and each token is
-claimed by one atomic operation, so the count stays exact under concurrency (measured: 400 concurrent
-callers against a limit of 50 admit exactly 50). What the fixed window gives up is smoothing, not
+and the check scales with cores. The shard caps sum to exactly the configured limit. A one-token check
+claims each token by one atomic operation, so its count is exact under concurrency (measured: 400
+concurrent callers against a limit of 50 admit exactly 50). A charge of several units (the publish quotas)
+adds its whole cost to a shard and gives back what went past the cap, so it never admits more than the
+limit in a window, but a charge racing another one's give-back can see the shard fuller than it is and be
+refused while a few units are still free: under contention near the limit it errs toward admitting less.
+What the fixed window gives up is smoothing, not
 arithmetic: a client can spend the tail of one window and the head of the next back to back, so a burst of
 up to 2x the limit is possible across a window boundary. That is acceptable for a throughput quota and is
 why the auth controls keep the token bucket.
 
-End to end, on the 3-node cluster with 48 connections and a batch of 100 (`benchmark/docker-ratelimit.sh`,
-best of 2, all cases `errors=0` and `rate_limited=0`):
+End to end, on the 3-node cluster with 48 connections, a batch of 100 and 256-byte records
+(`benchmark/docker-ratelimit.sh`, Linux under Colima with 4 CPUs, servers on cpuset `1,2,3` and the client
+on `0` via `SRV_CPUSET` and `LT_CPUSET`, 5 interleaved rounds, a fresh cluster for every round, every case
+`errors=0` and `rate_limited=0`). The rate is each case's best round; the spread is its own five rounds,
+worst to best, as a share of its best:
 
-| case | rec/s | vs off |
+| case | rec/s (best of 5) | vs off | spread |
+|---|---|---|---|
+| limiter off | 504,825 | baseline | 6.8% |
+| on, publish quotas unconfigured (the shipped default) | 505,250 | +0.1% | 5.0% |
+| on, records quota far above the offered load | 502,563 | -0.4% | 6.0% |
+| on, records and bytes quotas far above the offered load | 503,563 | -0.2% | 3.9% |
+
+Every delta is well inside the noise floor of the same run, 3.9% to 6.8%. The floor is not stable from run
+to run: an earlier five-round sweep on the same machine had spreads of 9.0% to 18.4%, and its
+records-and-bytes case reported 12,591 errors across its five rounds, which the harness did not break down
+by round or by reason at the time (it prints both now). Five more rounds of that case on fresh clusters had no errors,
+and neither did the sweep above. The charge disappears at this scale because it runs once per produce
+request: a batch of 100 at 500k records a second is about 5k charges a second.
+
+The charge in isolation (`benchmark/rate_limit_bench.exs`, same Linux machine, range over 3 runs, ns per
+call on one hot user):
+
+| call | 1 process | 64 processes |
 |---|---|---|
-| limiter off | 304,913 | baseline |
-| on, publish limit unconfigured (the shipped default) | 344,613 | +13.0% |
-| on, publish limit far above the offered load | 308,788 | +1.3% |
+| one-token check (`check_limit_in_caller/3`, the subscribe quota) | 436 to 479 | 118 to 121 |
+| produce charge, records quota set | 1,215 to 1,298 | 317 to 375 |
+| produce charge, records and bytes quotas set | 1,813 to 1,917 | 447 to 457 |
+| produce charge, both quotas unconfigured | 671 to 812 | 162 to 215 |
 
-Both are inside the run-to-run noise floor, and the `+13%` on a case that cannot possibly be faster than
-the baseline is what makes that floor visible. The reason the check disappears at this scale is worth
-being explicit about: a token is spent per produce REQUEST, so a batch of 100 at 300k records a second is
-only about 3k checks a second, against the 4.2M/s the check sustains. The headroom, not the reference
-load, is what the microbench is for.
+A produce charge costs about three times the one-token check (four with both quotas), and still sustains
+over 2 million charges a second at 64 concurrent processes. The rows do not do the same work: the one-token
+check is timed with its limit already in hand, while every produce charge reads both quotas' limits and
+windows and builds its list of charges first. The unconfigured row is exactly that work with no table
+touched, and taking it away leaves the ETS updates at about one one-token check per configured quota:
+on the means of the 3 runs, about 1.1x (1 process) to 1.4x (64 processes) with the records quota, and about
+2.3x to 2.5x with both. Run by run the subtraction varies more (0.8x to 1.8x with the records quota at 64
+processes), since the unconfigured row it takes away is the noisiest one in the table (162 to 215 ns at
+64 processes). How the unconfigured row splits between the config reads and the list has not been
+measured. Every charge timed there fits in the caller's own shard; a cost bigger than one
+shard's slice sweeps the other shards, an update or two per shard it takes from, and is not timed.
 
-Reproduce with `mix run benchmark/rate_limit_bench.exs` (the check in isolation) and
-`benchmark/docker-ratelimit.sh` (what it costs as a share of real produce throughput).
+Reproduce on Linux with `MIX_ENV=test mix run benchmark/rate_limit_bench.exs` (the check in isolation) and
+`REPEATS=5 SRV_CPUSET=1,2,3 LT_CPUSET=0 benchmark/docker-ratelimit.sh` (what it costs as a share of real
+produce throughput, with the settings the table above used on a 4-CPU machine; the script's own defaults
+put the servers on cpus 4 to 7 and need 8).
 
 **Token Bucket Algorithm**:
 ```elixir
@@ -233,7 +285,8 @@ different things to a client:
 | reason | when | what the client should do |
 |---|---|---|
 | `rate_limit_exceeded` | the auth handshake, per IP | stop reconnecting; the connection was never established |
-| `rate_limited` | a `produce` or `subscribe`, per authenticated user | back off until the window rolls over |
+| `rate_limited` | a `produce`, stream `append` or `subscribe`, per authenticated user | back off until the window rolls over |
+| `quota_too_small` | a `produce` or stream `append` bigger than a whole window of a publish quota | send smaller batches |
 | `overloaded` | a `produce`, when the broker is saturated | back off briefly and retry |
 
 A connection cap answers `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total
@@ -290,6 +343,7 @@ Returns JSON with rate limiting statistics:
       ["10.0.0.50", 312]
     ],
     "publish": [],
+    "publish_bytes": [],
     "subscribe": [],
     "channel_publish": [],
     "channel_subscribe": []
@@ -303,6 +357,10 @@ Returns JSON with rate limiting statistics:
       "limit": 1000,
       "window_ms": 1000
     },
+    "publish_bytes": {
+      "limit": null,
+      "window_ms": null
+    },
     "subscribe": {
       "limit": null,
       "window_ms": null
@@ -311,12 +369,13 @@ Returns JSON with rate limiting statistics:
 }
 ```
 
-`top_blocked` always carries all five action keys (`auth`, `publish`, `subscribe`, `channel_publish`,
-`channel_subscribe`). Three of them can be populated: `auth`, and `publish` / `subscribe` once an operator
-configures those quotas. `channel_publish` and `channel_subscribe` are vestigial and stay empty, since
+`top_blocked` always carries the keys `auth`, `dashboard_auth`, `dashboard_api`, `publish`,
+`publish_bytes`, `subscribe`, `channel_publish` and `channel_subscribe`. `publish`, `publish_bytes` and
+`subscribe` fill once an operator configures those quotas, each with the users that quota refused. `channel_publish` and `channel_subscribe` are vestigial and stay empty, since
 nothing blocks on them.
 
-The `config` object lists the `auth`, `publish`, and `subscribe` limits, read through the same
+The `config` object lists the `auth`, `dashboard_auth`, `publish`, `publish_bytes`, `subscribe` and
+`dashboard_api` limits, read through the same
 `RateLimiter.action_config/1` the enforcement path uses so the two can never disagree. An **unconfigured**
 action reports `null` for both fields, as `subscribe` does above, rather than a default nobody applies.
 
@@ -330,6 +389,7 @@ System metrics include rate limiting section:
     "rate_limiting": {
       "auth_blocked": 1523,
       "publish_blocked": 0,
+      "publish_bytes_blocked": 0,
       "subscribe_blocked": 0,
       "dashboard_api_blocked": 0,
       "connection_blocks": 45
@@ -338,10 +398,11 @@ System metrics include rate limiting section:
 }
 ```
 
-`publish_blocked` and `subscribe_blocked` move once an operator configures those quotas and a client
-exceeds one. They read `0` while the quotas are unconfigured, which is the default, so on a stock
-deployment a zero means "no quota is set" rather than "nobody hit it": `config.publish.limit` in
-`/rate_limits` is what tells the two apart.
+`publish_blocked`, `publish_bytes_blocked` and `subscribe_blocked` move once an operator configures those
+quotas and a client exceeds one (a `quota_too_small` refusal counts too, under the quota that refused it).
+They read `0` while the quotas are unconfigured, which is the default, so on a stock deployment a zero
+means "no quota is set" rather than "nobody hit it": `config.publish.limit` (or `config.publish_bytes.limit`)
+in `/rate_limits` is what tells the two apart.
 
 `rate_limiting.auth_blocked` counts only the TCP `:auth` blocks; dashboard `:dashboard_auth` blocks are
 counted separately and exposed under `system.dashboard.auth_blocked`, and in Prometheus as
@@ -491,8 +552,9 @@ iex> Malachi.ConnectionLimiter.unregister_connection(pid)
 The default limits are conservative and suitable for most deployments:
 
 - **Auth**: 10 attempts per minute per IP (prevents brute force), TCP and dashboard
-- **Publish**: off. Set `MALACHI_PUBLISH_RATE_LIMIT` to opt in; it counts produce REQUESTS per window per
-  authenticated user, per node
+- **Publish**: off. Set `MALACHI_PUBLISH_RATE_LIMIT` to opt in; it counts produced RECORDS per window per
+  authenticated user, per node. `MALACHI_PUBLISH_BYTES_RATE_LIMIT` (with
+  `MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS`) does the same for inflated bytes
 - **Subscribe**: off. Set `MALACHI_SUBSCRIBE_RATE_LIMIT` to opt in; same key and scope
 - **Connections**: 100 per IP, 10K global (prevents DoS)
 
@@ -505,7 +567,8 @@ it. Remember the count is per node: with N nodes a client can use up to N times 
 
 **High-traffic scenarios**:
 ```bash
-MALACHI_PUBLISH_RATE_LIMIT=10000
+MALACHI_PUBLISH_RATE_LIMIT=1000000
+MALACHI_PUBLISH_BYTES_RATE_LIMIT=1073741824
 MALACHI_MAX_TOTAL_CONN=50000
 ```
 
@@ -527,19 +590,20 @@ MALACHI_CONNECTION_LIMIT_ENABLED=false
 Key metrics to monitor:
 - `rate_limiting.auth_blocked` - Potential brute force against the TCP auth
 - `dashboard.auth_blocked` - Potential brute force against the dashboard login
-- `rate_limiting.publish_blocked` / `subscribe_blocked` - A client over its configured quota
+- `rate_limiting.publish_blocked` / `publish_bytes_blocked` / `subscribe_blocked` - A client over its
+  configured quota
 - `connection_blocks` - Network issues or DoS attempts
 - Top blocked IPs (via `/rate_limits` endpoint)
 
 ## Future Enhancements
 
-Shipped since this page was first written:
+Shipped:
 
 - [x] Enforce the configured publish/subscribe rate limits (per-user quotas on produce/subscribe)
+- [x] Publish quotas counted in records and inflated bytes
 
 Potential improvements (not currently implemented):
 
-- [ ] Per-record or per-byte publish quotas (today a produce costs one token whatever its batch size)
 - [ ] Carry `retry_after_ms` on the wire (needs a new `api_key`; see "What a client sees")
 - [ ] Rate limit `fetch` (today only streaming credit bounds a consumer)
 - [ ] Persistent ban list (Redis/ETS backed)

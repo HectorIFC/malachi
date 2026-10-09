@@ -57,6 +57,12 @@ defmodule Malachi.ProducerStreams do
           brokers: %{reference() => pid()}
         }
 
+  @typedoc """
+  Charges an append's inflated records and bytes to the connection's quotas: `:ok`, or the error the append
+  is answered with at its sequence.
+  """
+  @type charge :: (non_neg_integer(), non_neg_integer() -> :ok | {:error, atom()})
+
   @typedoc "What a step leaves for the connection to write: frames, each already a whole response frame."
   @type frames :: [binary()]
 
@@ -119,18 +125,19 @@ defmodule Malachi.ProducerStreams do
   end
 
   @doc """
-  Takes one append: checks its sequence and window, decodes its batch within `max_inflated_bytes`, and
-  sends it to the broker. An append that cannot be sent is answered at once with an error at its sequence;
-  one out of sequence ends the stream. `{:unknown, stream_id}` for a stream this connection does not hold.
+  Takes one append: checks its sequence and window, decodes its batch within `max_inflated_bytes`, charges
+  its inflated records and bytes to `charge` (the connection's publish quotas), and sends it to the broker.
+  An append that cannot be sent is answered at once with an error at its sequence; one out of sequence
+  ends the stream. `{:unknown, stream_id}` for a stream this connection does not hold.
   """
-  @spec append(t(), pos_integer(), non_neg_integer(), binary(), pos_integer()) ::
+  @spec append(t(), pos_integer(), non_neg_integer(), binary(), pos_integer(), charge()) ::
           {t(), frames()} | {:unknown, pos_integer()}
-  def append(%__MODULE__{} = state, stream_id, sequence, batch, max_inflated_bytes) do
+  def append(%__MODULE__{} = state, stream_id, sequence, batch, max_inflated_bytes, charge) do
     case Map.fetch(state.streams, stream_id) do
       :error -> {:unknown, stream_id}
       {:ok, %{open?: false}} -> {:unknown, stream_id}
       {:ok, stream} when sequence != stream.next_seq -> out_of_sequence(state, stream, sequence)
-      {:ok, stream} -> in_sequence(state, stream, sequence, batch, max_inflated_bytes)
+      {:ok, stream} -> in_sequence(state, stream, sequence, batch, max_inflated_bytes, charge)
     end
   end
 
@@ -230,12 +237,14 @@ defmodule Malachi.ProducerStreams do
     {stop(state, stream), [ack_frame(stream, stream.acked, [%{sequence: sequence, reason: reason}])]}
   end
 
-  defp in_sequence(state, stream, sequence, batch, max_inflated_bytes) do
+  defp in_sequence(state, stream, sequence, batch, max_inflated_bytes, charge) do
     stream = %{stream | next_seq: sequence + 1}
 
     with {:ok, entries, size} <- decode(batch, max_inflated_bytes),
          :ok <- within_window(stream, size),
-         {:ok, records} <- records(entries) do
+         {:ok, records} <- records(entries),
+         # charged last, so an append refused for any other reason spends nothing
+         :ok <- charge.(length(records), size) do
       label = {stream.id, sequence}
       reqids = BrokerServer.send_stream_produce(stream.broker, stream.range_id, records, label, state.reqids)
 

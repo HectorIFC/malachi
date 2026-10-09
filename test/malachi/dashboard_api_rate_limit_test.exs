@@ -24,7 +24,9 @@ defmodule Malachi.DashboardApiRateLimitTest do
     :session_ua_binding,
     :dashboard_update_interval_ms,
     :dashboard_cors_enabled,
-    :dashboard_cors_origins
+    :dashboard_cors_origins,
+    :publish_bytes_rate_limit,
+    :publish_bytes_rate_window_ms
   ]
 
   setup do
@@ -170,6 +172,21 @@ defmodule Malachi.DashboardApiRateLimitTest do
 
       refute response =~ token
       refute inspect(:ets.tab2list(:malachi_rate_limits), limit: :infinity) =~ token
+    end
+
+    test "the publish bytes quota is listed with its limit and the users it refused" do
+      Application.put_env(:malachi, :publish_bytes_rate_limit, 100)
+      Application.put_env(:malachi, :publish_bytes_rate_window_ms, 60_000)
+      user = "bytes_refused_#{System.unique_integer([:positive])}"
+      config = RateLimiter.action_config(:publish_bytes)
+      # a cost no window holds is refused at once, whatever the window's clock
+      {:error, :cost_exceeds_limit, :publish_bytes} =
+        RateLimiter.charge_in_caller(user, [{:publish_bytes, config, 101}])
+
+      rate_limits = json_body(get(session(@admin), "/rate_limits"))
+
+      assert %{"identifier" => user, "count" => 1} in rate_limits["top_blocked"]["publish_bytes"]
+      assert rate_limits["config"]["publish_bytes"] == %{"limit" => 100, "window_ms" => 60_000}
     end
   end
 

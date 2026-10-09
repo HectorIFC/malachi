@@ -48,6 +48,7 @@ defmodule Malachi.Metrics.Prometheus do
       metric("malachi_rate_limit_blocked_total", :counter, "Requests blocked by rate limiting", [
         {[action: "auth"], system.rate_limiting.auth_blocked},
         {[action: "publish"], system.rate_limiting.publish_blocked},
+        {[action: "publish_bytes"], system.rate_limiting.publish_bytes_blocked},
         {[action: "subscribe"], system.rate_limiting.subscribe_blocked},
         # Login throttling has no series here: it is `malachi_dashboard_auth_total{outcome="blocked"}`, and a
         # second series for the same event would count it twice in a `sum by (action)`.

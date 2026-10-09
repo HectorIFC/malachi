@@ -54,8 +54,13 @@ defmodule Malachi.ProducerStreamsUnitTest do
 
   defp batch(value), do: Batch.encode([{Record.new(value), false}], :none)
 
+  # quotas that admit everything
+  defp free(_records, _bytes), do: :ok
+
   defp append(streams, id, sequence) do
-    {streams, frames} = ProducerStreams.append(streams, id, sequence, batch(Integer.to_string(sequence)), 1_000_000)
+    {streams, frames} =
+      ProducerStreams.append(streams, id, sequence, batch(Integer.to_string(sequence)), 1_000_000, &free/2)
+
     {streams, Enum.map(frames, &push/1)}
   end
 
@@ -101,7 +106,7 @@ defmodule Malachi.ProducerStreamsUnitTest do
 
     {streams, [{:moved, moved}]} = pushes(streams, 1)
     assert moved.reason == "sealed"
-    assert ProducerStreams.append(streams, ctx.id, 1, batch("1"), 1_000_000) == {:unknown, ctx.id}
+    assert ProducerStreams.append(streams, ctx.id, 1, batch("1"), 1_000_000, &free/2) == {:unknown, ctx.id}
     assert ProducerStreams.busy?(streams)
 
     :ok = HeldBroker.release(ctx.broker, ["0"], {:ok, %{}})
@@ -187,7 +192,7 @@ defmodule Malachi.ProducerStreamsUnitTest do
   end
 
   test "an append on a stream the connection never opened is unknown", ctx do
-    assert ProducerStreams.append(ctx.streams, ctx.id + 1, 0, batch("x"), 1_000_000) == {:unknown, ctx.id + 1}
+    assert ProducerStreams.append(ctx.streams, ctx.id + 1, 0, batch("x"), 1_000_000, &free/2) == {:unknown, ctx.id + 1}
   end
 
   test "messages that are not about its streams are not taken", ctx do
@@ -227,6 +232,36 @@ defmodule Malachi.ProducerStreamsUnitTest do
     assert primary == Malachi.Metadata.broker_ref_string({:repl, :n1@host})
   end
 
+  test "an append is charged its inflated records and bytes, after every other check, before it is sent", ctx do
+    test = self()
+    charge = fn records, bytes -> send(test, {:charged, records, bytes}) && :ok end
+    two = Batch.encode([{Record.new("a"), false}, {Record.new("bb"), false}], :zstd)
+    {%{inflated_size: inflated}, <<>>} = Batch.split(two)
+
+    # a tombstone is refused before it is charged
+    tombstone = Batch.encode([{Record.new("t"), true}], :none)
+    {streams, [frame]} = ProducerStreams.append(ctx.streams, ctx.id, 0, tombstone, 1_000_000, charge)
+    assert {:append_ack, %{errors: [%{sequence: 0, reason: "tombstone_unsupported"}]}} = push(frame)
+    refute_received {:charged, _, _}
+
+    {streams, []} = ProducerStreams.append(streams, ctx.id, 1, two, 1_000_000, charge)
+    assert_received {:charged, 2, ^inflated}
+    assert ProducerStreams.busy?(streams)
+  end
+
+  test "an append its quota refuses is answered at its sequence, is not sent, and the stream goes on", ctx do
+    refuse = fn _records, _bytes -> {:error, :rate_limited} end
+    {streams, [frame]} = ProducerStreams.append(ctx.streams, ctx.id, 0, batch("0"), 1_000_000, refuse)
+    {:append_ack, ack} = push(frame)
+    assert %{acked_sequence: 1, errors: [%{sequence: 0, reason: "rate_limited"}]} = ack
+    refute ProducerStreams.busy?(streams)
+
+    {streams, []} = ProducerStreams.append(streams, ctx.id, 1, batch("1"), 1_000_000, &free/2)
+    :ok = HeldBroker.release(ctx.broker, ["1"], {:ok, %{}})
+    {_streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    assert %{acked_sequence: 2, errors: []} = ack
+  end
+
   defp wait_for_unregistered(name) do
     if Process.whereis(name), do: Process.sleep(5) && wait_for_unregistered(name), else: :ok
   end
@@ -243,7 +278,7 @@ defmodule Malachi.ProducerStreamsUnitTest do
     }
 
     {streams, other} = ProducerStreams.open(ctx.streams, one)
-    {streams, []} = ProducerStreams.append(streams, other, 0, batch("x"), 1_000_000)
+    {streams, []} = ProducerStreams.append(streams, other, 0, batch("x"), 1_000_000, &free/2)
     refute ProducerStreams.room?(streams)
 
     send(self(), {:stream_moved, one.token, :sealed, [{{"t", 1}, nil}]})

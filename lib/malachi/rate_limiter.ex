@@ -21,13 +21,15 @@ defmodule Malachi.RateLimiter do
   - `:auth` - TCP authentication attempts (tracked by IP)
   - `:dashboard_auth` - Dashboard logins, and dashboard tokens that do not validate (tracked by IP)
   - `:dashboard_api` - Authenticated dashboard requests (tracked by session, under a digest of its token)
-  - `:publish` - Produce requests (tracked by authenticated username)
+  - `:publish` - Produced records (tracked by authenticated username)
+  - `:publish_bytes` - Produced bytes: a stream append's inflated bytes, a produce request's as received
+    (tracked by authenticated username)
   - `:subscribe` - Subscribe requests (tracked by authenticated username)
 
-  All five are **enforced**, per node. `:publish` and `:subscribe` are off by default (limit `0`); an
-  operator opts in by configuring a limit. `:dashboard_api` is on by default (300 per minute per session)
-  and a limit of `0` turns it off. Enforcement is per node, not a cluster-wide quota, and a produce costs
-  one token per request, not per record.
+  All six are **enforced**, per node. `:publish`, `:publish_bytes` and `:subscribe` are off by default
+  (limit `0`); an operator opts in by configuring a limit. `:dashboard_api` is on by default (300 per
+  minute per session) and a limit of `0` turns it off. Enforcement is per node, not a cluster-wide quota.
+  A produce is charged its records and bytes together (`charge_in_caller/2`); every other check costs one.
 
   `:dashboard_api` is keyed by session rather than by user. The NorthGuard material this project follows
   says nothing about operator consoles or quotas; a per principal key is what the Kafka lineage would
@@ -42,8 +44,9 @@ defmodule Malachi.RateLimiter do
   read-modify-write is serialized and the limit is exact. The auth paths use it: they are cold (one check
   per connection or per login) and they are security controls, so exactness is worth a round-trip.
 
-  `check_limit_in_caller/3` is a different algorithm for a different problem. Produce is the hottest path
-  in the system, and the publish quota is keyed by **user**, so every connection belonging to one client
+  The sharded window (`check_limit_in_caller/3` for one token, `charge_in_caller/2` for a cost) is a
+  different algorithm for a different problem. Produce is the hottest path in the system, and the publish
+  quotas are keyed by **user**, so every connection belonging to one client
   contends for one quota. The obvious implementation (this module's own bucket body, just run in the caller
   instead of the GenServer) is the wrong answer, because `write_concurrency` buys nothing when every caller
   writes the SAME key. Measured on an 8-core machine against one hot key, at 64 concurrent processes:
@@ -58,13 +61,20 @@ defmodule Malachi.RateLimiter do
   with cores instead of against them. Each shard holds its slice of the quota; a caller whose own shard is
   exhausted sweeps the others before rejecting, so an unevenly spread load does not reject early.
 
-  End to end (`benchmark/rate_limit_bench.exs`, the whole public function rather than the bare ETS op) this
-  door measures 4.2M checks/s at 64 concurrent processes against the serialized door's 868k, and an
-  unconfigured action, the shipped default, costs 51ns because it never reaches the table at all.
+  End to end (`benchmark/rate_limit_bench.exs`, the whole public function rather than the bare ETS op, on
+  Linux with 4 CPUs) `check_limit_in_caller/3` measures 118 to 121 ns a check at 64 concurrent processes,
+  over 8 million checks a second, against 1 to 2.5 microseconds through the serialized door. A produce's
+  charge (`charge_in_caller/2`) measures 317 to 457 ns at 64 processes with quotas set, and 162 to 215 ns
+  with both unconfigured, the shipped default, which touches no table. The ranges, the runs and the end to
+  end cost on the 3-node cluster are in `docs/RATE_LIMITING.md`.
 
-  Every token is still claimed by one atomic `update_counter`, and the shard caps sum to exactly `limit`
-  (the remainder is spread across the low shards, not dropped), so the count itself is exact: measured at
-  200 concurrent callers, a limit of `n` admits exactly `n`.
+  `check_limit_in_caller/3` claims every token by one atomic `update_counter`, and the shard caps sum to
+  exactly `limit` (the remainder is spread across the low shards, not dropped), so its count is exact:
+  measured at 200 concurrent callers, a limit of `n` admits exactly `n`. `charge_in_caller/2` keeps the
+  ceiling, never admitting more than `limit` in a window, but not the floor: it adds a whole cost to a
+  shard and gives back what went past the cap, so a charger racing another one's give-back can see the
+  shard fuller than it is and be refused while units are still free. The error only ever goes toward
+  admitting less, and lasts as long as the race.
 
   What this door gives up is the *shape* of the limit, not its arithmetic. A fixed window does not refill
   gradually, so a client can spend the tail of one window and the head of the next back to back and burst
@@ -80,8 +90,10 @@ defmodule Malachi.RateLimiter do
   - `rate_limit_enabled` - Enable/disable rate limiting (default: true)
   - `auth_rate_limit` - Max auth attempts per window (default: 10)
   - `auth_rate_window_ms` - Auth window duration (default: 60000)
-  - `publish_rate_limit` - Max produce requests per window (default: 0, meaning no limit)
+  - `publish_rate_limit` - Max produced records per window (default: 0, meaning no limit)
   - `publish_rate_window_ms` - Publish window duration (default: 1000)
+  - `publish_bytes_rate_limit` - Max produced bytes per window (default: 0, meaning no limit)
+  - `publish_bytes_rate_window_ms` - Publish bytes window duration (default: 1000)
   - `subscribe_rate_limit` - Max subscribe requests per window (default: 0, meaning no limit)
   - `subscribe_rate_window_ms` - Subscribe window duration (default: 60000)
   - `dashboard_api_rate_limit` - Authenticated dashboard requests per window, per session (default: 300)
@@ -92,6 +104,9 @@ defmodule Malachi.RateLimiter do
   use GenServer
   require Logger
   alias Malachi.I18n
+
+  @typedoc "One quota to charge: the action, its configured limit (nil when unlimited) and the cost."
+  @type charge :: {atom(), %{limit: pos_integer(), window_ms: pos_integer()} | nil, non_neg_integer()}
 
   @table :malachi_rate_limits
   @shard_count_key {__MODULE__, :shard_count}
@@ -149,7 +164,8 @@ defmodule Malachi.RateLimiter do
   shards, read and written in the **calling process** so concurrent callers do not serialize on one ETS
   key or on the limiter process.
 
-  Use this for the publish/subscribe quotas and `check_limit/3` everywhere else. Inside one window it
+  Use this for a quota whose every request costs one token (the subscribe quota), `charge_in_caller/2` for
+  one charged by size (the publish quotas), and `check_limit/3` everywhere else. Inside one window it
   admits exactly `limit`, however many callers race for it: the shard caps sum to `limit` and each token
   is claimed by one atomic update. Across a window boundary it can admit up to twice the limit (the tail
   of one window and the head of the next), and it never admits under the limit. See "Two doors, on
@@ -166,10 +182,116 @@ defmodule Malachi.RateLimiter do
   end
 
   @doc """
+  Charges `identifier` a cost against each of several sharded quotas at once, all or nothing: either every
+  charge fits in its quota's current window and all are spent, or none is. `charges` is a list of
+  `{action, config, cost}`; a config of `nil` (the action is not limited) is skipped.
+
+  A cost is spent from this scheduler's shard first and then from the others, as `check_limit_in_caller/3`
+  spends its one token, and whatever was claimed is given back when the whole cost does not fit, so inside
+  a window a quota admits at most its `limit`. Unlike that function it does not admit exactly the limit
+  under contention: racing callers that are each giving back an over-claim can briefly see a shard as
+  fuller than it is, so near the limit a charge may be refused while a few units are still free. The count
+  errs toward admitting less, never more (see "Two doors, on purpose").
+
+  Returns `:ok`, `{:error, :rate_limit_exceeded, action, retry_after_ms}` for the first charge that did not
+  fit, or `{:error, :cost_exceeds_limit, action}` for a cost no window of that quota could ever admit.
+  """
+  @spec charge_in_caller(term(), [charge()]) ::
+          :ok
+          | {:error, :rate_limit_exceeded, atom(), non_neg_integer()}
+          | {:error, :cost_exceeds_limit, atom()}
+  def charge_in_caller(identifier, charges) do
+    charges = for {_action, %{} = _config, cost} = charge <- charges, cost > 0, do: charge
+
+    cond do
+      not enabled?() ->
+        :ok
+
+      oversized = Enum.find(charges, fn {_action, config, cost} -> cost > config.limit end) ->
+        too_big(identifier, oversized)
+
+      true ->
+        charge_all(identifier, charges, [])
+    end
+  end
+
+  defp too_big(identifier, {action, _config, _cost}) do
+    increment_blocked_counter(identifier, action)
+    {:error, :cost_exceeds_limit, action}
+  end
+
+  defp charge_all(_identifier, [], _claims), do: :ok
+
+  defp charge_all(identifier, [{action, %{limit: limit, window_ms: window_ms}, cost} | rest], claims) do
+    case claim_cost(identifier, action, limit, window_ms, cost) do
+      {:ok, claimed} ->
+        charge_all(identifier, rest, claimed ++ claims)
+
+      {:error, claimed, retry_after_ms} ->
+        give_back(claimed ++ claims)
+        increment_blocked_counter(identifier, action)
+        {:error, :rate_limit_exceeded, action, retry_after_ms}
+    end
+  end
+
+  # Claims `cost` units of one quota's window, own shard first. Returns the `{key, units}` it took, so the
+  # caller can give them back if this or a later charge does not fit. The common charge fits in this
+  # scheduler's slice and costs one update; only a short slice sweeps the other shards, in order, and each
+  # shard it takes from costs an update plus one more when the slice runs out under it.
+  defp claim_cost(identifier, action, limit, window_ms, cost) do
+    shards = shard_count()
+    {window_start, elapsed_in_window} = window_bounds(window_clock_ms(), window_ms)
+    own = rem(:erlang.system_info(:scheduler_id), shards)
+    take = fn shard, left -> take_from(identifier, action, window_start, shard, left, limit, shards, window_ms) end
+
+    {left, claimed} =
+      case take.(own, {cost, []}) do
+        {0, claimed} ->
+          {0, claimed}
+
+        partial ->
+          Enum.reduce_while(0..(shards - 1)//1, partial, fn
+            ^own, acc -> {:cont, acc}
+            shard, acc -> continue_until_paid(take.(shard, acc))
+          end)
+      end
+
+    if left == 0, do: {:ok, claimed}, else: {:error, claimed, window_ms - elapsed_in_window}
+  end
+
+  defp take_from(identifier, action, window_start, shard, {left, claimed}, limit, shards, window_ms) do
+    key = {identifier, action, window_start, shard}
+
+    case take_units(key, left, shard_cap(limit, shards, shard), window_ms) do
+      0 -> {left, claimed}
+      taken -> {left - taken, [{key, taken} | claimed]}
+    end
+  end
+
+  defp continue_until_paid({0, _claimed} = paid), do: {:halt, paid}
+  defp continue_until_paid(partial), do: {:cont, partial}
+
+  # Takes up to `units` from a shard's window counter and returns how many it took. The units are added in
+  # one atomic update and whatever went past the cap is given straight back, so the counter never rests
+  # above the cap because of this call (a counter a single-token check pinned at `cap + 1` stays there).
+  defp take_units(_key, _units, 0, _window_ms), do: 0
+
+  defp take_units(key, units, cap, window_ms) do
+    after_add = :ets.update_counter(@table, key, {2, units}, {key, 0, window_ms})
+    taken = units |> min(cap - (after_add - units)) |> max(0)
+    if taken < units, do: :ets.update_counter(@table, key, {2, taken - units})
+    taken
+  end
+
+  defp give_back(claims) do
+    Enum.each(claims, fn {key, units} -> :ets.update_counter(@table, key, {2, -units}) end)
+  end
+
+  @doc """
   The configured limit for an action that can be switched off, or `nil` when that action is not limited.
 
-  `:publish` and `:subscribe` are off unless an operator configures a positive limit and window, so a
-  limit of `0` (the default) means "no limit" and reads back as `nil`. `:dashboard_api` follows the same
+  `:publish`, `:publish_bytes` and `:subscribe` are off unless an operator configures a positive limit and
+  window, so a limit of `0` (the default) means "no limit" and reads back as `nil`. `:dashboard_api` follows the same
   rule but ships on, at 300 requests per 60 seconds. This is the single reader of those config keys: the
   enforcement path and the dashboard both go through it so they cannot diverge.
 
@@ -179,12 +301,19 @@ defmodule Malachi.RateLimiter do
       #=> nil                              # unconfigured, the default
       #=> %{limit: 1000, window_ms: 1000}  # MALACHI_PUBLISH_RATE_LIMIT=1000
 
+      action_config(:publish_bytes)
+      #=> %{limit: 1048576, window_ms: 1000}  # MALACHI_PUBLISH_BYTES_RATE_LIMIT=1048576
+
       action_config(:dashboard_api)
       #=> %{limit: 300, window_ms: 60000}  # the default
   """
-  @spec action_config(:publish | :subscribe | :dashboard_api) ::
+  @spec action_config(:publish | :publish_bytes | :subscribe | :dashboard_api) ::
           %{limit: pos_integer(), window_ms: pos_integer()} | nil
   def action_config(:publish), do: build_action_config(:publish_rate_limit, 0, :publish_rate_window_ms, 0)
+
+  def action_config(:publish_bytes),
+    do: build_action_config(:publish_bytes_rate_limit, 0, :publish_bytes_rate_window_ms, 0)
+
   def action_config(:subscribe), do: build_action_config(:subscribe_rate_limit, 0, :subscribe_rate_window_ms, 0)
 
   def action_config(:dashboard_api),
@@ -449,7 +578,8 @@ defmodule Malachi.RateLimiter do
 
   # How much of the quota one shard holds. The remainder is spread over the low shards rather than
   # dropped, so the caps sum to EXACTLY `limit`: rounding down would make the sharded window reject
-  # before the configured limit was reached, which is the one direction this path must never err in.
+  # before the configured limit was reached for every caller, by arithmetic alone. (A charge racing
+  # another one's give-back can still be refused below it, briefly; see `charge_in_caller/2`.)
   # It also means a limit smaller than the scheduler count leaves some shards at zero, which is correct
   # (they hold none of it) and costs only a sweep, on a limit too small for throughput to matter.
   defp shard_cap(limit, shards, shard) do
