@@ -50,6 +50,7 @@ defmodule Malachi.BrokerServer do
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.StreamWindow
   alias Malachi.Telemetry
   alias Malachi.UnexpectedMessage
   alias OpenTelemetry.Ctx
@@ -161,6 +162,38 @@ defmodule Malachi.BrokerServer do
   @doc "The topics bound to the policy `name`, sorted."
   @spec topics_bound_to(GenServer.server(), Malachi.Metadata.policy_name()) :: [Malachi.Metadata.topic_name()]
   def topics_bound_to(server, name), do: GenServer.call(server, {:topics_bound_to, name})
+
+  @doc """
+  Opens a producer stream on `range_id` for `pid` (`Malachi.ProducerStreams`): `{:ok, token, segment_id,
+  broker}` when this node leads the range's active segment (opened now if the range has none), `broker`
+  being this server's pid, the process whose index holds the stream; `{:moved, reason,
+  targets}` when the stream belongs elsewhere (the segment is led by another node, or the range was
+  retired), or `{:error, reason}`. The token closes the stream and names it in `{:stream_moved, token,
+  reason, targets}`, which the broker sends `pid` when the range moves on.
+  """
+  @spec open_stream(GenServer.server(), Metadata.range_id(), pid()) ::
+          {:ok, reference(), Metadata.segment_id(), pid()} | {:moved, atom(), list()} | {:error, term()}
+  def open_stream(server, range_id, pid \\ self()), do: GenServer.call(server, {:open_stream, range_id, pid})
+
+  @doc "Closes the producer stream `token` names. Idempotent."
+  @spec close_stream(GenServer.server(), reference()) :: :ok
+  def close_stream(server, token), do: GenServer.call(server, {:close_stream, token})
+
+  @doc """
+  Sends an append of a producer stream without waiting for it, under `label`, adding the request to
+  `reqids` (`:gen_server.send_request/4`). Its answer, `{produce_reply, scale}` with `scale` the share of
+  the stream's window the range's load leaves, arrives as a message `:gen_server.check_response/3` reads.
+  """
+  @spec send_stream_produce(
+          GenServer.server(),
+          Malachi.Metadata.range_id(),
+          [Malachi.Log.Record.t()],
+          term(),
+          :gen_server.request_id_collection()
+        ) ::
+          :gen_server.request_id_collection()
+  def send_stream_produce(server, range_id, records, label, reqids),
+    do: :gen_server.send_request(server, {:stream_produce, range_id, records, Ctx.get_current()}, label, reqids)
 
   @doc "Routes, replicates and commits records; returns `{:ok, placements}` or an error."
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
@@ -397,6 +430,12 @@ defmodule Malachi.BrokerServer do
     {max_inflight_records, opts} =
       Keyword.pop(opts, :group_commit_max_inflight, Application.get_env(:malachi, :group_commit_max_inflight, 200_000))
 
+    {stream_inflight_soft, opts} =
+      Keyword.pop(opts, :stream_inflight_soft, StreamWindow.inflight_soft())
+
+    {stream_inflight_hard, opts} =
+      Keyword.pop(opts, :stream_inflight_hard, StreamWindow.inflight_hard())
+
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
     {spread_by, opts} = Keyword.pop(opts, :spread_by)
@@ -521,6 +560,15 @@ defmodule Malachi.BrokerServer do
       # (graceful) instead of letting them queue until the caller's call times out and drops the connection.
       max_inflight_records: max_inflight_records,
       gc_timer: nil,
+      # Records dispatched for each range and not yet answered (the async path), which scale a producer
+      # stream's window between these two limits (`Malachi.StreamWindow`).
+      range_inflight: %{},
+      stream_inflight_soft: stream_inflight_soft,
+      stream_inflight_hard: stream_inflight_hard,
+      # Open producer streams, by the monitor ref of the connection that holds them: the range and the
+      # segment and primary each was opened on. A stream whose range moves on is sent `{:stream_moved, ...}`
+      # and dropped (`sweep_streams/1`).
+      streams: %{},
       # In-flight async produces (the non-group-commit path): ref => the parked caller, its computed
       # placements, how many replication dispatches are still owed, the records of the dispatches that went
       # out behind this frontend's own fence (`parts`, so they can be planned again), and the safety timer.
@@ -568,6 +616,48 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:topics_bound_to, name}, _from, state) do
     {:reply, Broker.topics_bound_to(state.broker, name), state}
+  end
+
+  # A producer stream on one range (`Malachi.ProducerStreams`), opened where the range's active segment is
+  # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
+  def handle_call({:open_stream, range_id, pid}, _from, state) do
+    {topic, _seq} = range_id
+
+    if topic_metadata_ready?(state, topic) do
+      do_open_stream(range_id, pid, state)
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
+    end
+  end
+
+  def handle_call({:close_stream, token}, _from, state) do
+    case Map.pop(state.streams, token) do
+      {nil, _streams} ->
+        {:reply, :ok, state}
+
+      {_stream, streams} ->
+        Process.demonitor(token, [:flush])
+        {:reply, :ok, %{state | streams: streams}}
+    end
+  end
+
+  # An append on a producer stream: the produce of one range, refused whole when a key falls outside it,
+  # answered with the produce's own reply and how much of its window the range's load leaves.
+  def handle_call({:stream_produce, range_id, records, ctx}, from, state) do
+    {topic, _seq} = range_id
+
+    if Broker.keys_in_range?(state.broker, range_id, records) do
+      case handle_call({:produce, topic, records, ctx}, {:stream, from, range_id}, state) do
+        {:reply, reply, state} ->
+          reply_produce({:stream, from, range_id}, reply, state)
+          {:noreply, state}
+
+        noreply ->
+          noreply
+      end
+    else
+      {:reply, {{:error, :key_outside_range}, stream_load(state, range_id)}, state}
+    end
   end
 
   def handle_call({:produce, topic, records, ctx}, from, state) do
@@ -633,7 +723,7 @@ defmodule Malachi.BrokerServer do
     case fence_parent(state, range_id) do
       {:ok, state} ->
         {broker, reply} = Broker.split_range(state.broker, range_id)
-        {:reply, reply, %{state | broker: broker}}
+        {:reply, reply, sweep_streams(%{state | broker: broker})}
 
       {:error, {^range_id, reason}, state} ->
         {:reply, {:error, {:fence_failed, range_id, reason}}, state}
@@ -647,7 +737,7 @@ defmodule Malachi.BrokerServer do
     with {:ok, state} <- fence_parent(state, range_id_a),
          {:ok, state} <- fence_parent(state, range_id_b) do
       {broker, reply} = Broker.merge_ranges(state.broker, range_id_a, range_id_b)
-      {:reply, reply, %{state | broker: broker}}
+      {:reply, reply, sweep_streams(%{state | broker: broker})}
     else
       {:error, {range_id, reason}, state} -> {:reply, {:error, {:fence_failed, range_id, reason}}, state}
     end
@@ -678,7 +768,7 @@ defmodule Malachi.BrokerServer do
   end
 
   def handle_call({:apply_heal, commands}, _from, state) do
-    {:reply, :ok, %{state | broker: Broker.apply_heal(state.broker, commands)}}
+    {:reply, :ok, sweep_streams(%{state | broker: Broker.apply_heal(state.broker, commands)})}
   end
 
   def handle_call({:delete_segment, segment_id}, _from, state) do
@@ -809,6 +899,8 @@ defmodule Malachi.BrokerServer do
         {:noreply, state}
 
       pending ->
+        {state, pending} = settle_dispatch(state, pending, dispatch)
+
         case result do
           {:ok, actual} ->
             # The range's primary serializes appends and assigns the REAL offsets (the NorthGuard
@@ -833,7 +925,11 @@ defmodule Malachi.BrokerServer do
           # the client's retry opens or adopts the successor instead of racing :segment_overlap.
           {:error, {:sealed, end_offset}} ->
             broker = Broker.forget_sealed(state.broker, dispatch.range_id, dispatch.segment_id, end_offset)
-            {:noreply, sealed_dispatch(%{state | broker: broker}, ref, pending, dispatch, end_offset)}
+            # the settled pending goes back first: a dispatch parked behind the fence is finished later from
+            # what `async_produces` holds, and must not be released from the in-flight count twice
+            async_produces = Map.put(state.async_produces, ref, pending)
+            state = sweep_streams(%{state | broker: broker, async_produces: async_produces})
+            {:noreply, sealed_dispatch(state, ref, pending, dispatch, end_offset)}
 
           {:error, reason} ->
             {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
@@ -845,7 +941,7 @@ defmodule Malachi.BrokerServer do
   # that fence go again: on success the successor is now open to them, and on failure they learn so from
   # the primary rather than from a wait.
   def handle_info({:seal_result, {:roll_fence, roll}, reply}, state) do
-    state = record_roll_fence(state, roll, reply)
+    state = state |> record_roll_fence(roll, reply) |> sweep_streams()
     {:noreply, release_fence_parked(state, roll.range_id, :replan)}
   end
 
@@ -931,6 +1027,12 @@ defmodule Malachi.BrokerServer do
   # A streaming subscriber's process died: drop that subscription. Each subscribe monitors anew, so the
   # ref names exactly one subscription and its topic is one index lookup away; a process subscribed to
   # several topics sends one :DOWN per subscription.
+  # A producer stream's connection went away: drop the stream (the subscriber clause below handles the rest).
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{streams: streams} = state)
+      when is_map_key(streams, ref) do
+    {:noreply, %{state | streams: Map.delete(streams, ref)}}
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     {removed, subscribers} = Subscribers.remove_ref(state.subscribers, ref)
 
@@ -1016,14 +1118,15 @@ defmodule Malachi.BrokerServer do
 
     if flushed_ok? do
       Enum.reduce(pending, base, fn waiter, st ->
-        GenServer.reply(waiter.from, waiter.reply)
+        # the load the reply reports is the one this flush is relieving
+        reply_produce(waiter.from, waiter.reply, state)
 
         st
         |> wake_waiters(waiter.topic, waiter.reply)
         |> wake_subscribers(waiter.topic, waiter.reply)
       end)
     else
-      Enum.each(pending, &GenServer.reply(&1.from, {:error, :flush_failed}))
+      Enum.each(pending, &reply_produce(&1.from, {:error, :flush_failed}, state))
       base
     end
   end
@@ -1290,7 +1393,7 @@ defmodule Malachi.BrokerServer do
   defp release_parked_entry(state, {:grouped, from, topic, records}, _mode) do
     case grouped_append(from, topic, records, state) do
       {:reply, reply, state} ->
-        GenServer.reply(from, reply)
+        reply_produce(from, reply, state)
         state
 
       {:noreply, state} ->
@@ -1308,7 +1411,8 @@ defmodule Malachi.BrokerServer do
     case Broker.produce_plan(state.broker, pending.topic, records) do
       {broker, {:ok, placements, dispatches}} ->
         state = %{state | broker: broker}
-        dispatch_async(state, ref, dispatches, false)
+        {_parts, tags} = dispatch_async(state, ref, dispatches, false)
+        {state, pending} = owe_dispatches(state, pending, tags)
 
         pending = %{
           pending
@@ -1320,6 +1424,97 @@ defmodule Malachi.BrokerServer do
 
       {broker, {:error, _reason} = error} ->
         finish_async_produce(%{state | broker: broker}, ref, pending, error)
+    end
+  end
+
+  defp do_open_stream(range_id, pid, state) do
+    case Broker.stream_segment(state.broker, range_id) do
+      {broker, {:ok, segment_id, primary}} ->
+        state = %{state | broker: broker}
+
+        if local_ref?(primary) do
+          token = Process.monitor(pid)
+          stream = %{pid: pid, range_id: range_id, segment_id: segment_id, primary: primary}
+          {:reply, {:ok, token, segment_id, self()}, %{state | streams: Map.put(state.streams, token, stream)}}
+        else
+          {:reply, {:moved, :elsewhere, [{range_id, {segment_id, primary}}]}, state}
+        end
+
+      {broker, {:error, :range_sealed}} ->
+        {:reply, {:moved, :retired, targets(broker, Broker.stream_target(broker, range_id))}, %{state | broker: broker}}
+
+      {broker, {:error, _reason} = error} ->
+        {:reply, error, %{state | broker: broker}}
+    end
+  end
+
+  # A broker reference that lives on this node: `{name, node}` on this node, a local pid, or a bare name.
+  defp local_ref?({_name, ref_node}) when is_atom(ref_node), do: ref_node == node()
+  defp local_ref?(pid) when is_pid(pid), do: node(pid) == node()
+  defp local_ref?(name) when is_atom(name), do: true
+  defp local_ref?(_other), do: false
+
+  defp reply_produce({:stream, from, range_id}, reply, state),
+    do: GenServer.reply(from, {reply, stream_load(state, range_id)})
+
+  defp reply_produce(from, reply, _state), do: GenServer.reply(from, reply)
+
+  # How much of a stream's window the range's load leaves (`Malachi.StreamWindow.scale/3`): with group
+  # commit, the node's parked records from half of the most it parks; otherwise the range's records in
+  # flight between the stream limits.
+  defp stream_load(%{group_commit: true} = state, _range_id),
+    do: StreamWindow.scale(state.pending_records, div(state.max_inflight_records, 2), state.max_inflight_records)
+
+  defp stream_load(state, range_id),
+    do:
+      StreamWindow.scale(
+        Map.get(state.range_inflight, range_id, 0),
+        state.stream_inflight_soft,
+        state.stream_inflight_hard
+      )
+
+  # Tells every open stream whose range has moved on where it belongs now, and drops it: its segment
+  # sealed (a roll, or a seal found on a refusal or by the reconcile), its primary changed (a failover), or
+  # its range was retired by a split or merge. Run after each of those.
+  defp sweep_streams(%{streams: streams} = state) when map_size(streams) == 0, do: state
+
+  defp sweep_streams(state) do
+    streams =
+      Map.filter(state.streams, fn {token, stream} ->
+        case Broker.stream_target(state.broker, stream.range_id) do
+          {:active, segment_id, primary} when segment_id == stream.segment_id and primary == stream.primary ->
+            true
+
+          target ->
+            Process.demonitor(token, [:flush])
+
+            send(
+              stream.pid,
+              {:stream_moved, token, moved_reason(target), targets(state.broker, target, stream.range_id)}
+            )
+
+            false
+        end
+      end)
+
+    %{state | streams: streams}
+  end
+
+  # A failover seals the segment before it moves the replicas (`Malachi.Cluster.Failover`), so it reaches a
+  # stream as `:sealed`, as a roll does: either way the range goes on in another segment.
+  defp moved_reason({:retired, _ranges}), do: :retired
+  defp moved_reason(_sealed_or_replaced), do: :sealed
+
+  # Where a moved stream goes: each range with its active segment and primary, when it has one.
+  defp targets(broker, target, range_id \\ nil)
+  defp targets(broker, {:retired, ranges}, _range_id), do: Enum.map(ranges, &{&1, active_of(broker, &1)})
+  defp targets(_broker, {:active, segment_id, primary}, range_id), do: [{range_id, {segment_id, primary}}]
+  defp targets(_broker, :none, range_id), do: [{range_id, nil}]
+
+  defp active_of(broker, range_id) do
+    case Broker.stream_target(broker, range_id) do
+      {:active, segment_id, primary} -> {segment_id, primary}
+      _none -> nil
     end
   end
 
@@ -1411,11 +1606,11 @@ defmodule Malachi.BrokerServer do
           |> Broker.replay_journal(journaled)
           |> Broker.drop_stale_active_segments()
 
-        %{
+        sweep_streams(%{
           state
           | broker: recover_range_state(broker),
             seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
-        }
+        })
         |> wake_all_subscribers()
     end
   end
@@ -1625,7 +1820,7 @@ defmodule Malachi.BrokerServer do
         # folded in by `adopt_result/4` as each dispatch lands, say where the segment really ends.
         state = %{state | broker: broker}
         ref = make_ref()
-        parts = dispatch_async(state, ref, dispatches, true)
+        {parts, tags} = dispatch_async(state, ref, dispatches, true)
 
         timer = Process.send_after(self(), {:produce_timeout, ref}, @async_produce_timeout)
 
@@ -1635,9 +1830,11 @@ defmodule Malachi.BrokerServer do
           placements: placements,
           remaining: length(dispatches),
           parts: parts,
-          timer: timer
+          timer: timer,
+          owed: %{}
         }
 
+        {state, pending} = owe_dispatches(state, pending, tags)
         {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
 
       {broker, {:error, _reason} = error} ->
@@ -1653,7 +1850,7 @@ defmodule Malachi.BrokerServer do
   defp dispatch_async(state, ref, dispatches, first_attempt?) do
     now = now_ms()
 
-    Enum.reduce(dispatches, %{}, fn d, parts ->
+    Enum.reduce(dispatches, {%{}, []}, fn d, {parts, tags} ->
       behind_fence? =
         first_attempt? and Broker.awaiting_fence?(state.broker, d.range_id, d.segment_id, now, @roll_fence_retry_ms)
 
@@ -1669,8 +1866,40 @@ defmodule Malachi.BrokerServer do
         {ref, tag}
       )
 
-      if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
+      parts = if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
+      {parts, [tag | tags]}
     end)
+  end
+
+  # The records each range has in flight (dispatched, no answer yet), which a producer stream's window
+  # scales by (`Malachi.StreamWindow`). A produce owes the counter its dispatches until each answers or
+  # the produce finishes, whichever comes first: a straggler answering after that changes nothing.
+  defp owe_dispatches(state, pending, tags) do
+    range_inflight =
+      Enum.reduce(tags, state.range_inflight, fn tag, acc ->
+        Map.update(acc, tag.range_id, tag.count, &(&1 + tag.count))
+      end)
+
+    {%{state | range_inflight: range_inflight},
+     %{pending | owed: Enum.reduce(tags, pending.owed, &Map.put(&2, &1, true))}}
+  end
+
+  defp settle_dispatch(state, pending, tag) do
+    if Map.has_key?(pending.owed, tag),
+      do: {release_inflight(state, [tag]), %{pending | owed: Map.delete(pending.owed, tag)}},
+      else: {state, pending}
+  end
+
+  defp release_inflight(state, tags) do
+    range_inflight =
+      Enum.reduce(tags, state.range_inflight, fn tag, acc ->
+        case Map.get(acc, tag.range_id, 0) - tag.count do
+          left when left > 0 -> Map.put(acc, tag.range_id, left)
+          _none -> Map.delete(acc, tag.range_id)
+        end
+      end)
+
+    %{state | range_inflight: range_inflight}
   end
 
   # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
@@ -1695,7 +1924,8 @@ defmodule Malachi.BrokerServer do
 
   defp finish_async_produce(state, ref, pending, reply) do
     Process.cancel_timer(pending.timer)
-    GenServer.reply(pending.from, reply)
+    state = release_inflight(state, Map.keys(pending.owed))
+    reply_produce(pending.from, reply, state)
 
     %{state | async_produces: Map.delete(state.async_produces, ref)}
     |> wake_waiters(pending.topic, reply)
@@ -1748,7 +1978,8 @@ defmodule Malachi.BrokerServer do
           end
 
         {broker, {:error, _reason} = error} ->
-          {:reply, error, %{state | broker: broker}}
+          # a sealed refusal dropped the segment from the cache: a stream bound to it is moved now
+          {:reply, error, sweep_streams(%{state | broker: broker})}
       end
     end
   end

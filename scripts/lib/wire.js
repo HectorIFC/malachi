@@ -660,6 +660,7 @@ function decodePush(payload) {
   if (kind === 'append_ack') {
     push = {
       stream_id: streamId,
+      // every sequence below this one has been answered (0 before the first answer)
       acked_sequence: r.num64(),
       window_appends: r.u32(),
       window_bytes: r.u32(),

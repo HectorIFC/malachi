@@ -49,8 +49,10 @@ defmodule Malachi.Wire do
 
     * **Produce** is a stream (`open_stream`, 26): a handshake binds it to a range's active segment and
       grants a window; `append` (27) carries a sequence number and one batch, pipelined up to the window;
-      the server pushes `append_ack` with the highest sequence acknowledged, per sequence errors and the
-      current window, and `moved` when the segment seals, fails over or splits. `close_stream` (28) ends it.
+      the server pushes `append_ack` with the sequence below which every append has been answered (0
+      before the first answer), per sequence errors and the current window, and `moved` when the segment
+      seals (a roll or a failover), the range splits or merges, or the broker restarts; the appends in flight
+      when it moves are still answered after the `moved`. `close_stream` (28) ends it.
     * **Consume** is the mirror (`open_consume`, 29): pushes of `records` carry the offset of every record,
       and `consume_ack` (30) says what was read and can move the window. `fetch_range` (31) is the unary
       read of one range.
@@ -715,7 +717,9 @@ defmodule Malachi.Wire do
   the codec the appends will carry; `window_appends` and `window_bytes` are what the client asks for, and
   the server grants at most that. `producer_id` is reserved for idempotent produce (#168) and is `nil` for
   now; `label` names the client in the operator interfaces. The window the server grants can later change
-  in any `append_ack`.
+  in any `append_ack`. The stream opens on the node that leads the range's active segment: another node
+  answers the error `moved`, and routes that differ from the vnode's answer `stale_routes`; either way the
+  client reads `topic_routes` again and opens where they say (`Malachi.ProducerStreams`).
   """
   @spec encode_open_stream_req(map()) :: binary()
   def encode_open_stream_req(%{} = req) do
@@ -876,9 +880,11 @@ defmodule Malachi.Wire do
   end
 
   @doc """
-  A server push on a stream: `append_ack` (the highest sequence acknowledged, the sequences that failed with
-  their reason, the window granted now, where 0 holds further appends until a later ack), `moved` (the stream is over: where its range's data goes now, after a
-  seal, a failover or a split) or `records` (a page, see `encode_page/1`).
+  A server push on a stream: `append_ack` (`acked_sequence`, the sequence below which every append has been
+  answered, 0 before the first answer; the sequences that failed with their reason; the window granted now,
+  where 0 holds further appends until a later ack), `moved` (the stream takes no more appends: where its
+  range's data goes now, after a seal, a split or merge, or a broker restart; the appends in flight are
+  still answered) or `records` (a page, see `encode_page/1`).
   """
   @spec encode_push(:append_ack | :moved | :records, map()) :: iodata()
   def encode_push(:append_ack, %{} = ack) do

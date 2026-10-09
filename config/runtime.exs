@@ -220,6 +220,14 @@ config :malachi,
   # Backpressure valve (records): past this many parked records the broker sheds new produces with an
   # `:overloaded` error instead of letting them queue until the caller times out and the connection drops.
   group_commit_max_inflight: parse_int.("MALACHI_GROUP_COMMIT_MAX_INFLIGHT", 200_000),
+  # Producer streams (Malachi.ProducerStreams): the most a stream's window may grant, in appends and in
+  # inflated bytes; the records a range may have in flight before its streams' windows start to shrink, and
+  # the count at which they reach 0 (Malachi.StreamWindow); and the most one append's batch may inflate to.
+  stream_max_window_appends: parse_int.("MALACHI_STREAM_MAX_WINDOW_APPENDS", 64),
+  stream_max_window_bytes: parse_int.("MALACHI_STREAM_MAX_WINDOW_BYTES", 16_777_216),
+  stream_inflight_soft: parse_int.("MALACHI_STREAM_INFLIGHT_SOFT", 50_000),
+  stream_inflight_hard: parse_int.("MALACHI_STREAM_INFLIGHT_HARD", 200_000),
+  max_inflated_batch_bytes: parse_int.("MALACHI_MAX_INFLATED_BATCH_BYTES", 16_777_216),
   # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
   # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
   # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.

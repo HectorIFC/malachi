@@ -314,6 +314,10 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_TCP_PORT` | 4040 | TCP server port |
 | `MALACHI_ADVERTISED_HOST` | node name's host (single node) | Host clients reach this node at, gossiped to every node; required on a node with peers, and neither loopback nor unspecified (`0.0.0.0`, `::`) |
 | `MALACHI_ADVERTISED_PORT` | `MALACHI_TCP_PORT` | Port clients reach this node at |
+| `MALACHI_STREAM_MAX_WINDOW_APPENDS` | 64 | Most appends a producer stream's window grants |
+| `MALACHI_STREAM_MAX_WINDOW_BYTES` | 16777216 | Most inflated bytes a producer stream's window grants |
+| `MALACHI_STREAM_INFLIGHT_SOFT` / `_HARD` | 50000 / 200000 | Records a range may have in flight before its streams' windows shrink, and where they reach 0 |
+| `MALACHI_MAX_INFLATED_BATCH_BYTES` | 16777216 | Most one append's batch may inflate to |
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
 | `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
@@ -797,8 +801,12 @@ membership beside the data path (`join_group`, `group_heartbeat`, `commit_offset
 batches that may be zstd compressed (`Malachi.Wire`, `Malachi.Wire.Batch`, `scripts/lib/wire.js`). Any
 authenticated session gets `cluster_state`: every broker with its status and the address it advertises
 (`MALACHI_ADVERTISED_HOST`), the vnodes, and whether the `producer_streams` cluster flag is on. Keys 25 to 34
-answer `unsupported` until that flag is on; with it on, `topic_routes` answers anyone holding `:produce` or
-`:consume` on the topic, and keys 26 to 34 get `unknown_api_key` until a server answers them.
+answer `unsupported` until that flag is on. With it on, `topic_routes` answers anyone holding `:produce` or
+`:consume` on the topic; `open_stream`, `append` and `close_stream` serve producer streams to anyone holding
+`:produce` on it, opened on the node that leads the range's active segment (another node answers `moved`,
+and routes that differ from the vnode's `stale_routes`), with a window the broker grants and adjusts on
+every ack and a `moved` push when the segment seals, fails over or the range splits; keys 29 to 34 get
+`unknown_api_key` until a server answers them.
 
 Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
 frames (keys 24 to 34) carry each record's position beside it, `{source_index, offset}` in its range's

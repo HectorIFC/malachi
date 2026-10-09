@@ -44,25 +44,34 @@ defmodule Malachi.Test.TCPHelper do
 
   # ---- binary Wire protocol helpers ----
 
-  @doc "Reads one length-prefixed Wire frame body from the socket (accumulating until complete)."
+  @doc """
+  Reads one length-prefixed Wire frame body from the socket (accumulating until complete). Bytes past the
+  frame, the start of the server's next frames when several reach the socket together, are kept for the
+  next read on the same socket from the same process.
+  """
   def recv_frame(socket, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 5000)
-    recv_frame_loop(socket, "", timeout, :os.system_time(:millisecond))
+    buffer = Process.delete({__MODULE__, :buffer, socket}) || ""
+    recv_frame_loop(socket, buffer, timeout, :os.system_time(:millisecond))
   end
 
   defp recv_frame_loop(socket, buffer, timeout, start_time) do
     case Wire.decode_frame(buffer) do
-      {:ok, body, _rest} ->
+      {:ok, body, rest} ->
+        if rest != "", do: Process.put({__MODULE__, :buffer, socket}, rest)
         {:ok, body}
 
       :incomplete ->
         remaining = max(timeout - (:os.system_time(:millisecond) - start_time), 0)
 
+        # a frame read only in part is kept too, for a later read to finish
         if remaining == 0 do
+          if buffer != "", do: Process.put({__MODULE__, :buffer, socket}, buffer)
           {:error, :timeout}
         else
           case :gen_tcp.recv(socket, 0, remaining) do
             {:ok, data} -> recv_frame_loop(socket, buffer <> data, timeout, start_time)
+            {:error, :timeout} -> recv_frame_loop(socket, buffer, timeout, start_time)
             {:error, _} = error -> error
           end
         end

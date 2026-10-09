@@ -64,7 +64,7 @@ defmodule Malachi.Cluster.Capabilities do
   # The capabilities this binary supports. A name is added here only by the release that can do the
   # thing, because advertising is a promise the rest of the cluster acts on. `producer_streams` gates the
   # routing and stream keys (`Malachi.Wire` 25 to 34, `Malachi.Routing.flag/0`): they answer `unsupported`
-  # until every node advertises it and an operator turns it on, which serves `topic_routes` (#275).
+  # until every node advertises it and an operator turns it on, which serves them as they land (#275).
   @capabilities [:producer_streams]
 
   @typedoc "A capability, which is also the name of the flag that requires it."

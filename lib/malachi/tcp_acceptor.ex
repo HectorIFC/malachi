@@ -20,6 +20,7 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.I18n
   alias Malachi.IPAddress
   alias Malachi.LogApi
+  alias Malachi.ProducerStreams
   alias Malachi.TCPProtocol
   alias Malachi.Wire
 
@@ -419,6 +420,7 @@ defmodule Malachi.TCPAcceptor do
         case process_buffered_frames(buffer <> data, state) do
           {:more, remaining} -> receive_loop(%{state | buffer: remaining})
           {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
+          {:producer, streams, remaining} -> producer_loop(%{state | buffer: remaining}, streams)
           {:close, _reason} -> close_oversized(state)
         end
 
@@ -434,8 +436,15 @@ defmodule Malachi.TCPAcceptor do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         case process_authenticated(frame_body, state) do
-          :ok -> process_buffered_frames(rest, state)
-          {:stream, sub_corr} -> {:stream, sub_corr, rest}
+          :ok ->
+            process_buffered_frames(rest, state)
+
+          {:stream, sub_corr} ->
+            {:stream, sub_corr, rest}
+
+          {:open_stream, corr, opened} ->
+            streams = TCPProtocol.open_stream_opened(state.socket, state.transport, ProducerStreams.new(), corr, opened)
+            {:producer, streams, rest}
         end
 
       :incomplete ->
@@ -499,6 +508,72 @@ defmodule Malachi.TCPAcceptor do
       {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
         close_socket(socket, transport)
     end
+  end
+
+  # A connection holding producer streams (`Malachi.ProducerStreams`): switched to active mode so a single
+  # `receive` takes the client's frames (appends, closes, opens and any other request) and the broker's
+  # answers to the appends in flight, its acks, and its moves. The socket is read only while every stream
+  # has room in its window, so a producer that outruns its grant is held back by TCP. Idle (nothing in
+  # flight and no frame) for the request timeout, the connection closes, as one in request mode does.
+  defp producer_loop(%{buffer: buffer} = state, streams) do
+    case handle_producer_buffer(buffer, state, streams) do
+      {:more, remaining, streams} -> producer_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+      {:close, _reason} -> close_oversized(state)
+    end
+  end
+
+  defp producer_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
+    idle_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
+
+    receive do
+      {tag, ^socket, data} when tag in [:tcp, :ssl] ->
+        case handle_producer_buffer(buffer <> data, state, streams) do
+          {:more, remaining, streams} -> producer_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+          {:close, _reason} -> close_oversized(state)
+        end
+
+      {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
+        close_socket(socket, transport)
+
+      {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
+        close_socket(socket, transport)
+
+      message ->
+        case ProducerStreams.handle_message(streams, message) do
+          {streams, frames} ->
+            Enum.each(frames, &transport.send(socket, &1))
+            producer_recv(state, arm_if_room(state, streams))
+
+          :no ->
+            producer_recv(state, streams)
+        end
+    after
+      idle_timeout ->
+        if ProducerStreams.busy?(streams),
+          do: producer_recv(state, streams),
+          else: close_socket(socket, transport)
+    end
+  end
+
+  defp handle_producer_buffer(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
+    case Wire.decode_frame(buffer, max_frame_size()) do
+      {:ok, frame_body, rest} ->
+        streams = TCPProtocol.process_producer_frame(socket, frame_body, session, transport, streams)
+        handle_producer_buffer(rest, state, streams)
+
+      :incomplete ->
+        {:more, buffer, streams}
+
+      {:error, :frame_too_large} ->
+        {:close, :frame_too_large}
+    end
+  end
+
+  # Re-arms the socket for one more delivery only while every stream has room: a full window stops the
+  # reads, and the ack that frees it arms them again.
+  defp arm_if_room(state, streams) do
+    if ProducerStreams.room?(streams), do: arm_active(state)
+    streams
   end
 
   # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the

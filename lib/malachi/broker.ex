@@ -756,6 +756,75 @@ defmodule Malachi.Broker do
     end
   end
 
+  @doc """
+  The segment a producer stream on `range_id` appends to, and its primary: the range's active segment,
+  opened now (placed and registered) when the range has none, exactly as its first produce would.
+  `{:error, :no_such_range}` for a range the metadata does not hold, `{:error, :range_sealed}` for one a
+  split or merge retired.
+  """
+  @spec stream_segment(t(), Metadata.range_id()) ::
+          {t(), {:ok, Metadata.segment_id(), term()} | {:error, term()}}
+  def stream_segment(%__MODULE__{} = broker, range_id) do
+    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
+      nil ->
+        {broker, {:error, :no_such_range}}
+
+      %{state: :sealed} ->
+        {broker, {:error, :range_sealed}}
+
+      _active ->
+        case ensure_segment(broker, range_id) do
+          {:ok, broker, segment} -> {broker, {:ok, segment.id, primary(segment)}}
+          {:error, reason} -> {broker, {:error, reason}}
+        end
+    end
+  end
+
+  @doc """
+  Where a producer stream bound to `range_id` belongs now: the range's active segment and its primary,
+  `:none` while the range has no active segment (its last one sealed and the next is opened by the next
+  append), or `{:retired, ranges}` once a split or merge retired it, naming the active ranges that took
+  over its keyspace.
+  """
+  @spec stream_target(t(), Metadata.range_id()) ::
+          {:active, Metadata.segment_id(), term()} | :none | {:retired, [Metadata.range_id()]}
+  def stream_target(%__MODULE__{} = broker, range_id) do
+    topic = topic_of_range(range_id)
+
+    case DSRSM.get_range(broker.dsrsm, topic, range_id) do
+      %{state: :active} ->
+        case Map.get(broker.segments, range_id) || registered_active_segment(broker, range_id) do
+          nil -> :none
+          segment -> {:active, segment.id, primary(segment)}
+        end
+
+      _sealed_or_gone ->
+        successors =
+          for %{id: id, parents: parents} <- DSRSM.active_ranges_of_topic(broker.dsrsm, topic),
+              range_id in parents,
+              do: id
+
+        {:retired, Enum.sort_by(successors, &elem(&1, 1))}
+    end
+  end
+
+  @doc "Whether every record's key falls inside `range_id`'s slice of its topic's keyspace."
+  @spec keys_in_range?(t(), Metadata.range_id(), [Record.t()]) :: boolean()
+  def keys_in_range?(%__MODULE__{} = broker, range_id, records) do
+    topic = topic_of_range(range_id)
+
+    case {DSRSM.get_topic(broker.dsrsm, topic), DSRSM.get_range(broker.dsrsm, topic, range_id)} do
+      {%{keyspace_size: size}, %{key_start: key_start, key_end: key_end}} ->
+        Enum.all?(records, fn record ->
+          position = Keyspace.position_of(record.key, size)
+          position >= key_start and position < key_end
+        end)
+
+      _unknown ->
+        false
+    end
+  end
+
   # The range's write head as the metadata records it. A segment with an empty replica set is skipped
   # rather than returned: there is no primary to fence, and `primary/1` would raise inside the broker
   # loop. Shared with `adopt_active_segment/2` so the fence and the adopt cannot disagree about which

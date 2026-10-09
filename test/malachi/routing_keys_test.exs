@@ -210,7 +210,7 @@ defmodule Malachi.RoutingKeysTest do
     end
 
     test "the stream keys no server answers yet are still unknown" do
-      for key <- Wire.open_stream_key()..Wire.commit_offsets_key() do
+      for key <- Wire.open_consume_key()..Wire.commit_offsets_key() do
         assert process(key, <<>>) == {:error, "unknown_api_key"}, "key #{key}"
       end
     end

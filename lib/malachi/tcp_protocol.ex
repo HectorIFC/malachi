@@ -17,16 +17,20 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
   alias Malachi.Auth.ConsoleRole
+  alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.Policy
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
+  alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.Policies
+  alias Malachi.ProducerStreams
   alias Malachi.RateLimiter
   alias Malachi.Routing
+  alias Malachi.StreamWindow
   alias Malachi.Wire
 
   @coordinator_name Malachi.LogGroupCoordinator
@@ -36,7 +40,8 @@ defmodule Malachi.TCPProtocol do
   `subscribe` frame is the exception. It registers a push stream and returns `{:stream, correlation_id}`
   (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
   """
-  @spec process_frame(term(), binary(), map(), atom()) :: :ok | {:stream, non_neg_integer()}
+  @spec process_frame(term(), binary(), map(), atom()) ::
+          :ok | {:stream, non_neg_integer()} | {:open_stream, non_neg_integer(), map()}
   def process_frame(socket, frame_body, session, transport) do
     result =
       case frame_body do
@@ -59,11 +64,137 @@ defmodule Malachi.TCPProtocol do
       {:stream, _sub_corr} = stream ->
         stream
 
+      {:open_stream, _corr, _opened} = opened ->
+        opened
+
       frame when is_binary(frame) ->
         transport.send(socket, frame)
         :ok
     end
   end
+
+  @doc """
+  Processes one client frame on a connection that holds producer streams (`Malachi.ProducerStreams`):
+  appends and closes go to the streams, `open_stream` opens another, and every other request is answered
+  as on any connection. A `subscribe` is refused: one connection does not push records and take appends at
+  once. Returns the streams after the frame.
+  """
+  @spec process_producer_frame(term(), binary(), map(), atom(), ProducerStreams.t()) :: ProducerStreams.t()
+  def process_producer_frame(socket, frame_body, session, transport, streams) do
+    case frame_body do
+      <<api_key::16, correlation_id::32, payload::binary>> ->
+        try do
+          producer_frame(api_key, correlation_id, payload, session, streams, socket, transport)
+        rescue
+          _malformed ->
+            transport.send(socket, Wire.encode_error(correlation_id, :malformed_request))
+            streams
+        end
+
+      _short ->
+        transport.send(socket, Wire.encode_error(0, :malformed_request))
+        streams
+    end
+  end
+
+  defp producer_frame(api_key, correlation_id, payload, session, streams, socket, transport) do
+    cond do
+      api_key == Wire.append_key() ->
+        {stream_id, sequence, batch} = Wire.decode_append_req(payload)
+        append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport)
+
+      api_key == Wire.close_stream_key() ->
+        stream_id = Wire.decode_close_stream_req(payload)
+
+        case ProducerStreams.close(streams, stream_id) do
+          {:ok, streams} ->
+            transport.send(socket, Wire.encode_ok(correlation_id, <<>>))
+            streams
+
+          :unknown ->
+            transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+            streams
+        end
+
+      api_key == Wire.subscribe_key() ->
+        transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
+        streams
+
+      true ->
+        case process_frame(socket, <<api_key::16, correlation_id::32, payload::binary>>, session, transport) do
+          {:open_stream, corr, opened} -> open_stream_opened(socket, transport, streams, corr, opened)
+          :ok -> streams
+        end
+    end
+  end
+
+  @doc """
+  Records a stream the broker opened (the `{:open_stream, corr, opened}` `process_frame/4` returned) and
+  answers the client with its id, segment, window and routes version. Returns the streams.
+  """
+  @spec open_stream_opened(term(), atom(), ProducerStreams.t(), non_neg_integer(), map()) :: ProducerStreams.t()
+  def open_stream_opened(socket, transport, streams, corr, opened) do
+    {streams, stream_id} = ProducerStreams.open(streams, Map.put(opened, :corr, corr))
+
+    resp = %{
+      stream_id: stream_id,
+      segment: Metadata.segment_seq(opened.segment_id),
+      window_appends: opened.granted.appends,
+      window_bytes: opened.granted.bytes,
+      routes_version: opened.routes_version
+    }
+
+    transport.send(socket, Wire.encode_ok(corr, Wire.encode_open_stream_resp(resp)))
+    streams
+  end
+
+  # One append: the flag and the topic permission are checked again on every frame (an operator can revoke
+  # either while the stream is open), and the publish quota takes one token per append.
+  defp append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport) do
+    case ProducerStreams.topic(streams, stream_id) do
+      nil ->
+        transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+        streams
+
+      topic ->
+        refusal =
+          cond do
+            not ClusterFlagsCache.enabled?(Routing.flag()) -> :unsupported
+            not topic_allowed?(session, :produce, topic) -> :permission_denied
+            not publish_allowed?(session) -> :rate_limited
+            true -> nil
+          end
+
+        if refusal do
+          transport.send(socket, Wire.encode_error(correlation_id, refusal))
+          streams
+        else
+          # `topic/2` above names only an open stream, so the append is taken or answered here
+          {streams, frames} = ProducerStreams.append(streams, stream_id, sequence, batch, max_inflated_batch_bytes())
+          Enum.each(frames, &transport.send(socket, &1))
+          streams
+        end
+    end
+  end
+
+  defp publish_allowed?(session) do
+    case RateLimiter.action_config(:publish) do
+      nil ->
+        true
+
+      config ->
+        case RateLimiter.check_limit_in_caller(session.username, :publish, config) do
+          :ok ->
+            true
+
+          {:error, :rate_limit_exceeded, _retry_after_ms} ->
+            Metrics.increment_rate_limit_blocked(:publish)
+            false
+        end
+    end
+  end
+
+  defp max_inflated_batch_bytes, do: Application.get_env(:malachi, :max_inflated_batch_bytes, 16_777_216)
 
   @doc """
   Processes one client frame while the connection is in streaming mode. The only inbound frame is a
@@ -153,10 +284,63 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.topic_routes_key() ->
         topic_routes(correlation_id, payload, session)
 
+      api_key == Wire.open_stream_key() ->
+        open_stream(correlation_id, payload, session)
+
+      # An append or close outside a connection that holds streams names a stream this connection never
+      # opened.
+      api_key in [Wire.append_key(), Wire.close_stream_key()] ->
+        Wire.encode_error(correlation_id, :unknown_stream)
+
       true ->
         Wire.encode_error(correlation_id, :unknown_api_key)
     end
   end
+
+  # A producer stream on one range (`Malachi.ProducerStreams`). The client opens it against the routes it
+  # read: routes that differ from the vnode's are `stale_routes`, and a range whose active segment another
+  # node leads (or that a split or merge retired) is `moved`, so the client reads the routes again and
+  # opens the stream where they say.
+  defp open_stream(correlation_id, payload, session) do
+    req = Wire.decode_open_stream_req(payload)
+
+    with :ok <- open_allowed(session, req.topic),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         {:ok, token, segment_id, broker_pid} <-
+           BrokerServer.open_stream(broker_for(req.topic), {req.topic, req.range}, self()),
+         # opening can place the range's first segment, which changes the routes: the client is told the
+         # version that names it
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic) do
+      {:open_stream, correlation_id,
+       %{
+         broker: broker_for(req.topic),
+         broker_pid: broker_pid,
+         topic: req.topic,
+         range_id: {req.topic, req.range},
+         token: token,
+         segment_id: segment_id,
+         routes_version: version,
+         granted:
+           StreamWindow.grant(
+             req.window_appends,
+             req.window_bytes,
+             StreamWindow.max_appends(),
+             StreamWindow.max_bytes()
+           )
+       }}
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  defp open_allowed(session, topic) do
+    if topic_allowed?(session, :produce, topic), do: :ok, else: {:error, :permission_denied}
+  end
+
+  defp current_routes(version, version), do: :ok
+  defp current_routes(_current, _stale), do: {:error, :stale_routes}
 
   # Any authenticated session: the answer names brokers and vnodes, never a topic.
   defp cluster_state(correlation_id, payload) do

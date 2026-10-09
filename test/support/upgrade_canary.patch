@@ -45,7 +45,7 @@ diff --git a/lib/malachi/broker_server.ex b/lib/malachi/broker_server.ex
 index 91d6d50..78d3ef2 100644
 --- a/lib/malachi/broker_server.ex
 +++ b/lib/malachi/broker_server.ex
-@@ -534,6 +534,12 @@ defmodule Malachi.BrokerServer do
+@@ -616,6 +616,12 @@ defmodule Malachi.BrokerServer do
      {:reply, Broker.topics_bound_to(state.broker, name), state}
    end
  
@@ -55,9 +55,9 @@ index 91d6d50..78d3ef2 100644
 +    {:reply, reply, %{state | broker: broker}}
 +  end
 +
-   def handle_call({:produce, topic, records, ctx}, from, state) do
-     # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
-     # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
+   # A producer stream on one range (`Malachi.ProducerStreams`), opened where the range's active segment is
+   # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
+   def handle_call({:open_stream, range_id, pid}, _from, state) do
 diff --git a/lib/malachi/cluster/capabilities.ex b/lib/malachi/cluster/capabilities.ex
 index 68ca555..6f4ab02 100644
 --- a/lib/malachi/cluster/capabilities.ex
@@ -65,7 +65,7 @@ index 68ca555..6f4ab02 100644
 @@ -65,7 +65,9 @@ defmodule Malachi.Cluster.Capabilities do
    # thing, because advertising is a promise the rest of the cluster acts on. `producer_streams` gates the
    # routing and stream keys (`Malachi.Wire` 25 to 34, `Malachi.Routing.flag/0`): they answer `unsupported`
-   # until every node advertises it and an operator turns it on, which serves `topic_routes` (#275).
+   # until every node advertises it and an operator turns it on, which serves them as they land (#275).
 -  @capabilities [:producer_streams]
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +  # scripts/docker-upgrade-chaos.sh, never into a release.
