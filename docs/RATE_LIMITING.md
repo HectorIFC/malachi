@@ -13,7 +13,7 @@ All six actions are enforced:
 | `:dashboard_api` | session (a SHA-256 digest of its token) | every authenticated dashboard request, `/stream` once when it opens | 300 per 60s (`0` turns it off) |
 | `:publish` | authenticated username | the records of a `produce` frame or a stream `append` | **off** (limit `0`) |
 | `:publish_bytes` | authenticated username | the bytes of a `produce` request as received (topic and framing included; the key carries no compression), or the inflated bytes of a stream `append` | **off** (limit `0`) |
-| `:subscribe` | authenticated username | the `subscribe` frame | **off** (limit `0`) |
+| `:subscribe` | authenticated username | the `subscribe` frame, an `open_consume` and a `fetch_range` (one token each) | **off** (limit `0`) |
 
 Read the publish and subscribe rows carefully, because four things about them are deliberate:
 
@@ -39,9 +39,10 @@ again; back off long enough for the quota's window to have room.
 
 Two things are explicitly **out of scope** for these limits, so that the one that is implemented has a
 single, documented meaning: keying by **IP** (the network-level control is the auth limit plus
-`ConnectionLimiter`) and keying by **topic** (listed as future work). `fetch` is not rate limited either:
-streaming already has credit-based backpressure, which bounds a consumer far better than a request count
-would.
+`ConnectionLimiter`) and keying by **topic** (listed as future work). What a consumer reads is not charged
+by records or bytes, and `fetch` is not rate limited: a push stream's credit window bounds a consumer far
+better than a request count would, so opening a consume stream or fetching a range spends one subscribe
+token and the rest is credit.
 
 ### What a client sees
 
@@ -288,7 +289,7 @@ different things to a client:
 | reason | when | what the client should do |
 |---|---|---|
 | `rate_limit_exceeded` | the auth handshake, per IP | stop reconnecting; the connection was never established |
-| `rate_limited` | a `produce`, stream `append` or `subscribe`, per authenticated user | back off until the window rolls over |
+| `rate_limited` | a `produce`, stream `append`, `subscribe`, `open_consume` or `fetch_range`, per authenticated user | back off until the window rolls over |
 | `quota_too_small` | a `produce` or stream `append` bigger than a whole window of a publish quota | send smaller batches |
 | `overloaded` | a `produce`, when the broker is saturated | back off briefly and retry |
 

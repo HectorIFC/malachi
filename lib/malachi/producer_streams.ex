@@ -24,11 +24,12 @@ defmodule Malachi.ProducerStreams do
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.StreamMoves
   alias Malachi.StreamWindow
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
-  defstruct streams: %{}, by_token: %{}, reqids: nil, next_id: 1, brokers: %{}
+  defstruct streams: %{}, by_token: %{}, reqids: nil, brokers: %{}
 
   @typedoc "One open stream."
   @type stream :: %{
@@ -53,8 +54,7 @@ defmodule Malachi.ProducerStreams do
           streams: %{pos_integer() => stream()},
           by_token: %{reference() => pos_integer()},
           reqids: :gen_server.request_id_collection() | nil,
-          next_id: pos_integer(),
-          brokers: %{reference() => pid()}
+          brokers: StreamMoves.brokers()
         }
 
   @typedoc """
@@ -72,10 +72,12 @@ defmodule Malachi.ProducerStreams do
 
   @doc """
   Records a stream the broker opened (`token` and `broker_pid`, from `Malachi.BrokerServer.open_stream/3`)
-  and returns its id. `granted` is the window the handshake granted.
+  under `id`, which the connection gives every stream it holds, of either kind
+  (`Malachi.ConnectionStreams`). `granted` is the window the handshake granted.
   """
-  @spec open(t(), map()) :: {t(), pos_integer()}
+  @spec open(t(), map()) :: t()
   def open(%__MODULE__{} = state, %{
+        id: id,
         corr: corr,
         broker: broker,
         broker_pid: broker_pid,
@@ -84,8 +86,6 @@ defmodule Malachi.ProducerStreams do
         token: token,
         granted: granted
       }) do
-    id = state.next_id
-
     stream = %{
       id: id,
       corr: corr,
@@ -104,24 +104,14 @@ defmodule Malachi.ProducerStreams do
       open?: true
     }
 
-    state = monitor_broker(state, broker_pid)
-
-    {%{
-       state
-       | streams: Map.put(state.streams, id, stream),
-         by_token: Map.put(state.by_token, token, id),
-         next_id: id + 1
-     }, id}
-  end
-
-  # The broker holds the index that tells a stream it moved, and loses it if it restarts; watching it lets
-  # the connection tell its streams instead (`handle_message/2` for `:DOWN`). The process watched is the one
-  # that answered the open, whose index holds the stream: one restarted under the same name since is
-  # another process, and one already gone answers the watch with `:DOWN` at once. One watch per process.
-  defp monitor_broker(state, broker_pid) do
-    if broker_pid in Map.values(state.brokers),
-      do: state,
-      else: %{state | brokers: Map.put(state.brokers, Process.monitor(broker_pid), broker_pid)}
+    # The process watched is the one that answered the open, whose index holds the stream: one restarted
+    # under the same name since is another process, and one already gone answers with `:DOWN` at once.
+    %{
+      state
+      | streams: Map.put(state.streams, id, stream),
+        by_token: Map.put(state.by_token, token, id),
+        brokers: StreamMoves.watch(state.brokers, broker_pid)
+    }
   end
 
   @doc """
@@ -161,7 +151,7 @@ defmodule Malachi.ProducerStreams do
   # moved: each is told now, to its own range, and the producer opens it again where the routes say.
   def handle_message(%__MODULE__{brokers: brokers} = state, {:DOWN, ref, :process, _pid, _reason})
       when is_map_key(brokers, ref) do
-    {broker_pid, brokers} = Map.pop!(brokers, ref)
+    {broker_pid, brokers} = StreamMoves.down(brokers, ref)
     gone = for {_id, %{broker_pid: ^broker_pid, open?: true} = stream} <- state.streams, do: stream
     state = Enum.reduce(gone, %{state | brokers: brokers}, &stop(&2, &1))
     {state, Enum.map(gone, &moved_frame(&1, :restarted, [{&1.range_id, nil}]))}
@@ -343,31 +333,6 @@ defmodule Malachi.ProducerStreams do
     Wire.encode_ok(stream.corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, push)))
   end
 
-  defp moved_frame(stream, reason, targets) do
-    push = %{
-      stream_id: stream.id,
-      reason: Atom.to_string(reason),
-      routes_version: routes_version(stream.topic),
-      targets: Enum.map(targets, &target/1)
-    }
-
-    Wire.encode_ok(stream.corr, IO.iodata_to_binary(Wire.encode_push(:moved, push)))
-  end
-
-  defp target({{_topic, seq}, nil}), do: %{range: seq, segment: nil}
-
-  defp target({{_topic, seq}, {segment_id, primary}}),
-    do: %{
-      range: seq,
-      segment: %{segment: Metadata.segment_seq(segment_id), primary: Metadata.broker_ref_string(primary)}
-    }
-
-  # The version of the routes a moved producer reads next, so it can tell whether its own copy is current;
-  # 0 when the routes cannot be read right now (the producer reads them again either way).
-  defp routes_version(topic) do
-    case Malachi.Routing.read_topic_routes(topic) do
-      {:ok, %{version: version}} -> version
-      {:error, _reason} -> 0
-    end
-  end
+  defp moved_frame(stream, reason, targets),
+    do: StreamMoves.moved_frame(stream.id, stream.corr, stream.topic, reason, targets)
 end

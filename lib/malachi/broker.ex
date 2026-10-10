@@ -103,7 +103,8 @@ defmodule Malachi.Broker do
           offsets: %{Metadata.range_id() => non_neg_integer()},
           rolling: %{Metadata.range_id() => roll()},
           fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}},
-          unrecovered: %{Metadata.range_id() => true}
+          unrecovered: %{Metadata.range_id() => true},
+          durable: %{Metadata.range_id() => non_neg_integer()}
         }
 
   defstruct dsrsm: nil,
@@ -150,7 +151,16 @@ defmodule Malachi.Broker do
             # serving a page clamped at a guessed horizon: an empty page there is a successful wrong
             # answer. The offset reads (`read/5`, `stream_history/5`) are not gated: no consumer reaches
             # them. See `seed_unrecovered_range/3`.
-            unrecovered: %{}
+            unrecovered: %{},
+            # Where each range's records are known to be durable: the offset after the last record of a
+            # produce this frontend answered as stored (`mark_durable/2`, once every dispatch of it was
+            # acknowledged by a replication quorum, or a group commit flushed it), and set to a sealed
+            # segment's end when this frontend learns of the seal. Nothing else moves it: a primary's local
+            # end counts records no quorum holds yet. `offsets` runs ahead of it by every batch planned and
+            # not yet answered. Consume streams read only up to it (`durable_end/2`), so a consumer never
+            # sees a record its producer was not told is stored, and a failover that seals below an
+            # unacknowledged tail cannot hand a consumer an offset that is later reused.
+            durable: %{}
 
   @doc """
   Opens an empty broker.
@@ -368,6 +378,56 @@ defmodule Malachi.Broker do
       | offsets: Map.update(broker.offsets, range_id, next_offset, &max(&1, next_offset)),
         segment_seq: Map.update(broker.segment_seq, range_id, min_seq, &max(&1, min_seq))
     }
+  end
+
+  defp raise_durable(durable, range_id, offset), do: Map.update(durable, range_id, offset, &max(&1, offset))
+
+  @doc """
+  Records the placements of a produce this frontend answered as stored as durable (`durable_end/2`): each
+  range's records up to the last one placed are held by a replication quorum, or flushed by a group commit.
+  """
+  @spec mark_durable(t(), %{Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}) :: t()
+  def mark_durable(%__MODULE__{} = broker, placements) do
+    durable =
+      Enum.reduce(placements, broker.durable, fn {range_id, {_first, last}}, acc ->
+        raise_durable(acc, range_id, last + 1)
+      end)
+
+    %{broker | durable: durable}
+  end
+
+  @doc """
+  The offset below which `range_id`'s records are durable, as this frontend knows it: the produces it
+  answered as stored (`mark_durable/2`) and the end of every sealed segment of the range. So records another
+  node's frontend wrote become readable here once their segment seals, and after this frontend restarts
+  the records of an active segment become readable with the next produce it answers there, or the seal.
+  Never past the range's end.
+  """
+  @spec durable_end(t(), Metadata.range_id()) :: non_neg_integer()
+  def durable_end(%__MODULE__{} = broker, range_id) do
+    sealed = sealed_end(broker, range_id)
+    broker.durable |> Map.get(range_id, 0) |> max(sealed) |> min(max(next_offset(broker, range_id), sealed))
+  end
+
+  # Where the range's last sealed segment ends in the control plane's metadata, 0 before any seals.
+  defp sealed_end(broker, range_id) do
+    broker.dsrsm
+    |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+    |> Enum.flat_map(fn
+      %{state: :sealed, start_offset: start, length: length} when is_integer(length) -> [start + length]
+      _active -> []
+    end)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  @doc """
+  A `Malachi.Broker.ReadView` of `range_id` whose horizon on the range's own records is `durable_end/2`
+  rather than the range's end: what a consume stream and `fetch_range` read through.
+  """
+  @spec consume_view(t(), Metadata.range_id()) :: ReadView.t()
+  def consume_view(%__MODULE__{} = broker, range_id) do
+    view = ReadView.new(broker, [range_id])
+    %{view | ends: Map.put(view.ends, range_id, durable_end(broker, range_id))}
   end
 
   @doc """
@@ -982,7 +1042,14 @@ defmodule Malachi.Broker do
     end
   end
 
-  defp put_offset(broker, range_id, offset), do: %{broker | offsets: Map.put(broker.offsets, range_id, offset)}
+  # Seats a range's next offset at a sealed edge: every record below it is durable, and none above it is
+  # yet, since the next segment starts there.
+  defp put_offset(broker, range_id, offset),
+    do: %{
+      broker
+      | offsets: Map.put(broker.offsets, range_id, offset),
+        durable: Map.put(broker.durable, range_id, offset)
+    }
 
   @doc """
   The current metadata as one flat view: the union of the sharded vnodes (see
@@ -1217,7 +1284,19 @@ defmodule Malachi.Broker do
   """
   @spec read_consume_view(ReadView.t(), Metadata.range_id(), consume_cursor(), pos_integer(), read_fun()) ::
           {:ok, [Record.t()], consume_cursor(), [Skip.t()]} | {:error, term()}
-  def read_consume_view(%ReadView{} = view, range_id, cursor, max_records, read_fun)
+  def read_consume_view(%ReadView{} = view, range_id, cursor, max_records, read_fun) do
+    with {:ok, positioned, next, skips} <- read_consume_positioned(view, range_id, cursor, max_records, read_fun) do
+      {:ok, Enum.map(positioned, &elem(&1, 1)), next, skips}
+    end
+  end
+
+  @doc """
+  `read_consume_view/5` with each record's position beside it, `{source_index, offset}` in the range's
+  history (the position a consumer that read it acknowledges, see `Malachi.Wire`).
+  """
+  @spec read_consume_positioned(ReadView.t(), Metadata.range_id(), consume_cursor(), pos_integer(), read_fun()) ::
+          {:ok, [{Metadata.position(), Record.t()}], consume_cursor(), [Skip.t()]} | {:error, term()}
+  def read_consume_positioned(%ReadView{} = view, range_id, cursor, max_records, read_fun)
       when is_integer(max_records) and max_records > 0 do
     range = ReadView.range(view, range_id)
 
@@ -1241,6 +1320,126 @@ defmodule Malachi.Broker do
         }
 
         consume_page(page, index, offset, [], 0, [])
+    end
+  end
+
+  @doc """
+  Where a consumer of `range_id` starts, as a position in the range's history: `:earliest` its first
+  source's start (a read clamps it to what retention left), `:latest` the end of the range's own durable
+  records (`durable_end/2`), `{:position, position}` that position when it names one of the range's
+  sources and does not lie past the range's end as this frontend knows it, and `{:committed, group}` the
+  group's checkpoint for the range, or the start when the group has none. `{:error, :invalid_position}` for
+  a position past the range's sources or its end; `{:error, :metadata_unavailable}` for a position on the
+  range's own records while its end is not known yet (a recovery could not learn it).
+  """
+  @spec consume_start(t(), Metadata.range_id(), term()) ::
+          {:ok, {non_neg_integer(), non_neg_integer()}}
+          | {:error, :no_such_range | :invalid_position | :metadata_unavailable}
+  def consume_start(%__MODULE__{} = broker, range_id, start) do
+    topic = topic_of_range(range_id)
+
+    case DSRSM.get_range(broker.dsrsm, topic, range_id) do
+      nil ->
+        {:error, :no_such_range}
+
+      range ->
+        own = length(range.parents)
+
+        case start do
+          :earliest -> {:ok, {0, 0}}
+          :latest -> {:ok, {own, durable_end(broker, range_id)}}
+          {:position, {index, offset}} when index < own -> {:ok, {index, offset}}
+          {:position, {^own, offset}} -> own_position(broker, range_id, own, offset)
+          {:position, _past_the_sources} -> {:error, :invalid_position}
+          {:committed, group} -> {:ok, committed_start(broker, group, topic, range_id)}
+        end
+    end
+  end
+
+  @doc """
+  Whether a reader of `range_id` at `position` has records to read now: one still in an ancestor always
+  has (an ancestor is sealed, so it reads to its end), one on the range's own records has when the range
+  ends past its offset. A range the control plane does not know has none.
+  """
+  @spec consume_ready?(t(), Metadata.range_id(), {non_neg_integer(), non_neg_integer()}) :: boolean()
+  def consume_ready?(%__MODULE__{} = broker, range_id, position) do
+    case own_source(broker, range_id) do
+      nil -> false
+      own -> ready_at?(position, own, durable_end(broker, range_id))
+    end
+  end
+
+  @doc """
+  `consume_ready?/3` from what it needs: the index of the range's own records in its history
+  (`own_source/2`) and its `durable_end/2`, so a caller checking many positions on one range computes them once.
+  """
+  @spec ready_at?({non_neg_integer(), non_neg_integer()}, non_neg_integer(), non_neg_integer()) :: boolean()
+  def ready_at?({index, offset}, own, durable_end), do: index < own or offset < durable_end
+
+  @doc "The index of `range_id`'s own records in its history (the number of its ancestors), nil when unknown."
+  @spec own_source(t(), Metadata.range_id()) :: non_neg_integer() | nil
+  def own_source(%__MODULE__{} = broker, range_id) do
+    case DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) do
+      nil -> nil
+      range -> length(range.parents)
+    end
+  end
+
+  @doc "Whether the control plane knows `range_id`, active or retired."
+  @spec range_known?(t(), Metadata.range_id()) :: boolean()
+  def range_known?(%__MODULE__{} = broker, range_id),
+    do: DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id) != nil
+
+  @doc "Where `range_id` ends on this frontend: the offset its next record takes, 0 before it knows one."
+  @spec range_end(t(), Metadata.range_id()) :: non_neg_integer()
+  def range_end(%__MODULE__{} = broker, range_id), do: next_offset(broker, range_id)
+
+  # A position on the range's own records is valid up to the range's end as this frontend knows it (what it
+  # planned, what a recovery learned, or where its last sealed segment ends), so a cursor handed out before a
+  # restart is still taken. A read from it waits for the durable horizon to reach it (`durable_end/2`): it
+  # never serves the records in between before a quorum holds them. A range whose end a recovery could not
+  # learn yet answers `:metadata_unavailable`, which a client retries, rather than a refusal it cannot tell
+  # from a bad cursor. A stream already open at a position a later seal falls below is not checked again:
+  # the broker never hands out a position past the durable horizon, so only a client's own made-up cursor
+  # can be there.
+  defp own_position(broker, range_id, own, offset) do
+    cond do
+      unrecovered?(broker, range_id) -> {:error, :metadata_unavailable}
+      offset <= max(next_offset(broker, range_id), sealed_end(broker, range_id)) -> {:ok, {own, offset}}
+      true -> {:error, :invalid_position}
+    end
+  end
+
+  defp committed_start(broker, group, topic, range_id) do
+    case Map.get(committed_offsets(broker, group, topic), range_id, :start) do
+      :start -> {0, 0}
+      {index, offset} -> {index, offset}
+    end
+  end
+
+  @doc """
+  How many records `range_id` still holds past `position`, as `view` sees it: exact on the range's own
+  records, and an upper bound while `position` is in an ancestor, whose records are counted whole although
+  only the range's slice of them is read.
+  """
+  @spec consume_backlog(ReadView.t(), Metadata.range_id(), {non_neg_integer(), non_neg_integer()}) ::
+          non_neg_integer()
+  def consume_backlog(%ReadView{} = view, range_id, {index, offset}) do
+    case ReadView.range(view, range_id) do
+      nil ->
+        0
+
+      range ->
+        sources = Enum.map(history_sources(range_id, range), &elem(&1, 0))
+
+        sources
+        |> Enum.with_index()
+        |> Enum.drop(index)
+        |> Enum.map(fn
+          {source_id, ^index} -> max(view_end(view, source_id) - offset, 0)
+          {source_id, _later} -> view_end(view, source_id)
+        end)
+        |> Enum.sum()
     end
   end
 
@@ -1805,12 +2004,16 @@ defmodule Malachi.Broker do
   defp take_page(records, filter_range, room, start) do
     indexed = for {record, index} <- Enum.with_index(records), in_page?(record, filter_range), do: {record, index}
 
+    with_offsets = fn kept ->
+      Enum.map(kept, fn {record, index} -> {record, record_offset(record, start, index)} end)
+    end
+
     if length(indexed) > room do
       taken = Enum.take(indexed, room)
       {last, last_index} = List.last(taken)
-      {Enum.map(taken, &elem(&1, 0)), record_offset(last, start, last_index) + 1}
+      {with_offsets.(taken), record_offset(last, start, last_index) + 1}
     else
-      {Enum.map(indexed, &elem(&1, 0)), last_offset(records, start) + 1}
+      {with_offsets.(indexed), last_offset(records, start) + 1}
     end
   end
 
@@ -1852,7 +2055,7 @@ defmodule Malachi.Broker do
         # `locate_segment/3` stepped over, both of them missing segments.
         skips = add_skip(skips, page, source_range_id, source, offset, start - offset)
         {kept, next_offset} = take_page(records, filter_range, page.max_records - count, start)
-        acc = Enum.reverse(kept) ++ acc
+        acc = Enum.reverse(Enum.map(kept, fn {record, offset} -> {{index, offset}, record} end)) ++ acc
         count = count + length(kept)
 
         if count >= page.max_records do

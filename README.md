@@ -807,7 +807,14 @@ answer `unsupported` until that flag is on. With it on, `topic_routes` answers a
 `:consume` on the topic; `open_stream`, `append` and `close_stream` serve producer streams to anyone holding
 `:produce` on it, opened on the node that leads the range's active segment (another node answers `moved`,
 and routes that differ from the vnode's `stale_routes`), with a window the broker grants and adjusts on
-every ack and a `moved` push when the segment seals, fails over or the range splits; keys 29 to 34 get
+every ack and a `moved` push when the segment seals, fails over or the range splits. `open_consume`,
+`consume_ack` and `fetch_range` serve a range's records to anyone holding `:consume` on the topic, from
+the same node: a consume stream pushes pages of records a replication quorum acknowledged (those written
+through this node's producer streams as their appends are acknowledged, those another node wrote once their
+segment seals; after the node restarts, an active segment's records once the next append there is
+acknowledged or it seals, while a cursor read before the restart is still taken and waits), each with its position in the range's history (ancestors first), within a credit window in records that `consume_ack`
+returns, and gets `moved` when the range splits or merges or its next segment opens on another node; `fetch_range` answers one page, waiting up to
+`wait_ms` for records. One connection can hold producer and consume streams at once. Keys 32 to 34 get
 `unknown_api_key` until a server answers them.
 
 Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream

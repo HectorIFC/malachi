@@ -172,7 +172,7 @@ successor is a separate, unimplemented operation.
 
 Clients see `:migrating` on metadata writes touching a fenced topic. This is transient and the correct
 response is retry, which the bundled scripts already do. See
-[Produce and consume](produce-and-consume.md#two-errors-a-correct-client-handles).
+[Produce and consume](produce-and-consume.md#errors-a-correct-client-retries).
 
 ### A reshard survives a restart
 

@@ -55,7 +55,9 @@ defmodule Malachi.Wire do
       when it moves are still answered after the `moved`. `close_stream` (28) ends it.
     * **Consume** is the mirror (`open_consume`, 29): pushes of `records` carry the offset of every record,
       and `consume_ack` (30) says what was read and can move the window. `fetch_range` (31) is the unary
-      read of one range.
+      read of one range. A page holds at most `max` records and about `max_bytes` bytes, always at least
+      one record, so `max_bytes` is a soft limit; both are capped by the server. The server sends its pages
+      with codec `none`, so a reader must accept it.
     * **Groups** live beside the data path, not in it: `join_group` (32) and `group_heartbeat` (33) answer
       a member's assignment and generation, `commit_offsets` (34) checkpoints its positions.
 
@@ -824,8 +826,10 @@ defmodule Malachi.Wire do
 
   @doc """
   `consume_ack` (30): the consumer read everything before `position` on the stream (the read ack, transcript
-  569), and moves its window to `window` records (0 leaves it as it is: see the moduledoc). No response: the ack shows up as pushes.
-  It returns credit only; checkpointing a group's position is `commit_offsets`.
+  569), and moves its window to `window` records (0 leaves it as it is: see the moduledoc). No response:
+  the ack shows up as pushes. It frees every page whose last record ends at or before `position`, so either
+  the position right after a page's last record or the page's `next` frees it. It returns credit only;
+  checkpointing a group's position is `commit_offsets`.
   """
   @spec encode_consume_ack_req(map()) :: binary()
   def encode_consume_ack_req(%{stream_id: stream_id, position: position, window: window}),

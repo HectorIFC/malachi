@@ -696,7 +696,7 @@ The flags this build knows:
 
 | flag | switches on |
 |---|---|
-| `producer_streams` | `topic_routes` (`Malachi.Wire` 25) and producer streams (`open_stream`, `append`, `close_stream`, 26 to 28). Until it is on, keys 25 to 34 answer `unsupported`; with it on, keys 29 to 34 answer `unknown_api_key` until a server answers them. `cluster_state` (24) says whether it is on |
+| `producer_streams` | `topic_routes` (`Malachi.Wire` 25), producer streams (`open_stream`, `append`, `close_stream`, 26 to 28) and consume streams with the unary range read (`open_consume`, `consume_ack`, `fetch_range`, 29 to 31). Until it is on, keys 25 to 34 answer `unsupported`; with it on, keys 32 to 34 answer `unknown_api_key` until a server answers them. `cluster_state` (24) says whether it is on |
 
 Two things follow from a flag being permanent:
 

@@ -45,7 +45,7 @@ diff --git a/lib/malachi/broker_server.ex b/lib/malachi/broker_server.ex
 index 91d6d50..78d3ef2 100644
 --- a/lib/malachi/broker_server.ex
 +++ b/lib/malachi/broker_server.ex
-@@ -616,6 +616,12 @@ defmodule Malachi.BrokerServer do
+@@ -664,6 +664,12 @@ defmodule Malachi.BrokerServer do
      {:reply, Broker.topics_bound_to(state.broker, name), state}
    end
  
@@ -57,7 +57,7 @@ index 91d6d50..78d3ef2 100644
 +
    # A producer stream on one range (`Malachi.ProducerStreams`), opened where the range's active segment is
    # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
-   def handle_call({:open_stream, range_id, pid}, _from, state) do
+   def handle_call({:open_stream, range_id, pid}, _from, state), do: do_open_stream(range_id, pid, state)
 diff --git a/lib/malachi/cluster/capabilities.ex b/lib/malachi/cluster/capabilities.ex
 index 68ca555..6f4ab02 100644
 --- a/lib/malachi/cluster/capabilities.ex

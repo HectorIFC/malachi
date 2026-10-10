@@ -20,8 +20,10 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.Policy
+  alias Malachi.ConnectionStreams
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.ConsumeStreams
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
   alias Malachi.Metadata
@@ -41,7 +43,7 @@ defmodule Malachi.TCPProtocol do
   (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
   """
   @spec process_frame(term(), binary(), map(), atom()) ::
-          :ok | {:stream, non_neg_integer()} | {:open_stream, non_neg_integer(), map()}
+          :ok | {:stream, non_neg_integer()} | {:opened, :producer | :consumer, non_neg_integer(), map()}
   def process_frame(socket, frame_body, session, transport) do
     result =
       case frame_body do
@@ -64,7 +66,7 @@ defmodule Malachi.TCPProtocol do
       {:stream, _sub_corr} = stream ->
         stream
 
-      {:open_stream, _corr, _opened} = opened ->
+      {:opened, _kind, _corr, _opened} = opened ->
         opened
 
       frame when is_binary(frame) ->
@@ -74,17 +76,17 @@ defmodule Malachi.TCPProtocol do
   end
 
   @doc """
-  Processes one client frame on a connection that holds producer streams (`Malachi.ProducerStreams`):
-  appends and closes go to the streams, `open_stream` opens another, and every other request is answered
-  as on any connection. A `subscribe` is refused: one connection does not push records and take appends at
-  once. Returns the streams after the frame.
+  Processes one client frame on a connection that holds streams (`Malachi.ConnectionStreams`): appends,
+  read acks and closes go to the streams, `open_stream` and `open_consume` open another, and every other
+  request is answered as on any connection. A `subscribe` is refused: its push stream belongs to a
+  connection of its own. Returns the streams after the frame.
   """
-  @spec process_producer_frame(term(), binary(), map(), atom(), ProducerStreams.t()) :: ProducerStreams.t()
-  def process_producer_frame(socket, frame_body, session, transport, streams) do
+  @spec process_streams_frame(term(), binary(), map(), atom(), ConnectionStreams.t()) :: ConnectionStreams.t()
+  def process_streams_frame(socket, frame_body, session, transport, streams) do
     case frame_body do
       <<api_key::16, correlation_id::32, payload::binary>> ->
         try do
-          producer_frame(api_key, correlation_id, payload, session, streams, socket, transport)
+          streams_frame(api_key, correlation_id, payload, session, streams, socket, transport)
         rescue
           _malformed ->
             transport.send(socket, Wire.encode_error(correlation_id, :malformed_request))
@@ -97,16 +99,22 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  defp producer_frame(api_key, correlation_id, payload, session, streams, socket, transport) do
+  defp streams_frame(api_key, correlation_id, payload, session, streams, socket, transport) do
     cond do
       api_key == Wire.append_key() ->
         {stream_id, sequence, batch} = Wire.decode_append_req(payload)
         append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport)
 
+      api_key == Wire.consume_ack_key() ->
+        consume_ack(correlation_id, Wire.decode_consume_ack_req(payload), streams, socket, transport)
+
+      api_key == Wire.fetch_range_key() and ClusterFlagsCache.enabled?(Routing.flag()) ->
+        fetch_range_async(correlation_id, payload, session, streams, socket, transport)
+
       api_key == Wire.close_stream_key() ->
         stream_id = Wire.decode_close_stream_req(payload)
 
-        case ProducerStreams.close(streams, stream_id) do
+        case ConnectionStreams.close(streams, stream_id) do
           {:ok, streams} ->
             transport.send(socket, Wire.encode_ok(correlation_id, <<>>))
             streams
@@ -122,19 +130,21 @@ defmodule Malachi.TCPProtocol do
 
       true ->
         case process_frame(socket, <<api_key::16, correlation_id::32, payload::binary>>, session, transport) do
-          {:open_stream, corr, opened} -> open_stream_opened(socket, transport, streams, corr, opened)
+          {:opened, kind, corr, opened} -> stream_opened(socket, transport, streams, kind, corr, opened)
           :ok -> streams
         end
     end
   end
 
   @doc """
-  Records a stream the broker opened (the `{:open_stream, corr, opened}` `process_frame/4` returned) and
-  answers the client with its id, segment, window and routes version. Returns the streams.
+  Records a stream the broker opened (the `{:opened, kind, corr, opened}` `process_frame/4` returned) and
+  answers the client with its id: a producer stream with its segment, window and routes version, a consume
+  stream with the position its first push starts at. Returns the streams.
   """
-  @spec open_stream_opened(term(), atom(), ProducerStreams.t(), non_neg_integer(), map()) :: ProducerStreams.t()
-  def open_stream_opened(socket, transport, streams, corr, opened) do
-    {streams, stream_id} = ProducerStreams.open(streams, Map.put(opened, :corr, corr))
+  @spec stream_opened(term(), atom(), ConnectionStreams.t(), :producer | :consumer, non_neg_integer(), map()) ::
+          ConnectionStreams.t()
+  def stream_opened(socket, transport, streams, :producer, corr, opened) do
+    {streams, stream_id} = ConnectionStreams.open_producer(streams, Map.put(opened, :corr, corr))
 
     resp = %{
       stream_id: stream_id,
@@ -148,11 +158,41 @@ defmodule Malachi.TCPProtocol do
     streams
   end
 
+  def stream_opened(socket, transport, streams, :consumer, corr, opened) do
+    {streams, stream_id} = ConnectionStreams.open_consumer(streams, Map.put(opened, :corr, corr))
+    resp = %{stream_id: stream_id, position: opened.position}
+    transport.send(socket, Wire.encode_ok(corr, Wire.encode_open_consume_resp(resp)))
+    streams
+  end
+
+  # A read ack has no response: what it changes shows up as pushes. One for a stream this connection does
+  # not hold is answered, so a client acking the wrong id learns it.
+  defp consume_ack(
+         correlation_id,
+         %{stream_id: stream_id, position: position, window: window},
+         streams,
+         socket,
+         transport
+       ) do
+    # the window a consumer asks for is capped as at open
+    window = if window > 0, do: stream_window(window), else: 0
+
+    case ConsumeStreams.ack(streams.consumers, stream_id, position, window) do
+      {:unknown, _stream_id} ->
+        transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+        streams
+
+      {consumers, frames} ->
+        Enum.each(frames, &transport.send(socket, &1))
+        %{streams | consumers: consumers}
+    end
+  end
+
   # One append: the flag and the topic permission are checked again on every frame (an operator can revoke
   # either while the stream is open). The publish quotas are charged inside `ProducerStreams.append/6`, once
   # the batch is decoded, by its inflated records and bytes (`charge_publish/3`).
   defp append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport) do
-    case ProducerStreams.topic(streams, stream_id) do
+    case ProducerStreams.topic(streams.producers, stream_id) do
       nil ->
         transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
         streams
@@ -172,11 +212,11 @@ defmodule Malachi.TCPProtocol do
           # `topic/2` above names only an open stream, so the append is taken or answered here
           charge = &charge_publish(session, &1, &2)
 
-          {streams, frames} =
-            ProducerStreams.append(streams, stream_id, sequence, batch, max_inflated_batch_bytes(), charge)
+          {producers, frames} =
+            ProducerStreams.append(streams.producers, stream_id, sequence, batch, max_inflated_batch_bytes(), charge)
 
           Enum.each(frames, &transport.send(socket, &1))
-          streams
+          %{streams | producers: producers}
         end
     end
   end
@@ -301,9 +341,15 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.open_stream_key() ->
         open_stream(correlation_id, payload, session)
 
-      # An append or close outside a connection that holds streams names a stream this connection never
-      # opened.
-      api_key in [Wire.append_key(), Wire.close_stream_key()] ->
+      api_key == Wire.open_consume_key() ->
+        open_consume(correlation_id, payload, session)
+
+      api_key == Wire.fetch_range_key() ->
+        fetch_range(correlation_id, payload, session)
+
+      # An append, read ack or close outside a connection that holds streams names a stream this connection
+      # never opened.
+      api_key in [Wire.append_key(), Wire.consume_ack_key(), Wire.close_stream_key()] ->
         Wire.encode_error(correlation_id, :unknown_stream)
 
       true ->
@@ -326,7 +372,7 @@ defmodule Malachi.TCPProtocol do
          # opening can place the range's first segment, which changes the routes: the client is told the
          # version that names it
          {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic) do
-      {:open_stream, correlation_id,
+      {:opened, :producer, correlation_id,
        %{
          broker: broker_for(req.topic),
          broker_pid: broker_pid,
@@ -352,6 +398,126 @@ defmodule Malachi.TCPProtocol do
   defp open_allowed(session, topic) do
     if topic_allowed?(session, :produce, topic), do: :ok, else: {:error, :permission_denied}
   end
+
+  # A consume stream on one range (`Malachi.ConsumeStreams`), opened where the range is served, against
+  # the routes the client read, as a producer stream is. It spends one token of the subscribe quota, as a
+  # subscribe does (`read_allowed/2` says when): the credit window, not a quota, bounds what it reads. The
+  # pages go out with codec `none`, so a client that does not accept it is refused.
+  defp open_consume(correlation_id, payload, session) do
+    req = Wire.decode_open_consume_req(payload)
+
+    with :ok <- read_allowed(session, req),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         :ok <- rate_limit_check(:subscribe, session),
+         {:ok, token, position, broker_pid} <-
+           BrokerServer.open_consume(broker_for(req.topic), {req.topic, req.range}, req.start, self()) do
+      {:opened, :consumer, correlation_id,
+       %{
+         broker: broker_for(req.topic),
+         broker_pid: broker_pid,
+         topic: req.topic,
+         range_id: {req.topic, req.range},
+         token: token,
+         position: position,
+         window: stream_window(req.window),
+         max: fetch_max(req.max),
+         max_bytes: page_bytes(req.max_bytes),
+         # checked again before every page, as an append is: an operator can revoke either while it is open
+         allowed: fn -> consume_allowed(session, req.topic) end
+       }}
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # One page of one range, read where the range is served, waiting up to `wait_ms` for records when there
+  # are none past the start yet. It spends one subscribe token, as an `open_consume` does.
+  defp fetch_range(correlation_id, payload, session) do
+    case fetch_request(payload, session) do
+      {:ok, fetch} ->
+        reply = BrokerServer.fetch_range(fetch.broker, fetch.range_id, fetch.start, fetch.wait_ms)
+        fetch_answer(correlation_id, fetch, reply)
+
+      {:error, reason} ->
+        Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # What a `fetch_range` asks of the session and the routes, and of the broker once those pass: the range,
+  # its start, how long to wait and how big a page.
+  defp fetch_request(payload, session) do
+    req = Wire.decode_fetch_range_req(payload)
+
+    with :ok <- read_allowed(session, req),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         :ok <- rate_limit_check(:subscribe, session) do
+      {:ok,
+       %{
+         broker: broker_for(req.topic),
+         range_id: {req.topic, req.range},
+         start: req.start,
+         wait_ms: fetch_wait(req.wait_ms),
+         max: fetch_max(req.max),
+         max_bytes: page_bytes(req.max_bytes)
+       }}
+    end
+  end
+
+  # The frame a `fetch_range` is answered with, from the broker's reply: the page read through the view it
+  # handed over, or the refusal.
+  defp fetch_answer(correlation_id, fetch, reply) do
+    with {:ok, position, view, reporter} <- reply,
+         {:ok, page, _count} <-
+           ConsumeStreams.read_page(view, fetch.range_id, position, fetch.max, fetch.max_bytes, reporter) do
+      Wire.encode_ok(correlation_id, IO.iodata_to_binary(Wire.encode_page(page)))
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # A `fetch_range` on a connection that holds streams: asked of the broker without waiting, so its wait does
+  # not hold the connection's streams back, and answered when the broker replies
+  # (`Malachi.ConnectionStreams.fetch/4`).
+  defp fetch_range_async(correlation_id, payload, session, streams, socket, transport) do
+    case fetch_request(payload, session) do
+      {:ok, fetch} ->
+        ConnectionStreams.fetch(streams, fetch.broker, {:fetch_range, fetch.range_id, fetch.start, fetch.wait_ms}, fn
+          reply -> fetch_answer(correlation_id, fetch, reply)
+        end)
+
+      {:error, reason} ->
+        transport.send(socket, Wire.encode_error(correlation_id, normalize(reason)))
+        streams
+    end
+  end
+
+  # What reading a range asks of the session and of the request before anything else: the consume
+  # permission on the topic and a codec the pages can go out in. The subscribe token is spent after these
+  # and the routes check, right before the broker is asked, so a request this node refuses on its own
+  # spends none; a refusal from the broker (`moved`, a position it does not hold) has spent it.
+  defp read_allowed(session, req) do
+    cond do
+      not topic_allowed?(session, :consume, req.topic) -> {:error, :permission_denied}
+      :none not in req.accept -> {:error, :unsupported_codec}
+      true -> :ok
+    end
+  end
+
+  # Whether a consume stream on `topic` may still push: the flag and the consume permission.
+  defp consume_allowed(session, topic) do
+    cond do
+      not ClusterFlagsCache.enabled?(Routing.flag()) -> {:error, :unsupported}
+      not topic_allowed?(session, :consume, topic) -> {:error, :permission_denied}
+      true -> :ok
+    end
+  end
+
+  # The soft byte limit of a page, capped by the inflated batch size the server takes in.
+  defp page_bytes(max_bytes), do: min(max_bytes, max_inflated_batch_bytes())
 
   defp current_routes(version, version), do: :ok
   defp current_routes(_current, _stale), do: {:error, :stale_routes}
@@ -695,18 +861,25 @@ defmodule Malachi.TCPProtocol do
   # payload is a bare reason string, and `Malachi.Wire` freezes that encoding, so carrying it would take a
   # new api_key.
   defp with_rate_limit(action, session, correlation_id, fun) do
+    case rate_limit_check(action, session) do
+      :ok -> fun.()
+      {:error, :rate_limited} -> Wire.encode_error(correlation_id, :rate_limited)
+    end
+  end
+
+  defp rate_limit_check(action, session) do
     case RateLimiter.action_config(action) do
       nil ->
-        fun.()
+        :ok
 
       config ->
         case RateLimiter.check_limit_in_caller(session.username, action, config) do
           :ok ->
-            fun.()
+            :ok
 
           {:error, :rate_limit_exceeded, _retry_after_ms} ->
             Metrics.increment_rate_limit_blocked(action)
-            Wire.encode_error(correlation_id, :rate_limited)
+            {:error, :rate_limited}
         end
     end
   end

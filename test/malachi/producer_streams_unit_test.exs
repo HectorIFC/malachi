@@ -48,7 +48,8 @@ defmodule Malachi.ProducerStreamsUnitTest do
       granted: granted
     }
 
-    {streams, id} = ProducerStreams.open(ProducerStreams.new(), opened)
+    id = 1
+    streams = ProducerStreams.open(ProducerStreams.new(), Map.put(opened, :id, id))
     %{broker: broker, token: token, streams: streams, id: id}
   end
 
@@ -149,14 +150,16 @@ defmodule Malachi.ProducerStreamsUnitTest do
       %{corr: 7, broker: name, broker_pid: pid, topic: "t", range_id: {"t", range}, token: make_ref(), granted: granted}
     end
 
-    {streams, first} = ProducerStreams.open(ProducerStreams.new(), opened.(0, old))
+    first = 1
+    streams = ProducerStreams.open(ProducerStreams.new(), Map.put(opened.(0, old), :id, first))
 
     Process.exit(old, :kill)
     wait_for_unregistered(name)
     {:ok, new} = HeldBroker.start(name: name)
     on_exit(fn -> Process.exit(new, :kill) end)
     # opened on the new process before the old one's DOWN is read
-    {streams, second} = ProducerStreams.open(streams, opened.(1, new))
+    second = 2
+    streams = ProducerStreams.open(streams, Map.put(opened.(1, new), :id, second))
 
     {streams, [{:moved, %{stream_id: ^first, reason: "restarted"}}]} = pushes(streams, 1)
     assert ProducerStreams.topic(streams, first) == nil
@@ -183,7 +186,8 @@ defmodule Malachi.ProducerStreamsUnitTest do
       granted: %{appends: 1, bytes: 1}
     }
 
-    {streams, id} = ProducerStreams.open(ctx.streams, opened)
+    id = ctx.id + 1
+    streams = ProducerStreams.open(ctx.streams, Map.put(opened, :id, id))
 
     {streams, [{:moved, %{stream_id: ^id, reason: "restarted"}}]} = pushes(streams, 1)
     assert ProducerStreams.topic(streams, id) == nil
@@ -277,7 +281,8 @@ defmodule Malachi.ProducerStreamsUnitTest do
       granted: %{appends: 1, bytes: 1_000}
     }
 
-    {streams, other} = ProducerStreams.open(ctx.streams, one)
+    other = ctx.id + 1
+    streams = ProducerStreams.open(ctx.streams, Map.put(one, :id, other))
     {streams, []} = ProducerStreams.append(streams, other, 0, batch("x"), 1_000_000, &free/2)
     refute ProducerStreams.room?(streams)
 

@@ -226,4 +226,303 @@ defmodule Malachi.BrokerServerStreamsTest do
       assert :sys.get_state(server).range_inflight == %{}
     end
   end
+
+  describe "consume streams" do
+    alias Malachi.Broker
+    alias Malachi.Broker.ReadView
+    alias Malachi.BrokerServer.ConsumeIndex
+    alias Malachi.Test.PollingHelper
+
+    # The consume stream's wake for `token`, with its view.
+    defp wake(token) do
+      assert_receive {:consume_wake, ^token, %ReadView{} = view, _reporter}, 2_000
+      view
+    end
+
+    defp produced(server, root, values) do
+      for value <- values, do: assert({{:ok, _}, _scale} = append(server, root, [Record.new(value, key: "k")]))
+      :ok
+    end
+
+    test "a stream opens from where its start resolves, and is handed a view of its range at once", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a", "b"])
+
+      assert {:ok, token, {0, 0}, ^server} = BrokerServer.open_consume(server, root, :earliest)
+      view = wake(token)
+
+      assert {:ok, [{{0, 0}, %{value: "a"}}, {{0, 1}, %{value: "b"}}], {0, 2}, []} =
+               Broker.read_consume_positioned(view, root, {0, 0}, 10, &ReplicationServer.read/4)
+
+      assert {:ok, _token, {0, 2}, _server} = BrokerServer.open_consume(server, root, :latest)
+      assert BrokerServer.open_consume(server, root, {:position, {3, 0}}) == {:error, :invalid_position}
+      assert BrokerServer.open_consume(server, {"events", 9}, :earliest) == {:error, :no_such_range}
+    end
+
+    test "an armed stream is woken once the range grows past what it read, and only then", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      {:ok, token, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      _first = wake(token)
+
+      :ok = BrokerServer.arm_consume(server, token, 0)
+      refute_receive {:consume_wake, ^token, _view, _reporter}, 100
+
+      produced(server, root, ["x"])
+      view = wake(token)
+      assert ReadView.fetch_end(view, root) == {:ok, 1}
+
+      # a stream not armed again is not woken again
+      produced(server, root, ["y"])
+      refute_receive {:consume_wake, ^token, _view, _reporter}, 100
+
+      # armed behind the range's end, it is woken at once
+      :ok = BrokerServer.arm_consume(server, token, 1)
+      assert ReadView.fetch_end(wake(token), root) == {:ok, 2}
+    end
+
+    test "a range whose active segment another node leads is answered where it is read", %{tmp_dir: dir} do
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {server, root} = with_topic(dir, brokers: [remote])
+      # a producer's open places the segment, on the only broker there is
+      {:moved, :elsewhere, _targets} = BrokerServer.open_stream(server, root)
+      assert {:moved, :elsewhere, [{^root, {_segment, ^remote}}]} = BrokerServer.open_consume(server, root, :earliest)
+      assert {:moved, :elsewhere, _targets} = BrokerServer.fetch_range(server, root, :earliest, 0)
+    end
+
+    test "reading never places a segment: a range with none is read here", %{tmp_dir: dir} do
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {server, root} = with_topic(dir, brokers: [remote])
+      assert {:ok, _token, {0, 0}, _server} = BrokerServer.open_consume(server, root, :earliest)
+      assert {:ok, {0, 0}, _view, _reporter} = BrokerServer.fetch_range(server, root, :earliest, 0)
+      assert Malachi.Metadata.segments_of_range(BrokerServer.metadata(server), root) == []
+    end
+
+    test "a roll keeps the range's consume streams: they read the range, not one segment", %{tmp_dir: dir} do
+      one_record = Record.encoded_size(Record.new("v0", key: "k"))
+      {server, root} = with_topic(dir, segment_max_bytes: one_record)
+      {:ok, token, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      _first = wake(token)
+      :ok = BrokerServer.arm_consume(server, token, 0)
+
+      # the append fills the segment, and its fence seals it: the range has no active segment until the next
+      produced(server, root, ["v0"])
+      assert_receive {:consume_wake, ^token, _view, _reporter}, 2_000
+      refute_receive {:stream_moved, ^token, _reason, _targets}, 300
+      assert ConsumeIndex.consumer?(:sys.get_state(server).consume, token)
+    end
+
+    test "a stream reads only up to what a quorum acknowledged, and a position past it is refused", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a", "b"])
+      broker = :sys.get_state(server).broker
+      assert Broker.durable_end(broker, root) == 2
+      assert ReadView.fetch_end(Broker.consume_view(broker, root), root) == {:ok, 2}
+
+      assert {:ok, _token, {0, 2}, _server} = BrokerServer.open_consume(server, root, :latest)
+      assert {:ok, _token, {0, 2}, _server} = BrokerServer.open_consume(server, root, {:position, {0, 2}})
+      assert BrokerServer.open_consume(server, root, {:position, {0, 3}}) == {:error, :invalid_position}
+    end
+
+    test "a split moves an open stream to the children, and a new primary moves it as a seal does", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      {:ok, token, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+      assert_receive {:stream_moved, ^token, :retired, [{^left, _}, {^right, _}]}, 2_000
+      assert :sys.get_state(server).consume.consumers == %{}
+
+      # a segment led here whose primary moves to another node: the stream follows it
+      local = start_repl(dir, 1)
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {replicated, range} = with_topic(Path.join(dir, "replicated"), brokers: [local, remote], replication_factor: 2)
+      # opening places the segment; it is led here when the local store comes first, so the test makes it so
+      _ = BrokerServer.open_stream(replicated, range)
+      segment = :sys.get_state(replicated).broker.segments[range].id
+      :ok = BrokerServer.apply_heal(replicated, [{:set_segment_replicas, segment, [local, remote]}])
+      {:ok, moved, _position, _server} = BrokerServer.open_consume(replicated, range, :earliest)
+
+      :ok = BrokerServer.apply_heal(replicated, [{:set_segment_replicas, segment, [remote, local]}])
+      assert_receive {:stream_moved, ^moved, :sealed, [{^range, {^segment, ^remote}}]}, 2_000
+      assert :sys.get_state(replicated).consume.consumers == %{}
+    end
+
+    test "a stream whose connection goes away, or that is closed, is dropped", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      holder = spawn(fn -> receive(do: (:stop -> :ok)) end)
+      {:ok, _gone, _position, _server} = BrokerServer.open_consume(server, root, :earliest, holder)
+      {:ok, closed, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      ref = Process.monitor(holder)
+      send(holder, :stop)
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+
+      :ok = BrokerServer.close_stream(server, closed)
+      :ok = BrokerServer.close_stream(server, closed)
+      assert :sys.get_state(server).consume.consumers == %{}
+    end
+
+    test "a fetch answers at once when records are past its start, waits for them otherwise", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a"])
+      assert {:ok, {0, 0}, %ReadView{}, _reporter} = BrokerServer.fetch_range(server, root, :earliest, 5_000)
+
+      waiting = Task.async(fn -> BrokerServer.fetch_range(server, root, :latest, 5_000) end)
+      PollingHelper.wait_until!(fn -> map_size(:sys.get_state(server).consume.waiters) == 1 end)
+      produced(server, root, ["b"])
+      assert {:ok, {0, 1}, view, _reporter} = Task.await(waiting)
+      assert ReadView.fetch_end(view, root) == {:ok, 2}
+
+      # nothing lands: answered after its wait, with a view to read nothing from
+      assert {:ok, {0, 2}, _view, _reporter} = BrokerServer.fetch_range(server, root, :latest, 100)
+      assert :sys.get_state(server).consume.waiters == %{}
+    end
+
+    test "records reserved for a produce not yet acknowledged are not read, and their ack wakes the stream", %{
+      tmp_dir: dir
+    } do
+      primary = :"bss_consume_held_#{System.unique_integer([:positive])}"
+      {:ok, held} = HeldPrimary.start(primary, self())
+      on_exit(fn -> Process.exit(held, :kill) end)
+      {server, root} = with_topic(dir, brokers: [primary])
+
+      # a segment led by the held primary, and a stream on it caught up at 0
+      _ = BrokerServer.open_stream(server, root)
+      {:ok, token, {0, 0}, _server} = BrokerServer.open_consume(server, root, :earliest)
+      _first = wake(token)
+      :ok = BrokerServer.arm_consume(server, token, 0)
+
+      # a produce reserves offset 0 and is held before its quorum
+      pending =
+        BrokerServer.send_stream_produce(server, root, [Record.new("v", key: "k")], :p, :gen_server.reqids_new())
+
+      assert_receive {:held, {:replicate_async, _seg, _set, _base, _records, {^server, tag}, _ctx}}
+      broker = :sys.get_state(server).broker
+      assert Broker.range_end(broker, root) == 1
+      assert Broker.durable_end(broker, root) == 0
+      assert ReadView.fetch_end(Broker.consume_view(broker, root), root) == {:ok, 0}
+      assert {:ok, _token, {0, 0}, _server} = BrokerServer.open_consume(server, root, :latest)
+      # a position at the reserved end is taken and waits; one past the range's end is refused
+      assert {:ok, waiting, {0, 1}, _server} = BrokerServer.open_consume(server, root, {:position, {0, 1}})
+      assert BrokerServer.open_consume(server, root, {:position, {0, 2}}) == {:error, :invalid_position}
+      refute_receive {:consume_wake, ^token, _view, _reporter}, 100
+      :ok = BrokerServer.close_stream(server, waiting)
+
+      # the quorum acknowledges it: now it is durable, and the waiting stream is woken to read it
+      send(server, {:replicate_result, tag, {:ok, 0}})
+      {{:reply, {{:ok, _}, _scale}}, :p, _} = :gen_server.receive_response(pending, 5_000, true)
+      assert ReadView.fetch_end(wake(token), root) == {:ok, 1}
+    end
+
+    test "the horizon moves only with produces answered as stored, and a seal sets it", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a", "b"])
+      broker = :sys.get_state(server).broker
+      segment = broker.segments[root].id
+      assert Broker.durable_end(broker, root) == 2
+
+      # a recovery's seed (a primary's local end) and a dispatch's adopted end move the offsets, not the horizon
+      seeded = Broker.seed_range_state(broker, root, 10, 0)
+      assert Broker.range_end(seeded, root) == 10
+      assert Broker.durable_end(seeded, root) == 2
+      # a cursor read before a restart (past the horizon, within the recovered end) is still taken, and waits
+      assert Broker.consume_start(seeded, root, {:position, {0, 8}}) == {:ok, {0, 8}}
+      refute Broker.consume_ready?(seeded, root, {0, 8})
+      assert Broker.consume_start(seeded, root, {:position, {0, 11}}) == {:error, :invalid_position}
+      adopted = Broker.adopt_offsets(seeded, root, segment, 11)
+      assert Broker.durable_end(adopted, root) == 2
+
+      # a seal below a tail no quorum held sets it there: the next segment reuses those offsets
+      sealed = broker |> Broker.mark_durable(%{root => {0, 4}}) |> Broker.forget_sealed(root, segment, 1)
+      assert Broker.durable_end(sealed, root) == 1
+      # and the next segment's offsets, reserved past it, are not durable until their own produces are answered
+      reserved = Broker.seed_range_state(sealed, root, 6, 0)
+      assert Broker.durable_end(reserved, root) == 1
+      # and a position past the seal names nothing any more
+      assert Broker.consume_start(sealed, root, {:position, {0, 2}}) == {:error, :invalid_position}
+    end
+
+    test "a cursor on sealed records is taken though this frontend's end is behind, and an unrecovered range is retried",
+         %{
+           tmp_dir: dir
+         } do
+      one_record = Record.encoded_size(Record.new("v0", key: "k"))
+      {server, root} = with_topic(dir, segment_max_bytes: one_record)
+      produced(server, root, ["v1", "v2"])
+
+      PollingHelper.wait_until!(fn ->
+        server
+        |> BrokerServer.metadata()
+        |> Malachi.Metadata.segments_of_range(root)
+        |> Enum.any?(&(&1.state == :sealed))
+      end)
+
+      broker = :sys.get_state(server).broker
+      # an end this frontend has not learned yet: the sealed segment still bounds what a cursor may name
+      behind = %{broker | offsets: Map.delete(broker.offsets, root)}
+      assert {:ok, {0, 1}} = Broker.consume_start(behind, root, {:position, {0, 1}})
+
+      # a recovery that could not learn the end leaves the range to be retried, not a refusal
+      {:ok, fresh} = BrokerServer.create_topic(server, "fresh", 4)
+      unrecovered = Broker.seed_unrecovered_range(:sys.get_state(server).broker, fresh, 0)
+      assert Broker.consume_start(unrecovered, fresh, {:position, {0, 0}}) == {:error, :metadata_unavailable}
+    end
+
+    test "with group commit, records count as durable once their flush answered them", %{tmp_dir: dir} do
+      {server, root} =
+        with_topic(dir,
+          group_commit: true,
+          group_commit_interval_ms: 60_000,
+          group_commit_flush_max_records: 2,
+          group_commit_max_inflight: 100
+        )
+
+      first = BrokerServer.send_stream_produce(server, root, [Record.new("v1", key: "k")], 1, :gen_server.reqids_new())
+      PollingHelper.wait_until!(fn -> :sys.get_state(server).pending_records == 1 end)
+      # buffered, not flushed: not durable, though its offset is reserved
+      assert Broker.durable_end(:sys.get_state(server).broker, root) == 0
+
+      second = BrokerServer.send_stream_produce(server, root, [Record.new("v2", key: "k")], 2, :gen_server.reqids_new())
+      {{:reply, {{:ok, _}, _}}, 1, _} = :gen_server.receive_response(first, 5_000, true)
+      {{:reply, {{:ok, _}, _}}, 2, _} = :gen_server.receive_response(second, 5_000, true)
+      assert Broker.durable_end(:sys.get_state(server).broker, root) == 2
+    end
+
+    test "a fetch's timer that fires after a wake answered it changes nothing", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      send(server, {:fetch_range_timeout, make_ref()})
+      assert {:ok, _token, _position, ^server} = BrokerServer.open_consume(server, root, :earliest)
+    end
+
+    test "a fetch waiting on a range a split retires is answered where its records went", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      waiting = Task.async(fn -> BrokerServer.fetch_range(server, root, :latest, 5_000) end)
+      PollingHelper.wait_until!(fn -> map_size(:sys.get_state(server).consume.waiters) == 1 end)
+
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+      assert {:moved, :retired, [{^left, _}, {^right, _}]} = Task.await(waiting, 2_000)
+      assert :sys.get_state(server).consume.waiters == %{}
+    end
+
+    test "the backlog past a position counts the range's own records exactly and its ancestors whole", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["p0", "p1", "p2"])
+      {:ok, left, _right} = BrokerServer.split_range(server, root)
+      # two records of the child's own, keyed into its slice
+      %{key_end: key_end, keyspace_size: size} =
+        :sys.get_state(server).broker |> Broker.metadata() |> Malachi.Metadata.get_range(left)
+
+      key = "k#{Enum.find(1..10_000, &(:erlang.phash2("k#{&1}", size) < key_end))}"
+      for value <- ["c0", "c1"], do: assert({{:ok, _}, _scale} = append(server, left, [Record.new(value, key: key)]))
+      broker = :sys.get_state(server).broker
+      view = ReadView.new(broker, [left])
+
+      # in the ancestor: what is left of it, counted whole, and every record of the child's own
+      assert Broker.consume_backlog(view, left, {0, 1}) == 2 + 2
+      assert Broker.consume_backlog(view, left, {1, 1}) == 1
+      assert Broker.consume_backlog(view, left, {1, 2}) == 0
+      assert Broker.consume_backlog(view, {"events", 99}, {0, 0}) == 0
+      assert Broker.consume_ready?(broker, left, {0, 3})
+      assert Broker.consume_ready?(broker, left, {1, 1})
+      refute Broker.consume_ready?(broker, left, {1, 2})
+      refute Broker.consume_ready?(broker, {"events", 99}, {0, 0})
+    end
+  end
 end

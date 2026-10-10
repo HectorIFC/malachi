@@ -166,16 +166,17 @@ configuration that turns this into exactly-once.
 The failure this prevents is not theoretical: it happens on every deploy that restarts a consumer between
 a fetch and its commit.
 
-## Two errors a correct client handles
+## Errors a correct client retries
 
-Both are transient and both mean retry, not fail:
+All three are transient and mean retry, not fail:
 
 | error | when | what to do |
 |---|---|---|
 | `:migrating` | a metadata write hit a topic whose range is being split or migrated | back off and retry; the fence lifts in milliseconds |
 | `:not_owner` | the read reached a node that no longer owns that range, after a failover or rebalance | re-resolve the owner and retry |
+| `:metadata_unavailable` | the node does not know where the range's records end yet (after a restart, before a recovery reached its primary) | back off and retry |
 
-> **Analogy.** Both mean "the shop is briefly rearranging, come back in a moment", not "gone for good".
+> **Analogy.** They mean "the shop is briefly rearranging, come back in a moment", not "gone for good".
 > Treating them as fatal is like seeing a "back in 5 minutes" sign and concluding the store closed forever.
 
 The bundled scripts handle both: `:migrating` through the `withRetry` helper in

@@ -7,16 +7,16 @@ defmodule Malachi.ProducerStreamsTest do
   # the routing reads the topology the consumer-group router publishes, cleared here for each test.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.StreamTCP
+
   import Malachi.Test.QuotaForensics, only: [within_one_window: 2, snapshot: 2, assert_refused: 4]
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
-  alias Malachi.Log.Record
   alias Malachi.Routing
   alias Malachi.Test.ClusterFlagsPause
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
-  alias Malachi.Wire.Batch
 
   @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
   @quota_window_ms 60_000
@@ -43,77 +43,6 @@ defmodule Malachi.ProducerStreamsTest do
     assert code == Wire.ok_code()
 
     %{socket: socket, topic: topic}
-  end
-
-  defp routes(socket, topic) do
-    {code, payload} = TCPHelper.request(socket, Wire.topic_routes_key(), 3, Wire.encode_topic_routes_req(topic))
-    assert code == Wire.ok_code()
-    Wire.decode_topic_routes_resp(payload)
-  end
-
-  defp open(socket, topic, opts \\ []) do
-    routes = routes(socket, topic)
-
-    req = %{
-      topic: topic,
-      range: Keyword.get(opts, :range, 0),
-      routes_version: Keyword.get(opts, :routes_version, routes.version),
-      codec: :none,
-      window_appends: Keyword.get(opts, :window_appends, 16),
-      window_bytes: Keyword.get(opts, :window_bytes, 1_048_576),
-      producer_id: nil,
-      label: "test"
-    }
-
-    case TCPHelper.request(socket, Wire.open_stream_key(), 10, Wire.encode_open_stream_req(req)) do
-      {0, payload} -> {:ok, Wire.decode_open_stream_resp(payload)}
-      {1, payload} -> {:error, Wire.decode_error_reason(payload)}
-    end
-  end
-
-  defp batch(values, opts \\ []) do
-    tombstone = Keyword.get(opts, :tombstone, false)
-
-    Batch.encode(
-      Enum.map(values, &{Record.new(&1, key: Keyword.get(opts, :key)), tombstone}),
-      Keyword.get(opts, :codec, :none)
-    )
-  end
-
-  defp send_append(socket, stream_id, sequence, batch),
-    do:
-      :ok =
-        :gen_tcp.send(
-          socket,
-          Wire.encode_request(
-            Wire.append_key(),
-            11,
-            IO.iodata_to_binary(Wire.encode_append_req(stream_id, sequence, batch))
-          )
-        )
-
-  # The next push on the stream opened with correlation id 10.
-  defp push(socket) do
-    {:ok, body} = TCPHelper.recv_frame(socket)
-    {10, 0, payload} = Wire.decode_response(body)
-    Wire.decode_push(payload)
-  end
-
-  # Reads pushes until every append up to `sequence` is answered (an ack's `acked_sequence` is the next one
-  # not yet answered), returning every error seen on the way.
-  defp acked_through(socket, sequence, errors \\ []) do
-    {:append_ack, ack} = push(socket)
-    errors = errors ++ ack.errors
-    if ack.acked_sequence > sequence, do: {ack, errors}, else: acked_through(socket, sequence, errors)
-  end
-
-  defp values(socket, topic) do
-    {code, payload} =
-      TCPHelper.request(socket, Wire.fetch_key(), 4, Wire.encode_fetch_req(topic, nil, nil, nil, 1000, 0))
-
-    assert code == Wire.ok_code()
-    {records, _cursor} = Wire.decode_fetch_resp(payload)
-    Enum.map(records, & &1.value)
   end
 
   describe "opening" do

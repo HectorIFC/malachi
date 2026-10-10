@@ -17,10 +17,10 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.Auth.MtlsProvider
   alias Malachi.Auth.OidcConfig
   alias Malachi.Auth.SessionManager
+  alias Malachi.ConnectionStreams
   alias Malachi.I18n
   alias Malachi.IPAddress
   alias Malachi.LogApi
-  alias Malachi.ProducerStreams
   alias Malachi.TCPProtocol
   alias Malachi.Wire
 
@@ -420,7 +420,7 @@ defmodule Malachi.TCPAcceptor do
         case process_buffered_frames(buffer <> data, state) do
           {:more, remaining} -> receive_loop(%{state | buffer: remaining})
           {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
-          {:producer, streams, remaining} -> producer_loop(%{state | buffer: remaining}, streams)
+          {:streams, streams, remaining} -> streams_loop(%{state | buffer: remaining}, streams)
           {:close, _reason} -> close_oversized(state)
         end
 
@@ -442,9 +442,11 @@ defmodule Malachi.TCPAcceptor do
           {:stream, sub_corr} ->
             {:stream, sub_corr, rest}
 
-          {:open_stream, corr, opened} ->
-            streams = TCPProtocol.open_stream_opened(state.socket, state.transport, ProducerStreams.new(), corr, opened)
-            {:producer, streams, rest}
+          {:opened, kind, corr, opened} ->
+            streams =
+              TCPProtocol.stream_opened(state.socket, state.transport, ConnectionStreams.new(), kind, corr, opened)
+
+            {:streams, streams, rest}
         end
 
       :incomplete ->
@@ -510,25 +512,26 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # A connection holding producer streams (`Malachi.ProducerStreams`): switched to active mode so a single
-  # `receive` takes the client's frames (appends, closes, opens and any other request) and the broker's
-  # answers to the appends in flight, its acks, and its moves. The socket is read only while every stream
-  # has room in its window, so a producer that outruns its grant is held back by TCP. Idle (nothing in
-  # flight and no frame) for the request timeout, the connection closes, as one in request mode does.
-  defp producer_loop(%{buffer: buffer} = state, streams) do
-    case handle_producer_buffer(buffer, state, streams) do
-      {:more, remaining, streams} -> producer_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+  # A connection holding streams (`Malachi.ConnectionStreams`), producer and consume streams alike: switched
+  # to active mode so a single `receive` takes the client's frames (appends, read acks, closes, opens and any
+  # other request) and the broker's messages: answers to the appends in flight, views to read consume pages
+  # from, and moves. The socket is read only while every producer stream has room in its window, so a
+  # producer that outruns its grant is held back by TCP. Idle (no append in flight, no consume stream open
+  # and no frame) for the request timeout, the connection closes, as one in request mode does.
+  defp streams_loop(%{buffer: buffer} = state, streams) do
+    case handle_streams_buffer(buffer, state, streams) do
+      {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
       {:close, _reason} -> close_oversized(state)
     end
   end
 
-  defp producer_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
+  defp streams_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
     idle_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
     receive do
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->
-        case handle_producer_buffer(buffer <> data, state, streams) do
-          {:more, remaining, streams} -> producer_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+        case handle_streams_buffer(buffer <> data, state, streams) do
+          {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
           {:close, _reason} -> close_oversized(state)
         end
 
@@ -539,27 +542,27 @@ defmodule Malachi.TCPAcceptor do
         close_socket(socket, transport)
 
       message ->
-        case ProducerStreams.handle_message(streams, message) do
+        case ConnectionStreams.handle_message(streams, message) do
           {streams, frames} ->
             Enum.each(frames, &transport.send(socket, &1))
-            producer_recv(state, arm_if_room(state, streams))
+            streams_recv(state, arm_if_room(state, streams))
 
           :no ->
-            producer_recv(state, streams)
+            streams_recv(state, streams)
         end
     after
       idle_timeout ->
-        if ProducerStreams.busy?(streams),
-          do: producer_recv(state, streams),
+        if ConnectionStreams.busy?(streams),
+          do: streams_recv(state, streams),
           else: close_socket(socket, transport)
     end
   end
 
-  defp handle_producer_buffer(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
+  defp handle_streams_buffer(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
-        streams = TCPProtocol.process_producer_frame(socket, frame_body, session, transport, streams)
-        handle_producer_buffer(rest, state, streams)
+        streams = TCPProtocol.process_streams_frame(socket, frame_body, session, transport, streams)
+        handle_streams_buffer(rest, state, streams)
 
       :incomplete ->
         {:more, buffer, streams}
@@ -569,10 +572,10 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  # Re-arms the socket for one more delivery only while every stream has room: a full window stops the
-  # reads, and the ack that frees it arms them again.
+  # Re-arms the socket for one more delivery only while every producer stream has room: a full window stops
+  # the reads, and the ack that frees it arms them again.
   defp arm_if_room(state, streams) do
-    if ProducerStreams.room?(streams), do: arm_active(state)
+    if ConnectionStreams.room?(streams), do: arm_active(state)
     streams
   end
 
