@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-10-09T11:24:50Z",
+    "timestamp": "2026-10-10T10:38:48Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "c1ced92",
-    "git_ref_date": "2026-10-08T11:27:09Z",
+    "git_ref": "49cc6e8",
+    "git_ref_date": "2026-10-09T11:25:00Z",
     "malachi_version": "0.22.0",
     "hardware": {
       "cpu": "x86_64",
@@ -25,16 +25,16 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 51457,
-    "post_chaos_records_per_s": 2100
+    "acked_writes": 48334,
+    "post_chaos_records_per_s": 2073
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1478)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4686)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1790)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4863)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4686)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4863)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261009T105225Z-c1ced92",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261010T100554Z-49cc6e8",
   "details": {
     "old_ref": "v0.21.1",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
@@ -45,9 +45,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 18561,
-      "phase2": 12235,
-      "phase3": 20661
+      "phase1": 18345,
+      "phase2": 9855,
+      "phase3": 20134
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
