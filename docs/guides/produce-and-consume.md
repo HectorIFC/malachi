@@ -2,7 +2,7 @@
 
 [Getting started](getting-started.md) showed the shortest path to a record landing and coming back. This
 guide is the working detail: how keys decide ordering, the three ways to track a position, what
-at-least-once obliges you to do, and the two errors a correct client must expect.
+at-least-once obliges you to do, and the errors a correct client must expect.
 
 ## Producing
 
@@ -174,16 +174,16 @@ All three are transient and mean retry, not fail:
 |---|---|---|
 | `:migrating` | a metadata write hit a topic whose range is being split or migrated | back off and retry; the fence lifts in milliseconds |
 | `:not_owner` | the read reached a node that no longer owns that range, after a failover or rebalance | re-resolve the owner and retry |
-| `:metadata_unavailable` | the node does not know where the range's records end yet (after a restart, before a recovery reached its primary) | back off and retry |
+| `:metadata_unavailable` | the node has not yet heard from the topic's metadata vnode, or does not yet know where the range's records end (after a restart or a join, before a recovery reached the range's primary) | back off and retry |
 
 > **Analogy.** They mean "the shop is briefly rearranging, come back in a moment", not "gone for good".
 > Treating them as fatal is like seeing a "back in 5 minutes" sign and concluding the store closed forever.
 
-The bundled scripts handle both: `:migrating` through the `withRetry` helper in
+The bundled scripts handle the first two: `:migrating` through the `withRetry` helper in
 [`scripts/lib/cli.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/cli.js), and
 `:not_owner` with a back-off around the fetch. Each prints a grey `~` per attempt, so you can watch a
-split or a failover happen live. A client that treats either as fatal will appear to fail at random under
-an otherwise healthy resharding.
+split or a failover happen live. `:metadata_unavailable` needs the same back-off. A client that treats any
+of them as fatal will appear to fail at random under an otherwise healthy resharding or restart.
 
 ## Next
 
