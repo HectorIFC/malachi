@@ -102,6 +102,14 @@ defmodule Malachi.Metrics.Prometheus do
           {[reason: "bad_index"], ops.integrity_bad_index}
         ]
       ),
+      metric("malachi_producer_streams_total", :counter, "Producer streams on this node, by what happened to them", [
+        {[event: "opened"], ops.producer_streams_opened},
+        {[event: "closed"], ops.producer_streams_closed},
+        {[event: "moved"], ops.producer_streams_moved}
+      ]),
+      metric("malachi_producer_streams_open", :gauge, "Producer streams open on this node", [
+        {[], ops.producer_streams_open}
+      ]),
       metric(
         "malachi_storage_failures_total",
         :counter,

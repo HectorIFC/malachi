@@ -399,6 +399,45 @@ defmodule Malachi.ProducerStreamsTest do
     end
   end
 
+  describe "the node's directory of producer streams" do
+    test "a stream opened over the wire is listed with its label, client and segment until it is closed", ctx do
+      {:ok, %{stream_id: id, segment: segment}} = open(ctx.socket, ctx.topic, label: "billing\twriter")
+
+      %{streams: streams, unanswered: 0} = Malachi.ProducerDirectory.list()
+      assert [listed] = Enum.filter(streams, &(&1.topic == ctx.topic))
+
+      assert %{stream_id: ^id, range: 0, segment: ^segment, label: "billing?writer", client_ip: "127.0.0.1"} = listed
+      assert listed.primary == Atom.to_string(node())
+
+      assert {0, <<>>} = TCPHelper.request(ctx.socket, Wire.close_stream_key(), 12, Wire.encode_close_stream_req(id))
+      %{streams: streams} = Malachi.ProducerDirectory.list()
+      assert Enum.filter(streams, &(&1.topic == ctx.topic)) == []
+    end
+
+    test "being listed is not activity: an idle connection with an open stream still closes", ctx do
+      previous = Application.get_env(:malachi, :tcp_recv_timeout)
+      Application.put_env(:malachi, :tcp_recv_timeout, 400)
+      on_exit(fn -> Application.put_env(:malachi, :tcp_recv_timeout, previous || 30_000) end)
+
+      # a connection of its own, which reads the shorter idle bound from its first loop
+      {:ok, socket} = TCPHelper.connect()
+      {:ok, _token} = TCPHelper.authenticate_wire(socket, "app", "app123")
+      {:ok, _stream} = open(socket, ctx.topic)
+
+      # an operator listing every 100 ms for as long as the test waits, well past the idle bound
+      lister = spawn_link(fn -> list_every(100) end)
+      on_exit(fn -> Process.exit(lister, :kill) end)
+
+      assert {:error, :closed} = TCPHelper.recv_frame(socket, timeout: 2_000)
+    end
+  end
+
+  defp list_every(interval_ms) do
+    Malachi.ProducerDirectory.list()
+    Process.sleep(interval_ms)
+    list_every(interval_ms)
+  end
+
   describe "closing and moving" do
     test "a closed stream takes no more appends", ctx do
       {:ok, %{stream_id: id}} = open(ctx.socket, ctx.topic)

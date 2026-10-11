@@ -9,6 +9,11 @@ defmodule Malachi.Telemetry do
     * `[:malachi, :produce]`: `%{count, bytes}` / `%{topic}` - records appended to a topic.
     * `[:malachi, :consume]`: `%{count}` / `%{topic}` - records read from a topic.
     * `[:malachi, :auth]`. `%{count: 1}` / `%{result: :ok | :error}` - an authentication attempt.
+    * `[:malachi, :producer_stream, :opened | :closed | :moved]`. `%{count: 1}` / `%{topic}` - a producer
+      stream opened on this node, closed (by its client, or ended by an append out of sequence), or moved
+      (its segment sealed, failed over or split, or its broker restarted). A connection that goes away
+      emits nothing for the streams it held; the open count is read from `Malachi.ProducerDirectory`,
+      which a connection's exit clears however it exits.
     * `[:malachi, :replication, :commit]`. `%{count}` / `%{result: :ok | :no_quorum}` - a quorum
       replication of a batch (`count` = records in the batch; `result` is whether a quorum stored it).
     * `[:malachi, :storage, :flush]`. `%{duration_us, bytes, records}` / `%{segment, directory}` - one
@@ -117,6 +122,12 @@ defmodule Malachi.Telemetry do
   @spec consume(String.t(), non_neg_integer()) :: :ok
   def consume(topic, count) do
     :telemetry.execute([:malachi, :consume], %{count: count}, %{topic: topic})
+  end
+
+  @doc "A producer stream on `topic` that `event` happened to: `:opened`, `:closed` or `:moved`."
+  @spec producer_stream(:opened | :closed | :moved, String.t()) :: :ok
+  def producer_stream(event, topic) when event in [:opened, :closed, :moved] do
+    :telemetry.execute([:malachi, :producer_stream, event], %{count: 1}, %{topic: topic})
   end
 
   @doc "An authentication attempt with its `result` (`:ok` or `:error`)."

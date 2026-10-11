@@ -334,6 +334,13 @@ defmodule Malachi.Metrics do
     :ok
   end
 
+  @doc "Records a producer stream `event` on this node: `:opened`, `:closed` or `:moved`."
+  def record_producer_stream(event) when event in [:opened, :closed, :moved] do
+    key = {:producer_stream, event}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ok
+  end
+
   @doc "Records a quorum replication with `result` (`:ok` / `:no_quorum`)."
   def record_replication(result) do
     key = {:replication_result, result}
@@ -647,6 +654,10 @@ defmodule Malachi.Metrics do
         auth_error: get_counter({:auth_result, :error}),
         replication_ok: get_counter({:replication_result, :ok}),
         replication_no_quorum: get_counter({:replication_result, :no_quorum}),
+        producer_streams_opened: get_counter({:producer_stream, :opened}),
+        producer_streams_closed: get_counter({:producer_stream, :closed}),
+        producer_streams_moved: get_counter({:producer_stream, :moved}),
+        producer_streams_open: Malachi.ProducerDirectory.open_count(),
         integrity_bad_crc: get_counter({:integrity_failure, :bad_crc}),
         integrity_bad_magic: get_counter({:integrity_failure, :bad_magic}),
         integrity_incomplete: get_counter({:integrity_failure, :incomplete}),

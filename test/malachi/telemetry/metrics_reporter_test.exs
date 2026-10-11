@@ -31,6 +31,24 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     assert ops.replication_no_quorum == before.replication_no_quorum + 1
   end
 
+  test "producer stream events are counted per event, and the open count is the directory's" do
+    before = Metrics.get_system_metrics().operations
+
+    Telemetry.producer_stream(:opened, "t")
+    Telemetry.producer_stream(:opened, "t")
+    Telemetry.producer_stream(:closed, "t")
+    Telemetry.producer_stream(:moved, "t")
+
+    ops = Metrics.get_system_metrics().operations
+    assert ops.producer_streams_opened == before.producer_streams_opened + 2
+    assert ops.producer_streams_closed == before.producer_streams_closed + 1
+    assert ops.producer_streams_moved == before.producer_streams_moved + 1
+    # the events do not move the gauge: only a connection holding a stream does
+    # this process holds a stream until it exits, which clears it
+    :ok = Malachi.ProducerDirectory.track()
+    assert Metrics.get_system_metrics().operations.producer_streams_open >= 1
+  end
+
   test "an integrity failure increments the counter for its reason" do
     before = Metrics.get_system_metrics().operations
     verdict = %{reason: :bad_crc, position: 128, unreadable_bytes: 64, sealed?: true}

@@ -410,6 +410,7 @@ defmodule Malachi.TCPProtocol do
          token: token,
          segment_id: segment_id,
          routes_version: version,
+         label: req.label,
          granted:
            StreamWindow.grant(
              req.window_appends,

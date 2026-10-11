@@ -24,8 +24,10 @@ defmodule Malachi.ProducerStreams do
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.ProducerDirectory
   alias Malachi.StreamMoves
   alias Malachi.StreamWindow
+  alias Malachi.Telemetry
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
@@ -47,7 +49,10 @@ defmodule Malachi.ProducerStreams do
           inflight_bytes: non_neg_integer(),
           answered: %{non_neg_integer() => :ok | {:error, String.t()}},
           acked: non_neg_integer(),
-          open?: boolean()
+          open?: boolean(),
+          segment_id: Metadata.segment_id() | nil,
+          label: String.t(),
+          opened_at: integer()
         }
 
   @type t :: %__MODULE__{
@@ -76,16 +81,19 @@ defmodule Malachi.ProducerStreams do
   (`Malachi.ConnectionStreams`). `granted` is the window the handshake granted.
   """
   @spec open(t(), map()) :: t()
-  def open(%__MODULE__{} = state, %{
-        id: id,
-        corr: corr,
-        broker: broker,
-        broker_pid: broker_pid,
-        topic: topic,
-        range_id: range_id,
-        token: token,
-        granted: granted
-      }) do
+  def open(
+        %__MODULE__{} = state,
+        %{
+          id: id,
+          corr: corr,
+          broker: broker,
+          broker_pid: broker_pid,
+          topic: topic,
+          range_id: range_id,
+          token: token,
+          granted: granted
+        } = opened
+      ) do
     stream = %{
       id: id,
       corr: corr,
@@ -101,8 +109,14 @@ defmodule Malachi.ProducerStreams do
       inflight_bytes: 0,
       answered: %{},
       acked: 0,
-      open?: true
+      open?: true,
+      segment_id: Map.get(opened, :segment_id),
+      label: label(Map.get(opened, :label)),
+      opened_at: System.system_time(:millisecond)
     }
+
+    :ok = ProducerDirectory.track()
+    Telemetry.producer_stream(:opened, topic)
 
     # The process watched is the one that answered the open, whose index holds the stream: one restarted
     # under the same name since is another process, and one already gone answers with `:DOWN` at once.
@@ -143,7 +157,7 @@ defmodule Malachi.ProducerStreams do
 
       {:ok, id} ->
         stream = Map.fetch!(state.streams, id)
-        {stop(state, stream), [moved_frame(stream, reason, targets)]}
+        {stop(state, stream, :moved), [moved_frame(stream, reason, targets)]}
     end
   end
 
@@ -153,7 +167,7 @@ defmodule Malachi.ProducerStreams do
       when is_map_key(brokers, ref) do
     {broker_pid, brokers} = StreamMoves.down(brokers, ref)
     gone = for {_id, %{broker_pid: ^broker_pid, open?: true} = stream} <- state.streams, do: stream
-    state = Enum.reduce(gone, %{state | brokers: brokers}, &stop(&2, &1))
+    state = Enum.reduce(gone, %{state | brokers: brokers}, &stop(&2, &1, :moved))
     {state, Enum.map(gone, &moved_frame(&1, :restarted, [{&1.range_id, nil}]))}
   end
 
@@ -179,21 +193,63 @@ defmodule Malachi.ProducerStreams do
     case Map.fetch(state.streams, stream_id) do
       {:ok, %{open?: true} = stream} ->
         :ok = BrokerServer.close_stream(stream.broker, stream.token)
-        {:ok, stop(state, stream)}
+        {:ok, stop(state, stream, :closed)}
 
       _closed_or_unknown ->
         :unknown
     end
   end
 
-  # Ends a stream for new appends. One with appends still in flight stays until they are answered, so each
-  # answer still reaches the producer as an ack; one with none is dropped now.
-  defp stop(state, stream) do
+  # Ends a stream for new appends, for `why` (`:closed` by the client or on an error, `:moved`). One with
+  # appends still in flight stays until they are answered, so each answer still reaches the producer as an
+  # ack; one with none is dropped now. Either way it is no longer an open stream of this node's.
+  defp stop(state, stream, why) do
+    :ok = ProducerDirectory.untrack()
+    Telemetry.producer_stream(why, stream.topic)
     state = %{state | by_token: Map.delete(state.by_token, stream.token)}
 
     if stream.inflight == %{},
       do: %{state | streams: Map.delete(state.streams, stream.id)},
       else: put_stream(state, %{stream | open?: false})
+  end
+
+  @doc """
+  The open streams, as the operator interfaces list them (`Malachi.ProducerDirectory`): what each writes
+  to, the window it has now, how far its sequences went, what is in flight, its label and when it opened.
+  """
+  @spec describe(t()) :: [map()]
+  def describe(%__MODULE__{streams: streams}) do
+    for {_id, %{open?: true} = stream} <- streams do
+      %{
+        stream_id: stream.id,
+        topic: stream.topic,
+        range: elem(stream.range_id, 1),
+        segment: stream.segment_id && Metadata.segment_seq(stream.segment_id),
+        primary: Atom.to_string(node(stream.broker_pid)),
+        label: stream.label,
+        window: %{appends: stream.window.appends, bytes: stream.window.bytes},
+        next_sequence: stream.next_seq,
+        acked_sequence: stream.acked,
+        in_flight: %{appends: map_size(stream.inflight), bytes: stream.inflight_bytes},
+        opened_at: stream.opened_at
+      }
+    end
+  end
+
+  # The most a label may be: it names a client in a listing, not a payload.
+  @max_label_bytes 128
+
+  # A client's label as the operator interfaces show it: printable ASCII only, anything else replaced, and
+  # cut to `@max_label_bytes`, so a client cannot put control characters or an unbounded string in front
+  # of an operator.
+  defp label(nil), do: ""
+
+  defp label(raw) when is_binary(raw) do
+    raw
+    |> binary_part(0, min(byte_size(raw), @max_label_bytes))
+    |> :binary.bin_to_list()
+    |> Enum.map(fn byte -> if byte in 0x20..0x7E, do: byte, else: ?? end)
+    |> List.to_string()
   end
 
   @doc "The topic of open stream `stream_id`, or nil for one this connection does not hold or has stopped."
@@ -224,7 +280,7 @@ defmodule Malachi.ProducerStreams do
   defp out_of_sequence(state, stream, sequence) do
     reason = if sequence < stream.next_seq, do: "sequence_repeat", else: "sequence_gap"
     :ok = BrokerServer.close_stream(stream.broker, stream.token)
-    {stop(state, stream), [ack_frame(stream, stream.acked, [%{sequence: sequence, reason: reason}])]}
+    {stop(state, stream, :closed), [ack_frame(stream, stream.acked, [%{sequence: sequence, reason: reason}])]}
   end
 
   defp in_sequence(state, stream, sequence, batch, max_inflated_bytes, charge) do

@@ -87,6 +87,11 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_crc"} 2)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="incomplete"} 1)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_index"} 4)
+    assert out =~ "# TYPE malachi_producer_streams_total counter\n"
+    assert out =~ ~s(malachi_producer_streams_total{event="opened"} 5)
+    assert out =~ ~s(malachi_producer_streams_total{event="closed"} 2)
+    assert out =~ ~s(malachi_producer_streams_total{event="moved"} 1)
+    assert out =~ "# TYPE malachi_producer_streams_open gauge\nmalachi_producer_streams_open 2\n"
     assert out =~ "# TYPE malachi_storage_failures_total counter\n"
     assert out =~ ~s(malachi_storage_failures_total{reason="enospc"} 6)
     assert out =~ ~s(malachi_storage_failures_total{reason="eio"} 1)

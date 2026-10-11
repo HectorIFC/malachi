@@ -34,7 +34,7 @@ defmodule Malachi.Test.StreamTCP do
       window_appends: Keyword.get(opts, :window_appends, 16),
       window_bytes: Keyword.get(opts, :window_bytes, 1_048_576),
       producer_id: nil,
-      label: "test"
+      label: Keyword.get(opts, :label, "test")
     }
 
     case TCPHelper.request(socket, Wire.open_stream_key(), @producer_corr, Wire.encode_open_stream_req(req)) do

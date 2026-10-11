@@ -450,7 +450,7 @@ binds it to the activity rail, and the web renders it as the sidebar.
 | 4 | **Segments** | Inventory, Copies, Scrub, Rebuilds |
 | 5 | **Consumers** | Groups, Assignment, Positions, Skips |
 | 6 | **Records** | Inspect, Produce |
-| 7 | **Cluster** | Nodes, Ring and vnodes, Raft, Compatibility, Upgrade |
+| 7 | **Cluster** | Nodes, Producers, Ring and vnodes, Raft, Compatibility, Upgrade |
 | 8 | **Signals** | Insights, Issues |
 | 9 | **Access** | Users, ACLs, Sessions, Lockouts, Audit |
 | 10 | **Settings** | Appearance, Language, Density, Keymap, About |
@@ -743,6 +743,27 @@ beside it, so the operator sees the fault tolerance the upgrade is temporarily c
 GAP: every field on this screen. The node list, the ring, the lease, the vnode placement and the
 machine versions are all cross node Erlang only today, and `mix malachi.ring --show` is the sole
 existing read, in tab separated text with no JSON mode.
+
+### 6.8.1 Producers
+
+The producer streams open on a node: who writes where, and how far. One row per stream: topic, range,
+segment, primary, label, client address, window (appends and bytes), next and acknowledged sequence,
+appends and bytes in flight, and when it opened, with the summary strip showing the open count and the
+streams opened, closed and moved since the node started. A stream that keeps moving, or one whose
+acknowledged sequence stops while its next keeps climbing, is the row an operator wants.
+
+The label is what the client named itself when it opened the stream (`Malachi.Wire` `open_stream`),
+shown as printable ASCII only and at most 128 bytes, so a client cannot put control characters or an
+unbounded string in front of an operator. NorthGuard keeps track of its clients in a separate client
+management layer (its Conductor); here the node a producer is connected to answers for it, from the
+connection that holds the stream (`Malachi.ProducerDirectory`).
+
+SOURCE: `GET /api/v1/producers` (row 14 of table 10.3), the streams of the node that answers, paged with
+a page token, with a total that is a lower bound when a connection did not answer within the listing's
+bound and `complete: false` on a walk that may have missed streams for that reason; and the
+Prometheus series `malachi_producer_streams_total{event}` and `malachi_producer_streams_open`. GAP: the
+whole cluster's streams in one listing, which is each node's listing gathered across nodes, and
+per-stream rates, which the connection would have to count.
 
 ### 6.9 Signals
 
@@ -1114,6 +1135,7 @@ Auth is the console role each route requires (#228, `Malachi.Console.Access.rout
 | `PUT`/`DELETE /policies/:name`, `/topics/:t/policy` | Editor | |
 | `GET /users`, `/users/:u/acls`, `PUT /users/:u/role` | Admin | Full CRUD |
 | `GET /api/v1/me` | Any session | Role, capabilities, permissions, locale, cluster identity |
+| `GET /api/v1/producers` | Viewer | The node's open producer streams, paged (6.8.1) |
 | `GET /health`, `/ready` | Public | |
 
 ### 10.2 The rate limiter, which blocks everything else
@@ -1157,6 +1179,7 @@ is `gte`. **No page numbers, no "N of M", and no scrollbar proportional to the d
 | 11 | `GET /api/v1/metrics/history` | Sparklines without waiting | The data already sits in ETS |
 | 12 | `GET /api/v1/i18n?locale=` | 12.2 | |
 | 13 | Per range load signal | 6.4's heatmap | #29. The hardest one: the measurement does not exist |
+| 14 | `GET /api/v1/producers` | 6.8.1 | The open producer streams of the answering node. **Delivered for one node (#275)**; the cluster wide listing is a gap |
 
 ### 10.4 Mutations
 

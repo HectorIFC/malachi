@@ -290,4 +290,124 @@ defmodule Malachi.ProducerStreamsUnitTest do
     {streams, [{:moved, _}]} = pushes(streams, 1)
     assert ProducerStreams.room?(streams)
   end
+
+  describe "what the operator interfaces see" do
+    # the streams this process holds, as the directory counts them
+    defp tracked do
+      case Registry.lookup(Malachi.ProducerDirectory, self()) do
+        [{_pid, count}] -> count
+        [] -> 0
+      end
+    end
+
+    defp attach_events(topic) do
+      parent = self()
+      handler = "producer-stream-#{inspect(make_ref())}"
+
+      :telemetry.attach_many(
+        handler,
+        for(event <- [:opened, :closed, :moved], do: [:malachi, :producer_stream, event]),
+        fn
+          [:malachi, :producer_stream, event], %{count: 1}, %{topic: ^topic}, _config ->
+            send(parent, {:stream_event, event})
+
+          _event, _measurements, _metadata, _config ->
+            :ok
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    defp opened(ctx, id, extra),
+      do:
+        Map.merge(
+          %{
+            id: id,
+            corr: 7,
+            broker: ctx.broker,
+            broker_pid: ctx.broker,
+            topic: "t",
+            range_id: {"t", 3},
+            token: make_ref(),
+            granted: %{appends: 8, bytes: 1_000_000}
+          },
+          extra
+        )
+
+    test "an open stream is described with its range, segment, window, sequences, label and opening", ctx do
+      {streams, []} = append(ctx.streams, ctx.id, 0)
+      streams = ProducerStreams.open(streams, opened(ctx, 2, %{segment_id: {{"t", 3}, 7}, label: "billing-writer"}))
+
+      [first, second] = streams |> ProducerStreams.describe() |> Enum.sort_by(& &1.stream_id)
+      assert %{stream_id: 1, topic: "t", range: 0, segment: nil, label: "", next_sequence: 1, acked_sequence: 0} = first
+      assert first.in_flight == %{appends: 1, bytes: first.in_flight.bytes} and first.in_flight.bytes > 0
+      assert first.window == %{appends: 8, bytes: 1_000_000}
+      assert first.primary == Atom.to_string(node())
+      assert is_integer(first.opened_at)
+
+      assert %{stream_id: 2, range: 3, segment: 7, label: "billing-writer", in_flight: %{appends: 0, bytes: 0}} = second
+    end
+
+    test "a broker that goes down moves its streams out of the directory, as moved", ctx do
+      # a topic of its own: the async suites move streams of other topics meanwhile
+      topic = "down_#{System.unique_integer([:positive])}"
+      streams = ProducerStreams.open(ctx.streams, opened(ctx, 2, %{topic: topic}))
+      attach_events(topic)
+      assert tracked() == 2
+
+      Process.exit(ctx.broker, :kill)
+      assert_receive {:DOWN, _ref, :process, _pid, _reason} = down
+      assert {_streams, [_one, _two]} = ProducerStreams.handle_message(streams, down)
+      assert_receive {:stream_event, :moved}
+      assert tracked() == 0
+    end
+
+    test "a stream that moved with appends still in flight is not listed, though it waits for their answers",
+         ctx do
+      {streams, []} = append(ctx.streams, ctx.id, 0)
+      {streams, [_moved]} = ProducerStreams.handle_message(streams, {:stream_moved, ctx.token, :sealed, []})
+
+      assert Map.has_key?(streams.streams, ctx.id)
+      assert ProducerStreams.describe(streams) == []
+    end
+
+    test "a label is shown as printable ASCII only, cut at 128 bytes" do
+      ctx = %{broker: self()}
+      control = ProducerStreams.open(ProducerStreams.new(), opened(ctx, 1, %{label: "a\nb\e[31mc\u00e9"}))
+      assert [%{label: "a?b?[31mc??"}] = ProducerStreams.describe(control)
+
+      long = ProducerStreams.open(ProducerStreams.new(), opened(ctx, 1, %{label: String.duplicate("x", 300)}))
+      assert [%{label: label}] = ProducerStreams.describe(long)
+      assert label == String.duplicate("x", 128)
+    end
+
+    test "a stream is in the directory while open, and leaves it as it is closed, moved or ends out of sequence",
+         ctx do
+      topic = "events_#{System.unique_integer([:positive])}"
+      attach_events(topic)
+
+      streams =
+        Enum.reduce([10, 11, 12], ProducerStreams.new(), fn id, acc ->
+          ProducerStreams.open(acc, opened(ctx, id, %{topic: topic, token: :"token_#{id}"}))
+        end)
+
+      for _ <- 1..3, do: assert_receive({:stream_event, :opened})
+      # the setup's stream and these three
+      assert tracked() == 4
+
+      {:ok, streams} = ProducerStreams.close(streams, 10)
+      assert_receive {:stream_event, :closed}
+
+      {streams, [_moved]} = ProducerStreams.handle_message(streams, {:stream_moved, :token_11, :sealed, []})
+      assert_receive {:stream_event, :moved}
+
+      {streams, _frames} = ProducerStreams.append(streams, 12, 5, batch("gap"), 1_000_000, &free/2)
+      assert_receive {:stream_event, :closed}
+
+      assert tracked() == 1
+      assert ProducerStreams.describe(streams) == []
+    end
+  end
 end

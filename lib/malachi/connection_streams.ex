@@ -19,7 +19,14 @@ defmodule Malachi.ConnectionStreams do
   # socket until one ends, as a producer stream's closed window stops it.
   @max_jobs 64
 
-  defstruct producers: nil, consumers: nil, next_id: 1, jobs: %{}, in_order: nil, in_order_pid: nil, waiting: nil
+  defstruct producers: nil,
+            consumers: nil,
+            next_id: 1,
+            jobs: %{},
+            in_order: nil,
+            in_order_pid: nil,
+            waiting: nil,
+            client_ip: nil
 
   @type job :: {(-> binary()), binary(), :run | :drop}
   @type t :: %__MODULE__{
@@ -29,13 +36,24 @@ defmodule Malachi.ConnectionStreams do
           jobs: %{reference() => binary()},
           in_order: reference() | nil,
           in_order_pid: pid() | nil,
+          client_ip: String.t() | nil,
           waiting: :queue.queue(job())
         }
 
-  @doc "No stream open yet."
-  @spec new() :: t()
-  def new,
-    do: %__MODULE__{producers: ProducerStreams.new(), consumers: ConsumeStreams.new(), waiting: :queue.new()}
+  @doc "No stream open yet, on a connection from `client_ip`."
+  @spec new(String.t() | nil) :: t()
+  def new(client_ip \\ nil),
+    do: %__MODULE__{
+      producers: ProducerStreams.new(),
+      consumers: ConsumeStreams.new(),
+      waiting: :queue.new(),
+      client_ip: client_ip
+    }
+
+  @doc "This connection's open producer streams, each with the address of the client that holds it."
+  @spec describe_producers(t()) :: [map()]
+  def describe_producers(%__MODULE__{} = state),
+    do: for(stream <- ProducerStreams.describe(state.producers), do: Map.put(stream, :client_ip, state.client_ip))
 
   @doc """
   Runs `job` beside the connection, in a process of its own, for a request whose answer waits on another

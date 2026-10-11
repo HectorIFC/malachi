@@ -444,7 +444,14 @@ defmodule Malachi.TCPAcceptor do
 
           {:opened, kind, corr, opened} ->
             streams =
-              TCPProtocol.stream_opened(state.socket, state.transport, ConnectionStreams.new(), kind, corr, opened)
+              TCPProtocol.stream_opened(
+                state.socket,
+                state.transport,
+                ConnectionStreams.new(state.client_ip),
+                kind,
+                corr,
+                opened
+              )
 
             {:streams, streams, rest}
         end
@@ -523,6 +530,8 @@ defmodule Malachi.TCPAcceptor do
   # producer that outruns its grant is held back by TCP. Idle (no append in flight, no consume stream open
   # and no frame) for the request timeout, the connection closes, as one in request mode does.
   defp streams_loop(%{buffer: buffer} = state, streams) do
+    state = active(state)
+
     case handle_streams_buffer(buffer, state, streams) do
       {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
       {:close, _reason, streams} -> close_streams(state, streams)
@@ -541,11 +550,21 @@ defmodule Malachi.TCPAcceptor do
     close_socket(socket, transport)
   end
 
-  defp streams_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
-    idle_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
+  # The connection is idle from the last thing that was about its streams: a frame from the client or a
+  # message for its streams. An operator's listing (`Malachi.ProducerDirectory`) is answered without
+  # counting, so watching a node does not keep its idle connections open.
+  defp active(state), do: Map.put(state, :idle_since, System.monotonic_time(:millisecond))
 
+  defp idle_left(state) do
+    idle_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
+    max(idle_timeout - (System.monotonic_time(:millisecond) - state.idle_since), 0)
+  end
+
+  defp streams_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
     receive do
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->
+        state = active(state)
+
         case handle_streams_buffer(buffer <> data, state, streams) do
           {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
           {:close, _reason, streams} -> close_streams(state, streams)
@@ -558,7 +577,13 @@ defmodule Malachi.TCPAcceptor do
       {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
         streams_closed(socket, transport, streams)
 
+      {:describe_producer_streams, _from, _ref} = asked ->
+        :ok = Malachi.ProducerDirectory.answer(asked, streams)
+        streams_recv(state, streams)
+
       message ->
+        state = active(state)
+
         case ConnectionStreams.handle_message(streams, message) do
           # a job that ended may have made room for frames left in the buffer
           {streams, frames} ->
@@ -573,9 +598,9 @@ defmodule Malachi.TCPAcceptor do
             streams_recv(state, streams)
         end
     after
-      idle_timeout ->
+      idle_left(state) ->
         if ConnectionStreams.busy?(streams),
-          do: streams_recv(state, streams),
+          do: streams_recv(active(state), streams),
           else: close_socket(socket, transport)
     end
   end

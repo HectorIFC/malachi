@@ -15,6 +15,9 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :produce],
     [:malachi, :consume],
     [:malachi, :auth],
+    [:malachi, :producer_stream, :opened],
+    [:malachi, :producer_stream, :closed],
+    [:malachi, :producer_stream, :moved],
     [:malachi, :replication, :commit],
     [:malachi, :storage, :flush],
     [:malachi, :storage, :integrity],
@@ -52,6 +55,10 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :auth], _measurements, %{result: result}, _config) do
     Metrics.record_auth(result)
+  end
+
+  def handle_event([:malachi, :producer_stream, event], _measurements, _metadata, _config) do
+    Metrics.record_producer_stream(event)
   end
 
   def handle_event([:malachi, :replication, :commit], _measurements, %{result: result}, _config) do

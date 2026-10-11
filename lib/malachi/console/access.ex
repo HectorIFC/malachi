@@ -96,6 +96,7 @@ defmodule Malachi.Console.Access do
     {"OPTIONS", :any, :public},
     # Any valid session: the shell needs to know who it is talking to before it knows what it may show.
     {"GET", ["api", "v1", "me"], :authenticated},
+    {"GET", ["api", "v1", "producers"], :viewer},
     # Reads of the cluster's operational state.
     {"GET", [], :viewer},
     {"GET", ["stream"], :viewer},

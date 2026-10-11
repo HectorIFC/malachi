@@ -124,6 +124,9 @@ defmodule Malachi.Application do
         [
           # Increase max_children for Task.Supervisor to allow large parallel broadcasts
           {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
+          # which connections hold producer streams, for the operator interfaces: before Metrics, whose
+          # snapshot reads its open count, and so stopped after it
+          Malachi.ProducerDirectory,
           Malachi.Metrics,
           # Audit logging (must start early for security event tracking)
           Malachi.AuditLog,
