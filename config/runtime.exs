@@ -228,6 +228,11 @@ config :malachi,
   stream_inflight_soft: parse_int.("MALACHI_STREAM_INFLIGHT_SOFT", 50_000),
   stream_inflight_hard: parse_int.("MALACHI_STREAM_INFLIGHT_HARD", 200_000),
   max_inflated_batch_bytes: parse_int.("MALACHI_MAX_INFLATED_BATCH_BYTES", 16_777_216),
+  # Consumer groups (Malachi.Consumer.GroupCoordinator): how long a member may go without a heartbeat or a
+  # commit before it is evicted and its ranges are handed to the others (the eviction runs on a tick of a
+  # third of it, at most 10 s). A positive count below 2^32: a whole number outside that is the default,
+  # logged, and anything that is not a whole number stops the node at boot, as every integer setting does.
+  group_session_ms: parse_int.("MALACHI_GROUP_SESSION_MS", 30_000),
   # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
   # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
   # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.

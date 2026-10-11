@@ -583,6 +583,114 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "group fence" do
+    test "open_group hands each opening the group's next epoch, per group and topic" do
+      metadata = Metadata.new()
+      assert Metadata.group_fence(metadata, "g", "events") == %{epoch: 0, generations: %{}}
+
+      {metadata, {:ok, 1}} = Metadata.apply(metadata, {:open_group, "g", "events"})
+      {metadata, {:ok, 2}} = Metadata.apply(metadata, {:open_group, "g", "events"})
+      {metadata, {:ok, 1}} = Metadata.apply(metadata, {:open_group, "other", "events"})
+      {metadata, {:ok, 1}} = Metadata.apply(metadata, {:open_group, "g", "logs"})
+      assert Metadata.group_fence(metadata, "g", "events").epoch == 2
+    end
+
+    test "a fenced commit records its generation per range and refuses, whole, one below a range's" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, left, right}} = apply!(state, {:split_range, root})
+
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{left => {0, 5}, right => {0, 1}}, 10})
+      assert Metadata.group_fence(state, "g", "events").generations == %{left => 10, right => 10}
+
+      # the range moved to a member of a later generation, which committed it
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{right => {0, 7}}, 12})
+
+      # a commit at 11 reaching the log after that one is refused whole, though its other range is fine
+      assert {^state, {:error, :stale_generation}} =
+               Metadata.apply(state, {:commit_offset, "g", "events", %{left => {0, 9}, right => {0, 2}}, 11})
+
+      assert Metadata.committed_offsets(state, "g", "events") == %{left => {0, 5}, right => {0, 7}}
+
+      # the same generation, or a range committed at a lower one, is taken
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{right => {0, 8}}, 12})
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{left => {0, 9}}, 11})
+      assert Metadata.committed_offsets(state, "g", "events") == %{left => {0, 9}, right => {0, 8}}
+      assert Metadata.group_fence(state, "g", "events").generations == %{left => 11, right => 12}
+    end
+
+    test "a fenced commit prunes the generations of retired ranges as it prunes their positions" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => {0, 5}}, 3})
+      {state, {:ok, left, _right}} = apply!(state, {:split_range, root})
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{left => {0, 1}}, 4})
+
+      assert Metadata.group_fence(state, "g", "events").generations == %{left => 4}
+      assert Metadata.committed_offsets(state, "g", "events") == %{left => {0, 1}}
+    end
+
+    test "a commit at an epoch below the group's last opening is refused apart, whatever its ranges" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, 1}} = apply!(state, {:open_group, "g", "events"})
+      {state, {:ok, 2}} = apply!(state, {:open_group, "g", "events"})
+
+      # epoch 1's coordinator was superseded by epoch 2's, though no range was committed at 2 yet
+      assert {^state, {:error, :stale_epoch}} =
+               Metadata.apply(state, {:commit_offset, "g", "events", %{root => {0, 1}}, Bitwise.bsl(1, 32) + 9})
+
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => {0, 1}}, Bitwise.bsl(2, 32) + 1})
+      assert Metadata.committed_offsets(state, "g", "events") == %{root => {0, 1}}
+    end
+
+    test "the plain commit neither reads nor moves the fence" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => {0, 5}}, 9})
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => {0, 1}}})
+      assert Metadata.group_fence(state, "g", "events").generations == %{root => 9}
+    end
+
+    test "a topic's fences ride along a vnode split, and leave the source with it" do
+      {state, root} = create_topic(Metadata.new(), "events", 4)
+      {state, {:ok, 1}} = apply!(state, {:open_group, "g", "events"})
+      generation = Bitwise.bsl(1, 32) + 7
+      {state, :ok} = apply!(state, {:commit_offset, "g", "events", %{root => {0, 5}}, generation})
+      {state, {:ok, 1}} = apply!(state, {:open_group, "g", "other_topic"})
+
+      {source, export} = Metadata.extract_topic(state, "events")
+      assert export.export_format == 7
+      destination = Metadata.insert_topic(Metadata.new(), export)
+
+      assert Metadata.group_fence(destination, "g", "events") == %{epoch: 1, generations: %{root => generation}}
+      assert Metadata.group_fence(source, "g", "events") == %{epoch: 0, generations: %{}}
+      assert Metadata.group_fence(source, "g", "other_topic").epoch == 1
+
+      # a topic no group fenced exports as format 0, which a vnode still below 7 takes
+      {state, _} = create_topic(Metadata.new(), "plain", 4)
+      {_source, plain} = Metadata.extract_topic(state, "plain")
+      assert plain.export_format == 0
+      refute Map.has_key?(plain, :fences)
+
+      # an export from before fences rode along inserts none
+      older = Map.delete(export, :fences)
+      assert Metadata.group_fence(Metadata.insert_topic(Metadata.new(), older), "g", "events").epoch == 0
+    end
+
+    test "the group fence commands route to their topic and are fenced while it migrates" do
+      assert Metadata.command_target_topic({:open_group, "g", "events"}) == "events"
+      assert Metadata.command_target_topic({:commit_offset, "g", "events", %{}, 1}) == "events"
+
+      {state, _root} = create_topic(Metadata.new(), "events", 4)
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+      assert {_, {:error, :migrating}} = Metadata.apply(state, {:open_group, "g", "events"})
+      assert {_, {:error, :migrating}} = Metadata.apply(state, {:commit_offset, "g", "events", %{}, 1})
+    end
+
+    test "both commands are introduced at machine version 7" do
+      versions = Metadata.command_versions()
+      assert versions[{:open_group, 3}] == 7
+      assert versions[{:commit_offset, 5}] == 7
+    end
+  end
+
   # Builds "events": root split into two children, two segments (one sealed) on the left child, and a
   # committed consumer group.
   defp events_with_segments do

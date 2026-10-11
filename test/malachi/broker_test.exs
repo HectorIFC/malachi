@@ -1785,6 +1785,30 @@ defmodule Malachi.BrokerTest do
       assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => 900}
     end
 
+    test "a replayed fenced commit never moves a group backwards, nor past a later generation" do
+      {broker, root_id} = broker_with_topic("events")
+      broker = Broker.journal(broker)
+
+      {broker, {:ok, 1}} = Broker.open_group(broker, "billing", "events")
+      {g5, g8} = {Bitwise.bsl(1, 32) + 5, Bitwise.bsl(1, 32) + 8}
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 10}}, g5)
+      {commands, broker} = Broker.take_journal(broker)
+      fence = fn broker -> broker.dsrsm |> DSRSM.merged_metadata() |> Metadata.group_fence("billing", "events") end
+
+      # a read already ahead at the same generation keeps its position
+      {ahead, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 900}}, g5)
+      replayed = Broker.replay_journal(ahead, commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => {0, 900}}
+      # and the replayed opening gives the cache no epoch the log did not
+      assert fence.(replayed).epoch == fence.(ahead).epoch
+
+      # a read that a later generation committed refuses the replayed commit, whatever its position
+      {later, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 3}}, g8)
+      replayed = Broker.replay_journal(later, commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => {0, 3}}
+      assert fence.(replayed).generations == %{root_id => g8}
+    end
+
     test "a command the control plane refused or never answered is not journaled" do
       # `ReplicatedMetadata.apply_command/3` returns the cache it was given when the command errored, so
       # a refusal and a transport failure look the same from here: nothing changed. Journaling either

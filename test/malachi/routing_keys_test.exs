@@ -209,9 +209,27 @@ defmodule Malachi.RoutingKeysTest do
       assert {:ok, _routes} = routes(topic, session)
     end
 
-    test "the stream keys no server answers yet are still unknown" do
-      for key <- Wire.join_group_key()..Wire.commit_offsets_key() do
-        assert process(key, <<>>) == {:error, "unknown_api_key"}, "key #{key}"
+    test "the group keys are refused to a session that may not consume the topic" do
+      topic = new_topic()
+      nobody = %{username: "routing_keys_nobody", permissions: []}
+      join = Wire.encode_join_group_req(%{topic: topic, group: "g", member: "m"})
+      heartbeat = Wire.encode_group_heartbeat_req(%{topic: topic, group: "g", member: "m", generation: 0})
+
+      commit =
+        Wire.encode_commit_offsets_req(%{
+          topic: topic,
+          group: "g",
+          member: "m",
+          generation: 0,
+          positions: [%{range: 0, position: {0, 1}}]
+        })
+
+      for {key, payload} <- [
+            {Wire.join_group_key(), join},
+            {Wire.group_heartbeat_key(), heartbeat},
+            {Wire.commit_offsets_key(), commit}
+          ] do
+        assert process(key, payload, nobody) == {:error, "permission_denied"}, "key #{key}"
       end
     end
   end

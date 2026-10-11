@@ -264,6 +264,7 @@ defmodule Malachi.Cluster.DSRSM do
       ranges: Map.merge(acc.ranges, from.ranges),
       segments: Map.merge(acc.segments, from.segments),
       committed_offsets: Map.merge(acc.committed_offsets, from.committed_offsets),
+      group_fences: Map.merge(acc.group_fences, from.group_fences),
       policies: Map.merge(acc.policies, from.policies),
       # Shards are disjoint by topic (and range), so the index keys never collide: a plain merge keeps
       # the reverse indexes exact on the merged view too.

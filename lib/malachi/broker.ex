@@ -1089,6 +1089,24 @@ defmodule Malachi.Broker do
   end
 
   @doc """
+  `commit_offset/4` for a group member's commit taken at `generation`, which the control plane refuses
+  whole with `{:error, :stale_generation}` when a range in it was committed at a higher generation (see
+  `Malachi.Metadata`'s group fence). Returns `{broker, reply}`.
+  """
+  @spec commit_offset(t(), Metadata.group(), Metadata.topic_name(), Metadata.offsets(), non_neg_integer()) ::
+          {t(), term()}
+  def commit_offset(%__MODULE__{} = broker, group, topic, offsets, generation) do
+    apply_metadata(broker, {:commit_offset, group, topic, offsets, generation})
+  end
+
+  @doc """
+  Opens consumer `group` of `topic` for a group coordinator through the control plane: `{broker, {:ok,
+  epoch}}`, the group's next epoch, above every epoch an earlier coordinator of the group was given.
+  """
+  @spec open_group(t(), Metadata.group(), Metadata.topic_name()) :: {t(), term()}
+  def open_group(%__MODULE__{} = broker, group, topic), do: apply_metadata(broker, {:open_group, group, topic})
+
+  @doc """
   Removes a sealed `segment_id` from the control plane (retention), through the control plane
   (Raft-backed when configured). Returns `{broker, reply}` (`:ok`, or a `Metadata` error such as
   `:segment_active`/`:no_such_segment`).
@@ -1198,6 +1216,22 @@ defmodule Malachi.Broker do
 
     Metadata.apply(metadata, {:commit_offset, group, topic, merged})
   end
+
+  # The fenced commit replays the same way, and its fence still holds: a read that already carries a
+  # higher generation for one of its ranges refuses it, which leaves the read as it was.
+  defp replay_apply(metadata, {:commit_offset, group, topic, offsets, generation}) do
+    merged =
+      metadata
+      |> Metadata.committed_offsets(group, topic)
+      |> Map.take(Map.keys(offsets))
+      |> Map.merge(offsets, fn _range_id, read, journaled -> max(read, journaled) end)
+
+    Metadata.apply(metadata, {:commit_offset, group, topic, merged, generation})
+  end
+
+  # Opening a group again would hand the cache an epoch the log never gave anyone; the epoch is only read
+  # from the log's own reply, so the read is left as it is.
+  defp replay_apply(metadata, {:open_group, _group, _topic}), do: {metadata, :ok}
 
   defp replay_apply(metadata, command), do: Metadata.apply(metadata, command)
 
@@ -1328,9 +1362,10 @@ defmodule Malachi.Broker do
   source's start (a read clamps it to what retention left), `:latest` the end of the range's own durable
   records (`durable_end/2`), `{:position, position}` that position when it names one of the range's
   sources and does not lie past the range's end as this frontend knows it, and `{:committed, group}` the
-  group's checkpoint for the range, or the start when the group has none. `{:error, :invalid_position}` for
-  a position past the range's sources or its end; `{:error, :metadata_unavailable}` for a position on the
-  range's own records while its end is not known yet (a recovery could not learn it).
+  group's checkpoint for the range, held to the same rules as a position, or the start when the group has
+  none. `{:error, :invalid_position}` for a position (or a checkpoint) past the range's sources or its end;
+  `{:error, :metadata_unavailable}` for one on the range's own records while its end is not known yet (a
+  recovery could not learn it).
   """
   @spec consume_start(t(), Metadata.range_id(), term()) ::
           {:ok, {non_neg_integer(), non_neg_integer()}}
@@ -1351,7 +1386,7 @@ defmodule Malachi.Broker do
           {:position, {index, offset}} when index < own -> {:ok, {index, offset}}
           {:position, {^own, offset}} -> own_position(broker, range_id, own, offset)
           {:position, _past_the_sources} -> {:error, :invalid_position}
-          {:committed, group} -> {:ok, committed_start(broker, group, topic, range_id)}
+          {:committed, group} -> committed_start(broker, group, topic, range_id)
         end
     end
   end
@@ -1410,10 +1445,13 @@ defmodule Malachi.Broker do
     end
   end
 
+  # A checkpoint is a position a member sent (`Malachi.Wire` 34) or a cursor carried (the legacy commit),
+  # so it is checked as one: a checkpoint past the range's history must not start a reader where it reads
+  # nothing forever.
   defp committed_start(broker, group, topic, range_id) do
     case Map.get(committed_offsets(broker, group, topic), range_id, :start) do
-      :start -> {0, 0}
-      {index, offset} -> {index, offset}
+      :start -> {:ok, {0, 0}}
+      position -> consume_start(broker, range_id, {:position, position})
     end
   end
 

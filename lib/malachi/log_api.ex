@@ -135,7 +135,7 @@ defmodule Malachi.LogApi do
           non_neg_integer()
         ) :: {:ok, [Record.t()], cursor()} | {:error, term()}
   def fetch_member(server, coordinator, topic, group, member, max, wait_ms \\ 0) when is_integer(max) and max > 0 do
-    case GroupCoordinator.poll(coordinator, group, topic, member) do
+    case poll(coordinator, group, topic, member) do
       {:ok, _generation, ranges} ->
         positions = BrokerServer.committed_offsets(server, group, topic)
         do_fetch(server, topic, group, Map.take(positions, ranges), max, wait_ms, ranges)
@@ -198,7 +198,7 @@ defmodule Malachi.LogApi do
         ) ::
           :ok | {:error, term()}
   def subscribe_member(server, coordinator, topic, group, member, window, max) do
-    case GroupCoordinator.poll(coordinator, group, topic, member) do
+    case poll(coordinator, group, topic, member) do
       {:ok, _generation, ranges} ->
         BrokerServer.subscribe(server, topic, group, window, max,
           member: member,
@@ -228,8 +228,9 @@ defmodule Malachi.LogApi do
 
   @doc """
   Like `stream_ack/5` but for a group **member**: re-polls the `coordinator` (a heartbeat that also
-  refreshes the member's ranges, so a rebalance is picked up on the next ack) before acking. Returns `:ok`
-  or `{:error, :invalid_cursor}`.
+  refreshes the member's ranges, so a rebalance is picked up on the next ack) before acking. Returns `:ok`,
+  `{:error, :invalid_cursor}`, or `{:error, :not_owner}` when the coordinator is not the topic's or cannot
+  be reached, in which case nothing was acked and the caller ends the stream.
   """
   @spec stream_ack_member(
           GenServer.server(),
@@ -244,13 +245,14 @@ defmodule Malachi.LogApi do
   def stream_ack_member(server, coordinator, topic, group, member, cursor, count) do
     case decode_cursor(cursor) do
       {:ok, positions} ->
-        case GroupCoordinator.poll(coordinator, group, topic, member) do
+        case poll(coordinator, group, topic, member) do
           # refresh the subscriber's ranges *and* its coordinator ref, so after a leadership change the
           # :DOWN leave (and later acks) target the current owner, not the one captured at subscribe time
           {:ok, _generation, ranges} ->
             BrokerServer.stream_ack(server, topic, group, positions, count, ranges, coordinator)
 
-          # stale routing during a failover: fire-and-forget, the member's next ack re-resolves
+          # stale routing during a failover, or a coordinator gone: the credit is not returned, which the
+          # caller answers by ending the stream
           {:error, _reason} = error ->
             error
         end
@@ -400,4 +402,13 @@ defmodule Malachi.LogApi do
     do: is_integer(source_index) and source_index >= 0 and is_integer(source_offset) and source_offset >= 0
 
   defp valid_position?(_other), do: false
+
+  # The member's coordinator may be on another node (`Malachi.Consumer.CoordinatorRouter`), and gone for a
+  # moment while leadership moves: that is `:not_owner`, which the caller answers by asking again. Only the
+  # coordinator's exit is turned into it; the broker calls around it keep their own failures.
+  defp poll(coordinator, group, topic, member) do
+    GroupCoordinator.poll(coordinator, group, topic, member)
+  catch
+    :exit, _reason -> {:error, :not_owner}
+  end
 end

@@ -214,6 +214,22 @@ defmodule Malachi.Cluster.DSRSMTest do
       assert map_size(merged.topics) == 20
       for index <- 0..19, do: assert(Malachi.Metadata.get_topic(merged, "topic-#{index}"))
     end
+
+    test "unions every vnode's group fences" do
+      dsrsm = with_vnodes([{:a, 4}, {:b, 8}, {:c, 12}, {:d, 15}])
+
+      dsrsm =
+        Enum.reduce(0..19, dsrsm, fn index, dsrsm ->
+          {dsrsm, {:ok, 1}} = DSRSM.command(dsrsm, "topic-#{index}", {:open_group, "g", "topic-#{index}"})
+          dsrsm
+        end)
+
+      owners = for index <- 0..19, do: elem(DSRSM.vnode_for(dsrsm, "topic-#{index}"), 1)
+      assert length(Enum.uniq(owners)) > 1, "the groups must spread over several vnodes for this to test anything"
+
+      merged = DSRSM.merged_metadata(dsrsm)
+      for index <- 0..19, do: assert(Malachi.Metadata.group_fence(merged, "g", "topic-#{index}").epoch == 1)
+    end
   end
 
   describe "topics_bound_to/2 across shards" do

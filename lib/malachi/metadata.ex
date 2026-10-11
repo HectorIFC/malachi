@@ -84,6 +84,13 @@ defmodule Malachi.Metadata do
   @typedoc "Identifies a consumer group's position for a topic."
   @type group_topic :: {group(), topic_name()}
 
+  @typedoc """
+  What fences a group's checkpoints: how many times a group coordinator has opened the group (`epoch`,
+  which a coordinator puts above its rebalance count in every generation it hands out), and the
+  generation each range was last committed at, below which a commit of that range is refused.
+  """
+  @type group_fence :: %{epoch: non_neg_integer(), generations: %{range_id() => non_neg_integer()}}
+
   @typedoc "A policy's name. The shape it names lives in `Malachi.Cluster.Policy`."
   @type policy_name :: Policy.name()
 
@@ -95,6 +102,7 @@ defmodule Malachi.Metadata do
           ranges: %{range_id() => range_meta()},
           segments: %{segment_id() => segment_meta()},
           committed_offsets: %{group_topic() => offsets()},
+          group_fences: %{group_topic() => group_fence()},
           policies: %{policy_name() => policy()},
           # Secondary (reverse) indexes kept in lockstep with `ranges`/`segments` so
           # `ranges_of_topic`/`segments_of_range` can be O(1)+O(k) lookups instead of full scans. Stored
@@ -117,6 +125,7 @@ defmodule Malachi.Metadata do
           required(:ranges) => %{range_id() => range_meta()},
           required(:segments) => %{segment_id() => segment_meta()},
           required(:offsets) => %{group() => offsets()},
+          optional(:fences) => %{group() => group_fence()},
           optional(:export_format) => non_neg_integer()
         }
 
@@ -131,6 +140,8 @@ defmodule Malachi.Metadata do
           | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
           | {:commit_offset, group(), topic_name(), offsets()}
+          | {:commit_offset, group(), topic_name(), offsets(), non_neg_integer()}
+          | {:open_group, group(), topic_name()}
           | {:define_policy, policy_name(), policy()}
           | {:set_topic_policy, topic_name(), policy_name() | nil}
           | {:bind_topic_policy, topic_name(), policy_name() | nil}
@@ -143,6 +154,7 @@ defmodule Malachi.Metadata do
             ranges: %{},
             segments: %{},
             committed_offsets: %{},
+            group_fences: %{},
             policies: %{},
             topic_ranges: %{},
             range_segments: %{},
@@ -154,13 +166,25 @@ defmodule Malachi.Metadata do
   # The machine version whose topic state shape `export_topic/2` produces. Raise it to the version a
   # change ships in whenever that change adds to or reshapes what a topic export carries, so a vnode
   # whose group has not reached that version refuses the insert instead of storing state it cannot read.
-  @export_format 0
+  #
+  # 7 adds the groups' fences (`:fences`, see `t:group_fence/0`). An export that carries none is still
+  # format 0, which every version reads: a vnode split of a topic no group key ever fenced goes through
+  # while an upgrade holds the control plane below 7.
+  @export_format 7
 
   @behaviour Malachi.Cluster.MachineVersion
 
   @doc "An empty metadata state."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc """
+  `state` with every field this build has: one an older build produced (a vnode leader still on it answers
+  a read of its whole state during a rolling upgrade, `Malachi.Cluster.MetadataServer.query/3`) lacks the
+  fields added since, which read here as their empty defaults.
+  """
+  @spec normalize(t()) :: t()
+  def normalize(%__MODULE__{} = state), do: struct(__MODULE__, Map.from_struct(state))
 
   @doc "Every command shape, mapped to the machine version that introduced it (see `Malachi.Cluster.MachineVersion`)."
   @impl Malachi.Cluster.MachineVersion
@@ -176,6 +200,10 @@ defmodule Malachi.Metadata do
       {:delete_segment, 2} => 0,
       {:set_segment_replicas, 3} => 0,
       {:commit_offset, 4} => 0,
+      # The fenced commit and the group epoch the group keys (#275) need: a commit that carries the
+      # generation it was taken at, and a coordinator opening a group.
+      {:commit_offset, 5} => 7,
+      {:open_group, 3} => 7,
       {:define_policy, 3} => 0,
       {:set_topic_policy, 3} => 0,
       # The binding an operator emits (#194). A new shape rather than the legacy one above, whose rule was
@@ -221,6 +249,8 @@ defmodule Malachi.Metadata do
   def command_target_topic({:set_topic_policy, name, _policy}), do: name
   def command_target_topic({:bind_topic_policy, name, _policy}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
+  def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
+  def command_target_topic({:open_group, _group, topic}), do: topic
   def command_target_topic(command), do: List.first(routed_range_topics(command))
 
   @doc """
@@ -322,6 +352,8 @@ defmodule Malachi.Metadata do
   defp command_topic(_state, {:set_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:bind_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
+  defp command_topic(_state, {:commit_offset, _group, topic, _offsets, _generation}), do: topic
+  defp command_topic(_state, {:open_group, _group, topic}), do: topic
   defp command_topic(state, {:split_range, range_id}), do: range_topic(state, range_id)
   defp command_topic(state, {:merge_ranges, range_id_a, _range_id_b}), do: range_topic(state, range_id_a)
   defp command_topic(state, {:register_segment, range_id, _seg, _replicas, _off}), do: range_topic(state, range_id)
@@ -476,6 +508,37 @@ defmodule Malachi.Metadata do
     merged = Map.merge(committed_offsets(state, group, topic), offsets)
     committed = Map.put(state.committed_offsets, {group, topic}, prune_offsets(state, topic, merged))
     {%{state | committed_offsets: committed}, :ok}
+  end
+
+  defp do_apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets, generation}) do
+    # A group member's commit, taken at `generation`. Its coordinator checked the generation when it was
+    # asked, but the commit reaches the log later, and by then the range may have moved to another member
+    # that committed it already: a generation names its coordinator's epoch above the rebalance count, and
+    # both only grow, so a range committed at a higher generation than this one refuses it whole, here,
+    # where every commit is ordered. A generation of an epoch below the group's last opening comes from a
+    # coordinator another one has superseded, which is refused apart (`:stale_epoch`) so that coordinator
+    # opens the group again. Otherwise the positions merge as above and each range remembers this
+    # generation, pruned alike.
+    fence = group_fence(state, group, topic)
+
+    cond do
+      Bitwise.bsr(generation, 32) < fence.epoch ->
+        {state, {:error, :stale_epoch}}
+
+      Enum.any?(offsets, fn {range_id, _position} -> Map.get(fence.generations, range_id, 0) > generation end) ->
+        {state, {:error, :stale_generation}}
+
+      true ->
+        fenced_commit(state, group, topic, offsets, generation, fence)
+    end
+  end
+
+  defp do_apply(%__MODULE__{} = state, {:open_group, group, topic}) do
+    # A group coordinator opening `group` of `topic`: it starts the group's next epoch, so every
+    # generation it hands out is above every generation an earlier coordinator of the group handed out.
+    fence = group_fence(state, group, topic)
+    fence = %{fence | epoch: fence.epoch + 1}
+    {%{state | group_fences: Map.put(state.group_fences, {group, topic}, fence)}, {:ok, fence.epoch}}
   end
 
   defp do_apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
@@ -644,6 +707,11 @@ defmodule Malachi.Metadata do
     |> Map.get(range_id, @empty_set)
     |> Enum.map(&Map.fetch!(state.segments, &1))
   end
+
+  @doc "A consumer group's fence for a topic (`t:group_fence/0`): epoch 0 and no generation if it has none."
+  @spec group_fence(t(), group(), topic_name()) :: group_fence()
+  def group_fence(%__MODULE__{} = state, group, topic),
+    do: Map.get(state.group_fences, {group, topic}, %{epoch: 0, generations: %{}})
 
   @doc "A consumer group's committed offsets for a topic, or `%{}` if it has never committed."
   @spec committed_offsets(t(), group(), topic_name()) :: offsets()
@@ -832,7 +900,13 @@ defmodule Malachi.Metadata do
         ranges = Map.take(state.ranges, MapSet.to_list(range_ids))
         segments = Map.filter(state.segments, fn {_id, seg} -> MapSet.member?(range_ids, seg.range_id) end)
         offsets = for {{group, ^name}, offs} <- state.committed_offsets, into: %{}, do: {group, offs}
-        %{topic: topic, ranges: ranges, segments: segments, offsets: offsets, export_format: @export_format}
+        fences = for {{group, ^name}, fence} <- state.group_fences, into: %{}, do: {group, fence}
+
+        export = %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
+
+        if fences == %{},
+          do: Map.put(export, :export_format, 0),
+          else: Map.merge(export, %{fences: fences, export_format: @export_format})
     end
   end
 
@@ -859,6 +933,7 @@ defmodule Malachi.Metadata do
               ranges: Map.drop(state.ranges, range_ids),
               segments: Map.drop(state.segments, Map.keys(export.segments)),
               committed_offsets: Map.reject(state.committed_offsets, fn {{_g, t}, _offs} -> t == name end),
+              group_fences: Map.reject(state.group_fences, fn {{_g, t}, _fence} -> t == name end),
               # the topic is gone, so drop any migration fence it held
               migrating: Map.delete(state.migrating, name)
           }
@@ -883,17 +958,41 @@ defmodule Malachi.Metadata do
     # re-key the exported per-group offsets back to {group, topic}; default `%{}` tolerates an older
     # export (e.g. an :insert_topic command logged before offsets rode along)
     offsets = for {group, offs} <- Map.get(export, :offsets, %{}), into: %{}, do: {{group, name}, offs}
+    fences = for {group, fence} <- Map.get(export, :fences, %{}), into: %{}, do: {{group, name}, fence}
 
     state = %{
       state
       | topics: Map.put(state.topics, name, export.topic),
         ranges: Map.merge(state.ranges, export.ranges),
         segments: Map.merge(state.segments, export.segments),
-        committed_offsets: Map.merge(state.committed_offsets, offsets)
+        committed_offsets: Map.merge(state.committed_offsets, offsets),
+        group_fences: Map.merge(state.group_fences, fences)
     }
 
     state = Enum.reduce(export.ranges, state, fn {id, range}, s -> index_add_range(s, range.topic, id) end)
     Enum.reduce(export.segments, state, fn {id, seg}, s -> index_add_segment(s, seg.range_id, id) end)
+  end
+
+  # --- internals: group fence ---
+
+  # The positions merge as the plain commit merges them, and each committed range remembers `generation`;
+  # both are pruned of retired ranges with one look at the topic's active ranges.
+  defp fenced_commit(state, group, topic, offsets, generation, fence) do
+    keep? = active_range_filter(state, topic)
+    committed = state |> committed_offsets(group, topic) |> Map.merge(offsets) |> Map.filter(keep?)
+
+    generations =
+      fence.generations
+      |> Map.merge(Map.new(offsets, fn {range_id, _position} -> {range_id, generation} end))
+      |> Map.filter(keep?)
+
+    state = %{
+      state
+      | committed_offsets: Map.put(state.committed_offsets, {group, topic}, committed),
+        group_fences: Map.put(state.group_fences, {group, topic}, %{fence | generations: generations})
+    }
+
+    {state, :ok}
   end
 
   # --- internals: topic ---
@@ -947,12 +1046,16 @@ defmodule Malachi.Metadata do
 
   # Drops committed offsets whose range is no longer active (a retired split/merge parent). Skipped when
   # the topic has no ranges index yet (committed before routing) so those offsets are kept as-is.
-  defp prune_offsets(state, topic, offsets) do
+  defp prune_offsets(state, topic, offsets), do: Map.filter(offsets, active_range_filter(state, topic))
+
+  # Whether a `{range_id, _}` entry names an active range of `topic`; every entry when the topic has no
+  # ranges index yet.
+  defp active_range_filter(state, topic) do
     if Map.has_key?(state.topic_ranges, topic) do
       active = active_range_id_set(state, topic)
-      Map.filter(offsets, fn {range_id, _offset} -> MapSet.member?(active, range_id) end)
+      fn {range_id, _value} -> MapSet.member?(active, range_id) end
     else
-      offsets
+      fn _entry -> true end
     end
   end
 

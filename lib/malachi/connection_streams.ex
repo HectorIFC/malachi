@@ -6,41 +6,111 @@ defmodule Malachi.ConnectionStreams do
   of both kinds, as NorthGuard's clients do (meetup transcript, 542 to 569).
 
   The connection reads its socket only while every producer stream has room in its window
-  (`Malachi.ProducerStreams.room?/1`); a consume stream only pushes, so it never holds the socket back. It
-  is never idle while a consume stream is open, an append is in flight or a `fetch_range` waits for its
-  answer.
+  (`Malachi.ProducerStreams.room?/1`) and fewer than 64 jobs run or wait beside it; a consume stream only
+  pushes, so it never holds the socket back. It is never idle while a consume stream is open, an append is
+  in flight or a job runs beside it (`run/3`: a `fetch_range` waiting for records, a group key waiting for
+  its coordinator).
   """
 
   alias Malachi.ConsumeStreams
   alias Malachi.ProducerStreams
 
-  defstruct producers: nil, consumers: nil, next_id: 1, fetches: nil
+  # The most jobs one connection may have running or waiting: past it the connection stops reading its
+  # socket until one ends, as a producer stream's closed window stops it.
+  @max_jobs 64
 
+  defstruct producers: nil, consumers: nil, next_id: 1, jobs: %{}, in_order: nil, in_order_pid: nil, waiting: nil
+
+  @type job :: {(-> binary()), binary(), :run | :drop}
   @type t :: %__MODULE__{
           producers: ProducerStreams.t(),
           consumers: ConsumeStreams.t(),
           next_id: pos_integer(),
-          fetches: :gen_server.request_id_collection()
+          jobs: %{reference() => binary()},
+          in_order: reference() | nil,
+          in_order_pid: pid() | nil,
+          waiting: :queue.queue(job())
         }
 
   @doc "No stream open yet."
   @spec new() :: t()
   def new,
-    do: %__MODULE__{
-      producers: ProducerStreams.new(),
-      consumers: ConsumeStreams.new(),
-      fetches: :gen_server.reqids_new()
-    }
+    do: %__MODULE__{producers: ProducerStreams.new(), consumers: ConsumeStreams.new(), waiting: :queue.new()}
 
   @doc """
-  Sends `request` to `broker` without waiting (a `fetch_range`, whose wait would otherwise hold the
-  connection's streams back), and answers it when the broker replies: `finish` turns the reply into the
-  frame the client gets (`handle_message/2`). A broker that goes down meanwhile is answered as
-  `{:error, :broker_down}`.
+  Runs `job` beside the connection, in a process of its own, for a request whose answer waits on another
+  process (a `fetch_range` waiting for records, a group key asking its coordinator) and would otherwise hold
+  the connection's streams back. `job` returns the frame the client gets, which `handle_message/2` hands
+  back once it is done; a job that crashes is answered with `fallback`.
   """
-  @spec fetch(t(), GenServer.server(), term(), (term() -> binary())) :: t()
-  def fetch(%__MODULE__{} = state, broker, request, finish),
-    do: %{state | fetches: :gen_server.send_request(broker, request, finish, state.fetches)}
+  @spec run(t(), (-> binary()), binary()) :: t()
+  def run(%__MODULE__{} = state, job, fallback), do: elem(start(state, job, fallback), 0)
+
+  @doc """
+  The connection is closing: the in-order jobs still waiting (a `leave_group` behind a commit) are run all
+  the same, in order, by a process of their own once the running one ends, since the client sent them
+  before it went, except those queued with `on_close: :drop`. Nobody is left to read their answers.
+  """
+  @spec hand_off(t()) :: :ok
+  def hand_off(%__MODULE__{in_order: nil}), do: :ok
+
+  def hand_off(%__MODULE__{in_order_pid: running} = state) do
+    case :queue.to_list(state.waiting) do
+      [] ->
+        :ok
+
+      waiting ->
+        spawn(fn ->
+          ref = Process.monitor(running)
+          receive(do: ({:DOWN, ^ref, :process, _pid, _reason} -> :ok))
+          for {job, _fallback, :run} <- waiting, do: run_detached(job)
+        end)
+
+        :ok
+    end
+  end
+
+  # One waiting job after the connection closed: a job that raises or exits does not keep the next from
+  # running.
+  defp run_detached(job) do
+    job.()
+  catch
+    _kind, _reason -> :ok
+  end
+
+  @doc """
+  `run/3` for jobs whose effects must land in the order the client sent them (a member's commits, each of
+  which may move the same checkpoint): each starts once the one before it ended. `on_close: :drop` (the
+  default is `:run`) leaves the job out of `hand_off/1` if it is still waiting when the connection closes.
+  """
+  @spec run_in_order(t(), (-> binary()), binary(), keyword()) :: t()
+  def run_in_order(state, job, fallback, opts \\ [])
+
+  def run_in_order(%__MODULE__{in_order: nil} = state, job, fallback, _opts) do
+    {state, ref, pid} = start(state, job, fallback)
+    %{state | in_order: ref, in_order_pid: pid}
+  end
+
+  def run_in_order(%__MODULE__{} = state, job, fallback, opts),
+    do: %{state | waiting: :queue.in({job, fallback, Keyword.get(opts, :on_close, :run)}, state.waiting)}
+
+  defp start(state, job, fallback) do
+    {pid, ref} = spawn_monitor(fn -> exit({:shutdown, {:frame, job.()}}) end)
+    {%{state | jobs: Map.put(state.jobs, ref, fallback)}, ref, pid}
+  end
+
+  # The in-order job that ended was `ref`: the next one waiting starts.
+  defp next_in_order(%__MODULE__{in_order: ref} = state, ref) do
+    case :queue.out(state.waiting) do
+      {{:value, {job, fallback, _on_close}}, waiting} ->
+        run_in_order(%{state | in_order: nil, in_order_pid: nil, waiting: waiting}, job, fallback)
+
+      {:empty, _waiting} ->
+        %{state | in_order: nil, in_order_pid: nil}
+    end
+  end
+
+  defp next_in_order(state, _ref), do: state
 
   @doc "Records a producer stream the broker opened and returns the id it is given."
   @spec open_producer(t(), map()) :: {t(), pos_integer()}
@@ -69,24 +139,25 @@ defmodule Malachi.ConnectionStreams do
   end
 
   @doc """
-  Folds a message the connection received into whatever it is about: the answer to a pending fetch (or the
-  `:DOWN` of the broker it was asked of, answered as `{:error, :broker_down}`), or a message for one kind
-  of stream. `:no` for one that belongs to none. A broker that went down is told to both kinds of stream,
-  since each watches the brokers its own streams were opened on.
+  Folds a message the connection received into whatever it is about: the end of a job (`run/3`), with the
+  frame it answers, or a message for one kind of stream. `:no` for one that belongs to none. A broker that
+  went down is told to both kinds of stream, since each watches the brokers its own streams were opened on.
   """
   @spec handle_message(t(), term()) :: {t(), [binary()]} | :no
-  def handle_message(%__MODULE__{} = state, message) do
-    case :gen_server.check_response(message, state.fetches, true) do
-      {{:reply, reply}, finish, fetches} ->
-        {%{state | fetches: fetches}, [finish.(reply)]}
+  def handle_message(%__MODULE__{jobs: jobs} = state, {:DOWN, ref, :process, _pid, reason})
+      when is_map_key(jobs, ref) do
+    {fallback, jobs} = Map.pop!(jobs, ref)
 
-      {{:error, {_reason, _server}}, finish, fetches} ->
-        {%{state | fetches: fetches}, [finish.({:error, :broker_down})]}
+    frame =
+      case reason do
+        {:shutdown, {:frame, frame}} -> frame
+        _crashed -> fallback
+      end
 
-      _not_a_fetch ->
-        streams_message(state, message)
-    end
+    {next_in_order(%{state | jobs: jobs}, ref), [frame]}
   end
+
+  def handle_message(%__MODULE__{} = state, message), do: streams_message(state, message)
 
   defp streams_message(state, {:DOWN, _ref, :process, _pid, _reason} = down) do
     {producers, from_producers} = taken(ProducerStreams.handle_message(state.producers, down), state.producers)
@@ -116,14 +187,27 @@ defmodule Malachi.ConnectionStreams do
   defp frames(:no), do: []
   defp frames(frames), do: frames
 
-  @doc "Whether every producer stream has room for another append: the connection reads its socket only then."
+  @doc """
+  Whether every producer stream has room for another append and the connection has room for another job:
+  the connection reads its socket only then.
+  """
   @spec room?(t()) :: boolean()
-  def room?(%__MODULE__{producers: producers}), do: ProducerStreams.room?(producers)
+  def room?(%__MODULE__{} = state), do: ProducerStreams.room?(state.producers) and job_room?(state)
 
-  @doc "Whether the connection has work outstanding: an append in flight, a consume stream open, or a fetch waiting."
+  @doc """
+  Whether the connection may take another job: fewer than `max_jobs/0` run or wait. Asked before each frame
+  the connection reads, not only before each read, so one delivery holding many requests stops at the cap
+  and the rest wait in the buffer until a job ends.
+  """
+  @spec job_room?(t()) :: boolean()
+  def job_room?(%__MODULE__{} = state), do: map_size(state.jobs) + :queue.len(state.waiting) < @max_jobs
+
+  @doc "The most jobs a connection may have running or waiting before it stops reading its socket."
+  @spec max_jobs() :: pos_integer()
+  def max_jobs, do: @max_jobs
+
+  @doc "Whether the connection has work outstanding: an append in flight, a consume stream open, or a job running."
   @spec busy?(t()) :: boolean()
   def busy?(%__MODULE__{} = state),
-    do:
-      ProducerStreams.busy?(state.producers) or ConsumeStreams.open?(state.consumers) or
-        :gen_server.reqids_size(state.fetches) > 0
+    do: ProducerStreams.busy?(state.producers) or ConsumeStreams.open?(state.consumers) or map_size(state.jobs) > 0
 end

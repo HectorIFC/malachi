@@ -216,6 +216,8 @@ defmodule Malachi.Routing do
     end
   end
 
+  # one Raft group for the whole metadata: the member the broker joined it through, whoever leads
+  def metadata_source(_topic, %{leader_of: server_id}, _cluster), do: {:ok, server_id}
   def metadata_source(_topic, nil, nil), do: :in_memory
   def metadata_source(_topic, nil, cluster), do: {:ok, {cluster, node()}}
 

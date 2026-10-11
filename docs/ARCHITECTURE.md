@@ -93,6 +93,12 @@ Metadata (topics, ranges, segments) lives in a **directory of sharded replicated
 - A **vnode** is a Raft group (an `ra` cluster) holding one shard of the metadata.
 - A **coordinator** is the vnode's leader; it carries the business logic: sealing or deleting a topic,
   splitting or merging a range, choosing segment replica sets, and healing under-replicated segments.
+- **Consumer groups** are coordinated on the same leader (`Malachi.Consumer.GroupCoordinator`): it
+  assigns a topic's ranges across a group's members and checks their commits, and the checkpoints with
+  the fence that orders them (each group's epoch and each range's last committed generation) live in the
+  vnode's Raft state. NorthGuard gives this to a separate client management layer, its Conductor, with
+  checkpoints in their own store; Malachi keeps it with the topic's metadata, so a checkpoint and the
+  fence that guards it are written in one Raft log.
 - vnodes sit on a hash ring (consistent hashing) keyed by topic name. NorthGuard also places a range by
   the hash of the range itself; Malachi keeps a topic's ranges and segments on the topic's vnode for now
   (`Malachi.Cluster.DSRSM`, and `Malachi.Metadata.segment_routing_topic/1`, the one function that decides

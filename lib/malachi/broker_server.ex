@@ -379,6 +379,24 @@ defmodule Malachi.BrokerServer do
   def commit_offset(server, group, topic, offsets),
     do: GenServer.call(server, {:commit_offset, group, topic, offsets})
 
+  @doc """
+  A group member's commit taken at `generation` (`Malachi.Broker.commit_offset/5`): `:ok`, or `{:error,
+  :stale_generation}` when a range in it was already committed at a higher generation.
+  """
+  @spec commit_offset(
+          GenServer.server(),
+          Malachi.Metadata.group(),
+          Malachi.Metadata.topic_name(),
+          Malachi.Metadata.offsets(),
+          non_neg_integer()
+        ) :: term()
+  def commit_offset(server, group, topic, offsets, generation),
+    do: GenServer.call(server, {:commit_offset, group, topic, offsets, generation})
+
+  @doc "Opens consumer `group` of `topic` for a group coordinator: `{:ok, epoch}` (`Malachi.Broker.open_group/3`)."
+  @spec open_group(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) :: term()
+  def open_group(server, group, topic), do: GenServer.call(server, {:open_group, group, topic})
+
   @doc "A consumer group's committed offsets for a topic (empty if it never committed)."
   @spec committed_offsets(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) ::
           Malachi.Metadata.offsets()
@@ -865,6 +883,16 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:commit_offset, group, topic, offsets}, _from, state) do
     {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:commit_offset, group, topic, offsets, generation}, _from, state) do
+    {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets, generation)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:open_group, group, topic}, _from, state) do
+    {broker, reply} = Broker.open_group(state.broker, group, topic)
     {:reply, reply, %{state | broker: broker}}
   end
 
@@ -2343,6 +2371,9 @@ defmodule Malachi.BrokerServer do
 
   defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?, read_timeout) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
+    # Consumer-group coordination follows this group's leader, so members connected to any node reach one
+    # coordinator rather than each node's own.
+    CoordinatorRouter.put_leader(server_id)
     # Left at ra's default on purpose, unlike every read the reconcile makes. This one is matched on
     # `{:ok, _}`, so bounding it would turn a control plane that is merely slow to elect at boot into a
     # broker that refuses to start. The single cluster is also all or nothing: there is no partial view

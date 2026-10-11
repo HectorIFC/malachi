@@ -56,7 +56,7 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   def apply_command(server_id, metadata, command) do
     case submit(server_id, command) do
       {:ok, reply} ->
-        if MachineVersion.refusal?(reply),
+        if MachineVersion.refusal?(reply) or refused_commit?(command, reply),
           do: {metadata, reply},
           else: {elem(Metadata.apply(metadata, command), 0), reply}
 
@@ -64,6 +64,14 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
         {metadata, {:error, reason}}
     end
   end
+
+  # A group member's commit the log refused: applied to the cache instead, it would meet the cache's own
+  # fence, which may lag the log's and take what the log refused, putting a position the group never
+  # committed in front of a reader that starts from the checkpoint. Other refusals still reach the cache,
+  # where the deterministic apply refuses them again, or does what a lagging cache needs (a seal that lost
+  # to an earlier one still seals a segment the cache holds active).
+  defp refused_commit?({:commit_offset, _group, _topic, _offsets, _generation}, {:error, _reason}), do: true
+  defp refused_commit?(_command, _reply), do: false
 
   # How long a command may wait for its commit. The broker runs these inside its own loop, so every
   # produce and fetch of the shard waits behind the call. The data path's commands keep ra's default,
@@ -76,14 +84,25 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   # election and then redirects would hold the loop for one timeout per hop.
   @admin_command_deadline_ms 2_000
 
-  defp submit(server_id, {:bind_topic_policy, _topic, _name} = command),
-    do:
-      run_within(
-        fn -> MetadataServer.command(server_id, command, @admin_command_deadline_ms) end,
-        @admin_command_deadline_ms
-      )
+  # A group's commands (`Malachi.Wire` 32 to 34) are no data path either: a member retries a commit or a
+  # join that timed out, and the group coordinator gives up on an opening after 2 s, so the broker must have
+  # answered before then, or each retry would queue another command behind the one still waiting.
+  @group_command_deadline_ms 1_500
 
-  defp submit(server_id, command), do: MetadataServer.command(server_id, command)
+  defp submit(server_id, command) do
+    case deadline(command) do
+      nil ->
+        MetadataServer.command(server_id, command)
+
+      deadline_ms ->
+        run_within(fn -> MetadataServer.command(server_id, command, deadline_ms) end, deadline_ms)
+    end
+  end
+
+  defp deadline({:bind_topic_policy, _topic, _name}), do: @admin_command_deadline_ms
+  defp deadline({:open_group, _group, _topic}), do: @group_command_deadline_ms
+  defp deadline({:commit_offset, _group, _topic, _offsets, _generation}), do: @group_command_deadline_ms
+  defp deadline(_data_path), do: nil
 
   @doc false
   # Runs `fun` in a monitored, unlinked process and answers what it returned, or `{:error, :timeout}` when

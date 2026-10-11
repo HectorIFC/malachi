@@ -76,7 +76,7 @@ defmodule Malachi.Test.StreamTCP do
     }
 
     :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.fetch_range_key(), 30, Wire.encode_fetch_range_req(req)))
-    {:ok, body} = TCPHelper.recv_frame(socket, timeout: req.wait_ms + 5_000)
+    {:ok, body} = TCPHelper.recv_frame(socket, timeout: Keyword.get(opts, :recv_timeout, req.wait_ms + 5_000))
 
     case Wire.decode_response(body) do
       {30, 0, payload} -> {:ok, Wire.decode_page(payload)}

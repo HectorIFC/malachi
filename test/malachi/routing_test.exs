@@ -152,6 +152,10 @@ defmodule Malachi.RoutingTest do
 
     test "a single control plane is read through this node's member, and no cluster means the broker's memory" do
       assert Routing.metadata_source("orders", nil, :malachi_log) == {:ok, {:malachi_log, node()}}
+
+      assert Routing.metadata_source("orders", %{leader_of: {:malachi_log, :malachi@a}}, :malachi_log) ==
+               {:ok, {:malachi_log, :malachi@a}}
+
       assert Routing.metadata_source("orders", nil, nil) == :in_memory
     end
   end

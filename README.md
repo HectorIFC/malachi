@@ -318,6 +318,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_STREAM_MAX_WINDOW_BYTES` | 16777216 | Most inflated bytes a producer stream's window grants |
 | `MALACHI_STREAM_INFLIGHT_SOFT` / `_HARD` | 50000 / 200000 | Records a range may have in flight before its streams' windows shrink, and where they reach 0 |
 | `MALACHI_MAX_INFLATED_BATCH_BYTES` | 16777216 | Most one append's batch may inflate to |
+| `MALACHI_GROUP_SESSION_MS` | 30000 | How long a group member may go without a heartbeat or a commit before it is evicted, within a third of the session more (at most 10 s); a positive count below 2^32 |
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
 | `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
@@ -814,8 +815,22 @@ through this node's producer streams as their appends are acknowledged, those an
 segment seals; after the node restarts, an active segment's records once the next append there is
 acknowledged or it seals, while a cursor read before the restart is still taken and waits), each with its position in the range's history (ancestors first), within a credit window in records that `consume_ack`
 returns, and gets `moved` when the range splits or merges or its next segment opens on another node; `fetch_range` answers one page, waiting up to
-`wait_ms` for records. One connection can hold producer and consume streams at once. Keys 32 to 34 get
-`unknown_api_key` until a server answers them.
+`wait_ms` for records. One connection can hold producer and consume streams at once. `join_group`,
+`group_heartbeat` and `commit_offsets` answer anyone holding `:consume` on the topic, from the topic's group
+coordinator on any node: a member's ranges, its generation and the session it must heartbeat within
+(`MALACHI_GROUP_SESSION_MS`); a heartbeat reports a rebalance. A commit is fenced per range: a member may
+commit a range it holds at any generation from the one it was handed that range at, so a rebalance that
+moves other members' ranges leaves its checkpoints alone (`not_assigned` for a range it does not hold,
+`stale_generation` for a generation older than its hand-over, `unknown_member` for one evicted). The
+control plane, which orders every commit, refuses one below a generation the range was already committed
+at through these keys, so an owner's commit that reaches it after the range's next owner committed is
+refused too; the legacy commit and stream acknowledgement write the same checkpoint unfenced, which a
+group that only uses these keys never meets. A generation carries the group's epoch, which the control
+plane raises each time a coordinator opens the group; a commit at an epoch another coordinator has since
+superseded is refused, and that coordinator opens the group again, so its members learn a new generation
+on their next heartbeat. A connection's commits land in the order it sent them. The group keys need the control
+plane at machine version 7 and answer `unsupported` below it. `leave_group` (7) takes a member out;
+closing a consume stream does not.
 
 Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
 frames (keys 24 to 34) carry each record's position beside it, `{source_index, offset}` in its range's

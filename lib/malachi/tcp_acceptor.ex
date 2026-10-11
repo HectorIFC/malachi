@@ -465,18 +465,22 @@ defmodule Malachi.TCPAcceptor do
   # A subscribed connection becomes a one-stream duplex: switched to active mode so a single `receive`
   # handles both the broker's `{:log_read, plan}` pushes (read here and forwarded to the client as
   # response frames tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
-  # alongside the subscribe are drained first. The stream ends when the socket closes; the broker drops
-  # the subscriber via the connection process's `:DOWN`.
+  # alongside the subscribe are drained first. The stream ends when the socket closes, or when a member's
+  # ack finds no coordinator to answer it (`TCPProtocol.process_stream_frame/3`); the broker drops the
+  # subscriber via the connection process's `:DOWN`.
   defp stream_loop(%{buffer: buffer} = state, sub_corr) do
     case handle_stream_buffer(buffer, state) do
       {:more, remaining} ->
         arm_active(state)
         stream_recv(%{state | buffer: remaining}, sub_corr)
 
-      {:close, _reason} ->
-        close_oversized(state)
+      {:close, reason} ->
+        close_stream(state, reason)
     end
   end
+
+  defp close_stream(state, :frame_too_large), do: close_oversized(state)
+  defp close_stream(%{socket: socket, transport: transport}, _told), do: close_socket(socket, transport)
 
   defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
     receive do
@@ -500,8 +504,8 @@ defmodule Malachi.TCPAcceptor do
             arm_active(state)
             stream_recv(%{state | buffer: remaining}, sub_corr)
 
-          {:close, _reason} ->
-            close_oversized(state)
+          {:close, reason} ->
+            close_stream(state, reason)
         end
 
       {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
@@ -521,8 +525,20 @@ defmodule Malachi.TCPAcceptor do
   defp streams_loop(%{buffer: buffer} = state, streams) do
     case handle_streams_buffer(buffer, state, streams) do
       {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
-      {:close, _reason} -> close_oversized(state)
+      {:close, _reason, streams} -> close_streams(state, streams)
     end
+  end
+
+  # An oversized frame ends the connection like a close does: the in-order jobs the client sent before it
+  # still run (`Malachi.ConnectionStreams.hand_off/1`).
+  defp close_streams(state, streams) do
+    :ok = ConnectionStreams.hand_off(streams)
+    close_oversized(state)
+  end
+
+  defp streams_closed(socket, transport, streams) do
+    :ok = ConnectionStreams.hand_off(streams)
+    close_socket(socket, transport)
   end
 
   defp streams_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
@@ -532,20 +548,26 @@ defmodule Malachi.TCPAcceptor do
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->
         case handle_streams_buffer(buffer <> data, state, streams) do
           {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
-          {:close, _reason} -> close_oversized(state)
+          {:close, _reason, streams} -> close_streams(state, streams)
         end
 
+      # the client's leave or commit still waiting behind a running one is run all the same
       {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
-        close_socket(socket, transport)
+        streams_closed(socket, transport, streams)
 
       {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
-        close_socket(socket, transport)
+        streams_closed(socket, transport, streams)
 
       message ->
         case ConnectionStreams.handle_message(streams, message) do
+          # a job that ended may have made room for frames left in the buffer
           {streams, frames} ->
             Enum.each(frames, &transport.send(socket, &1))
-            streams_recv(state, arm_if_room(state, streams))
+
+            case handle_streams_buffer(buffer, state, streams) do
+              {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+              {:close, _reason, streams} -> close_streams(state, streams)
+            end
 
           :no ->
             streams_recv(state, streams)
@@ -558,7 +580,15 @@ defmodule Malachi.TCPAcceptor do
     end
   end
 
-  defp handle_streams_buffer(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
+  # A connection at its cap of jobs (`Malachi.ConnectionStreams.job_room?/1`) leaves the rest of the buffer
+  # unread; the end of a job reads it on.
+  defp handle_streams_buffer(buffer, state, streams) do
+    if ConnectionStreams.job_room?(streams),
+      do: handle_streams_frame(buffer, state, streams),
+      else: {:more, buffer, streams}
+  end
+
+  defp handle_streams_frame(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         streams = TCPProtocol.process_streams_frame(socket, frame_body, session, transport, streams)
@@ -568,7 +598,7 @@ defmodule Malachi.TCPAcceptor do
         {:more, buffer, streams}
 
       {:error, :frame_too_large} ->
-        {:close, :frame_too_large}
+        {:close, :frame_too_large, streams}
     end
   end
 
@@ -580,12 +610,15 @@ defmodule Malachi.TCPAcceptor do
   end
 
   # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the
-  # trailing partial data to keep buffered, or `{:close, reason}` on an oversized frame.
+  # trailing partial data to keep buffered, or `{:close, reason}` on an oversized frame or a stream that
+  # ends (a member ack its coordinator could not answer, already told to the client).
   defp handle_stream_buffer(buffer, %{socket: socket, transport: transport} = state) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
-        TCPProtocol.process_stream_frame(socket, frame_body, transport)
-        handle_stream_buffer(rest, state)
+        case TCPProtocol.process_stream_frame(socket, frame_body, transport) do
+          :ok -> handle_stream_buffer(rest, state)
+          {:close, _reason} = close -> close
+        end
 
       :incomplete ->
         {:more, buffer}

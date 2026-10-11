@@ -3,7 +3,9 @@ defmodule Malachi.Cluster.MetadataServerTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Metadata
+  alias Malachi.Test.OlderShapeMachine
 
   setup_all do
     :ok
@@ -28,6 +30,20 @@ defmodule Malachi.Cluster.MetadataServerTest do
 
     assert {:ok, active} = MetadataServer.query(server_id, &Metadata.active_ranges_of_topic(&1, "events"))
     assert Enum.sort(Enum.map(active, & &1.id)) == Enum.sort([left_id, right_id])
+  end
+
+  test "a vnode led by an older build is read with every field, so its topics export and split" do
+    name = :"older_#{System.unique_integer([:positive])}"
+    {:ok, server_id} = RaCluster.start(OlderShapeMachine, name, [node()])
+    on_exit(fn -> RaCluster.delete(server_id) end)
+    {:ok, {:ok, _root}} = MetadataServer.command(server_id, {:create_topic, "events", 4})
+
+    # what the leader holds lacks the field; what the caller reads has it
+    {:ok, raw} = RaCluster.query(server_id, 5_000)
+    refute Map.has_key?(raw, :group_fences)
+
+    assert {:ok, %{group_fences: %{}}} = MetadataServer.query(server_id, &Function.identity/1)
+    assert {:ok, %{export_format: 0}} = MetadataServer.query(server_id, &Metadata.export_topic(&1, "events"))
   end
 
   test "a raising query_fun fails the caller and leaves the replicated server serving" do

@@ -33,7 +33,7 @@ index 12e3b72..6171125 100644
  
 +  @doc """
 +  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
-+  control plane, a command introduced at machine version 6.
++  control plane, a command introduced at machine version 8.
 +  """
 +  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
 +  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
@@ -74,18 +74,18 @@ index 68ca555..6f4ab02 100644
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()
 diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
-index 3d76aa2..ccef20d 100644
+index 0243b778..6f1041a7 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -73,7 +73,10 @@ defmodule Malachi.Cluster.MachineVersion do
-   # `{:put_user, username, hash, permissions, role}` and `{:import_users_with_roles, entries}`. 4
-   # introduced `{:bind_topic_policy, topic, name}` in `Malachi.Metadata` (#194), 3 the storage policy
-   # store and 2 the cluster flags; all are released, which is why the roles take the next version.
--  @code_version 5
+@@ -77,7 +77,10 @@ defmodule Malachi.Cluster.MachineVersion do
+   # permissions, role}` and `{:import_users_with_roles, entries}`. 4 introduced `{:bind_topic_policy, topic,
+   # name}` in `Malachi.Metadata` (#194), 3 the storage policy store and 2 the cluster flags; all are
+   # released, which is why each new shape takes the next version.
+-  @code_version 7
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Version 6 introduces
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 8 introduces
 +  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
-+  @code_version 6
++  @code_version 8
  
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
@@ -131,10 +131,10 @@ index 8eaeef6..d226504 100644
    # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
    def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
 diff --git a/lib/malachi/metadata.ex b/lib/malachi/metadata.ex
-index 2b150bc..3189739 100644
+index 01755135..7af8c657 100644
 --- a/lib/malachi/metadata.ex
 +++ b/lib/malachi/metadata.ex
-@@ -184,7 +184,10 @@ defmodule Malachi.Metadata do
+@@ -204,7 +204,10 @@ defmodule Malachi.Metadata do
        {:extract_topic, 2} => 0,
        {:insert_topic, 2} => 0,
        {:begin_migration, 2} => 0,
@@ -142,19 +142,19 @@ index 2b150bc..3189739 100644
 +      {:end_migration, 2} => 0,
 +      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +      # scripts/docker-upgrade-chaos.sh, never into a release.
-+      {:canary_note, 3} => 6
++      {:canary_note, 3} => 8
      }
    end
  
-@@ -221,6 +224,7 @@ defmodule Malachi.Metadata do
-   def command_target_topic({:set_topic_policy, name, _policy}), do: name
-   def command_target_topic({:bind_topic_policy, name, _policy}), do: name
+@@ -243,6 +246,7 @@ defmodule Malachi.Metadata do
    def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
+   def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
+   def command_target_topic({:open_group, _group, topic}), do: topic
 +  def command_target_topic({:canary_note, topic, _note}), do: topic
    def command_target_topic(command), do: List.first(routed_range_topics(command))
  
    @doc """
-@@ -550,6 +554,17 @@ defmodule Malachi.Metadata do
+@@ -604,6 +608,17 @@ defmodule Malachi.Metadata do
    # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
    # not-yet-effective command before it gets here, so an older replica never skips a command that a
    # newer one applies.

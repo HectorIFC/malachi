@@ -3,6 +3,7 @@ defmodule Malachi.Consumer.CoordinatorRouterTest do
 
   alias Malachi.Cluster.HashRing
   alias Malachi.Consumer.CoordinatorRouter, as: Router
+  alias Malachi.Test.SilentRaMember
 
   @name Malachi.LogGroupCoordinator
 
@@ -15,6 +16,13 @@ defmodule Malachi.Consumer.CoordinatorRouterTest do
   describe "location/4 (pure routing decision)" do
     test "no topology (single-node/in-memory) is local, and never queries leadership" do
       assert Router.location("t", nil, :n1@h, fn _ -> flunk("leader_fn must not run") end) == :local
+    end
+
+    test "a control plane that is one Raft group routes every topic to that group's leader" do
+      topo = %{leader_of: {:log_meta, :member@h}}
+      assert Router.location("t", topo, :owner@h, fn {:log_meta, _} -> :owner@h end) == :local
+      assert Router.location("other", topo, :me@h, fn {:log_meta, _} -> :owner@h end) == {:remote, :owner@h}
+      assert Router.location("t", topo, :me@h, fn _ -> nil end) == :local
     end
 
     test "an empty ring falls back to local" do
@@ -53,13 +61,37 @@ defmodule Malachi.Consumer.CoordinatorRouterTest do
     end
   end
 
+  # The topology is node-wide (`:persistent_term`) and the running application published its own at boot:
+  # a test that replaces it puts that one back, so suites run after it still see the boot topology.
+  defp restore_topology_on_exit do
+    key = {Malachi.Consumer.CoordinatorRouter, :topology}
+    previous = :persistent_term.get(key, nil)
+
+    on_exit(fn ->
+      if previous, do: :persistent_term.put(key, previous), else: :persistent_term.erase(key)
+    end)
+  end
+
   describe "topology persistence" do
-    test "put_topology/topology round-trips; teardown restores the unset (nil) state" do
-      # mirrors the module's private @topology_key
-      on_exit(fn -> :persistent_term.erase({Malachi.Consumer.CoordinatorRouter, :topology}) end)
+    test "put_topology/topology round-trips; teardown restores what was there" do
+      restore_topology_on_exit()
       ring = single_vnode_ring()
       :ok = Router.put_topology(ring, %{v1: {:meta_v1, node()}})
       assert %{ring: ^ring, servers: %{v1: {:meta_v1, _}}} = Router.topology()
+    end
+
+    test "a leader that has to be asked of another node is asked briefly, and unanswered means local" do
+      restore_topology_on_exit()
+      # a member that never answers: this node hosts no member of the cluster, so its leader is not in ra's
+      # local table and is asked over the wire, where it would cost ra's default 5 s
+      silent = :"router_mute_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = SilentRaMember.start_link(silent)
+      on_exit(fn -> SilentRaMember.stop(silent) end)
+      :ok = Router.put_leader({silent, node()})
+
+      {elapsed_us, owns?} = :timer.tc(fn -> Router.owns?("t") end)
+      assert owns?
+      assert elapsed_us < 1_000_000, "waited #{div(elapsed_us, 1000)} ms"
     end
   end
 

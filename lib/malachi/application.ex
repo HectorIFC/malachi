@@ -887,14 +887,44 @@ defmodule Malachi.Application do
   end
 
   # The node-wide consumer-group coordinator (non-sharded control plane): assigns a topic's ranges across
-  # group members for parallel, server-scoped consumption (the client never sees ranges). `owns_fun` is a
-  # no-op guard here (single-node always owns); the sharded case runs one coordinator per led vnode instead.
-  defp group_coordinator_child do
-    {GroupCoordinator,
-     name: Malachi.LogGroupCoordinator,
-     ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
-     owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end}
+  # group members for parallel, server-scoped consumption (the client never sees ranges). On a single node
+  # it always owns; in a cluster whose metadata is one Raft group, the coordinator on that group's leader
+  # owns (`CoordinatorRouter.put_leader/1`) and the others refuse with `not_owner`, while the leader is
+  # known (an unresolved leader falls back to local, see `CoordinatorRouter`). The sharded case runs one
+  # coordinator per led vnode instead.
+  defp group_coordinator_child, do: {GroupCoordinator, group_coordinator_opts(Malachi.LogGroupCoordinator)}
+
+  @doc false
+  # What every group coordinator is started with, the node-wide one and each vnode's: the topic's ranges,
+  # the ownership guard, the group epochs the control plane opens (on the broker that owns the topic, as a
+  # commit goes) and the session (`MALACHI_GROUP_SESSION_MS`, a positive count of milliseconds that fits
+  # the wire's 32 bits, or the 30_000 default).
+  @spec group_coordinator_opts(atom()) :: keyword()
+  def group_coordinator_opts(name) do
+    [
+      name: name,
+      ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
+      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end,
+      open_fun: fn group, topic ->
+        group_command_reply(BrokerServer.open_group(DataPlaneRouter.shard_for(topic), group, topic))
+      end,
+      session_ms:
+        Malachi.Config.checked(
+          Application.get_env(:malachi, :group_session_ms, 30_000),
+          :group_session_ms,
+          30_000,
+          &(is_integer(&1) and &1 > 0 and &1 <= 0xFFFFFFFF)
+        )
+    ]
   end
+
+  @doc false
+  # The group fence's commands (`{:open_group, ...}`, the fenced `commit_offset`) are introduced at machine
+  # version 7: a control plane still below it (an upgrade not finalized yet) refuses them, which the group
+  # keys answer as `unsupported`.
+  @spec group_command_reply(term()) :: term()
+  def group_command_reply({:error, {:unsupported_command, _key, _introduced, _effective}}), do: {:error, :unsupported}
+  def group_command_reply(reply), do: reply
 
   # Started whatever the environment says. Retention used to be gated on the two global limits being set,
   # which is not where a policy can be: with both unset, the default, no coordinator existed at all and a
@@ -1551,12 +1581,7 @@ defmodule Malachi.Application do
   # under a per-vnode name so `CoordinatorRouter.resolve/2` on any node can forward to it; the manager runs
   # it only while this node leads the vnode, and `owns_fun` rejects work during a brief leadership flap.
   defp group_coordinator_vnode_child(vnode_id) do
-    opts = [
-      name: CoordinatorRouter.coordinator_name(Malachi.LogGroupCoordinator, vnode_id),
-      ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
-      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end
-    ]
-
+    opts = group_coordinator_opts(CoordinatorRouter.coordinator_name(Malachi.LogGroupCoordinator, vnode_id))
     %{id: Malachi.LogGroupCoordinator, start: {GroupCoordinator, :start_link, [opts]}}
   end
 

@@ -59,7 +59,10 @@ defmodule Malachi.Wire do
       one record, so `max_bytes` is a soft limit; both are capped by the server. The server sends its pages
       with codec `none`, so a reader must accept it.
     * **Groups** live beside the data path, not in it: `join_group` (32) and `group_heartbeat` (33) answer
-      a member's assignment and generation, `commit_offsets` (34) checkpoints its positions.
+      a member's assignment, generation and session, a heartbeat whatever generation it names, so a member
+      that missed a rebalance learns it there; `commit_offsets` (34) checkpoints its positions, for ranges
+      the member holds and at a generation no older than the one each was handed to it at, and refused by
+      the control plane below a generation the range was already committed at through this key.
 
   A server push reuses the response envelope with the correlation id of the request that opened the
   stream, as a subscribe push always has; its payload starts with a kind byte (`append_ack`, `moved`,

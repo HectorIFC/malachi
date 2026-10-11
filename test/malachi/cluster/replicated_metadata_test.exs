@@ -106,6 +106,27 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
     assert %{state: :sealed} = Map.fetch!(cache.segments, segment)
   end
 
+  test "a group member's commit the log refused stays out of a cache that would have taken it" do
+    # The cache lags the log: the range's next owner committed at a later generation through another
+    # node. The log refuses the earlier owner's commit, and the lagging cache, whose fence has not seen the
+    # later one, must not take it either, or a reader starting from the checkpoint here would start at a
+    # position the group never committed.
+    replicated = start()
+    {{:ok, root}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
+    stale = ReplicatedMetadata.metadata(replicated)
+    {:ok, replicated} = ReplicatedMetadata.command(replicated, {:commit_offset, "g", "events", %{root => {0, 60}}, 9})
+
+    assert {cache, {:error, :stale_generation}} =
+             ReplicatedMetadata.apply_command(
+               replicated.server_id,
+               stale,
+               {:commit_offset, "g", "events", %{root => {0, 100}}, 5}
+             )
+
+    assert cache == stale
+    assert Malachi.Metadata.committed_offsets(cache, "g", "events") == %{}
+  end
+
   test "the cache equals the replicated state (refresh is a no-op for the sole writer)" do
     replicated = start()
     {{:ok, root_id}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
@@ -157,6 +178,19 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
 
     assert result == {cache, {:error, :timeout}}
     assert elapsed_us < 3_000_000, "waited #{div(elapsed_us, 1000)} ms"
+  end
+
+  test "a group's commands wait at most 1.5 s, inside the coordinator's 2 s, on a vnode that cannot commit" do
+    silent = :"rm_mute_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = SilentRaMember.start_link(silent)
+    on_exit(fn -> SilentRaMember.stop(silent) end)
+    cache = Metadata.new()
+
+    for command <- [{:open_group, "g", "t"}, {:commit_offset, "g", "t", %{}, 1}] do
+      {elapsed_us, result} = :timer.tc(fn -> ReplicatedMetadata.apply_command({silent, node()}, cache, command) end)
+      assert result == {cache, {:error, :timeout}}, inspect(command)
+      assert elapsed_us < 2_000_000, "#{inspect(command)} waited #{div(elapsed_us, 1000)} ms"
+    end
   end
 
   test "the 2 s are a deadline for the whole bind, not for each hop of a redirect" do

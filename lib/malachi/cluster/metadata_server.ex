@@ -67,11 +67,15 @@ defmodule Malachi.Cluster.MetadataServer do
 
   `timeout` bounds the wait and defaults to ra's 5s. The reconcile path passes a short one, because a
   vnode that does not answer must cost milliseconds there, not five seconds.
+
+  The state comes from the leader, which during a rolling upgrade may run an older build whose state
+  lacks fields this one reads: `query_fun` sees it with every field (`Malachi.Metadata.normalize/1`), so
+  a vnode split or a cache refresh against an older leader reads them as empty.
   """
   @spec query(server_id(), (Metadata.t() -> result), timeout()) :: {:ok, result} | {:error, term()}
         when result: term()
   def query(server_id, query_fun, timeout \\ @default_timeout) do
-    with {:ok, metadata} <- RaCluster.query(server_id, timeout), do: {:ok, query_fun.(metadata)}
+    with {:ok, metadata} <- RaCluster.query(server_id, timeout), do: {:ok, query_fun.(Metadata.normalize(metadata))}
   end
 
   @doc """

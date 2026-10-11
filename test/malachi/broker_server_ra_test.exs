@@ -14,6 +14,7 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
@@ -37,6 +38,8 @@ defmodule Malachi.BrokerServerRaTest do
   test "metadata mutations are committed to the Raft cluster, and the cache matches it" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
+    router_topology = :persistent_term.get({CoordinatorRouter, :topology}, nil)
+    on_exit(fn -> :persistent_term.put({CoordinatorRouter, :topology}, router_topology) end)
 
     brokers = for _ <- 1..3, do: start_replication()
 
@@ -59,6 +62,9 @@ defmodule Malachi.BrokerServerRaTest do
 
     # and the broker's local cache is exactly the replicated state (read-your-writes)
     assert BrokerServer.metadata(control) == replicated
+
+    # and consumer-group coordination routes to the leader of the group the broker joined
+    assert CoordinatorRouter.topology() == %{leader_of: {cluster, node()}}
 
     :ok = BrokerServer.stop(control)
   end

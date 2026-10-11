@@ -108,8 +108,18 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.consume_ack_key() ->
         consume_ack(correlation_id, Wire.decode_consume_ack_req(payload), streams, socket, transport)
 
-      api_key == Wire.fetch_range_key() and ClusterFlagsCache.enabled?(Routing.flag()) ->
-        fetch_range_async(correlation_id, payload, session, streams, socket, transport)
+      waits_beside?(api_key) ->
+        beside(api_key, correlation_id, payload, session, streams, socket, transport)
+
+      # a leave waits for the member's joins and commits sent before it (see `beside/7`)
+      api_key == Wire.leave_group_key() ->
+        request = Wire.decode_leave_group_req(payload)
+
+        ConnectionStreams.run_in_order(
+          streams,
+          fn -> leave_answer(request, correlation_id, session) end,
+          Wire.encode_error(correlation_id, :internal_error)
+        )
 
       api_key == Wire.close_stream_key() ->
         stream_id = Wire.decode_close_stream_req(payload)
@@ -253,10 +263,12 @@ defmodule Malachi.TCPProtocol do
   @doc """
   Processes one client frame while the connection is in streaming mode. The only inbound frame is a
   `stream_ack` (applied for its window credit + durable commit); any other frame gets an error response
-  and the stream continues. Returns `:ok`. A malformed frame is answered, not fatal: the stream ends
-  only when the socket closes (the broker then drops the subscriber via the process `:DOWN`).
+  and the stream continues. A malformed frame is answered, not fatal. Returns `:ok`, or `{:close,
+  :not_owner}` for a member's ack its coordinator could not answer: the stream ends, the connection closes
+  without a response (an ack never gets one), and the broker drops the subscriber via the process
+  `:DOWN`.
   """
-  @spec process_stream_frame(term(), binary(), atom()) :: :ok
+  @spec process_stream_frame(term(), binary(), atom()) :: :ok | {:close, :not_owner}
   def process_stream_frame(socket, frame_body, transport) do
     {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
 
@@ -266,12 +278,11 @@ defmodule Malachi.TCPProtocol do
       # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
       # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
       if member != nil and group != nil do
-        LogApi.stream_ack_member(broker_for(topic), coordinator_for(topic), topic, group, member, cursor, count)
+        member_ack({topic, group, member, cursor, count})
       else
         LogApi.stream_ack(broker_for(topic), topic, group, cursor, count)
+        :ok
       end
-
-      :ok
     else
       transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
       :ok
@@ -280,6 +291,21 @@ defmodule Malachi.TCPProtocol do
     _malformed ->
       transport.send(socket, Wire.encode_error(0, :malformed_request))
       :ok
+  end
+
+  # A member's read ack goes through its coordinator before it returns the stream's credit. A coordinator
+  # that cannot answer (gone, or no longer the topic's) would leave the credit unreturned and the stream
+  # stalled with nothing to tell the client, so the stream ends instead. An ack never gets a response
+  # (`Malachi.Wire`), so the connection just closes, as it did when the coordinator's exit took it down:
+  # the client subscribes again, where the coordinator is, from the group's checkpoint.
+  defp member_ack({topic, group, member, cursor, count}) do
+    case LogApi.stream_ack_member(broker_for(topic), coordinator_for(topic), topic, group, member, cursor, count) do
+      {:error, :not_owner} ->
+        {:close, :not_owner}
+
+      _acked_or_refused ->
+        :ok
+    end
   end
 
   # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
@@ -346,6 +372,9 @@ defmodule Malachi.TCPProtocol do
 
       api_key == Wire.fetch_range_key() ->
         fetch_range(correlation_id, payload, session)
+
+      group_key?(api_key) ->
+        group_frame(api_key, correlation_id, payload, session)
 
       # An append, read ack or close outside a connection that holds streams names a stream this connection
       # never opened.
@@ -437,8 +466,7 @@ defmodule Malachi.TCPProtocol do
   defp fetch_range(correlation_id, payload, session) do
     case fetch_request(payload, session) do
       {:ok, fetch} ->
-        reply = BrokerServer.fetch_range(fetch.broker, fetch.range_id, fetch.start, fetch.wait_ms)
-        fetch_answer(correlation_id, fetch, reply)
+        fetch_answer(correlation_id, fetch, ask_fetch(fetch))
 
       {:error, reason} ->
         Wire.encode_error(correlation_id, normalize(reason))
@@ -479,20 +507,159 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  # A `fetch_range` on a connection that holds streams: asked of the broker without waiting, so its wait does
-  # not hold the connection's streams back, and answered when the broker replies
-  # (`Malachi.ConnectionStreams.fetch/4`).
+  # The keys whose answer waits on another process, run beside a connection that holds streams so the wait
+  # holds none of them back (`Malachi.ConnectionStreams.run/3`): a `fetch_range` waiting for records, and the
+  # group keys, which ask a coordinator that may be on another node and, for a commit, the control plane
+  # after it. Only while they are served: otherwise they answer `unsupported` in line.
+  defp waits_beside?(api_key),
+    do: (api_key == Wire.fetch_range_key() or group_key?(api_key)) and ClusterFlagsCache.enabled?(Routing.flag())
+
+  # A group request is decoded here, where a malformed one is answered `malformed_request` as on any
+  # connection; only the asking runs beside it. Joins and commits run in the order they came, with any
+  # `leave_group`, as each changes the member's standing or the checkpoint it moves: a leave sent after a
+  # commit must not overtake it, nor a join overtake the leave. A heartbeat changes neither and runs at once.
+  defp beside(api_key, correlation_id, payload, session, streams, socket, transport) do
+    if api_key == Wire.fetch_range_key() do
+      fetch_range_async(correlation_id, payload, session, streams, socket, transport)
+    else
+      request = group_request(api_key, payload)
+      job = fn -> group_answer(request, correlation_id, session) end
+      fallback = Wire.encode_error(correlation_id, :internal_error)
+
+      # a join still waiting when the connection closes is not made: nobody would heartbeat the member
+      case elem(request, 0) do
+        :join -> ConnectionStreams.run_in_order(streams, job, fallback, on_close: :drop)
+        :commit -> ConnectionStreams.run_in_order(streams, job, fallback)
+        :heartbeat -> ConnectionStreams.run(streams, job, fallback)
+      end
+    end
+  end
+
+  # The broker's answer to a `fetch_range`, waiting for records up to the request's wait. A broker that goes
+  # down meanwhile, or does not answer within the wait and its margin, is `broker_down`, not an exit that
+  # takes the connection with it.
+  defp ask_fetch(fetch) do
+    BrokerServer.fetch_range(fetch.broker, fetch.range_id, fetch.start, fetch.wait_ms)
+  catch
+    :exit, _reason -> {:error, :broker_down}
+  end
+
+  # A `fetch_range` on a connection that holds streams: the request is checked here, and its wait runs
+  # beside the connection (`Malachi.ConnectionStreams.run/3`), so it does not hold the streams back.
   defp fetch_range_async(correlation_id, payload, session, streams, socket, transport) do
     case fetch_request(payload, session) do
       {:ok, fetch} ->
-        ConnectionStreams.fetch(streams, fetch.broker, {:fetch_range, fetch.range_id, fetch.start, fetch.wait_ms}, fn
-          reply -> fetch_answer(correlation_id, fetch, reply)
-        end)
+        ConnectionStreams.run(
+          streams,
+          fn -> fetch_answer(correlation_id, fetch, ask_fetch(fetch)) end,
+          Wire.encode_error(correlation_id, :internal_error)
+        )
 
       {:error, reason} ->
         transport.send(socket, Wire.encode_error(correlation_id, normalize(reason)))
         streams
     end
+  end
+
+  defp group_key?(api_key), do: api_key in Wire.join_group_key()..Wire.commit_offsets_key()
+
+  defp group_frame(api_key, correlation_id, payload, session),
+    do: api_key |> group_request(payload) |> group_answer(correlation_id, session)
+
+  defp group_request(api_key, payload) do
+    cond do
+      api_key == Wire.join_group_key() -> {:join, Wire.decode_join_group_req(payload)}
+      api_key == Wire.group_heartbeat_key() -> {:heartbeat, Wire.decode_group_heartbeat_req(payload)}
+      true -> {:commit, Wire.decode_commit_offsets_req(payload)}
+    end
+  end
+
+  defp group_answer({:join, req}, correlation_id, session),
+    do: group_assignment(correlation_id, req, session, &GroupCoordinator.join_group/4)
+
+  defp group_answer({:heartbeat, req}, correlation_id, session),
+    do: group_assignment(correlation_id, req, session, &GroupCoordinator.heartbeat_group/4)
+
+  defp group_answer({:commit, req}, correlation_id, session), do: commit_offsets(correlation_id, req, session)
+
+  # A group member's assignment (`join_group` or `group_heartbeat`), from the topic's group coordinator,
+  # which lives beside the data path (`Malachi.Consumer.GroupCoordinator`, reached from any node through
+  # `Malachi.Consumer.CoordinatorRouter`): the generation, the session to heartbeat within and the ranges, as
+  # their sequence numbers. A heartbeat's generation is not checked: it is answered with the current one, so
+  # a member that missed a rebalance learns it here.
+  defp group_assignment(correlation_id, req, session, ask) do
+    with :ok <- group_allowed(session, req.topic),
+         {:ok, assignment} <-
+           ask_coordinator(fn -> ask.(coordinator_for(req.topic), req.group, req.topic, req.member) end) do
+      resp = %{assignment | ranges: Enum.map(assignment.ranges, fn {_topic, seq} -> seq end)}
+      Wire.encode_ok(correlation_id, Wire.encode_assignment_resp(resp))
+    else
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # A member's checkpoint of its ranges' positions (`commit_offsets`). The coordinator first checks that
+  # every range is the member's and was handed to it at or before the generation it commits at, then the
+  # positions go to the control plane carrying that generation, which refuses them if a range was already
+  # committed at a higher one: a rebalance that lands between the two cannot let an earlier owner's commit
+  # overwrite a later owner's. A control plane that does not answer in time is `timeout`, which the member
+  # may retry, as the commit may or may not have been applied.
+  defp commit_offsets(correlation_id, req, session) do
+    offsets = Map.new(req.positions, fn %{range: range, position: position} -> {{req.topic, range}, position} end)
+
+    with :ok <- group_allowed(session, req.topic),
+         :ok <-
+           ask_coordinator(fn ->
+             GroupCoordinator.validate_commit(
+               coordinator_for(req.topic),
+               req.group,
+               req.topic,
+               req.member,
+               req.generation,
+               Map.keys(offsets)
+             )
+           end),
+         :ok <- commit_fenced(req, offsets) do
+      Wire.encode_ok(correlation_id, <<>>)
+    else
+      # the control plane found the coordinator that handed this generation out superseded by another
+      # that opened the group since: it opens the group again, and the member, told its generation is
+      # stale, learns the new one on its next heartbeat
+      {:error, :stale_epoch} ->
+        GroupCoordinator.drop_epoch(coordinator_for(req.topic), req.group, req.topic, Bitwise.bsr(req.generation, 32))
+        Wire.encode_error(correlation_id, :stale_generation)
+
+      {:error, reason} ->
+        Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  defp commit_fenced(req, offsets) do
+    Malachi.Application.group_command_reply(
+      BrokerServer.commit_offset(broker_for(req.topic), req.group, req.topic, offsets, req.generation)
+    )
+  catch
+    :exit, _reason -> {:error, :timeout}
+  end
+
+  defp group_allowed(session, topic),
+    do: if(topic_allowed?(session, :consume, topic), do: :ok, else: {:error, :permission_denied})
+
+  # A consumer-group member gets a stream scoped to its ranges (opaque); otherwise the stream is the whole
+  # group's.
+  defp subscribe_as(topic, group, member, window, max) when member != nil and group != nil,
+    do: LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
+
+  defp subscribe_as(topic, group, _member, window, max),
+    do: LogApi.subscribe(broker_for(topic), topic, group, window, max)
+
+  # A coordinator reached by name on this node or another (`CoordinatorRouter.resolve/2`) can be gone for a
+  # moment while a vnode's leadership moves: that is `:not_owner`, which the client answers by asking again,
+  # not an exit that takes the connection with it.
+  defp ask_coordinator(call) do
+    call.()
+  catch
+    :exit, _reason -> {:error, :not_owner}
   end
 
   # What reading a range asks of the session and of the request before anything else: the consume
@@ -557,13 +724,7 @@ defmodule Malachi.TCPProtocol do
         window = stream_window(window_raw)
         max = fetch_max(max_raw)
 
-        # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
-        result =
-          if member != nil and group != nil do
-            LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
-          else
-            LogApi.subscribe(broker_for(topic), topic, group, window, max)
-          end
+        result = subscribe_as(topic, group, member, window, max)
 
         # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
         # mode; the client re-resolves and re-subscribes against the new owner.
@@ -645,12 +806,15 @@ defmodule Malachi.TCPProtocol do
   end
 
   # Removes a member from its consumer group (fast rebalance on a clean shutdown). Acks with an empty ok.
-  defp leave_group(correlation_id, payload, session) do
-    {topic, group, member} = Wire.decode_leave_group_req(payload)
+  defp leave_group(correlation_id, payload, session),
+    do: payload |> Wire.decode_leave_group_req() |> leave_answer(correlation_id, session)
 
+  defp leave_answer({topic, group, member}, correlation_id, session) do
     with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      _ = GroupCoordinator.leave(coordinator_for(topic), group, topic, member)
-      Wire.encode_ok(correlation_id, <<>>)
+      case ask_coordinator(fn -> GroupCoordinator.leave(coordinator_for(topic), group, topic, member) end) do
+        :ok -> Wire.encode_ok(correlation_id, <<>>)
+        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+      end
     end)
   end
 

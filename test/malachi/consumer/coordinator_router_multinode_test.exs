@@ -141,4 +141,52 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     # resolve on the new leader now returns the bare per-vnode name (local), members reconverge here
     assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
   end
+
+  test "a cluster whose metadata is one Raft group coordinates every group on its leader, under one name" do
+    {_pa, node_a} = start_peer()
+    {_pb, node_b} = start_peer()
+    {_pc, node_c} = start_peer()
+    nodes = [node_a, node_b, node_c]
+    cluster = :"meta_#{System.unique_integer([:positive])}"
+
+    {:ok, _} = :erpc.call(node_a, MetadataServer, :start, [cluster, [node_a]])
+    assert Rebalance.ra_add_member(cluster, node_b, [node_a]) == :ok
+    assert Rebalance.ra_add_member(cluster, node_c, [node_a, node_b]) == :ok
+    {:ok, leader} = leader_via(cluster, node_a)
+
+    # what each broker publishes when it joins the group, with its own member as the server id
+    for n <- nodes, do: :ok = :erpc.call(n, CoordinatorRouter, :put_leader, [{cluster, n}])
+    # every node runs the node-wide coordinator; only the leader's may coordinate
+    for n <- nodes, do: start_coordinator_on(n, @coord)
+
+    # each node resolves the group to the leader's node-wide coordinator, once its own record of the
+    # leader (ra's local leaderboard, which follows the election) has caught up
+    for n <- nodes do
+      expected = if n == leader, do: @coord, else: {@coord, leader}
+
+      assert {:ok, ^expected} =
+               retry(fn ->
+                 case :erpc.call(n, CoordinatorRouter, :resolve, [@coord, "t"]) do
+                   ^expected -> {:ok, expected}
+                   other -> other
+                 end
+               end)
+
+      assert :erpc.call(n, CoordinatorRouter, :owns?, ["t"]) == (n == leader)
+    end
+
+    # two members joining through different nodes reach one coordinator, and share the ranges out
+    [via_a, via_b] = Enum.take(nodes, 2)
+    ref_a = :erpc.call(via_a, CoordinatorRouter, :resolve, [@coord, "t"])
+    ref_b = :erpc.call(via_b, CoordinatorRouter, :resolve, [@coord, "t"])
+    {:ok, _, _} = :erpc.call(via_a, GroupCoordinator, :join, [ref_a, "g", "t", :m1])
+    {:ok, _, _} = :erpc.call(via_b, GroupCoordinator, :join, [ref_b, "g", "t", :m2])
+    {:ok, _, r1} = :erpc.call(via_a, GroupCoordinator, :assignment, [ref_a, "g", "t", :m1])
+    {:ok, _, r2} = :erpc.call(via_b, GroupCoordinator, :assignment, [ref_b, "g", "t", :m2])
+    assert Enum.sort(r1 ++ r2) == [:r0, :r1]
+
+    # a follower's own coordinator refuses, rather than coordinate the group a second time
+    follower = hd(nodes -- [leader])
+    assert GroupCoordinator.join({@coord, follower}, "g", "t", :mx) == {:error, :not_owner}
+  end
 end

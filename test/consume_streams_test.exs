@@ -188,6 +188,26 @@ defmodule Malachi.ConsumeStreamsTest do
   end
 
   describe "fetch_range" do
+    test "a broker that does not answer in time is broker_down, on either kind of connection, which lives on",
+         ctx do
+      # the stream places the range's segment, which moves the routes on: read them after
+      {:ok, _stream} = open(ctx.producer, ctx.topic)
+      version = routes(ctx.consumer, ctx.topic).version
+      broker = Process.whereis(DataPlaneRouter.shard_for(ctx.topic))
+      :ok = :sys.suspend(broker)
+      on_exit(fn -> if Process.alive?(broker), do: :sys.resume(broker) end)
+
+      # a plain connection asks in line, one that holds streams beside itself; the call gives up after the
+      # wait and its 5 s margin
+      for socket <- [ctx.consumer, ctx.producer] do
+        assert fetch_range(socket, ctx.topic, routes_version: version, wait_ms: 10, recv_timeout: 9_000) ==
+                 {:error, "broker_down"}
+      end
+
+      :ok = :sys.resume(broker)
+      assert {:ok, _page} = fetch_range(ctx.consumer, ctx.topic, routes_version: version)
+    end
+
     test "answers one page at once", ctx do
       produce(ctx.producer, ctx.topic, ["f0", "f1", "f2"])
 
