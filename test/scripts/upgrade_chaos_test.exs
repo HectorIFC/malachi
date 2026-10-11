@@ -15,6 +15,44 @@ defmodule UpgradeChaosTest do
 
   # A test run by a git hook inherits these, and any one of them would point git at the host repository
   # instead of the throwaway one (the same set test/scripts/worktree_env_test.exs clears).
+  # A tar that stops reading early, as bsdtar does at the end-of-archive marker, every time it extracts from
+  # stdin: short groups (-xf -, -x -f -, -xC dir), an attached operand (-xfFILE), long options (--extract,
+  # --get, --file -, --file=-) and the dashless old style (tar xf -) are all told apart from extracting a
+  # named archive, which, like anything else, goes to the real tar (REAL_TAR, filled in by the test).
+  @early_tar ~S"""
+  #!/usr/bin/env bash
+  extract=0; archive=""; want_archive=0; first=1
+  for arg in "$@"; do
+    if [ "$want_archive" = 1 ]; then archive="$arg"; want_archive=0; first=0; continue; fi
+    case "$arg" in
+      --extract|--get) extract=1 ;;
+      --file=*) archive="${arg#--file=}" ;;
+      --file) want_archive=1 ;;
+      --*) ;;
+      -*)
+        group="${arg#-}"
+        case "$group" in *x*) extract=1 ;; esac
+        case "$group" in
+          *f) want_archive=1 ;;
+          *f*) archive="${group#*f}" ;;
+        esac
+        ;;
+      *)
+        if [ "$first" = 1 ]; then
+          case "$arg" in *x*) extract=1 ;; esac
+          case "$arg" in *f*) want_archive=1 ;; esac
+        fi
+        ;;
+    esac
+    first=0
+  done
+  if [ "$extract" = 1 ] && { [ -z "$archive" ] || [ "$archive" = "-" ]; }; then
+    head -c 512 > /dev/null
+    exit 0
+  fi
+  exec "REAL_TAR" "$@"
+  """
+
   @no_git_env [{"GIT_DIR", nil}, {"GIT_WORK_TREE", nil}, {"GIT_COMMON_DIR", nil}, {"GIT_INDEX_FILE", nil}]
 
   setup_all do
@@ -128,33 +166,10 @@ defmodule UpgradeChaosTest do
     test "copies both trees through files, so a tar that stops reading at the end marker cannot fail it", ctx do
       # bsdtar exits as soon as it reads the end-of-archive marker; a writer (`git archive`, or a creating tar)
       # still writing its padding into a pipe then dies of SIGPIPE. This tar, extracting from stdin however it
-      # is spelled (`-x` with no `-f`, or `-f -`), reads one block and leaves, every time; anything else is
-      # the real tar.
+      # is spelled, reads one block and leaves, every time; anything else is the real tar (@early_tar).
       real_tar = System.find_executable("tar")
 
-      write!(
-        ctx.stubs,
-        "tar",
-        ~S"""
-        #!/usr/bin/env bash
-        extract=0; archive=""; want_archive=0
-        for arg in "$@"; do
-          if [ "$want_archive" = 1 ]; then archive="$arg"; want_archive=0; continue; fi
-          case "$arg" in
-            --*) ;;
-            -*x*f) extract=1; want_archive=1 ;;
-            -*f) want_archive=1 ;;
-            -*x*) extract=1 ;;
-          esac
-        done
-        if [ "$extract" = 1 ] && { [ -z "$archive" ] || [ "$archive" = "-" ]; }; then
-          head -c 512 > /dev/null
-          exit 0
-        fi
-        exec REAL_TAR "$@"
-        """
-        |> String.replace("REAL_TAR", real_tar)
-      )
+      write!(ctx.stubs, "tar", String.replace(@early_tar, "REAL_TAR", real_tar))
 
       File.chmod!(Path.join(ctx.stubs, "tar"), 0o755)
       assert {output, 0} = run_drill(ctx)
