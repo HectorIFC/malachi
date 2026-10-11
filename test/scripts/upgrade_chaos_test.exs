@@ -125,6 +125,42 @@ defmodule UpgradeChaosTest do
       assert acked == p1 + p2 + p3 and p1 > 0 and p2 > 0 and p3 > 0
     end
 
+    test "copies both trees through files, so a tar that stops reading at the end marker cannot fail it", ctx do
+      # bsdtar exits as soon as it reads the end-of-archive marker; a writer (`git archive`, or a creating tar)
+      # still writing its padding into a pipe then dies of SIGPIPE. This tar, extracting from stdin however it
+      # is spelled (`-x` with no `-f`, or `-f -`), reads one block and leaves, every time; anything else is
+      # the real tar.
+      real_tar = System.find_executable("tar")
+
+      write!(
+        ctx.stubs,
+        "tar",
+        ~S"""
+        #!/usr/bin/env bash
+        extract=0; archive=""; want_archive=0
+        for arg in "$@"; do
+          if [ "$want_archive" = 1 ]; then archive="$arg"; want_archive=0; continue; fi
+          case "$arg" in
+            --*) ;;
+            -*x*f) extract=1; want_archive=1 ;;
+            -*f) want_archive=1 ;;
+            -*x*) extract=1 ;;
+          esac
+        done
+        if [ "$extract" = 1 ] && { [ -z "$archive" ] || [ "$archive" = "-" ]; }; then
+          head -c 512 > /dev/null
+          exit 0
+        fi
+        exec REAL_TAR "$@"
+        """
+        |> String.replace("REAL_TAR", real_tar)
+      )
+
+      File.chmod!(Path.join(ctx.stubs, "tar"), 0o755)
+      assert {output, 0} = run_drill(ctx)
+      refute output =~ "could not export"
+    end
+
     test "builds OLD from the release's own tree and NEW from the working tree with the canary", ctx do
       File.write!(Path.join(ctx.root, "lib/canary.txt"), "released\n")
       assert {_output, 0} = run_drill(ctx)

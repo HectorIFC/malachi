@@ -146,7 +146,11 @@ prepare_contexts() {
   NEW_CTX="$WORK/ctx-new"
   mkdir -p "$OLD_CTX" "$NEW_CTX"
 
-  git archive "$OLD_SHA" | tar -x -C "$OLD_CTX" || usage_error "could not export $OLD_REF"
+  # Through a file, not a pipe: bsdtar (macOS) stops reading at the end-of-archive marker, and `git archive`
+  # may still have its last padding to write, which then dies of SIGPIPE (exit 141, nothing on stderr) and,
+  # under pipefail, failed the export now and then on a loaded host.
+  git archive -o "$WORK/old.tar" "$OLD_SHA" && tar -x -f "$WORK/old.tar" -C "$OLD_CTX" ||
+    usage_error "could not export $OLD_REF"
   OLD_VERSION=$(grep '@version' "$OLD_CTX/mix.exs" | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
   OLD_PIN=$(sed -n 's/^  @code_version \([0-9][0-9]*\)$/\1/p' "$OLD_CTX/lib/malachi/cluster/machine_version.ex")
   [ -n "$OLD_PIN" ] || usage_error "cannot read the machine version of $OLD_REF"
@@ -161,9 +165,12 @@ prepare_contexts() {
   fi
 
   # The working tree as it is, uncommitted changes included, minus what git ignores and what was deleted.
+  # Through a file for the same reason as OLD's export: an extracting tar that stops at the end marker
+  # would leave the creating one to die of SIGPIPE writing its padding.
   git ls-files -z --cached --others --exclude-standard |
     while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done |
-    tar --null -T - -cf - | tar -xf - -C "$NEW_CTX" || abort_run "could not copy the working tree"
+    tar --null -T - -cf "$WORK/new.tar" && tar -xf "$WORK/new.tar" -C "$NEW_CTX" ||
+    abort_run "could not copy the working tree"
 
   apply_to "$NEW_CTX" "$UPGRADE_CANARY_PATCH" "upgrade canary" "NEW"
   # The machine version the canary command is introduced at, which the control plane reaches once the pin
