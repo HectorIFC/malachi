@@ -149,15 +149,25 @@ defmodule Malachi.LogApi do
 
   @doc """
   Durably commits a consumer `group`'s position for `topic` from `cursor` (a token from `fetch`/
-  `fetch_group`). Returns `:ok`, or `{:error, :invalid_cursor}` for a bad token.
+  `fetch_group`). Returns `:ok`, `{:error, :invalid_cursor}` for a bad token, or `{:error, :timeout}` when
+  the broker does not answer in time (its control plane electing or out of quorum): the commit may or may
+  not have been applied, and the client may retry it.
   """
   @spec commit(GenServer.server(), Metadata.topic_name(), Metadata.group(), cursor()) ::
           :ok | {:error, term()}
   def commit(server, topic, group, cursor) do
     case decode_cursor(cursor) do
-      {:ok, positions} -> BrokerServer.commit_offset(server, group, topic, positions)
+      {:ok, positions} -> commit_positions(server, group, topic, positions)
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # A broker that does not answer in time is an answer the caller can send on, not an exit that takes the
+  # caller (a client's connection) with it.
+  defp commit_positions(server, group, topic, positions) do
+    BrokerServer.commit_offset(server, group, topic, positions)
+  catch
+    :exit, _reason -> {:error, :timeout}
   end
 
   @doc """

@@ -187,6 +187,36 @@ defmodule Malachi.LogProtocolTest do
     end)
   end
 
+  test "a commit the broker does not answer in time is a timeout, and the connection lives on" do
+    with_session("app", "app123", fn socket ->
+      topic = "logproto_commit_timeout_#{System.unique_integer([:positive])}"
+      assert {code, _} = create_topic(socket, topic)
+      assert ok?(code)
+      assert {code, _} = produce(socket, topic, ["a"])
+      assert ok?(code)
+      assert {code, payload} = fetch(socket, topic, group: "g1")
+      assert ok?(code)
+      {[_record], cursor} = Wire.decode_fetch_resp(payload)
+
+      broker = Process.whereis(Malachi.DataPlaneRouter.shard_for(topic))
+      :ok = :sys.suspend(broker)
+      on_exit(fn -> if Process.alive?(broker), do: :sys.resume(broker) end)
+
+      # the call gives up after its 5 s default, so the answer is read with more room than the helper's
+      :ok =
+        :gen_tcp.send(socket, Wire.encode_request(Wire.commit_key(), 41, Wire.encode_commit_req(topic, "g1", cursor)))
+
+      {:ok, body} = TCPHelper.recv_frame(socket, timeout: 8_000)
+      :ok = :sys.resume(broker)
+      assert {41, 1, reason} = Wire.decode_response(body)
+      assert Wire.decode_error_reason(reason) == "timeout"
+
+      # the connection still answers
+      assert {code, _payload} = fetch(socket, topic, group: "g1")
+      assert ok?(code)
+    end)
+  end
+
   test "fetch rejects a malformed opaque cursor instead of silently restarting" do
     with_session("app", "app123", fn socket ->
       topic = "logproto_badcur_#{System.unique_integer([:positive])}"
