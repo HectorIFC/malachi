@@ -78,55 +78,6 @@ defmodule Malachi.ConnectionRegistryTest do
     end
   end
 
-  describe "set_connection_type/3" do
-    test "updates connection type to producer", %{socket: socket} do
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-
-      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
-    end
-
-    test "updates connection type to consumer", %{socket: socket} do
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-
-      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
-    end
-
-    test "returns error for unregistered pid" do
-      fake_pid = spawn(fn -> :ok end)
-      :timer.sleep(50)
-
-      assert {:error, :not_found} = Malachi.ConnectionRegistry.set_connection_type(fake_pid, :producer)
-    end
-
-    test "updates type multiple times", %{socket: socket} do
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-
-      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "queue1")
-      assert :ok = Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "queue2")
-    end
-  end
-
   describe "unregister/1" do
     test "unregisters a connection", %{socket: socket} do
       pid =
@@ -156,171 +107,6 @@ defmodule Malachi.ConnectionRegistryTest do
       count = Malachi.ConnectionRegistry.count()
       assert is_integer(count)
       assert count >= 0
-    end
-  end
-
-  describe "list_producers_by_queue/1" do
-    test "lists producers for specific queue", %{socket: socket} do
-      queue_name = "producer_queue_#{:rand.uniform(10000)}"
-
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, queue_name)
-
-      producers = Malachi.ConnectionRegistry.list_producers_by_queue(queue_name)
-
-      assert is_list(producers)
-      assert producers != []
-
-      if producers != [] do
-        producer = hd(producers)
-        assert Map.has_key?(producer, :pid)
-        assert Map.has_key?(producer, :ip)
-        assert Map.has_key?(producer, :connected_at)
-      end
-    end
-
-    test "returns empty list for queue with no producers" do
-      producers = Malachi.ConnectionRegistry.list_producers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
-      assert producers == []
-    end
-
-    test "does not include consumers", %{socket: _socket} do
-      queue_name = "mixed_queue_#{:rand.uniform(10000)}"
-
-      # Create two sockets
-      {:ok, listen_socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
-      {:ok, port} = :inet.port(listen_socket)
-
-      spawn(fn ->
-        case :gen_tcp.accept(listen_socket) do
-          {:ok, _s1} ->
-            case :gen_tcp.accept(listen_socket) do
-              {:ok, _s2} ->
-                receive do
-                  _ -> :ok
-                end
-
-              _ ->
-                :ok
-            end
-
-          _ ->
-            :ok
-        end
-      end)
-
-      {:ok, socket1} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
-      {:ok, socket2} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
-
-      producer_pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      consumer_pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(
-        producer_pid,
-        socket1,
-        :gen_tcp,
-        Malachi.IPAddress.from_socket(socket1, :gen_tcp)
-      )
-
-      Malachi.ConnectionRegistry.register(
-        consumer_pid,
-        socket2,
-        :gen_tcp,
-        Malachi.IPAddress.from_socket(socket2, :gen_tcp)
-      )
-
-      Malachi.ConnectionRegistry.set_connection_type(producer_pid, :producer, queue_name)
-      Malachi.ConnectionRegistry.set_connection_type(consumer_pid, :consumer, queue_name)
-
-      producers = Malachi.ConnectionRegistry.list_producers_by_queue(queue_name)
-
-      assert producers != []
-      assert Enum.all?(producers, fn p -> String.contains?(p.pid, inspect(producer_pid)) end)
-    end
-  end
-
-  describe "list_consumers_by_queue/1" do
-    test "lists consumers for specific queue", %{socket: socket} do
-      queue_name = "consumer_queue_#{:rand.uniform(10000)}"
-
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, queue_name)
-
-      consumers = Malachi.ConnectionRegistry.list_consumers_by_queue(queue_name)
-
-      assert is_list(consumers)
-      assert consumers != []
-
-      if consumers != [] do
-        consumer = hd(consumers)
-        assert Map.has_key?(consumer, :pid)
-        assert Map.has_key?(consumer, :ip)
-        assert Map.has_key?(consumer, :connected_at)
-      end
-    end
-
-    test "returns empty list for queue with no consumers" do
-      consumers = Malachi.ConnectionRegistry.list_consumers_by_queue("nonexistent_queue_#{:rand.uniform(10000)}")
-      assert consumers == []
-    end
-  end
-
-  describe "list_producers/0" do
-    test "lists all producers", %{socket: socket} do
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test_queue")
-
-      producers = Malachi.ConnectionRegistry.list_producers()
-      assert is_list(producers)
-    end
-  end
-
-  describe "list_consumers/0" do
-    test "lists all consumers", %{socket: socket} do
-      pid =
-        spawn(fn ->
-          receive do
-            _ -> :ok
-          end
-        end)
-
-      Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      Malachi.ConnectionRegistry.set_connection_type(pid, :consumer, "test_queue")
-
-      consumers = Malachi.ConnectionRegistry.list_consumers()
-      assert is_list(consumers)
     end
   end
 
@@ -361,12 +147,15 @@ defmodule Malachi.ConnectionRegistryTest do
       Malachi.ConnectionRegistry.register(pid1, socket1, :gen_tcp, Malachi.IPAddress.from_socket(socket1, :gen_tcp))
       Malachi.ConnectionRegistry.register(pid2, socket2, :gen_tcp, Malachi.IPAddress.from_socket(socket2, :gen_tcp))
 
+      watched = for pid <- [pid1, pid2], do: {pid, Process.monitor(pid)}
+
       result = Malachi.ConnectionRegistry.close_all()
       assert result == :ok
 
-      :timer.sleep(100)
-      count = Malachi.ConnectionRegistry.count()
-      assert count == 0
+      # each handler is stopped and each socket is closed, not just the table emptied
+      for {pid, ref} <- watched, do: assert_receive({:DOWN, ^ref, :process, ^pid, :shutdown}, 1_000)
+      for socket <- [socket1, socket2], do: assert({:error, _closed} = :gen_tcp.recv(socket, 0, 100))
+      assert Malachi.ConnectionRegistry.count() == 0
 
       :gen_tcp.close(listen_socket)
     end
@@ -390,7 +179,7 @@ defmodule Malachi.ConnectionRegistryTest do
       spawn(fn ->
         {:ok, client_socket} = :gen_tcp.accept(listen_socket)
         # Try to receive the shutdown message
-        case :gen_tcp.recv(client_socket, 0, 200) do
+        case :gen_tcp.recv(client_socket, 0, 2_000) do
           {:ok, msg} ->
             send(test_pid, {:received, msg})
 
@@ -411,18 +200,9 @@ defmodule Malachi.ConnectionRegistryTest do
       Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
       Malachi.ConnectionRegistry.close_all()
 
-      # The shutdown message should have been sent
-      receive do
-        {:received, msg} ->
-          assert String.contains?(msg, "shutdown")
-
-        :no_message ->
-          # Message might have been sent but not received in time, that's ok
-          :ok
-      after
-        500 ->
-          :ok
-      end
+      # the peer reads the shutdown notice before the socket closes
+      assert_receive {:received, msg}, 3_000
+      assert %{"shutdown" => true} = Jason.decode!(String.trim(msg))
 
       :gen_tcp.close(listen_socket)
     end
@@ -445,7 +225,7 @@ defmodule Malachi.ConnectionRegistryTest do
       pid = spawn(fn -> Process.sleep(:infinity) end)
 
       Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      assert [{^pid, _, _, _, _, _, _}] = :ets.lookup(:malachi_connections, pid)
+      assert [{^pid, _, _, _, _}] = :ets.lookup(:malachi_connections, pid)
 
       # Monitor the pid from the test too, so we can wait until it is actually dead before checking.
       ref = Process.monitor(pid)
@@ -488,15 +268,12 @@ defmodule Malachi.ConnectionRegistryTest do
         end)
 
       Malachi.ConnectionRegistry.register(pid, socket, :gen_tcp, Malachi.IPAddress.from_socket(socket, :gen_tcp))
-      Malachi.ConnectionRegistry.set_connection_type(pid, :producer, "test")
-
-      producers = Malachi.ConnectionRegistry.list_producers_by_queue("test")
 
       # Exact equality, not is_binary/1 plus "contains a dot": both of those passed under every one of
       # the three formatters this codebase used to carry, so they pinned nothing about the shape.
-      assert [producer] = producers
-      assert producer.ip == Malachi.IPAddress.from_socket(socket, :gen_tcp)
-      assert producer.ip == "127.0.0.1"
+      assert [{^pid, _socket, :gen_tcp, _connected_at, ip}] = :ets.lookup(:malachi_connections, pid)
+      assert ip == Malachi.IPAddress.from_socket(socket, :gen_tcp)
+      assert ip == "127.0.0.1"
 
       :gen_tcp.close(listen_socket)
     end
