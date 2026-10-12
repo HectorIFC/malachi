@@ -8,9 +8,15 @@ defmodule Malachi.Test.StreamStub do
   `open_stream` opens the next stream id, and every `append` is acknowledged unless `set_appends/2`
   says otherwise. `overrides`, given at start and changed with `set_override/3`, replace the answer to a
   key: `:close` (the connection), `:silent` (no answer), `{:error, reason}`, or for an append
-  `{:refuse_append, reason}` (an acknowledgement naming it as failed, counted by `refused/1`). Routes can
+  `{:refuse_append, reason}` (an acknowledgement naming it as failed, counted by `refused/1`), or for an
+  open_consume `{:push_on_open, values}` (a page of the ones at or past the position the open asks for, the
+  `n`th value at offset `n`, pushed right after the answer); `{:after, n, reply}` answers the first `n`
+  requests to the key as usual (`{:after, n, first, reply}`: with `first`) and every later one with `reply`,
+  and `{:delay, ms, reply}` answers with
+  `reply` after `ms` milliseconds. A `fetch_range` gets an empty page. Routes can
   also change from one read to the next (`set_routes_sequence/2`); an `open_stream` answers with the
-  version last read, by any connection (the stub keeps one for all), and `opened/1` counts the opens.
+  version last read, by any connection (the stub keeps one for all), `opened/1` counts the opens, and
+  `consumes/1` lists the open_consumes, as `{corr, start}`.
 
   The appends the stub took are kept, in arrival order, with their values (`appends/1`), and a test can
   write any frame to the connections that opened streams (`push/2`): a `moved` push, or the error frames
@@ -40,6 +46,10 @@ defmodule Malachi.Test.StreamStub do
           refused: 0,
           appends: :ack,
           next_stream: 1,
+          consumes: [],
+          fetched: 0,
+          advertised_port: nil,
+          other_brokers: [],
           taken: [],
           streamers: []
         }
@@ -89,6 +99,32 @@ defmodule Malachi.Test.StreamStub do
   @spec opened(t()) :: non_neg_integer()
   def opened(%__MODULE__{state: state}), do: Agent.get(state, &(&1.next_stream - 1))
 
+  @doc "Every open_consume so far, answered or refused, in arrival order: `{corr, start}`, as it asked where to read from."
+  @spec consumes(t()) :: [{non_neg_integer(), term()}]
+  def consumes(%__MODULE__{state: state}), do: state |> Agent.get(& &1.consumes) |> Enum.reverse()
+
+  @doc "How many fetch_ranges were answered with a page so far."
+  @spec fetched(t()) :: non_neg_integer()
+  def fetched(%__MODULE__{state: state}), do: Agent.get(state, & &1.fetched)
+
+  @doc """
+  The port `cluster_state` advertises the stub's broker at from now on (its own until then), so routes name
+  an address that may not be the stub's: one nobody listens on, say, while the stub keeps answering
+  metadata at the address it was bootstrapped from.
+  """
+  @spec set_advertised_port(t(), :inet.port_number()) :: :ok
+  def set_advertised_port(%__MODULE__{state: state}, port), do: Agent.update(state, &%{&1 | advertised_port: port})
+
+  @doc """
+  One more broker `cluster_state` lists from now on, `id` at `port`, leading nothing: with a cluster of more
+  than one, a client no longer takes the bootstrap address for a primary that advertises none.
+  """
+  @spec add_broker(t(), String.t(), :inet.port_number()) :: :ok
+  def add_broker(%__MODULE__{state: state}, id, port) do
+    broker = %{id: id, host: "127.0.0.1", port: port, status: :alive}
+    Agent.update(state, &%{&1 | other_brokers: [broker | &1.other_brokers]})
+  end
+
   @doc "Every append taken so far, in arrival order: `{stream_id, sequence, values}`."
   @spec appends(t()) :: [{pos_integer(), non_neg_integer(), [binary()]}]
   def appends(%__MODULE__{state: state}), do: state |> Agent.get(& &1.taken) |> Enum.reverse()
@@ -115,7 +151,9 @@ defmodule Malachi.Test.StreamStub do
   defp serve(stub, sock) do
     case :gen_tcp.recv(sock, 0) do
       {:ok, <<api_key::16, corr::32, payload::binary>>} ->
-        case Agent.get(stub.state, &Map.get(&1.overrides, api_key, :default)) do
+        if api_key == 29, do: took_consume(stub, corr, payload)
+
+        case override(stub, api_key) do
           :close ->
             :gen_tcp.close(sock)
 
@@ -124,6 +162,11 @@ defmodule Malachi.Test.StreamStub do
 
           {:error, reason} ->
             :gen_tcp.send(sock, error_body(corr, reason))
+            serve(stub, sock)
+
+          {:delay, ms, reply} ->
+            Process.sleep(ms)
+            answer(stub, sock, api_key, corr, payload, reply)
             serve(stub, sock)
 
           reply ->
@@ -139,9 +182,37 @@ defmodule Malachi.Test.StreamStub do
     :exit, _noproc -> :gen_tcp.close(sock)
   end
 
+  # The answer a request to `api_key` gets: its override, `:default` without one; `{:after, n, reply}`
+  # answers the first `n` requests to the key as usual and every later one with `reply`, and `{:after, n,
+  # first, reply}` the first `n` with `first`.
+  defp override(stub, api_key) do
+    Agent.get_and_update(stub.state, fn state ->
+      case Map.get(state.overrides, api_key, :default) do
+        {:after, 0, reply} ->
+          {reply, state}
+
+        {:after, n, reply} ->
+          {:default, after_one(state, api_key, n, :default, reply)}
+
+        {:after, 0, _first, reply} ->
+          {reply, state}
+
+        {:after, n, first, reply} ->
+          {first, after_one(state, api_key, n, first, reply)}
+
+        reply ->
+          {reply, state}
+      end
+    end)
+  end
+
+  defp after_one(state, api_key, n, first, reply),
+    do: %{state | overrides: Map.put(state.overrides, api_key, {:after, n - 1, first, reply})}
+
   defp answer(stub, sock, 24, corr, _payload, _reply) do
-    broker = %{id: "stub@127.0.0.1", host: "127.0.0.1", port: stub.port, status: :alive}
-    state = %{version: 1, streams_enabled: true, brokers: [broker], vnodes: [0]}
+    %{advertised_port: advertised, other_brokers: others} = Agent.get(stub.state, & &1)
+    broker = %{id: "stub@127.0.0.1", host: "127.0.0.1", port: advertised || stub.port, status: :alive}
+    state = %{version: 1, streams_enabled: true, brokers: [broker | others], vnodes: [0]}
     :gen_tcp.send(sock, ok_body(corr, Wire.encode_cluster_state_resp(state)))
   end
 
@@ -181,6 +252,46 @@ defmodule Malachi.Test.StreamStub do
     :gen_tcp.send(sock, ok_body(corr, Wire.encode_open_stream_resp(opened)))
   end
 
+  # An open_consume: the next stream id, read from where it asks; with `{:push_on_open, values}` given for
+  # key 29 (`values` at offsets 0, 1, ... of source 0), a page of those at or past that position follows the
+  # answer at once, as a broker with records to read pushes it, and none when it asks past them all.
+  defp answer(stub, sock, 29, corr, payload, reply) do
+    %{start: start} = Wire.decode_open_consume_req(payload)
+
+    id =
+      Agent.get_and_update(stub.state, fn s ->
+        {s.next_stream, %{s | next_stream: s.next_stream + 1, streamers: Enum.uniq([sock | s.streamers])}}
+      end)
+
+    :gen_tcp.send(sock, ok_body(corr, Wire.encode_open_consume_resp(%{stream_id: id, position: {0, 0}})))
+
+    with {:push_on_open, values} <- reply,
+         from = from_offset(start),
+         [_ | _] = left <- Enum.drop(values, from) do
+      batch =
+        Batch.encode(
+          Enum.with_index(left, fn value, i -> {{0, from + i}, Malachi.Log.Record.new(value), false} end),
+          :none,
+          :positioned
+        )
+
+      page = %{next: {0, length(values)}, skip: 0, backlog: 0, expired: 0, expired_exact: true, batch: batch}
+      :gen_tcp.send(sock, ok_body(corr, IO.iodata_to_binary(Wire.encode_push(:records, Map.put(page, :stream_id, id)))))
+    end
+  end
+
+  # A fetch_range: an empty page, ending where it asked from.
+  defp answer(stub, sock, 31, corr, payload, _reply) do
+    %{start: start} = Wire.decode_fetch_range_req(payload)
+    Agent.update(stub.state, &%{&1 | fetched: &1.fetched + 1})
+    batch = Batch.encode([], :none, :positioned)
+    page = %{next: {0, from_offset(start)}, skip: 0, backlog: 0, expired: 0, expired_exact: true, batch: batch}
+    :gen_tcp.send(sock, ok_body(corr, IO.iodata_to_binary(Wire.encode_page(page))))
+  end
+
+  # A consume_ack is answered by no frame, as the broker answers it only with the pushes it frees.
+  defp answer(_stub, _sock, 30, _corr, _payload, _reply), do: :ok
+
   defp answer(stub, sock, 27, corr, payload, reply) do
     {stream_id, seq, batch} = Wire.decode_append_req(payload)
     {:ok, entries} = Batch.decode(batch, max_inflated_bytes: 16_777_216)
@@ -212,6 +323,15 @@ defmodule Malachi.Test.StreamStub do
 
   # authentication, topic creation and anything else: an empty ok
   defp answer(_stub, sock, _api_key, corr, _payload, _reply), do: :gen_tcp.send(sock, ok_body(corr, <<>>))
+
+  # Every open_consume is kept, whatever it is answered.
+  defp took_consume(stub, corr, payload) do
+    %{start: start} = Wire.decode_open_consume_req(payload)
+    Agent.update(stub.state, &%{&1 | consumes: [{corr, start} | &1.consumes]})
+  end
+
+  defp from_offset({:position, {0, offset}}), do: offset
+  defp from_offset(_earliest_or_latest), do: 0
 
   defp ok_body(corr, payload), do: <<corr::32, Wire.ok_code()::16, payload::binary>>
 

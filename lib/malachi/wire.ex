@@ -71,10 +71,13 @@ defmodule Malachi.Wire do
   within the topic, a segment likewise, a position as the index of its source in the range's history (an
   ancestor before a split, or the range itself) and an offset in that source. A range's history lists its
   sources oldest first, and a split only extends it, so a child's history starts with its parent's: a
-  position read in the parent names the same record in the child. A merge does not keep that: the merged
-  range lists both buddies, so a position read in one of them does not carry over to it. That ordering is part
-  of the contract. A consumer of a range a split or merge just made starts from the start of its history,
-  so it reads its share of the ancestors' records again: at least once, never lost.
+  position read in the parent names the same record in the child. A merge does not keep that for its
+  buddies: the merged range lists the first buddy's ancestors, then the second's not listed yet, then both
+  buddies, so a position read in one of them does not carry over to it; one read in an ancestor both
+  buddies share does, since their common history comes first. That ordering is part of the contract. A
+  consumer of a range a split or merge just made starts from the start of its history, or from a position
+  read in one of its ancestors, so it reads its share of the ancestors' records again: at least once, never
+  lost.
 
   A window is counted in appends and bytes on a producer stream and in records on a consume stream. The
   window an `open_stream` or `open_consume` asks for is an integer from 1 to 2^32 - 1 in each count, since a

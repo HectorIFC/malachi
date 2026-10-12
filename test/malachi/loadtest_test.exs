@@ -11,21 +11,19 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Payload
+  alias Malachi.Log.Record
   alias Malachi.ProducerDirectory
   alias Malachi.RateLimiter
-  alias Malachi.Routing
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.ClusterFlagsPause
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.StreamsOn
   alias Malachi.Test.StreamStub
   alias Malachi.Test.StreamTCP
   alias Malachi.Test.SubscribeResetStub
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
-
-  # mirrors Malachi.Consumer.CoordinatorRouter's private @topology_key
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
+  alias Malachi.Wire.Batch
 
   # Runs a load test quietly and returns its report, capturing the printed summary.
   defp run(opts) do
@@ -276,22 +274,308 @@ defmodule Malachi.LoadtestTest do
     end
   end
 
+  describe "read on the stream keys" do
+    # With the `producer_streams` flag on, a `stream` worker is a consumer (a consume stream on every range
+    # of its topic, `Malachi.Loadtest.Consumer`) and a `fetch` worker a fetcher (`fetch_range` on each range
+    # in turn, `Malachi.Loadtest.Fetcher`), both opened inside the connect ramp.
+    setup {StreamsOn, :setup}
+
+    test "stream reads the backlog on consume streams: pages pushed, records counted, nothing refused" do
+      r = run(scenario: :stream, connections: 2, batch: 10, prepopulate: 200, max: 50, topic: topic("read_stream"))
+
+      assert r.protocol == :streams
+      assert r.errors == 0 and r.error_reasons == %{}
+      assert r.dropped == 0
+      assert r.ops > 0
+      # every worker reads the whole topic
+      assert r.records >= 2 * 200
+    end
+
+    test "fetch pages every range in turn, timed, and starts over at the end" do
+      r = run(scenario: :fetch, connections: 2, batch: 10, prepopulate: 100, max: 50, topic: topic("read_fetch"))
+
+      assert r.protocol == :streams
+      assert r.errors == 0 and r.error_reasons == %{}, inspect(r.error_reasons)
+      assert r.ops > 0
+      # pages that bring nothing send a range back to the start, so the backlog is read more than once
+      assert r.records > 2 * 100
+      assert r.latency_ms.p50 > 0
+    end
+
+    test "mixed produces and fetches on the stream keys at once" do
+      r = run(scenario: :mixed, connections: 4, batch: 5, prepopulate: 50, topic: topic("read_mixed"))
+
+      assert r.protocol == :streams
+      assert r.errors == 0 and r.error_reasons == %{}
+      assert r.ops > 0 and r.records > 0
+      # a produce is an op of 5 records; only the fetching half brings pages of more (the 50 prepopulated
+      # ones, then each start over), so more records than 5 an op means the fetchers read
+      assert r.records > r.ops * 5
+    end
+
+    # The consume streams the broker serving `topic` holds on its range `range`.
+    defp consume_streams_on(topic, range) do
+      %{consume: consume} = :sys.get_state(DataPlaneRouter.shard_for(topic))
+      Enum.count(consume.consumers, fn {_token, consumer} -> consumer.range_id == {topic, range} end)
+    end
+
+    test "a split mid-run moves every consume stream, and the reading goes on on the children" do
+      t = topic("read_split")
+      parent = self()
+
+      # the split once both workers' consume streams are open on the range (the broker holds them), so it
+      # moves streams, rather than racing the setup
+      spawn_link(fn ->
+        PollingHelper.wait_until!(fn -> consume_streams_on(t, 0) == 2 end, timeout: 15_000)
+        send(parent, {:split, BrokerServer.split_range(DataPlaneRouter.shard_for(t), {t, 0})})
+      end)
+
+      r = run(scenario: :stream, connections: 2, batch: 10, prepopulate: 100, duration: 2, topic: t)
+
+      assert_receive {:split, {:ok, _left, _right}}, 5_000
+      assert r.errors == 0, inspect(r.error_reasons)
+      assert r.moved >= 2
+      assert r.records >= 2 * 100
+    end
+
+    test "pages pushed while a stream worker's streams are opening are counted" do
+      # two ranges, each open followed at once by a page of three: the first range's page comes while the
+      # second is still opening, inside the measured run, and counts as the second's does
+      stub = StreamStub.start(%{29 => {:push_on_open, ["a", "b", "c"]}})
+      StreamStub.set_routes(stub, 1, [{0, 0, 128}, {1, 128, 256}])
+
+      try do
+        r = run(scenario: :stream, connections: 2, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.records == 2 * 6
+        assert r.ops == 2 * 2
+      after
+        StreamStub.stop(stub)
+      end
+    end
+
+    # A stub serving one range, answering `overrides` (StreamStub), stopped when `fun` returns.
+    defp with_stub(overrides, fun) do
+      stub = StreamStub.start(overrides)
+
+      try do
+        fun.(stub)
+      after
+        StreamStub.stop(stub)
+      end
+    end
+
+    test "a fetch the broker sheds is counted as shed, and one redirected or dropped is no op and no error" do
+      with_stub(%{31 => {:error, "overloaded"}}, fn stub ->
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.overloaded > 0 and r.errors == 0 and r.ops == 0
+      end)
+
+      with_stub(%{31 => {:error, "moved"}}, fn stub ->
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.redirects > 0 and r.route_refreshes > 0
+        assert r.errors == 0 and r.ops == 0
+      end)
+
+      with_stub(%{31 => :close}, fn stub ->
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.dropped > 0
+        assert r.errors == 0 and r.ops == 0
+      end)
+    end
+
+    # Writes the refusal of the first open_consume the stub took to its connection, once one came: what a
+    # broker that closes a consume stream mid-run sends.
+    defp refuse_first_consume(stub) do
+      spawn(fn ->
+        PollingHelper.wait_until!(fn -> StreamStub.consumes(stub) != [] end)
+        [{corr, _start} | _] = StreamStub.consumes(stub)
+        StreamStub.push(stub, Wire.encode_error(corr, :permission_denied))
+      end)
+    end
+
+    test "a fetch whose broker takes no connection waits and tries again, counting no error" do
+      with_stub(%{}, fn stub ->
+        # once the fetcher has read, its broker moves to an address nobody listens on and the connection it
+        # had closes: the routes it reads again name that address, so every connect fails from then on
+        move =
+          spawn(fn ->
+            PollingHelper.wait_until!(fn -> StreamStub.fetched(stub) > 0 end)
+            {:ok, listen} = :gen_tcp.listen(0, [])
+            {:ok, closed} = :inet.port(listen)
+            :gen_tcp.close(listen)
+            StreamStub.set_advertised_port(stub, closed)
+            StreamStub.set_override(stub, 31, :close)
+          end)
+
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        Process.exit(move, :kill)
+
+        assert r.ops > 0
+        assert r.dropped >= 1
+        assert r.errors == 0 and r.error_reasons == %{}
+        # each failed connect waits before the next try: some dozens of route reads in the second, not
+        # one per loop
+        assert r.route_refreshes < 100
+      end)
+    end
+
+    test "a fetch whose routes cannot be read counts each attempt once, waiting out the backoff between" do
+      with_stub(%{}, fn stub ->
+        # once the fetcher has read, its connection closes and the routes are refused from then on
+        refuse =
+          spawn(fn ->
+            PollingHelper.wait_until!(fn -> StreamStub.fetched(stub) > 0 end)
+            StreamStub.set_override(stub, 25, {:error, "no_such_topic"})
+            StreamStub.set_override(stub, 31, :close)
+          end)
+
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        Process.exit(refuse, :kill)
+
+        # one read of the routes about every 200 ms of the second, each one error: not one per loop
+        assert Map.keys(r.error_reasons) == ["no_such_topic"]
+        assert r.errors in 1..10
+      end)
+    end
+
+    test "a consume stream the broker closes with a refusal mid-run is an error under it, once, and is not read again" do
+      with_stub(%{29 => {:push_on_open, ["a"]}}, fn stub ->
+        refuse = refuse_first_consume(stub)
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        Process.exit(refuse, :kill)
+
+        assert r.error_reasons == %{"permission_denied" => 1}
+        # the page pushed before the refusal counts; the range was not opened again, so nothing more came
+        assert r.records == 1
+        assert length(StreamStub.consumes(stub)) == 1
+      end)
+    end
+
+    test "a range refused at its open is an error, once, while the other ranges are read throughout" do
+      # two ranges: the first open is answered with a page, the second refused
+      with_stub(%{29 => {:after, 1, {:push_on_open, ["a", "b"]}, {:error, "permission_denied"}}}, fn stub ->
+        StreamStub.set_routes(stub, 1, [{0, 0, 128}, {1, 128, 256}])
+
+        # once both opens came, one more page on the stream that opened: the last stream the stub opened
+        # (the setup opened producer streams before it)
+        more =
+          spawn(fn ->
+            PollingHelper.wait_until!(fn -> length(StreamStub.consumes(stub)) == 2 end)
+            [{corr, _start} | _] = StreamStub.consumes(stub)
+            batch = Batch.encode([{{0, 2}, Record.new("c"), false}], :none, :positioned)
+
+            page = %{
+              stream_id: StreamStub.opened(stub),
+              next: {0, 3},
+              skip: 0,
+              backlog: 0,
+              expired: 0,
+              expired_exact: true,
+              batch: batch
+            }
+
+            StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:records, page))))
+          end)
+
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        Process.exit(more, :kill)
+
+        assert r.error_reasons == %{"permission_denied" => 1}
+        # the page that came after the refusal counts: the range that opened was read on
+        assert r.records == 3 and r.ops == 2
+      end)
+    end
+
+    test "a consume stream refused by the subscribe quota, or overloaded, is counted as shed, not as an error" do
+      with_stub(%{29 => {:error, "rate_limited"}}, fn stub ->
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.rate_limited == 1 and r.errors == 0
+      end)
+
+      with_stub(%{29 => {:error, "overloaded"}}, fn stub ->
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, port: stub.port, topic: "t")
+        assert r.overloaded == 1 and r.errors == 0
+      end)
+    end
+
+    test "pages and fetches inside the warmup are not counted; a refusal inside it is, as a legacy one is" do
+      # the page comes as the stream opens, at the barrier: inside the warmup
+      with_stub(%{29 => {:push_on_open, ["a", "b"]}}, fn stub ->
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, warmup: 1, port: stub.port, topic: "t")
+        assert r.records == 0 and r.ops == 0
+      end)
+
+      with_stub(%{29 => {:error, "permission_denied"}}, fn stub ->
+        r = run(scenario: :stream, connections: 1, prepopulate: 0, warmup: 1, port: stub.port, topic: "t")
+        assert r.error_reasons == %{"permission_denied" => 1}
+      end)
+
+      # three fetches answered at once, inside the warmup; every later one finds its connection closed
+      with_stub(%{31 => {:after, 3, :close}}, fn stub ->
+        r = run(scenario: :fetch, connections: 1, prepopulate: 0, warmup: 1, port: stub.port, topic: "t")
+        assert r.ops == 0 and r.errors == 0
+      end)
+    end
+
+    test "a fetch refused by the subscribe quota is counted apart from a genuine error, as a produce is" do
+      for key <- [:subscribe_rate_limit, :subscribe_rate_window_ms] do
+        prior = Application.get_env(:malachi, key)
+        on_exit(fn -> Application.put_env(:malachi, key, prior) end)
+      end
+
+      # a fetch_range spends a subscribe token: a handful are admitted, the rest of the run refused
+      Application.put_env(:malachi, :subscribe_rate_limit, 5)
+      Application.put_env(:malachi, :subscribe_rate_window_ms, 60_000)
+      RateLimiter.reset_bucket("admin", :subscribe)
+
+      r = run(scenario: :fetch, connections: 1, batch: 10, prepopulate: 10, topic: topic("read_quota"))
+
+      assert r.rate_limited > 0, "the quota never bit, so this case proves nothing"
+      assert r.errors == 0 and r.error_reasons == %{}
+      assert r.overloaded == 0
+    end
+
+    test "a fetch the broker refuses is a genuine error under its reason" do
+      # the producer may write the topic but not read it
+      r =
+        run(
+          scenario: :fetch,
+          connections: 1,
+          batch: 10,
+          prepopulate: 10,
+          user: "producer",
+          pass: "producer123",
+          topic: topic("read_denied")
+        )
+
+      assert r.errors > 0
+      assert Map.keys(r.error_reasons) == ["permission_denied"]
+      assert r.ops == 0
+    end
+
+    test "a consumer whose streams the broker refuses counts the refusal and reads nothing, as a refused subscribe does" do
+      r =
+        run(
+          scenario: :stream,
+          connections: 1,
+          batch: 10,
+          prepopulate: 10,
+          user: "producer",
+          pass: "producer123",
+          topic: topic("read_denied_stream")
+        )
+
+      assert r.errors == 1
+      assert r.error_reasons == %{"permission_denied" => 1}
+      assert r.ops == 0
+    end
+  end
+
   describe "produce on the stream keys" do
     # With the `producer_streams` flag on, a producing connection is a whole client
     # (`Malachi.Loadtest.Producer`): it reads the routes, opens a stream on each range of its topic inside
     # the connect ramp, and counts every acknowledged append as an op.
-    setup do
-      :ok = ClusterFlagsPause.pause()
-      ClusterFlagsCache.put([Routing.flag()])
-      topology = :persistent_term.get(@router_topology, nil)
-      :persistent_term.erase(@router_topology)
-
-      on_exit(fn ->
-        if topology,
-          do: :persistent_term.put(@router_topology, topology),
-          else: :persistent_term.erase(@router_topology)
-      end)
-    end
+    setup {StreamsOn, :setup}
 
     # The producer streams open on this node for `topic`, and the connections that hold them.
     defp producer_streams(topic), do: Enum.filter(ProducerDirectory.list().streams, &(&1.topic == topic))
@@ -326,7 +610,9 @@ defmodule Malachi.LoadtestTest do
 
     test "auto takes the stream keys the cluster serves: every append acknowledged, nothing refused" do
       t = topic("streams")
-      r = run(scenario: :produce, connections: 4, batch: 5, topic: t)
+      # one connection at a time: were the topic's first segment placed by the first worker's open, every
+      # later worker would open with routes that no longer name it, and be redirected
+      r = run(scenario: :produce, connections: 4, connect_concurrency: 1, batch: 5, topic: t)
 
       assert r.protocol == :streams
       assert r.errors == 0 and r.error_reasons == %{}
@@ -334,7 +620,9 @@ defmodule Malachi.LoadtestTest do
       assert r.ops > 0
       assert r.records == r.ops * 5
       # every stream opened where the setup's routes said, so routing had nothing to do
-      assert r.moved == 0 and r.redirects == 0 and r.route_refreshes == 0
+      assert r.moved == 0 and r.redirects == 0 and r.route_refreshes == 0,
+             inspect(Map.take(r, [:moved, :redirects, :route_refreshes]))
+
       assert length(stream_values(t)) >= r.records
     end
 
@@ -587,8 +875,17 @@ defmodule Malachi.LoadtestTest do
       end)
     end
 
-    test "routes the server refuses, or a connection lost reading them, fail the setup" do
+    test "ranges the server will not open, or routes it will not give, fail the setup, naming the step" do
+      # the setup opens a stream on each range first (placing its segment), then reads the routes
       with_stream_server(%{25 => {:error, "no_such_topic"}}, fn port ->
+        assert_raise Loadtest.SetupError,
+                     ~r/could not open the ranges of "t": the server answered "no_such_topic"/,
+                     fn ->
+                       run(scenario: :produce, connections: 1, port: port, topic: "t")
+                     end
+      end)
+
+      with_stream_server(%{25 => {:after, 1, {:error, "no_such_topic"}}}, fn port ->
         assert_raise Loadtest.SetupError,
                      ~r/could not read the routes of "t": the server answered "no_such_topic"/,
                      fn ->
@@ -596,7 +893,7 @@ defmodule Malachi.LoadtestTest do
                      end
       end)
 
-      with_stream_server(%{25 => :close}, fn port ->
+      with_stream_server(%{25 => {:after, 1, :close}}, fn port ->
         assert_raise Loadtest.SetupError, ~r/could not read the routes of "t": the connection failed/, fn ->
           run(scenario: :produce, connections: 1, port: port, topic: "t")
         end
@@ -648,12 +945,20 @@ defmodule Malachi.LoadtestTest do
     end
 
     test "a stream client whose streams cannot open fails the run as a connection that cannot authenticate" do
-      # a server that serves the stream keys and refuses every open: each worker's open happens inside the
-      # connect ramp, so the run fails there, naming the refusal
-      with_stream_server(%{26 => {:error, "permission_denied"}}, fn port ->
+      # the setup's own open goes through; every worker's, inside the connect ramp, is refused
+      with_stream_server(%{26 => {:after, 1, {:error, "permission_denied"}}}, fn port ->
         assert_raise Loadtest.SetupError, ~r/2 of 2 connections failed.*permission_denied/, fn ->
           run(scenario: :produce, connections: 2, port: port, topic: "refused")
         end
+      end)
+
+      # and one refused at the setup's open fails there, naming the topic
+      with_stream_server(%{26 => {:error, "permission_denied"}}, fn port ->
+        assert_raise Loadtest.SetupError,
+                     ~r/could not open the ranges of "refused": the server answered "permission_denied"/,
+                     fn ->
+                       run(scenario: :produce, connections: 2, port: port, topic: "refused")
+                     end
       end)
     end
   end

@@ -21,7 +21,9 @@ defmodule Malachi.Loadtest.Producer do
   are still answered on it, and the records not yet sent go to the stream the routes now name, read again
   over a metadata connection opened only when it is first needed. An open refused `moved`, `stale_routes`,
   `not_owner` or `migrating` reads the routes again and opens where they say, backing off once it has
-  been redirected 5 times in a row.
+  been redirected 5 times in a row; routes that name a range's primary with no address are a redirect too,
+  read again after a backoff (`Malachi.Loadtest.Links.unadvertised/4`), and the range's records wait in
+  its buffer meanwhile rather than fail.
 
   Lingering, per range: each `produce/4` call's share of a range waits in the range's buffer as one unit,
   until the buffer holds `linger_bytes` (counted by `record_bytes/2`) or its oldest unit has waited
@@ -31,7 +33,23 @@ defmodule Malachi.Loadtest.Producer do
   the window rather than buffering without bound.
   """
 
+  import Malachi.Loadtest.Links,
+    only: [
+      address_of_message: 2,
+      backoff_until: 1,
+      bump: 2,
+      connection: 2,
+      ensure_routes: 3,
+      forget: 2,
+      is_redirect: 1,
+      on?: 2,
+      put_conn: 3,
+      refresh: 2
+    ]
+
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Links
+  alias Malachi.Loadtest.Options
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
   alias Malachi.Wire
@@ -51,14 +69,6 @@ defmodule Malachi.Loadtest.Producer do
           connect_failures: non_neg_integer()
         }
 
-  # The refusals of an open that mean the routes it went by are behind the cluster's.
-  @redirects ["moved", "stale_routes", "not_owner", "migrating"]
-  # Redirects in a row after which a range backs off before opening again, and the most it waits.
-  @redirects_before_backoff 5
-  @max_backoff_ms 1_000
-  # How long a range waits before opening again after a refusal that is not a redirect, or a broker it
-  # could not connect to.
-  @retry_ms 200
   # The inflated bytes a stream asks the broker for; the broker caps it (`MALACHI_STREAM_MAX_WINDOW_BYTES`).
   @window_bytes 16_777_216
   # The first correlation id a stream's open takes; pushes on the stream come back under it.
@@ -100,9 +110,9 @@ defmodule Malachi.Loadtest.Producer do
       router: router,
       conn_opts: conn_opts,
       label: Keyword.get(opts, :label, "malachi-loadtest"),
-      max_inflight: positive!(opts, :max_inflight, 1),
-      linger_ms: non_negative!(opts, :linger_ms, 0),
-      linger_bytes: positive!(opts, :linger_bytes, 1)
+      max_inflight: Options.positive!(opts, :max_inflight, 1),
+      linger_ms: Options.non_negative!(opts, :linger_ms, 0),
+      linger_bytes: Options.positive!(opts, :linger_bytes, 1)
     }
   end
 
@@ -310,11 +320,7 @@ defmodule Malachi.Loadtest.Producer do
 
   @doc "Closes every connection; the brokers drop its streams with them."
   @spec close(t()) :: :ok
-  def close(%__MODULE__{} = p) do
-    Enum.each(p.conns, fn {_address, %{conn: conn}} -> Conn.close(conn) end)
-    if p.control, do: Conn.close(p.control)
-    :ok
-  end
+  def close(%__MODULE__{} = p), do: Links.close_all(p)
 
   # --- routing records to ranges ---
 
@@ -464,8 +470,9 @@ defmodule Malachi.Loadtest.Producer do
       {:error, :unknown_range} ->
         reroute(p, key, lane, now)
 
+      # routes that name no address for the primary are behind the cluster's, as a redirect says
       {:error, :unadvertised} ->
-        fail_buffer(p, key, lane, "unadvertised", now)
+        {Links.unadvertised(p, key, lane, now), []}
     end
   end
 
@@ -640,22 +647,17 @@ defmodule Malachi.Loadtest.Producer do
     {%{p | streams: Map.put(p.streams, {address, resp.stream_id}, stream)} |> put_lane(key, lane), events}
   end
 
-  defp opened(p, events, {topic, _range} = key, _address, _corr, _code, payload, now) do
+  defp opened(p, events, key, _address, _corr, _code, payload, now) do
     reason = Wire.decode_error_reason(payload)
     lane = %{Map.fetch!(p.lanes, key) | stream: nil}
 
-    if reason in @redirects do
-      redirects = lane.redirects + 1
-      retry_at = if redirects >= @redirects_before_backoff, do: now + backoff(redirects), else: nil
-      p = p |> bump(:redirects) |> forget(topic) |> put_lane(key, %{lane | redirects: redirects, retry_at: retry_at})
-      {p, events}
+    if is_redirect(reason) do
+      {Links.redirected(p, key, lane, now), events}
     else
       {p, failed} = fail_buffer(p, key, lane, reason, now)
       {p, events ++ failed}
     end
   end
-
-  defp backoff(redirects), do: min(@max_backoff_ms, 50 * (redirects - @redirects_before_backoff + 1))
 
   defp push(p, events, address, {:append_ack, ack}) do
     case Map.fetch(p.streams, {address, ack.stream_id}) do
@@ -858,157 +860,20 @@ defmodule Malachi.Loadtest.Producer do
     {Enum.reduce(topics, p, &forget(&2, &1)), events}
   end
 
-  defp on?({_open_or_opening, {address, _id}}, address), do: true
-  defp on?(_stream, _address), do: false
-
-  # --- connections ---
-
-  defp connection(p, address) do
-    case Map.fetch(p.conns, address) do
-      {:ok, %{conn: conn}} ->
-        {:ok, p, conn}
-
-      :error ->
-        with {:ok, conn} <- connect(p, address), :ok <- Conn.activate(conn) do
-          {:ok,
-           %{p | conns: Map.put(p.conns, address, %{conn: conn}), sockets: Map.put(p.sockets, conn.socket, address)},
-           conn}
-        else
-          _refused -> {:error, bump(p, :connect_failures)}
-        end
-    end
-  end
-
-  defp connect(p, {host, port}) do
-    opts = Keyword.merge(p.conn_opts, host: host, port: port)
-
-    with {:ok, conn} <- Conn.connect(opts) do
-      case Conn.authenticate(conn, opts) do
-        {:ok, conn} ->
-          {:ok, conn}
-
-        {:error, _} = refused ->
-          Conn.close(conn)
-          refused
-      end
-    end
-  end
-
-  defp put_conn(p, address, conn), do: %{p | conns: Map.put(p.conns, address, %{conn: conn})}
-
-  defp address_of_message(p, message) when is_tuple(message) and tuple_size(message) in [2, 3] do
-    case Map.fetch(p.sockets, elem(message, 1)) do
-      {:ok, address} -> {:ok, address}
-      :error -> :no
-    end
-  end
-
-  defp address_of_message(_p, _message), do: :no
-
-  # --- routes ---
-
-  # When a fixed backoff ends, counted from when the call gave up, not from when it was asked: a topic's
-  # routes that could not be read (`ensure_routes/3`); a range whose connection failed, on connect or on a
-  # send (`open_at/5`), or dropped (`dropped/4`); and a range whose records failed (`fail_buffer/5`), for an
-  # open the broker refused for a reason that is not a redirect, routes that could not be read, or a
-  # primary with no address. A call that blocked (a node that does not answer takes the connect timeout per
-  # address) would otherwise leave one already over, and the next attempt would not wait at all. `now` is
-  # the caller's instant, which a test may set ahead of the clock.
+  # --- connections and routes ---
   #
-  # The one backoff that does not use it is the redirect branch of `opened/8`: it grows with the redirects
-  # in a row, and is counted from `now`, which follows an answer read from the socket with no blocking call
-  # before it, so `now` is when that answer came.
-  defp backoff_until(now), do: max(now, mono_ms()) + @retry_ms
-
-  # The routes of `topic`, read again if they were forgotten. A topic whose routes could not be read is not
-  # asked again until its backoff ends, whichever path asks (a hand-over, an open, a reroute, a prepare):
-  # until then the answer is the refusal the routes last got, with no round trip. One read is not held
-  # back: `route_known/6`'s second look at routes that left a record without a range (read mid-split),
-  # since those routes stay known and that look happens once per hand-over or reroute the gap catches,
-  # failing or not.
-  defp ensure_routes(p, topic, now) do
-    cond do
-      Router.routes(p.router, topic) ->
-        {:ok, p}
-
-      match?({until, _reason} when until > now, Map.get(p.unroutable, topic)) ->
-        {:error, elem(Map.fetch!(p.unroutable, topic), 1), p}
-
-      true ->
-        case refresh(p, topic) do
-          {:ok, p} ->
-            {:ok, %{p | unroutable: Map.delete(p.unroutable, topic)}}
-
-          {:error, reason, p} ->
-            {:error, reason, %{p | unroutable: Map.put(p.unroutable, topic, {backoff_until(now), reason})}}
-        end
-    end
-  end
-
-  # Reads the cluster state and `topic`'s routes over the metadata connection, opened on first use to the
-  # bootstrap address or, should that not answer, to each broker the cluster state lists in turn.
-  defp refresh(p, topic), do: p |> bump(:refreshes) |> read_routes(topic, p.control != nil)
-
-  # A metadata connection kept from an earlier read may have been closed by the server since (an idle one
-  # is, after `MALACHI_TCP_RECV_TIMEOUT`): one that fails is replaced and the read made again, once.
-  defp read_routes(p, topic, reused?) do
-    case control(p) do
-      {:ok, p, conn} ->
-        case Router.refresh(p.router, conn, topic) do
-          {:ok, router, conn} ->
-            {:ok, %{p | router: router, control: conn}}
-
-          {:error, reason, conn} when is_binary(reason) ->
-            {:error, reason, %{p | control: conn}}
-
-          {:error, _transport} ->
-            Conn.close(conn)
-            p = %{p | control: nil}
-            if reused?, do: read_routes(p, topic, false), else: {:error, "metadata_unavailable", p}
-        end
-
-      {:error, p} ->
-        {:error, "metadata_unavailable", p}
-    end
-  end
-
-  defp control(%{control: nil} = p) do
-    p.router
-    |> control_addresses()
-    |> Enum.find_value({:error, p}, fn address ->
-      case connect(p, address) do
-        {:ok, conn} -> {:ok, %{p | control: conn}, conn}
-        {:error, _} -> nil
-      end
-    end)
-  end
-
-  defp control(%{control: conn} = p), do: {:ok, p, conn}
-
-  defp control_addresses(%Router{bootstrap: bootstrap, brokers: brokers}) do
-    advertised = for {_id, %{host: host, port: port}} <- brokers, is_binary(host) and port > 0, do: {host, port}
-    Enum.uniq([bootstrap | advertised])
-  end
-
-  defp forget(p, topic), do: %{p | router: Router.forget(p.router, topic)}
+  # Through `Malachi.Loadtest.Links`, which the consumer and the fetcher share. Every fixed backoff here
+  # runs from when its call gave up (`Links.backoff_until/1`): a topic's routes that could not be read
+  # (`Links.ensure_routes/3`); a range whose connection failed, on connect or on a send (`open_at/5`), or
+  # dropped (`dropped/4`); and a range whose records failed (`fail_buffer/5`), for an open the broker refused
+  # for a reason that is not a redirect, routes that could not be read, or a primary with no address. The
+  # one that does not is the redirect branch of `opened/8`: it grows with the redirects in a row, and is
+  # counted from `now`, which follows an answer read from the socket with no blocking call before it, so
+  # `now` is when that answer came. And one read is not held back by a topic's backoff: `route_known/6`'s
+  # second look at routes that left a record without a range (read mid-split), since those routes stay
+  # known and that look happens once per hand-over or reroute the gap catches, failing or not.
 
   defp put_lane(p, key, lane), do: %{p | lanes: Map.put(p.lanes, key, lane)}
-
-  defp bump(p, stat), do: %{p | stats: Map.update!(p.stats, stat, &(&1 + 1))}
-
-  defp positive!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> value
-      value -> raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
-    end
-  end
-
-  defp non_negative!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value >= 0 -> value
-      value -> raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
-    end
-  end
 
   defp mono_ms, do: System.monotonic_time(:millisecond)
   defp mono_us, do: System.monotonic_time(:microsecond)

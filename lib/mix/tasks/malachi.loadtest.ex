@@ -20,8 +20,10 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--protocol` auto | streams | legacy (default auto): the keys a produce goes on. auto takes the
       producer streams when the cluster serves them (the `producer_streams` flag) and the legacy produce
       otherwise; streams refuses a cluster that does not serve them; legacy never asks. On streams each
-      producing connection is a whole client, routing every record to its range's primary
-      (`Malachi.Loadtest.Producer`), and the report counts `moved`, `redirects` and `route_refreshes`.
+      connection is a whole routing client: a producer routes every record to its range's primary
+      (`Malachi.Loadtest.Producer`), a `stream` worker reads every range on consume streams
+      (`Malachi.Loadtest.Consumer`), a `fetch` worker pages every range in turn with `fetch_range`
+      (`Malachi.Loadtest.Fetcher`); the report counts `moved`, `redirects` and `route_refreshes`.
     * `--linger-ms` (0) and `--linger-bytes` (one batch): how long a range's share of each batch waits to
       go out with others as one append, and how many bytes of them make one go at once; an append takes
       whole shares only, as many as fit. Only accepted with auto or streams

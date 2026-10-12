@@ -604,7 +604,7 @@ defmodule Malachi.Loadtest.ProducerTest do
       assert failed(events) == [{"a", "no_such_topic"}]
     end
 
-    test "a primary that advertises no address, in a cluster of several, fails its range's records" do
+    test "a primary that advertises no address, in a cluster of several, is a redirect: its records wait" do
       router =
         Router.new({"127.0.0.1", 1})
         |> Router.put_cluster_state(%{
@@ -621,8 +621,10 @@ defmodule Malachi.Loadtest.ProducerTest do
           ranges: [%{range: 0, key_start: 0, key_end: 256, state: :active, segment: %{segment: 0, primary: "a@h"}}]
         })
 
-      assert {_p, [{:failed, [{"a", _}], "unadvertised"}]} =
-               Producer.produce(Producer.new(router, []), "t", entries(["a"]), now())
+      # the routes are forgotten, to be read again; the record is neither sent nor failed
+      assert {p, []} = Producer.produce(Producer.new(router, []), "t", entries(["a"]), now())
+      assert %{redirects: 1} = Producer.stats(p)
+      assert Router.routes(p.router, "t") == nil
     end
 
     test "a broker that refuses the connection, or its credentials, is retried after a backoff", ctx do

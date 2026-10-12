@@ -31,6 +31,9 @@ defmodule Malachi.Loadtest do
 
   alias Malachi.Histogram
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Consumer
+  alias Malachi.Loadtest.Fetcher
+  alias Malachi.Loadtest.Options
   alias Malachi.Loadtest.Payload
   alias Malachi.Loadtest.Producer
   alias Malachi.Loadtest.Router
@@ -203,19 +206,19 @@ defmodule Malachi.Loadtest do
       payload: enums.payload,
       payload_seed: payload_seed!(opts, enums.payload),
       protocol: enums.protocol,
-      linger_ms: non_negative!(opts, :linger_ms, 0),
+      linger_ms: Options.non_negative!(opts, :linger_ms, 0),
       linger_bytes: Keyword.get(opts, :linger_bytes),
       # How long the setup waits for its prepopulate to be acknowledged. Not a flag: a seam for the tests,
       # which would otherwise wait the whole 30 s to see a setup that never gets an answer.
-      setup_timeout_ms: positive!(opts, :setup_timeout_ms, 30_000),
-      connect_concurrency: positive!(opts, :connect_concurrency, 32),
-      connect_stagger_ms: positive!(opts, :connect_stagger_ms, 100),
-      connections: positive!(opts, :connections, 128),
-      duration: positive!(opts, :duration, 10),
-      warmup: non_negative!(opts, :warmup, 2),
-      batch: positive!(opts, :batch, 10),
-      record_size: positive!(opts, :record_size, 256),
-      keys: positive!(opts, :keys, 1000),
+      setup_timeout_ms: Options.positive!(opts, :setup_timeout_ms, 30_000),
+      connect_concurrency: Options.positive!(opts, :connect_concurrency, 32),
+      connect_stagger_ms: Options.positive!(opts, :connect_stagger_ms, 100),
+      connections: Options.positive!(opts, :connections, 128),
+      duration: Options.positive!(opts, :duration, 10),
+      warmup: Options.non_negative!(opts, :warmup, 2),
+      batch: Options.positive!(opts, :batch, 10),
+      record_size: Options.positive!(opts, :record_size, 256),
+      keys: Options.positive!(opts, :keys, 1000),
       pipeline: max(1, Keyword.get(opts, :pipeline, 1)),
       max: Keyword.get(opts, :max, 100),
       window: Keyword.get(opts, :window, 100),
@@ -427,15 +430,6 @@ defmodule Malachi.Loadtest do
 
   defp check_payload_size!(cfg), do: cfg
 
-  # A zero or negative count would fail late and confusingly (an ArithmeticError after the whole run,
-  # or an instantly-empty measurement): reject it up front with a named error instead.
-  defp positive!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> value
-      value -> raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
-    end
-  end
-
   # The file a harness waits for before sampling CPU. Checked before any connection opens: finding out
   # after hundreds of authentications that the marker cannot be written would lose the whole run, and
   # creating the file early to prove it would fire the signal before the window it marks.
@@ -486,13 +480,6 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  defp non_negative!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value >= 0 -> value
-      value -> raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
-    end
-  end
-
   defp setup(cfg) do
     admin =
       case connect_auth(conn_opts_for(cfg, 0)) do
@@ -518,10 +505,15 @@ defmodule Malachi.Loadtest do
   end
 
   # The routes every worker starts from, read once here: the workers share them and read them again only
-  # when the cluster says they moved.
+  # when the cluster says they moved. A range of a new topic has no segment until a stream first opens on
+  # it, and placing it changes the routes, so every worker opening with the routes read before would be
+  # redirected once: a stream is opened, and closed, on each range first, so the routes read name the
+  # segments every worker will find. That is preparing the topic, not measured work.
   defp read_routes(conn, %{protocol_used: :legacy} = cfg, _topic), do: {conn, cfg}
 
   defp read_routes(conn, cfg, topic) do
+    place_segments(cfg, topic)
+
     case Router.refresh(cfg.router, conn, topic) do
       {:ok, router, conn} ->
         {conn, %{cfg | router: router}}
@@ -532,6 +524,19 @@ defmodule Malachi.Loadtest do
 
       {:error, reason} ->
         raise SetupError, "could not read the routes of #{inspect(topic)}: the connection failed (#{inspect(reason)})"
+    end
+  end
+
+  defp place_segments(cfg, topic) do
+    producer = Producer.new(cfg.router, conn_opts_for(cfg, 0), label: "malachi-loadtest-setup")
+
+    case Producer.prepare(producer, topic, cfg.setup_timeout_ms) do
+      {:ok, producer} ->
+        Producer.close(producer)
+
+      {:error, reason, producer} ->
+        Producer.close(producer)
+        raise SetupError, "could not open the ranges of #{inspect(topic)}: the server answered #{inspect(reason)}"
     end
   end
 
@@ -745,31 +750,57 @@ defmodule Malachi.Loadtest do
   # here, inside the connect ramp, so the measured window starts with every stream open. Any other worker
   # is the one authenticated connection it always was.
   defp open_client(cfg, index, conn_opts) do
-    if stream_producer?(cfg, index) do
-      producer =
-        Producer.new(cfg.router, conn_opts,
-          max_inflight: cfg.pipeline,
-          linger_ms: cfg.linger_ms,
-          linger_bytes: cfg.linger_bytes,
-          label: "malachi-loadtest-#{index}"
-        )
+    case stream_client(cfg, index) do
+      :producer ->
+        producer =
+          Producer.new(cfg.router, conn_opts,
+            max_inflight: cfg.pipeline,
+            linger_ms: cfg.linger_ms,
+            linger_bytes: cfg.linger_bytes,
+            label: "malachi-loadtest-#{index}"
+          )
 
-      case Producer.prepare(producer, topic_for(cfg, index), 15_000) do
-        {:ok, producer} ->
-          {:ok, producer}
+        prepared(Producer.prepare(producer, topic_for(cfg, index), 15_000), &Producer.close/1)
 
-        {:error, reason, producer} ->
-          Producer.close(producer)
-          {:error, reason}
-      end
-    else
-      connect_auth(conn_opts)
+      # connected only: the streams open when the barrier lifts, as a legacy subscribe goes out then, so
+      # every page pushed is pushed inside the measured run
+      :consumer ->
+        consumer = Consumer.new(cfg.router, conn_opts, window: cfg.window, max: cfg.max, on_refusal: :stop)
+        prepared(Consumer.prepare(consumer, topic_for(cfg, index)), &Consumer.close/1)
+
+      :fetcher ->
+        fetcher = Fetcher.new(cfg.router, conn_opts, max: cfg.max)
+        prepared(Fetcher.prepare(fetcher, topic_for(cfg, index)), &Fetcher.close/1)
+
+      nil ->
+        connect_auth(conn_opts)
     end
   end
 
-  defp stream_producer?(cfg, index), do: cfg.protocol_used == :streams and scenario_for(cfg.scenario, index) == :produce
+  defp prepared({:ok, client}, _close), do: {:ok, client}
+
+  defp prepared({:error, reason, client}, close) do
+    close.(client)
+    {:error, reason}
+  end
+
+  # On the stream keys a worker that produces, consumes or fetches is a whole routing client: a producer,
+  # a consumer (the `stream` scenario: a consume stream on every range) or a fetcher (`fetch`, and the
+  # reading half of `mixed`: one `fetch_range` per range in turn). The admin scenarios keep one connection.
+  defp stream_client(%{protocol_used: :streams} = cfg, index) do
+    case scenario_for(cfg.scenario, index) do
+      :produce -> :producer
+      :stream -> :consumer
+      :fetch -> :fetcher
+      _admin -> nil
+    end
+  end
+
+  defp stream_client(_legacy, _index), do: nil
 
   defp close_client(%Producer{} = producer), do: Producer.close(producer)
+  defp close_client(%Consumer{} = consumer), do: Consumer.close(consumer)
+  defp close_client(%Fetcher{} = fetcher), do: Fetcher.close(fetcher)
   defp close_client(%Conn{} = conn), do: Conn.close(conn)
 
   defp worker_loop(parent, index, cfg, ops, hist, conn_opts, conn) do
@@ -867,8 +898,10 @@ defmodule Malachi.Loadtest do
   defp scenario_for(:mixed, index), do: if(rem(index, 2) == 0, do: :produce, else: :fetch)
   defp scenario_for(other, _index), do: other
 
-  @spec drive(map(), Conn.t() | Producer.t(), map(), m()) :: Conn.t() | Producer.t()
+  @spec drive(map(), client, map(), m()) :: client when client: Conn.t() | Producer.t() | Consumer.t() | Fetcher.t()
   defp drive(_cfg, %Producer{} = producer, ctx, m), do: stream_produce(producer, ctx, m)
+  defp drive(_cfg, %Consumer{} = consumer, ctx, m), do: start_consume(consumer, ctx, m)
+  defp drive(_cfg, %Fetcher{} = fetcher, ctx, m), do: stream_fetch(fetcher, ctx, m)
   defp drive(_cfg, conn, %{op: {:stream, s}} = ctx, m), do: stream_loop(conn, ctx, s, m)
   defp drive(cfg, conn, %{op: {:produce, _}} = ctx, m) when cfg.pipeline > 1, do: pipelined(conn, ctx, m)
   defp drive(_cfg, conn, ctx, m), do: closed_loop(conn, ctx, m, 2)
@@ -1042,12 +1075,16 @@ defmodule Malachi.Loadtest do
       producer |> Producer.stop_sending() |> Producer.await(@drain_ms, &(not Producer.in_flight?(&1)))
 
     record_events(m, events, true)
-    stats = Producer.stats(producer)
+    count_routing(m, Producer.stats(producer))
+    producer
+  end
+
+  # What a routing client did over the whole run counts, as a dropped connection does: an event, not a rate.
+  defp count_routing(m, stats) do
     :counters.add(m.ops, @moved, stats.moved)
     :counters.add(m.ops, @redirects, stats.redirects)
     :counters.add(m.ops, @refreshes, stats.refreshes)
     :counters.add(m.ops, @dropped, stats.dropped)
-    producer
   end
 
   # One acknowledged append is one op, its records and its round trip, as a legacy produce is; a refused
@@ -1066,6 +1103,97 @@ defmodule Malachi.Loadtest do
   defp record_refusal(m, "overloaded", true), do: :counters.add(m.ops, @overloaded, 1)
   defp record_refusal(m, "rate_limited", true), do: :counters.add(m.ops, @rate_limited, 1)
   defp record_refusal(m, reason, true), do: count_error(m, reason)
+
+  # A consume stream refused, on its open or later, counted warmup or not, as a refused legacy subscribe is:
+  # the two sheds apart, any other reason as an error.
+  defp count_refusal(m, "overloaded"), do: :counters.add(m.ops, @overloaded, 1)
+  defp count_refusal(m, "rate_limited"), do: :counters.add(m.ops, @rate_limited, 1)
+  defp count_refusal(m, reason), do: count_error(m, reason)
+
+  # --- stream consume (consume streams, `Malachi.Loadtest.Consumer`) ---
+  #
+  # The opens go out when the barrier lifts, as a legacy subscribe does, and nothing waits for them: the
+  # pages the brokers push are read until the deadline, from the first, whichever range they come from:
+  # one op per page with records, and its records, as a legacy push is (no latency: a push carries no
+  # client-side start). A range the broker refuses, on its open or later, is counted once, warmup or not
+  # (`rate_limited` and `overloaded` as sheds, anything else as an error under its reason), and neither it
+  # nor a range a split makes of it is read again, as a refused legacy subscribe ends that worker's
+  # stream; the other ranges read on. The consumer acks every page itself, so the credit comes back as the
+  # pages are read.
+
+  defp start_consume(consumer, ctx, m) do
+    {consumer, events} = Consumer.start(consumer, ctx.topic, mono_ms())
+    record_pages(m, events)
+    stream_consume(consumer, m)
+  end
+
+  defp stream_consume(consumer, m) do
+    left = m.measure_end - mono_ms()
+
+    if left <= 0 do
+      count_routing(m, Consumer.stats(consumer))
+      consumer
+    else
+      receive do
+        message ->
+          case Consumer.handle_message(consumer, message, mono_ms()) do
+            {:ok, consumer, events} -> consumer |> tap(fn _ -> record_pages(m, events) end) |> stream_consume(m)
+            :no -> stream_consume(consumer, m)
+          end
+      after
+        min(left, Consumer.next_timeout(consumer, mono_ms())) ->
+          {consumer, events} = Consumer.tick(consumer, mono_ms())
+          record_pages(m, events)
+          stream_consume(consumer, m)
+      end
+    end
+  end
+
+  defp record_pages(m, events) do
+    measuring = mono_ms() >= m.warmup_end
+
+    Enum.each(events, fn
+      {:records, _range, n} when measuring and n > 0 -> record_push(m, n)
+      {:failed, _range, reason} -> count_refusal(m, reason)
+      _not_counted -> :ok
+    end)
+  end
+
+  # --- stream fetch (`fetch_range`, `Malachi.Loadtest.Fetcher`) ---
+  #
+  # A closed loop, as a legacy fetch is: one `fetch_range` of the next range in turn, an op with the records
+  # it brought (a page with none is still an op), timed over its round trip alone (reading routes or
+  # connecting before it is not, as a legacy reconnect is not). A `fetch_range` spends a token of the
+  # subscribe quota, so one refused `rate_limited` (or `overloaded`) is the server shedding load: counted
+  # apart, after the short backoff a shed produce takes. Any other refusal, or routes that could not be read,
+  # is an error under its reason, once per attempt: while the routes back off after a failed read the worker
+  # waits the backoff out rather than count it again. A redirect is no op; a dropped connection, or one that
+  # cannot be made, waits a little before the next try, as a legacy reconnect does.
+
+  defp stream_fetch(fetcher, ctx, m) do
+    now = mono_ms()
+
+    if now >= m.measure_end do
+      count_routing(m, Fetcher.stats(fetcher))
+      fetcher
+    else
+      {fetcher, result} = Fetcher.fetch(fetcher, ctx.topic, now)
+      measuring = now >= m.warmup_end
+
+      case result do
+        {:ok, n, latency_us} -> record(m, {:ok, n}, latency_us, measuring)
+        {:held, ms} -> Process.sleep(min(ms, max(0, m.measure_end - mono_ms())))
+        {:error, "connect_failed"} -> Process.sleep(@reconnect_backoff_ms)
+        {:error, "rate_limited"} -> shed(m, :rate_limited, measuring)
+        {:error, "overloaded"} -> shed(m, :overloaded, measuring)
+        {:error, reason} -> record(m, {:error, reason}, 0, measuring)
+        :dropped -> Process.sleep(@reconnect_backoff_ms)
+        :redirected -> :ok
+      end
+
+      stream_fetch(fetcher, ctx, m)
+    end
+  end
 
   # --- stream loop (server push + credit acks) ---
   #
